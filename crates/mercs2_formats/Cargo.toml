@@ -1,0 +1,7 @@
+[package]
+name = "mercs2_formats"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flate2 = "1"

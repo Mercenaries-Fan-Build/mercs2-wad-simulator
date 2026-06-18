@@ -1,0 +1,13 @@
+[package]
+name = "dlc_port"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dlc_port"
+path = "src/main.rs"
+
+[dependencies]
+mercs2_formats = { path = "../mercs2_formats" }
+ucfx_byteswap = { path = "../ucfx_byteswap" }
+clap = { version = "4", features = ["derive"] }
