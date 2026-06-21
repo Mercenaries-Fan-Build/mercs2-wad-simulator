@@ -1,14 +1,10 @@
 # Mercenaries 2 FourCC tag registry
 
-Auto-generated from `crates/mercs2_formats/src/tag_registry.rs` — keep in sync.
-Scanned from `cmp eax,<imm32>` sites in `output/patched/Mercenaries2.exe` (base 0x00400000).
+Auto-generated from `crates/mercs2_formats/src/tag_registry.rs`.
+Invariants verified against `output/_ghidra/all_functions_decomp.txt` (Ghidra decomp, PC EXE) + retail vz.wad.
 
-- **Validated** — a simulator validator checks this chunk's invariant.
-- **Registered** — recognized & benign (converter-handled), no structural validator.
-- **NeedsInvestigation** — not yet validated; simulator/converter flags it.
-
-Totals: 232 tags — UcfxAsset=69, D3dFormat=7, EntityRuntime=30, NetworkProto=100, LuaReflection=17, Misc=9
-Status: Validated=40, Registered=23, NeedsInvestigation=169
+Totals: 232 — UcfxAsset=69, D3dFormat=7, EntityRuntime=30, NetworkProto=100, LuaReflection=17, Misc=9
+Status: Validated=39, Registered=24, NeedsInvestigation=169
 
 
 ## UCFX asset chunk (UcfxAsset)
@@ -47,7 +43,6 @@ Status: Validated=40, Registered=23, NeedsInvestigation=169
 | `STRM` | 0x004782fd | Validated |  |
 | `TEXT` | 0x00492fab | Validated | effect text/texture ref @0x492fab: reads a leading u32 (id/count) then variable data. Validated: body >= 4 |
 | `TRCK` | 0x0068e7c3 | Validated | anim track @0x68e7c3: 12-byte inline header (3×u32) then count×4 parallel arrays (overflow-guarded). Validated: body >= 12 |
-| `TREE` | 0x0045f629 | Validated | ECS tree/hierarchy array @0x45f629: count×0x34 records (overflow-guarded). Validated: body % 0x34 == 0 |
 | `TRFM` | 0x0048cd09 | Validated | transform @0x48cd09: unrolled read of 16×4-byte floats = one 4x4 matrix. Validated: body >= 64 |
 | `VALU` | 0x0067c9d7 | Validated | anim VALU @0x67c9d7: (count+1)×width value blob, u32 elements (overflow-guarded). Validated: body % 4 == 0 |
 | `data` | 0x004a47d6 | Validated |  |
@@ -72,6 +67,7 @@ Status: Validated=40, Registered=23, NeedsInvestigation=169
 | `STRS` | 0x004640a0 | Registered |  |
 | `SWIT` | 0x004cf5d7 | Registered |  |
 | `TINY` | 0x00471a01 | Registered | low-LOD mesh @0x471a01: allocates a FIXED 0x18-byte renderable per descriptor, index-driven (like MESH); no body read. Engine-safe, no body invariant |
+| `TREE` | 0x0045f629 | Registered | ECS tree/hierarchy @FUN_0045f3f0 (decomp): count (from INFO) variable-length records (4xu32 + u16 sub-count + sub_count xu16); 0x34 is the in-memory alloc, not an on-disk stride — no fixed body invariant |
 | `TRNS` | 0x0068c7e5 | Registered |  |
 | `TYPE` | 0x0067c8f9 | Registered | anim TYPE @0x67c8f9: count×2 u16 read where count is caller-passed (external, not in body) — no self-contained body invariant. Recognized/benign (separate from Stance TYPE converter arm) |
 | `UNIQ` | 0x006549fb | Registered |  |
