@@ -166,3 +166,132 @@ impl ComponentSchema {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_type_from_code_all_valid() {
+        assert_eq!(SchemaFieldType::from_code(1), Some(SchemaFieldType::Bit));
+        assert_eq!(SchemaFieldType::from_code(2), Some(SchemaFieldType::U8));
+        assert_eq!(SchemaFieldType::from_code(4), Some(SchemaFieldType::U16));
+        assert_eq!(SchemaFieldType::from_code(5), Some(SchemaFieldType::F32));
+        assert_eq!(SchemaFieldType::from_code(6), Some(SchemaFieldType::U32));
+        assert_eq!(SchemaFieldType::from_code(7), Some(SchemaFieldType::Ref));
+        assert_eq!(SchemaFieldType::from_code(8), Some(SchemaFieldType::StringRef));
+        assert_eq!(SchemaFieldType::from_code(9), Some(SchemaFieldType::Flags));
+        assert_eq!(SchemaFieldType::from_code(10), Some(SchemaFieldType::Vec3));
+        assert_eq!(SchemaFieldType::from_code(11), Some(SchemaFieldType::Blob32));
+    }
+
+    #[test]
+    fn field_type_from_code_invalid() {
+        assert_eq!(SchemaFieldType::from_code(0), None);
+        assert_eq!(SchemaFieldType::from_code(3), None);
+        assert_eq!(SchemaFieldType::from_code(12), None);
+        assert_eq!(SchemaFieldType::from_code(0xFFFFFFFF), None);
+    }
+
+    #[test]
+    fn field_type_byte_width() {
+        assert_eq!(SchemaFieldType::Bit.byte_width(), 0);
+        assert_eq!(SchemaFieldType::U8.byte_width(), 1);
+        assert_eq!(SchemaFieldType::U16.byte_width(), 2);
+        assert_eq!(SchemaFieldType::F32.byte_width(), 4);
+        assert_eq!(SchemaFieldType::U32.byte_width(), 4);
+        assert_eq!(SchemaFieldType::Ref.byte_width(), 4);
+        assert_eq!(SchemaFieldType::StringRef.byte_width(), 4);
+        assert_eq!(SchemaFieldType::Flags.byte_width(), 4);
+        assert_eq!(SchemaFieldType::Vec3.byte_width(), 12);
+        assert_eq!(SchemaFieldType::Blob32.byte_width(), 32);
+    }
+
+    #[test]
+    fn field_type_needs_swap() {
+        assert!(!SchemaFieldType::Bit.needs_swap());
+        assert!(!SchemaFieldType::U8.needs_swap());
+        assert!(SchemaFieldType::U16.needs_swap());
+        assert!(SchemaFieldType::F32.needs_swap());
+        assert!(SchemaFieldType::U32.needs_swap());
+        assert!(SchemaFieldType::Vec3.needs_swap());
+        assert!(SchemaFieldType::Blob32.needs_swap());
+    }
+
+    #[test]
+    fn field_type_swap_unit() {
+        assert_eq!(SchemaFieldType::U16.swap_unit(), 2);
+        assert_eq!(SchemaFieldType::F32.swap_unit(), 4);
+        assert_eq!(SchemaFieldType::U32.swap_unit(), 4);
+        assert_eq!(SchemaFieldType::Vec3.swap_unit(), 4);
+    }
+
+    #[test]
+    fn field_type_swap_count() {
+        assert_eq!(SchemaFieldType::U16.swap_count(), 1);
+        assert_eq!(SchemaFieldType::F32.swap_count(), 1);
+        assert_eq!(SchemaFieldType::Vec3.swap_count(), 3);
+        assert_eq!(SchemaFieldType::Blob32.swap_count(), 8);
+    }
+
+    #[test]
+    fn from_schm_body_too_small() {
+        assert!(ComponentSchema::from_schm_body(&[], false).is_none());
+        assert!(ComponentSchema::from_schm_body(&[0, 0, 0], false).is_none());
+    }
+
+    #[test]
+    fn from_schm_body_zero_fields() {
+        let body = [
+            0, 0, 0, 0, // n_fields = 0
+            100, 0, 0, 0, // payload_stride = 100
+        ];
+        let schema = ComponentSchema::from_schm_body(&body, false);
+        assert!(schema.is_some());
+        let schema_unwrapped = schema.unwrap();
+        assert_eq!(schema_unwrapped.payload_stride, 100);
+        assert_eq!(schema_unwrapped.fields.len(), 0);
+    }
+
+    #[test]
+    fn from_schm_body_too_many_fields() {
+        let mut body = vec![
+            200, 0, 0, 0, // n_fields = 200 (max boundary)
+            100, 0, 0, 0, // payload_stride = 100
+        ];
+        // Add 200 * 16 = 3200 bytes of field data
+        body.resize(8 + 201 * 16, 0);
+        assert!(ComponentSchema::from_schm_body(&body, false).is_none());
+    }
+
+    #[test]
+    fn from_schm_body_insufficient_data() {
+        let body = [
+            1, 0, 0, 0, // n_fields = 1
+            100, 0, 0, 0, // payload_stride = 100
+        ];
+        // Only 8 bytes, but need 8 + 16 = 24
+        assert!(ComponentSchema::from_schm_body(&body, false).is_none());
+    }
+
+    #[test]
+    fn from_schm_body_le() {
+        let body = [
+            1, 0, 0, 0, // n_fields = 1
+            100, 0, 0, 0, // payload_stride = 100
+            // One field: type=6 (U32), name_hash=0x12345678, unk=0, offset=(10 << 16) | 5
+            6, 0, 0, 0, // type_code = 6 (U32)
+            0x78, 0x56, 0x34, 0x12, // name_hash = 0x12345678
+            0, 0, 0, 0, // unk
+            5, 0, 10, 0, // raw_offset = (10 << 16) | 5
+        ];
+        let schema = ComponentSchema::from_schm_body(&body, false).unwrap();
+        assert_eq!(schema.payload_stride, 100);
+        assert_eq!(schema.fields.len(), 1);
+        let field = &schema.fields[0];
+        assert_eq!(field.field_type, SchemaFieldType::U32);
+        assert_eq!(field.name_hash, 0x12345678);
+        assert_eq!(field.byte_offset, 10);
+        assert_eq!(field.flags, 5);
+    }
+}
