@@ -199,21 +199,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut exit_code = 0i32;
 
     if !cli.skip_aset {
-        println!("{}", "=== ASET OOB Validation ===".bright_white().bold());
-        match aset_validate::run_aset_oob(&cli.wad, cli.oob_only, cli.limit) {
-            Ok(stats) => {
-                aset_validate::print_aset_summary(&stats);
-                if stats.out_of_bounds > 0 {
-                    exit_code = 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("ASET validation failed: {e}");
-                exit_code = 1;
-            }
-        }
-        println!();
-
+        // NOTE: the former "ASET OOB Validation" pass (run_aset_oob) was removed.
+        // It treated the packed-ref low-16 as a 16-byte-entry-table INDEX and flagged
+        // `sub >= entry_count` as "heap corruption", which false-positived on 10,798
+        // retail entries. RE of retail vz.wad shows the low-16 is `sub_offset` — a
+        // byte offset to the asset's sub-resource within the block, not a table index
+        // (the asset resolves by hash in its block: 100% of non-primary entries verify
+        // below). Correct validation is hash-ownership, which already runs here.
         println!(
             "{}",
             "=== ASET Hash Ownership Validation ===".bright_white().bold()
