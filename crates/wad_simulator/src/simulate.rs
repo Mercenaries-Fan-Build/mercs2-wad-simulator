@@ -951,14 +951,11 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
         println!("  {}", "ASSETS BY TYPE:".bright_white().bold());
         let mut types: Vec<_> = report.assets_by_type.values().collect();
         types.sort_by_key(|t| t.type_id);
-        for t in types.iter().take(20) {
+        for t in &types {
             println!(
                 "    type_id {:2} {:16} consumed={:5} issues={}",
                 t.type_id, t.type_name, t.consumed, t.issues
             );
-        }
-        if types.len() > 20 {
-            println!("    ... and {} more types", types.len() - 20);
         }
         println!();
     }

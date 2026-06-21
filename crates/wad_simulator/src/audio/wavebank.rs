@@ -86,21 +86,27 @@ pub fn consume_wavebank_with_options(
     if records_offset < HEADER_SIZE {
         issues.push(format!("records_offset {records_offset} < {HEADER_SIZE}"));
     }
-    let records_end = records_offset
-        .checked_add(count as usize * RECORD_SIZE)
-        .unwrap_or(usize::MAX);
-    if records_end > body.len() {
-        issues.push(format!(
-            "records extend past body: end 0x{records_end:X} > len 0x{:X}",
-            body.len()
-        ));
-    }
 
+    // `count` @0 is the record CAPACITY; `populated_count` @8 is how many records
+    // are actually present in the body (the remainder is unfilled capacity). The
+    // engine only reads `populated_count` records, so the body holds exactly that
+    // many — e.g. retail streaming wavebank 0x7871F925: count=29, populated=20,
+    // body=0x2F8 = records_offset(0x28) + 20*36. Bounding by `count` false-flags
+    // "records extend past body" (0x43C > 0x2F8); bound by what is actually read.
     let check_count = if populated_count > 0 && u32::from(populated_count) <= count {
         populated_count as usize
     } else {
         count as usize
     };
+    let records_end = records_offset
+        .checked_add(check_count * RECORD_SIZE)
+        .unwrap_or(usize::MAX);
+    if records_end > body.len() {
+        issues.push(format!(
+            "records extend past body: end 0x{records_end:X} > len 0x{:X} (count={count}, populated={populated_count})",
+            body.len()
+        ));
+    }
 
     let mut clips = Vec::new();
     let mut streaming_clip_count = 0usize;

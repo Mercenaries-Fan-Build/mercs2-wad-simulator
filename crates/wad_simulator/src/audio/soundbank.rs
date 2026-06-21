@@ -67,16 +67,15 @@ pub fn consume_soundbank(
         if (section_off1 - data_start) % sub_count as usize == 0 {
             let record_size = (section_off1 - data_start) / sub_count as usize;
 
-            // P2-7: record stride sanity
-            if record_size < 48 {
-                issues.push(format!(
-                    "section_a record stride {record_size} < 48 (suspiciously small)"
-                ));
-            } else if record_size != 116 && record_size != 118 {
-                issues.push(format!(
-                    "section_a record stride {record_size} not in known set {{116, 118}}"
-                ));
-            }
+            // The section-A record stride is DATA-DRIVEN, not a fixed value: it is
+            // simply section_a_size / sub_count and varies per bank. RE of retail
+            // game-files/vz.wad observed strides 80, 94, 96, 103, 106, 112, 116, 118,
+            // 124, 128, 140 and 152 — all of which load fine in-game (even single-
+            // record banks vary: 128/140/152). The old "must be in {116, 118}" set
+            // was just the two most common in the golden sample and false-positived
+            // on every other stride. The real structural invariant is that section A
+            // divides evenly into sub_count records (checked by this `% == 0` guard)
+            // and that every record is in-bounds (exercised via SafeSlice below).
             for r in 0..sub_count as usize {
                 let rec_off = data_start + r * record_size;
                 for &fo in U8X4_RECORD_RELATIVE {
