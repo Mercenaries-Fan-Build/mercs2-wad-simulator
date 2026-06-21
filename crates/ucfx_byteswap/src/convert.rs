@@ -377,7 +377,7 @@ fn apply_binn_transcode(
         .iter()
         .enumerate()
         .filter(|(_, d)| {
-            matches!(d.tag, ChunkTag::Unknown(b) if b == *b"BINN")
+            matches!(d.tag, ChunkTag::Binn)
                 && d.row_u0 != 0xFFFF_FFFF
                 && d.body_size > 0
         })
@@ -1250,7 +1250,7 @@ fn convert_generic_bodies(
                         // (BE u32 7 stays `00 00 00 07` in PC, not reversed). The generic
                         // u32 default wrongly reverses them. No swap. (oracle: 2946 -> 0.)
                     }
-                    ChunkTag::Unknown(b) if b == *b"INST" || b == *b"BSHI" => {
+                    ChunkTag::Inst | ChunkTag::Bshi => {
                         // INST / BSHI: u16 record / index arrays. PC = per-u16 byte-swap of
                         // the BE source; the generic u32 default transposes each pair (e.g.
                         // BSHI {0,1,2,3} -> {1,0,3,2}). (oracle: INST 1020 + BSHI 186 -> 0.)
@@ -1268,18 +1268,18 @@ fn convert_generic_bodies(
                             swap_u32_array(body); // odd length -> prior safe behaviour
                         }
                     }
-                    ChunkTag::Unknown(b) if b == *b"TRCK" => {
+                    ChunkTag::Trck => {
                         // TRCK: [u32 hash][u32 hash] then a u16 array (variable length).
                         convert_trck_inplace(&mut data_area[body_local_start..body_local_end]);
                     }
-                    ChunkTag::Unknown(b) if b == *b"PTMS" => {
+                    ChunkTag::Ptms => {
                         // PTMS: 8-byte records [u32][u16][u16].
                         let body = &mut data_area[body_local_start..body_local_end];
                         if !walk_records(body, &PTMS_WALKER) {
                             swap_u32_array(body);
                         }
                     }
-                    ChunkTag::Unknown(b) if b == *b"PTCH" => {
+                    ChunkTag::Ptch => {
                         // PTCH: 56-byte records (f32 + u16 pair @0x34).
                         let body = &mut data_area[body_local_start..body_local_end];
                         if !convert_ptch_inplace(body) {
@@ -1342,9 +1342,7 @@ fn convert_generic_bodies(
                         // (@0x67D130). Swap each u16 in place (no transposition).
                         swap_u16_array(&mut data_area[body_local_start..body_local_end]);
                     }
-                    ChunkTag::Unknown(b)
-                        if b == *b"TYPE" && type_hash == types::TYPE_HASH_STANCE =>
-                    {
+                    ChunkTag::Type if type_hash == types::TYPE_HASH_STANCE => {
                         // Stance/named-registry TYPE = the dimension-name table:
                         // totalDims × ([ASCII name]\0 [u16 field]). The generic u32 sweep
                         // reverses the ASCII in 4-byte groups ("Stance" -> "natS…"),
@@ -1402,7 +1400,7 @@ fn convert_generic_bodies(
                             &mut data_area[body_local_start..body_local_end],
                         );
                     }
-                    ChunkTag::Unknown(b) if b == *b"EMTR" => {
+                    ChunkTag::Emtr => {
                         // EMTR: 2-byte emitter count (genuine u16).
                         swap_u16_array(&mut data_area[body_local_start..body_local_end]);
                     }
@@ -1410,13 +1408,13 @@ fn convert_generic_bodies(
                     // disproven) "Python u16 group" reasoning. Default u32 is the
                     // known-good baseline; re-add a u16 arm only if a chunk is VERIFIED
                     // to hold u16 data (not f32) against the validator/retail.
-                    ChunkTag::Unknown(b) if b == *b"BINN" => {
+                    ChunkTag::Binn => {
                         // Lua bytecode: leave RAW BE here; converted afterward by
                         // apply_binn_transcode (unluac disassemble→flip-endianness→
                         // reassemble — NOT a byte-swap; the body may resize). Mirrors
                         // the wavebank `data` no-op + apply_wavebank_transcode reframe.
                     }
-                    ChunkTag::Unknown(b) if b == *b"MINF" => {
+                    ChunkTag::Minf => {
                         // MINF: [u32 hash][u16] (6 bytes). The old whole-body u16 swap
                         // transposed the u32 hash (oracle: @0 flagged). u32-swap the hash,
                         // u16-swap the rest.
@@ -1441,7 +1439,7 @@ fn convert_generic_bodies(
                         // types whose bodies carry a nested trnm sub-container).
                         convert_trnm_inplace(&mut data_area[body_local_start..body_local_end]);
                     }
-                    ChunkTag::Unknown(b) if b == *b"PHY2" => {
+                    ChunkTag::Phy2 => {
                         // PHY2 is a Havok 5.5 collision packfile (u32 header +
                         // embedded packfile), NOT a u32 array. A blanket u32 swap
                         // scrambles the ASCII __classnames__ strings; the Havok
@@ -1511,14 +1509,29 @@ fn convert_generic_bodies(
                     }
                     other_tag => {
                         if let Some(ref mut rpt) = report {
-                            let type_name = types::type_name_from_hash(type_hash);
-                            rpt.record_generic_fallback(
-                                entry_idx,
-                                type_hash,
-                                type_name,
-                                &format!("{}", other_tag),
-                                desc.body_size,
-                            );
+                            // Tags the engine dispatches on but we have NOT yet
+                            // validated as WAD chunks (or that belong to non-UCFX
+                            // subsystems) get a loud "requires deeper investigation"
+                            // entry instead of the quiet generic-fallback note.
+                            match mercs2_formats::tag_registry::needs_investigation(other_tag.as_bytes()) {
+                                Some(info) => rpt.record_needs_investigation(
+                                    entry_idx,
+                                    &format!("{}", other_tag),
+                                    info.subsystem.label(),
+                                    info.note,
+                                    desc.body_size,
+                                ),
+                                None => {
+                                    let type_name = types::type_name_from_hash(type_hash);
+                                    rpt.record_generic_fallback(
+                                        entry_idx,
+                                        type_hash,
+                                        type_name,
+                                        &format!("{}", other_tag),
+                                        desc.body_size,
+                                    );
+                                }
+                            }
                         }
                         swap_u32_array(&mut data_area[body_local_start..body_local_end]);
                     }

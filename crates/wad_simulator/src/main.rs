@@ -39,6 +39,7 @@ mod animation;
 mod aset_validate;
 mod audio;
 mod blocks;
+mod chunk_invariants;
 mod consume;
 mod material;
 mod model;

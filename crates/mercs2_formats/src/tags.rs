@@ -19,6 +19,7 @@ pub enum ChunkTag {
     Hier,      // "HIER"
     Prmg,      // "PRMG"
     Mtrl,      // "MTRL"
+    Area,      // "AREA" (mesh sub-area container; consumed by Mesh_ConsumeChunk @0x478366 → 0x4a4ab0)
     InfoUpper, // "INFO" (different from lowercase "info")
     Body,      // "BODY"
     Chdr,      // "CHDR"
@@ -64,6 +65,43 @@ pub enum ChunkTag {
     Skin,      // "SKIN"
     Watr,      // "watr"
 
+    // UCFX asset chunks dispatched by the engine but previously unregistered
+    // (see tag_registry.rs / docs/ucfx_tag_registry.md for handler addresses).
+    Asto, // "ASTO"
+    Atrb, // "ATRB"
+    Binn, // "BINN" (Lua bytecode container; transcoded, not byte-swapped)
+    Bshi, // "BSHI"
+    Bshp, // "BSHP"
+    Colr, // "COLR"
+    Damg, // "DAMG"
+    DataUpper, // "DATA"
+    Debr, // "DEBR"
+    DeclUpper, // "DECL"
+    Emit, // "EMIT"
+    Emtr, // "EMTR"
+    Frce, // "FRCE"
+    Inst, // "INST"
+    Keys, // "KEYS"
+    Manm, // "MANM"
+    Mesh, // "MESH"
+    Minf, // "MINF"
+    Node, // "NODE"
+    Part, // "PART"
+    Phy2, // "PHY2"
+    Poff, // "POFF"
+    Ptch, // "PTCH"
+    Ptms, // "PTMS"
+    Ptyp, // "PTYP"
+    Soun, // "SOUN"
+    Text, // "TEXT"
+    Tiny, // "TINY"
+    Trck, // "TRCK"
+    Tree, // "TREE"
+    Trfm, // "TRFM"
+    Type, // "TYPE"
+    Valu, // "VALU"
+    TrnsLower, // "trns"
+
     // Unknown tag (carries raw bytes for diagnostics)
     Unknown([u8; 4]),
 }
@@ -86,6 +124,7 @@ impl ChunkTag {
             b"HIER" => Self::Hier,
             b"PRMG" => Self::Prmg,
             b"MTRL" => Self::Mtrl,
+            b"AREA" => Self::Area,
             b"INFO" => Self::InfoUpper,
             b"BODY" => Self::Body,
             b"CHDR" => Self::Chdr,
@@ -114,6 +153,40 @@ impl ChunkTag {
             b"DEPS" => Self::Deps,
             b"SKIN" => Self::Skin,
             b"watr" => Self::Watr,
+            b"ASTO" => Self::Asto,
+            b"ATRB" => Self::Atrb,
+            b"BINN" => Self::Binn,
+            b"BSHI" => Self::Bshi,
+            b"BSHP" => Self::Bshp,
+            b"COLR" => Self::Colr,
+            b"DAMG" => Self::Damg,
+            b"DATA" => Self::DataUpper,
+            b"DEBR" => Self::Debr,
+            b"DECL" => Self::DeclUpper,
+            b"EMIT" => Self::Emit,
+            b"EMTR" => Self::Emtr,
+            b"FRCE" => Self::Frce,
+            b"INST" => Self::Inst,
+            b"KEYS" => Self::Keys,
+            b"MANM" => Self::Manm,
+            b"MESH" => Self::Mesh,
+            b"MINF" => Self::Minf,
+            b"NODE" => Self::Node,
+            b"PART" => Self::Part,
+            b"PHY2" => Self::Phy2,
+            b"POFF" => Self::Poff,
+            b"PTCH" => Self::Ptch,
+            b"PTMS" => Self::Ptms,
+            b"PTYP" => Self::Ptyp,
+            b"SOUN" => Self::Soun,
+            b"TEXT" => Self::Text,
+            b"TINY" => Self::Tiny,
+            b"TRCK" => Self::Trck,
+            b"TREE" => Self::Tree,
+            b"TRFM" => Self::Trfm,
+            b"TYPE" => Self::Type,
+            b"VALU" => Self::Valu,
+            b"trns" => Self::TrnsLower,
             _ => Self::Unknown(b),
         }
     }
@@ -141,6 +214,7 @@ impl ChunkTag {
             Self::Hier => *b"HIER",
             Self::Prmg => *b"PRMG",
             Self::Mtrl => *b"MTRL",
+            Self::Area => *b"AREA",
             Self::InfoUpper => *b"INFO",
             Self::Body => *b"BODY",
             Self::Chdr => *b"CHDR",
@@ -169,6 +243,40 @@ impl ChunkTag {
             Self::Deps => *b"DEPS",
             Self::Skin => *b"SKIN",
             Self::Watr => *b"watr",
+            Self::Asto => *b"ASTO",
+            Self::Atrb => *b"ATRB",
+            Self::Binn => *b"BINN",
+            Self::Bshi => *b"BSHI",
+            Self::Bshp => *b"BSHP",
+            Self::Colr => *b"COLR",
+            Self::Damg => *b"DAMG",
+            Self::DataUpper => *b"DATA",
+            Self::Debr => *b"DEBR",
+            Self::DeclUpper => *b"DECL",
+            Self::Emit => *b"EMIT",
+            Self::Emtr => *b"EMTR",
+            Self::Frce => *b"FRCE",
+            Self::Inst => *b"INST",
+            Self::Keys => *b"KEYS",
+            Self::Manm => *b"MANM",
+            Self::Mesh => *b"MESH",
+            Self::Minf => *b"MINF",
+            Self::Node => *b"NODE",
+            Self::Part => *b"PART",
+            Self::Phy2 => *b"PHY2",
+            Self::Poff => *b"POFF",
+            Self::Ptch => *b"PTCH",
+            Self::Ptms => *b"PTMS",
+            Self::Ptyp => *b"PTYP",
+            Self::Soun => *b"SOUN",
+            Self::Text => *b"TEXT",
+            Self::Tiny => *b"TINY",
+            Self::Trck => *b"TRCK",
+            Self::Tree => *b"TREE",
+            Self::Trfm => *b"TRFM",
+            Self::Type => *b"TYPE",
+            Self::Valu => *b"VALU",
+            Self::TrnsLower => *b"trns",
             Self::Unknown(b) => *b,
         }
     }

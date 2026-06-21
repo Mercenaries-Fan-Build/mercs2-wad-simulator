@@ -162,6 +162,10 @@ pub struct SimulateReport {
     pub bounds_advisory: usize,
     pub structural_advisory: u32,
     pub position_advisory: usize,
+    /// NON-fatal — engine tags found in WAD data that are not yet validated as WAD
+    /// chunks (registered-but-unvalidated UCFX tags, or non-UCFX subsystems). Each
+    /// is a "requires deeper investigation" message; deduped across the run.
+    pub needs_investigation: Vec<String>,
 }
 
 pub struct SimulateOptions<'a> {
@@ -350,6 +354,9 @@ pub fn run_simulate_with_options(
         report.bounds_advisory += result.bounds_advisory;
         report.structural_advisory += result.structural_advisory;
         report.position_advisory += result.position_advisory;
+        report
+            .needs_investigation
+            .extend(result.needs_investigation.iter().cloned());
         // Buffer-too-small from consume_texture (ASET) + check_embedded_texture_buffers
         // (layer/model embedded) → the headline counter, same as the block sweep.
         for m in &result.texture_buffer_issues {
@@ -706,25 +713,78 @@ fn dispatch_consume(
     data_body: Option<&[u8]>,
     label: &str,
 ) -> ConsumeResult {
-    match type_hash {
-        TYPE_HASH_WATERMAP => return consume_watermap(container, data_body, label),
-        TYPE_HASH_FX_DICTIONARY => return consume_fxdict(container, data_body, label),
-        _ => {}
+    let mut result = match type_hash {
+        TYPE_HASH_WATERMAP => consume_watermap(container, data_body, label),
+        TYPE_HASH_FX_DICTIONARY => consume_fxdict(container, data_body, label),
+        _ => match type_id {
+            TYPE_ID_MODEL | TYPE_ID_LOWRES_TERRAIN | TYPE_ID_TERRAIN_MESH => {
+                consume_model(container, data_body, label)
+            }
+            TYPE_ID_TEXTURE => consume_texture(container, data_body, label),
+            TYPE_ID_LAYER => consume_layer(container, data_body, label),
+            TYPE_ID_SCRIPT => consume_script(container, data_body, label),
+            TYPE_ID_ANIMATION => consume_animation(container, data_body, label),
+            TYPE_ID_STANCE => consume_action_table(asset_hash, container, data_body, label),
+            TYPE_ID_MATERIAL_PARAMS => consume_material(container, data_body, label),
+            TYPE_ID_FX_DICTIONARY => consume_fxdict(container, data_body, label),
+            TYPE_ID_WORLD_ENTITY_DATA => consume_structural(container, data_body, label),
+            _ => consume_structural(container, data_body, label),
+        },
+    };
+    // Engine-verified per-chunk structural invariants (PTCH/INST/PTMS record
+    // alignment, POFF/PTYP min-size, PHY2 Havok magic), applied to any container.
+    let inv = crate::chunk_invariants::validate_chunk_invariants(container, label);
+    result.structural_advisory += inv.violations;
+    result.issues.extend(inv.issues);
+    // Registry-driven flag: any tag the engine dispatches on but we have not yet
+    // validated as a WAD chunk (or that belongs to a non-UCFX subsystem) gets a
+    // "requires deeper investigation" entry, regardless of asset type.
+    result
+        .needs_investigation
+        .extend(scan_needs_investigation(container, label));
+    result
+}
+
+/// Walk a UCFX container's descriptor tags and flag any whose registry status is
+/// `NeedsInvestigation` (deduped per tag). See `mercs2_formats::tag_registry`.
+fn scan_needs_investigation(container: &[u8], label: &str) -> Vec<String> {
+    use mercs2_formats::ffcs::read_u32_le;
+    use mercs2_formats::tag_registry;
+
+    let mut out = Vec::new();
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return out;
     }
-    match type_id {
-        TYPE_ID_MODEL | TYPE_ID_LOWRES_TERRAIN | TYPE_ID_TERRAIN_MESH => {
-            consume_model(container, data_body, label)
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max_desc = container.len().saturating_sub(20) / 20;
+    if n_desc > max_desc {
+        return out;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..n_desc {
+        let row = 20 + i * 20;
+        if row + 4 > container.len() {
+            break;
         }
-        TYPE_ID_TEXTURE => consume_texture(container, data_body, label),
-        TYPE_ID_LAYER => consume_layer(container, data_body, label),
-        TYPE_ID_SCRIPT => consume_script(container, data_body, label),
-        TYPE_ID_ANIMATION => consume_animation(container, data_body, label),
-        TYPE_ID_STANCE => consume_action_table(asset_hash, container, data_body, label),
-        TYPE_ID_MATERIAL_PARAMS => consume_material(container, data_body, label),
-        TYPE_ID_FX_DICTIONARY => consume_fxdict(container, data_body, label),
-        TYPE_ID_WORLD_ENTITY_DATA => consume_structural(container, data_body, label),
-        _ => consume_structural(container, data_body, label),
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(&container[row..row + 4]);
+        if !seen.insert(tag) {
+            continue;
+        }
+        if let Some(info) = tag_registry::needs_investigation(tag) {
+            let disp = String::from_utf8_lossy(&tag);
+            let note = if info.note.is_empty() {
+                "no invariant recorded"
+            } else {
+                info.note
+            };
+            out.push(format!(
+                "{label}: tag '{disp}' ({}) present — requires deeper investigation: {note}",
+                info.subsystem.label()
+            ));
+        }
     }
+    out
 }
 
 fn record_type_stats(report: &mut SimulateReport, type_id: u32, result: &ConsumeResult) {
@@ -852,6 +912,34 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
         }
     }
     println!();
+
+    if !report.needs_investigation.is_empty() {
+        // Dedup by message (per-tag text is identical apart from the asset label,
+        // which we strip so a tag shows once with an example occurrence).
+        let mut by_tag: std::collections::BTreeMap<&str, (usize, &str)> =
+            std::collections::BTreeMap::new();
+        for msg in &report.needs_investigation {
+            // message form: "<label>: tag '<X>' (...) present — ..."
+            if let Some(idx) = msg.find(": tag '") {
+                let key = &msg[idx + 2..]; // from "tag '..."
+                let e = by_tag.entry(key).or_insert((0, msg.as_str()));
+                e.0 += 1;
+            }
+        }
+        println!(
+            "  {} {} distinct tag(s) ({} occurrence(s))",
+            "REQUIRES DEEPER INVESTIGATION:".magenta().bold(),
+            by_tag.len(),
+            report.needs_investigation.len()
+        );
+        for (key, (count, _)) in by_tag.iter().take(40) {
+            println!("    {} x{}", key.magenta(), count);
+        }
+        if by_tag.len() > 40 {
+            println!("    ... and {} more distinct tags", by_tag.len() - 40);
+        }
+        println!();
+    }
 
     if !report.assets_by_type.is_empty() {
         println!("  {}", "ASSETS BY TYPE:".bright_white().bold());

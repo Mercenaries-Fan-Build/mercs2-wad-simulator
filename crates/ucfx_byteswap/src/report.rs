@@ -16,6 +16,10 @@ pub struct SchemaCoverageReport {
     pub no_schema_components: Vec<NoSchemaEntry>,
     /// Non-ECS descriptor bodies that hit the catch-all swap_u32_array path.
     pub generic_fallback_tags: Vec<GenericFallbackEntry>,
+    /// Tags present in WAD data that are registered but NOT yet validated as WAD
+    /// chunks (see mercs2_formats::tag_registry). These need deeper investigation
+    /// before we can trust the conversion; surfaced loudly, not silently swapped.
+    pub needs_investigation_tags: Vec<NeedsInvestigationEntry>,
 }
 
 /// A schema field with an unrecognized type code.
@@ -63,6 +67,18 @@ pub struct GenericFallbackEntry {
     /// Chunk tag (4-char identifier).
     pub tag: String,
     /// Size of the body in bytes.
+    pub body_size: u32,
+}
+
+/// A tag present in WAD data that the engine dispatches on but which we have not
+/// yet validated as a WAD chunk (registered-but-unvalidated UCFX tag, or a
+/// non-UCFX subsystem). Converted with a generic u32 sweep that may be wrong.
+#[derive(Debug)]
+pub struct NeedsInvestigationEntry {
+    pub entry_idx: usize,
+    pub tag: String,
+    pub subsystem: &'static str,
+    pub note: &'static str,
     pub body_size: u32,
 }
 
@@ -133,6 +149,23 @@ impl SchemaCoverageReport {
         });
     }
 
+    pub fn record_needs_investigation(
+        &mut self,
+        entry_idx: usize,
+        tag: &str,
+        subsystem: &'static str,
+        note: &'static str,
+        body_size: u32,
+    ) {
+        self.needs_investigation_tags.push(NeedsInvestigationEntry {
+            entry_idx,
+            tag: tag.to_string(),
+            subsystem,
+            note,
+            body_size,
+        });
+    }
+
     /// Print the report to stderr in human-readable format.
     pub fn print_report(&self) {
         eprintln!();
@@ -198,12 +231,25 @@ impl SchemaCoverageReport {
             eprintln!();
         }
 
+        if !self.needs_investigation_tags.is_empty() {
+            eprintln!("** REQUIRES DEEPER INVESTIGATION: {} tag occurrence(s) **",
+                self.needs_investigation_tags.len());
+            eprintln!("   (registered-but-unvalidated WAD tags / non-UCFX subsystems — \
+                converted with a generic u32 sweep that may be wrong)");
+            for entry in &self.needs_investigation_tags {
+                eprintln!("  entry[{}] tag={:<4} [{}] body_size={} :: {}",
+                    entry.entry_idx, entry.tag, entry.subsystem, entry.body_size, entry.note);
+            }
+            eprintln!();
+        }
+
         let total_issues = unknown_count
             + self.schema_parse_failures.len()
             + self.no_schema_components.iter()
                 .filter(|e| e.swap_strategy == "u32_array sweep")
                 .count()
-            + self.generic_fallback_tags.len();
+            + self.generic_fallback_tags.len()
+            + self.needs_investigation_tags.len();
 
         if total_issues == 0 {
             eprintln!("Result: all data bodies have typed swap coverage.");
