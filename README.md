@@ -63,6 +63,5 @@ cargo build --release -p ucfx_byteswap
 
 ## See also
 
-- [mercs2-pmc-blackbox](https://github.com/austinkregel/mercs2-pmc-blackbox) — Game startup DLL (SecuROM spoof, ASI loader).
-- [mercs2-crack-game](https://github.com/austinkregel/mercs2-crack-game) — EXE patcher (applies cracks and injects pmc_bb.dll).
-- [mercenaries-game](https://github.com/austinkregel/mercenaries-game) — Full reverse-engineering toolkit.
+- [mercs2-pmc-blackbox](https://github.com/Mercenaries-Fan-Build/pmc-blackbox) — Game startup DLL (SecuROM spoof, ASI loader).
+- [mercs2-crack-game](https://github.com/Mercenaries-Fan-Build/mercs2-securom-bypass) — EXE patcher (applies cracks and injects pmc_bb.dll).
