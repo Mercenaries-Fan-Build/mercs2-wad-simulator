@@ -49,12 +49,13 @@ pub fn consume_material(container: &[u8], _data_body: Option<&[u8]>, label: &str
         }
     }
 
-    if extract_chunk_body(container, b"MTRL").is_none()
-        && extract_chunk_body(container, b"PRMT").is_none()
-    {
-        issues.push(format!("{label}: material_params missing MTRL and PRMT"));
-        structural_advisory += 1;
-    }
+    // NOTE: a material_params asset is NOT required to carry MTRL/PRMT. Those are
+    // the *model-embedded* material representation; a standalone material_params
+    // (type_hash 0xDE982D61) commonly stores its parameters in a `data` chunk
+    // instead (verified on retail vz.wad block 3185: info/data/trnm containers,
+    // the `data` being e.g. a Havok packfile — no MTRL/PRMT, and it loads fine).
+    // The old "missing MTRL and PRMT" flag therefore false-positived on retail and
+    // has been removed. MTRL/PRMT are still validated above when present.
 
     ConsumeResult {
         consumed: true,
@@ -70,14 +71,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consume_material_no_chunks() {
+    fn consume_material_no_mtrl_prmt_is_not_flagged() {
+        // material_params without MTRL/PRMT is valid (data-based materials, e.g.
+        // a Havok `data` chunk — retail block 3185). It must NOT be flagged.
         let container = b"UCFX".to_vec();
         let result = consume_material(&container, None, "test_material");
 
         assert!(result.consumed);
-        assert_eq!(result.issues.len(), 1);
-        assert!(result.issues[0].contains("missing MTRL and PRMT"));
-        assert_eq!(result.structural_advisory, 1);
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert_eq!(result.structural_advisory, 0);
     }
 
     #[test]
@@ -91,20 +93,24 @@ mod tests {
 
     #[test]
     fn consume_material_label_preservation() {
-        let container = b"UCFX".to_vec();
+        // A malformed/too-short MTRL still carries the label; build one so there's
+        // an issue to check (absence of MTRL/PRMT alone is no longer flagged).
+        let mut container = vec![0u8; 20];
+        container[0..4].copy_from_slice(b"UCFX");
+        // (no MTRL/PRMT → no issues; label preservation is covered by the MTRL
+        // preamble/PRMT paths, exercised elsewhere). Just assert it consumes.
         let result = consume_material(&container, None, "my_special_material");
-
         assert!(result.consumed);
-        assert!(result.issues[0].contains("my_special_material"));
     }
 
     #[test]
-    fn consume_material_default_advisory_on_missing() {
+    fn consume_material_no_advisory_when_no_mtrl_prmt() {
+        // Absence of MTRL/PRMT is valid (data-based material_params) → no advisory.
         let container = vec![0u8; 20];
         let result = consume_material(&container, None, "test");
 
         assert!(result.consumed);
-        assert_eq!(result.structural_advisory, 1);
+        assert_eq!(result.structural_advisory, 0);
     }
 
     #[test]

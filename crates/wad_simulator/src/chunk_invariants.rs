@@ -81,7 +81,10 @@ pub fn validate_chunk_invariants(container: &[u8], label: &str) -> ChunkInvarian
             b"BSHI" => record_aligned(&mut r, label, "BSHI", body.len(), 2),
             b"ASTO" => min_size(&mut r, label, "ASTO", body.len(), 4, "u32 count @FUN_0067c780"),
             b"MINF" => min_size(&mut r, label, "MINF", body.len(), 6, "u32 hash + u16 @FUN_0068e5d0"),
-            b"DECL" => record_aligned(&mut r, label, "DECL", body.len(), 0x24),
+            // DECL is context-dependent: the ECS-template DECL is 0x24-record
+            // (FUN_0045dbb0), but DECL in other asset types (e.g. material/resident
+            // blocks) has a different layout — a context-blind record-align check
+            // false-fired on retail (block 3185, 10000-byte DECL). Registered.
             // High-frequency effect/mesh chunks (>100 occurrences in vz.wad), each
             // verified against its engine handler (see docs/ucfx_tag_registry.md).
             // The engine overflow-guards the count-driven allocations, so a short
