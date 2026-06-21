@@ -11,6 +11,12 @@ pub const CODEC_IMA: u8 = 0x02;
 pub const CODEC_XMA: u8 = 0x01;
 pub const CODEC_XBOX_ADPCM: u8 = 0x05;
 pub const CODEC_XMA2: u8 = 0x69;
+/// Streaming codec: the clip's audio is NOT embedded — it lives in an external
+/// `.pws` referenced by (data_offset, data_size). Verified on retail wavebank
+/// 0x7871F925: all clips are codec 0x04, stereo, 44100 Hz, with multi-MB sizes at
+/// offsets into the `.pws`. The simulator validates the reference (the .pws is
+/// present and offset+size fits), not the codec-0x04 bytes.
+pub const CODEC_STREAM: u8 = 0x04;
 
 #[derive(Debug, Clone)]
 pub struct WaveClip {
@@ -130,10 +136,12 @@ pub fn consume_wavebank_with_options(
             });
         }
 
-        // P2-6: Structural checks for embedded clips
-        if codec != CODEC_IMA {
+        // Embedded clips are IMA (0x02); streaming clips are codec 0x04 (audio in
+        // the external .pws, validated by reference below). Anything else is a
+        // genuinely unexpected codec.
+        if codec != CODEC_IMA && codec != CODEC_STREAM {
             issues.push(format!(
-                "clip[{i}] 0x{clip_hash:08X}: unexpected codec 0x{codec:02X} (expected 0x02 IMA ADPCM)"
+                "clip[{i}] 0x{clip_hash:08X}: unexpected codec 0x{codec:02X} (expected 0x02 IMA or 0x04 stream)"
             ));
         }
 
