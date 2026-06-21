@@ -143,15 +143,15 @@ pub fn consume_wavebank_with_options(
             ));
         }
 
-        if data_size > 0 && codec == CODEC_IMA {
-            let block_align = 36 * channels as u32;
-            if block_align > 0 && data_size % block_align != 0 {
-                issues.push(format!(
-                    "clip[{i}] 0x{clip_hash:08X}: IMA data_size {data_size} not aligned to block size {} (36*{channels}ch)",
-                    block_align
-                ));
-            }
-        }
+        // NOTE: no `data_size % (36*channels)` alignment check. It false-positived
+        // on every retail wavebank (which plays fine): retail clip data_size is not
+        // 36-aligned (sizes are variously 32-/64-aligned), so 36 is not the real
+        // block size, and XACT-style IMA permits a partial final block (decode is
+        // bounded by sample count, not block alignment). For embedded clips the
+        // real per-block validation is `validate_ima_payload` below; for streaming
+        // clips `data_size` is the EXTERNAL .pws byte length, where block alignment
+        // is meaningless. (The audio decoder is not in the decompiled .text, so this
+        // rests on the retail oracle + XACT IMA semantics, not a decomp trace.)
 
         let mut decoded_samples = None;
         let mut external_stream = false;
