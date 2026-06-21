@@ -49,12 +49,21 @@ pub fn consume_layer(container: &[u8], data_body: Option<&[u8]>, label: &str) ->
         }
     }
 
-    // Schema-driven float/position scan across ALL components with a schm
-    // (the spatial-hash crash source — positions feed an unclamped cell index).
+    // Schema-driven NaN/Inf scan across components with a schm. This is a
+    // DIFFERENTIAL-ONLY signal, not an absolute one: per the decompilation
+    // (output/_ghidra) the spatial-hash cell index (the actual world-load crash)
+    // is fed ONLY by an object's transform position (FUN_00515f60 → FUN_00516c00),
+    // never by component data fields — and retail vz.wad itself carries NaN in some
+    // component floats (e.g. Road's leading Vec3, which the engine tolerates as
+    // non-position ref data). So a NaN here is only meaningful *relative to the
+    // retail oracle* (tools/diff_ecs_violations.py), and the per-record strings are
+    // deliberately NOT surfaced as absolute issues (they false-positived on retail).
+    // The count is retained as a non-fatal differential metric; real object
+    // placements are validated above (Transform) and below (flgs).
     let schema_scan = validate_ecs_component_schemas(container, label);
     placements_validated += schema_scan.records_checked;
     ecs_float_violations += schema_scan.violations;
-    issues.extend(schema_scan.issues);
+    let ecs_diff_issues = schema_scan.issues;
 
     // P2-10: ECS string component printable ASCII check (HEURISTIC → advisory; see above).
     structural_advisory += validate_string_components(container, label, &mut issues);
@@ -80,6 +89,7 @@ pub fn consume_layer(container: &[u8], data_body: Option<&[u8]>, label: &str) ->
         placements_validated,
         flgs_placements_validated,
         ecs_float_violations,
+        ecs_diff_issues,
         texture_buffer_issues,
         position_advisory,
         structural_advisory,
@@ -253,24 +263,30 @@ struct SchemaScan {
     issues: Vec<String>,
 }
 
-/// Coordinate magnitude that is unambiguously byte-swap garbage for any float
-/// field (legit scales/velocities/normals never approach this). Used for
-/// non-Transform `Vec3` fields where we can't be sure the field is a world
-/// position, to keep false positives near zero.
-const ABSURD_COORD: f32 = 1.0e6;
-
 /// Max issue lines emitted per component (violations are still fully counted).
 const MAX_ISSUES_PER_COMP: usize = 6;
 
 /// Schema-driven scan: walk every COMP group's info/schm/data triplet, parse the
-/// `schm` field layout, and validate float fields across all records. This catches
-/// position-bearing components the name-matched Transform heuristic skips — the
-/// likely source of the unclamped garbage cell index in the spatial-hash crash.
+/// `schm` field layout, and check float fields for **NaN/Inf only**.
 ///
-/// - Any float (`F32`/`Vec3`/`Blob32`) that is NaN/Inf → byte-swap corruption.
-/// - `Blob32` (Transform pos+quat blob): position bounds + quaternion unit check.
-/// - `Vec3`: flagged only when a component is clearly corrupt (NaN/Inf or |coord|
-///   beyond `ABSURD_COORD`) to avoid mislabeling scale/velocity vectors.
+/// Engine-grounded scope (decompilation `output/_ghidra`): the spatial-hash cell
+/// index — the actual world-load crash (`FUN_00516b10`:
+/// `gridW*((int)(z-originZ)>>s) + ((int)(x-originX)>>s)`, unclamped `cvttss2si`)
+/// — is only ever fed an **object's transform position**, fetched per placed
+/// object via `FUN_00515f60`→`FUN_00434f10` and inserted by `FUN_00516c00`
+/// (its only two callers are vtable methods on placed objects). Arbitrary ECS
+/// component `Vec3`/`Blob32` fields are component-local data and **never reach
+/// that path**, so a "position out of world bounds → spatial hash corruption"
+/// check on them is engine-incorrect — it false-positived on retail data
+/// (`PhysicalLink` anchors, `Road` ref-data) that loads fine. Object placement
+/// positions are validated where they really live: `validate_transform_components`
+/// (Transform, 42-byte record) and `validate_flgs_placements`.
+///
+/// What remains here is a pure converter/data-integrity check: a correct BE→LE
+/// swap of a finite float stays finite, so a NaN/Inf in a schema-typed float
+/// field signals a swap/schema defect. Finite magnitude is NOT flagged.
+/// `Blob32` is left opaque (32-byte component-specific blob — not assumed to be a
+/// pos+quat pose), so it is not interpreted as floats at all.
 fn validate_ecs_component_schemas(container: &[u8], label: &str) -> SchemaScan {
     let mut scan = SchemaScan {
         records_checked: 0,
@@ -390,28 +406,10 @@ fn scan_comp_group_schema(
                     }
                 }
                 SchemaFieldType::Vec3 => {
-                    if let (Some(x), Some(y), Some(z)) = (
-                        read_f32_le(data, off),
-                        read_f32_le(data, off + 4),
-                        read_f32_le(data, off + 8),
-                    ) {
-                        let non_finite = !x.is_finite() || !y.is_finite() || !z.is_finite();
-                        let absurd = x.abs() > ABSURD_COORD
-                            || y.abs() > ABSURD_COORD
-                            || z.abs() > ABSURD_COORD;
-                        if non_finite || absurd {
-                            scan.violations += 1;
-                            let kind = if non_finite { "position NaN/Inf" } else { "position out of world bounds" };
-                            push_capped(&mut scan.issues, &mut comp_issue_count, format!(
-                                "{label}: ECS \"{comp_name}\" Vec3+0x{:X} record[{rec_idx}] {kind}: ({x}, {y}, {z}) — \
-                                 unclamped cell index → spatial hash corruption",
-                                field.byte_offset
-                            ));
-                        }
-                    }
-                }
-                SchemaFieldType::Blob32 => {
-                    // pos(3) + pad(1) + quat(4) — same layout as Transform.
+                    // Schema-typed as 3 floats → NaN/Inf is a genuine swap/schema
+                    // defect. Magnitude is NOT checked: a finite Vec3 (direction,
+                    // scale, velocity, or a component-local point) is not an object
+                    // placement and never reaches the spatial-hash cell index.
                     if let (Some(x), Some(y), Some(z)) = (
                         read_f32_le(data, off),
                         read_f32_le(data, off + 4),
@@ -420,42 +418,20 @@ fn scan_comp_group_schema(
                         if !x.is_finite() || !y.is_finite() || !z.is_finite() {
                             scan.violations += 1;
                             push_capped(&mut scan.issues, &mut comp_issue_count, format!(
-                                "{label}: ECS \"{comp_name}\" Blob32+0x{:X} record[{rec_idx}] position NaN/Inf: ({x}, {y}, {z})",
-                                field.byte_offset
-                            ));
-                        } else if !is_valid_position(x, y, z) {
-                            scan.violations += 1;
-                            push_capped(&mut scan.issues, &mut comp_issue_count, format!(
-                                "{label}: ECS \"{comp_name}\" Blob32+0x{:X} record[{rec_idx}] position out of world bounds: ({x}, {y}, {z})",
-                                field.byte_offset
-                            ));
-                        }
-                    }
-                    if let (Some(qx), Some(qy), Some(qz), Some(qw)) = (
-                        read_f32_le(data, off + 16),
-                        read_f32_le(data, off + 20),
-                        read_f32_le(data, off + 24),
-                        read_f32_le(data, off + 28),
-                    ) {
-                        // An exactly-all-zero quaternion is an empty/unused record
-                        // slot (e.g. PhysicalLink record[0]), not corruption — a
-                        // byte-swap of zeros is still zeros, so it cannot be a swap
-                        // artifact; flagging it was a false positive.
-                        let all_zero = qx == 0.0 && qy == 0.0 && qz == 0.0 && qw == 0.0;
-                        if !all_zero && !is_valid_quaternion(qx, qy, qz, qw) {
-                            scan.violations += 1;
-                            let kind = if !qx.is_finite() || !qy.is_finite() || !qz.is_finite() || !qw.is_finite() {
-                                "quaternion NaN/Inf"
-                            } else {
-                                "quaternion not unit"
-                            };
-                            push_capped(&mut scan.issues, &mut comp_issue_count, format!(
-                                "{label}: ECS \"{comp_name}\" Blob32+0x{:X} record[{rec_idx}] {kind}: ({qx}, {qy}, {qz}, {qw})",
+                                "{label}: ECS \"{comp_name}\" Vec3+0x{:X} record[{rec_idx}] non-finite float: ({x}, {y}, {z}) — converter/data-integrity",
                                 field.byte_offset
                             ));
                         }
                     }
                 }
+                // SchemaFieldType::Blob32 is intentionally NOT validated here: it is
+                // an opaque 32-byte component-specific blob, not assumed to be a
+                // Transform-style pos+quat pose. Even when it is a pose, that pose is
+                // component-local (e.g. a PhysicalLink anchor) and never feeds the
+                // spatial hash, so a world-bounds / quaternion-unit check here was an
+                // engine-incorrect false positive. Object placements are validated in
+                // validate_transform_components / validate_flgs_placements. Falls
+                // through to the catch-all below.
                 _ => {}
             }
         }

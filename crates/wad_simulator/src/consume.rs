@@ -50,11 +50,16 @@ pub struct ConsumeResult {
     pub vertex_violations: usize,
     pub bounds_violations: usize,
     pub structural_violations: u32,
-    /// Schema-driven ECS float-field corruption: NaN/Inf in any float field, or
-    /// non-finite/out-of-bounds positions in non-Transform position-bearing
-    /// components. Catches byte-swap defects the name-matched Transform heuristic
-    /// misses (the spatial-hash garbage-cell-index source).
+    /// DIFFERENTIAL-ONLY count of NaN/Inf in schema-typed component float fields.
+    /// NOT an absolute defect signal: per the decompilation only an object's
+    /// transform position reaches the spatial-hash cell index, and retail itself
+    /// carries component-field NaN (e.g. Road ref-data), so this is meaningful only
+    /// relative to the retail oracle (tools/diff_ecs_violations.py). Non-fatal.
     pub ecs_float_violations: usize,
+    /// The per-record NaN/Inf strings behind `ecs_float_violations`. Routed to the
+    /// JSON report for the oracle diff, but kept OUT of the human "UCFX/FORMAT"
+    /// display (they false-positive on retail and are differential-only).
+    pub ecs_diff_issues: Vec<String>,
     /// FATAL — engine-accurate texture buffer-too-small messages (BODY shorter
     /// than the dimension-derived DXT mip chain). Aggregated into the report's
     /// headline `texture_buffer_too_small` count, NOT into `structural_violations`.

@@ -151,6 +151,9 @@ pub struct SimulateReport {
     pub bounds_violations: usize,
     pub structural_violations: u32,
     pub ecs_float_violations: usize,
+    /// Differential-only ECS component NaN/Inf strings (oracle diff input). Kept in
+    /// the JSON for tools/diff_ecs_violations.py; NOT shown in the UCFX/FORMAT report.
+    pub ecs_diff_issues: Vec<String>,
     /// FATAL — engine-accurate streaming buffer-too-small: a texture sub-resource
     /// whose BODY is shorter than the DXT mip chain the engine instantiates from
     /// the dimensions. This is the world-load livelock signal.
@@ -350,6 +353,9 @@ pub fn run_simulate_with_options(
         report.bounds_violations += result.bounds_violations;
         report.structural_violations += result.structural_violations;
         report.ecs_float_violations += result.ecs_float_violations;
+        report
+            .ecs_diff_issues
+            .extend(result.ecs_diff_issues.iter().cloned());
         report.vertex_advisory += result.vertex_advisory;
         report.bounds_advisory += result.bounds_advisory;
         report.structural_advisory += result.structural_advisory;
@@ -895,7 +901,7 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
     }
     if report.ecs_float_violations > 0 {
         println!(
-            "  ECS float (advisory): {}  (schema-driven non-Transform Vec3/Blob32; diff vs retail oracle — not fatal)",
+            "  ECS float (differential-only): {}  (component-field NaN/Inf; retail itself carries these — compare vs retail oracle via ecs_diff_issues in --json-output; NOT a defect on its own)",
             report.ecs_float_violations.to_string().yellow()
         );
     }
