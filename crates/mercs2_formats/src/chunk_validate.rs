@@ -189,3 +189,186 @@ pub fn validate_skin_containers(container: &[u8]) -> Vec<String> {
     }
     issues
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_deps_body_empty() {
+        assert!(validate_deps_body(&[]).is_some());
+    }
+
+    #[test]
+    fn validate_deps_body_zero_count() {
+        let body = [0u8]; // count = 0
+        assert!(validate_deps_body(&body).is_none());
+    }
+
+    #[test]
+    fn validate_deps_body_single_hash() {
+        let mut body = vec![1u8]; // count = 1
+        body.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]); // one hash
+        assert!(validate_deps_body(&body).is_none());
+    }
+
+    #[test]
+    fn validate_deps_body_multiple_hashes() {
+        let mut body = vec![3u8]; // count = 3
+        body.extend_from_slice(&[0, 0, 0, 0]); // hash 1
+        body.extend_from_slice(&[1, 1, 1, 1]); // hash 2
+        body.extend_from_slice(&[2, 2, 2, 2]); // hash 3
+        assert!(validate_deps_body(&body).is_none());
+    }
+
+    #[test]
+    fn validate_deps_body_truncated() {
+        let mut body = vec![2u8]; // count = 2
+        body.extend_from_slice(&[0, 0, 0, 0]); // hash 1
+        // Missing hash 2 — should error
+        assert!(validate_deps_body(&body).is_some());
+    }
+
+    #[test]
+    fn validate_deps_body_trailing_data() {
+        let mut body = vec![1u8]; // count = 1
+        body.extend_from_slice(&[0, 0, 0, 0]); // hash 1
+        body.push(0xFF); // trailing byte
+        assert!(validate_deps_body(&body).is_some());
+    }
+
+    #[test]
+    fn watr_payload_size_for_grid_zero_dims() {
+        assert!(watr_payload_size_for_grid(0, 257, 5).is_none());
+        assert!(watr_payload_size_for_grid(257, 0, 5).is_none());
+    }
+
+    #[test]
+    fn watr_payload_size_for_grid_wrong_layers() {
+        assert!(watr_payload_size_for_grid(257, 257, 4).is_none());
+        assert!(watr_payload_size_for_grid(257, 257, 6).is_none());
+    }
+
+    #[test]
+    fn watr_payload_size_for_grid_retail() {
+        let size = watr_payload_size_for_grid(WATR_GRID_DIM, WATR_GRID_DIM, WATR_LAYER_COUNT);
+        assert_eq!(size, Some(WATR_EXPECTED_SIZE));
+    }
+
+    #[test]
+    fn watr_payload_size_for_grid_calculation() {
+        // 257x257 grid: 36 header + 257*257*4 (heights) + 257*257*3 (masks) + 33290 footer
+        let expected = 36 + 257 * 257 * 4 + 257 * 257 * 3 + 33290;
+        assert_eq!(watr_payload_size_for_grid(257, 257, 5), Some(expected));
+    }
+
+    #[test]
+    fn validate_watr_payload_too_short() {
+        let payload = [0u8; 20];
+        assert!(validate_watr_payload(&payload).is_some());
+    }
+
+    #[test]
+    fn validate_watr_payload_wrong_layers() {
+        let mut payload = vec![0u8; WATR_HEADER_BYTES];
+        // layer_count at offset 0: set to 4 instead of 5
+        payload[0] = 4;
+        payload[1] = 0;
+        payload[2] = 0;
+        payload[3] = 0;
+        assert!(validate_watr_payload(&payload).is_some());
+    }
+
+    #[test]
+    fn validate_watr_payload_wrong_grid_dims() {
+        let mut payload = vec![0u8; WATR_EXPECTED_SIZE];
+        // layer_count = 5
+        payload[0] = 5;
+        // grid_w = 256 (wrong)
+        payload[4] = 0;
+        payload[5] = 1;
+        payload[6] = 0;
+        payload[7] = 0;
+        // grid_h = 257
+        payload[8] = 1;
+        payload[9] = 1;
+        payload[10] = 0;
+        payload[11] = 0;
+        // cell_size = 32.0
+        payload[12] = 0;
+        payload[13] = 0;
+        payload[14] = 0;
+        payload[15] = 0x42;
+        assert!(validate_watr_payload(&payload).is_some());
+    }
+
+    #[test]
+    fn validate_fxdict_chunks_info_too_short() {
+        assert!(validate_fxdict_chunks(&[], &[]).is_some());
+        assert!(validate_fxdict_chunks(&[0, 0], &[]).is_some());
+    }
+
+    #[test]
+    fn validate_fxdict_chunks_zero_entries() {
+        let info = [0, 0, 0, 0]; // entry_count = 0
+        let dict = [];
+        assert!(validate_fxdict_chunks(&info, &dict).is_none());
+    }
+
+    #[test]
+    fn validate_fxdict_chunks_single_entry() {
+        let info = [1, 0, 0, 0]; // entry_count = 1
+        let dict = [0u8; 20]; // exactly 1 * 20 bytes
+        assert!(validate_fxdict_chunks(&info, &dict).is_none());
+    }
+
+    #[test]
+    fn validate_fxdict_chunks_multiple_entries() {
+        let info = [3, 0, 0, 0]; // entry_count = 3
+        let dict = vec![0u8; 3 * 20]; // exactly 3 * 20 bytes
+        assert!(validate_fxdict_chunks(&info, &dict).is_none());
+    }
+
+    #[test]
+    fn validate_fxdict_chunks_dict_too_short() {
+        let info = [3, 0, 0, 0]; // entry_count = 3
+        let dict = vec![0u8; 50]; // less than 3 * 20 = 60
+        assert!(validate_fxdict_chunks(&info, &dict).is_some());
+    }
+
+    #[test]
+    fn validate_fxdict_chunks_dict_trailing() {
+        let info = [2, 0, 0, 0]; // entry_count = 2
+        let dict = vec![0u8; 2 * 20 + 5]; // 2 * 20 + 5 trailing
+        assert!(validate_fxdict_chunks(&info, &dict).is_some());
+    }
+
+    #[test]
+    fn validate_skin_containers_empty() {
+        let result = validate_skin_containers(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn validate_skin_containers_too_small() {
+        let data = vec![0u8; 10];
+        let result = validate_skin_containers(&data);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn validate_skin_containers_bad_magic() {
+        let data = vec![0u8; 20];
+        let result = validate_skin_containers(&data);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn validate_skin_containers_zero_descriptors() {
+        let mut data = vec![0u8; 20];
+        data[0..4].copy_from_slice(b"UCFX");
+        // n_desc at offset 16 = 0
+        let result = validate_skin_containers(&data);
+        assert!(result.is_empty());
+    }
+}

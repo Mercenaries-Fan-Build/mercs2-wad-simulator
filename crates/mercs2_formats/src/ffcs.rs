@@ -219,3 +219,238 @@ pub fn load_ffcs_archive(file: &mut File, file_size: u64) -> Result<FfcsArchive,
         paths,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_u32_le_basic() {
+        let data = [0x78, 0x56, 0x34, 0x12];
+        assert_eq!(read_u32_le(&data, 0), 0x12345678);
+    }
+
+    #[test]
+    fn read_u32_be_basic() {
+        let data = [0x12, 0x34, 0x56, 0x78];
+        assert_eq!(read_u32_be(&data, 0), 0x12345678);
+    }
+
+    #[test]
+    fn read_u16_le_basic() {
+        let data = [0x34, 0x12];
+        assert_eq!(read_u16_le(&data, 0), 0x1234);
+    }
+
+    #[test]
+    fn read_u16_be_basic() {
+        let data = [0x12, 0x34];
+        assert_eq!(read_u16_be(&data, 0), 0x1234);
+    }
+
+    #[test]
+    fn read_f32_le_from_zero() {
+        let bits = 0u32;
+        assert_eq!(read_f32_le(&bits.to_le_bytes(), 0), 0.0);
+    }
+
+    #[test]
+    fn read_f32_le_ten() {
+        let bits = 0x41200000u32; // 10.0 in IEEE 754
+        let f = read_f32_le(&bits.to_le_bytes(), 0);
+        assert!((f - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn read_f32_be_ten() {
+        let bits = 0x41200000u32; // 10.0 in IEEE 754
+        let f = read_f32_be(&bits.to_be_bytes(), 0);
+        assert!((f - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn indx_entry_decompressed_page_count() {
+        let entry = IndxEntry {
+            page_index: 0,
+            packed_field: 0x00FFFFFF,
+            flags_and_page_count: 0,
+        };
+        assert_eq!(entry.decompressed_page_count(), 0x00FFFFFF);
+    }
+
+    #[test]
+    fn indx_entry_compressed_page_count() {
+        let entry = IndxEntry {
+            page_index: 0,
+            packed_field: 0,
+            flags_and_page_count: 0xFFFF,
+        };
+        assert_eq!(entry.compressed_page_count(), 0xFFFF);
+    }
+
+    #[test]
+    fn aset_entry_block_index() {
+        let entry = AsetEntry {
+            asset_hash: 0,
+            secondary_ref: 0,
+            packed_block_ref: 0x12340000,
+            type_id: 0,
+        };
+        assert_eq!(entry.block_index(), 0x1234);
+    }
+
+    #[test]
+    fn aset_entry_sub_entry() {
+        let entry = AsetEntry {
+            asset_hash: 0,
+            secondary_ref: 0,
+            packed_block_ref: 0x12345678,
+            type_id: 0,
+        };
+        assert_eq!(entry.sub_entry(), 0x5678);
+    }
+
+    #[test]
+    fn aset_entry_is_primary_yes() {
+        let entry = AsetEntry {
+            asset_hash: 0,
+            secondary_ref: 0,
+            packed_block_ref: 0x1234FFFF,
+            type_id: 0,
+        };
+        assert!(entry.is_primary());
+    }
+
+    #[test]
+    fn aset_entry_is_primary_no() {
+        let entry = AsetEntry {
+            asset_hash: 0,
+            secondary_ref: 0,
+            packed_block_ref: 0x12340000,
+            type_id: 0,
+        };
+        assert!(!entry.is_primary());
+    }
+
+    #[test]
+    fn parse_ffcs_header_bad_magic() {
+        let mut header = [0u8; FFCS_HEADER_SIZE];
+        header[0..4].copy_from_slice(b"XXXX");
+        let result = parse_ffcs_header(&header);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ffcs_header_bad_version() {
+        let mut header = [0u8; FFCS_HEADER_SIZE];
+        header[0..4].copy_from_slice(b"FFCS");
+        // version at offset 4 stays 0 (wrong)
+        let result = parse_ffcs_header(&header);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_ffcs_header_valid_zero_chunks() {
+        let mut header = [0u8; FFCS_HEADER_SIZE];
+        header[0..4].copy_from_slice(b"FFCS");
+        // version = 2
+        header[4..8].copy_from_slice(&2u32.to_le_bytes());
+        // chunk_count = 0
+        header[8..12].copy_from_slice(&0u32.to_le_bytes());
+        let result = parse_ffcs_header(&header);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parse_ffcs_header_valid_one_chunk() {
+        let mut header = [0u8; FFCS_HEADER_SIZE];
+        header[0..4].copy_from_slice(b"FFCS");
+        // version = 2
+        header[4..8].copy_from_slice(&2u32.to_le_bytes());
+        // chunk_count = 1
+        header[8..12].copy_from_slice(&1u32.to_le_bytes());
+        // First chunk at offset 0x0C: tag, offset, meta
+        header[0x0C..0x10].copy_from_slice(b"INDX");
+        header[0x10..0x14].copy_from_slice(&0x100u32.to_le_bytes());
+        header[0x14..0x18].copy_from_slice(&10u32.to_le_bytes());
+        let result = parse_ffcs_header(&header).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tag, *b"INDX");
+        assert_eq!(result[0].offset, 0x100);
+        assert_eq!(result[0].meta, 10);
+    }
+
+    #[test]
+    fn find_chunk_found() {
+        let rows = vec![
+            ChunkRow { tag: *b"INDX", offset: 0x100, meta: 10 },
+            ChunkRow { tag: *b"DATA", offset: 0x200, meta: 20 },
+        ];
+        let found = find_chunk(&rows, b"DATA");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().offset, 0x200);
+    }
+
+    #[test]
+    fn find_chunk_not_found() {
+        let rows = vec![
+            ChunkRow { tag: *b"INDX", offset: 0x100, meta: 10 },
+        ];
+        let found = find_chunk(&rows, b"XXXX");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_chunk_empty() {
+        let rows: Vec<ChunkRow> = vec![];
+        let found = find_chunk(&rows, b"INDX");
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn chunk_row_clone() {
+        let row = ChunkRow {
+            tag: *b"INDX",
+            offset: 0x100,
+            meta: 10,
+        };
+        let cloned = row.clone();
+        assert_eq!(cloned.tag, row.tag);
+        assert_eq!(cloned.offset, row.offset);
+    }
+
+    #[test]
+    fn indx_entry_clone() {
+        let entry = IndxEntry {
+            page_index: 42,
+            packed_field: 100,
+            flags_and_page_count: 200,
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.page_index, entry.page_index);
+    }
+
+    #[test]
+    fn aset_entry_clone() {
+        let entry = AsetEntry {
+            asset_hash: 0x12345678,
+            secondary_ref: 0x87654321,
+            packed_block_ref: 0xDEADBEEF,
+            type_id: 27,
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.asset_hash, entry.asset_hash);
+        assert_eq!(cloned.type_id, entry.type_id);
+    }
+
+    #[test]
+    fn page_size_constant() {
+        assert_eq!(PAGE_SIZE, 0x8000);
+    }
+
+    #[test]
+    fn ffcs_header_size_constant() {
+        assert_eq!(FFCS_HEADER_SIZE, 0x100);
+    }
+}
