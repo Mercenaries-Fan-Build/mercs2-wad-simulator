@@ -228,6 +228,13 @@ pub fn consume_model(container: &[u8], _data_body: Option<&[u8]>, label: &str) -
         issues.extend(prmg_issues);
     }
 
+    // AREA sub-area validation (container-based). Engine handler @0x4a4ab0.
+    {
+        let (area_v, area_issues) = validate_area(container, label);
+        structural_advisory += area_v;
+        issues.extend(area_issues);
+    }
+
     if let Some(mtrl) = extract_chunk_body(container, b"MTRL") {
         // MTRL layout (decompile FUN_00858790, spatial/streaming docs):
         // [u32/f32 × 26 = 104B][u16 flags @104][u16 count @106][u32 hash × count @108][u32×2].
@@ -667,4 +674,147 @@ fn validate_prmg_info(container: &[u8], label: &str) -> (usize, Vec<String>) {
     }
 
     (violations, issues)
+}
+
+/// Validate AREA sub-area containers, mirroring the engine's mesh consumer
+/// `Mesh_ConsumeChunk` (0x00478270): the AREA tag (0x41455241) is dispatched at
+/// 0x00478366 to the AREA handler `FUN_004a4ab0`.
+///
+/// What the engine actually does with AREA (decompiled @0x004a4ab0):
+///   * Treats AREA as a UCFX container and enters its child descriptor range.
+///   * Walks every child; for each child tagged `"info"` (0x6f666e69) it obtains
+///     the chunk reader (0x00464780) and reads EXACTLY 4 bytes from the body via
+///     the reader vtable (`call [[reader]+0x14]`, count = 4) — a u32 header word.
+///   * The read value is otherwise structural (discarded by this handler); there
+///     is NO fixed-size array and NO count-driven allocation. AREA is therefore
+///     not the heap-overrun hazard MTRL is (MTRL's count@106 overruns a fixed
+///     10-slot array — see the MTRL block above). Consequently AREA defects are
+///     ADVISORY here (the engine does not crash on them), not fatal.
+///
+/// Scope note: PC retail vz.wad ships ZERO AREA chunks (verified across the full
+/// ~2.5 GB image); AREA only appears in console/DLC source data being ported, so
+/// this check guards CONVERTED content. The on-disk descriptor layout is parsed
+/// by the validated `find_container_children` walk (the engine's `edi` table is a
+/// runtime-parsed form whose field offsets do not map 1:1 to the disk record, so
+/// we rely on the disk parser + the engine's semantic contract, not raw offsets).
+///
+/// Contract checked:
+///   * an AREA descriptor that exists but is not a container (no children) is
+///     flagged — the engine's handler only ever walks AREA as a container.
+///   * each `"info"` child body must be >= 4 bytes (the engine's 4-byte read).
+///   * an AREA container carrying no `"info"` child has no payload the handler
+///     can consume.
+/// Returns (advisory_violations, issues).
+fn validate_area(container: &[u8], label: &str) -> (u32, Vec<String>) {
+    let children = find_container_children(container, b"AREA");
+    if children.is_empty() {
+        // No AREA-as-container. If a flat (non-container) AREA descriptor exists,
+        // the engine's handler — which only walks AREA as a container — would skip
+        // it, leaving dead data; flag that as a converter defect.
+        if extract_chunk_body(container, b"AREA").is_some() {
+            return (
+                1,
+                vec![format!(
+                    "{label}: AREA descriptor is not a container; engine handler \
+                     @0x4a4ab0 only walks AREA as a container (payload unreachable)"
+                )],
+            );
+        }
+        return (0, Vec::new());
+    }
+
+    let mut advisory = 0u32;
+    let mut issues = Vec::new();
+    let mut info_children = 0usize;
+
+    for child in &children {
+        if &child.tag != b"info" {
+            continue;
+        }
+        info_children += 1;
+        if child.body_size < 4 {
+            issues.push(format!(
+                "{label}: AREA 'info' child body {} bytes < 4 — engine reads a \
+                 4-byte header @0x4a4ab0 (truncated/over-read)",
+                child.body_size
+            ));
+            advisory += 1;
+        }
+    }
+
+    if info_children == 0 {
+        issues.push(format!(
+            "{label}: AREA container has no 'info' child — engine's AREA handler \
+             @0x4a4ab0 has no payload to consume"
+        ));
+        advisory += 1;
+    }
+
+    (advisory, issues)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal UCFX container from descriptors `(tag, u0, body_size)` plus
+    /// a trailing data area. Mirrors the layout `find_container_children` parses:
+    /// header[0..4]="UCFX", [4..8]=data_area_off, [16..20]=n_desc, then 20-byte rows.
+    fn build_ucfx(descs: &[(&[u8; 4], u32, u32)], data: &[u8]) -> Vec<u8> {
+        let n = descs.len();
+        let data_area_off = 20 + n * 20;
+        let mut buf = vec![0u8; data_area_off];
+        buf[0..4].copy_from_slice(b"UCFX");
+        buf[4..8].copy_from_slice(&(data_area_off as u32).to_le_bytes());
+        buf[16..20].copy_from_slice(&(n as u32).to_le_bytes());
+        for (i, (tag, u0, size)) in descs.iter().enumerate() {
+            let off = 20 + i * 20;
+            buf[off..off + 4].copy_from_slice(*tag);
+            buf[off + 4..off + 8].copy_from_slice(&u0.to_le_bytes());
+            buf[off + 8..off + 12].copy_from_slice(&size.to_le_bytes());
+        }
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    const C: u32 = 0xFFFF_FFFF; // container marker (row_u0)
+
+    #[test]
+    fn area_absent_is_clean() {
+        let c = build_ucfx(&[(b"GEOM", 0, 4)], &[1, 2, 3, 4]);
+        assert_eq!(validate_area(&c, "t").0, 0);
+    }
+
+    #[test]
+    fn area_container_with_valid_info_is_clean() {
+        // AREA container + a 4-byte "info" child (engine reads 4 bytes).
+        let c = build_ucfx(&[(b"AREA", C, 0), (b"info", 0, 4)], &[0, 0, 0, 0]);
+        let (v, issues) = validate_area(&c, "t");
+        assert_eq!(v, 0, "{issues:?}");
+    }
+
+    #[test]
+    fn area_info_too_small_is_flagged() {
+        let c = build_ucfx(&[(b"AREA", C, 0), (b"info", 0, 2)], &[0, 0]);
+        let (v, issues) = validate_area(&c, "t");
+        assert_eq!(v, 1);
+        assert!(issues[0].contains("< 4"), "{issues:?}");
+    }
+
+    #[test]
+    fn area_container_without_info_is_flagged() {
+        let c = build_ucfx(&[(b"AREA", C, 0), (b"data", 0, 8)], &[0; 8]);
+        let (v, issues) = validate_area(&c, "t");
+        assert_eq!(v, 1);
+        assert!(issues[0].contains("no 'info' child"), "{issues:?}");
+    }
+
+    #[test]
+    fn flat_area_descriptor_is_flagged() {
+        // AREA present as a non-container leaf → engine handler never walks it.
+        let c = build_ucfx(&[(b"AREA", 0, 4)], &[0, 0, 0, 0]);
+        let (v, issues) = validate_area(&c, "t");
+        assert_eq!(v, 1);
+        assert!(issues[0].contains("not a container"), "{issues:?}");
+    }
 }
