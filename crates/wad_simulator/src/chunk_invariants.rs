@@ -94,7 +94,9 @@ pub fn validate_chunk_invariants(container: &[u8], label: &str) -> ChunkInvarian
             b"DEBR" => record_aligned(&mut r, label, "DEBR", body.len(), 4),
             b"PART" => record_aligned(&mut r, label, "PART", body.len(), 4),
             b"SOUN" => record_aligned(&mut r, label, "SOUN", body.len(), 4),
-            b"TREE" => record_aligned(&mut r, label, "TREE", body.len(), 0x34),
+            // TREE: variable-length records (4×u32 + u16 sub-count + sub_count×u16,
+            // FUN_0045f3f0); 0x34 is the in-memory alloc size, NOT an on-disk stride —
+            // so there is no fixed body-size invariant (Registered, like MANM).
             // KEYS @0x4640a8: u32 count header then count×8 keyframe records.
             b"KEYS" => header_records(&mut r, label, "KEYS", body.len(), 4, 8),
             // Anim/sequence (0x67c–0x68e): VALU is a 4-aligned value blob; TRCK has
