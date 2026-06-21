@@ -77,6 +77,11 @@ pub fn validate_chunk_invariants(container: &[u8], label: &str) -> ChunkInvarian
             b"PTMS" => record_aligned(&mut r, label, "PTMS", body.len(), 0x08),
             b"POFF" => min_size(&mut r, label, "POFF", body.len(), 0x0c, "Vec3 offset"),
             b"PTYP" => min_size(&mut r, label, "PTYP", body.len(), 1, "flags byte"),
+            // Mesh/anim tail, confirmed in all_functions_decomp.txt.
+            b"BSHI" => record_aligned(&mut r, label, "BSHI", body.len(), 2),
+            b"ASTO" => min_size(&mut r, label, "ASTO", body.len(), 4, "u32 count @FUN_0067c780"),
+            b"MINF" => min_size(&mut r, label, "MINF", body.len(), 6, "u32 hash + u16 @FUN_0068e5d0"),
+            b"DECL" => record_aligned(&mut r, label, "DECL", body.len(), 0x24),
             // High-frequency effect/mesh chunks (>100 occurrences in vz.wad), each
             // verified against its engine handler (see docs/ucfx_tag_registry.md).
             // The engine overflow-guards the count-driven allocations, so a short

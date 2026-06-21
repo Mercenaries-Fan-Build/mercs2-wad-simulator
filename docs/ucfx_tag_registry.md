@@ -3,8 +3,8 @@
 Auto-generated from `crates/mercs2_formats/src/tag_registry.rs`.
 Invariants verified against `output/_ghidra/all_functions_decomp.txt` (Ghidra decomp, PC EXE) + retail vz.wad.
 
-Totals: 232 — UcfxAsset=69, D3dFormat=7, EntityRuntime=30, NetworkProto=100, LuaReflection=17, Misc=9
-Status: Validated=39, Registered=24, NeedsInvestigation=169
+Totals: 232 — UcfxAsset=70, D3dFormat=7, EntityRuntime=30, NetworkProto=100, LuaReflection=17, Misc=8
+Status: Validated=43, Registered=26, NeedsInvestigation=163
 
 
 ## UCFX asset chunk (UcfxAsset)
@@ -12,14 +12,17 @@ Status: Validated=39, Registered=24, NeedsInvestigation=169
 | Tag | VA | Status | Notes |
 |-----|-----|--------|-------|
 | `AREA` | 0x0047830a | Validated | container walk @0x4a4ab0; reads 4-byte 'info' header per child; no fixed array |
+| `ASTO` | 0x0067c780 | Validated | anim struct @FUN_0067c780 (decomp): reads u32 count then count*4 alloc (overflow-guarded). Validated: body >= 4 |
 | `ATRB` | 0x00492b1c | Validated | effect attribute @0x492b1c: reads a 4-byte inner hash then sub-dispatches to per-attribute readers. Validated: body >= 4 |
 | `BINN` | 0x0059d008 | Validated |  |
 | `BNDS` | 0x004a86dc | Validated |  |
 | `BODY` | 0x00750aa5 | Validated |  |
+| `BSHI` | 0x00478318 | Validated | blendshape index @FUN_00478270 (decomp): reads count*2 u16 array (count from INFO param_1[0x6a]); converter swaps u16. Validated: body % 2 == 0 |
 | `COLR` | 0x004930e5 | Validated | colour palette @0x4930e5: stores a fixed 0xC8 (200-byte) record into the effect palette heap. Validated: body >= 0xC8 |
 | `COMP` | 0x006549ef | Validated |  |
 | `DAMG` | 0x0045f558 | Validated | ECS damage ref array @0x45f558: count×4 u32 refs (count from INFO field, overflow-guarded). Validated: body % 4 == 0 |
 | `DEBR` | 0x0045f9a8 | Validated | ECS debris ref array @0x45f9a8: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0 |
+| `DECL` | 0x0045dbb0 | Validated | ECS declaration array @FUN_0045dbb0 (decomp): count records of [u32 id][0x20 blob] = 0x24 bytes each (count from INFO). Validated: body % 0x24 == 0 |
 | `DEPS` | 0x0059d0d3 | Validated |  |
 | `DICT` | 0x00491386 | Validated |  |
 | `EMTR` | 0x00492402 | Validated | emitter @0x492402: reads a u16 count then count×4 alloc (overflow-guarded). Validated: body >= 2 |
@@ -29,8 +32,9 @@ Status: Validated=39, Registered=24, NeedsInvestigation=169
 | `INFO` | 0x0045dc2b | Validated |  |
 | `INST` | 0x004a4e51 | Validated | renderable consumer @0x4a4c40: count×0x18 (24B) records, count @esi+0x28 (renderable INFO); alloc overflow-guarded. Validated: body % 0x18 == 0 |
 | `KEYS` | 0x004640a8 | Validated | keyframe list @0x4640a8: u32 count header then count×8 keyframe records. Validated: (body-4) % 8 == 0, body >= 4 |
+| `MINF` | 0x0068e5d0 | Validated | mesh/anim info @FUN_0068e5d0 (decomp): reads [u32 hash][u16] (6 bytes) per record. Validated: body >= 6 |
 | `MTRL` | 0x004a528d | Validated | tex count@106 -> fixed 10-slot array @+0xAC; >10 overruns (AV 0x84DD5B); parser FUN_00858790 |
-| `NODE` | 0x004cf48b | Validated | scene node @0x4cf48b: reads u32 hash + u32 child-count (8B header), then count×0x14 child array (overflow-guarded). Validated: body >= 8 |
+| `NODE` | 0x004cf48b | Validated | scene node @FUN_004cf340 (decomp): u32 hash + u32 child-count (8B header), then count*0x14 child array (overflow-guarded). Validated: body >= 8 |
 | `PART` | 0x0045f8e3 | Validated | ECS particle ref array @0x45f8e3: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0 |
 | `PHY2` | 0x004a845f | Validated | Havok 5.5 collision packfile @0x4a845f: u32 header prefix + embedded packfile (magic SEARCHED, palindromic 57E0E057 10C0C010) + trailing wrapper. Validated by recalculation (havok::validate_phy2): locate packfile, verify length + Havok version + __classnames__ it needs to convert; magic-less PHY2 is valid legacy form |
 | `POFF` | 0x004a9cf2 | Validated | effect consumer @0x4a9cf2: reads a fixed 0xC (Vec3) offset into @esi+0x30. Validated: body >= 0xC |
@@ -43,7 +47,7 @@ Status: Validated=39, Registered=24, NeedsInvestigation=169
 | `STRM` | 0x004782fd | Validated |  |
 | `TEXT` | 0x00492fab | Validated | effect text/texture ref @0x492fab: reads a leading u32 (id/count) then variable data. Validated: body >= 4 |
 | `TRCK` | 0x0068e7c3 | Validated | anim track @0x68e7c3: 12-byte inline header (3×u32) then count×4 parallel arrays (overflow-guarded). Validated: body >= 12 |
-| `TRFM` | 0x0048cd09 | Validated | transform @0x48cd09: unrolled read of 16×4-byte floats = one 4x4 matrix. Validated: body >= 64 |
+| `TRFM` | 0x0048cd09 | Validated | transform @FUN_0048cc30 (decomp): unrolled read of 16x4-byte floats = one 4x4 matrix. Validated: body >= 64 |
 | `VALU` | 0x0067c9d7 | Validated | anim VALU @0x67c9d7: (count+1)×width value blob, u32 elements (overflow-guarded). Validated: body % 4 == 0 |
 | `data` | 0x004a47d6 | Validated |  |
 | `decl` | 0x004a47e2 | Validated |  |
@@ -51,7 +55,9 @@ Status: Validated=39, Registered=24, NeedsInvestigation=169
 | `info` | 0x004a47ea | Validated |  |
 | `schm` | 0x00654b6e | Validated |  |
 | `AINF` | 0x0068c7de | Registered |  |
+| `BSHP` | 0x004a4770 | Registered | blendshape data @FUN_004a4770 (decomp): container-walker that finds a child data chunk (0x61746164) and resolves its offset (NOT a count*0x18 array). Recognized/benign |
 | `CEXE` | 0x004cf3d9 | Registered |  |
+| `CHAR` | 0x004ac8e0 | Registered | renderable sub-chunk @FUN_004ac8e0 (decomp): dispatched alongside INFO/MTRL; reads a count and stack-allocs count*2. Recognized/benign (was mis-classified Misc) |
 | `CHDR` | 0x004cf3bb | Registered |  |
 | `DATA` | 0x0045f187 | Registered | ECS entity data @0x45f187: delegates body parse to template builder 0x631c90; no self-contained body invariant. Recognized/benign (distinct from lowercase data) |
 | `EMIT` | 0x00492703 | Registered | emitter timing @0x492703: delegates body parse to sub-reader 0x48cc30; no self-contained body invariant. Recognized/benign |
@@ -74,11 +80,6 @@ Status: Validated=39, Registered=24, NeedsInvestigation=169
 | `enum` | 0x006549dd | Registered |  |
 | `flgt` | 0x00654f22 | Registered |  |
 | `sequ` | 0x0067bfaa | Registered |  |
-| `ASTO` | 0x0067c7de | NeedsInvestigation | anim struct array count x0xc (VERIFY handler) |
-| `BSHI` | 0x00478318 | NeedsInvestigation | blendshape index; Mesh_ConsumeChunk @0x478318; converter swaps u16 |
-| `BSHP` | 0x0047839e | NeedsInvestigation | blendshape data; handler ~0x4a4770; count x0x18 alloc (VERIFY handler) |
-| `DECL` | 0x0045dc20 | NeedsInvestigation |  |
-| `MINF` | 0x0068e61f | NeedsInvestigation | mesh/anim info; parallel count x4 arrays (VERIFY handler) |
 | `trns` | 0x0067e4d5 | NeedsInvestigation |  |
 
 ## D3DFORMAT pixel code (D3dFormat)
@@ -259,7 +260,6 @@ Status: Validated=39, Registered=24, NeedsInvestigation=169
 
 | Tag | VA | Status | Notes |
 |-----|-----|--------|-------|
-| `CHAR` | 0x004ac973 | NeedsInvestigation | unclassified FourCC immediate - requires deeper investigation |
 | `GGGG` | 0x0057e9d5 | NeedsInvestigation | unclassified FourCC immediate - requires deeper investigation |
 | `HHlP` | 0x004eea8a | NeedsInvestigation | unclassified FourCC immediate - requires deeper investigation |
 | `INVD` | 0x0059cffc | NeedsInvestigation | unclassified FourCC immediate - requires deeper investigation |
