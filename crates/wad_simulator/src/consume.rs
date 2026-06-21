@@ -72,6 +72,13 @@ pub struct ConsumeResult {
     pub structural_advisory: u32,
     /// flgs placement records (42-byte stride guess).
     pub position_advisory: usize,
+    /// Tags found in this container that the engine dispatches on but which we
+    /// have NOT yet validated as WAD chunks (registered-but-unvalidated UCFX tags,
+    /// or non-UCFX subsystems like the entity/network/Lua dispatchers). These are
+    /// converted with a generic u32 sweep that may be wrong — surfaced (not fatal)
+    /// so unverified engine features get a deeper look. See
+    /// `mercs2_formats::tag_registry`.
+    pub needs_investigation: Vec<String>,
 }
 
 pub trait AssetConsumer {

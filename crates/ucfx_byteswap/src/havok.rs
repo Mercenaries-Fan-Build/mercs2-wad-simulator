@@ -486,6 +486,47 @@ fn havok_packfile_size(be: &[u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Outcome of recalculating a PHY2 chunk body's embedded Havok packfile.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Phy2Check {
+    /// No Havok magic present — legacy simple PHY2 (valid; converter u32-sweeps it).
+    Legacy,
+    /// Embedded packfile present and structurally convertible. `magic_off` is the
+    /// u32 header-prefix length; `packfile_size` is recomputed from the section
+    /// headers (best-effort — read big-endian, so only exact on a BE source body).
+    Ok { magic_off: usize, packfile_size: usize },
+    /// Magic present but the packfile lacks what `convert_phy2_be_to_le` requires
+    /// to convert it (would fail BE→LE). The string explains which check failed.
+    Malformed(String),
+}
+
+/// Recalculate a PHY2 chunk body instead of trusting it: locate the embedded
+/// Havok packfile (the magic is *searched*, NOT at offset 0 — there is a u32
+/// header prefix) and verify it carries everything `convert_phy2_be_to_le` needs:
+/// a minimum length, a `Havok-…` version string, and a `__classnames__` section.
+/// Those markers are ASCII / palindromic, hence endian-invariant, so this is exact
+/// on both a BE source and an LE retail body and mirrors the converter's error
+/// conditions — a PHY2 that converts cleanly never reports `Malformed`.
+pub fn validate_phy2(body: &[u8]) -> Phy2Check {
+    let magic_off = match find_sub(body, &HAVOK_MAGIC) {
+        None => return Phy2Check::Legacy,
+        Some(o) => o,
+    };
+    let pf = &body[magic_off..];
+    if pf.len() < 64 {
+        return Phy2Check::Malformed(format!("embedded packfile only {} bytes (<64)", pf.len()));
+    }
+    let ver = match find_sub(pf, HAVOK_VER).or_else(|| find_sub(pf, HAVOK_DASH)) {
+        None => return Phy2Check::Malformed("packfile missing Havok version string".into()),
+        Some(v) => v,
+    };
+    if find_sub_from(pf, CLASSNAMES, ver).is_none() {
+        return Phy2Check::Malformed("packfile missing __classnames__ section".into());
+    }
+    let packfile_size = havok_packfile_size(pf).unwrap_or(pf.len()).min(pf.len());
+    Phy2Check::Ok { magic_off, packfile_size }
+}
+
 /// Structurally convert a Havok 5.5 packfile from BE to LE.
 pub fn convert_havok_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
     if be.len() < 64 {
@@ -712,5 +753,33 @@ mod tests {
         let be: [u8; 8] = [0x00, 0x00, 0x00, 0x39, 0x85, 0xE4, 0x08, 0x30];
         let got = convert_phy2_be_to_le(&be).expect("u32 sweep");
         assert_eq!(got, vec![0x39, 0x00, 0x00, 0x00, 0x30, 0x08, 0xE4, 0x85]);
+    }
+
+    #[test]
+    fn validate_phy2_classifies_bodies() {
+        // No magic anywhere → legacy simple PHY2.
+        assert_eq!(validate_phy2(&[0u8; 32]), Phy2Check::Legacy);
+
+        // magic + too-short packfile → malformed.
+        let mut short = vec![0u8; 4]; // u32 header prefix
+        short.extend_from_slice(&HAVOK_MAGIC);
+        short.extend_from_slice(&[0u8; 8]); // packfile far under 64 bytes
+        assert!(matches!(validate_phy2(&short), Phy2Check::Malformed(_)));
+
+        // magic + length but missing version string → malformed.
+        let mut nover = vec![0u8; 4];
+        nover.extend_from_slice(&HAVOK_MAGIC);
+        nover.extend_from_slice(&[0u8; 80]);
+        assert!(matches!(validate_phy2(&nover), Phy2Check::Malformed(_)));
+
+        // magic + version + __classnames__ → Ok (convertible).
+        let mut ok = vec![0u8; 4];
+        ok.extend_from_slice(&HAVOK_MAGIC);
+        ok.extend_from_slice(&[0u8; 8]);
+        ok.extend_from_slice(HAVOK_VER);
+        ok.extend_from_slice(&[0u8; 4]);
+        ok.extend_from_slice(CLASSNAMES);
+        ok.extend_from_slice(&[0u8; 64]); // room for section headers
+        assert!(matches!(validate_phy2(&ok), Phy2Check::Ok { .. }));
     }
 }

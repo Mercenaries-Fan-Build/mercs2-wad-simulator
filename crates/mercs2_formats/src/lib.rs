@@ -9,6 +9,7 @@ pub mod patch_wad;
 pub mod safe_slice;
 pub mod schema;
 pub mod sges;
+pub mod tag_registry;
 pub mod tags;
 pub mod texsize;
 pub mod types;
