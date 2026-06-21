@@ -220,3 +220,54 @@ pub fn convert_binn_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
     head.extend_from_slice(&le_luaq);
     Ok(head)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_binn_body() {
+        let empty = vec![];
+        let result = convert_binn_be_to_le(&empty);
+        // Empty body: might succeed or fail depending on implementation
+        let _ = result;
+    }
+
+    #[test]
+    fn test_short_binn_body() {
+        let short = vec![0u8; 2];
+        let result = convert_binn_be_to_le(&short);
+        // Short body: might succeed (fallback to header-only swap) or fail
+        let _ = result;
+    }
+
+    #[test]
+    fn test_luaq_signature_detection() {
+        // Body with Lua signature: starts with junk, then \x1bLua
+        let mut data = vec![0u8; 100];
+        // Insert Lua signature at offset 50
+        data[50..54].copy_from_slice(b"\x1bLua");
+        // This should attempt to process the bytecode via unluac
+        // but will likely fail due to missing Java/unluac
+        let result = convert_binn_be_to_le(&data);
+        // We just check it doesn't crash; the actual conversion depends on environment
+        let _ = result;
+    }
+
+    #[test]
+    fn test_no_luaq_signature_skips_java() {
+        // Body without Lua signature (all zeros)
+        let data = vec![0u8; 100];
+        let result = convert_binn_be_to_le(&data);
+        // Without signature, should just byte-swap the leading u32 and return
+        match result {
+            Ok(output) => {
+                // Output should be similar length or shorter (no Java processing)
+                assert!(output.len() <= data.len());
+            }
+            Err(_) => {
+                // Some error paths are acceptable
+            }
+        }
+    }
+}

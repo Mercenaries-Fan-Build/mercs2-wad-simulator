@@ -1,3 +1,32 @@
+//! Block-level UCFX byteswap converter (main public API).
+//!
+//! Entry point: [`convert_block`] converts a decompressed Xbox 360 big-endian UCFX
+//! block to PC little-endian format. Handles:
+//!
+//! - **Entry table** (name/type/size/field_c): reads in BE, writes as LE
+//! - **Descriptors** (UCFX header): tag and field swaps
+//! - **ECS bodies** (Layer, WorldEntity, GuidMap): schema-driven field conversion
+//! - **Generic bodies** (Texture, Mesh, Animation, etc.): tag-aware dispatch
+//! - **Embedded type conversions**:
+//!   - Havok packfile (`layoutRules` restoration)
+//!   - Texture untiling (DXT GPU-tiled → linear)
+//!   - Wavebank audio transcode (Xbox-ADPCM/XMA → PC IMA)
+//!   - Mesh vertex format translation (Xbox 12-byte → PC 8-byte D3DVERTEXELEMENT9)
+//!   - Lua bytecode (unluac round-trip)
+//!   - Terrainmesh re-encoding (vertex expansion + index destrip)
+//!
+//! Optionally collects schema field coverage stats via [`SchemaCoverageReport`].
+//!
+//! # Examples
+//! ```no_run
+//! # use ucfx_byteswap::convert;
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
+//! let le_block = convert::convert_block(&be_block, false, None)?;
+//! # Ok(())
+//! # }
+//! ```
+
 use mercs2_formats::crc32::crc32_mercs2;
 use mercs2_formats::ffcs::read_u32_be;
 use mercs2_formats::schema::{ComponentSchema, SchemaFieldType};
@@ -12,6 +41,7 @@ use crate::report::SchemaCoverageReport;
 /// When `true`, the per-block / per-entry diagnostics below are suppressed.
 /// The in-process `dlc_port` driver sets this (it converts thousands of blocks);
 /// the CLI leaves it `false` so single-block runs stay verbose.
+#[doc(hidden)]
 pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 macro_rules! vlog {

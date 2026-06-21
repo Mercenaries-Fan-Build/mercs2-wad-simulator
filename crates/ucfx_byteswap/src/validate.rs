@@ -450,3 +450,91 @@ fn tag_display(tag_bytes: &[u8; 4]) -> String {
         if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' }
     }).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validation_error_display() {
+        let err = ValidationError::CsumMismatch {
+            entry_idx: 5,
+            expected: 0x12345678,
+            actual: 0x9ABCDEF0,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("entry[5]"));
+        assert!(msg.contains("CSUM"));
+    }
+
+    #[test]
+    fn test_entry_table_overflow_error() {
+        let err = ValidationError::EntryTableOverflow {
+            entry_idx: 0,
+            detail: "block too small (10 bytes)".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("entry table overflow"));
+    }
+
+    #[test]
+    fn test_float_nan_inf_error() {
+        let err = ValidationError::FloatNanInf {
+            entry_idx: 3,
+            tag: "STRM".to_string(),
+            offset: 0x100,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("NaN/Inf"));
+        assert!(msg.contains("entry[3]"));
+    }
+
+    #[test]
+    fn test_float_out_of_world_error() {
+        let err = ValidationError::FloatOutOfWorld {
+            entry_idx: 2,
+            tag: "BNDS".to_string(),
+            offset: 0x24,
+            value: 9999.0,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("out-of-world"));
+        assert!(msg.contains("9999"));
+    }
+
+    #[test]
+    fn test_index_out_of_bounds_error() {
+        let err = ValidationError::IndexOutOfBounds {
+            entry_idx: 1,
+            index_value: 1000,
+            vertex_count: 500,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("IBUF"));
+        assert!(msg.contains("1000"));
+        assert!(msg.contains("500"));
+    }
+
+    #[test]
+    fn test_validate_tiny_block() {
+        let tiny = vec![0u8; 2];
+        let errors = validate_converted_block(&tiny);
+        assert!(!errors.is_empty());
+        assert!(matches!(errors[0], ValidationError::EntryTableOverflow { .. }));
+    }
+
+    #[test]
+    fn test_validate_empty_block_zero_entries() {
+        // 4 bytes: entry_count = 0
+        let data = vec![0u8; 4];
+        // No entries, no data
+        let errors = validate_converted_block(&data);
+        assert!(errors.is_empty(), "Empty block should be valid");
+    }
+
+    #[test]
+    fn test_tag_display() {
+        let tag = tag_display(&[0x41, 0x42, 0x43, 0xFF]);
+        assert_eq!(tag, "ABC?");
+    }
+}

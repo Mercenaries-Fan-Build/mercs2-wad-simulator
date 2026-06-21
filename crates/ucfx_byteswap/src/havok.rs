@@ -17,8 +17,11 @@ use std::collections::HashMap;
 
 use mercs2_formats::ffcs::read_u32_be;
 
+/// Swap unit for u32 fields (4 bytes).
 pub const U32: u8 = 4;
+/// Swap unit for u16 fields (2 bytes).
 pub const U16: u8 = 2;
+/// Swap unit for u8 fields (1 byte, no actual swap needed).
 pub const U8W: u8 = 1;
 
 const HAVOK_VER: &[u8] = b"Havok-5.5.0-r1";
@@ -31,21 +34,33 @@ const HAVOK_MAGIC: [u8; 8] = [0x57, 0xE0, 0xE0, 0x57, 0x10, 0xC0, 0xC0, 0x10];
 
 // ── class layout registry (HK550, 32-bit; animation classes) ─────────────
 
+/// Information for converting an array field in a Havok class.
 pub struct ArrayInfo {
+    /// Byte offset of the array pointer field (if Some, indicates a pointer array).
     pub ptr_off: Option<usize>,
+    /// Byte offset of the array element count field (if Some, indicates the count location).
     pub count_off: Option<usize>,
+    /// Size in bytes of each array element.
     pub elem_size: usize,
+    /// Swap unit for each element (U32, U16, or U8W).
     pub elem_swap: u8,
 }
 
+/// How to swap fields in a Havok class instance.
 pub enum SwapSpec {
+    /// Swap all u32 fields (blanket swap).
     AllU32,
+    /// Per-field swap spec: list of (byte_offset, swap_unit).
     Fields(&'static [(usize, u8)]),
 }
 
+/// Layout information for a Havok class (size, field swaps, arrays).
 pub struct ClassLayout {
+    /// Instance size in bytes.
     pub size: usize,
+    /// How to swap fields in instances of this class.
     pub swap: SwapSpec,
+    /// Array fields (name and info for each one).
     pub arrays: &'static [(&'static str, ArrayInfo)],
 }
 

@@ -1,4 +1,38 @@
 //! Mercenaries 2 WAD engine consumption simulator.
+//!
+//! This crate provides an engine-accurate simulator for analyzing how the Mercenaries 2 game engine
+//! loads and consumes WAD (World Asset Database) files. It validates ASET (Asset Set) entries for
+//! out-of-bounds references, simulates the full asset consumption pipeline, and produces detailed
+//! diagnostic reports for modders.
+//!
+//! # Key Concepts
+//!
+//! - **ASET**: Asset Set section of a WAD; sparse array of asset metadata (hash, block index, type)
+//! - **OOB**: Out-of-bounds; ASET entries whose sub_entry offset exceeds the actual entry count in
+//!   the decompressed block, causing heap violations
+//! - **WAD Overlay**: Patch WAD entries override base WAD entries (last-opened-file-wins semantics)
+//! - **Block**: SGES compressed container; decompressed into UCFX asset format
+//! - **UCFX Container**: Asset format wrapper with header and typed chunks
+//!
+//! # Typical Usage
+//!
+//! ```bash
+//! wad_simulator \
+//!   --wad patch.wad \
+//!   --base-wad base.wad \
+//!   --base-wad-dir game_data/ \
+//!   --json-output report.json
+//! ```
+//!
+//! # Simulation Stages
+//!
+//! 1. Load base and patch WADs via FFCS archive interface
+//! 2. Build virtual disk with overlay resolution (patch > base)
+//! 3. Validate ASET entries for OOB references
+//! 4. Discover and load auxiliary base WADs (optional)
+//! 5. Prefetch and decompress SGES blocks in parallel
+//! 6. Parse UCFX containers and dispatch to type-specific consumers
+//! 7. Aggregate diagnostic results and export report
 
 mod action_table;
 mod animation;

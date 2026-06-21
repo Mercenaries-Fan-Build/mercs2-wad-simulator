@@ -64,3 +64,54 @@ pub fn consume_material(container: &[u8], _data_body: Option<&[u8]>, label: &str
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consume_material_no_chunks() {
+        let container = b"UCFX".to_vec();
+        let result = consume_material(&container, None, "test_material");
+
+        assert!(result.consumed);
+        assert_eq!(result.issues.len(), 1);
+        assert!(result.issues[0].contains("missing MTRL and PRMT"));
+        assert_eq!(result.structural_advisory, 1);
+    }
+
+    #[test]
+    fn consume_material_returns_consume_result() {
+        let container = b"TEST".to_vec();
+        let result = consume_material(&container, None, "test");
+
+        assert!(result.consumed);
+        assert!(result.xref_hashes.is_empty());
+    }
+
+    #[test]
+    fn consume_material_label_preservation() {
+        let container = b"UCFX".to_vec();
+        let result = consume_material(&container, None, "my_special_material");
+
+        assert!(result.consumed);
+        assert!(result.issues[0].contains("my_special_material"));
+    }
+
+    #[test]
+    fn consume_material_default_advisory_on_missing() {
+        let container = vec![0u8; 20];
+        let result = consume_material(&container, None, "test");
+
+        assert!(result.consumed);
+        assert_eq!(result.structural_advisory, 1);
+    }
+
+    #[test]
+    fn consume_material_preamble_constant() {
+        // Verify the constant is reasonable (> 0)
+        assert!(MTRL_PREAMBLE_MIN > 0);
+        assert_eq!(MTRL_PREAMBLE_MIN, 104);
+    }
+}
+

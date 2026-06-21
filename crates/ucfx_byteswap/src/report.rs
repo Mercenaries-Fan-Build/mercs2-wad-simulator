@@ -18,42 +18,62 @@ pub struct SchemaCoverageReport {
     pub generic_fallback_tags: Vec<GenericFallbackEntry>,
 }
 
+/// A schema field with an unrecognized type code.
 #[derive(Debug)]
 pub struct UnknownFieldEntry {
+    /// ECS component name (e.g., "Transform", "__hash_0x1234").
     pub component_name: String,
+    /// Raw type code that didn't match SchemaFieldType::from_code().
     pub type_code: u32,
+    /// Name hash of the field (helps identify which field it was).
     pub field_name_hash: u32,
+    /// Byte offset of the field within the component data body.
     pub field_byte_offset: u16,
 }
 
+/// A COMP group with a schm chunk that failed to parse.
 #[derive(Debug)]
 pub struct SchemaFailureEntry {
+    /// ECS component name.
     pub component_name: String,
+    /// Type codes encountered in the schm body that prevented parsing.
     pub unknown_codes_in_body: Vec<u32>,
 }
 
+/// A COMP group with no schema (used hardcoded handler or generic fallback).
 #[derive(Debug)]
 pub struct NoSchemaEntry {
+    /// ECS component name.
     pub component_name: String,
+    /// Size of the data body in bytes.
     pub data_size: usize,
+    /// How the body was swapped (e.g., "hardcoded handler", "numeric records", "u32_array sweep").
     pub swap_strategy: &'static str,
 }
 
+/// A non-ECS descriptor body that used the generic fallback swap.
 #[derive(Debug)]
 pub struct GenericFallbackEntry {
+    /// Entry index in the block.
     pub entry_idx: usize,
+    /// Type hash (identifies the container type, e.g., Texture, Mesh).
     pub type_hash: u32,
+    /// Human-readable type name.
     pub type_name: String,
+    /// Chunk tag (4-char identifier).
     pub tag: String,
+    /// Size of the body in bytes.
     pub body_size: u32,
 }
 
 impl SchemaCoverageReport {
+    /// Record a schema field with its type code.
     pub fn record_field(&mut self, type_code: u32) {
         self.total_schema_fields += 1;
         *self.type_code_counts.entry(type_code).or_insert(0) += 1;
     }
 
+    /// Record a field with an unrecognized type code.
     pub fn record_unknown_field(
         &mut self,
         component_name: &str,
@@ -69,6 +89,7 @@ impl SchemaCoverageReport {
         });
     }
 
+    /// Record a component whose schema failed to parse.
     pub fn record_schema_parse_failure(
         &mut self,
         component_name: &str,
@@ -80,6 +101,7 @@ impl SchemaCoverageReport {
         });
     }
 
+    /// Record a component with no schema (using a hardcoded handler or generic fallback).
     pub fn record_no_schema(
         &mut self,
         component_name: &str,
@@ -93,6 +115,7 @@ impl SchemaCoverageReport {
         });
     }
 
+    /// Record a non-ECS body that used the generic fallback swap.
     pub fn record_generic_fallback(
         &mut self,
         entry_idx: usize,
@@ -110,6 +133,7 @@ impl SchemaCoverageReport {
         });
     }
 
+    /// Print the report to stderr in human-readable format.
     pub fn print_report(&self) {
         eprintln!();
         eprintln!("=== Schema Coverage Report ===");
@@ -203,5 +227,98 @@ fn type_code_display_name(code: u32) -> &'static str {
         10 => "Vec3",
         11 => "Blob32",
         _ => "UNKNOWN",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aset::AsetEntry;
+
+    #[test]
+    fn test_empty_report() {
+        let report = SchemaCoverageReport::default();
+        assert_eq!(report.total_schema_fields, 0);
+        assert!(report.unknown_fields.is_empty());
+        assert!(report.schema_parse_failures.is_empty());
+        assert!(report.no_schema_components.is_empty());
+        assert!(report.generic_fallback_tags.is_empty());
+    }
+
+    #[test]
+    fn test_record_field() {
+        let mut report = SchemaCoverageReport::default();
+        report.record_field(6); // U32
+        report.record_field(6);
+        report.record_field(5); // F32
+
+        assert_eq!(report.total_schema_fields, 3);
+        assert_eq!(report.type_code_counts[&6], 2);
+        assert_eq!(report.type_code_counts[&5], 1);
+    }
+
+    #[test]
+    fn test_record_unknown_field() {
+        let mut report = SchemaCoverageReport::default();
+        report.record_unknown_field("Transform", 99, 0x12345678, 42);
+
+        assert_eq!(report.unknown_fields.len(), 1);
+        let entry = &report.unknown_fields[0];
+        assert_eq!(entry.component_name, "Transform");
+        assert_eq!(entry.type_code, 99);
+        assert_eq!(entry.field_name_hash, 0x12345678);
+        assert_eq!(entry.field_byte_offset, 42);
+    }
+
+    #[test]
+    fn test_record_schema_parse_failure() {
+        let mut report = SchemaCoverageReport::default();
+        report.record_schema_parse_failure("CustomComp", vec![99, 88]);
+
+        assert_eq!(report.schema_parse_failures.len(), 1);
+        let entry = &report.schema_parse_failures[0];
+        assert_eq!(entry.component_name, "CustomComp");
+        assert_eq!(entry.unknown_codes_in_body, vec![99, 88]);
+    }
+
+    #[test]
+    fn test_record_no_schema() {
+        let mut report = SchemaCoverageReport::default();
+        report.record_no_schema("Transform", 1024, "hardcoded handler");
+
+        assert_eq!(report.no_schema_components.len(), 1);
+        let entry = &report.no_schema_components[0];
+        assert_eq!(entry.component_name, "Transform");
+        assert_eq!(entry.data_size, 1024);
+        assert_eq!(entry.swap_strategy, "hardcoded handler");
+    }
+
+    #[test]
+    fn test_record_generic_fallback() {
+        let mut report = SchemaCoverageReport::default();
+        report.record_generic_fallback(5, 0xDEADBEEF, "Texture", "Body", 4096);
+
+        assert_eq!(report.generic_fallback_tags.len(), 1);
+        let entry = &report.generic_fallback_tags[0];
+        assert_eq!(entry.entry_idx, 5);
+        assert_eq!(entry.type_hash, 0xDEADBEEF);
+        assert_eq!(entry.type_name, "Texture");
+        assert_eq!(entry.tag, "Body");
+        assert_eq!(entry.body_size, 4096);
+    }
+
+    #[test]
+    fn test_aset_entry_sub_accessors() {
+        let mut entry = AsetEntry {
+            asset_hash: 0x12345678,
+            u32_2: 0xABCD_1234,
+            primary: false,
+            in_base: true,
+        };
+
+        assert_eq!(entry.sub(), 0x1234);
+        entry.set_sub(0x5678);
+        assert_eq!(entry.sub(), 0x5678);
+        assert_eq!(entry.u32_2, 0xABCD_5678);
     }
 }

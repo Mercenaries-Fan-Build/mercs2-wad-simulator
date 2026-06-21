@@ -1,4 +1,86 @@
-//! End-to-end engine consumption simulation.
+//! End-to-end engine asset consumption simulation and diagnostic aggregation.
+//!
+//! This module orchestrates the complete WAD analysis pipeline:
+//! 1. Load and overlay WADs
+//! 2. Validate ASET entries for OOB references
+//! 3. Discover and prefetch asset blocks
+//! 4. Dispatch assets to type-specific consumers
+//! 5. Aggregate results into a [`SimulateReport`]
+//!
+//! # Simulation Report
+//!
+//! [`SimulateReport`] contains:
+//! - Per-type statistics: consumed count, issue count
+//! - Aggregate violation counts: structural, ECS float, texture buffer
+//! - Cross-reference resolution: resolved, unresolved, rainbow-table annotations
+//! - ASET validation results: in-bounds, OOB, decompression failures
+//! - Access violations: pathological parse errors
+//! - JSON-serializable format for automation
+//!
+//! # Type-Specific Consumers
+//!
+//! Each asset type has a dedicated consumer module:
+//! - [`crate::model`]: Model hierarchies, rigging, LOD chains
+//! - [`crate::texture`]: DXT compression, mip chains, buffer validation
+//! - [`crate::animation`]: Skeletal keyframe data
+//! - [`crate::placement`]: Instance/placement data
+//! - [`crate::script`]: Lua bytecode structure
+//! - [`crate::material`]: Shader parameter tables
+//! - [`crate::action_table`]: Action dispatcher metadata
+//! - [`crate::audio`]: Wavebanks, soundbanks, streaming audio
+//! - [`crate::resident`]: FX dictionaries, watermaps
+//!
+//! # Asset Limits & Sampling
+//!
+//! Supports partial consumption:
+//! - `--asset-limit`: Consume up to N non-audio assets (0 = all)
+//! - `--audio-only`: Skip non-audio assets entirely
+//! - `--skip-audio`: Skip audio assets
+//!
+//! # Progress Logging
+//!
+//! Configurable via `--progress-interval`: log every N asset/block steps.
+//!
+//! # JSON Export
+//!
+//! [`SimulateReport`] implements `serde::Serialize` for machine-readable output:
+//! ```json
+//! {
+//!   "access_violations": [],
+//!   "type_stats": [
+//!     { "type_id": 0x05, "type_name": "Model", "consumed": 42, "issues": 2 }
+//!   ],
+//!   "structural_violations": 5,
+//!   "unresolved": ["0xdeadbeef", "0xcafebabe"],
+//!   "in_bounds": 1024,
+//!   "out_of_bounds": 3
+//! }
+//! ```
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use wad_simulator::simulate::run_simulation;
+//! use std::path::Path;
+//!
+//! let report = run_simulation(
+//!     Path::new("patch.wad"),
+//!     Some(Path::new("base.wad")),
+//!     None, // base_wad_dir
+//!     false, // skip_aset
+//!     false, // skip_audio
+//!     false, // audio_only
+//!     0, // asset_limit (0 = all)
+//!     100, // progress_interval
+//!     0, // jobs (auto)
+//!     false, // skip_assets
+//!     None, // audios_dir
+//!     None, // audio_manifest
+//!     None, // rainbow_table
+//! ).expect("Simulation failed");
+//!
+//! println!("Structural violations: {}", report.structural_violations);
+//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -958,3 +1040,224 @@ pub fn load_clip_pws_map(manifest_path: &Path) -> Option<std::collections::HashM
         Some(map)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_stats_default() {
+        let stats = TypeStats::default();
+        assert_eq!(stats.type_id, 0);
+        assert!(stats.type_name.is_empty());
+        assert_eq!(stats.consumed, 0);
+        assert_eq!(stats.issues, 0);
+    }
+
+    #[test]
+    fn type_stats_construction() {
+        let stats = TypeStats {
+            type_id: 42,
+            type_name: "Model".to_string(),
+            consumed: 100,
+            issues: 5,
+        };
+
+        assert_eq!(stats.type_id, 42);
+        assert_eq!(stats.type_name, "Model");
+        assert_eq!(stats.consumed, 100);
+        assert_eq!(stats.issues, 5);
+    }
+
+    #[test]
+    fn simulate_report_default() {
+        let report = SimulateReport::default();
+        assert!(report.access_violations.is_empty());
+        assert!(report.decode_errors.is_empty());
+        assert!(report.unresolved_hashes.is_empty());
+        assert!(report.ucfx_issues.is_empty());
+        assert_eq!(report.wavebanks_loaded, 0);
+        assert_eq!(report.soundbanks_loaded, 0);
+        assert_eq!(report.total_assets_consumed, 0);
+        assert_eq!(report.texture_buffer_too_small, 0);
+        assert!(!report.has_base_wad);
+    }
+
+    #[test]
+    fn simulate_options_default() {
+        let opts = SimulateOptions::default();
+        assert!(opts.audios_dir.is_none());
+        assert!(opts.clip_pws_map.is_none());
+        assert!(!opts.skip_audio);
+        assert!(!opts.audio_only);
+        assert_eq!(opts.asset_limit, 0);
+        assert_eq!(opts.progress_interval, 100);
+        assert_eq!(opts.jobs, 0);
+        assert!(opts.rainbow.is_none());
+        assert!(opts.aux_wads.is_empty());
+    }
+
+    #[test]
+    fn simulate_exit_code_clean() {
+        let report = SimulateReport::default();
+        assert_eq!(simulate_exit_code(&report), 0);
+    }
+
+    #[test]
+    fn simulate_exit_code_has_issues() {
+        let mut report = SimulateReport::default();
+        report.access_violations.push("test violation".to_string());
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_decode_errors() {
+        let mut report = SimulateReport::default();
+        report.decode_errors.push("codec error".to_string());
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_texture_too_small() {
+        let mut report = SimulateReport::default();
+        report.texture_buffer_too_small = 1;
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_position_violations() {
+        let mut report = SimulateReport::default();
+        report.position_violations = 5;
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_vertex_violations() {
+        let mut report = SimulateReport::default();
+        report.vertex_violations = 3;
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_bounds_violations() {
+        let mut report = SimulateReport::default();
+        report.bounds_violations = 2;
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_structural_violations() {
+        let mut report = SimulateReport::default();
+        report.structural_violations = 1;
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_unresolved_xref_with_base() {
+        let mut report = SimulateReport::default();
+        report.has_base_wad = true;
+        report.unresolved_hashes.push("0x12345678".to_string());
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_unresolved_xref_without_base() {
+        let mut report = SimulateReport::default();
+        report.has_base_wad = false;
+        report.unresolved_hashes.push("0x12345678".to_string());
+        // Should not fail without base_wad
+        assert_eq!(simulate_exit_code(&report), 0);
+    }
+
+    #[test]
+    fn simulate_exit_code_fatal_ucfx_codec() {
+        let mut report = SimulateReport::default();
+        report.ucfx_issues.push("unsupported codec 0x05".to_string());
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_xma_issue() {
+        let mut report = SimulateReport::default();
+        report.ucfx_issues.push("XMA codec not supported".to_string());
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn simulate_exit_code_multiple_issues() {
+        let mut report = SimulateReport::default();
+        report.access_violations.push("access".to_string());
+        report.decode_errors.push("decode".to_string());
+        report.vertex_violations = 10;
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn type_stats_serializes() {
+        let stats = TypeStats {
+            type_id: 10,
+            type_name: "Texture".to_string(),
+            consumed: 50,
+            issues: 2,
+        };
+
+        let json = serde_json::to_string(&stats);
+        assert!(json.is_ok());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("\"type_id\":10"));
+        assert!(json_str.contains("\"consumed\":50"));
+    }
+
+    #[test]
+    fn simulate_report_serializes() {
+        let mut report = SimulateReport::default();
+        report.total_assets_consumed = 100;
+        report.wavebanks_loaded = 5;
+
+        let json = serde_json::to_string(&report);
+        assert!(json.is_ok());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("\"total_assets_consumed\":100"));
+        assert!(json_str.contains("\"wavebanks_loaded\":5"));
+    }
+
+    #[test]
+    fn simulate_report_with_errors() {
+        let mut report = SimulateReport::default();
+        report.access_violations.push("violation1".to_string());
+        report.access_violations.push("violation2".to_string());
+        report.decode_errors.push("error1".to_string());
+
+        assert_eq!(report.access_violations.len(), 2);
+        assert_eq!(report.decode_errors.len(), 1);
+        assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn type_stats_accumulation() {
+        let mut map: HashMap<u32, TypeStats> = HashMap::new();
+        map.insert(
+            10,
+            TypeStats {
+                type_id: 10,
+                type_name: "Model".to_string(),
+                consumed: 50,
+                issues: 3,
+            },
+        );
+        map.insert(
+            20,
+            TypeStats {
+                type_id: 20,
+                type_name: "Texture".to_string(),
+                consumed: 100,
+                issues: 5,
+            },
+        );
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&10].consumed, 50);
+        assert_eq!(map[&20].consumed, 100);
+    }
+}
+

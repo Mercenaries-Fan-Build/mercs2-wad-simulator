@@ -1,4 +1,50 @@
-//! Parallel WAD block decompression and per-block UCFX parse cache.
+//! Parallel WAD block decompression and per-block UCFX container parse cache.
+//!
+//! This module handles the core I/O and decompression pipeline for WAD block processing:
+//! 1. Discover unique blocks referenced by ASET entries
+//! 2. Decompress SGES (Streaming Global Equipment System) blocks in parallel
+//! 3. Parse UCFX (Universal Container Format eXtended) headers and entries
+//! 4. Cache parsed blocks to avoid redundant decompression
+//!
+//! # Block Processing Stages
+//!
+//! ## Prefetch
+//! [`prefetch_blocks_parallel`] decompresses all referenced blocks in parallel using Rayon,
+//! storing results in a thread-safe cache. This stage is I/O and decompression bound.
+//!
+//! ## Parsing
+//! [`parse_blocks_parallel`] parses cached decompressed blocks into [`ParsedBlock`] structures,
+//! validating UCFX header structure and walking entry tables.
+//!
+//! # Block Key
+//!
+//! [`BlockKey`] uniquely identifies a block:
+//! - `path`: WAD file path
+//! - `block_idx`: Block index within the WAD
+//! - `source`: Base or Patch WAD
+//!
+//! # Parallelism Strategy
+//!
+//! Uses Rayon's thread pool (configurable via `--jobs` CLI flag):
+//! - Default: Auto-detect core count
+//! - 0: Use rayon's default
+//! - N: Explicit thread count
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use wad_simulator::blocks::{prefetch_blocks_parallel, collect_block_keys};
+//! use std::path::Path;
+//!
+//! let entries = vec![/* resolved assets */];
+//! let keys = collect_block_keys(&entries, Some(Path::new("base.wad")), Some(Path::new("patch.wad")));
+//! let cache = prefetch_blocks_parallel(
+//!     &keys,
+//!     Some(Path::new("base.wad")),
+//!     Some(Path::new("patch.wad")),
+//!     8, // threads
+//! ).expect("Prefetch failed");
+//! ```
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -229,3 +275,325 @@ pub fn merge_block_issues(cache: &ParsedBlockCache, report_ucfx: &mut Vec<String
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_key_equality() {
+        let key1 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        let key2 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn block_key_different_block_idx() {
+        let key1 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        let key2 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 6,
+            source: AsetSource::Base,
+        };
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn block_key_different_source() {
+        let key1 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        let key2 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Patch,
+        };
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn block_key_different_path() {
+        let key1 = BlockKey {
+            path: "base.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        let key2 = BlockKey {
+            path: "patch.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn block_key_is_hash() {
+        use std::collections::HashSet;
+        let key1 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        let key2 = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 5,
+            source: AsetSource::Base,
+        };
+        let mut set = HashSet::new();
+        set.insert(key1);
+        assert!(set.contains(&key2));
+    }
+
+    #[test]
+    fn collect_block_keys_empty_entries() {
+        let entries = vec![];
+        let keys = collect_block_keys(&entries, None, None);
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn collect_block_keys_filters_duplicates() {
+        let entry1 = ResolvedAset {
+            asset_hash: 0x11111111,
+            secondary_ref: 0,
+            packed_block_ref: 0x00000001,  // block=0, sub=1
+            type_id: 10,
+            source: AsetSource::Base,
+        };
+        let entry2 = ResolvedAset {
+            asset_hash: 0x22222222,
+            secondary_ref: 0,
+            packed_block_ref: 0x00000001,  // same block
+            type_id: 20,
+            source: AsetSource::Base,
+        };
+
+        let entries = vec![entry1, entry2];
+        let keys = collect_block_keys(&entries, Some(std::path::Path::new("base.wad")), None);
+
+        // Should have only 1 unique block key
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].block_idx, 0);
+    }
+
+    #[test]
+    fn collect_block_keys_different_sources() {
+        let entry1 = ResolvedAset {
+            asset_hash: 0x11111111,
+            secondary_ref: 0,
+            packed_block_ref: 0x00000001,
+            type_id: 10,
+            source: AsetSource::Base,
+        };
+        let entry2 = ResolvedAset {
+            asset_hash: 0x22222222,
+            secondary_ref: 0,
+            packed_block_ref: 0x00000001,  // same block index but different source
+            type_id: 20,
+            source: AsetSource::Patch,
+        };
+
+        let entries = vec![entry1, entry2];
+        let keys = collect_block_keys(
+            &entries,
+            Some(std::path::Path::new("base.wad")),
+            Some(std::path::Path::new("patch.wad")),
+        );
+
+        // Should have 2 keys (different sources)
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn collect_block_keys_no_base_path() {
+        let entry = ResolvedAset {
+            asset_hash: 0x11111111,
+            secondary_ref: 0,
+            packed_block_ref: 0x00000001,
+            type_id: 10,
+            source: AsetSource::Base,
+        };
+
+        let entries = vec![entry];
+        let keys = collect_block_keys(&entries, None, Some(std::path::Path::new("patch.wad")));
+
+        // Base entry but no base path -> no key
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn collect_block_keys_no_patch_path() {
+        let entry = ResolvedAset {
+            asset_hash: 0x11111111,
+            secondary_ref: 0,
+            packed_block_ref: 0x00000001,
+            type_id: 10,
+            source: AsetSource::Patch,
+        };
+
+        let entries = vec![entry];
+        let keys = collect_block_keys(&entries, Some(std::path::Path::new("base.wad")), None);
+
+        // Patch entry but no patch path -> no key
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn block_key_for_entry_base() {
+        let entry = ResolvedAset {
+            asset_hash: 0x11111111,
+            secondary_ref: 0,
+            packed_block_ref: 0x00050005,
+            type_id: 10,
+            source: AsetSource::Base,
+        };
+
+        let key = block_key_for_entry(&entry, Some(std::path::Path::new("base.wad")), None);
+
+        assert!(key.is_some());
+        let k = key.unwrap();
+        assert_eq!(k.block_idx, 5);
+        assert_eq!(k.source, AsetSource::Base);
+        assert!(k.path.contains("base.wad"));
+    }
+
+    #[test]
+    fn block_key_for_entry_patch() {
+        let entry = ResolvedAset {
+            asset_hash: 0x22222222,
+            secondary_ref: 0,
+            packed_block_ref: 0x00030003,
+            type_id: 20,
+            source: AsetSource::Patch,
+        };
+
+        let key = block_key_for_entry(&entry, None, Some(std::path::Path::new("patch.wad")));
+
+        assert!(key.is_some());
+        let k = key.unwrap();
+        assert_eq!(k.block_idx, 3);
+        assert_eq!(k.source, AsetSource::Patch);
+        assert!(k.path.contains("patch.wad"));
+    }
+
+    #[test]
+    fn block_key_for_entry_missing_path() {
+        let entry = ResolvedAset {
+            asset_hash: 0x11111111,
+            secondary_ref: 0,
+            packed_block_ref: 0x00050005,
+            type_id: 10,
+            source: AsetSource::Base,
+        };
+
+        let key = block_key_for_entry(&entry, None, None);
+        assert!(key.is_none());
+    }
+
+    #[test]
+    fn parsed_block_cache_empty() {
+        let cache = ParsedBlockCache {
+            blocks: HashMap::new(),
+            issues: HashMap::new(),
+        };
+
+        assert!(cache.blocks.is_empty());
+        assert!(cache.issues.is_empty());
+    }
+
+    #[test]
+    fn merge_block_issues_empty() {
+        let cache = ParsedBlockCache {
+            blocks: HashMap::new(),
+            issues: HashMap::new(),
+        };
+
+        let mut report = Vec::new();
+        merge_block_issues(&cache, &mut report);
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn merge_block_issues_collects_all() {
+        use mercs2_formats::ucfx::UcfxWalkIssue;
+
+        let key = BlockKey {
+            path: "test.wad".to_string(),
+            block_idx: 0,
+            source: AsetSource::Base,
+        };
+
+        let issues = vec![
+            UcfxWalkIssue {
+                context: "block[0]".to_string(),
+                detail: "issue 1".to_string(),
+            },
+            UcfxWalkIssue {
+                context: "block[0]".to_string(),
+                detail: "issue 2".to_string(),
+            },
+        ];
+
+        let mut issue_map = HashMap::new();
+        issue_map.insert(key, issues);
+
+        let cache = ParsedBlockCache {
+            blocks: HashMap::new(),
+            issues: issue_map,
+        };
+
+        let mut report = Vec::new();
+        merge_block_issues(&cache, &mut report);
+
+        assert_eq!(report.len(), 2);
+        assert!(report[0].contains("issue 1"));
+        assert!(report[1].contains("issue 2"));
+    }
+
+    #[test]
+    fn collect_block_keys_multiple_blocks() {
+        let entries = vec![
+            ResolvedAset {
+                asset_hash: 0x11111111,
+                secondary_ref: 0,
+                packed_block_ref: 0x00000001,
+                type_id: 10,
+                source: AsetSource::Base,
+            },
+            ResolvedAset {
+                asset_hash: 0x22222222,
+                secondary_ref: 0,
+                packed_block_ref: 0x00010002,
+                type_id: 20,
+                source: AsetSource::Base,
+            },
+            ResolvedAset {
+                asset_hash: 0x33333333,
+                secondary_ref: 0,
+                packed_block_ref: 0x00020003,
+                type_id: 30,
+                source: AsetSource::Base,
+            },
+        ];
+
+        let keys = collect_block_keys(&entries, Some(std::path::Path::new("base.wad")), None);
+
+        // 3 different block indices
+        assert_eq!(keys.len(), 3);
+    }
+}
+

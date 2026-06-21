@@ -1,4 +1,42 @@
-//! Per-asset-type consumption dispatch.
+//! Per-asset-type consumption dispatch and result aggregation.
+//!
+//! This module provides the trait-based asset consumer interface used to validate and simulate
+//! loading of individual asset types (Models, Textures, Animations, etc.). Each consumer inspects
+//! a UCFX container and its data chunks, checking for structural, schema, and data-integrity issues.
+//!
+//! # Consumer Results
+//!
+//! Each consumer returns a [`ConsumeResult`] with:
+//! - `consumed`: Whether the asset was recognized and processed
+//! - `issues`: Human-readable diagnostic messages
+//! - `xref_hashes`: Cross-reference asset hashes referenced by this asset
+//! - Type-specific validation counters (meshes, textures, placements, etc.)
+//! - Categorized violations: structural, ECS float corruption, buffer overflows
+//! - Advisory counters: heuristic checks excluded from the verdict
+//!
+//! # Asset Types Supported
+//!
+//! - **Model** (TYPE_ID_MODEL): Mesh hierarchies with skinning/rigging
+//! - **Texture** (TYPE_ID_TEXTURE): DXT-compressed image data with mip chains
+//! - **Animation** (TYPE_ID_ANIMATION): Skeletal animation keyframe data
+//! - **Layer** (TYPE_ID_LAYER): Placement and instance data for level geometry
+//! - **Script** (TYPE_ID_SCRIPT): Lua/game logic bytecode
+//! - **Material** (TYPE_ID_MATERIAL_PARAMS): Shader parameter tables
+//! - **Action Table** (TYPE_ID_ACTION_TABLE): Gameplay action dispatcher metadata
+//! - **Terrain Mesh** (TYPE_ID_TERRAIN_MESH): Landscape geometry
+//! - **Stance** (TYPE_ID_STANCE): Character pose/animation stance data
+//! - **FX Dictionary** (TYPE_ID_FX_DICTIONARY): Particle/effect definitions
+//! - **Watermap** (TYPE_ID_WATERMAP): Water surface simulation data
+//! - **Wavebank** (TYPE_ID_WAVEBANK): Audio waveform container
+//! - **Soundbank** (TYPE_ID_SOUNDBANK): Audio event dispatcher
+//! - **Wavebank** (TYPE_ID_WAVEBANK): Audio waveform container
+//!
+//! # Violation Categories
+//!
+//! - **Structural**: Type mismatch, invalid header, entry count vs. index buffer size mismatch
+//! - **ECS Float**: NaN/Inf in float fields or out-of-bounds positions in spatial components
+//! - **Texture Buffer**: DXT mip chain exceeds BODY chunk size
+//! - **Advisory**: Heuristic stride/offset guesses (STRM, HIER, PRMG, flgs)
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct ConsumeResult {
@@ -65,3 +103,126 @@ impl AssetConsumer for StructuralConsumer {
 pub fn consume_structural(container: &[u8], data_body: Option<&[u8]>, label: &str) -> ConsumeResult {
     StructuralConsumer.consume(container, data_body, label)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consume_result_default_is_all_zeros() {
+        let result = ConsumeResult::default();
+        assert!(!result.consumed);
+        assert!(result.issues.is_empty());
+        assert!(result.xref_hashes.is_empty());
+        assert_eq!(result.placements_validated, 0);
+        assert_eq!(result.meshes_validated, 0);
+        assert_eq!(result.structural_violations, 0);
+        assert_eq!(result.ecs_float_violations, 0);
+    }
+
+    #[test]
+    fn structural_consumer_valid_ucfx_container() {
+        let mut container = vec![0u8; 100];
+        container[0..4].copy_from_slice(b"UCFX");
+        let body = vec![1, 2, 3, 4];
+
+        let result = consume_structural(&container, Some(&body), "test_asset");
+
+        assert!(result.consumed);
+        assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn structural_consumer_invalid_magic() {
+        let container = vec![0u8; 100];
+        let body = vec![1, 2, 3, 4];
+
+        let result = consume_structural(&container, Some(&body), "test_asset");
+
+        assert!(result.consumed);
+        assert_eq!(result.issues.len(), 1);
+        assert!(result.issues[0].contains("not a UCFX container"));
+    }
+
+    #[test]
+    fn structural_consumer_empty_data_body() {
+        let mut container = vec![0u8; 100];
+        container[0..4].copy_from_slice(b"UCFX");
+        let body = vec![];
+
+        let result = consume_structural(&container, Some(&body), "test_asset");
+
+        assert!(result.consumed);
+        assert_eq!(result.issues.len(), 1);
+        assert!(result.issues[0].contains("empty data chunk"));
+    }
+
+    #[test]
+    fn structural_consumer_no_body() {
+        let mut container = vec![0u8; 100];
+        container[0..4].copy_from_slice(b"UCFX");
+
+        let result = consume_structural(&container, None, "test_asset");
+
+        assert!(result.consumed);
+        assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn structural_consumer_too_short_container() {
+        let container = vec![0u8; 10];
+        let body = vec![1, 2, 3];
+
+        let result = consume_structural(&container, Some(&body), "test_asset");
+
+        assert!(result.consumed);
+        assert_eq!(result.issues.len(), 1);
+        assert!(result.issues[0].contains("not a UCFX container"));
+    }
+
+    #[test]
+    fn structural_consumer_preserves_label() {
+        let container = vec![0u8; 20];
+        let body = vec![1, 2, 3];
+
+        let result = consume_structural(&container, Some(&body), "my_special_asset");
+
+        assert!(result.consumed);
+        assert!(result.issues[0].contains("my_special_asset"));
+    }
+
+    #[test]
+    fn consume_result_serializes() {
+        let result = ConsumeResult {
+            consumed: true,
+            issues: vec!["issue1".to_string()],
+            xref_hashes: vec![0x12345678],
+            placements_validated: 5,
+            meshes_validated: 3,
+            structural_violations: 1,
+            ecs_float_violations: 2,
+            texture_buffer_issues: vec!["buffer too small".to_string()],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&result);
+        assert!(json.is_ok());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("true"));
+        assert!(json_str.contains("issue1"));
+    }
+
+    #[test]
+    fn structural_consumer_both_issues() {
+        let container = vec![0u8; 10];
+        let body = vec![];
+
+        let result = consume_structural(&container, Some(&body), "bad_asset");
+
+        assert!(result.consumed);
+        assert_eq!(result.issues.len(), 2);
+        assert!(result.issues[0].contains("not a UCFX container"));
+        assert!(result.issues[1].contains("empty data chunk"));
+    }
+}
+
