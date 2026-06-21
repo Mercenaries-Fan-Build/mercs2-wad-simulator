@@ -11,6 +11,12 @@ pub const CODEC_IMA: u8 = 0x02;
 pub const CODEC_XMA: u8 = 0x01;
 pub const CODEC_XBOX_ADPCM: u8 = 0x05;
 pub const CODEC_XMA2: u8 = 0x69;
+/// Streaming codec: the clip's audio is NOT embedded — it lives in an external
+/// `.pws` referenced by (data_offset, data_size). Verified on retail wavebank
+/// 0x7871F925: all clips are codec 0x04, stereo, 44100 Hz, with multi-MB sizes at
+/// offsets into the `.pws`. The simulator validates the reference (the .pws is
+/// present and offset+size fits), not the codec-0x04 bytes.
+pub const CODEC_STREAM: u8 = 0x04;
 
 #[derive(Debug, Clone)]
 pub struct WaveClip {
@@ -130,10 +136,12 @@ pub fn consume_wavebank_with_options(
             });
         }
 
-        // P2-6: Structural checks for embedded clips
-        if codec != CODEC_IMA {
+        // Embedded clips are IMA (0x02); streaming clips are codec 0x04 (audio in
+        // the external .pws, validated by reference below). Anything else is a
+        // genuinely unexpected codec.
+        if codec != CODEC_IMA && codec != CODEC_STREAM {
             issues.push(format!(
-                "clip[{i}] 0x{clip_hash:08X}: unexpected codec 0x{codec:02X} (expected 0x02 IMA ADPCM)"
+                "clip[{i}] 0x{clip_hash:08X}: unexpected codec 0x{codec:02X} (expected 0x02 IMA or 0x04 stream)"
             ));
         }
 
@@ -143,15 +151,15 @@ pub fn consume_wavebank_with_options(
             ));
         }
 
-        if data_size > 0 && codec == CODEC_IMA {
-            let block_align = 36 * channels as u32;
-            if block_align > 0 && data_size % block_align != 0 {
-                issues.push(format!(
-                    "clip[{i}] 0x{clip_hash:08X}: IMA data_size {data_size} not aligned to block size {} (36*{channels}ch)",
-                    block_align
-                ));
-            }
-        }
+        // NOTE: no `data_size % (36*channels)` alignment check. It false-positived
+        // on every retail wavebank (which plays fine): retail clip data_size is not
+        // 36-aligned (sizes are variously 32-/64-aligned), so 36 is not the real
+        // block size, and XACT-style IMA permits a partial final block (decode is
+        // bounded by sample count, not block alignment). For embedded clips the
+        // real per-block validation is `validate_ima_payload` below; for streaming
+        // clips `data_size` is the EXTERNAL .pws byte length, where block alignment
+        // is meaningless. (The audio decoder is not in the decompiled .text, so this
+        // rests on the retail oracle + XACT IMA semantics, not a decomp trace.)
 
         let mut decoded_samples = None;
         let mut external_stream = false;

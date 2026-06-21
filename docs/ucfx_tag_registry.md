@@ -4,7 +4,7 @@ Auto-generated from `crates/mercs2_formats/src/tag_registry.rs`.
 Invariants verified against `output/_ghidra/all_functions_decomp.txt` (Ghidra decomp, PC EXE) + retail vz.wad.
 
 Totals: 232 — UcfxAsset=70, D3dFormat=7, EntityRuntime=30, NetworkProto=100, LuaReflection=17, Misc=8
-Status: Validated=43, Registered=26, NeedsInvestigation=163
+Status: Validated=42, Registered=27, NeedsInvestigation=163
 
 
 ## UCFX asset chunk (UcfxAsset)
@@ -22,7 +22,6 @@ Status: Validated=43, Registered=26, NeedsInvestigation=163
 | `COMP` | 0x006549ef | Validated |  |
 | `DAMG` | 0x0045f558 | Validated | ECS damage ref array @0x45f558: count×4 u32 refs (count from INFO field, overflow-guarded). Validated: body % 4 == 0 |
 | `DEBR` | 0x0045f9a8 | Validated | ECS debris ref array @0x45f9a8: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0 |
-| `DECL` | 0x0045dbb0 | Validated | ECS declaration array @FUN_0045dbb0 (decomp): count records of [u32 id][0x20 blob] = 0x24 bytes each (count from INFO). Validated: body % 0x24 == 0 |
 | `DEPS` | 0x0059d0d3 | Validated |  |
 | `DICT` | 0x00491386 | Validated |  |
 | `EMTR` | 0x00492402 | Validated | emitter @0x492402: reads a u16 count then count×4 alloc (overflow-guarded). Validated: body >= 2 |
@@ -60,6 +59,7 @@ Status: Validated=43, Registered=26, NeedsInvestigation=163
 | `CHAR` | 0x004ac8e0 | Registered | renderable sub-chunk @FUN_004ac8e0 (decomp): dispatched alongside INFO/MTRL; reads a count and stack-allocs count*2. Recognized/benign (was mis-classified Misc) |
 | `CHDR` | 0x004cf3bb | Registered |  |
 | `DATA` | 0x0045f187 | Registered | ECS entity data @0x45f187: delegates body parse to template builder 0x631c90; no self-contained body invariant. Recognized/benign (distinct from lowercase data) |
+| `DECL` | 0x0045dbb0 | Registered | context-dependent: ECS-template DECL @FUN_0045dbb0 is count×0x24 ([u32 id][0x20 blob]), but DECL in other asset types (material/resident) has a different layout, so no context-blind body invariant (retail block 3185 has a 10000-byte DECL) |
 | `EMIT` | 0x00492703 | Registered | emitter timing @0x492703: delegates body parse to sub-reader 0x48cc30; no self-contained body invariant. Recognized/benign |
 | `INDX` | 0x004719f3 | Registered |  |
 | `ITEM` | 0x0067c315 | Registered |  |
