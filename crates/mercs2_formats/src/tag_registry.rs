@@ -11,6 +11,11 @@
 //! NOTE: tags appear in multiple call sites; `handler_va` is one representative
 //! dispatch site, not the only one. Addresses marked "(VERIFY handler)" in `note`
 //! still need their handler disassembled to pin the exact invariant.
+//!
+//! Provenance: invariants verified against the Ghidra decompilation at
+//! output/_ghidra/all_functions_decomp.txt (PC EXE, base 0x00400000), function
+//! bodies keyed by the FUN_<addr> named in each note, cross-checked vs capstone
+//! (tools/disasm_func.py) and the retail vz.wad (zero false-positives).
 
 /// Engine subsystem a FourCC belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,15 +111,15 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo { fourcc: *b"enum", handler_va: 0x006549dd, subsystem: UcfxAsset, verify: Registered, note: "" },
     TagInfo { fourcc: *b"flgt", handler_va: 0x00654f22, subsystem: UcfxAsset, verify: Registered, note: "" },
     TagInfo { fourcc: *b"sequ", handler_va: 0x0067bfaa, subsystem: UcfxAsset, verify: Registered, note: "" },
-    TagInfo { fourcc: *b"ASTO", handler_va: 0x0067c7de, subsystem: UcfxAsset, verify: NeedsInvestigation, note: "anim struct array count x0xc (VERIFY handler)" },
+    TagInfo { fourcc: *b"ASTO", handler_va: 0x0067c780, subsystem: UcfxAsset, verify: Validated, note: "anim struct @FUN_0067c780 (decomp): reads u32 count then count*4 alloc (overflow-guarded). Validated: body >= 4" },
     TagInfo { fourcc: *b"ATRB", handler_va: 0x00492b1c, subsystem: UcfxAsset, verify: Validated, note: "effect attribute @0x492b1c: reads a 4-byte inner hash then sub-dispatches to per-attribute readers. Validated: body >= 4" },
-    TagInfo { fourcc: *b"BSHI", handler_va: 0x00478318, subsystem: UcfxAsset, verify: NeedsInvestigation, note: "blendshape index; Mesh_ConsumeChunk @0x478318; converter swaps u16" },
-    TagInfo { fourcc: *b"BSHP", handler_va: 0x0047839e, subsystem: UcfxAsset, verify: NeedsInvestigation, note: "blendshape data; handler ~0x4a4770; count x0x18 alloc (VERIFY handler)" },
+    TagInfo { fourcc: *b"BSHI", handler_va: 0x00478318, subsystem: UcfxAsset, verify: Validated, note: "blendshape index @FUN_00478270 (decomp): reads count*2 u16 array (count from INFO param_1[0x6a]); converter swaps u16. Validated: body % 2 == 0" },
+    TagInfo { fourcc: *b"BSHP", handler_va: 0x004a4770, subsystem: UcfxAsset, verify: Registered, note: "blendshape data @FUN_004a4770 (decomp): container-walker that finds a child data chunk (0x61746164) and resolves its offset (NOT a count*0x18 array). Recognized/benign" },
     TagInfo { fourcc: *b"COLR", handler_va: 0x004930e5, subsystem: UcfxAsset, verify: Validated, note: "colour palette @0x4930e5: stores a fixed 0xC8 (200-byte) record into the effect palette heap. Validated: body >= 0xC8" },
     TagInfo { fourcc: *b"DAMG", handler_va: 0x0045f558, subsystem: UcfxAsset, verify: Validated, note: "ECS damage ref array @0x45f558: count×4 u32 refs (count from INFO field, overflow-guarded). Validated: body % 4 == 0" },
     TagInfo { fourcc: *b"DATA", handler_va: 0x0045f187, subsystem: UcfxAsset, verify: Registered, note: "ECS entity data @0x45f187: delegates body parse to template builder 0x631c90; no self-contained body invariant. Recognized/benign (distinct from lowercase data)" },
     TagInfo { fourcc: *b"DEBR", handler_va: 0x0045f9a8, subsystem: UcfxAsset, verify: Validated, note: "ECS debris ref array @0x45f9a8: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0" },
-    TagInfo { fourcc: *b"DECL", handler_va: 0x0045dc20, subsystem: UcfxAsset, verify: NeedsInvestigation, note: "" },
+    TagInfo { fourcc: *b"DECL", handler_va: 0x0045dbb0, subsystem: UcfxAsset, verify: Validated, note: "ECS declaration array @FUN_0045dbb0 (decomp): count records of [u32 id][0x20 blob] = 0x24 bytes each (count from INFO). Validated: body % 0x24 == 0" },
     TagInfo { fourcc: *b"EMIT", handler_va: 0x00492703, subsystem: UcfxAsset, verify: Registered, note: "emitter timing @0x492703: delegates body parse to sub-reader 0x48cc30; no self-contained body invariant. Recognized/benign" },
     TagInfo { fourcc: *b"EMTR", handler_va: 0x00492402, subsystem: UcfxAsset, verify: Validated, note: "emitter @0x492402: reads a u16 count then count×4 alloc (overflow-guarded). Validated: body >= 2" },
     TagInfo { fourcc: *b"FRCE", handler_va: 0x00491c93, subsystem: UcfxAsset, verify: Validated, note: "force @0x491c93: reads a 4-byte inner hash then sub-dispatches per force type. Validated: body >= 4" },
@@ -122,8 +127,8 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo { fourcc: *b"KEYS", handler_va: 0x004640a8, subsystem: UcfxAsset, verify: Validated, note: "keyframe list @0x4640a8: u32 count header then count×8 keyframe records. Validated: (body-4) % 8 == 0, body >= 4" },
     TagInfo { fourcc: *b"MANM", handler_va: 0x0067a844, subsystem: UcfxAsset, verify: Registered, note: "anim-name @0x67a844: allocates a fixed 0x34 in-memory struct; body read is smaller (16 bytes in retail) — no confirmed body invariant. Recognized/benign" },
     TagInfo { fourcc: *b"MESH", handler_va: 0x00471923, subsystem: UcfxAsset, verify: Registered, note: "mesh dispatcher @0x471900: allocates a FIXED 0x10-byte renderable per descriptor, indexed by a u16; no body read, no count-driven array. Engine-safe; no self-contained body invariant" },
-    TagInfo { fourcc: *b"MINF", handler_va: 0x0068e61f, subsystem: UcfxAsset, verify: NeedsInvestigation, note: "mesh/anim info; parallel count x4 arrays (VERIFY handler)" },
-    TagInfo { fourcc: *b"NODE", handler_va: 0x004cf48b, subsystem: UcfxAsset, verify: Validated, note: "scene node @0x4cf48b: reads u32 hash + u32 child-count (8B header), then count×0x14 child array (overflow-guarded). Validated: body >= 8" },
+    TagInfo { fourcc: *b"MINF", handler_va: 0x0068e5d0, subsystem: UcfxAsset, verify: Validated, note: "mesh/anim info @FUN_0068e5d0 (decomp): reads [u32 hash][u16] (6 bytes) per record. Validated: body >= 6" },
+    TagInfo { fourcc: *b"NODE", handler_va: 0x004cf48b, subsystem: UcfxAsset, verify: Validated, note: "scene node @FUN_004cf340 (decomp): u32 hash + u32 child-count (8B header), then count*0x14 child array (overflow-guarded). Validated: body >= 8" },
     TagInfo { fourcc: *b"PART", handler_va: 0x0045f8e3, subsystem: UcfxAsset, verify: Validated, note: "ECS particle ref array @0x45f8e3: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0" },
     TagInfo { fourcc: *b"PHY2", handler_va: 0x004a845f, subsystem: UcfxAsset, verify: Validated, note: "Havok 5.5 collision packfile @0x4a845f: u32 header prefix + embedded packfile (magic SEARCHED, palindromic 57E0E057 10C0C010) + trailing wrapper. Validated by recalculation (havok::validate_phy2): locate packfile, verify length + Havok version + __classnames__ it needs to convert; magic-less PHY2 is valid legacy form" },
     TagInfo { fourcc: *b"POFF", handler_va: 0x004a9cf2, subsystem: UcfxAsset, verify: Validated, note: "effect consumer @0x4a9cf2: reads a fixed 0xC (Vec3) offset into @esi+0x30. Validated: body >= 0xC" },
@@ -135,7 +140,7 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo { fourcc: *b"TINY", handler_va: 0x00471a01, subsystem: UcfxAsset, verify: Registered, note: "low-LOD mesh @0x471a01: allocates a FIXED 0x18-byte renderable per descriptor, index-driven (like MESH); no body read. Engine-safe, no body invariant" },
     TagInfo { fourcc: *b"TRCK", handler_va: 0x0068e7c3, subsystem: UcfxAsset, verify: Validated, note: "anim track @0x68e7c3: 12-byte inline header (3×u32) then count×4 parallel arrays (overflow-guarded). Validated: body >= 12" },
     TagInfo { fourcc: *b"TREE", handler_va: 0x0045f629, subsystem: UcfxAsset, verify: Registered, note: "ECS tree/hierarchy @FUN_0045f3f0 (decomp): count (from INFO) variable-length records (4xu32 + u16 sub-count + sub_count xu16); 0x34 is the in-memory alloc, not an on-disk stride — no fixed body invariant" },
-    TagInfo { fourcc: *b"TRFM", handler_va: 0x0048cd09, subsystem: UcfxAsset, verify: Validated, note: "transform @0x48cd09: unrolled read of 16×4-byte floats = one 4x4 matrix. Validated: body >= 64" },
+    TagInfo { fourcc: *b"TRFM", handler_va: 0x0048cd09, subsystem: UcfxAsset, verify: Validated, note: "transform @FUN_0048cc30 (decomp): unrolled read of 16x4-byte floats = one 4x4 matrix. Validated: body >= 64" },
     TagInfo { fourcc: *b"TYPE", handler_va: 0x0067c8f9, subsystem: UcfxAsset, verify: Registered, note: "anim TYPE @0x67c8f9: count×2 u16 read where count is caller-passed (external, not in body) — no self-contained body invariant. Recognized/benign (separate from Stance TYPE converter arm)" },
     TagInfo { fourcc: *b"VALU", handler_va: 0x0067c9d7, subsystem: UcfxAsset, verify: Validated, note: "anim VALU @0x67c9d7: (count+1)×width value blob, u32 elements (overflow-guarded). Validated: body % 4 == 0" },
     TagInfo { fourcc: *b"trns", handler_va: 0x0067e4d5, subsystem: UcfxAsset, verify: NeedsInvestigation, note: "" },
@@ -298,7 +303,7 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo { fourcc: *b"tlif", handler_va: 0x009765a7, subsystem: LuaReflection, verify: NeedsInvestigation, note: "Lua/object property accessor key; NOT a WAD chunk - requires deeper investigation" },
     TagInfo { fourcc: *b"wonp", handler_va: 0x009765ef, subsystem: LuaReflection, verify: NeedsInvestigation, note: "Lua/object property accessor key; NOT a WAD chunk - requires deeper investigation" },
     // --- Misc ---
-    TagInfo { fourcc: *b"CHAR", handler_va: 0x004ac973, subsystem: Misc, verify: NeedsInvestigation, note: "unclassified FourCC immediate - requires deeper investigation" },
+    TagInfo { fourcc: *b"CHAR", handler_va: 0x004ac8e0, subsystem: UcfxAsset, verify: Registered, note: "renderable sub-chunk @FUN_004ac8e0 (decomp): dispatched alongside INFO/MTRL; reads a count and stack-allocs count*2. Recognized/benign (was mis-classified Misc)" },
     TagInfo { fourcc: *b"GGGG", handler_va: 0x0057e9d5, subsystem: Misc, verify: NeedsInvestigation, note: "unclassified FourCC immediate - requires deeper investigation" },
     TagInfo { fourcc: *b"HHlP", handler_va: 0x004eea8a, subsystem: Misc, verify: NeedsInvestigation, note: "unclassified FourCC immediate - requires deeper investigation" },
     TagInfo { fourcc: *b"INVD", handler_va: 0x0059cffc, subsystem: Misc, verify: NeedsInvestigation, note: "unclassified FourCC immediate - requires deeper investigation" },
@@ -356,7 +361,12 @@ mod tests {
     #[test]
     fn investigation_flags_nonwad_but_not_validated() {
         assert!(needs_investigation(*b"CSID").is_some());   // network/entity
-        assert!(needs_investigation(*b"BSHI").is_some());   // new ucfx, still pending
+        assert!(needs_investigation(*b"trns").is_some());   // ucfx, still pending
+        assert!(needs_investigation(*b"DECL").is_none());   // now validated (body % 0x24)
+        assert!(needs_investigation(*b"BSHI").is_none());   // now validated (body % 2)
+        assert!(needs_investigation(*b"ASTO").is_none());   // now validated (body>=4)
+        assert!(needs_investigation(*b"MINF").is_none());   // now validated (body>=6)
+        assert!(needs_investigation(*b"CHAR").is_none());   // reclassified UCFX, registered
         assert!(needs_investigation(*b"NODE").is_none());   // now validated (body>=8)
         assert!(needs_investigation(*b"TRFM").is_none());   // now validated (4x4 matrix)
         assert!(needs_investigation(*b"TREE").is_none());   // now validated (body % 0x34)

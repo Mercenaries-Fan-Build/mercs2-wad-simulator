@@ -72,6 +72,7 @@ pub enum ChunkTag {
     Binn, // "BINN" (Lua bytecode container; transcoded, not byte-swapped)
     Bshi, // "BSHI"
     Bshp, // "BSHP"
+    Char, // "CHAR" (renderable sub-chunk; consumer FUN_004ac8e0)
     Colr, // "COLR"
     Damg, // "DAMG"
     DataUpper, // "DATA"
@@ -158,6 +159,7 @@ impl ChunkTag {
             b"BINN" => Self::Binn,
             b"BSHI" => Self::Bshi,
             b"BSHP" => Self::Bshp,
+            b"CHAR" => Self::Char,
             b"COLR" => Self::Colr,
             b"DAMG" => Self::Damg,
             b"DATA" => Self::DataUpper,
@@ -248,6 +250,7 @@ impl ChunkTag {
             Self::Binn => *b"BINN",
             Self::Bshi => *b"BSHI",
             Self::Bshp => *b"BSHP",
+            Self::Char => *b"CHAR",
             Self::Colr => *b"COLR",
             Self::Damg => *b"DAMG",
             Self::DataUpper => *b"DATA",
