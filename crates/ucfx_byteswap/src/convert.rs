@@ -356,7 +356,16 @@ fn convert_container(
     // the terrainmesh type_hash, and rebuilds + reframes the whole data area. See
     // apply_terrainmesh_reencode / docs/terrainmesh_reencode_implementation.md.
     if is_be && type_hash == types::TYPE_HASH_TERRAIN_MESH {
-        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end)?;
+        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, true)?;
+    } else if is_be && type_hash == types::TYPE_HASH_MODEL {
+        // Skinned character MODEL: the decl translation widened its DEC3N normals/tangents
+        // to FLOAT16_4 (stride 32→40) but the data/info stayed 32, so the decl over-runs the
+        // vertex buffer → BUFFER_TOO_SMALL → model never signals ObjectIsReady "awake". Apply
+        // the STRM vertex widening + info-stride rewrite, and de-strip the IBUF into a
+        // degenerate-stitched triangle STRIP (models draw as strips; emitting a list makes
+        // the engine read list data as a strip → spikes). MTRL transposition fix is applied
+        // separately (wad_builder fix-model-mtrl).
+        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, false)?;
     }
 
     Ok(out)
@@ -1246,9 +1255,23 @@ fn convert_generic_bodies(
                         // (rosetta oracle: TRNS 8744 size-equal diffs -> 0.)
                     }
                     ChunkTag::Unknown(b) if b == *b"SEGM" => {
-                        // SEGM: native big-endian records — verified pc == be byte-for-byte
-                        // (BE u32 7 stays `00 00 00 07` in PC, not reversed). The generic
-                        // u32 default wrongly reverses them. No swap. (oracle: 2946 -> 0.)
+                        // SEGM = 4-byte records `[u16 bone-remap @0][u8 seg_index @2]
+                        // [u8 group @3]`. The u16 bone-remap is big-endian and MUST be
+                        // byte-swapped to LE; the two u8s stay put (so neither a blanket
+                        // u32 swap nor "no swap" is right). The old "no swap" only looked
+                        // correct on models whose bone-remap is 0 (a no-op); skinned
+                        // characters with real remaps (mattias/jen/chris v2/v3/v4/...) got
+                        // garbled per-segment bone palettes → those body parts skinned to
+                        // junk bones → mangled posed mesh while remap=0 parts stayed fine.
+                        // Verified swap-u16@0-per-record == retail oracle for 6 base
+                        // character models; a no-op for the zero-remap models that
+                        // previously "passed". Each record's u16 is the bone index.
+                        let body = &mut data_area[body_local_start..body_local_end];
+                        let mut o = 0;
+                        while o + 4 <= body.len() {
+                            body.swap(o, o + 1);
+                            o += 4;
+                        }
                     }
                     ChunkTag::Inst | ChunkTag::Bshi => {
                         // INST / BSHI: u16 record / index arrays. PC = per-u16 byte-swap of
@@ -1319,6 +1342,38 @@ fn convert_generic_bodies(
                     }
                     ChunkTag::InfoUpper if is_texture => {
                         convert_texture_info(&mut data_area[body_local_start..body_local_end]);
+                    }
+                    ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_MODEL => {
+                        // Model INFO. Buffer at entry = RAW big-endian body. The generic
+                        // u32 sweep is byte-exact for the 4B scalar and 60B all-f32 shapes,
+                        // but WRONG for two shapes whose tails are u16 fields — a blanket
+                        // 4-byte reversal TRANSPOSES each u16 pair:
+                        //   72B model-bbox header : u32/f32 fields [0:68] + a trailing
+                        //     [u16][u16] pair [68:72] (generic gave BE 0x0000FFFF ->
+                        //     0xFFFF0000; retail keeps the two LE u16).
+                        //   56B PRMG/sub-mesh record : 6×u32 header [0:24] (flags, 2 hashes,
+                        //     count) + a u16 (value,count) tail [24:56] (generic transposes
+                        //     each pair).
+                        // Verified raw-Xbox->retail across 10 base character models: 4B/60B/
+                        // 72B are 100% byte-exact; 56B matches retail for every byte EXCEPT
+                        // four u16s at off 30/42/50/52, which the PC asset compiler
+                        // re-quantized from the mesh's vertex bounds (provably two-to-one,
+                        // not derivable from the Xbox bytes — render-side bound hints). The
+                        // u16-swap leaves those at the nearest valid value; the destructive
+                        // pair-transposition (the engine-affecting corruption) is fixed.
+                        // (Three independent RE agents converged on this exact transform.)
+                        let body = &mut data_area[body_local_start..body_local_end];
+                        match body.len() {
+                            72 => {
+                                swap_u32_array(&mut body[0..68]);
+                                swap_u16_array(&mut body[68..72]);
+                            }
+                            56 => {
+                                swap_u32_array(&mut body[0..24]);
+                                swap_u16_array(&mut body[24..56]);
+                            }
+                            _ => swap_u32_array(body),
+                        }
                     }
                     ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_SCRIPT => {
                         // Script INFO: [u8][u16 name_len@1][u8×2][ASCII name][NUL][u8 cnt]
@@ -2256,7 +2311,10 @@ fn convert_decl(be: &[u8]) -> Result<Vec<u8>, String> {
     out.extend_from_slice(&0u32.to_le_bytes()); // PC header word 0
     out.extend_from_slice(&16u32.to_le_bytes()); // PC header stride-gate = 16
     let mut pos = 12usize; // skip the 12-byte Xbox header
-    let mut off: Option<u16> = None;
+    // Offset auto-increments by element size WITHIN a stream, but resets to the
+    // source offset (0) at the start of each new stream — matching retail.
+    let mut off: u16 = 0;
+    let mut prev_stream: Option<u16> = None;
     let mut n_elems = 0usize;
     let mut saw_end = false;
     while pos + 12 <= be.len() {
@@ -2272,20 +2330,28 @@ fn convert_decl(be: &[u8]) -> Result<Vec<u8>, String> {
             saw_end = true;
             break;
         }
-        let cur_off = off.unwrap_or((a & 0xffff) as u16);
+        // Xbox element: a = [stream:16][offset:16]; b byte1 = format; c byte1 =
+        // Usage, c byte2 = UsageIndex. PC D3DVERTEXELEMENT9 = {Stream, Offset,
+        // Type, Method, Usage, UsageIndex}. Multi-stream decls (blend-shape /
+        // extra-texcoord channels) carry stream 1..N — must be preserved, else the
+        // channels collapse onto stream 0 / UsageIndex 0 (duplicate semantic) and
+        // D3D CreateVertexDeclaration returns E_FAIL.
+        let stream = ((a >> 16) & 0xffff) as u16;
+        let cur_off = if prev_stream != Some(stream) { (a & 0xffff) as u16 } else { off };
         let fmt = ((b >> 8) & 0xff) as u8;
         let typ = xbox_decl_format_to_pc_type(fmt).ok_or_else(|| {
             format!("unknown Xbox decl format byte 0x{:02X} (element b=0x{:08X})", fmt, b)
         })?;
-        out.extend_from_slice(&0u16.to_le_bytes()); // Stream
+        out.extend_from_slice(&stream.to_le_bytes()); // Stream (Xbox a>>16)
         out.extend_from_slice(&cur_off.to_le_bytes()); // Offset
         out.extend_from_slice(&[
             typ,                      // Type
             0,                        // Method
-            ((c >> 16) & 0xff) as u8, // Usage
-            (c & 0xff) as u8,         // UsageIndex
+            ((c >> 16) & 0xff) as u8, // Usage    (Xbox c byte 1)
+            ((c >> 8) & 0xff) as u8,  // UsageIndex (Xbox c byte 2)
         ]);
-        off = Some(cur_off + pc_d3ddecltype_size(typ));
+        off = cur_off + pc_d3ddecltype_size(typ);
+        prev_stream = Some(stream);
         n_elems += 1;
     }
     // Fail loud rather than silently emit a geometry-less decl: a header-only or
@@ -2396,9 +2462,10 @@ fn apply_strm_vertex_fix(
             i += 1;
             continue;
         }
-        // Collect the decl + data children of this STRM group (until the next sentinel).
+        // Collect the decl + data + info children of this STRM group (until the next sentinel).
         let mut decl: Option<(usize, usize)> = None;
         let mut data: Option<(usize, usize)> = None;
+        let mut info: Option<(usize, usize)> = None;
         let mut j = i + 1;
         while j < descriptors.len() {
             let cd = &descriptors[j];
@@ -2411,6 +2478,7 @@ fn apply_strm_vertex_fix(
                 match cd.tag {
                     ChunkTag::Decl => decl = Some((start, size)),
                     ChunkTag::Data => data = Some((start, size)),
+                    ChunkTag::Info => info = Some((start, size)),
                     _ => {}
                 }
             }
@@ -2450,6 +2518,24 @@ fn apply_strm_vertex_fix(
         }
         if n_elems == 0 || !all_u16 || stride < 4 || stride % 4 != 0 || vl < stride {
             continue;
+        }
+        // If the STRM `info` stride differs from this (PC-decl) stride, the data is
+        // STILL at its Xbox stride and will be widened + position-fixed by
+        // rebuild_terrain_vertices (DEC3N normals/tangents widen to FLOAT16_4). The
+        // all-u16 grouping correction here would then run at the WRONG (PC) stride
+        // over Xbox-stride bytes, and rebuild's half-unswap would double-process the
+        // position → Z/W transposed. (Only all-u16 static model submeshes hit this —
+        // e.g. mattias_v5's waist props sub 13/14 thrown to Z=1.0 on the floor.) Skip
+        // these; rebuild owns them. STRM already at PC stride (info==decl) proceed.
+        if let Some((is, il)) = info {
+            if il >= 8 {
+                let info_stride =
+                    u32::from_le_bytes([out[is + 4], out[is + 5], out[is + 6], out[is + 7]])
+                        as usize;
+                if info_stride != 0 && info_stride != stride {
+                    continue;
+                }
+            }
         }
         let n_verts = vl / stride;
 
@@ -2568,25 +2654,37 @@ fn f32_to_f16_bits(f: f32) -> u16 {
 ///
 /// **Bit layout (pinned empirically from 24,282 base-terrainmesh NORMAL pairs;
 /// mean angular error 0.05°, max 0.12° — see the implementation doc):**
-///   * X = sign-extend(bits[0:11])  / 1023   (11-bit signed)
-///   * Y = sign-extend(bits[11:22]) / 1023   (11-bit signed)
-///   * Z = sign-extend(bits[22:32]) / 511    (10-bit signed)
+///   * NORMAL (HEND3N, 11-11-10): X=sx(bits[0:11])/1023, Y=sx(bits[11:22])/1023,
+///     Z=sx(bits[22:32])/511.
+///   * TANGENT/BINORMAL (DEC3N, 10-10-10-2): X=sx(bits[0:10])/511,
+///     Y=sx(bits[10:20])/511, Z=sx(bits[20:30])/511 (top 2 W bits ignored).
 ///   * W = 1.0
-/// i.e. an 11-11-10 signed-normalized packing (Xbox `D3DDECLTYPE_DEC3N` /
-/// "HEND3N" variant). The decoded vector is normalized, then each component is
-/// re-encoded to binary16. This is **geometry-correct, not byte-exact**: PC's
-/// FLOAT16_4 normals were quantized from the original high-precision source mesh,
-/// so they differ from this lossy-Xbox-decode by ≤1–2 half-float ULP. The
-/// direction is reproduced to ~0.05°, which is what the engine/lighting needs.
-fn dec3n_to_half4_le(u: u32) -> [u8; 8] {
+/// The two share a stream-0 4-byte slot but use **different bit splits** — NORMAL is
+/// Xbox HEND3N (11-11-10), TANGENT/BINORMAL is D3DDECLTYPE_DEC3N (10-10-10-2). Using
+/// the normal's 11-11-10 split for a tangent garbles it (~125° error → broken
+/// normal-mapped shader). `ten_ten_ten=true` selects the tangent layout. Verified vs
+/// the retail base_v2 oracle: normal 11-11-10 = 4102/4102 within 1°, tangent 10-10-10
+/// matches retail (0° on v0). The decoded vector is normalized, then re-encoded to
+/// binary16 — geometry-correct, not byte-exact (≤1–2 ULP from the PC quantization).
+fn dec3n_to_half4_le(u: u32, ten_ten_ten: bool) -> [u8; 8] {
     let sx = |v: u32, bits: u32| -> i32 {
         let m = (v & ((1 << bits) - 1)) as i32;
         let half = 1 << (bits - 1);
         if m >= half { m - (1 << bits) } else { m }
     };
-    let x = sx(u, 11) as f32 / 1023.0;
-    let y = sx(u >> 11, 11) as f32 / 1023.0;
-    let z = sx(u >> 22, 10) as f32 / 511.0;
+    let (x, y, z) = if ten_ten_ten {
+        (
+            sx(u, 10) as f32 / 511.0,
+            sx(u >> 10, 10) as f32 / 511.0,
+            sx(u >> 20, 10) as f32 / 511.0,
+        )
+    } else {
+        (
+            sx(u, 11) as f32 / 1023.0,
+            sx(u >> 11, 11) as f32 / 1023.0,
+            sx(u >> 22, 10) as f32 / 511.0,
+        )
+    };
     let mag = (x * x + y * y + z * z).sqrt();
     let (nx, ny, nz) = if mag > 0.0 {
         (x / mag, y / mag, z / mag)
@@ -2605,6 +2703,9 @@ fn dec3n_to_half4_le(u: u32) -> [u8; 8] {
 struct DeclElem {
     offset_pc: usize,
     typ: u8,
+    /// D3DDECLUSAGE (3=NORMAL, 6=TANGENT, 7=BINORMAL, …). Selects the DEC3N bit
+    /// layout for type-16 (FLOAT16_4) elements: NORMAL=11-11-10, else=10-10-10.
+    usage: u8,
 }
 
 /// Parse a translated PC `decl` body into its element list + computed PC stride.
@@ -2622,12 +2723,22 @@ fn parse_pc_decl(decl: &[u8]) -> Option<(Vec<DeclElem>, usize)> {
         if stream == 0x00ff || typ == 17 {
             break;
         }
+        let usage = decl[p + 6]; // D3DVERTEXELEMENT9.Usage
         let offset = u16::from_le_bytes([decl[p + 2], decl[p + 3]]) as usize;
+        // Only stream-0, non-position (offset>0) elements participate in the stream-0
+        // vertex widening. Blend-shape UV streams (stream>0) live in separate BSHP
+        // bodies; the off-0 position is the implicit 8-byte prefix handled directly by
+        // rebuild_terrain_vertices. (Single-stream terrain with an unlisted position is
+        // unaffected — it has neither stream>0 nor an off-0 listed element.)
+        if stream != 0 || offset == 0 {
+            p += 8;
+            continue;
+        }
         let end = offset + pc_d3ddecltype_size(typ) as usize;
         if end > stride {
             stride = end;
         }
-        elems.push(DeclElem { offset_pc: offset, typ });
+        elems.push(DeclElem { offset_pc: offset, typ, usage });
         p += 8;
     }
     if elems.is_empty() {
@@ -2702,7 +2813,9 @@ fn rebuild_terrain_vertices(
                     if bo + 4 <= src.len() {
                         let b = &src[bo..bo + 4];
                         let u = u32::from_le_bytes([b[0], b[1], b[2], b[3]]); // = BE-of-original
-                        let half4 = dec3n_to_half4_le(u);
+                        // NORMAL (usage 3) is HEND3N 11-11-10; TANGENT/BINORMAL use
+                        // DEC3N 10-10-10-2. Wrong split garbles tangents (~125° error).
+                        let half4 = dec3n_to_half4_le(u, e.usage != 3);
                         out[po..po + 8].copy_from_slice(&half4);
                     }
                 }
@@ -2744,42 +2857,105 @@ fn rebuild_terrain_vertices(
 /// `src` is the generic-swapped (u16-swap-corrected) Xbox index body. Returns the
 /// PC triangle-list index bytes (LE u16).
 fn destrip_indices(src: &[u8]) -> Vec<u8> {
+    destrip_indices_with_map(src).0
+}
+
+/// Like `destrip_indices`, but also returns a position map `posmap` of length
+/// `n_strip_indices + 1`, where `posmap[p]` = the number of LIST indices emitted
+/// by the time strip-index position `p` is reached. Used to remap PRMT draw-call
+/// ranges `{start_index, index_count}` from strip-index space into the new
+/// triangle-list index space: `new_start = posmap[start]`,
+/// `new_count = posmap[start + count] - posmap[start]`.
+///
+/// Emits byte-identical output to the per-run `destrip_indices`: when the current
+/// run reaches length L (after pushing the L-th vertex), it emits the (L-3)-th
+/// triangle with winding `(L-3) % 2`, exactly matching the per-run flush.
+fn destrip_indices_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
     let n = src.len() / 2;
     let idx: Vec<u16> = (0..n)
         .map(|i| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]))
         .collect();
     let mut out: Vec<u16> = Vec::with_capacity(n * 3);
+    let mut posmap: Vec<u32> = vec![0u32; n + 1];
     let mut run: Vec<u16> = Vec::new();
-    let flush = |run: &[u16], out: &mut Vec<u16>| {
-        if run.len() < 3 {
-            return;
-        }
-        for k in 0..run.len() - 2 {
-            let (a, b, c) = (run[k], run[k + 1], run[k + 2]);
-            if a == b || b == c || a == c {
-                continue; // degenerate
-            }
-            if k % 2 == 0 {
-                out.extend_from_slice(&[a, b, c]);
-            } else {
-                out.extend_from_slice(&[a, c, b]);
-            }
-        }
-    };
-    for &x in &idx {
+    for p in 0..n {
+        posmap[p] = out.len() as u32;
+        let x = idx[p];
         if x == 0xffff {
-            flush(&run, &mut out);
             run.clear();
         } else {
             run.push(x);
+            if run.len() >= 3 {
+                let l = run.len();
+                let (a, b, c) = (run[l - 3], run[l - 2], run[l - 1]);
+                if a != b && b != c && a != c {
+                    let k = l - 3;
+                    if k % 2 == 0 {
+                        out.extend_from_slice(&[a, b, c]);
+                    } else {
+                        out.extend_from_slice(&[a, c, b]);
+                    }
+                }
+            }
         }
     }
-    flush(&run, &mut out);
+    posmap[n] = out.len() as u32;
     let mut bytes = Vec::with_capacity(out.len() * 2);
     for x in out {
         bytes.extend_from_slice(&x.to_le_bytes());
     }
-    bytes
+    (bytes, posmap)
+}
+
+/// Convert an Xbox triangle strip (u16 indices, `0xFFFF` primitive-restart) into a
+/// SINGLE PC degenerate-stitched triangle strip (`D3DPT_TRIANGLESTRIP` — the form
+/// retail character models use), dropping the 0xFFFF markers. Adjacent strip
+/// segments are joined with zero-area degenerate triangles; a parity pad ensures
+/// every segment's first vertex lands at an EVEN strip position, so each PRMT
+/// sub-range (drawn separately, which resets the GPU's winding alternation at its
+/// start_index) renders with correct winding.
+///
+/// Returns (strip bytes, posmap) where `posmap[p]` = the output strip position of
+/// the vertex at input position `p` (the current/next position for a 0xFFFF), used
+/// to remap PRMT `{start_index, index_count}` from Xbox-strip into PC-strip space.
+fn degen_stitch_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
+    let n = src.len() / 2;
+    let idx: Vec<u16> = (0..n)
+        .map(|i| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]))
+        .collect();
+    let mut out: Vec<u16> = Vec::with_capacity(n + n / 4 + 8);
+    let mut posmap: Vec<u32> = vec![0u32; n + 1];
+    let mut in_segment = false;
+    for p in 0..n {
+        let x = idx[p];
+        if x == 0xffff {
+            posmap[p] = out.len() as u32;
+            in_segment = false;
+        } else {
+            if !in_segment {
+                if let Some(&last) = out.last() {
+                    // Bridge previous segment -> this one: [last, x] (parity pad an
+                    // extra `last` when the current length is odd) so the segment's
+                    // first vertex (pushed below) lands at an even position.
+                    let l = out.len();
+                    out.push(last);
+                    if l % 2 == 1 {
+                        out.push(last);
+                    }
+                    out.push(x);
+                }
+                in_segment = true;
+            }
+            posmap[p] = out.len() as u32;
+            out.push(x);
+        }
+    }
+    posmap[n] = out.len() as u32;
+    let mut bytes = Vec::with_capacity(out.len() * 2);
+    for x in out {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    (bytes, posmap)
 }
 
 /// Fix transposed `[u16 flags][u16 count]` count pairs in an MTRL body that the
@@ -2845,6 +3021,10 @@ fn apply_terrainmesh_reencode(
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
+    // true = terrainmesh (also de-strip IBUF indices + re-encode MTRL); false = a
+    // skinned character MODEL, which needs ONLY the STRM vertex widening + info-stride
+    // rewrite (its IBUF is already a list, and its MTRL is already correct).
+    terrainmesh: bool,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     if data_start > out.len() {
@@ -2960,14 +3140,21 @@ fn apply_terrainmesh_reencode(
             plans.insert(vi, Plan::StrmData { be_stride, pc_stride, elems, n_verts: vcount });
             plans.insert(ii, Plan::StrmInfoStride { pc_stride: pc_stride as u32 });
         } else if *gtag == ChunkTag::Ibuf {
+            // Both terrainmesh AND character-model index buffers are Xbox triangle
+            // strips with 0xFFFF primitive-restart, which D3D9 cannot parse (it reads
+            // 0xFFFF as a literal vertex index -> exploded mesh). De-strip both to a
+            // triangle list; for models the paired PRMT draw-call ranges are remapped
+            // from strip-index space to list-index space below (see ibuf_posmaps).
             let (Some(ii), Some(vi)) = (info_idx, data_idx) else { continue };
             plans.insert(vi, Plan::IbufData);
             plans.insert(ii, Plan::IbufInfoCount);
         }
     }
-    for (idx, d) in descriptors.iter().enumerate() {
-        if d.tag == ChunkTag::Mtrl && d.row_u0 != 0xFFFF_FFFF {
-            plans.entry(idx).or_insert(Plan::Mtrl);
+    if terrainmesh {
+        for (idx, d) in descriptors.iter().enumerate() {
+            if d.tag == ChunkTag::Mtrl && d.row_u0 != 0xFFFF_FFFF {
+                plans.entry(idx).or_insert(Plan::Mtrl);
+            }
         }
     }
 
@@ -2981,6 +3168,8 @@ fn apply_terrainmesh_reencode(
     let mut ibuf_count_for_info: HashMap<usize, u32> = HashMap::new();
     // Build a map data_idx -> info_idx for IBUF groups.
     let mut ibuf_info_of_data: HashMap<usize, usize> = HashMap::new();
+    // (original strip index count, posmap) per de-stripped IBUF, for PRMT remap.
+    let mut ibuf_posmaps: Vec<(usize, Vec<u32>)> = Vec::new();
     for (_g, (gtag, kids)) in &group_of {
         if *gtag == ChunkTag::Ibuf {
             let mut info_idx = None;
@@ -3012,12 +3201,21 @@ fn apply_terrainmesh_reencode(
                 new_bytes.insert(b.idx, info);
             }
             Some(Plan::IbufData) => {
-                let listed = destrip_indices(&b.bytes);
-                let count = (listed.len() / 2) as u32;
+                // terrainmesh renders as a triangle LIST (D3DPT_TRIANGLELIST); character
+                // models render as a triangle STRIP (D3DPT_TRIANGLESTRIP, like retail
+                // base_v2's degenerate-stitched strips). De-strip accordingly: emitting a
+                // list for a model makes the engine read list data as a strip -> spikes.
+                let (out_idx, posmap) = if terrainmesh {
+                    destrip_indices_with_map(&b.bytes)
+                } else {
+                    degen_stitch_with_map(&b.bytes)
+                };
+                let count = (out_idx.len() / 2) as u32;
                 if let Some(&ii) = ibuf_info_of_data.get(&b.idx) {
                     ibuf_count_for_info.insert(ii, count);
                 }
-                new_bytes.insert(b.idx, listed);
+                ibuf_posmaps.push((b.bytes.len() / 2, posmap));
+                new_bytes.insert(b.idx, out_idx);
             }
             Some(Plan::Mtrl) => {
                 let mut m = b.bytes.clone();
@@ -3038,6 +3236,48 @@ fn apply_terrainmesh_reencode(
                 new_bytes.insert(b.idx, info);
             }
         }
+    }
+
+    // Remap PRMT draw-call records {start_index, index_count} from Xbox-strip index
+    // space into the de-stripped PC index space (a triangle list for terrainmesh, a
+    // degenerate-stitched strip for models — the posmap encodes whichever was emitted;
+    // for the strip the parity pad guarantees each range start lands on an even strip
+    // position so the sub-range draw resets winding correctly). Record layout (16 bytes):
+    //   u32 material_index, u32 start_index, u16 index_count, u16 base_vertex,
+    //   u16 max_vertex_index, u16 vertex_span. start/count index into the paired
+    //   IBUF; base/max/span are vertex-space (unchanged by the index reorder). Match
+    //   each PRMT body to the IBUF whose original strip length is the tightest fit
+    //   covering its max range, then map via that IBUF's posmap.
+    for (idx, d) in descriptors.iter().enumerate() {
+        if d.tag != ChunkTag::Prmt || d.row_u0 == 0xFFFF_FFFF || (d.body_size as usize) < 16 {
+            continue;
+        }
+        let Some(snap) = bodies.iter().find(|b| b.idx == idx) else { continue };
+        let mut body = snap.bytes.clone();
+        let nrec = body.len() / 16;
+        let mut max_range = 0usize;
+        for r in 0..nrec {
+            let s = u32::from_le_bytes([body[r * 16 + 4], body[r * 16 + 5], body[r * 16 + 6], body[r * 16 + 7]]) as usize;
+            let c = u16::from_le_bytes([body[r * 16 + 8], body[r * 16 + 9]]) as usize;
+            max_range = max_range.max(s + c);
+        }
+        let Some((_, posmap)) = ibuf_posmaps
+            .iter()
+            .filter(|(orig, pm)| *orig >= max_range && pm.len() > max_range)
+            .min_by_key(|(orig, _)| *orig)
+        else {
+            continue;
+        };
+        for r in 0..nrec {
+            let s = u32::from_le_bytes([body[r * 16 + 4], body[r * 16 + 5], body[r * 16 + 6], body[r * 16 + 7]]) as usize;
+            let c = u16::from_le_bytes([body[r * 16 + 8], body[r * 16 + 9]]) as usize;
+            let ns = posmap[s.min(posmap.len() - 1)];
+            let ne = posmap[(s + c).min(posmap.len() - 1)];
+            let new_count = ne.saturating_sub(ns).min(0xFFFF) as u16;
+            body[r * 16 + 4..r * 16 + 8].copy_from_slice(&ns.to_le_bytes());
+            body[r * 16 + 8..r * 16 + 10].copy_from_slice(&new_count.to_le_bytes());
+        }
+        new_bytes.insert(idx, body);
     }
 
     // Reassemble the data area in row_u0 order, recomputing offsets, and patch the
@@ -4187,7 +4427,7 @@ mod tests {
             (0x1c5c4659, [-0.4131, 0.8833, 0.2216]),
         ];
         for &(u, exp) in cases {
-            let h = super::dec3n_to_half4_le(u);
+            let h = super::dec3n_to_half4_le(u, false); // NORMAL = 11-11-10
             let nx = half_to_f32(u16::from_le_bytes([h[0], h[1]]));
             let ny = half_to_f32(u16::from_le_bytes([h[2], h[3]]));
             let nz = half_to_f32(u16::from_le_bytes([h[4], h[5]]));
@@ -4202,6 +4442,34 @@ mod tests {
             // mean 0.05° / max 0.12° (see the implementation doc).
             assert!(ang < 1.5, "DEC3N {u:08x} angular error {ang}° > 1.5");
         }
+    }
+
+    #[test]
+    fn dec3n_tangent_uses_10_10_10() {
+        // Retail base_v2 oracle, main-STRM vertex 0 TANGENT: raw Xbox BE u32
+        // 0x7fe30a25 -> retail PC FLOAT16_4 tangent (-0.929, 0.380, -0.004).
+        // The 10-10-10-2 split reproduces it to 0°; the 11-11-10 normal split
+        // gives ~126° (the bug that garbled every tangent).
+        let u = 0x7fe30a25u32;
+        let exp = [-0.929f32, 0.380, -0.004];
+        let h = super::dec3n_to_half4_le(u, true); // TANGENT = 10-10-10
+        let tx = half_to_f32(u16::from_le_bytes([h[0], h[1]]));
+        let ty = half_to_f32(u16::from_le_bytes([h[2], h[3]]));
+        let tz = half_to_f32(u16::from_le_bytes([h[4], h[5]]));
+        let em = (exp[0] * exp[0] + exp[1] * exp[1] + exp[2] * exp[2]).sqrt();
+        let dot = (tx * exp[0] + ty * exp[1] + tz * exp[2]) / em;
+        let ang = dot.clamp(-1.0, 1.0).acos().to_degrees();
+        assert!(ang < 2.0, "tangent 10-10-10 angular error {ang}° > 2 (got {tx},{ty},{tz})");
+        // And the wrong (normal) layout must NOT match — guards against regressing.
+        let hw = super::dec3n_to_half4_le(u, false);
+        let wx = half_to_f32(u16::from_le_bytes([hw[0], hw[1]]));
+        let wy = half_to_f32(u16::from_le_bytes([hw[2], hw[3]]));
+        let wz = half_to_f32(u16::from_le_bytes([hw[4], hw[5]]));
+        let wang = ((wx * exp[0] + wy * exp[1] + wz * exp[2]) / em)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
+        assert!(wang > 30.0, "11-11-10 should garble this tangent, got {wang}°");
     }
 
     #[test]
