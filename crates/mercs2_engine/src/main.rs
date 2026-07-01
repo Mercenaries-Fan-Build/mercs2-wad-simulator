@@ -730,7 +730,8 @@ fn main() {
             return;
         }
         let animate = args.iter().any(|a| a == "--animate");
-        match load_from_wad(&wadpath, val("--model"), val("--index"), animate) {
+        let clip_hash = val("--clip").and_then(|c| parse_hash(&c));
+        match load_from_wad(&wadpath, val("--model"), val("--index"), animate, clip_hash) {
             Ok((verts, indices, draws, textures, skin, clip, title)) => {
                 pollster::block_on(run_render(
                     verts, indices, draws, textures, skin, clip, animate, false, title,
@@ -813,7 +814,6 @@ fn wad_list(wadpath: &str) -> Result<(), String> {
 /// variants and reports each resulting bbox vs the known-good BIND pose. The variant whose extent +
 /// centroid match the bind pose reveals the correct rotation/root convention — measured, not guessed.
 fn animdiag(wadpath: &str, model: Option<String>, index: Option<String>) -> Result<(), String> {
-    use mercs2_formats::anim::QsTransform;
     use mercs2_formats::skeleton::transform_point;
 
     let mut w = wad::open(wadpath)?;
@@ -832,130 +832,84 @@ fn animdiag(wadpath: &str, model: Option<String>, index: Option<String>) -> Resu
         return Err("model has no skeleton".into());
     }
     let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
-    let ca = load_clip_for_rig(&mut w, &hier).ok_or("no decodable clip bound to this model")?;
-    let tth = &ca.track_to_hier;
-    let sample = ca.clip.sample_local(0.0);
-    println!("model 0x{hash:08X}: {} bones, {} verts; clip 0x{:08X}", s.rig.len(), verts.len(), ca.name_hash);
-
-    // Transposed-rotation and conjugate-quaternion variants of qs_to_local (to test row/col + handedness).
-    let qs_local_t = |qs: &QsTransform| -> [[f32; 4]; 4] {
-        let m = pose::qs_to_local(qs);
-        [
-            [m[0][0], m[1][0], m[2][0], 0.0],
-            [m[0][1], m[1][1], m[2][1], 0.0],
-            [m[0][2], m[1][2], m[2][2], 0.0],
-            [m[3][0], m[3][1], m[3][2], 1.0],
-        ]
-    };
-    let conj = |qs: &QsTransform| QsTransform {
-        translation: qs.translation,
-        rotation: [-qs.rotation[0], -qs.rotation[1], -qs.rotation[2], qs.rotation[3]],
-        scale: qs.scale,
-    };
-
-    // Build per-variant local sets.
-    let bind = pose::bind_locals(&s.rig);
-    let build = |f: &dyn Fn(usize, &QsTransform) -> Option<[[f32; 4]; 4]>| -> Vec<[[f32; 4]; 4]> {
-        let mut locals = pose::bind_locals(&s.rig);
-        for (track, bone) in tth.iter().enumerate() {
-            if let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) {
-                if let Some(m) = f(b, qs) {
-                    if b < locals.len() {
-                        locals[b] = m;
-                    }
-                }
-            }
+    // Find the animgroup whose clips best cover this HIER, and inspect EVERY clip — to reveal whether
+    // the spikes are clip-specific (e.g. the full-body/additive clip) or universal.
+    use mercs2_formats::animgroup::parse_animgroup;
+    let mut best_blk: Option<(u16, usize)> = None;
+    for blk in wad::animgroup_blocks(&w) {
+        let Ok(data) = wad::decompress_block_index(&mut w, blk) else { continue };
+        let Ok(ag) = parse_animgroup(&data) else { continue };
+        let total: usize = ag
+            .clips
+            .iter()
+            .map(|c| c.binding.resolve_to_hier(&hier).iter().filter(|r| r.is_some()).count())
+            .sum();
+        if best_blk.map_or(true, |(_, t)| total > t) {
+            best_blk = Some((blk, total));
         }
-        locals
-    };
-    // Decoded scale / quaternion-norm stats (rule out bad scale or denormal quats).
-    let (mut smin, mut smax, mut qmin, mut qmax) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
-    for qs in &sample {
-        for &sc in &qs.scale {
-            smin = smin.min(sc);
-            smax = smax.max(sc);
-        }
-        let qn = (qs.rotation.iter().map(|c| c * c).sum::<f32>()).sqrt();
-        qmin = qmin.min(qn);
-        qmax = qmax.max(qn);
     }
-    println!("  decoded scale [{smin:.3},{smax:.3}]  quat|q| [{qmin:.4},{qmax:.4}]");
+    let (blk, _) = best_blk.ok_or("no animgroup matched this model")?;
+    let data = wad::decompress_block_index(&mut w, blk)?;
+    let ag = parse_animgroup(&data).map_err(|e| format!("parse animgroup: {e}"))?;
 
-    // wxyz reinterpretation of the quaternion.
-    let wxyz = |qs: &QsTransform| QsTransform {
-        translation: qs.translation,
-        rotation: [qs.rotation[1], qs.rotation[2], qs.rotation[3], qs.rotation[0]],
-        scale: qs.scale,
-    };
-    let ident_rot = |qs: &QsTransform| QsTransform {
-        translation: qs.translation,
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: [1.0, 1.0, 1.0],
-    };
-
-    // Variants (all but the first strip root motion, parent<0 keeps bind, to isolate deformation).
-    let v_anim = build(&|_b, qs| Some(pose::qs_to_local(qs))); // with root (shows travel)
-    let v_noroot = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(qs)));
-    let v_tonly = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(&ident_rot(qs))));
-    let v_transpose = build(&|b, qs| (s.rig[b].parent >= 0).then(|| qs_local_t(qs)));
-    let v_conj = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(&conj(qs))));
-    let v_wxyz = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(&wxyz(qs))));
-    let v_ronly = build(&|b, qs| {
-        // anim rotation but BIND translation (keep the fixed bone offset) — isolates rotation.
-        if s.rig[b].parent < 0 {
-            return None;
-        }
-        let mut m = pose::qs_to_local(qs);
-        let lb = s.rig[b].local_bind;
-        m[3] = [lb[3][0], lb[3][1], lb[3][2], 1.0];
-        Some(m)
-    });
-
-    // CPU-skin (mirrors the shader LBS) and report the bbox for each palette.
-    let bbox = |locals: &[[[f32; 4]; 4]]| -> (f32, [f32; 3]) {
-        let pal = pose::palette(&s.rig, locals);
+    // CPU-skin bbox extent for a palette (mirrors the shader LBS).
+    let extent_of = |pal: &[[[f32; 4]; 4]]| -> f32 {
         let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
         for v in &verts {
             let wsum: f32 = v.weights.iter().map(|&x| x as f32).sum::<f32>().max(1.0);
             let mut acc = [0.0f32; 3];
             for k in 0..4 {
                 let wk = v.weights[k] as f32 / wsum;
-                if wk <= 0.0 {
-                    continue;
-                }
+                if wk <= 0.0 { continue; }
                 let b = v.joints[k] as usize;
-                if b >= pal.len() {
-                    continue;
-                }
+                if b >= pal.len() { continue; }
                 let p = transform_point(&pal[b], v.pos);
-                for j in 0..3 {
-                    acc[j] += wk * p[j];
-                }
+                for j in 0..3 { acc[j] += wk * p[j]; }
             }
-            for j in 0..3 {
-                lo[j] = lo[j].min(acc[j]);
-                hi[j] = hi[j].max(acc[j]);
+            for j in 0..3 { lo[j] = lo[j].min(acc[j]); hi[j] = hi[j].max(acc[j]); }
+        }
+        (0..3).map(|j| hi[j] - lo[j]).fold(0.0f32, f32::max)
+    };
+    let bind_extent = extent_of(&pose::palette(&s.rig, &pose::bind_locals(&s.rig)));
+    println!(
+        "model 0x{hash:08X}: {} bones, {} verts; animgroup block[{blk}], {} clips; BIND extent {bind_extent:.3}",
+        s.rig.len(), verts.len(), ag.clips.len()
+    );
+
+    // Rotation-driven locals for a clip sample (matches shipping animate_locals): xyzw absolute
+    // rotation, rigid bind offset, root at bind.
+    let times = [0.0f32, 0.12, 0.25, 0.37, 0.5, 0.62, 0.75, 0.87];
+    let locals_at = |ac: &mercs2_formats::anim::AnimClip, tth: &[Option<usize>], t: f32| -> Vec<[[f32; 4]; 4]> {
+        let sample = ac.sample_local(t * ac.duration.max(1e-3));
+        let mut locals = pose::bind_locals(&s.rig);
+        for (track, bone) in tth.iter().enumerate() {
+            if let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) {
+                if b >= locals.len() || s.rig[b].parent < 0 { continue; }
+                let mut m = pose::qs_to_local(qs);
+                let lb = s.rig[b].local_bind;
+                m[3] = [lb[3][0], lb[3][1], lb[3][2], 1.0];
+                locals[b] = m;
             }
         }
-        let extent = (0..3).map(|j| hi[j] - lo[j]).fold(0.0f32, f32::max);
-        let centroid = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
-        (extent, centroid)
+        locals
     };
 
-    let (be, bc) = bbox(&bind);
-    println!("  BIND (reference)      extent={be:.3}  centroid=[{:+.2},{:+.2},{:+.2}]", bc[0], bc[1], bc[2]);
-    for (name, locals) in [
-        ("anim (current,+root)", &v_anim),
-        ("NR anim", &v_noroot),
-        ("NR T-only (no rot)", &v_tonly),
-        ("NR R-only (bind T)", &v_ronly),
-        ("NR rot-TRANSPOSE", &v_transpose),
-        ("NR quat-CONJUGATE", &v_conj),
-        ("NR quat-WXYZ", &v_wxyz),
-    ] {
-        let (e, c) = bbox(locals);
-        let verdict = if (e - be).abs() < 0.35 * be { "  <- matches bind extent" } else { "" };
-        println!("  {name:<22} extent={e:.3}  centroid=[{:+.2},{:+.2},{:+.2}]{verdict}", c[0], c[1], c[2]);
+    println!("  per-clip max bbox extent (want ~{bind_extent:.2}; >1.4x = spikes):");
+    for c in &ag.clips {
+        let Ok(ac) = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]) else { continue };
+        if !ac.decoded { continue; }
+        let tth = c.binding.resolve_to_hier(&hier);
+        let resolved = tth.iter().filter(|r| r.is_some()).count();
+        let mut max_e = 0.0f32;
+        for &t in &times {
+            let e = extent_of(&pose::palette(&s.rig, &locals_at(&ac, &tth, t)));
+            if e > max_e { max_e = e; }
+        }
+        let tag = if max_e < 1.4 * bind_extent { "  <- CLEAN" } else { "" };
+        println!(
+            "    clip 0x{:08X}  {:>3}t {:>3}res  {:>5.2}s  max extent={max_e:.3}{tag}",
+            c.name_hash, ac.num_tracks, resolved, ac.duration
+        );
     }
     Ok(())
 }
@@ -1360,21 +1314,34 @@ struct ClipAnim {
     name_hash: u32,
 }
 
-/// Find the animgroup whose binding best covers this model's HIER, decode its richest decodable
-/// clip, and bind its tracks to HIER bones. Scans animation-type ASET blocks (per `--animcheck`).
-fn load_clip_for_rig(w: &mut wad::Wad, hier: &[u32]) -> Option<ClipAnim> {
+/// Find the animgroup whose binding best covers this model's HIER, decode a clip, and bind its
+/// tracks to HIER bones. `want` selects a specific clip by name-hash; otherwise a normal fully-mapped
+/// body clip is chosen (≤70 tracks — the 105-track full-body/reference clip is a special case that
+/// over-poses a single body, so it's not the default).
+fn load_clip_for_rig(w: &mut wad::Wad, hier: &[u32], want: Option<u32>) -> Option<ClipAnim> {
     use mercs2_formats::animgroup::parse_animgroup;
-    // Pass 1: pick the (block, clip) with the most tracks resolving onto this HIER; break ties by
-    // more transform tracks (richer full-body motion).
     let mut best: Option<(u16, u32, usize, u32)> = None; // (block, clip_hash, resolved, tracks)
     for blk in wad::animgroup_blocks(w) {
         let Ok(data) = wad::decompress_block_index(w, blk) else { continue };
         let Ok(ag) = parse_animgroup(&data) else { continue };
         for c in &ag.clips {
+            if let Some(h) = want {
+                if c.name_hash != h {
+                    continue;
+                }
+            }
             let resolved = c.binding.resolve_to_hier(hier).iter().filter(|r| r.is_some()).count();
+            if resolved == 0 && want.is_none() {
+                continue; // clip drives no bone of this model
+            }
+            let normal = c.num_transform_tracks <= 70; // exclude the 105-track special clip
             let better = match best {
                 None => true,
-                Some((_, _, r, t)) => resolved > r || (resolved == r && c.num_transform_tracks > t),
+                Some((_, _, r, _)) if want.is_some() => resolved > r,
+                Some((_, _, r, t)) => {
+                    let best_normal = t <= 70;
+                    if normal != best_normal { normal } else { resolved > r }
+                }
             };
             if better {
                 best = Some((blk, c.name_hash, resolved, c.num_transform_tracks));
@@ -1399,6 +1366,7 @@ fn load_from_wad(
     model: Option<String>,
     index: Option<String>,
     animate: bool,
+    clip_hash: Option<u32>,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<mesh::DrawGroup>, TexMap, mesh::SkinData, Option<ClipAnim>, String), String> {
     let mut w = wad::open(wadpath)?;
     let models = wad::model_list(&w);
@@ -1443,7 +1411,7 @@ fn load_from_wad(
     // Animation: bind the best-matching clip to this model's HIER (only when requested).
     let clip = if animate && !s.rig.is_empty() {
         let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
-        match load_clip_for_rig(&mut w, &hier) {
+        match load_clip_for_rig(&mut w, &hier, clip_hash) {
             Some(ca) => {
                 let resolved = ca.track_to_hier.iter().filter(|r| r.is_some()).count();
                 println!(
