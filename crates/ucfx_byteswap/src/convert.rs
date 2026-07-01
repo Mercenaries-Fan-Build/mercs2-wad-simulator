@@ -2029,6 +2029,13 @@ fn untile_dxt_body(tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], 
     Some(out)
 }
 
+/// Public wrapper: untile a raw tiled Xbox DXT BODY into the PC-linear mip chain.
+pub fn untile_tiled_dxt_body(
+    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
+) -> Option<Vec<u8>> {
+    untile_dxt_body(tiled, width, height, fourcc, mips)
+}
+
 /// Nearest-neighbour scale a DXT surface at *block* granularity (each 4x4 DXT
 /// block is copied whole, so no decode/recompress is needed and the result is a
 /// valid DXT surface). Works in either direction (up- or down-scale).

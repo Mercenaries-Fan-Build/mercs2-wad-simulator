@@ -64,6 +64,13 @@ pub struct ConsumeResult {
     /// than the dimension-derived DXT mip chain). Aggregated into the report's
     /// headline `texture_buffer_too_small` count, NOT into `structural_violations`.
     pub texture_buffer_issues: Vec<String>,
+    /// Per-material DIFFUSE texture hash (the first texture hash of each MTRL
+    /// material), in material order. Populated by `consume_model` for the DLC
+    /// material texture-provenance render-correctness check (see
+    /// `simulate.rs`): a patch-origin model whose material diffuse resolves in
+    /// the BASE wad's ASET but is NOT shipped by the PATCH wad falls back to wrong
+    /// content in menu/wardrobe scenes. Advisory only — not a fatal counter.
+    pub material_diffuse_hashes: Vec<u32>,
     // --- Advisory (NON-fatal) counters ---
     // These come from HEURISTIC checks whose offset/stride interpretations are not
     // verified against engine behavior; they fire heavily on WADs that load fine

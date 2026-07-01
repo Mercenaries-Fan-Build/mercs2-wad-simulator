@@ -13,6 +13,7 @@ pub fn consume_model(container: &[u8], _data_body: Option<&[u8]>, label: &str) -
     let mut issues = Vec::new();
     let mut meshes_validated = 0usize;
     let mut xref_hashes = Vec::new();
+    let mut material_diffuse_hashes = Vec::new();
     let mut bounds_violations = 0usize;
     // Advisory (NON-fatal): heuristic checks with unverified offsets/strides that
     // false-positive on WADs that load fine in-game. Reported but excluded from
@@ -290,6 +291,15 @@ pub fn consume_model(container: &[u8], _data_body: Option<&[u8]>, label: &str) -
                     xref_hashes.push(tex_hash);
                 }
             }
+
+            // MULTI-material walk for the DLC texture-provenance render check.
+            // The single-material read above only sees material[0]'s textures;
+            // real character models are multi-material (often many materials).
+            // Walk every material at the engine/converter stride (116 + count*4,
+            // count-pair @material+104) and collect each material's DIFFUSE hash
+            // (the first texture hash of the group, at material+108). These feed
+            // the provenance advisory in simulate.rs.
+            material_diffuse_hashes = mtrl_diffuse_hashes(&mtrl);
         }
     }
 
@@ -317,6 +327,7 @@ pub fn consume_model(container: &[u8], _data_body: Option<&[u8]>, label: &str) -
         consumed: true,
         issues,
         xref_hashes,
+        material_diffuse_hashes,
         meshes_validated,
         bounds_violations,
         structural_violations,
@@ -326,6 +337,51 @@ pub fn consume_model(container: &[u8], _data_body: Option<&[u8]>, label: &str) -
         structural_advisory,
         ..Default::default()
     }
+}
+
+/// Walk EVERY material in an MTRL body and return each material's DIFFUSE texture
+/// hash (the first texture hash of the material's texture group), in material order.
+///
+/// Layout (mirrors the converter's `convert_mtrl` / `mtrl_tiles_standard` walk and
+/// the engine parser FUN_00858790): each material record is
+///   `[104-byte param block][u16 flags @104][u16 count @106][count × u32 tex-hash][8-byte tail]`
+/// so the record stride is `116 + count*4` and the DIFFUSE hash is the first of the
+/// `count` hashes, at `material_start + 108`. A skinned character model can carry
+/// many materials; the per-record stride varies with each material's texture count
+/// (e.g. 120/128 bytes for counts 1/3).
+///
+/// The count word can be in PC form `[flags][count]` or transposed `[count][0]`
+/// (the generic u32 swap leaves material[1..] transposed); we accept either. If a
+/// record's count is implausible (0 or >64) or the next stride runs off the end,
+/// we stop walking — never reading garbage past the array.
+fn mtrl_diffuse_hashes(mtrl: &[u8]) -> Vec<u32> {
+    const PARAM_BLOCK: usize = 104;
+    const TAIL: usize = 8;
+    let mut out = Vec::new();
+    let mut rec = 0usize;
+    while rec + PARAM_BLOCK + 4 <= mtrl.len() {
+        let cp = rec + PARAM_BLOCK; // count-pair offset (flags@cp, count@cp+2)
+        let lo = read_u16_le(mtrl, cp);
+        let hi = read_u16_le(mtrl, cp + 2);
+        // PC form is [flags][count]; the generic swap may transpose to [count][0].
+        let count = if (1..=64).contains(&hi) {
+            hi as usize
+        } else if hi == 0 && (1..=64).contains(&lo) {
+            lo as usize // transposed
+        } else {
+            break; // unrecognized record layout — stop, don't read garbage
+        };
+        let diffuse_off = cp + 4; // first texture hash = diffuse
+        if diffuse_off + 4 > mtrl.len() {
+            break;
+        }
+        let diffuse = read_u32_le(mtrl, diffuse_off);
+        if diffuse != 0 && diffuse != 0xFFFF_FFFF {
+            out.push(diffuse);
+        }
+        rec += PARAM_BLOCK + 4 + count * 4 + TAIL;
+    }
+    out
 }
 
 struct ContainerChild {
@@ -807,6 +863,58 @@ mod tests {
         let (v, issues) = validate_area(&c, "t");
         assert_eq!(v, 1);
         assert!(issues[0].contains("no 'info' child"), "{issues:?}");
+    }
+
+    /// Build a synthetic multi-material MTRL body: a sequence of records, each
+    /// `[104-byte param block][u16 flags][u16 count][count × u32 hash][8-byte tail]`.
+    /// The first hash of each record is its diffuse. Returns the body bytes.
+    fn build_mtrl(materials: &[(u16, &[u32])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (flags, hashes) in materials {
+            body.extend(std::iter::repeat(0u8).take(104)); // param block
+            body.extend_from_slice(&flags.to_le_bytes());
+            body.extend_from_slice(&(hashes.len() as u16).to_le_bytes());
+            for h in *hashes {
+                body.extend_from_slice(&h.to_le_bytes());
+            }
+            body.extend(std::iter::repeat(0u8).take(8)); // tail
+        }
+        body
+    }
+
+    #[test]
+    fn mtrl_diffuse_walk_collects_every_material() {
+        // 3 materials with counts 1/3/2 — diffuse = first hash of each group.
+        let body = build_mtrl(&[
+            (0x0080, &[0xAABBCCDD]),
+            (0x0080, &[0x11111111, 0x22222222, 0x33333333]),
+            (0x0000, &[0x44444444, 0x55555555]),
+        ]);
+        let diffuse = mtrl_diffuse_hashes(&body);
+        assert_eq!(diffuse, vec![0xAABBCCDD, 0x11111111, 0x44444444]);
+    }
+
+    #[test]
+    fn mtrl_diffuse_walk_skips_null_and_sentinel() {
+        let body = build_mtrl(&[
+            (0, &[0x00000000]),       // null diffuse — skipped
+            (0, &[0xFFFFFFFF]),       // sentinel diffuse — skipped
+            (0, &[0xDEADBEEF]),       // kept
+        ]);
+        assert_eq!(mtrl_diffuse_hashes(&body), vec![0xDEADBEEF]);
+    }
+
+    #[test]
+    fn mtrl_diffuse_walk_stops_on_bad_count() {
+        // A valid first material, then a record whose count word is garbage:
+        // the walk must stop, not read past the array.
+        let mut body = build_mtrl(&[(0, &[0x12345678])]);
+        // Append a bogus param block + an implausible count (0x7FFF) -> stop.
+        body.extend(std::iter::repeat(0u8).take(104));
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0x7FFFu16.to_le_bytes());
+        body.extend(std::iter::repeat(0u8).take(8));
+        assert_eq!(mtrl_diffuse_hashes(&body), vec![0x12345678]);
     }
 
     #[test]
