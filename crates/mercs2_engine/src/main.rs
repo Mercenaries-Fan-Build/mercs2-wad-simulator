@@ -231,7 +231,9 @@ struct Renderer {
     bone_buf: wgpu::Buffer,
     /// Per-bone rig for re-posing under animation (empty for un-skinned geometry).
     rig: Vec<mesh::BoneRig>,
-    /// When set, drive the palette from a pose each frame (synthetic proof until clips land).
+    /// A real animation clip bound to this model, if loaded; drives the palette per frame.
+    clip: Option<ClipAnim>,
+    /// When set (and no real clip), drive the palette from the synthetic joint-wobble proof.
     animate: bool,
     tex_binds: Vec<wgpu::BindGroup>,
     /// Per-group draws: (index_start, index_count, index into `tex_binds`).
@@ -250,6 +252,7 @@ impl Renderer {
         draws: &[mesh::DrawGroup],
         textures: &TexMap,
         skin: &mesh::SkinData,
+        clip: Option<ClipAnim>,
         animate: bool,
         points: bool,
     ) -> Renderer {
@@ -530,6 +533,7 @@ impl Renderer {
             bone_bind,
             bone_buf,
             rig: skin.rig.clone(),
+            clip,
             animate: animate && !skin.rig.is_empty(),
             tex_binds,
             draw_calls,
@@ -562,9 +566,16 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&mvp.to_cols_array()));
 
-        // Animation: recompute + upload the skinning palette from the current pose. At bind pose
-        // this is identity (no visible change); the synthetic driver swings one joint as proof.
-        if self.animate {
+        // Animation: recompute + upload the skinning palette from the current pose. A real clip
+        // (looped) drives it if bound; otherwise the synthetic joint-wobble proves the path.
+        if let Some(ca) = &self.clip {
+            let dur = ca.clip.duration.max(1e-3);
+            let sample = ca.clip.sample_local(t % dur);
+            let locals = pose::animate_locals(&self.rig, &sample, &ca.track_to_hier);
+            let pal = pose::palette(&self.rig, &locals);
+            self.queue
+                .write_buffer(&self.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&pal)));
+        } else if self.animate {
             let pal = pose::synthetic_palette(&self.rig, t);
             self.queue
                 .write_buffer(&self.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&pal)));
@@ -712,10 +723,12 @@ fn main() {
             return;
         }
         let animate = args.iter().any(|a| a == "--animate");
-        match load_from_wad(&wadpath, val("--model"), val("--index")) {
-            Ok((verts, indices, draws, textures, skin, title)) => pollster::block_on(run_render(
-                verts, indices, draws, textures, skin, animate, false, title,
-            )),
+        match load_from_wad(&wadpath, val("--model"), val("--index"), animate) {
+            Ok((verts, indices, draws, textures, skin, clip, title)) => {
+                pollster::block_on(run_render(
+                    verts, indices, draws, textures, skin, clip, animate, false, title,
+                ))
+            }
             Err(e) => {
                 eprintln!("wad load failed: {e}");
                 std::process::exit(1);
@@ -745,6 +758,7 @@ fn main() {
         Vec::new(),
         TexMap::new(),
         mesh::SkinData::identity(),
+        None,
         false,
         points,
         title,
@@ -957,6 +971,36 @@ fn animcheck(wadpath: &str, model: Option<String>, index: Option<String>) -> Res
             break;
         }
     }
+
+    // Full render-path sanity: build the animated palette at mid-clip and confirm every Skin matrix
+    // is finite and bounded (Skin translation = per-bone displacement from bind; a blow-up = NaN or
+    // huge values). This exercises sample_local -> animate_locals -> palette exactly as render() does.
+    let sample_mid = ac.sample_local(ac.duration * 0.5);
+    let locals = pose::animate_locals(&s.rig, &sample_mid, &track_to_hier);
+    let pal = pose::palette(&s.rig, &locals);
+    let mut finite = true;
+    let mut max_t = 0.0f32;
+    for m in &pal {
+        for row in m {
+            for &v in row {
+                if !v.is_finite() {
+                    finite = false;
+                }
+            }
+        }
+        let t = (m[3][0].powi(2) + m[3][1].powi(2) + m[3][2].powi(2)).sqrt();
+        max_t = max_t.max(t);
+    }
+    let extent = (0..3).map(|k| s.bbox_max[k] - s.bbox_min[k]).fold(0.0f32, f32::max);
+    println!(
+        "animated palette @{:.2}s: finite={finite}  max|Skin T|={max_t:.3}  (model extent ~{extent:.2})  ->  {}",
+        ac.duration * 0.5,
+        if finite && max_t < 4.0 * extent.max(0.25) {
+            "SANE (render path bounded)"
+        } else {
+            "UNSTABLE — investigate before rendering"
+        }
+    );
     Ok(())
 }
 
@@ -1150,11 +1194,54 @@ fn wad_meshes(wadpath: &str, model: Option<String>) -> Result<(), String> {
 
 type TexMap = std::collections::HashMap<u32, mercs2_formats::texture::TextureData>;
 
+/// A decoded animation clip bound to a model's HIER, ready to drive `pose::animate_locals`.
+struct ClipAnim {
+    clip: mercs2_formats::anim::AnimClip,
+    /// track index -> HIER bone index (None = track's bone absent from this model).
+    track_to_hier: Vec<Option<usize>>,
+    name_hash: u32,
+}
+
+/// Find the animgroup whose binding best covers this model's HIER, decode its richest decodable
+/// clip, and bind its tracks to HIER bones. Scans animation-type ASET blocks (per `--animcheck`).
+fn load_clip_for_rig(w: &mut wad::Wad, hier: &[u32]) -> Option<ClipAnim> {
+    use mercs2_formats::animgroup::parse_animgroup;
+    // Pass 1: pick the (block, clip) with the most tracks resolving onto this HIER; break ties by
+    // more transform tracks (richer full-body motion).
+    let mut best: Option<(u16, u32, usize, u32)> = None; // (block, clip_hash, resolved, tracks)
+    for blk in wad::animgroup_blocks(w) {
+        let Ok(data) = wad::decompress_block_index(w, blk) else { continue };
+        let Ok(ag) = parse_animgroup(&data) else { continue };
+        for c in &ag.clips {
+            let resolved = c.binding.resolve_to_hier(hier).iter().filter(|r| r.is_some()).count();
+            let better = match best {
+                None => true,
+                Some((_, _, r, t)) => resolved > r || (resolved == r && c.num_transform_tracks > t),
+            };
+            if better {
+                best = Some((blk, c.name_hash, resolved, c.num_transform_tracks));
+            }
+        }
+    }
+    let (blk, clip_hash, _, _) = best?;
+    // Pass 2: decode it.
+    let data = wad::decompress_block_index(w, blk).ok()?;
+    let ag = parse_animgroup(&data).ok()?;
+    let c = ag.clips.iter().find(|c| c.name_hash == clip_hash)?;
+    let clip = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]).ok()?;
+    if !clip.decoded {
+        return None; // e.g. a delta clip (header-only) — leave synthetic driver in place
+    }
+    let track_to_hier = c.binding.resolve_to_hier(hier);
+    Some(ClipAnim { clip, track_to_hier, name_hash: clip_hash })
+}
+
 fn load_from_wad(
     wadpath: &str,
     model: Option<String>,
     index: Option<String>,
-) -> Result<(Vec<Vertex>, Vec<u32>, Vec<mesh::DrawGroup>, TexMap, mesh::SkinData, String), String> {
+    animate: bool,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<mesh::DrawGroup>, TexMap, mesh::SkinData, Option<ClipAnim>, String), String> {
     let mut w = wad::open(wadpath)?;
     let models = wad::model_list(&w);
     if models.is_empty() {
@@ -1194,14 +1281,30 @@ fn load_from_wad(
         "loaded model 0x{hash:08X}: {} verts / {ntris} tris / {} groups / {} textures ({} accessory groups skipped)",
         s.vertices, s.meshes, textures.len(), s.skipped
     );
-    Ok((
-        verts,
-        indices,
-        draws,
-        textures,
-        s.skin_data(),
-        format!("Mercs 2 — model 0x{hash:08X} ({ntris} tris)"),
-    ))
+
+    // Animation: bind the best-matching clip to this model's HIER (only when requested).
+    let clip = if animate && !s.rig.is_empty() {
+        let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
+        match load_clip_for_rig(&mut w, &hier) {
+            Some(ca) => {
+                let resolved = ca.track_to_hier.iter().filter(|r| r.is_some()).count();
+                println!(
+                    "animation: clip 0x{:08X} ({} tracks, {} frames, {:.2}s), {resolved} tracks -> HIER bones",
+                    ca.name_hash, ca.clip.num_tracks, ca.clip.num_frames, ca.clip.duration
+                );
+                Some(ca)
+            }
+            None => {
+                eprintln!("animation: no decodable clip bound to this model — using synthetic driver");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let title = format!("Mercs 2 — model 0x{hash:08X} ({ntris} tris)");
+    Ok((verts, indices, draws, textures, s.skin_data(), clip, title))
 }
 
 async fn run_render(
@@ -1210,6 +1313,7 @@ async fn run_render(
     draws: Vec<mesh::DrawGroup>,
     textures: TexMap,
     skin: mesh::SkinData,
+    clip: Option<ClipAnim>,
     animate: bool,
     points: bool,
     title: String,
@@ -1230,6 +1334,7 @@ async fn run_render(
         &draws,
         &textures,
         &skin,
+        clip,
         animate,
         points,
     )
