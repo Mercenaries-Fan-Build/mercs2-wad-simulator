@@ -701,6 +701,13 @@ fn main() {
             }
             return;
         }
+        if args.iter().any(|a| a == "--animdiag") {
+            if let Err(e) = animdiag(&wadpath, val("--model"), val("--index")) {
+                eprintln!("--animdiag failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if args.iter().any(|a| a == "--animcheck") {
             if let Err(e) = animcheck(&wadpath, val("--model"), val("--index")) {
                 eprintln!("--animcheck failed: {e}");
@@ -799,6 +806,157 @@ fn wad_list(wadpath: &str) -> Result<(), String> {
         }
     }
     eprintln!("measured {ok} models; {human} look humanoid");
+    Ok(())
+}
+
+/// Skinning-convention diagnostic (headless). CPU-skins the mesh at frame 0 under several bone-matrix
+/// variants and reports each resulting bbox vs the known-good BIND pose. The variant whose extent +
+/// centroid match the bind pose reveals the correct rotation/root convention — measured, not guessed.
+fn animdiag(wadpath: &str, model: Option<String>, index: Option<String>) -> Result<(), String> {
+    use mercs2_formats::anim::QsTransform;
+    use mercs2_formats::skeleton::transform_point;
+
+    let mut w = wad::open(wadpath)?;
+    let models = wad::model_list(&w);
+    let hash = if let Some(m) = model {
+        parse_hash(&m).ok_or_else(|| format!("bad --model hash '{m}'"))?
+    } else if let Some(n) = index {
+        let n: usize = n.parse().map_err(|_| format!("bad --index '{n}'"))?;
+        models.get(n).map(|&(h, _)| h).ok_or("--index out of range")?
+    } else {
+        models.first().map(|&(h, _)| h).ok_or("no models in WAD")?
+    };
+    let container = wad::extract_container(&mut w, hash)?;
+    let (verts, _i, _d, s) = mesh::build_indexed_from_container(&container)?;
+    if s.rig.is_empty() {
+        return Err("model has no skeleton".into());
+    }
+    let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
+    let ca = load_clip_for_rig(&mut w, &hier).ok_or("no decodable clip bound to this model")?;
+    let tth = &ca.track_to_hier;
+    let sample = ca.clip.sample_local(0.0);
+    println!("model 0x{hash:08X}: {} bones, {} verts; clip 0x{:08X}", s.rig.len(), verts.len(), ca.name_hash);
+
+    // Transposed-rotation and conjugate-quaternion variants of qs_to_local (to test row/col + handedness).
+    let qs_local_t = |qs: &QsTransform| -> [[f32; 4]; 4] {
+        let m = pose::qs_to_local(qs);
+        [
+            [m[0][0], m[1][0], m[2][0], 0.0],
+            [m[0][1], m[1][1], m[2][1], 0.0],
+            [m[0][2], m[1][2], m[2][2], 0.0],
+            [m[3][0], m[3][1], m[3][2], 1.0],
+        ]
+    };
+    let conj = |qs: &QsTransform| QsTransform {
+        translation: qs.translation,
+        rotation: [-qs.rotation[0], -qs.rotation[1], -qs.rotation[2], qs.rotation[3]],
+        scale: qs.scale,
+    };
+
+    // Build per-variant local sets.
+    let bind = pose::bind_locals(&s.rig);
+    let build = |f: &dyn Fn(usize, &QsTransform) -> Option<[[f32; 4]; 4]>| -> Vec<[[f32; 4]; 4]> {
+        let mut locals = pose::bind_locals(&s.rig);
+        for (track, bone) in tth.iter().enumerate() {
+            if let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) {
+                if let Some(m) = f(b, qs) {
+                    if b < locals.len() {
+                        locals[b] = m;
+                    }
+                }
+            }
+        }
+        locals
+    };
+    // Decoded scale / quaternion-norm stats (rule out bad scale or denormal quats).
+    let (mut smin, mut smax, mut qmin, mut qmax) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+    for qs in &sample {
+        for &sc in &qs.scale {
+            smin = smin.min(sc);
+            smax = smax.max(sc);
+        }
+        let qn = (qs.rotation.iter().map(|c| c * c).sum::<f32>()).sqrt();
+        qmin = qmin.min(qn);
+        qmax = qmax.max(qn);
+    }
+    println!("  decoded scale [{smin:.3},{smax:.3}]  quat|q| [{qmin:.4},{qmax:.4}]");
+
+    // wxyz reinterpretation of the quaternion.
+    let wxyz = |qs: &QsTransform| QsTransform {
+        translation: qs.translation,
+        rotation: [qs.rotation[1], qs.rotation[2], qs.rotation[3], qs.rotation[0]],
+        scale: qs.scale,
+    };
+    let ident_rot = |qs: &QsTransform| QsTransform {
+        translation: qs.translation,
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0, 1.0, 1.0],
+    };
+
+    // Variants (all but the first strip root motion, parent<0 keeps bind, to isolate deformation).
+    let v_anim = build(&|_b, qs| Some(pose::qs_to_local(qs))); // with root (shows travel)
+    let v_noroot = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(qs)));
+    let v_tonly = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(&ident_rot(qs))));
+    let v_transpose = build(&|b, qs| (s.rig[b].parent >= 0).then(|| qs_local_t(qs)));
+    let v_conj = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(&conj(qs))));
+    let v_wxyz = build(&|b, qs| (s.rig[b].parent >= 0).then(|| pose::qs_to_local(&wxyz(qs))));
+    let v_ronly = build(&|b, qs| {
+        // anim rotation but BIND translation (keep the fixed bone offset) — isolates rotation.
+        if s.rig[b].parent < 0 {
+            return None;
+        }
+        let mut m = pose::qs_to_local(qs);
+        let lb = s.rig[b].local_bind;
+        m[3] = [lb[3][0], lb[3][1], lb[3][2], 1.0];
+        Some(m)
+    });
+
+    // CPU-skin (mirrors the shader LBS) and report the bbox for each palette.
+    let bbox = |locals: &[[[f32; 4]; 4]]| -> (f32, [f32; 3]) {
+        let pal = pose::palette(&s.rig, locals);
+        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for v in &verts {
+            let wsum: f32 = v.weights.iter().map(|&x| x as f32).sum::<f32>().max(1.0);
+            let mut acc = [0.0f32; 3];
+            for k in 0..4 {
+                let wk = v.weights[k] as f32 / wsum;
+                if wk <= 0.0 {
+                    continue;
+                }
+                let b = v.joints[k] as usize;
+                if b >= pal.len() {
+                    continue;
+                }
+                let p = transform_point(&pal[b], v.pos);
+                for j in 0..3 {
+                    acc[j] += wk * p[j];
+                }
+            }
+            for j in 0..3 {
+                lo[j] = lo[j].min(acc[j]);
+                hi[j] = hi[j].max(acc[j]);
+            }
+        }
+        let extent = (0..3).map(|j| hi[j] - lo[j]).fold(0.0f32, f32::max);
+        let centroid = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+        (extent, centroid)
+    };
+
+    let (be, bc) = bbox(&bind);
+    println!("  BIND (reference)      extent={be:.3}  centroid=[{:+.2},{:+.2},{:+.2}]", bc[0], bc[1], bc[2]);
+    for (name, locals) in [
+        ("anim (current,+root)", &v_anim),
+        ("NR anim", &v_noroot),
+        ("NR T-only (no rot)", &v_tonly),
+        ("NR R-only (bind T)", &v_ronly),
+        ("NR rot-TRANSPOSE", &v_transpose),
+        ("NR quat-CONJUGATE", &v_conj),
+        ("NR quat-WXYZ", &v_wxyz),
+    ] {
+        let (e, c) = bbox(locals);
+        let verdict = if (e - be).abs() < 0.35 * be { "  <- matches bind extent" } else { "" };
+        println!("  {name:<22} extent={e:.3}  centroid=[{:+.2},{:+.2},{:+.2}]{verdict}", c[0], c[1], c[2]);
+    }
     Ok(())
 }
 

@@ -47,9 +47,17 @@ pub fn qs_to_local(qs: &QsTransform) -> [[f32; 4]; 4] {
     ]
 }
 
-/// Build the per-bone local transforms for a sampled animation frame: start from the bind-pose
-/// locals, then override each bone that a track drives (`track_to_hier[track] == Some(bone)`) with
-/// the clip's sampled local. Un-driven bones keep their HIER bind local (retail's sole rest pose).
+/// Build the per-bone local transforms for a sampled animation frame. Mercs2 (like most humanoid
+/// skeletal animation) is ROTATION-DRIVEN: bones rotate but their offset from the parent is rigid,
+/// so each driven bone takes the clip's rotation (+scale) with its BIND local translation preserved.
+/// The root's world-space translation (locomotion) is handled separately, so the root stays at its
+/// bind local here — animating in place. Un-driven bones keep their HIER bind local.
+///
+/// This was verified by measurement (`--animdiag`): applying the clip's per-bone TRANSLATION blows
+/// the mesh apart (frame-0 bbox extent 3.3 vs bind 1.9, since small offset errors on near-root bones
+/// compound down the chain), while rotation-only + bind offsets reproduces the bind extent (1.98) as
+/// a correctly posed figure. The rotation convention (`qs_to_local`, quat xyzw, row-vector) is
+/// confirmed correct by the same test.
 pub fn animate_locals(
     rig: &[BoneRig],
     sample: &[QsTransform],
@@ -58,9 +66,13 @@ pub fn animate_locals(
     let mut locals = bind_locals(rig);
     for (track, bone) in track_to_hier.iter().enumerate() {
         if let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) {
-            if b < locals.len() {
-                locals[b] = qs_to_local(qs);
+            if b >= locals.len() || rig[b].parent < 0 {
+                continue; // root: keep bind (its motion is world-space, applied elsewhere)
             }
+            let mut m = qs_to_local(qs);
+            let lb = rig[b].local_bind; // keep the rigid bind bone-offset; animate rotation/scale only
+            m[3] = [lb[3][0], lb[3][1], lb[3][2], 1.0];
+            locals[b] = m;
         }
     }
     locals
