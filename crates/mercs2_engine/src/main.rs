@@ -701,6 +701,13 @@ fn main() {
             }
             return;
         }
+        if args.iter().any(|a| a == "--poseoracle") {
+            if let Err(e) = poseoracle(&wadpath, val("--model"), val("--index")) {
+                eprintln!("--poseoracle failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if args.iter().any(|a| a == "--animdiag") {
             if let Err(e) = animdiag(&wadpath, val("--model"), val("--index")) {
                 eprintln!("--animdiag failed: {e}");
@@ -807,6 +814,151 @@ fn wad_list(wadpath: &str) -> Result<(), String> {
         }
     }
     eprintln!("measured {ok} models; {human} look humanoid");
+    Ok(())
+}
+
+/// Isolation test: render the model in the ENGINE'S EXACT captured pose (from the x32dbg oracle,
+/// clip 0x24F8C8E6 frame-pos 1.496), fed through OUR compose/skin. If Mattias reads as a coherent
+/// posed human, our compose/skin/shader is correct and the scramble is a DECODE problem; if it
+/// scrambles here too, the compose/skin convention (quat->matrix / Havok RH vs game LH / palette)
+/// is wrong and must be grounded in the decomp. Applies the FULL captured transform per track.
+fn poseoracle(wadpath: &str, model: Option<String>, index: Option<String>) -> Result<(), String> {
+    use mercs2_formats::anim::QsTransform;
+    use mercs2_formats::animgroup::parse_animgroup;
+
+    // The 64 captured hkQsTransforms (48 bytes each: translation[4], rotation[4] xyzw, scale[4]).
+    let raw: &[u8] = include_bytes!("../../mercs2_formats/tests/fixtures/oracle_pose.bin");
+    let f = |o: usize| f32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]);
+    let pose: Vec<QsTransform> = (0..raw.len() / 48)
+        .map(|i| {
+            let b = i * 48;
+            QsTransform {
+                translation: [f(b), f(b + 4), f(b + 8)],
+                rotation: [f(b + 16), f(b + 20), f(b + 24), f(b + 28)],
+                scale: [f(b + 32), f(b + 36), f(b + 40)],
+            }
+        })
+        .collect();
+
+    let mut w = wad::open(wadpath)?;
+    let models = wad::model_list(&w);
+    let hash = if let Some(m) = model {
+        parse_hash(&m).ok_or_else(|| format!("bad --model hash '{m}'"))?
+    } else if let Some(n) = index {
+        let n: usize = n.parse().map_err(|_| format!("bad --index '{n}'"))?;
+        models.get(n).map(|&(h, _)| h).ok_or("--index out of range")?
+    } else {
+        models.first().map(|&(h, _)| h).ok_or("no models in WAD")?
+    };
+    let container = wad::extract_container(&mut w, hash)?;
+    let (verts, indices, draws, s) = mesh::build_indexed_from_container(&container)?;
+    let mut skin = s.skin_data();
+    if skin.rig.is_empty() {
+        return Err("model has no skeleton".into());
+    }
+    let hier: Vec<u32> = skin.rig.iter().map(|b| b.name_hash).collect();
+
+    // Track->HIER binding for the captured clip 0x24F8C8E6.
+    let mut binding: Option<Vec<Option<usize>>> = None;
+    for blk in wad::animgroup_blocks(&w) {
+        let Ok(data) = wad::decompress_block_index(&mut w, blk) else { continue };
+        let Ok(ag) = parse_animgroup(&data) else { continue };
+        if let Some(c) = ag.clips.iter().find(|c| c.name_hash == 0x24F8C8E6) {
+            binding = Some(c.binding.resolve_to_hier(&hier));
+            break;
+        }
+    }
+    let binding = binding.ok_or("clip 0x24F8C8E6 not found in any animgroup")?;
+
+    // Apply the FULL captured pose (rotation + translation) per driven bone, then compose the palette.
+    // Skip degenerate quaternions (|q| far from 1 — e.g. the clip's float/facial tracks stored in the
+    // same 64-slot buffer produce zero/garbage rotations that collapse a bone through qs_to_local).
+    let mut locals = pose::bind_locals(&skin.rig);
+    let mut skipped_deg = Vec::new();
+    for (track, bone) in binding.iter().enumerate() {
+        if let (Some(&b), Some(qs)) = (bone.as_ref(), pose.get(track)) {
+            if b >= locals.len() {
+                continue;
+            }
+            let qn = (qs.rotation.iter().map(|c| c * c).sum::<f32>()).sqrt();
+            if !(0.5..1.5).contains(&qn) {
+                skipped_deg.push((track, b, qn));
+                continue; // degenerate — leave bone at bind
+            }
+            let mut q = *qs;
+            for c in q.rotation.iter_mut() {
+                *c /= qn; // normalize
+            }
+            locals[b] = pose::qs_to_local(&q);
+        }
+    }
+    if !skipped_deg.is_empty() {
+        println!("  skipped {} degenerate-quat tracks (track,bone,|q|): {:?}", skipped_deg.len(), skipped_deg);
+    }
+    skin.bones = pose::palette(&skin.rig, &locals);
+
+    let mut textures: TexMap = std::collections::HashMap::new();
+    for d in &draws {
+        for h in [d.diffuse, d.normal].into_iter().flatten() {
+            if !textures.contains_key(&h) {
+                if let Ok(t) = wad::extract_texture(&mut w, h) {
+                    textures.insert(h, t);
+                }
+            }
+        }
+    }
+    let resolved = binding.iter().filter(|x| x.is_some()).count();
+    println!(
+        "poseoracle: model 0x{hash:08X}, {} tracks -> HIER bones; rendering the engine's captured pose",
+        resolved
+    );
+
+    // Pinpoint the worst-displaced bones (the head-scramble culprits): CPU-skin, find bones whose
+    // verts land far from the body centre.
+    {
+        use mercs2_formats::skeleton::transform_point;
+        let pal = &skin.bones;
+        let (mut mean, mut nv) = ([0.0f32; 3], 0.0f32);
+        for v in &verts {
+            let wi = v.weights.iter().enumerate().max_by_key(|(_, &w)| w).map(|(i, _)| i).unwrap_or(0);
+            let b = v.joints[wi] as usize;
+            if b >= pal.len() { continue; }
+            let p = transform_point(&pal[b], v.pos);
+            for j in 0..3 { mean[j] += p[j]; }
+            nv += 1.0;
+        }
+        for j in 0..3 { mean[j] /= nv.max(1.0); }
+        let mut per_bone_max = vec![0.0f32; skin.rig.len()];
+        for v in &verts {
+            let wi = v.weights.iter().enumerate().max_by_key(|(_, &w)| w).map(|(i, _)| i).unwrap_or(0);
+            let b = v.joints[wi] as usize;
+            if b >= pal.len() { continue; }
+            let p = transform_point(&pal[b], v.pos);
+            let d = ((p[0]-mean[0]).powi(2)+(p[1]-mean[1]).powi(2)+(p[2]-mean[2]).powi(2)).sqrt();
+            if d > per_bone_max[b] { per_bone_max[b] = d; }
+        }
+        let mut ranked: Vec<(usize,f32)> = per_bone_max.iter().copied().enumerate().collect();
+        ranked.sort_by(|a,b| b.1.total_cmp(&a.1));
+        // which track drives each bone
+        let bone_track: std::collections::HashMap<usize,usize> = binding.iter().enumerate()
+            .filter_map(|(t,b)| b.map(|bb| (bb,t))).collect();
+        println!("  worst-displaced bones (bone d hash parent track):");
+        for (b,d) in ranked.iter().take(10) {
+            println!("    bone{b:<3} d={d:6.2} hash=0x{:08X} parent={:<3} track={:?}",
+                skin.rig[*b].name_hash, skin.rig[*b].parent, bone_track.get(b));
+        }
+    }
+    pollster::block_on(run_render(
+        verts,
+        indices,
+        draws,
+        textures,
+        skin,
+        None,
+        false,
+        false,
+        format!("Mercs 2 — ENGINE CAPTURED POSE (0x{hash:08X})"),
+    ));
     Ok(())
 }
 
