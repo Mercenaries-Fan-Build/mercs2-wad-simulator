@@ -303,6 +303,461 @@ fn read_binding_track_to_bone(pk: &[u8], raw: &RawPackfile, src: usize) -> Vec<i
         .collect()
 }
 
+// ── wavelet decompression (faithful port of hk_anim/wavelet.py) ──────────────
+//
+// HK550 32-bit layout offsets (from wavelet struct start). Matches the Python
+// `_OFF_*` / `_WAVELET_STRUCT_SIZE` constants byte-for-byte.
+const W_OFF_ANIM_TYPE: usize = 8;
+const W_OFF_DURATION: usize = 12;
+const W_OFF_NUM_TT: usize = 16;
+const W_OFF_NUM_FT: usize = 20;
+const W_OFF_NUM_POSES: usize = 36;
+const W_OFF_BLOCK_SIZE: usize = 40;
+const W_OFF_QFMT: usize = 44; // 20-byte QuantizationFormat
+const W_OFF_STATIC_MASK_IDX: usize = 64;
+const W_OFF_STATIC_DOFS_IDX: usize = 68;
+const W_OFF_BLOCK_INDEX_IDX: usize = 72;
+const W_OFF_BLOCK_INDEX_SIZE: usize = 76;
+const W_OFF_QUANT_DATA_IDX: usize = 80;
+const W_OFF_QUANT_DATA_SIZE: usize = 84;
+const W_OFF_NUM_DATA_BUFFER: usize = 92;
+const WAVELET_STRUCT_SIZE: usize = 96;
+
+// TrackType: DYNAMIC=0, STATIC=1, IDENTITY=2 (2-bit fields in the static mask).
+// MaskBit sub-track bit indices (from _decompress_common.MaskBit):
+const MB_POS_Z: u32 = 6;
+const MB_POS_Y: u32 = 7;
+const MB_POS_X: u32 = 8;
+const MB_ROT_W: u32 = 9;
+const MB_ROT_Z: u32 = 10;
+const MB_ROT_Y: u32 = 11;
+const MB_ROT_X: u32 = 12;
+const MB_SCALE_Z: u32 = 13;
+const MB_SCALE_Y: u32 = 14;
+const MB_SCALE_X: u32 = 15;
+
+#[inline]
+fn sm_pos_type(raw: u16) -> u32 {
+    (raw as u32) & 3
+}
+#[inline]
+fn sm_rot_type(raw: u16) -> u32 {
+    ((raw as u32) >> 2) & 3
+}
+#[inline]
+fn sm_scale_type(raw: u16) -> u32 {
+    ((raw as u32) >> 4) & 3
+}
+#[inline]
+fn sm_use_sub(raw: u16, bit: u32) -> bool {
+    (raw & (1 << bit)) != 0
+}
+
+/// Extract `n_values` unsigned integers of `bit_width` bits from packed `buf`
+/// starting at `bit_offset`. Mirrors `dequantize_bitstream`.
+fn dequantize_bitstream(buf: &[u8], bit_offset: usize, bit_width: u32, n_values: usize) -> Vec<u32> {
+    if bit_width == 0 {
+        return vec![0; n_values];
+    }
+    let mask: u32 = if bit_width >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << bit_width) - 1
+    };
+    let mut out = Vec::with_capacity(n_values);
+    let mut cur_bit = bit_offset;
+    for _ in 0..n_values {
+        let mut byte_idx = cur_bit >> 3;
+        let mut bit_in_byte = (cur_bit & 7) as u32;
+        let mut val: u32 = 0;
+        let mut bits_read: u32 = 0;
+        while bits_read < bit_width {
+            if byte_idx >= buf.len() {
+                break;
+            }
+            let available = 8 - bit_in_byte;
+            let need = bit_width - bits_read;
+            let take = available.min(need);
+            let chunk = ((buf[byte_idx] as u32) >> bit_in_byte) & ((1u32 << take) - 1);
+            val |= chunk << bits_read;
+            bits_read += take;
+            byte_idx += 1;
+            bit_in_byte = 0;
+        }
+        out.push(val & mask);
+        cur_bit += bit_width as usize;
+    }
+    out
+}
+
+/// Convert quantized integers to floats: `offset + q * scale * fractal`.
+fn dequantize_values(quantized: &[u32], offset: f32, scale: f32, bit_width: u32) -> Vec<f32> {
+    if bit_width == 0 {
+        return vec![offset; quantized.len()];
+    }
+    let fractal = 1.0f32 / (((1u32 << bit_width) - 1) as f32);
+    quantized
+        .iter()
+        .map(|&q| offset + (q as f32) * scale * fractal)
+        .collect()
+}
+
+/// Reconstruct quaternion W when Havok stores the `±2` sentinel.
+fn fix_quat_w_sentinel(qx: f32, qy: f32, qz: f32, qw: f32) -> (f32, f32, f32, f32) {
+    if qw == 2.0 || qw == -2.0 {
+        let basis = qw * 0.5; // ±1
+        let w_sq = (1.0 - qx * qx - qy * qy - qz * qz).max(0.0);
+        return (qx, qy, qz, basis * w_sq.sqrt());
+    }
+    (qx, qy, qz, qw)
+}
+
+/// Normalize quaternion components (indices 3..=6) in place, honoring the
+/// ±2 W sentinel. Mirrors `_normalize_quat_inplace`.
+fn normalize_quat_inplace(vals: &mut [f32; 10]) {
+    let (qx, qy, qz, qw) = fix_quat_w_sentinel(vals[3], vals[4], vals[5], vals[6]);
+    vals[3] = qx;
+    vals[4] = qy;
+    vals[5] = qz;
+    vals[6] = qw;
+    let qlen = (qx * qx + qy * qy + qz * qz + qw * qw).sqrt();
+    if qlen > 1e-8 {
+        let inv = 1.0 / qlen;
+        vals[3] *= inv;
+        vals[4] *= inv;
+        vals[5] *= inv;
+        vals[6] *= inv;
+    } else {
+        vals[3] = 0.0;
+        vals[4] = 0.0;
+        vals[5] = 0.0;
+        vals[6] = 1.0;
+    }
+}
+
+/// Inverse Haar wavelet (lifting) transform. `coeffs` has `n` entries:
+/// [average, detail_level0, detail_level1, ...]. Reconstructs `n` samples.
+fn inverse_haar(coeffs: &[f32], n: usize) -> Vec<f32> {
+    if n <= 1 {
+        return coeffs[..n.min(coeffs.len())].to_vec();
+    }
+    let mut vals: Vec<f32> = coeffs[..n].to_vec();
+    let mut level = 1usize;
+    while level < n {
+        let mut tmp = vals.clone();
+        for i in 0..level {
+            let a = vals[i];
+            let d = if level + i < n { vals[level + i] } else { 0.0 };
+            tmp[2 * i] = a + d;
+            if 2 * i + 1 < n {
+                tmp[2 * i + 1] = a - d;
+            }
+        }
+        vals = tmp;
+        level *= 2;
+    }
+    vals.truncate(n);
+    vals
+}
+
+/// Locate the wavelet animation struct by scanning for type=3 + plausible
+/// duration. Faithful port of `_find_wavelet_struct`.
+fn find_wavelet_struct(blob: &[u8]) -> Option<usize> {
+    if blob.len() < WAVELET_STRUCT_SIZE {
+        return None;
+    }
+    let limit = (blob.len() - WAVELET_STRUCT_SIZE).min(4096);
+    let mut off = 0usize;
+    while off < limit {
+        let t = u32_le(blob, off + W_OFF_ANIM_TYPE);
+        if t != 3 {
+            off += 4;
+            continue;
+        }
+        let d = f32_le(blob, off + W_OFF_DURATION);
+        if !(d.is_finite() && (0.001..=600.0).contains(&d)) {
+            off += 4;
+            continue;
+        }
+        let ntt = u32_le(blob, off + W_OFF_NUM_TT);
+        if !(1..=500).contains(&ntt) {
+            off += 4;
+            continue;
+        }
+        let bs = u32_le(blob, off + W_OFF_BLOCK_SIZE);
+        if !matches!(bs, 2 | 4 | 8 | 16 | 32 | 64) {
+            off += 4;
+            continue;
+        }
+        return Some(off);
+    }
+    None
+}
+
+/// Reconstructed wavelet clip: per-frame per-track 10-tuples (tx,ty,tz, qx,qy,qz,qw, sx,sy,sz).
+struct WaveletDecoded {
+    duration: f32,
+    n_tt: usize,
+    frames: Vec<Vec<[f32; 10]>>,
+}
+
+/// Decode a `hkaWaveletSkeletalAnimation` from packfile bytes. Faithful port of
+/// `hk_anim/wavelet.py::decode_wavelet`.
+fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
+    let struct_off = find_wavelet_struct(blob)?;
+
+    let dur = f32_le(blob, struct_off + W_OFF_DURATION);
+    let n_tt = u32_le(blob, struct_off + W_OFF_NUM_TT) as usize;
+    let _n_ft = u32_le(blob, struct_off + W_OFF_NUM_FT) as usize;
+    let n_poses = u32_le(blob, struct_off + W_OFF_NUM_POSES) as usize;
+    let block_size = u32_le(blob, struct_off + W_OFF_BLOCK_SIZE) as usize;
+
+    let _max_bw = *blob.get(struct_off + W_OFF_QFMT)? as u32;
+    let preserved = *blob.get(struct_off + W_OFF_QFMT + 1)? as usize;
+    let num_d = u32_le(blob, struct_off + W_OFF_QFMT + 4) as usize;
+    let offset_idx = u32_le(blob, struct_off + W_OFF_QFMT + 8) as usize;
+    let scale_idx = u32_le(blob, struct_off + W_OFF_QFMT + 12) as usize;
+    let bw_idx = u32_le(blob, struct_off + W_OFF_QFMT + 16) as usize;
+
+    let sm_idx = u32_le(blob, struct_off + W_OFF_STATIC_MASK_IDX) as usize;
+    let sd_idx = u32_le(blob, struct_off + W_OFF_STATIC_DOFS_IDX) as usize;
+    let bi_idx = u32_le(blob, struct_off + W_OFF_BLOCK_INDEX_IDX) as usize;
+    let bi_size = u32_le(blob, struct_off + W_OFF_BLOCK_INDEX_SIZE) as usize;
+    let qd_idx = u32_le(blob, struct_off + W_OFF_QUANT_DATA_IDX) as usize;
+    let _qd_size = u32_le(blob, struct_off + W_OFF_QUANT_DATA_SIZE) as usize;
+    let _num_data_buf = u32_le(blob, struct_off + W_OFF_NUM_DATA_BUFFER) as usize;
+
+    if dur <= 0.0 || n_tt == 0 {
+        return None;
+    }
+
+    let db_base = struct_off + WAVELET_STRUCT_SIZE;
+
+    // --- Static masks (u16 each) ---
+    let masks: Vec<u16> = (0..n_tt)
+        .map(|i| {
+            let o = db_base + sm_idx + i * 2;
+            if o + 2 <= blob.len() {
+                u16::from_le_bytes([blob[o], blob[o + 1]])
+            } else {
+                0
+            }
+        })
+        .collect();
+
+    // --- Read static DOF values (f32 each) ---
+    let sd_start = db_base + sd_idx;
+    let n_static_floats = (offset_idx.saturating_sub(sd_idx)) / 4;
+    let static_dofs: Vec<f32> = (0..n_static_floats)
+        .map(|i| f32_le(blob, sd_start + i * 4))
+        .collect();
+
+    // --- Per-dynamic-DOF offset/scale/bitWidth arrays ---
+    let mut offsets = Vec::with_capacity(num_d);
+    let mut scales = Vec::with_capacity(num_d);
+    let mut bit_widths = Vec::with_capacity(num_d);
+    for i in 0..num_d {
+        offsets.push(f32_le(blob, db_base + offset_idx + i * 4));
+        scales.push(f32_le(blob, db_base + scale_idx + i * 4));
+    }
+    for i in 0..num_d {
+        bit_widths.push(*blob.get(db_base + bw_idx + i).unwrap_or(&0) as u32);
+    }
+
+    // --- Number of blocks ---
+    let n_blocks = (n_poses + block_size - 1) / block_size;
+
+    // --- Block index (byte offsets into quantized data, one per block) ---
+    let block_offsets: Vec<usize> = if bi_size >= n_blocks {
+        (0..n_blocks)
+            .map(|i| u32_le(blob, db_base + bi_idx + i * 4) as usize)
+            .collect()
+    } else {
+        vec![0; n_blocks]
+    };
+
+    let qd_start = db_base + qd_idx;
+
+    // --- Static / identity rest-pose values per track (HavokLib static rules) ---
+    let identity_vals: [f32; 10] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    let mut static_trs_per_track: Vec<[f32; 10]> = Vec::with_capacity(n_tt);
+    let mut sd_cursor = 0usize;
+    let read_sd = |cursor: &mut usize| -> f32 {
+        if *cursor >= static_dofs.len() {
+            return 0.0;
+        }
+        let v = static_dofs[*cursor];
+        *cursor += 1;
+        v
+    };
+
+    for &m in masks.iter().take(n_tt) {
+        let mut vals = identity_vals;
+        // Position
+        match sm_pos_type(m) {
+            1 => {
+                vals[0] = read_sd(&mut sd_cursor);
+                vals[1] = read_sd(&mut sd_cursor);
+                vals[2] = read_sd(&mut sd_cursor);
+            }
+            0 => {
+                for (axis, bit) in [MB_POS_X, MB_POS_Y, MB_POS_Z].iter().enumerate() {
+                    if !sm_use_sub(m, *bit) {
+                        vals[axis] = read_sd(&mut sd_cursor);
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Rotation
+        match sm_rot_type(m) {
+            1 => {
+                vals[3] = read_sd(&mut sd_cursor);
+                vals[4] = read_sd(&mut sd_cursor);
+                vals[5] = read_sd(&mut sd_cursor);
+                vals[6] = read_sd(&mut sd_cursor);
+            }
+            0 => {
+                for (j, bit) in [MB_ROT_X, MB_ROT_Y, MB_ROT_Z, MB_ROT_W].iter().enumerate() {
+                    if !sm_use_sub(m, *bit) {
+                        vals[3 + j] = read_sd(&mut sd_cursor);
+                    }
+                }
+            }
+            2 => {
+                vals[3] = 0.0;
+                vals[4] = 0.0;
+                vals[5] = 0.0;
+                vals[6] = 1.0;
+            }
+            _ => {}
+        }
+        // Scale
+        match sm_scale_type(m) {
+            1 => {
+                vals[7] = read_sd(&mut sd_cursor);
+                vals[8] = read_sd(&mut sd_cursor);
+                vals[9] = read_sd(&mut sd_cursor);
+            }
+            0 => {
+                for (j, bit) in [MB_SCALE_X, MB_SCALE_Y, MB_SCALE_Z].iter().enumerate() {
+                    if !sm_use_sub(m, *bit) {
+                        vals[7 + j] = read_sd(&mut sd_cursor);
+                    }
+                }
+            }
+            2 => {
+                vals[7] = 1.0;
+                vals[8] = 1.0;
+                vals[9] = 1.0;
+            }
+            _ => {}
+        }
+
+        normalize_quat_inplace(&mut vals);
+        static_trs_per_track.push(vals);
+    }
+
+    // --- Mapping: dynamic DOF index -> (track, component) ---
+    let mut dyn_dof_map: Vec<(usize, usize)> = Vec::with_capacity(num_d);
+    for (ti, &m) in masks.iter().enumerate().take(n_tt) {
+        if sm_pos_type(m) == 0 {
+            for (j, b) in [MB_POS_X, MB_POS_Y, MB_POS_Z].iter().enumerate() {
+                if sm_use_sub(m, *b) {
+                    dyn_dof_map.push((ti, j));
+                }
+            }
+        }
+        if sm_rot_type(m) == 0 {
+            for (j, b) in [MB_ROT_X, MB_ROT_Y, MB_ROT_Z, MB_ROT_W].iter().enumerate() {
+                if sm_use_sub(m, *b) {
+                    dyn_dof_map.push((ti, 3 + j));
+                }
+            }
+        }
+        if sm_scale_type(m) == 0 {
+            for (j, b) in [MB_SCALE_X, MB_SCALE_Y, MB_SCALE_Z].iter().enumerate() {
+                if sm_use_sub(m, *b) {
+                    dyn_dof_map.push((ti, 7 + j));
+                }
+            }
+        }
+    }
+    if dyn_dof_map.len() != num_d {
+        return None;
+    }
+
+    // --- Per-block decode: interleave preserved f32 + packed quant stream per DOF ---
+    let mut all_frames_trs: Vec<Vec<[f32; 10]>> = Vec::with_capacity(n_poses);
+    let n_quant_per_dof = block_size - preserved;
+
+    for blk in 0..n_blocks {
+        let poses_in_block = block_size.min(n_poses - blk * block_size);
+
+        let blk_byte_off = if blk < block_offsets.len() {
+            block_offsets[blk]
+        } else {
+            0
+        };
+
+        let qd_blk_abs = qd_start + blk_byte_off;
+        let mut bit_off = qd_blk_abs * 8;
+
+        let mut frame_vals_per_dof: Vec<Vec<f32>> = Vec::with_capacity(num_d);
+        for di in 0..num_d {
+            bit_off = ((bit_off + 7) >> 3) << 3;
+            let mut pv: Vec<f32> = Vec::with_capacity(preserved);
+            for _pi in 0..preserved {
+                let bidx = bit_off >> 3;
+                if bidx + 4 <= blob.len() {
+                    pv.push(f32_le(blob, bidx));
+                } else {
+                    pv.push(0.0);
+                }
+                bit_off += 32;
+            }
+
+            let bw = bit_widths[di];
+            let dq: Vec<f32> = if n_quant_per_dof > 0 && bw > 0 {
+                let quants = dequantize_bitstream(blob, bit_off, bw, n_quant_per_dof);
+                let dq = dequantize_values(&quants, offsets[di], scales[di], bw);
+                bit_off += (bw as usize) * n_quant_per_dof;
+                dq
+            } else {
+                vec![0.0; n_quant_per_dof]
+            };
+
+            let mut coeffs: Vec<f32> = pv;
+            coeffs.extend_from_slice(&dq);
+            while coeffs.len() < block_size {
+                coeffs.push(0.0);
+            }
+
+            let frame_values = inverse_haar(&coeffs, block_size);
+            frame_vals_per_dof.push(frame_values[..poses_in_block].to_vec());
+        }
+
+        // Assemble TRS per frame in this block
+        for fi in 0..poses_in_block {
+            let mut frame_data = static_trs_per_track.clone();
+            for di in 0..num_d {
+                let (ti, ci) = dyn_dof_map[di];
+                frame_data[ti][ci] = frame_vals_per_dof[di][fi];
+            }
+            for vals in frame_data.iter_mut() {
+                normalize_quat_inplace(vals);
+            }
+            all_frames_trs.push(frame_data);
+        }
+    }
+
+    Some(WaveletDecoded {
+        duration: dur,
+        n_tt,
+        frames: all_frames_trs,
+    })
+}
+
 /// Decode a Havok animation packfile into a sampleable [`AnimClip`].
 ///
 /// `packfile` may start at (or before) the `__classnames__` section table, or at
@@ -374,9 +829,48 @@ pub fn parse_anim(packfile: &[u8]) -> Result<AnimClip, String> {
                 frames,
             })
         }
-        AnimType::Wavelet | AnimType::Delta | AnimType::Spline => {
+        AnimType::Wavelet => {
+            // Faithful port of hk_anim/wavelet.py::decode_wavelet. Reconstructs
+            // per-frame QsTransform via static-mask + inverse-Haar lifting.
+            if let Some(w) = decode_wavelet(pk) {
+                let num_frames = w.frames.len();
+                let num_tracks = w.n_tt;
+                let mut frames = Vec::with_capacity(num_frames * num_tracks);
+                for frame in &w.frames {
+                    for v in frame {
+                        frames.push(QsTransform {
+                            translation: [v[0], v[1], v[2]],
+                            rotation: [v[3], v[4], v[5], v[6]],
+                            scale: [v[7], v[8], v[9]],
+                        });
+                    }
+                }
+                return Ok(AnimClip {
+                    anim_type,
+                    duration: w.duration,
+                    num_tracks,
+                    num_frames,
+                    track_to_bone,
+                    decoded: true,
+                    frames,
+                });
+            }
+            // Fall through to header-only if the struct could not be located.
+            let num_frames = i32_le(pk, obj + OFF_WAVELET_NUM_POSES).max(0) as usize;
+            Ok(AnimClip {
+                anim_type,
+                duration,
+                num_tracks,
+                num_frames,
+                track_to_bone,
+                decoded: false,
+                frames: Vec::new(),
+            })
+        }
+        AnimType::Delta | AnimType::Spline => {
             // Header decoded faithfully; frame reconstruction is proprietary and
-            // absent from this workspace — return a header-only clip.
+            // absent from this workspace — return a header-only clip. (delta.py is
+            // header-only too; detection is enough — don't crash on it.)
             let num_frames = i32_le(pk, obj + OFF_WAVELET_NUM_POSES).max(0) as usize;
             Ok(AnimClip {
                 anim_type,
@@ -402,34 +896,66 @@ mod tests {
 
     /// Golden fixture: the KS-750 motorcycle animation packfile (retail PC, LE).
     /// It contains one `hkaWaveletSkeletalAnimation` (60 transform tracks,
-    /// duration ~0.968 s, 30 poses). The header must decode faithfully even
-    /// though the wavelet frames themselves are not reconstructable here.
+    /// duration ~0.968 s, 30 poses). The full wavelet reconstruction is a
+    /// faithful port of `hk_anim/wavelet.py`; golden values below are that
+    /// Python decoder's output on this fixture (tolerance 1e-3).
     #[test]
-    fn ks750_anim_header_decodes() {
+    fn ks750_anim_wavelet_decodes() {
         let buf: &[u8] = include_bytes!("../tests/fixtures/anim_ks750_le.bin");
         let clip = parse_anim(buf).expect("parse anim");
 
         assert_eq!(clip.anim_type, AnimType::Wavelet, "wavelet-compressed clip");
-        assert!(clip.duration > 0.0, "duration = {}", clip.duration);
-        assert!(clip.num_tracks > 0, "num_tracks = {}", clip.num_tracks);
-        assert!(clip.num_frames >= 1, "num_frames = {}", clip.num_frames);
-        // Concrete oracle values observed in the fixture bytes.
+        assert!(clip.decoded, "wavelet frames must be reconstructed");
         assert_eq!(clip.num_tracks, 60);
         assert_eq!(clip.num_frames, 30);
         assert!(
-            (clip.duration - 0.967_633).abs() < 1e-4,
+            (clip.duration - 0.967_633_4).abs() < 1e-3,
             "duration = {}",
             clip.duration
         );
 
-        // sample_local always yields one transform per track with unit quats.
+        // frame 0, track 0: translation.
+        let f0t0 = clip.frame(0, 0);
+        let t = f0t0.translation;
+        assert!((t[0] - 0.958_11).abs() < 1e-3, "f0t0.tx = {}", t[0]);
+        assert!((t[1] - 1.146_91).abs() < 1e-3, "f0t0.ty = {}", t[1]);
+        assert!((t[2] - 0.659_49).abs() < 1e-3, "f0t0.tz = {}", t[2]);
+
+        // frame 0, track 30: rotation (quat xyzw).
+        let r = clip.frame(0, 30).rotation;
+        assert!((r[0] - 0.526_59).abs() < 1e-3, "f0t30.qx = {}", r[0]);
+        assert!((r[1] - -0.315_43).abs() < 1e-3, "f0t30.qy = {}", r[1]);
+        assert!((r[2] - -0.451_79).abs() < 1e-3, "f0t30.qz = {}", r[2]);
+        assert!((r[3] - 0.647_38).abs() < 1e-3, "f0t30.qw = {}", r[3]);
+
+        // frame 15, track 30: rotation.
+        let r = clip.frame(15, 30).rotation;
+        assert!((r[0] - 0.514_44).abs() < 1e-3, "f15t30.qx = {}", r[0]);
+        assert!((r[1] - 0.376_07).abs() < 1e-3, "f15t30.qy = {}", r[1]);
+        assert!((r[2] - 0.381_30).abs() < 1e-3, "f15t30.qz = {}", r[2]);
+        assert!((r[3] - 0.669_72).abs() < 1e-3, "f15t30.qw = {}", r[3]);
+
+        // Every track's quaternion is unit length; every scale ≈ [1,1,1].
+        for f in 0..clip.num_frames {
+            for tr in 0..clip.num_tracks {
+                let q = clip.frame(f, tr);
+                assert!(
+                    (qlen(q.rotation) - 1.0).abs() < 1e-3,
+                    "f{f}t{tr} |q| = {}",
+                    qlen(q.rotation)
+                );
+                for (a, &s) in q.scale.iter().enumerate() {
+                    assert!((s - 1.0).abs() < 1e-3, "f{f}t{tr} scale[{a}] = {s}");
+                }
+            }
+        }
+
+        // sample_local yields one transform per track with unit quats.
         let pose = clip.sample_local(0.0);
         assert_eq!(pose.len(), clip.num_tracks);
-        for t in &pose {
-            assert!((qlen(t.rotation) - 1.0).abs() < 1e-3, "|q| = {}", qlen(t.rotation));
+        for tx in &pose {
+            assert!((qlen(tx.rotation) - 1.0).abs() < 1e-3, "|q| = {}", qlen(tx.rotation));
         }
-        // Not decodable here → neutral pose, and honestly flagged.
-        assert!(!clip.decoded, "wavelet frames are not reconstructed");
         let mid = clip.sample_local(clip.duration * 0.5);
         assert_eq!(mid.len(), clip.num_tracks);
     }
