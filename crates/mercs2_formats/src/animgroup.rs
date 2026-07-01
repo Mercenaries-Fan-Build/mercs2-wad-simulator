@@ -30,7 +30,9 @@
 //!   +4  data_area_off   +16 n_desc   then 20B descriptor rows
 //!   desc "info"  — 2 bytes (version/flags)
 //!   desc "data"  — the Havok-5.5.0-r1 32-bit packfile (container + one animation)
-//!   desc "trnm"  — [u32 track_count][track_count × u32 bone_name_hash]
+//!   desc "trnm"  — [u32 track_count][u32 leading entry][track_count × u32 bone_name_hash]
+//!                  (verified `size == 8 + track_count*4`; the leading entry is a
+//!                   non-track reference/motion node, see `read_trnm`)
 //! ```
 //!
 //! `trnm` is the real, shipped equivalent of `transformTrackToBoneIndices`, but
@@ -266,14 +268,28 @@ fn read_trnm(container: &[u8]) -> Option<Vec<u32>> {
             return None;
         }
         let t = &container[start..end];
+        // trnm body layout (verified against retail vz.wad, all human clips):
+        //   [u32 count][u32 leading entry][count × u32 bone_name_hash]
+        // The count word is followed by ONE extra leading word before the per-track
+        // hashes: `size == 8 + count*4` exactly (e.g. count=105 => 428 bytes,
+        // count=61 => 252, count=60 => 248). That leading word is NOT a transform
+        // track's bone hash — it is not present in the paired model's HIER and is
+        // constant per rig (the reference-frame/motion entry, mirroring how the
+        // wavelet stream's track 0 is the first real transform track and root motion
+        // is carried separately in m_extractedMotion). Reading the per-track hashes
+        // from offset +4 (skipping only the count) shifts every track by one; the
+        // correct per-track hashes start at offset +8. Cross-confirmed three ways:
+        // (a) `size == 8 + count*4`; (b) the wavelet frame-0 local translations match
+        // the resolved HIER bind-local translations only under the +8 read
+        // (mean|Δ| 0.028 vs 0.117); (c) the leading word resolves to no HIER bone.
         let count = read_u32_le(t, 0) as usize;
-        // A valid trnm holds count u32s in `size-4` bytes.
+        // A valid trnm holds a leading word + count u32s in `size-4` bytes.
         if count > (size - 4) / 4 {
             return None;
         }
         let mut v = Vec::with_capacity(count);
         for k in 0..count {
-            v.push(read_u32_le(t, 4 + k * 4));
+            v.push(read_u32_le(t, 8 + k * 4));
         }
         return Some(v);
     }
@@ -568,9 +584,11 @@ mod tests {
     /// carries a `trnm` chunk with three bone name-hashes and a `data` chunk that
     /// is NOT a real packfile (so the header read fails gracefully).
     fn synth_block(track_hashes: &[u32]) -> Vec<u8> {
-        // trnm body: [count][hashes...]
+        // trnm body: [count][leading entry][hashes...] — matches retail layout
+        // (`size == 8 + count*4`; the per-track hashes start at offset +8).
         let mut trnm = Vec::new();
         trnm.extend_from_slice(&(track_hashes.len() as u32).to_le_bytes());
+        trnm.extend_from_slice(&0xDEAD_0000u32.to_le_bytes()); // leading reference/motion entry
         for &h in track_hashes {
             trnm.extend_from_slice(&h.to_le_bytes());
         }

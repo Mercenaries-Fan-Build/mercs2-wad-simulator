@@ -915,14 +915,19 @@ fn animcheck(wadpath: &str, model: Option<String>, index: Option<String>) -> Res
         "translation delta (anim local vs HIER bind local), {n} non-root driven bones:"
     );
     println!("  mean |Δ| = {mean_d:.6}   max |Δ| = {max_d:.6}   (mean bone offset = {mean_off:.4})");
-    let rel = if mean_off > 1e-6 { mean_d / mean_off } else { mean_d };
+    // Correctness gate = BINDING ALIGNMENT, not bind-equality: the animation is authored in the
+    // HIER frame iff the aligned translation delta is clearly the smallest of {N-1, N, N+1}. (A
+    // straight rel<threshold gate is confounded — a clip genuinely moves some bones in frame 0, so
+    // aligned |Δ| is never zero; but a one-track misbinding makes a neighbour shift fit better.)
+    let d_next = shift_next.1 / shift_next.0.max(1) as f32;
+    let d_prev = shift_prev.1 / shift_prev.0.max(1) as f32;
+    let aligned_best = mean_d < 0.7 * d_next && mean_d < 0.7 * d_prev;
     println!(
-        "  relative mean Δ = {:.3}%  ->  {}",
-        rel * 100.0,
-        if rel < 0.02 {
-            "GATE PASS — clip locals share the HIER frame (no coord conversion needed)"
+        "  aligned mean Δ = {mean_d:.4} vs shift±1 [{d_prev:.4}, {d_next:.4}]  ->  {}",
+        if aligned_best {
+            "GATE PASS — track↔bone binding is aligned (clip authored in HIER frame)"
         } else {
-            "GATE FAIL — frames differ; investigate handedness/scale before wiring"
+            "GATE FAIL — a neighbouring shift fits better; binding is misaligned"
         }
     );
     print!("  worst bones (Δ):");
