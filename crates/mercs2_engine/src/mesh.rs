@@ -35,14 +35,33 @@ pub struct ModelStats {
     /// Per-bone skinning palette `Skin[b] = InvBind[b] · Pose[b]` (row-vector). At bind pose
     /// (Pose = world-rest) every entry is identity — the LBS gate. Empty when no skeleton.
     pub bones: Vec<[[f32; 4]; 4]>,
+    /// Per-bone rig (parent/inv-bind/local-bind) for re-posing under animation. Empty when no skeleton.
+    pub rig: Vec<BoneRig>,
 }
 
-/// Everything the renderer needs to skin + place a model: the fit transform and the bone palette.
+/// One bone's rig data — enough to recompose an animated pose. All matrices are row-major,
+/// row-vector convention (`world = local · world_parent`), matching `skeleton.rs`.
+#[derive(Debug, Clone)]
+pub struct BoneRig {
+    pub parent: i32, // -1 = root
+    pub name_hash: u32,
+    /// Bind-pose world-rest transform.
+    pub world_bind: [[f32; 4]; 4],
+    /// Inverse of `world_bind` (the InvBind used in `Skin[b] = InvBind[b] · Pose[b]`).
+    pub inv_bind: [[f32; 4]; 4],
+    /// Bind-pose LOCAL transform (relative to parent). Animation replaces this per bone; bones
+    /// with no track keep it, so an un-animated skeleton recomposes to the exact bind pose.
+    pub local_bind: [[f32; 4]; 4],
+}
+
+/// Everything the renderer needs to skin + place a model: the fit transform, the bind-pose bone
+/// palette (identity at bind), and the per-bone rig for re-posing under animation.
 #[derive(Debug, Clone)]
 pub struct SkinData {
     pub center: [f32; 3],
     pub scale: f32,
     pub bones: Vec<[[f32; 4]; 4]>,
+    pub rig: Vec<BoneRig>,
 }
 
 impl SkinData {
@@ -57,6 +76,7 @@ impl SkinData {
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ]],
+            rig: Vec::new(),
         }
     }
 }
@@ -67,6 +87,7 @@ impl ModelStats {
             center: self.fit_center,
             scale: self.fit_scale,
             bones: self.bones.clone(),
+            rig: self.rig.clone(),
         }
     }
 }
@@ -102,7 +123,9 @@ pub fn build_indexed_from_container(
     container: &[u8],
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
     use mercs2_formats::model_cubeize::ModelMesh;
-    use mercs2_formats::skeleton::{mat4_mul, transform_dir, transform_point, Skeleton};
+    use mercs2_formats::skeleton::{
+        affine_inverse, mat4_mul, transform_dir, transform_point, Skeleton,
+    };
 
     let meshes = read_model_meshes(container)?;
     let materials = mercs2_formats::texture::parse_mtrl(container);
@@ -123,6 +146,31 @@ pub fn build_indexed_from_container(
     let bones: Vec<[[f32; 4]; 4]> = match &skel {
         Some(s) => (0..s.bones.len())
             .map(|b| mat4_mul(&s.inv_world_bind(b), &s.world_bind(b)))
+            .collect(),
+        None => Vec::new(),
+    };
+
+    // Per-bone rig for animation: parent, inv-bind, and the bind-pose LOCAL transform
+    // (local_b = world_b · inv(world_parent); root's local = its world).
+    let rig: Vec<BoneRig> = match &skel {
+        Some(s) => s
+            .bones
+            .iter()
+            .map(|b| {
+                let inv_bind = affine_inverse(&b.world);
+                let local_bind = if b.parent < 0 {
+                    b.world
+                } else {
+                    mat4_mul(&b.world, &affine_inverse(&s.bones[b.parent as usize].world))
+                };
+                BoneRig {
+                    parent: b.parent,
+                    name_hash: b.name_hash,
+                    world_bind: b.world,
+                    inv_bind,
+                    local_bind,
+                }
+            })
             .collect(),
         None => Vec::new(),
     };
@@ -248,6 +296,7 @@ pub fn build_indexed_from_container(
         fit_center: center,
         fit_scale: scale,
         bones,
+        rig,
     };
     Ok((verts, indices, draws, stats))
 }
@@ -344,6 +393,7 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
         fit_center: [0.0, 0.0, 0.0],
         fit_scale: 1.0,
         bones: Vec::new(),
+        rig: Vec::new(),
     };
     Ok((verts, stats))
 }

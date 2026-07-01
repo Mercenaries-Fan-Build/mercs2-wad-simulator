@@ -9,6 +9,7 @@
 //!   cargo run -p mercs2_engine -- --dump <model.bin>  # headless: parse + print stats, no window
 
 mod mesh;
+mod pose;
 mod wad;
 
 use mesh::Vertex;
@@ -224,8 +225,14 @@ struct Renderer {
     nindices: u32,
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
-    /// Skinning palette bind group (group 2). Static in Phase A (bind-pose identity).
+    /// Skinning palette bind group (group 2). Static at bind pose; updated per frame when animating.
     bone_bind: wgpu::BindGroup,
+    /// Backing storage buffer for the bone palette (re-uploaded each frame when animating).
+    bone_buf: wgpu::Buffer,
+    /// Per-bone rig for re-posing under animation (empty for un-skinned geometry).
+    rig: Vec<mesh::BoneRig>,
+    /// When set, drive the palette from a pose each frame (synthetic proof until clips land).
+    animate: bool,
     tex_binds: Vec<wgpu::BindGroup>,
     /// Per-group draws: (index_start, index_count, index into `tex_binds`).
     draw_calls: Vec<(u32, u32, usize)>,
@@ -243,6 +250,7 @@ impl Renderer {
         draws: &[mesh::DrawGroup],
         textures: &TexMap,
         skin: &mesh::SkinData,
+        animate: bool,
         points: bool,
     ) -> Renderer {
         let size = window.inner_size();
@@ -520,6 +528,9 @@ impl Renderer {
             camera_buf,
             camera_bind,
             bone_bind,
+            bone_buf,
+            rig: skin.rig.clone(),
+            animate: animate && !skin.rig.is_empty(),
             tex_binds,
             draw_calls,
             depth_view,
@@ -550,6 +561,14 @@ impl Renderer {
         let mvp = proj * view * self.fit;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&mvp.to_cols_array()));
+
+        // Animation: recompute + upload the skinning palette from the current pose. At bind pose
+        // this is identity (no visible change); the synthetic driver swings one joint as proof.
+        if self.animate {
+            let pal = pose::synthetic_palette(&self.rig, t);
+            self.queue
+                .write_buffer(&self.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&pal)));
+        }
 
         let output = self.surface.get_current_texture()?;
         let view_tex = output
@@ -685,10 +704,11 @@ fn main() {
             }
             return;
         }
+        let animate = args.iter().any(|a| a == "--animate");
         match load_from_wad(&wadpath, val("--model"), val("--index")) {
-            Ok((verts, indices, draws, textures, skin, title)) => {
-                pollster::block_on(run_render(verts, indices, draws, textures, skin, false, title))
-            }
+            Ok((verts, indices, draws, textures, skin, title)) => pollster::block_on(run_render(
+                verts, indices, draws, textures, skin, animate, false, title,
+            )),
             Err(e) => {
                 eprintln!("wad load failed: {e}");
                 std::process::exit(1);
@@ -718,6 +738,7 @@ fn main() {
         Vec::new(),
         TexMap::new(),
         mesh::SkinData::identity(),
+        false,
         points,
         title,
     ));
@@ -791,12 +812,29 @@ fn skincheck(wadpath: &str, model: Option<String>, index: Option<String>) -> Res
             }
         }
     }
+    // Recompose gate: rebuild the palette from the rig's bind-pose LOCAL transforms (local->world
+    // ->skin chain, the animation path). Must also be identity, proving the hierarchy recompose.
+    let recomposed = pose::palette(&s.rig, &pose::bind_locals(&s.rig));
+    let mut worst_r = 0.0f32;
+    for m in &recomposed {
+        for r in 0..4 {
+            for c in 0..4 {
+                let ident = if r == c { 1.0 } else { 0.0 };
+                worst_r = worst_r.max((m[r][c] - ident).abs());
+            }
+        }
+    }
+
     let skinned = verts.iter().filter(|v| v.weights != [255, 0, 0, 0]).count();
     println!("model 0x{hash:08X}: {} bones, {} verts", s.bones.len(), verts.len());
     println!("fit: center={:?} scale={:.5}", s.fit_center, s.fit_scale);
     println!(
-        "bind-pose palette max |Skin - I| = {worst:.6} (bone {worst_bone})  ->  {}",
+        "bind-pose palette   max |Skin - I| = {worst:.6} (bone {worst_bone})  ->  {}",
         if worst < 1e-3 { "GATE PASS (identity)" } else { "GATE FAIL — convention bug" }
+    );
+    println!(
+        "recomposed palette  max |Skin - I| = {worst_r:.6}                 ->  {}",
+        if worst_r < 1e-3 { "GATE PASS (local->world->skin)" } else { "GATE FAIL — recompose bug" }
     );
     println!(
         "blend coverage: {skinned}/{} verts skinned ({} rigid/pass-through)",
@@ -993,6 +1031,7 @@ async fn run_render(
     draws: Vec<mesh::DrawGroup>,
     textures: TexMap,
     skin: mesh::SkinData,
+    animate: bool,
     points: bool,
     title: String,
 ) {
@@ -1005,8 +1044,17 @@ async fn run_render(
             .expect("window"),
     );
 
-    let mut r =
-        Renderer::new(window.clone(), &verts, &indices, &draws, &textures, &skin, points).await;
+    let mut r = Renderer::new(
+        window.clone(),
+        &verts,
+        &indices,
+        &draws,
+        &textures,
+        &skin,
+        animate,
+        points,
+    )
+    .await;
 
     event_loop
         .run(move |event, elwt| match event {
