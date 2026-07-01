@@ -133,6 +133,39 @@ pub fn skin_palette(rig: &[BoneRig], model: &[QsTransform]) -> Vec<[[f32; 4]; 4]
         .collect()
 }
 
+/// Full Havok pose->palette for one sampled frame: sampleAndCombine (bind base, overwrite the
+/// rotation of bones driven by a real transform track) -> model-space compose -> skin palette.
+/// `sample` is the clip's per-track local pose; `track_to_hier` maps track->bone; only the first
+/// `num_transform_tracks` are transforms (the rest are float tracks).
+pub fn havok_palette(
+    rig: &[BoneRig],
+    sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+) -> Vec<[[f32; 4]; 4]> {
+    let mut local = bind_qs(rig);
+    for (track, bone) in track_to_hier.iter().enumerate() {
+        if track >= num_transform_tracks {
+            break;
+        }
+        if let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) {
+            if b < local.len() {
+                // Full sampled hkQsTransform overwrites the bind pose (the sample carries the real
+                // bone offsets in T; only the quaternion needs renormalizing after interpolation).
+                let mut q = *qs;
+                let qn = (q.rotation.iter().map(|c| c * c).sum::<f32>()).sqrt();
+                if qn > 1e-6 {
+                    for c in q.rotation.iter_mut() {
+                        *c /= qn;
+                    }
+                }
+                local[b] = q;
+            }
+        }
+    }
+    skin_palette(rig, &model_poses(rig, &local))
+}
+
 /// Compose a Havok `QsTransform` (translation, quat xyzw, scale) into a row-major, row-vector
 /// LOCAL matrix (`p' = p · M`): upper 3×3 = `diag(scale) · R_row`, translation in row 3 — the same
 /// layout as the HIER local transform (`skeleton.rs`). Retail ships NO referencePose, so clip locals

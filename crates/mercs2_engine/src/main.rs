@@ -879,33 +879,10 @@ fn poseoracle(wadpath: &str, model: Option<String>, index: Option<String>, conv:
     let binding = binding.ok_or("clip 0x24F8C8E6 not found in any animgroup")?;
     let _ = conv;
 
-    // Faithful Havok sampleAndCombine: start every bone at its bind local pose, then overwrite the
-    // bones driven by a real TRANSFORM track with the sampled hkQsTransform (full T/R/S). Undriven
-    // bones and float-track slots keep bind (no (0,0,0) collapse). Then model-space compose + skin.
-    let mut local_qs = pose::bind_qs(&skin.rig);
-    for (track, bone) in binding.iter().enumerate() {
-        if track >= num_transform_tracks {
-            break; // float tracks — not transforms
-        }
-        if let (Some(&b), Some(qs)) = (bone.as_ref(), pose.get(track)) {
-            if b >= local_qs.len() {
-                continue;
-            }
-            let mut rot = qs.rotation;
-            let qn = (rot.iter().map(|c| c * c).sum::<f32>()).sqrt();
-            if qn > 1e-6 {
-                for c in rot.iter_mut() {
-                    *c /= qn;
-                }
-            }
-            // Overwrite ROTATION from the sample; keep the bind translation/scale (the sample's
-            // (0,0,0) translation = absent DOFs, which Havok fills from the reference/bind pose).
-            local_qs[b].rotation = rot;
-        }
-    }
-    println!("  Havok combine: {} transform tracks over {} bind poses", num_transform_tracks, local_qs.len());
-    let model = pose::model_poses(&skin.rig, &local_qs);
-    skin.bones = pose::skin_palette(&skin.rig, &model);
+    // Faithful Havok sampleAndCombine: bind base, driven transform-track bones take the full sampled
+    // hkQsTransform (the sample carries the real bone offsets in T); model-space compose + skin.
+    println!("  Havok combine: {} transform tracks over {} bind poses", num_transform_tracks, skin.rig.len());
+    skin.bones = pose::havok_palette(&skin.rig, &pose, &binding, num_transform_tracks);
 
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
