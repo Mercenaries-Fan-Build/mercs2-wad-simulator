@@ -571,8 +571,7 @@ impl Renderer {
         if let Some(ca) = &self.clip {
             let dur = ca.clip.duration.max(1e-3);
             let sample = ca.clip.sample_local(t % dur);
-            let locals = pose::animate_locals(&self.rig, &sample, &ca.track_to_hier);
-            let pal = pose::palette(&self.rig, &locals);
+            let pal = pose::havok_palette(&self.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks);
             self.queue
                 .write_buffer(&self.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&pal)));
         } else if self.animate {
@@ -1450,6 +1449,8 @@ struct ClipAnim {
     clip: mercs2_formats::anim::AnimClip,
     /// track index -> HIER bone index (None = track's bone absent from this model).
     track_to_hier: Vec<Option<usize>>,
+    /// number of transform tracks (the rest are float tracks, not bone transforms).
+    num_transform_tracks: usize,
     name_hash: u32,
 }
 
@@ -1497,7 +1498,12 @@ fn load_clip_for_rig(w: &mut wad::Wad, hier: &[u32], want: Option<u32>) -> Optio
         return None; // e.g. a delta clip (header-only) — leave synthetic driver in place
     }
     let track_to_hier = c.binding.resolve_to_hier(hier);
-    Some(ClipAnim { clip, track_to_hier, name_hash: clip_hash })
+    Some(ClipAnim {
+        clip,
+        track_to_hier,
+        num_transform_tracks: c.num_transform_tracks as usize,
+        name_hash: clip_hash,
+    })
 }
 
 fn load_from_wad(
