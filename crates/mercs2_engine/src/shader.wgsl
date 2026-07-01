@@ -39,8 +39,9 @@ fn vs_main(
     // view and projection, so skinned positions go straight to clip space.
     var wsum = weights.x + weights.y + weights.z + weights.w;
     if (wsum <= 0.0) { wsum = 1.0; }
-    let js = array<u32, 4>(joints.x, joints.y, joints.z, joints.w);
-    let ws = array<f32, 4>(weights.x, weights.y, weights.z, weights.w);
+    // `var` (not `let`): WGSL only permits dynamic indexing of arrays in the function address space.
+    var js = array<u32, 4>(joints.x, joints.y, joints.z, joints.w);
+    var ws = array<f32, 4>(weights.x, weights.y, weights.z, weights.w);
     var skinned = vec4<f32>(0.0);
     var nrm = vec3<f32>(0.0);
     var tng = vec3<f32>(0.0);
