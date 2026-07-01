@@ -702,7 +702,11 @@ fn main() {
             return;
         }
         if args.iter().any(|a| a == "--poseoracle") {
-            if let Err(e) = poseoracle(&wadpath, val("--model"), val("--index")) {
+            // Default 3 = rotation-driven (anim rotation + rigid bind offset), the correct compose:
+            // clip translation is (0,0,0) on rotation-only tracks and applying it literally collapses
+            // bones; keeping the bind offset matches the engine (visually confirmed, coherent idle).
+            let conv = val("--conv").and_then(|c| c.parse::<u32>().ok()).unwrap_or(3);
+            if let Err(e) = poseoracle(&wadpath, val("--model"), val("--index"), conv) {
                 eprintln!("--poseoracle failed: {e}");
                 std::process::exit(1);
             }
@@ -822,9 +826,10 @@ fn wad_list(wadpath: &str) -> Result<(), String> {
 /// posed human, our compose/skin/shader is correct and the scramble is a DECODE problem; if it
 /// scrambles here too, the compose/skin convention (quat->matrix / Havok RH vs game LH / palette)
 /// is wrong and must be grounded in the decomp. Applies the FULL captured transform per track.
-fn poseoracle(wadpath: &str, model: Option<String>, index: Option<String>) -> Result<(), String> {
+fn poseoracle(wadpath: &str, model: Option<String>, index: Option<String>, conv: u32) -> Result<(), String> {
     use mercs2_formats::anim::QsTransform;
     use mercs2_formats::animgroup::parse_animgroup;
+    use mercs2_formats::skeleton::mat4_mul;
 
     // The 64 captured hkQsTransforms (48 bytes each: translation[4], rotation[4] xyzw, scale[4]).
     let raw: &[u8] = include_bytes!("../../mercs2_formats/tests/fixtures/oracle_pose.bin");
@@ -889,7 +894,38 @@ fn poseoracle(wadpath: &str, model: Option<String>, index: Option<String>) -> Re
             for c in q.rotation.iter_mut() {
                 *c /= qn; // normalize
             }
-            locals[b] = pose::qs_to_local(&q);
+            let lb = skin.rig[b].local_bind;
+            let bind_rot = [
+                [lb[0][0], lb[0][1], lb[0][2], 0.0],
+                [lb[1][0], lb[1][1], lb[1][2], 0.0],
+                [lb[2][0], lb[2][1], lb[2][2], 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ];
+            // quaternion variants
+            let r = q.rotation;
+            let qv = match conv {
+                5 => QsTransform { rotation: [-r[0], -r[1], -r[2], r[3]], ..q }, // conjugate
+                6 => QsTransform { rotation: [r[0], r[1], -r[2], r[3]], ..q },   // negate z
+                7 => QsTransform { rotation: [-r[0], -r[1], r[2], r[3]], ..q },  // negate x,y
+                8 => QsTransform { rotation: [r[0], r[1], r[2], -r[3]], ..q },   // negate w
+                _ => q,
+            };
+            let anim = pose::qs_to_local(&qv);
+            let transpose = |m: &[[f32; 4]; 4]| {
+                [[m[0][0], m[1][0], m[2][0], 0.0], [m[0][1], m[1][1], m[2][1], 0.0],
+                 [m[0][2], m[1][2], m[2][2], 0.0], [m[3][0], m[3][1], m[3][2], 1.0]]
+            };
+            let mut m = match conv {
+                0 => anim,                          // absolute (current)
+                1 => mat4_mul(&bind_rot, &anim),    // delta bind·anim
+                2 => mat4_mul(&anim, &bind_rot),    // delta anim·bind
+                4 => transpose(&anim),              // transposed rotation
+                _ => anim,                          // 3,5,6,7,8 = absolute w/ variant quat
+            };
+            if matches!(conv, 1 | 2 | 3) {
+                m[3] = [lb[3][0], lb[3][1], lb[3][2], 1.0]; // keep bind offset for these
+            }
+            locals[b] = m;
         }
     }
     if !skipped_deg.is_empty() {
