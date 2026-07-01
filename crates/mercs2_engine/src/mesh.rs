@@ -28,6 +28,47 @@ pub struct ModelStats {
     pub skipped: usize,
     pub bbox_min: [f32; 3],
     pub bbox_max: [f32; 3],
+    /// Model-space centre and uniform scale that fit the model into view. Applied by the
+    /// camera MVP (NOT baked into vertex positions) so skinning runs in model space.
+    pub fit_center: [f32; 3],
+    pub fit_scale: f32,
+    /// Per-bone skinning palette `Skin[b] = InvBind[b] · Pose[b]` (row-vector). At bind pose
+    /// (Pose = world-rest) every entry is identity — the LBS gate. Empty when no skeleton.
+    pub bones: Vec<[[f32; 4]; 4]>,
+}
+
+/// Everything the renderer needs to skin + place a model: the fit transform and the bone palette.
+#[derive(Debug, Clone)]
+pub struct SkinData {
+    pub center: [f32; 3],
+    pub scale: f32,
+    pub bones: Vec<[[f32; 4]; 4]>,
+}
+
+impl SkinData {
+    /// Identity skin (single bone) for un-skinned geometry (placeholder triangle, point clouds).
+    pub fn identity() -> Self {
+        SkinData {
+            center: [0.0, 0.0, 0.0],
+            scale: 1.0,
+            bones: vec![[
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]],
+        }
+    }
+}
+
+impl ModelStats {
+    pub fn skin_data(&self) -> SkinData {
+        SkinData {
+            center: self.fit_center,
+            scale: self.fit_scale,
+            bones: self.bones.clone(),
+        }
+    }
 }
 
 /// Parse a model block/container file and return engine-space vertices (fitted to clip space)
@@ -61,7 +102,7 @@ pub fn build_indexed_from_container(
     container: &[u8],
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
     use mercs2_formats::model_cubeize::ModelMesh;
-    use mercs2_formats::skeleton::{transform_dir, transform_point, Skeleton};
+    use mercs2_formats::skeleton::{mat4_mul, transform_dir, transform_point, Skeleton};
 
     let meshes = read_model_meshes(container)?;
     let materials = mercs2_formats::texture::parse_mtrl(container);
@@ -74,6 +115,17 @@ pub fn build_indexed_from_container(
     block[16..20].copy_from_slice(&(container.len() as u32).to_le_bytes());
     block.extend_from_slice(container);
     let skel = Skeleton::from_block(&block).ok();
+
+    // Skinning palette: Skin[b] = InvBind[b] · Pose[b] (row-vector). Phase A is the bind-pose gate:
+    // Pose = world-rest, so Skin[b] = InvBind[b] · WorldBind[b] = identity (up to fp). Rebuilding it
+    // from the real matrices (rather than emitting literal identities) exercises the matmul/inverse
+    // so a convention bug detonates the model instead of hiding. Phase B swaps Pose per animation frame.
+    let bones: Vec<[[f32; 4]; 4]> = match &skel {
+        Some(s) => (0..s.bones.len())
+            .map(|b| mat4_mul(&s.inv_world_bind(b), &s.world_bind(b)))
+            .collect(),
+        None => Vec::new(),
+    };
 
     // Active LOD/state tier: body sub-objects carry a single-bit mask (0x01/02/04/08), accessories
     // 0x0f (all). Render only tier 0x01 + accessories → no LOD/state overdraw (the triple hair).
@@ -146,18 +198,28 @@ pub fn build_indexed_from_container(
         let m = pl.m;
         let base = verts.len() as u32;
         let index_start = indices.len() as u32;
+        // Rigid accessories are pre-transformed into bind space above; bind them 100% to their
+        // attach bone so the same LBS palette carries them (and follows the bone under animation).
+        // Skinned bodies keep their extracted BLENDINDICES/BLENDWEIGHT. Positions stay in model
+        // space — the fit (center/scale) is applied by the camera MVP so skinning is model-space.
+        let rigid_bind: Option<([u8; 4], [u8; 4])> =
+            m.rigid.then_some(([m.bone as u8, 0, 0, 0], [255, 0, 0, 0]));
         for (vi, p) in pl.positions.iter().enumerate() {
-            let x = (p[0] - center[0]) * scale;
-            let y = (p[1] - center[1]) * scale;
-            let z = (p[2] - center[2]) * scale;
+            let (joints, weights) = match rigid_bind {
+                Some(jw) => jw,
+                None => (
+                    m.joints.get(vi).copied().unwrap_or([0, 0, 0, 0]),
+                    m.weights.get(vi).copied().unwrap_or([255, 0, 0, 0]),
+                ),
+            };
             verts.push(Vertex {
-                pos: [x, y, z],
+                pos: [p[0], p[1], p[2]],
                 color: [0.5, 0.5, 0.5], // unused by the textured shader
                 uv: m.uvs.get(vi).copied().unwrap_or([0.0, 0.0]),
                 normal: pl.normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0]),
                 tangent: pl.tangents.get(vi).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
-                joints: m.joints.get(vi).copied().unwrap_or([0, 0, 0, 0]),
-                weights: m.weights.get(vi).copied().unwrap_or([255, 0, 0, 0]),
+                joints,
+                weights,
             });
         }
         for t in &m.tris {
@@ -183,6 +245,9 @@ pub fn build_indexed_from_container(
         skipped,
         bbox_min: min,
         bbox_max: max,
+        fit_center: center,
+        fit_scale: scale,
+        bones,
     };
     Ok((verts, indices, draws, stats))
 }
@@ -275,6 +340,10 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
         skipped,
         bbox_min: min,
         bbox_max: max,
+        // This path bakes the fit into positions and has no skeleton palette.
+        fit_center: [0.0, 0.0, 0.0],
+        fit_scale: 1.0,
+        bones: Vec::new(),
     };
     Ok((verts, stats))
 }

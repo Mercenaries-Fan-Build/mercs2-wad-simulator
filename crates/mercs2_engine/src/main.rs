@@ -224,10 +224,14 @@ struct Renderer {
     nindices: u32,
     camera_buf: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
+    /// Skinning palette bind group (group 2). Static in Phase A (bind-pose identity).
+    bone_bind: wgpu::BindGroup,
     tex_binds: Vec<wgpu::BindGroup>,
     /// Per-group draws: (index_start, index_count, index into `tex_binds`).
     draw_calls: Vec<(u32, u32, usize)>,
     depth_view: wgpu::TextureView,
+    /// Model-fit transform (centre + uniform scale), folded into the MVP so skinning is model-space.
+    fit: glam::Mat4,
     start: std::time::Instant,
 }
 
@@ -238,6 +242,7 @@ impl Renderer {
         indices: &[u32],
         draws: &[mesh::DrawGroup],
         textures: &TexMap,
+        skin: &mesh::SkinData,
         points: bool,
     ) -> Renderer {
         let size = window.inner_size();
@@ -304,6 +309,58 @@ impl Renderer {
             }],
         });
 
+        // Skinning palette (group 2): the bone matrices, row-major (see shader.wgsl). Uploaded as a
+        // read-only storage buffer so it can grow to any bone count and (Phase B) update per frame.
+        // Always at least one identity bone so un-skinned geometry (bone 0) passes through unchanged.
+        let mut bone_floats: Vec<f32> = Vec::new();
+        let palette: &[[[f32; 4]; 4]] = if skin.bones.is_empty() {
+            &[[
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]]
+        } else {
+            &skin.bones
+        };
+        for m in palette {
+            for row in m {
+                bone_floats.extend_from_slice(row);
+            }
+        }
+        let bone_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bone palette"),
+            size: (bone_floats.len() * 4) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        bone_buf
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(bytemuck::cast_slice(&bone_floats));
+        bone_buf.unmap();
+        let bone_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bone bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bone_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bone bind"),
+            layout: &bone_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bone_buf.as_entire_binding(),
+            }],
+        });
+
         // Material bind group layout (group 1): diffuse + normal-map + sampler.
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -367,13 +424,13 @@ impl Renderer {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline layout"),
-            bind_group_layouts: &[&camera_bgl, &tex_bgl],
+            bind_group_layouts: &[&camera_bgl, &tex_bgl, &bone_bgl],
             push_constant_ranges: &[],
         });
         let vbuf_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
         };
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("geometry pipeline"),
@@ -443,6 +500,11 @@ impl Renderer {
 
         let depth_view = make_depth(&device, &config);
 
+        // Fit transform: p_view = scale · (p_model − centre). Folded into the MVP so vertices stay
+        // in model space for skinning. Column-vector: from_scale · from_translation(−centre).
+        let fit = glam::Mat4::from_scale(glam::Vec3::splat(skin.scale))
+            * glam::Mat4::from_translation(-glam::Vec3::from(skin.center));
+
         Renderer {
             window,
             surface,
@@ -457,9 +519,11 @@ impl Renderer {
             nindices,
             camera_buf,
             camera_bind,
+            bone_bind,
             tex_binds,
             draw_calls,
             depth_view,
+            fit,
             start: std::time::Instant::now(),
         }
     }
@@ -483,7 +547,7 @@ impl Renderer {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let view = glam::Mat4::look_at_lh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
         let proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, 0.1, 100.0);
-        let mvp = proj * view;
+        let mvp = proj * view * self.fit;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::cast_slice(&mvp.to_cols_array()));
 
@@ -518,6 +582,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind, &[]);
+            pass.set_bind_group(2, &self.bone_bind, &[]);
             // group 1 (texture) must always be bound; index 0 is the white fallback.
             let fallback = &self.tex_binds[0];
             pass.set_bind_group(1, fallback, &[]);
@@ -606,6 +671,13 @@ fn main() {
             }
             return;
         }
+        if args.iter().any(|a| a == "--skincheck") {
+            if let Err(e) = skincheck(&wadpath, val("--model"), val("--index")) {
+                eprintln!("--skincheck failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if args.iter().any(|a| a == "--list") {
             if let Err(e) = wad_list(&wadpath) {
                 eprintln!("--list failed: {e}");
@@ -614,8 +686,8 @@ fn main() {
             return;
         }
         match load_from_wad(&wadpath, val("--model"), val("--index")) {
-            Ok((verts, indices, draws, textures, title)) => {
-                pollster::block_on(run_render(verts, indices, draws, textures, false, title))
+            Ok((verts, indices, draws, textures, skin, title)) => {
+                pollster::block_on(run_render(verts, indices, draws, textures, skin, false, title))
             }
             Err(e) => {
                 eprintln!("wad load failed: {e}");
@@ -640,7 +712,15 @@ fn main() {
         },
         None => (TRI.to_vec(), false, "Mercenaries 2 — engine skeleton (Phase 1)".to_string()),
     };
-    pollster::block_on(run_render(verts, Vec::new(), Vec::new(), TexMap::new(), points, title));
+    pollster::block_on(run_render(
+        verts,
+        Vec::new(),
+        Vec::new(),
+        TexMap::new(),
+        mesh::SkinData::identity(),
+        points,
+        title,
+    ));
 }
 
 fn parse_hash(s: &str) -> Option<u32> {
@@ -677,6 +757,52 @@ fn wad_list(wadpath: &str) -> Result<(), String> {
         }
     }
     eprintln!("measured {ok} models; {human} look humanoid");
+    Ok(())
+}
+
+/// Bind-pose skinning gate (headless): the palette `Skin[b] = InvBind[b]·Pose[b]` must be identity
+/// at bind pose. Reports the worst per-bone deviation from I, the fit transform, and blend coverage.
+/// A near-zero max deviation means the LBS palette reproduces the un-skinned render exactly.
+fn skincheck(wadpath: &str, model: Option<String>, index: Option<String>) -> Result<(), String> {
+    let mut w = wad::open(wadpath)?;
+    let models = wad::model_list(&w);
+    let hash = if let Some(m) = model {
+        parse_hash(&m).ok_or_else(|| format!("bad --model hash '{m}'"))?
+    } else if let Some(n) = index {
+        let n: usize = n.parse().map_err(|_| format!("bad --index '{n}'"))?;
+        models.get(n).map(|&(h, _)| h).ok_or("--index out of range")?
+    } else {
+        models.first().map(|&(h, _)| h).ok_or("no models in WAD")?
+    };
+    let container = wad::extract_container(&mut w, hash)?;
+    let (verts, _indices, _draws, s) = mesh::build_indexed_from_container(&container)?;
+
+    let mut worst = 0.0f32;
+    let mut worst_bone = 0usize;
+    for (b, m) in s.bones.iter().enumerate() {
+        for r in 0..4 {
+            for c in 0..4 {
+                let ident = if r == c { 1.0 } else { 0.0 };
+                let d = (m[r][c] - ident).abs();
+                if d > worst {
+                    worst = d;
+                    worst_bone = b;
+                }
+            }
+        }
+    }
+    let skinned = verts.iter().filter(|v| v.weights != [255, 0, 0, 0]).count();
+    println!("model 0x{hash:08X}: {} bones, {} verts", s.bones.len(), verts.len());
+    println!("fit: center={:?} scale={:.5}", s.fit_center, s.fit_scale);
+    println!(
+        "bind-pose palette max |Skin - I| = {worst:.6} (bone {worst_bone})  ->  {}",
+        if worst < 1e-3 { "GATE PASS (identity)" } else { "GATE FAIL — convention bug" }
+    );
+    println!(
+        "blend coverage: {skinned}/{} verts skinned ({} rigid/pass-through)",
+        verts.len(),
+        verts.len() - skinned
+    );
     Ok(())
 }
 
@@ -811,7 +937,7 @@ fn load_from_wad(
     wadpath: &str,
     model: Option<String>,
     index: Option<String>,
-) -> Result<(Vec<Vertex>, Vec<u32>, Vec<mesh::DrawGroup>, TexMap, String), String> {
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<mesh::DrawGroup>, TexMap, mesh::SkinData, String), String> {
     let mut w = wad::open(wadpath)?;
     let models = wad::model_list(&w);
     if models.is_empty() {
@@ -856,6 +982,7 @@ fn load_from_wad(
         indices,
         draws,
         textures,
+        s.skin_data(),
         format!("Mercs 2 — model 0x{hash:08X} ({ntris} tris)"),
     ))
 }
@@ -865,6 +992,7 @@ async fn run_render(
     indices: Vec<u32>,
     draws: Vec<mesh::DrawGroup>,
     textures: TexMap,
+    skin: mesh::SkinData,
     points: bool,
     title: String,
 ) {
@@ -877,7 +1005,8 @@ async fn run_render(
             .expect("window"),
     );
 
-    let mut r = Renderer::new(window.clone(), &verts, &indices, &draws, &textures, points).await;
+    let mut r =
+        Renderer::new(window.clone(), &verts, &indices, &draws, &textures, &skin, points).await;
 
     event_loop
         .run(move |event, elwt| match event {

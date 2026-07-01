@@ -10,6 +10,11 @@ struct Camera {
 @group(1) @binding(1) var t_normal:  texture_2d<f32>;
 @group(1) @binding(2) var s_linear:  sampler;
 
+// Skinning palette: Skin[b] = InvBind[b]·Pose[b], row-vector, uploaded row-major so WGSL's
+// column-major read yields the transpose — i.e. `bones[b] * v` computes the row-vector product
+// `v · Skin[b]`. At bind pose every entry is identity (the LBS gate).
+@group(2) @binding(0) var<storage, read> bones: array<mat4x4<f32>>;
+
 struct VSOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -25,13 +30,35 @@ fn vs_main(
     @location(2) uv: vec2<f32>,
     @location(3) normal: vec3<f32>,
     @location(4) tangent: vec4<f32>,
+    @location(5) joints: vec4<u32>,   // BLENDINDICES (global bone indices)
+    @location(6) weights: vec4<f32>,  // BLENDWEIGHT (Unorm8x4 -> 0..1)
 ) -> VSOut {
     var out: VSOut;
-    out.clip_pos = cam.mvp * vec4<f32>(pos, 1.0);
+
+    // Linear blend skinning in model space. cam.mvp already folds in the fit (centre/scale),
+    // view and projection, so skinned positions go straight to clip space.
+    var wsum = weights.x + weights.y + weights.z + weights.w;
+    if (wsum <= 0.0) { wsum = 1.0; }
+    let js = array<u32, 4>(joints.x, joints.y, joints.z, joints.w);
+    let ws = array<f32, 4>(weights.x, weights.y, weights.z, weights.w);
+    var skinned = vec4<f32>(0.0);
+    var nrm = vec3<f32>(0.0);
+    var tng = vec3<f32>(0.0);
+    for (var k = 0; k < 4; k = k + 1) {
+        let w = ws[k] / wsum;
+        if (w <= 0.0) { continue; }
+        let m = bones[js[k]];
+        let m3 = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        skinned += w * (m * vec4<f32>(pos, 1.0));
+        nrm += w * (m3 * normal);
+        tng += w * (m3 * tangent.xyz);
+    }
+
+    out.clip_pos = cam.mvp * vec4<f32>(skinned.xyz, 1.0);
     out.uv = uv;
-    out.n = normal;
-    out.t = tangent.xyz;
-    out.b = cross(normal, tangent.xyz) * tangent.w; // bitangent, handedness from tangent.w
+    out.n = nrm;
+    out.t = tng;
+    out.b = cross(nrm, tng) * tangent.w; // bitangent, handedness from tangent.w
     return out;
 }
 
