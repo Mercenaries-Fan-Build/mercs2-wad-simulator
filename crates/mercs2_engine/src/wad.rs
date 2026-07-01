@@ -6,6 +6,7 @@
 
 use mercs2_formats::ffcs::{load_ffcs_archive, FfcsArchive};
 use mercs2_formats::sges::decompress_block;
+use mercs2_formats::types::TYPE_ID_ANIMATION;
 use mercs2_formats::ucfx::parse_block_entry_table;
 use std::fs::File;
 
@@ -84,6 +85,27 @@ pub fn extract_texture(
     name_hash: u32,
 ) -> Result<mercs2_formats::texture::TextureData, String> {
     mercs2_formats::texture::extract_texture(&mut wad.file, &wad.archive, name_hash)
+}
+
+/// Decompress a raw block by index (for animgroup blocks, which `animgroup::parse_animgroup`
+/// consumes whole — they are not `type_hash=="model"` containers).
+pub fn decompress_block_index(wad: &mut Wad, block: u16) -> Result<Vec<u8>, String> {
+    decompress_block(&mut wad.file, &wad.archive.indx, block)
+}
+
+/// Distinct block indices that hold an animation-type ASET asset (candidate animgroups),
+/// found directly from the ASET table — no need to decompress every block.
+pub fn animgroup_blocks(wad: &Wad) -> Vec<u16> {
+    let mut v: Vec<u16> = wad
+        .archive
+        .aset
+        .iter()
+        .filter(|e| e.type_id == TYPE_ID_ANIMATION)
+        .map(|e| e.block_index())
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// Extract the UCFX model container for `name_hash` (via its primary ASET block).

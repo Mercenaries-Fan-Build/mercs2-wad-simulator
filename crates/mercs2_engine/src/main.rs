@@ -690,6 +690,13 @@ fn main() {
             }
             return;
         }
+        if args.iter().any(|a| a == "--animcheck") {
+            if let Err(e) = animcheck(&wadpath, val("--model"), val("--index")) {
+                eprintln!("--animcheck failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if args.iter().any(|a| a == "--skincheck") {
             if let Err(e) = skincheck(&wadpath, val("--model"), val("--index")) {
                 eprintln!("--skincheck failed: {e}");
@@ -778,6 +785,173 @@ fn wad_list(wadpath: &str) -> Result<(), String> {
         }
     }
     eprintln!("measured {ok} models; {human} look humanoid");
+    Ok(())
+}
+
+/// Animation coordinate-consistency gate (headless). Retail ships no referencePose, so clip local
+/// transforms must be authored in the SAME frame as the mesh HIER bind locals. Decisive check: for
+/// every bone a track drives, the animated LOCAL translation (bone offset from parent) must equal the
+/// HIER bind-local translation — bones rotate but don't stretch. A near-zero delta proves the clip
+/// data drops straight into `pose::palette` with no coordinate conversion; a large/negated delta
+/// would reveal a handedness fix is needed. Finds the animgroup whose binding best matches this model.
+fn animcheck(wadpath: &str, model: Option<String>, index: Option<String>) -> Result<(), String> {
+    use mercs2_formats::animgroup::parse_animgroup;
+
+    let mut w = wad::open(wadpath)?;
+    let models = wad::model_list(&w);
+    let hash = if let Some(m) = model {
+        parse_hash(&m).ok_or_else(|| format!("bad --model hash '{m}'"))?
+    } else if let Some(n) = index {
+        let n: usize = n.parse().map_err(|_| format!("bad --index '{n}'"))?;
+        models.get(n).map(|&(h, _)| h).ok_or("--index out of range")?
+    } else {
+        models.first().map(|&(h, _)| h).ok_or("no models in WAD")?
+    };
+    let container = wad::extract_container(&mut w, hash)?;
+    let (_v, _i, _d, s) = mesh::build_indexed_from_container(&container)?;
+    if s.rig.is_empty() {
+        return Err("model has no skeleton (rig empty)".into());
+    }
+    let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
+
+    // Pass 1: pick the animgroup + clip whose binding resolves the most tracks onto this HIER.
+    let mut best: Option<(u16, u32, usize)> = None; // (block, clip name_hash, resolved count)
+    for blk in wad::animgroup_blocks(&w) {
+        let Ok(data) = wad::decompress_block_index(&mut w, blk) else { continue };
+        let Ok(ag) = parse_animgroup(&data) else { continue };
+        for c in &ag.clips {
+            let resolved = c
+                .binding
+                .resolve_to_hier(&hier)
+                .iter()
+                .filter(|r| r.is_some())
+                .count();
+            if best.map_or(true, |(_, _, r)| resolved > r) {
+                best = Some((blk, c.name_hash, resolved));
+            }
+        }
+    }
+    let (blk, clip_hash, resolved) = best.ok_or("no animgroup binding matched this model")?;
+    println!("model 0x{hash:08X}: {} bones; best animgroup block[{blk}] clip 0x{clip_hash:08X} ({resolved} tracks resolve to HIER)", s.rig.len());
+
+    // Pass 2: decode that clip and compare its frame-0 local translations to the HIER bind locals.
+    let data = wad::decompress_block_index(&mut w, blk)?;
+    let ag = parse_animgroup(&data).map_err(|e| format!("parse animgroup: {e}"))?;
+    let clip = ag
+        .clips
+        .iter()
+        .find(|c| c.name_hash == clip_hash)
+        .ok_or("clip vanished on re-parse")?;
+    let pk = &data[clip.havok_offset..];
+    let ac = mercs2_formats::anim::parse_anim(pk).map_err(|e| format!("parse_anim: {e}"))?;
+    println!(
+        "clip: class={} decoded={} tracks={} frames={} duration={:.3}",
+        clip.class, ac.decoded, ac.num_tracks, ac.num_frames, ac.duration
+    );
+    if !ac.decoded {
+        return Err(format!("clip not decoded (class {}) — cannot check", clip.class));
+    }
+
+    let track_to_hier = clip.binding.resolve_to_hier(&hier);
+    let sample = ac.sample_local(0.0);
+
+    let (mut n, mut sum_d, mut max_d, mut sum_off) = (0u32, 0.0f32, 0.0f32, 0.0f32);
+    let mut worst: Vec<(usize, f32)> = Vec::new();
+    for (track, bone) in track_to_hier.iter().enumerate() {
+        let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) else { continue };
+        if s.rig[b].parent < 0 {
+            continue; // root translation is motion, not a fixed bone offset
+        }
+        let at = qs.translation;
+        let bt = [s.rig[b].local_bind[3][0], s.rig[b].local_bind[3][1], s.rig[b].local_bind[3][2]];
+        let d = ((at[0] - bt[0]).powi(2) + (at[1] - bt[1]).powi(2) + (at[2] - bt[2]).powi(2)).sqrt();
+        let off = (bt[0] * bt[0] + bt[1] * bt[1] + bt[2] * bt[2]).sqrt();
+        n += 1;
+        sum_d += d;
+        sum_off += off;
+        if d > max_d {
+            max_d = d;
+        }
+        worst.push((b, d));
+    }
+    if n == 0 {
+        return Err("no non-root driven bones to compare".into());
+    }
+    // Hypothesis test: the decoded wavelet tracks may be offset by one relative to the trnm binding.
+    // Compare sample[track] against the bone that binding[track+1] names, and against [track-1].
+    let mut shift_next = (0u32, 0.0f32); // sample[N] vs bone(binding[N+1])
+    let mut shift_prev = (0u32, 0.0f32); // sample[N] vs bone(binding[N-1])
+    for (track, qs) in sample.iter().enumerate() {
+        for (delta, acc) in [(1i32, &mut shift_next), (-1i32, &mut shift_prev)] {
+            let j = track as i32 + delta;
+            if j < 0 || j as usize >= track_to_hier.len() {
+                continue;
+            }
+            let Some(&b) = track_to_hier[j as usize].as_ref() else { continue };
+            if s.rig[b].parent < 0 {
+                continue;
+            }
+            let bt = [s.rig[b].local_bind[3][0], s.rig[b].local_bind[3][1], s.rig[b].local_bind[3][2]];
+            let d = ((qs.translation[0] - bt[0]).powi(2)
+                + (qs.translation[1] - bt[1]).powi(2)
+                + (qs.translation[2] - bt[2]).powi(2))
+            .sqrt();
+            acc.0 += 1;
+            acc.1 += d;
+        }
+    }
+
+    let mean_d = sum_d / n as f32;
+    let mean_off = sum_off / n as f32;
+    if shift_next.0 > 0 {
+        println!(
+            "  SHIFT TEST: aligned mean|Δ|={mean_d:.6}  |  sample[N]vs binding[N+1] mean|Δ|={:.6}  |  vs binding[N-1] mean|Δ|={:.6}",
+            shift_next.1 / shift_next.0 as f32,
+            shift_prev.1 / shift_prev.0.max(1) as f32
+        );
+    }
+    worst.sort_by(|a, b| b.1.total_cmp(&a.1));
+    println!(
+        "translation delta (anim local vs HIER bind local), {n} non-root driven bones:"
+    );
+    println!("  mean |Δ| = {mean_d:.6}   max |Δ| = {max_d:.6}   (mean bone offset = {mean_off:.4})");
+    let rel = if mean_off > 1e-6 { mean_d / mean_off } else { mean_d };
+    println!(
+        "  relative mean Δ = {:.3}%  ->  {}",
+        rel * 100.0,
+        if rel < 0.02 {
+            "GATE PASS — clip locals share the HIER frame (no coord conversion needed)"
+        } else {
+            "GATE FAIL — frames differ; investigate handedness/scale before wiring"
+        }
+    );
+    print!("  worst bones (Δ):");
+    for (b, d) in worst.iter().take(4) {
+        print!(" bone{b}={d:.4}");
+    }
+    println!();
+
+    // Raw side-by-side dump (anim frame-0 local T/R vs HIER bind-local T) to reveal the relationship
+    // (rotation-only? scaled? negated component? mapping off?) without guessing.
+    println!("  --- raw anim-vs-bind for first 6 driven non-root bones ---");
+    let mut shown = 0;
+    for (track, bone) in track_to_hier.iter().enumerate() {
+        let (Some(&b), Some(qs)) = (bone.as_ref(), sample.get(track)) else { continue };
+        if s.rig[b].parent < 0 {
+            continue;
+        }
+        let bt = [s.rig[b].local_bind[3][0], s.rig[b].local_bind[3][1], s.rig[b].local_bind[3][2]];
+        println!(
+            "    track{track:>3}->bone{b:<3} animT=[{:+.4},{:+.4},{:+.4}] bindT=[{:+.4},{:+.4},{:+.4}] animR=[{:+.3},{:+.3},{:+.3},{:+.3}]",
+            qs.translation[0], qs.translation[1], qs.translation[2],
+            bt[0], bt[1], bt[2],
+            qs.rotation[0], qs.rotation[1], qs.rotation[2], qs.rotation[3]
+        );
+        shown += 1;
+        if shown >= 6 {
+            break;
+        }
+    }
     Ok(())
 }
 
