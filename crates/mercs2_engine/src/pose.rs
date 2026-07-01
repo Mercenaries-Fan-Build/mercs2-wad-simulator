@@ -12,6 +12,127 @@ use crate::mesh::BoneRig;
 use mercs2_formats::anim::QsTransform;
 use mercs2_formats::skeleton::mat4_mul;
 
+// ---------------------------------------------------------------------------
+// Faithful Havok hkQsTransform math (Havok Animation 5.5) — the actual pipeline the
+// engine runs, not a matrix approximation:
+//   sampleAndCombine: localPose starts as the reference (bind) pose; animated TRANSFORM
+//     tracks overwrite their bone's full hkQsTransform. Undriven bones / float-track slots
+//     keep the bind pose (so they don't collapse to (0,0,0)).
+//   transformLocalPoseToModelPose: model[b] = model[parent] * local[b]  via hkQsTransform::setMul.
+//   skin: skinMatrix[b] = InvBind[b] · model[b].
+// ---------------------------------------------------------------------------
+
+const QS_IDENTITY: QsTransform = QsTransform {
+    translation: [0.0, 0.0, 0.0],
+    rotation: [0.0, 0.0, 0.0, 1.0],
+    scale: [1.0, 1.0, 1.0],
+};
+
+/// hkQuaternion multiply (Hamilton product), xyzw. `q = a * b`.
+fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let ([ax, ay, az, aw], [bx, by, bz, bw]) = (a, b);
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+/// Rotate a vector by a quaternion (xyzw): `v' = v + 2w(u×v) + 2(u×(u×v))`, u = q.xyz.
+fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let [x, y, z, w] = q;
+    let u = [x, y, z];
+    let t = [
+        2.0 * (u[1] * v[2] - u[2] * v[1]),
+        2.0 * (u[2] * v[0] - u[0] * v[2]),
+        2.0 * (u[0] * v[1] - u[1] * v[0]),
+    ];
+    [
+        v[0] + w * t[0] + (u[1] * t[2] - u[2] * t[1]),
+        v[1] + w * t[1] + (u[2] * t[0] - u[0] * t[2]),
+        v[2] + w * t[2] + (u[0] * t[1] - u[1] * t[0]),
+    ]
+}
+
+/// hkQsTransform::setMul — `out = a * b` (a = parent, b = child/local):
+/// rotation = a.rot * b.rot; translation = a.t + a.rot·(a.scale ⊙ b.t); scale = a.scale ⊙ b.scale.
+fn qs_mul(a: &QsTransform, b: &QsTransform) -> QsTransform {
+    let rotation = quat_mul(a.rotation, b.rotation);
+    let st = [
+        a.scale[0] * b.translation[0],
+        a.scale[1] * b.translation[1],
+        a.scale[2] * b.translation[2],
+    ];
+    let r = quat_rotate(a.rotation, st);
+    QsTransform {
+        rotation,
+        translation: [a.translation[0] + r[0], a.translation[1] + r[1], a.translation[2] + r[2]],
+        scale: [a.scale[0] * b.scale[0], a.scale[1] * b.scale[1], a.scale[2] * b.scale[2]],
+    }
+}
+
+/// Decompose a row-vector affine matrix (as produced by `qs_to_local` / the HIER local) back into an
+/// hkQsTransform: translation = row 3, scale = row lengths, rotation extracted from the normalized
+/// R_row (inverse of `qs_to_local`'s quaternion→matrix).
+pub fn mat_to_qs(m: &[[f32; 4]; 4]) -> QsTransform {
+    let sx = (m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]).sqrt();
+    let sy = (m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]).sqrt();
+    let sz = (m[2][0] * m[2][0] + m[2][1] * m[2][1] + m[2][2] * m[2][2]).sqrt();
+    let (ix, iy, iz) = (1.0 / sx.max(1e-8), 1.0 / sy.max(1e-8), 1.0 / sz.max(1e-8));
+    // normalized R_row
+    let r = [
+        [m[0][0] * ix, m[0][1] * ix, m[0][2] * ix],
+        [m[1][0] * iy, m[1][1] * iy, m[1][2] * iy],
+        [m[2][0] * iz, m[2][1] * iz, m[2][2] * iz],
+    ];
+    let trace = r[0][0] + r[1][1] + r[2][2];
+    let rotation = if trace > 0.0 {
+        let w = (1.0 + trace).sqrt() * 0.5;
+        let f = 1.0 / (4.0 * w);
+        [(r[1][2] - r[2][1]) * f, (r[2][0] - r[0][2]) * f, (r[0][1] - r[1][0]) * f, w]
+    } else {
+        // fallback: largest-diagonal branch (row-vector R_row convention)
+        if r[0][0] > r[1][1] && r[0][0] > r[2][2] {
+            let s = (1.0 + r[0][0] - r[1][1] - r[2][2]).sqrt() * 2.0;
+            [0.25 * s, (r[1][0] + r[0][1]) / s, (r[2][0] + r[0][2]) / s, (r[1][2] - r[2][1]) / s]
+        } else if r[1][1] > r[2][2] {
+            let s = (1.0 + r[1][1] - r[0][0] - r[2][2]).sqrt() * 2.0;
+            [(r[1][0] + r[0][1]) / s, 0.25 * s, (r[2][1] + r[1][2]) / s, (r[2][0] - r[0][2]) / s]
+        } else {
+            let s = (1.0 + r[2][2] - r[0][0] - r[1][1]).sqrt() * 2.0;
+            [(r[2][0] + r[0][2]) / s, (r[2][1] + r[1][2]) / s, 0.25 * s, (r[0][1] - r[1][0]) / s]
+        }
+    };
+    QsTransform { translation: [m[3][0], m[3][1], m[3][2]], rotation, scale: [sx, sy, sz] }
+}
+
+/// Bind local poses as hkQsTransforms (from the rig's bind-local matrices).
+pub fn bind_qs(rig: &[BoneRig]) -> Vec<QsTransform> {
+    rig.iter().map(|b| mat_to_qs(&b.local_bind)).collect()
+}
+
+/// `transformLocalPoseToModelPose`: model[b] = model[parent] * local[b] (hkQsTransform), root = local.
+/// (HIER guarantees parent index < child.)
+pub fn model_poses(rig: &[BoneRig], local: &[QsTransform]) -> Vec<QsTransform> {
+    let mut model = vec![QS_IDENTITY; rig.len()];
+    for b in 0..rig.len() {
+        model[b] = if rig[b].parent < 0 {
+            local[b]
+        } else {
+            qs_mul(&model[rig[b].parent as usize], &local[b])
+        };
+    }
+    model
+}
+
+/// Skinning palette from model-space hkQsTransforms: Skin[b] = InvBind[b] · model[b] (row-vector).
+pub fn skin_palette(rig: &[BoneRig], model: &[QsTransform]) -> Vec<[[f32; 4]; 4]> {
+    (0..rig.len())
+        .map(|b| mat4_mul(&rig[b].inv_bind, &qs_to_local(&model[b])))
+        .collect()
+}
+
 /// Compose a Havok `QsTransform` (translation, quat xyzw, scale) into a row-major, row-vector
 /// LOCAL matrix (`p' = p · M`): upper 3×3 = `diag(scale) · R_row`, translation in row 3 — the same
 /// layout as the HIER local transform (`skeleton.rs`). Retail ships NO referencePose, so clip locals

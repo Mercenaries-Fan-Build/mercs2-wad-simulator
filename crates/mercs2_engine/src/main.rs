@@ -863,75 +863,49 @@ fn poseoracle(wadpath: &str, model: Option<String>, index: Option<String>, conv:
     }
     let hier: Vec<u32> = skin.rig.iter().map(|b| b.name_hash).collect();
 
-    // Track->HIER binding for the captured clip 0x24F8C8E6.
+    // Track->HIER binding for the captured clip 0x24F8C8E6, plus its transform-track count (the
+    // 64-slot buffer is 61 transform + 3 float tracks; only transform tracks drive bones).
     let mut binding: Option<Vec<Option<usize>>> = None;
+    let mut num_transform_tracks = 0usize;
     for blk in wad::animgroup_blocks(&w) {
         let Ok(data) = wad::decompress_block_index(&mut w, blk) else { continue };
         let Ok(ag) = parse_animgroup(&data) else { continue };
         if let Some(c) = ag.clips.iter().find(|c| c.name_hash == 0x24F8C8E6) {
             binding = Some(c.binding.resolve_to_hier(&hier));
+            num_transform_tracks = c.num_transform_tracks as usize;
             break;
         }
     }
     let binding = binding.ok_or("clip 0x24F8C8E6 not found in any animgroup")?;
+    let _ = conv;
 
-    // Apply the FULL captured pose (rotation + translation) per driven bone, then compose the palette.
-    // Skip degenerate quaternions (|q| far from 1 — e.g. the clip's float/facial tracks stored in the
-    // same 64-slot buffer produce zero/garbage rotations that collapse a bone through qs_to_local).
-    let mut locals = pose::bind_locals(&skin.rig);
-    let mut skipped_deg = Vec::new();
+    // Faithful Havok sampleAndCombine: start every bone at its bind local pose, then overwrite the
+    // bones driven by a real TRANSFORM track with the sampled hkQsTransform (full T/R/S). Undriven
+    // bones and float-track slots keep bind (no (0,0,0) collapse). Then model-space compose + skin.
+    let mut local_qs = pose::bind_qs(&skin.rig);
     for (track, bone) in binding.iter().enumerate() {
+        if track >= num_transform_tracks {
+            break; // float tracks — not transforms
+        }
         if let (Some(&b), Some(qs)) = (bone.as_ref(), pose.get(track)) {
-            if b >= locals.len() {
+            if b >= local_qs.len() {
                 continue;
             }
-            let qn = (qs.rotation.iter().map(|c| c * c).sum::<f32>()).sqrt();
-            if !(0.5..1.5).contains(&qn) {
-                skipped_deg.push((track, b, qn));
-                continue; // degenerate — leave bone at bind
+            let mut rot = qs.rotation;
+            let qn = (rot.iter().map(|c| c * c).sum::<f32>()).sqrt();
+            if qn > 1e-6 {
+                for c in rot.iter_mut() {
+                    *c /= qn;
+                }
             }
-            let mut q = *qs;
-            for c in q.rotation.iter_mut() {
-                *c /= qn; // normalize
-            }
-            let lb = skin.rig[b].local_bind;
-            let bind_rot = [
-                [lb[0][0], lb[0][1], lb[0][2], 0.0],
-                [lb[1][0], lb[1][1], lb[1][2], 0.0],
-                [lb[2][0], lb[2][1], lb[2][2], 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ];
-            // quaternion variants
-            let r = q.rotation;
-            let qv = match conv {
-                5 => QsTransform { rotation: [-r[0], -r[1], -r[2], r[3]], ..q }, // conjugate
-                6 => QsTransform { rotation: [r[0], r[1], -r[2], r[3]], ..q },   // negate z
-                7 => QsTransform { rotation: [-r[0], -r[1], r[2], r[3]], ..q },  // negate x,y
-                8 => QsTransform { rotation: [r[0], r[1], r[2], -r[3]], ..q },   // negate w
-                _ => q,
-            };
-            let anim = pose::qs_to_local(&qv);
-            let transpose = |m: &[[f32; 4]; 4]| {
-                [[m[0][0], m[1][0], m[2][0], 0.0], [m[0][1], m[1][1], m[2][1], 0.0],
-                 [m[0][2], m[1][2], m[2][2], 0.0], [m[3][0], m[3][1], m[3][2], 1.0]]
-            };
-            let mut m = match conv {
-                0 => anim,                          // absolute (current)
-                1 => mat4_mul(&bind_rot, &anim),    // delta bind·anim
-                2 => mat4_mul(&anim, &bind_rot),    // delta anim·bind
-                4 => transpose(&anim),              // transposed rotation
-                _ => anim,                          // 3,5,6,7,8 = absolute w/ variant quat
-            };
-            if matches!(conv, 1 | 2 | 3) {
-                m[3] = [lb[3][0], lb[3][1], lb[3][2], 1.0]; // keep bind offset for these
-            }
-            locals[b] = m;
+            // Overwrite ROTATION from the sample; keep the bind translation/scale (the sample's
+            // (0,0,0) translation = absent DOFs, which Havok fills from the reference/bind pose).
+            local_qs[b].rotation = rot;
         }
     }
-    if !skipped_deg.is_empty() {
-        println!("  skipped {} degenerate-quat tracks (track,bone,|q|): {:?}", skipped_deg.len(), skipped_deg);
-    }
-    skin.bones = pose::palette(&skin.rig, &locals);
+    println!("  Havok combine: {} transform tracks over {} bind poses", num_transform_tracks, local_qs.len());
+    let model = pose::model_poses(&skin.rig, &local_qs);
+    skin.bones = pose::skin_palette(&skin.rig, &model);
 
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
