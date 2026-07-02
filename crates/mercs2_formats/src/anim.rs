@@ -394,10 +394,18 @@ fn wv_bit_budget(block_size: usize, bw: u32, preserved: usize) -> usize {
 /// clips use `bw = maxBitWidth` (11 for the gated clip) so the general path is
 /// the one that runs. The specialized bw==8/bw==16 paths in the decomp are a
 /// byte/word fast copy of the same logic and are not needed here.
-fn wv_entropy_unpack(blob: &[u8], base: usize, bw: u32, fill: u32, preserved: usize, budget: usize) -> Vec<u8> {
+fn wv_entropy_unpack(
+    blob: &[u8],
+    base: usize,
+    bw: u32,
+    fill: u32,
+    preserved: usize,
+    budget: usize,
+) -> (Vec<u8>, Vec<bool>) {
     let n = ((budget as i32 + preserved as i32 * -4) * 8) / bw as i32;
     let n = n.max(0) as usize;
     let mut out: Vec<u8> = Vec::new();
+    let mut is_fill: Vec<bool> = Vec::with_capacity(preserved + n);
     // preserved leading coefficients: copied verbatim (as raw f32 bytes).
     for i in 0..preserved {
         let o = base + i * 4;
@@ -406,6 +414,7 @@ fn wv_entropy_unpack(blob: &[u8], base: usize, bw: u32, fill: u32, preserved: us
         } else {
             out.extend_from_slice(&[0, 0, 0, 0]);
         }
+        is_fill.push(false);
     }
     let rd16 = |p: usize| -> u32 {
         if p + 2 <= blob.len() {
@@ -446,8 +455,9 @@ fn wv_entropy_unpack(blob: &[u8], base: usize, bw: u32, fill: u32, preserved: us
             reg >>= bw & 0x1f;
             avail -= bw;
             acc_bits = nb;
+            is_fill.push(false);
         } else {
-            // run-fill.
+            // run-fill (FUN_009ff120 line ~920802: `param_2[1]` written *unmasked*).
             let next = acc_bits + bw;
             acc |= fill << (acc_bits & 0x1f);
             let mut nb = next;
@@ -458,6 +468,7 @@ fn wv_entropy_unpack(blob: &[u8], base: usize, bw: u32, fill: u32, preserved: us
                 nb -= 0x10;
             }
             acc_bits = nb;
+            is_fill.push(true);
         }
         b_mask <<= 1;
         if b_mask == 0x100 {
@@ -472,24 +483,44 @@ fn wv_entropy_unpack(blob: &[u8], base: usize, bw: u32, fill: u32, preserved: us
         }
     }
     out.extend_from_slice(&obuf);
-    out
+    (out, is_fill)
 }
 
-/// The per-DOF byte-advance of one entropy block, matching FUN_009ff120's
-/// return value `preserved*0x20 + 7 + bw*entries + entries >> 3`.
+/// The per-DOF byte-advance of one entropy block = FUN_009ff120's return value
+/// `(preserved*0x20 + 7 + bw*present + n) >> 3`, where `present` is the number
+/// of *present* (bitmap bit == 0, read-from-stream) codes — NOT all `n`. Only
+/// present codes consume stream bits; run-fill codes do not advance the input.
+/// (Verified against the live 2.5673 s capture: using `n` here drifts the
+/// per-DOF quant pointer.)
 #[inline]
-fn wv_entropy_advance(block_size: usize, bw: u32, preserved: usize) -> usize {
+fn wv_entropy_advance(block_size: usize, bw: u32, preserved: usize, present: usize) -> usize {
+    let n = wv_entropy_n(block_size, bw, preserved);
+    (preserved * 0x20 + 7 + (bw as usize) * present + n) >> 3
+}
+
+/// Number of non-preserved codes in one block's entropy stream (FUN_009ff120
+/// `uVar8 = ((budget - preserved*4) * 8) / bw`).
+#[inline]
+fn wv_entropy_n(block_size: usize, bw: u32, preserved: usize) -> usize {
     let budget = wv_bit_budget(block_size, bw, preserved);
-    let n = (((budget as i32 + preserved as i32 * -4) * 8) / bw as i32).max(0) as usize;
-    (preserved * 0x20 + 7 + (bw as usize) * n + n) >> 3
+    (((budget as i32 - preserved as i32 * 4) * 8) / bw as i32).max(0) as usize
 }
 
 /// FUN_009fdd50 (decomp line ~919935): quantized-int → float dequant of one
-/// DOF's block. `value = (rawInt + 0.5) * (2^-bw * mult) + off`, where `2^-bw`
-/// is the `DAT_00b6b808` power-of-two scale table (verified live). Returns
+/// DOF's block. `value = ((float)code + bias) * (2^-bw * mult) + off`, where
+/// `2^-bw` is the `DAT_00b6b808` power-of-two scale table and `bias =
+/// _DAT_00bea940 = 0.0` (both read live from the exe). `mult` is the clip's
+/// per-DOF scale array (obj+0x38), `off` the offset array (obj+0x34). Returns
 /// `block_size` wavelet coefficients (still in wavelet space; caller applies
 /// the inverse transform).
-fn wv_dequant(stream: &[u8], bw: u32, preserved: usize, mult: f32, off: f32, block_size: usize) -> Vec<f32> {
+fn wv_dequant(
+    stream: &[u8],
+    bw: u32,
+    preserved: usize,
+    mult: f32,
+    off: f32,
+    block_size: usize,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; block_size];
     for i in 0..preserved {
         out[i] = f32_le(stream, i * 4);
@@ -509,7 +540,7 @@ fn wv_dequant(stream: &[u8], bw: u32, preserved: usize, mult: f32, off: f32, blo
         let v = (acc & mask) as u32;
         acc >>= bw;
         nbits = nbits.saturating_sub(bw);
-        out[preserved + k] = (v as f32 + 0.5) * scale + off;
+        out[preserved + k] = v as f32 * scale + off; // + _DAT_00bea940 (0.0)
     }
     out
 }
@@ -664,13 +695,14 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
         })
         .collect();
 
-    // Per-dynamic-DOF quant descriptors. In FUN_009f54f0 the additive term is
-    // the obj+0x34 (`scale_idx`) array value and the multiplicative term is the
-    // obj+0x38 (`offset_idx`) array value (from the stack aliasing: `local_10`=
-    // scaleArr, `local_14`=offArr; fdd50 uses `*(pbVar7+4)`=local_14 as the
-    // multiplier and `*(pbVar7+8)`=local_10 as the addend).
-    let mult: Vec<f32> = (0..num_d).map(|i| f32_le(blob, db + offset_idx + i * 4)).collect();
-    let addend: Vec<f32> = (0..num_d).map(|i| f32_le(blob, db + scale_idx + i * 4)).collect();
+    // Per-dynamic-DOF quant descriptors. FUN_009fdd50 uses `*(pbVar7+4)` as the
+    // multiplier and `*(pbVar7+8)` as the additive offset; tracing the FUN_009f54f0
+    // stack these are the obj+0x38 and obj+0x34 arrays respectively. On disk those
+    // map to `scale_idx` (QFMT+12 → multiplier) and `offset_idx` (QFMT+8 → offset).
+    // Verified live: with this ordering the 3.3366 s oracle clip decodes 64/64
+    // rotation tracks (swapping them gives 19/64).
+    let mult: Vec<f32> = (0..num_d).map(|i| f32_le(blob, db + scale_idx + i * 4)).collect();
+    let addend: Vec<f32> = (0..num_d).map(|i| f32_le(blob, db + offset_idx + i * 4)).collect();
     let bw: Vec<u32> = (0..num_d).map(|i| *blob.get(db + bw_idx + i).unwrap_or(&0) as u32).collect();
 
     // Block index (byte offset of each block's quant data).
@@ -728,7 +760,8 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
                 for _ in 0..poses_here {
                     per_dof_frames[d].push(addend[d]);
                 }
-                p += wv_entropy_advance(block_size, bwd.max(1), preserved);
+                let bw1 = bwd.max(1);
+                p += wv_entropy_advance(block_size, bw1, preserved, wv_entropy_n(block_size, bw1, preserved));
                 continue;
             }
             // Fill (run) value = the quantized code that dequantizes to ≈ -addend
@@ -736,21 +769,22 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
             // ROUND(-addend·2^bw / mult)` clamped away from 2^bw (FUN_009f54f0
             // lines ~913966-913971).
             let ival = 1i64 << bwd;
-            let bias = if mult[d] != 0.0 {
+            let bias_unclamped = if mult[d] != 0.0 {
                 (-addend[d] * ival as f32 / mult[d]).round() as i64
             } else {
                 0
             };
-            let bias = (if bias == ival { ival - 1 } else { bias }) as u32;
+            let bias = (if bias_unclamped == ival { ival - 1 } else { bias_unclamped }) as u32;
 
             let budget = wv_bit_budget(block_size, bwd, preserved);
-            let stream = wv_entropy_unpack(blob, p, bwd, bias, preserved, budget);
+            let (stream, is_fill) = wv_entropy_unpack(blob, p, bwd, bias, preserved, budget);
+            let present = is_fill[preserved..].iter().filter(|&&f| !f).count();
             let coeffs = wv_dequant(&stream, bwd, preserved, mult[d], addend[d], block_size);
             let frames = wv_inverse(&coeffs, block_size);
             for f in frames.into_iter().take(poses_here) {
                 per_dof_frames[d].push(f);
             }
-            p += wv_entropy_advance(block_size, bwd, preserved);
+            p += wv_entropy_advance(block_size, bwd, preserved, present);
         }
     }
 
@@ -1018,15 +1052,13 @@ mod tests {
     /// 64 transform tracks, blockSize 8, 322 dynamic DOF) and reproduce
     /// `tests/fixtures/wavelet_live_oracle.md`'s param_4 output buffer.
     ///
-    /// Frame-position calibration: the capture's `param_2 = 1.496` reconstructs
-    /// (matched numerically) to **frame 2** of the wavelet stream — sampling at
-    /// frame-position 2.0 reproduces the captured pose for the verified tracks.
-    /// (The oracle note's "frame 1 + frac 0.496" is FUN_009f0ee0's ROUND landing
-    /// nearer frame 2; the reconstruction, not the note, is the oracle.)
+    /// The capture's `param_2 = 1.496` is a TIME in seconds; FUN_009f0ee0 maps it
+    /// to `g = (numPoses-1)*time/duration = 100*1.496/3.3366 = 44.83` → frame 45,
+    /// frac ≈ -0.166 (verified against the 2.5673 s live capture, whose
+    /// StDecompressW input is reproduced to 246/246 in `wavelet_decompress.rs`).
     ///
     /// Runs only when the clip fixture is present (dumped out-of-band from
-    /// vz.wad — see the module report); otherwise it no-ops so CI without the
-    /// retail WAD stays green.
+    /// vz.wad); otherwise it no-ops so CI without the retail WAD stays green.
     #[test]
     fn wavelet_gate_oracle_clip_frame_1_496() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/oracle_clip.bin");
@@ -1041,7 +1073,10 @@ mod tests {
         assert_eq!(clip.num_tracks, 64, "64 mask entries (61 xform + 3 float)");
         assert!((clip.duration - 3.3366).abs() < 1e-3, "dur = {}", clip.duration);
 
-        let pose = sample_at_framepos(&clip, 2.0);
+        // FUN_009f0ee0: time 1.496 s → g on the [0, numPoses-1] frame timeline.
+        let time = 1.496f32;
+        let g = (clip.num_frames as f32 - 1.0) * (time / clip.duration);
+        let pose = sample_at_framepos(&clip, g);
 
         // track 0 — identity.
         let t0 = pose[0];
@@ -1050,25 +1085,14 @@ mod tests {
             "t0 R {:?}", t0.rotation);
         assert!(t0.scale.iter().all(|s| (s - 1.0).abs() < 1e-3), "t0 S {:?}", t0.scale);
 
-        // track 2 — R(0.03847, 0.06850, 0.04435, 0.99590), S(1,1,1).
-        let t2 = pose[2];
-        let er = [0.03847f32, 0.06850, 0.04435, 0.99590];
-        for (i, (&g, &e)) in t2.rotation.iter().zip(er.iter()).enumerate() {
-            assert!((g - e).abs() < 3e-3, "t2 R[{i}] = {g} (expect {e})");
-        }
-        assert!(t2.scale.iter().all(|s| (s - 1.0).abs() < 1e-3), "t2 S {:?}", t2.scale);
-
-        // Full-buffer check for the reproducing tracks. Parse the oracle's raw
-        // param_4 output buffer (3072 B = 64 × 48-B hkQsTransform) and compare
-        // the rotation of every track that the decoder reproduces to ≤3e-3.
-        //
-        // OPEN (needs a live x32dbg intermediate capture to close — see report):
-        // tracks whose *entire* quaternion is dynamic (the ±2 W-sentinel path,
-        // e.g. tracks 4 and 9) and a handful of DOFs where the qx sign / DC term
-        // diverges (11, 14, 15) are excluded. 13 of the first 16 tracks match.
+        // Full-buffer check: compare the rotation quaternion of every track to the
+        // captured oracle output buffer and report the exact match count. The
+        // oracle was captured at frame 45 (time-based); a per-track slerp of the
+        // two bracketing decoded frames reproduces the rotations.
         let ob = oracle_output_buffer();
-        let reproduce = [0usize, 1, 2, 3, 5, 6, 7, 8, 10, 12];
-        for &t in &reproduce {
+        let mut ok = 0usize;
+        let mut mism: Vec<usize> = Vec::new();
+        for t in 0..clip.num_tracks {
             let o = t * 48;
             let orr = [
                 f32_le(&ob, o + 16),
@@ -1076,15 +1100,23 @@ mod tests {
                 f32_le(&ob, o + 24),
                 f32_le(&ob, o + 28),
             ];
-            for i in 0..4 {
-                assert!(
-                    (pose[t].rotation[i] - orr[i]).abs() < 3e-3,
-                    "track {t} R[{i}] = {} (oracle {})",
-                    pose[t].rotation[i],
-                    orr[i]
-                );
+            let close = (0..4).all(|i| (pose[t].rotation[i] - orr[i]).abs() < 3e-3);
+            if close {
+                ok += 1;
+            } else {
+                mism.push(t);
             }
         }
+        eprintln!(
+            "oracle-clip rotations: {}/{} tracks within 3e-3; mismatched tracks: {:?}",
+            ok, clip.num_tracks, mism
+        );
+        // Time-based sampling (frame 45) + the corrected mult/addend, entropy
+        // advance (present-count), and 0.0 dequant bias reproduce every rotation
+        // track of the captured oracle. (The 2.5673 s live capture validates the
+        // decoder even more tightly: stage-1 246/246 in wavelet_decompress.rs,
+        // stage-2 660/660 in wavelet_recompose.rs.)
+        assert_eq!(ok, clip.num_tracks, "all rotation tracks must match (see stderr)");
     }
 
     /// The captured `param_4` output buffer (64 × 48-byte hkQsTransform, 3072 B)
