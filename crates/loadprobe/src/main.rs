@@ -8,12 +8,15 @@ mod parse;
 mod phases;
 mod report;
 mod sha256;
+mod symbolize;
 
 use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const DEFAULT_LOG: &str = "C:/Users/Shadow/Desktop/Mercenaries 2 World in Flames/pmc_blackbox.log";
+const DEFAULT_EXE_SYMBOLS: &str =
+    "C:/Users/Shadow/Desktop/notes-on-the-released-game/scripts/mercs2_annotations.json";
 
 #[derive(Parser)]
 #[command(name = "loadprobe", about = "Quantify world-load progress + forensic dump of pmc_blackbox.log")]
@@ -48,6 +51,20 @@ struct Cli {
     /// Print the milestone ladder and exit.
     #[arg(long)]
     milestones: bool,
+
+    /// Resolve `module+0xOFFSET` tokens in the [crash] block to `function+0xN`
+    /// (reads the un-stripped .asi/.dll COFF symbols + the exe annotation map).
+    #[arg(long, short = 'S')]
+    symbolize: bool,
+
+    /// Curated Mercenaries2.exe VA→name map for --symbolize.
+    #[arg(long, default_value = DEFAULT_EXE_SYMBOLS)]
+    exe_symbols: PathBuf,
+
+    /// Extra directory to search for .asi/.dll module files (repeatable). The
+    /// log's directory and its scripts/ subdir are always searched.
+    #[arg(long)]
+    module_dir: Vec<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -80,7 +97,30 @@ fn main() -> ExitCode {
     let routine: Vec<String> = cli.routine.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     let signals: Vec<String> = cli.signals.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
-    let rep = report::analyze(&path.display().to_string(), log_sha256, &lines, &routine, &signals, cli.hang_secs, cli.top_gaps);
+    let mut rep = report::analyze(&path.display().to_string(), log_sha256, &lines, &routine, &signals, cli.hang_secs, cli.top_gaps);
+
+    // Optional: rewrite the [crash] block's `module+0xOFFSET` tokens into
+    // `= function+0xN`. Post-analysis + out-of-crash-path by design (the game's
+    // handler stays allocation-free; naming happens here where symbols are safe).
+    if cli.symbolize {
+        if let Some(crash) = rep.crash.as_mut() {
+            let mut dirs = Vec::new();
+            if let Some(parent) = path.parent() {
+                dirs.push(parent.to_path_buf());
+                dirs.push(parent.join("scripts"));
+            }
+            dirs.extend(cli.module_dir.iter().cloned());
+            let mut sym = symbolize::Symbolizer::new(&cli.exe_symbols, dirs);
+            if sym.has_any_source() {
+                for line in crash.block.iter_mut() {
+                    *line = sym.rewrite_line(line);
+                }
+            } else {
+                eprintln!("loadprobe: --symbolize found no symbol sources \
+                    (exe map {} and no .asi/.dll next to the log)", cli.exe_symbols.display());
+            }
+        }
+    }
 
     if cli.json {
         match serde_json::to_string_pretty(&rep) {
