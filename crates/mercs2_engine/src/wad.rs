@@ -5,7 +5,7 @@
 //! (`type_hash == "model"`) — which is the UCFX container `mesh::build_from_container` consumes.
 
 use mercs2_formats::ffcs::{load_ffcs_archive, FfcsArchive};
-use mercs2_formats::sges::decompress_block;
+use mercs2_formats::sges::{decompress_block, decompress_block_head};
 use mercs2_formats::types::TYPE_ID_ANIMATION;
 use mercs2_formats::ucfx::parse_block_entry_table;
 use std::fs::File;
@@ -87,10 +87,64 @@ pub fn extract_texture(
     mercs2_formats::texture::extract_texture(&mut wad.file, &wad.archive, name_hash)
 }
 
+/// The real loading-screen background from `shell.wad` (sibling of the given `vz.wad`):
+/// the `lti_precache1` plate (2048x1024 DXT1, hash 0x7329D083), cropped to its content.
+pub fn shell_loading_plate(vz_wadpath: &str) -> Result<mercs2_formats::texture::TextureData, String> {
+    let shell = std::path::Path::new(vz_wadpath).with_file_name("shell.wad");
+    let mut wad = open(&shell.to_string_lossy())?;
+    let hash = mercs2_formats::hash::pandemic_hash_m2("lti_precache1");
+    let td = extract_texture(&mut wad, hash)?;
+    Ok(crop_loading_plate(td))
+}
+
+/// Crop the plate to its content rect: the art is a 1280x720 frame inset at (384,149) in the
+/// 2048x1024 texture, surrounded by transparent black (measured non-black bbox). Cropping on
+/// 4px block boundaries (x 384, y 148) makes the quad's aspect match the art. Returns the
+/// texture unchanged if it isn't the expected plate layout.
+fn crop_loading_plate(td: mercs2_formats::texture::TextureData) -> mercs2_formats::texture::TextureData {
+    use mercs2_formats::texture::TexFormat;
+    const RECT: (u32, u32, u32, u32) = (384, 148, 1280, 720); // x, y, w, h
+    let (cx, cy, cw, ch) = RECT;
+    let block_bytes = match td.format {
+        TexFormat::Bc1 => 8usize,
+        TexFormat::Bc3 => 16usize,
+    };
+    let src_blocks_wide = (td.width / 4) as usize;
+    let need = src_blocks_wide * (td.height / 4) as usize * block_bytes;
+    if td.width < cx + cw || td.height < cy + ch || td.mip0.len() < need {
+        return td;
+    }
+    let row_bytes = (cw / 4) as usize * block_bytes;
+    let mut mip0 = Vec::with_capacity((ch / 4) as usize * row_bytes);
+    for by in (cy / 4)..((cy + ch) / 4) {
+        let s = (by as usize * src_blocks_wide + (cx / 4) as usize) * block_bytes;
+        mip0.extend_from_slice(&td.mip0[s..s + row_bytes]);
+    }
+    mercs2_formats::texture::TextureData {
+        width: cw,
+        height: ch,
+        format: td.format,
+        all_mips: mip0.clone(),
+        mip0,
+        mip_count: 1,
+    }
+}
+
 /// Decompress a raw block by index (for animgroup blocks, which `animgroup::parse_animgroup`
 /// consumes whole — they are not `type_hash=="model"` containers).
 pub fn decompress_block_index(wad: &mut Wad, block: u16) -> Result<Vec<u8>, String> {
     decompress_block(&mut wad.file, &wad.archive.indx, block)
+}
+
+/// Block path strings (PTHS), indexed by block index (e.g. `…\c30123\…` names cell blocks).
+pub fn block_paths(wad: &Wad) -> &[String] {
+    &wad.archive.paths
+}
+
+/// Decompress only the head of a block (enough for its entry table) — a cheap format probe
+/// that avoids inflating multi-MB texture/stream blocks during scans.
+pub fn peek_block_head(wad: &mut Wad, block: u16, max_out: usize) -> Result<Vec<u8>, String> {
+    decompress_block_head(&mut wad.file, &wad.archive.indx, block, max_out)
 }
 
 /// Distinct block indices that hold an animation-type ASET asset (candidate animgroups),

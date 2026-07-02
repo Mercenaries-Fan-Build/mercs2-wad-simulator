@@ -143,6 +143,90 @@ pub fn havok_palette(
     track_to_hier: &[Option<usize>],
     num_transform_tracks: usize,
 ) -> Vec<[[f32; 4]; 4]> {
+    let local = havok_locals(rig, sample, track_to_hier, num_transform_tracks);
+    skin_palette(rig, &model_poses(rig, &local))
+}
+
+/// `havok_palette` with baked root locomotion stripped: after sampleAndCombine, ROOT bones keep
+/// their BIND local translation (sampled rotation/scale stay), so a clip whose root track strides
+/// (the walk clip's root translates up to ~1.55 m) animates in place and the entity `Transform`
+/// alone moves the model. Separate entry point so `--animate` / diagnostics keep the raw clip.
+pub fn havok_palette_in_place(
+    rig: &[BoneRig],
+    sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+) -> Vec<[[f32; 4]; 4]> {
+    let mut local = havok_locals(rig, sample, track_to_hier, num_transform_tracks);
+    for b in 0..rig.len() {
+        if rig[b].parent < 0 {
+            let lb = rig[b].local_bind;
+            local[b].translation = [lb[3][0], lb[3][1], lb[3][2]];
+        }
+    }
+    skin_palette(rig, &model_poses(rig, &local))
+}
+
+/// Crossfade variant of [`havok_palette_in_place`]: sampleAndCombine BOTH clip samples into
+/// per-bone locals, blend them per bone (hkaSkeletonUtils::blendPoses math — `w` = weight of
+/// sample B), strip root locomotion, then compose. Used by the world scene during clip switches.
+pub fn havok_palette_blend_in_place(
+    rig: &[BoneRig],
+    sample_a: &[QsTransform],
+    track_to_hier_a: &[Option<usize>],
+    num_transform_tracks_a: usize,
+    sample_b: &[QsTransform],
+    track_to_hier_b: &[Option<usize>],
+    num_transform_tracks_b: usize,
+    w: f32,
+) -> Vec<[[f32; 4]; 4]> {
+    let la = havok_locals(rig, sample_a, track_to_hier_a, num_transform_tracks_a);
+    let lb = havok_locals(rig, sample_b, track_to_hier_b, num_transform_tracks_b);
+    let mut local: Vec<QsTransform> = la.iter().zip(&lb).map(|(a, b)| qs_blend(a, b, w)).collect();
+    for b in 0..rig.len() {
+        if rig[b].parent < 0 {
+            let m = rig[b].local_bind;
+            local[b].translation = [m[3][0], m[3][1], m[3][2]];
+        }
+    }
+    skin_palette(rig, &model_poses(rig, &local))
+}
+
+/// hkaSkeletonUtils::blendPoses per-bone math: translation/scale lerp, rotation nlerp with the
+/// hemisphere fix (negate b's quaternion if dot(a,b) < 0, then lerp + renormalize). `w` = weight
+/// of `b` (0 = pure a, 1 = pure b).
+fn qs_blend(a: &QsTransform, b: &QsTransform, w: f32) -> QsTransform {
+    let l3 = |x: [f32; 3], y: [f32; 3]| {
+        [x[0] + (y[0] - x[0]) * w, x[1] + (y[1] - x[1]) * w, x[2] + (y[2] - x[2]) * w]
+    };
+    let (qa, mut qb) = (a.rotation, b.rotation);
+    if qa[0] * qb[0] + qa[1] * qb[1] + qa[2] * qb[2] + qa[3] * qb[3] < 0.0 {
+        for c in qb.iter_mut() {
+            *c = -*c;
+        }
+    }
+    let mut r = [0.0f32; 4];
+    for i in 0..4 {
+        r[i] = qa[i] + (qb[i] - qa[i]) * w;
+    }
+    let n = (r.iter().map(|c| c * c).sum::<f32>()).sqrt();
+    if n > 1e-6 {
+        for c in r.iter_mut() {
+            *c /= n;
+        }
+    } else {
+        r = qa;
+    }
+    QsTransform { translation: l3(a.translation, b.translation), rotation: r, scale: l3(a.scale, b.scale) }
+}
+
+/// sampleAndCombine into per-bone local hkQsTransforms (shared by the palette entry points above).
+fn havok_locals(
+    rig: &[BoneRig],
+    sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+) -> Vec<QsTransform> {
     let mut local = bind_qs(rig);
     for (track, bone) in track_to_hier.iter().enumerate() {
         if track >= num_transform_tracks {
@@ -163,7 +247,7 @@ pub fn havok_palette(
             }
         }
     }
-    skin_palette(rig, &model_poses(rig, &local))
+    local
 }
 
 /// Compose a Havok `QsTransform` (translation, quat xyzw, scale) into a row-major, row-vector

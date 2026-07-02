@@ -1,8 +1,11 @@
 // Phase-1e.2b shader: textured + tangent-space normal mapping + directional light.
 // Game space is left-handed, +Y up (docs/coordinate_systems.md); MVP built LH.
 
+// Distance fog is a PLACEHOLDER for the game's real PgSky/PgSun/PgCloud shader stack.
 struct Camera {
     mvp: mat4x4<f32>,
+    fog_color_density: vec4<f32>, // rgb = fog color, w = density
+    fog_misc: vec4<f32>,          // x = fog enable 0/1, y = fog start distance, z/w reserved
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -21,6 +24,8 @@ struct VSOut {
     @location(1) n: vec3<f32>,
     @location(2) t: vec3<f32>,
     @location(3) b: vec3<f32>,
+    @location(4) view_depth: f32, // clip.w = view-space depth (LH perspective proj)
+    @location(5) color: vec3<f32>, // vertex color (albedo modulation; markers category-tint)
 };
 
 @vertex
@@ -56,6 +61,8 @@ fn vs_main(
     }
 
     out.clip_pos = cam.mvp * vec4<f32>(skinned.xyz, 1.0);
+    out.view_depth = out.clip_pos.w;
+    out.color = color;
     out.uv = uv;
     out.n = nrm;
     out.t = tng;
@@ -65,7 +72,10 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    let albedo = textureSample(t_diffuse, s_linear, in.uv).rgb;
+    // Vertex color modulates the sampled albedo. Textured geometry (terrain/player/props) authors
+    // color = (1,1,1) so this is a no-op there; the untextured placement markers use it (white
+    // fallback texture) to category-tint via vertex color.
+    let albedo = textureSample(t_diffuse, s_linear, in.uv).rgb * in.color;
 
     // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
     let nsamp = textureSample(t_normal, s_linear, in.uv);
@@ -81,5 +91,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(N, L), 0.0);
     let ambient = 0.35;
     let lit = albedo * (ambient + 0.9 * ndl);
-    return vec4<f32>(lit, 1.0);
+
+    // Distance fog (PLACEHOLDER for PgSky/PgSun/PgCloud): exponential falloff past the start distance.
+    var rgb = lit;
+    if (cam.fog_misc.x > 0.5) {
+        let f = clamp(
+            1.0 - exp(-cam.fog_color_density.w * max(in.view_depth - cam.fog_misc.y, 0.0)),
+            0.0, 1.0,
+        );
+        rgb = mix(rgb, cam.fog_color_density.rgb, f);
+    }
+    return vec4<f32>(rgb, 1.0);
 }
