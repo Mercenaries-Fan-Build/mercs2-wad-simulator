@@ -381,12 +381,14 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         let nxt = prmg.get(gi + 1).copied().unwrap_or(n_desc);
         let (mut strm_info, mut strm_decl, mut strm_data) = (None, None, None);
         let (mut ibuf_info, mut ibuf_data, mut prmt) = (None, None, None);
+        let mut grp_info = None; // the group's INFO leaf (row right after PRMG)
         let mut state = 0u8; // 1 = inside STRM, 2 = inside IBUF
         for i in (pr + 1)..nxt {
             let cm = u0(i) == 0xFFFF_FFFF;
             match (tag(i), cm) {
                 (b"STRM", true) => state = 1,
                 (b"IBUF", true) => state = 2,
+                (b"INFO", false) if state == 0 && grp_info.is_none() => grp_info = resolve(u0(i), size(i)),
                 (b"PRMT", false) if prmt.is_none() => prmt = resolve(u0(i), size(i)),
                 (b"info", false) if state == 1 && strm_info.is_none() => strm_info = resolve(u0(i), size(i)),
                 (b"decl", false) if state == 1 && strm_decl.is_none() => strm_decl = resolve(u0(i), size(i)),
@@ -473,6 +475,41 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         tangents.truncate(positions.len());
         joints.truncate(positions.len());
         weights.truncate(positions.len());
+
+        // BLENDINDICES are palette-relative, not global: the group's INFO leaf carries a
+        // bone-range table (`+20 u32 range_count`, then `range_count × {u16 hier_base,
+        // u16 count}` pairs from +24), and the vertex indices address the CONCATENATION of
+        // those ranges. Engine oracle FUN_00479d90: per range, the shader-constant upload
+        // sources `pose + hier_base*0x30` for `count` matrices, with the destination offset
+        // accumulating counts. Expand the table and map each index to its global HIER bone.
+        // Groups without a valid table (rigid MESH INFO(60) holds different data; sanity
+        // gates reject it) keep their indices as-is.
+        if !joints.is_empty() {
+            if let Some((is_, ie_)) = grp_info {
+                let rc = if ie_ - is_ >= 28 { read_u32_le(container, is_ + 20) as usize } else { 0 };
+                if (1..=8).contains(&rc) && 24 + rc * 4 <= ie_ - is_ {
+                    let mut palette: Vec<u16> = Vec::new();
+                    let mut ok = true;
+                    for r in 0..rc {
+                        let o = is_ + 24 + r * 4;
+                        let base = u16::from_le_bytes([container[o], container[o + 1]]);
+                        let cnt = u16::from_le_bytes([container[o + 2], container[o + 3]]);
+                        if cnt == 0 || base as usize + cnt as usize > 4096 || palette.len() + cnt as usize > 256 {
+                            ok = false;
+                            break;
+                        }
+                        palette.extend(base..base + cnt);
+                    }
+                    if ok {
+                        for j4 in joints.iter_mut() {
+                            for j in j4.iter_mut() {
+                                *j = palette.get(*j as usize).copied().unwrap_or(*j as u16).min(255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Index strip (u16) → triangles. Index count at ibuf_info+0.
         let ic = read_u32_le(container, iis) as usize;
