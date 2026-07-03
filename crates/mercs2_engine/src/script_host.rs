@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mercs2_script::{EngineHost, ScriptHost};
@@ -109,13 +110,84 @@ impl EngineHost for GameScriptHost {
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
-/// realize. Runs the authentic `MrxUtil.SpawnActor` body (mrxutil.lua:463) for the inanimate
-/// `HqInterior` against the real `Pg.Spawn` / `Object.*` bindings.
-///
-/// This is boot glue standing in for the real `mrxhq`/`WifPmcInterior` module tree (a 6-module import
-/// cascade) until that runs end to end — but the control flow is already authentic: the interior
-/// spawns because Lua's `Pg.Spawn` asked for it, not a hardcoded engine call.
+/// realize. Prefers the REAL `MrxUtil.SpawnActor` (imported from the decompiled Lua corpus); falls
+/// back to an inlined copy of its body if the corpus isn't reachable or the import cascade fails, so
+/// the game boot never breaks. Either way the interior spawns because the script asked for it.
 pub fn run_interior_boot() -> Vec<SpawnRequest> {
+    if let Some(root) = discover_lua_root() {
+        match run_interior_boot_real(&root) {
+            Ok(spawns) if !spawns.is_empty() => {
+                println!(
+                    "[script] interior boot via REAL MrxUtil.SpawnActor (corpus {}): {} spawn(s)",
+                    root.display(),
+                    spawns.len()
+                );
+                return spawns;
+            }
+            Ok(_) => eprintln!("[script] real boot produced no spawns; using inline glue"),
+            Err(e) => eprintln!("[script] real boot failed ({e}); using inline glue"),
+        }
+    }
+    run_interior_boot_inline()
+}
+
+/// Locate the decompiled Lua corpus root (`docs/mercs2-luacd/src`): `MERCS2_LUA_ROOT` if set, else the
+/// dev path baked from this crate's location. Returns `None` at a shipped install (corpus not present).
+fn discover_lua_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("MERCS2_LUA_ROOT") {
+        let pb = PathBuf::from(p);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    // crate dir = <repo>/tools/wad_simulator/crates/mercs2_engine → up 4 to <repo>.
+    let baked = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/mercs2-luacd/src");
+    baked.is_dir().then_some(baked)
+}
+
+/// Run the interior boot through the REAL corpus `MrxUtil.SpawnActor` — no inlined copy. Imports the
+/// module (which cascades through its own imports) and calls the actual function that ships in the
+/// game. Its body uses only bindings the engine already provides (`Pg.Spawn`/`Object.*`/`Debug`/
+/// `Event`), so a successful import means real game code is driving the engine.
+pub fn run_interior_boot_real(root: &Path) -> Result<Vec<SpawnRequest>, String> {
+    use std::collections::BTreeSet;
+    let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+    let sh = ScriptHost::new(vec![root.to_path_buf()]).map_err(|e| e.to_string())?;
+    sh.register_engine(host.clone()).map_err(|e| e.to_string())?;
+    // Let the real import cascade COMPLETE: auto-stub the engine binding tables the game modules touch
+    // at load time (VO/Hud/Net/Graphics/…) as logged no-ops. The interior spawn itself uses only the
+    // real bindings (Pg.Spawn/Object.*); the stubs just keep unrelated top-level code from erroring.
+    let trace: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
+    sh.enable_autostub(trace.clone()).map_err(|e| e.to_string())?;
+    let o = PMC_INTERIOR_ACTOR_ORIGIN;
+    let src = format!(
+        "import(\"MrxUtil\")\n\
+         MrxUtil.SpawnActor(\"{tpl}\", \"HqInterior\", {{ {x}, {y}, {z} }}, nil, 0, false, false)\n",
+        tpl = PMC_INTERIOR_TEMPLATE,
+        x = o[0],
+        y = o[1],
+        z = o[2]
+    );
+    sh.exec(&src, "@interior_boot_real").map_err(|e| e.to_string())?;
+    let stubbed: Vec<String> = trace
+        .borrow()
+        .iter()
+        .filter_map(|s| s.strip_prefix("global:").map(String::from))
+        .collect();
+    if !stubbed.is_empty() {
+        println!(
+            "[script] real boot completed; auto-stubbed {} engine binding table(s): {}",
+            stubbed.len(),
+            stubbed.join(", ")
+        );
+    }
+    let spawns = std::mem::take(&mut host.borrow_mut().spawns);
+    Ok(spawns)
+}
+
+/// The fallback: the exact inanimate-`HqInterior` branch of `MrxUtil.SpawnActor` (mrxutil.lua:463),
+/// inlined as engine-embedded boot glue for when the corpus isn't reachable.
+pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
     let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
     let sh = match ScriptHost::bare() {
         Ok(s) => s,
@@ -129,7 +201,6 @@ pub fn run_interior_boot() -> Vec<SpawnRequest> {
         return Vec::new();
     }
     let o = PMC_INTERIOR_ACTOR_ORIGIN;
-    // The exact inanimate-HqInterior branch of MrxUtil.SpawnActor, as engine-embedded boot glue.
     let src = format!(
         "local uGuid = Pg.GetGuidByName(\"HqInterior\")\n\
          if not uGuid then uGuid = Pg.Spawn(\"{tpl}\", 0, 0, 0, 0, false, true) end\n\

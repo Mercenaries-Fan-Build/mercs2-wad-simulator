@@ -98,6 +98,31 @@ string.gfind = string.gfind or string.gmatch
 _MODULES = _MODULES or {}
 "#;
 
+/// Bring-up auto-stub layer (opt-in). Installs a `_G` metatable so a read of an as-yet-unimplemented
+/// Capitalized global (an engine binding table the game Lua expects) resolves to a logged no-op stub
+/// — indexable AND callable, recursively — instead of erroring. Lets the real import cascade complete;
+/// every stubbed name is reported to `__stub_note` (a reimpl-side Surface-B binding trace). Lowercase
+/// misses stay `nil` (normal semantics).
+const AUTOSTUB_LUA: &str = r#"
+local function makestub(path)
+  return setmetatable({}, {
+    __index = function(_, k) __stub_note(path .. "." .. tostring(k)); return makestub(path .. "." .. tostring(k)) end,
+    __call  = function(_, ...) __stub_note("call:" .. path); return nil end,
+  })
+end
+setmetatable(_G, {
+  __index = function(_, k)
+    if type(k) == "string" and string.match(k, "^%u") then
+      __stub_note("global:" .. k)
+      local s = makestub(k)
+      rawset(_G, k, s)
+      return s
+    end
+    return nil
+  end,
+})
+"#;
+
 /// The module loader: resolves `import`/`inherit` names to corpus `.lua` files, executes each in its
 /// own environment, and caches the result. Held behind an `Rc` and captured by the loader closures.
 struct Loader {
@@ -383,6 +408,24 @@ impl ScriptHost {
         )?;
         g.set("Event", event)?;
 
+        Ok(())
+    }
+
+    /// Install the lenient bring-up auto-stub layer ([`AUTOSTUB_LUA`]): reads of unimplemented
+    /// Capitalized engine binding tables resolve to logged no-op stubs so the real import cascade
+    /// completes. Every stubbed name is inserted into `sink` — the reimpl-side Surface-B binding trace
+    /// telling us exactly which bindings the real scripts touch. Call AFTER `register_engine` so the
+    /// real bindings take precedence; stubs only fill the gaps.
+    pub fn enable_autostub(
+        &self,
+        sink: Rc<RefCell<std::collections::BTreeSet<String>>>,
+    ) -> LuaResult<()> {
+        let note = self.lua.create_function(move |_, name: String| {
+            sink.borrow_mut().insert(name);
+            Ok(())
+        })?;
+        self.lua.globals().set("__stub_note", note)?;
+        self.lua.load(AUTOSTUB_LUA).set_name("@autostub").exec()?;
         Ok(())
     }
 
