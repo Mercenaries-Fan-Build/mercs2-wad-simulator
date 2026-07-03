@@ -90,6 +90,17 @@ impl Stockpile {
     }
 }
 
+/// The MESH asset a stockpile category renders as. The placement name (`pmcoutpost_stockpile_money 1`)
+/// does NOT hash to the asset — the real asset is named differently (found via reverse-hashing every
+/// vz.wad ASET: `--find-mesh`/`--dump-asets`). money → `global_moneylargea` (0xA14A463B, 48v, verified).
+/// The `stockpile_<cat>` support assets are type-27 and don't `build_indexed` yet (TODO).
+fn stockpile_mesh(cat: &str) -> Option<u32> {
+    match cat {
+        "money" => Some(0xA14A463B),
+        _ => None,
+    }
+}
+
 /// Parse a `pmcoutpost_stockpile_<category> <tier>` placement name → (category, tier); `None` otherwise.
 fn parse_stockpile_name(name: Option<&str>) -> Option<(String, usize)> {
     let n = name?;
@@ -150,18 +161,24 @@ pub fn load_pmc_interior(
             }
             // Stockpile piles (`pmcoutpost_stockpile_<cat> <tier>`) grow with the player's cash/supplies:
             // tier `i` is visible only once the save's quantity reaches `_tStockpile[cat][i]`
-            // (wifpmcinterior.lua `_SetStockpileCategoryQty`). Hide the tiers the save hasn't reached.
-            if let Some((cat, tier)) = parse_stockpile_name(p.name.as_deref()) {
-                if !stockpile.tier_visible(&cat, tier) {
+            // (wifpmcinterior.lua `_SetStockpileCategoryQty`). Hide the tiers the save hasn't reached, and
+            // resolve their mesh by CATEGORY (the placement name doesn't hash to the asset).
+            let sp = parse_stockpile_name(p.name.as_deref());
+            if let Some((cat, tier)) = &sp {
+                if !stockpile.tier_visible(cat, *tier) {
                     continue;
                 }
             }
-            let hash = model_by_key.get(&p.key).copied().or_else(|| {
-                p.name.as_deref().map(|n| {
-                    let base = n.split(" 0x").next().unwrap_or(n).trim_start_matches('_');
-                    pandemic_hash_m2(base)
-                })
-            });
+            let hash = sp
+                .as_ref()
+                .and_then(|(cat, _)| stockpile_mesh(cat))
+                .or_else(|| model_by_key.get(&p.key).copied())
+                .or_else(|| {
+                    p.name.as_deref().map(|n| {
+                        let base = n.split(" 0x").next().unwrap_or(n).trim_start_matches('_');
+                        pandemic_hash_m2(base)
+                    })
+                });
             let Some(hash) = hash else { continue };
             let Some((m, bmin, bmax)) = load_model_by_hash(w, hash) else { continue };
             tv += m.verts.len();

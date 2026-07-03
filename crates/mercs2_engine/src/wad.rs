@@ -59,6 +59,21 @@ pub fn aset_types(wad: &Wad, name_hash: u32) -> Vec<(u32, bool, u16)> {
         .collect()
 }
 
+/// Every distinct ASET `(name_hash, type_id, is_primary)` in the archive — for reverse-name hunts over
+/// assets that aren't primary models (e.g. props whose mesh isn't a type-19 primary ASET, like the
+/// recruitheli mesh). Sorted + deduped.
+pub fn all_asets(wad: &Wad) -> Vec<(u32, u32, bool)> {
+    let mut v: Vec<(u32, u32, bool)> = wad
+        .archive
+        .aset
+        .iter()
+        .map(|e| (e.asset_hash, e.type_id, e.is_primary()))
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// All model assets as `(name_hash, block_index)` from primary ASET entries, sorted + deduped.
 pub fn model_list(wad: &Wad) -> Vec<(u32, u16)> {
     let mut v: Vec<(u32, u16)> = wad

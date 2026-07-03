@@ -123,6 +123,17 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: dump EVERY ASET (name_hash, type_id, primary) in vz.wad, for reverse-name hunts
+    // over non-primary assets (props whose mesh isn't a type-19 model). `--dump-asets`.
+    if args.iter().any(|a| a == "--dump-asets") {
+        if let Some(w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            for (h, t, prim) in mercs2_engine::wad::all_asets(&w) {
+                println!("{h:08x} {t} {}", if prim { 1 } else { 0 });
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: dump the COMP-type inventory of a WAD block (default 667, the PMC interior
     // overlay) — to see which components each placement carries (Transform/Name/ModelName/Model/…).
     if let Some(i) = args.iter().position(|a| a == "--comps") {
