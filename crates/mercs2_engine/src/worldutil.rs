@@ -411,6 +411,18 @@ pub fn add_overlay_to_catalog(
     (n_mn, n_named)
 }
 
+/// Resolve a vz_state overlay LAYER name to its WAD block, matching the PTHS filename
+/// `<layer>_P###_Q#.block` — i.e. the layer name immediately followed by the `_P` quality suffix.
+/// This avoids the prefix ambiguity a loose substring ([`find_block_by_path`]) has: `vz_state_pmc`
+/// must NOT match `vz_state_pmcinterior_...`. Returns the lowest matching block index, or `None`.
+pub fn resolve_overlay_block(w: &wad::Wad, layer: &str) -> Option<u16> {
+    let needle = format!("{}_p", layer.to_ascii_lowercase());
+    wad::block_paths(w)
+        .iter()
+        .position(|p| p.to_ascii_lowercase().contains(&needle))
+        .map(|i| i as u16)
+}
+
 /// Keyed by entity key in the map `build_streaming_catalog` returns, so the streaming executor can
 /// instantiate the prop on WAKE.
 #[derive(Clone, Copy)]

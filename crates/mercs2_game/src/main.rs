@@ -20,6 +20,11 @@ use mercs2_formats::save;
 /// drops the hero here on a new/continued game). This is GAME data — it belongs in the game layer.
 const PMC_INTERIOR_SPAWN: [f32; 3] = [3794.0427, 450.7505, -3911.0322];
 
+/// The PMC interior's own vz_state overlay (block 667). The save's `tLayerData` does NOT list it (the
+/// interior is Lua/mission-loaded), but the game-start spawn IS the interior — so the game activates
+/// it explicitly, streaming the room shells + furniture around the spawn.
+const INTERIOR_OVERLAYS: &[&str] = &["vz_state_pmcinterior"];
+
 /// `%USERPROFILE%\Documents\My Games\Mercenaries 2\SaveGames`, if it exists.
 fn save_games_dir() -> Option<PathBuf> {
     let up = std::env::var("USERPROFILE").ok()?;
@@ -146,14 +151,21 @@ fn main() {
             cmd.arg(&spawn_arg);
             // Hand the active vz_state overlay set to the engine via a temp file (253 names is too
             // many for argv). The engine resolves each -> its WAD block and folds it into the world.
-            let overlays_arg = state
-                .as_ref()
-                .filter(|s| !s.layers.is_empty())
-                .and_then(|s| {
-                    let path = std::env::temp_dir().join("mercs2_overlays.txt");
-                    std::fs::write(&path, s.layers.join("\n")).ok()?;
-                    Some(format!("--overlays={}", path.display()))
-                });
+            // The save's world-state overlays PLUS the PMC interior overlay (spawn = interior).
+            let mut layers: Vec<String> = state.as_ref().map(|s| s.layers.clone()).unwrap_or_default();
+            for l in INTERIOR_OVERLAYS {
+                if !layers.iter().any(|x| x == *l) {
+                    layers.push((*l).to_string());
+                }
+            }
+            let overlays_arg = if layers.is_empty() {
+                None
+            } else {
+                let path = std::env::temp_dir().join("mercs2_overlays.txt");
+                std::fs::write(&path, layers.join("\n"))
+                    .ok()
+                    .map(|_| format!("--overlays={}", path.display()))
+            };
             if let Some(ov) = &overlays_arg {
                 cmd.arg(ov);
             }

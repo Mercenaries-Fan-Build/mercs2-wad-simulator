@@ -3381,7 +3381,7 @@ fn load_streaming_world_data(
     // the PMC interior) the save selects. Empty `overlays` = base world only.
     let (mut ov_resolved, mut ov_entities) = (0usize, 0usize);
     for layer in overlays {
-        let Some(bi) = find_block_by_path(&w, layer) else { continue };
+        let Some(bi) = resolve_overlay_block(&w, layer) else { continue };
         let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
         let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut manager, &mut props);
         ov_resolved += 1;

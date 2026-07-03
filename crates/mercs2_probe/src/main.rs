@@ -79,7 +79,7 @@ fn first_positional(args: &[String]) -> Option<String> {
 /// a window (the engine's streaming render uses the same `worldutil` fold).
 fn overlays_report(wadpath: &str, profile_path: &str) -> Result<(), String> {
     use mercs2_core::streaming::{StreamingConfig, StreamingManager};
-    use mercs2_engine::worldutil::{add_overlay_to_catalog, find_block_by_path, PropSpawn};
+    use mercs2_engine::worldutil::{add_overlay_to_catalog, resolve_overlay_block, PropSpawn};
     use std::collections::HashMap;
 
     let bytes = std::fs::read(profile_path).map_err(|e| format!("read {profile_path}: {e}"))?;
@@ -102,7 +102,7 @@ fn overlays_report(wadpath: &str, profile_path: &str) -> Result<(), String> {
     let mut unresolved: Vec<&str> = Vec::new();
     let mut per: Vec<(String, usize)> = Vec::new();
     for l in layers {
-        match find_block_by_path(&w, l) {
+        match resolve_overlay_block(&w, l) {
             Some(bi) => {
                 let dec = wad::decompress_block_index(&mut w, bi).map_err(|e| format!("block {bi}: {e}"))?;
                 let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut mgr, &mut props);
