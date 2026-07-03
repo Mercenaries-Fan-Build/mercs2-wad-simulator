@@ -16,6 +16,7 @@ pub mod patch_wad;
 pub mod placement;
 pub mod retarget;
 pub mod safe_slice;
+pub mod save;
 pub mod schema;
 pub mod sges;
 pub mod skeleton;
