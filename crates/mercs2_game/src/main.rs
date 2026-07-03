@@ -68,6 +68,16 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
+    if args.iter().any(|a| a == "--c3-flat") {
+        if let Some(p) = mercs2_engine::wad::registry_vz_wad() {
+            if let Err(e) = mercs2_engine::diag::c3_flat_report(&p) {
+                eprintln!("--c3-flat: {e}");
+            }
+        }
+        return;
+    }
+
     let plan_only = args.iter().any(|a| a == "--plan");
     // Optional explicit profile path (positional); else newest in the save folder.
     let explicit = args

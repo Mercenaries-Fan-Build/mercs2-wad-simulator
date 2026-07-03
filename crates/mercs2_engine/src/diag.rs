@@ -76,6 +76,68 @@ pub fn export_c3_obj(wadpath: &str, outdir: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Scan every c3 building model and report the FLAT, floor-sized ones — candidates for the PMC
+/// interior floor (a nearly-flat mesh whose XZ footprint could be a room floor). Sorted by footprint.
+pub fn c3_flat_report(wadpath: &str) -> Result<(), String> {
+    use mercs2_formats::ucfx::parse_block_entry_table;
+    let mut w = wad::open(wadpath)?;
+    let paths: Vec<String> = wad::block_paths(&w).to_vec();
+    let mut hits: Vec<(String, usize, f32, f32, f32, [f32; 3], [f32; 3], usize)> = Vec::new();
+    for (bi, path) in paths.iter().enumerate() {
+        let lname = path.to_lowercase();
+        if !(lname.contains("\\c3") && lname.contains("_p000_q3") && !lname.contains('-')) {
+            continue;
+        }
+        let Ok(dec) = wad::decompress_block_index(&mut w, bi as u16) else { continue };
+        let (count, entries) = parse_block_entry_table(&dec);
+        if entries.iter().any(|e| e.type_hash == TERRAINMESH_TYPE_HASH) {
+            continue;
+        }
+        let mut pos = 4 + count as usize * 16;
+        let mut model: Option<(usize, usize)> = None;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == wad::MODEL_TYPE_HASH && end <= dec.len() {
+                model = Some((pos, end));
+                break;
+            }
+            pos = end;
+        }
+        let Some((s0, s1)) = model else { continue };
+        let Ok((verts, _i, _d, _s)) = mesh::build_indexed_from_container(&dec[s0..s1]) else { continue };
+        if verts.is_empty() {
+            continue;
+        }
+        let mut mn = [f32::MAX; 3];
+        let mut mx = [f32::MIN; 3];
+        for v in &verts {
+            for c in 0..3 {
+                mn[c] = mn[c].min(v.pos[c]);
+                mx[c] = mx[c].max(v.pos[c]);
+            }
+        }
+        let (dx, dy, dz) = (mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]);
+        // FLAT = thin in Y; floor-sized = a real XZ footprint.
+        if dy < 2.0 && (dx > 15.0 || dz > 15.0) {
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.split("_P000").next().unwrap_or(s).rsplit(['\\', '/']).next().unwrap_or(s).to_string())
+                .unwrap_or_else(|| format!("block{bi}"));
+            hits.push((stem, bi, dx, dy, dz, mn, mx, verts.len()));
+        }
+    }
+    hits.sort_by(|a, b| (b.2 * b.4).partial_cmp(&(a.2 * a.4)).unwrap_or(std::cmp::Ordering::Equal));
+    println!("[c3-flat] {} flat floor-sized c3 model(s) (dy<2m, XZ>15m), largest footprint first:", hits.len());
+    for (stem, bi, dx, dy, dz, mn, mx, nv) in &hits {
+        println!(
+            "  {stem} (blk {bi}) {nv}v dims=({dx:.1},{dy:.1},{dz:.1}) bbox x[{:.1},{:.1}] y[{:.1},{:.1}] z[{:.1},{:.1}]",
+            mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]
+        );
+    }
+    Ok(())
+}
+
 /// Dump the placement-side reference hashes from layers_static: every `ModelName` COMP `model_hash`
 /// (with reuse count) and every named-placement base-name hash (`pandemic_hash_m2`, with reuse
 /// count). Intersecting these with the c3 blocks' model-chunk name_hashes tests whether c3 model
