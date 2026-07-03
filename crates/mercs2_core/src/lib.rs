@@ -16,6 +16,14 @@ pub use hecs::{Entity, World};
 mod components;
 pub use components::{AnimState, ModelRef, SkinPalette, Transform};
 
+pub mod streaming;
+
+/// Keystone A — the reflection / component-descriptor registry (see `registry.rs`): the engine's
+/// component/serialization spine that keys every component class by its name-hash and carries its
+/// pool budget (`cdbsizes.ini`). Keystone C is the ordered [`Schedule`] below.
+pub mod registry;
+pub use registry::{ComponentDescriptor, ComponentRegistry};
+
 /// Fixed-timestep simulation clock. Real frame deltas are accumulated and drained in `fixed_dt`
 /// chunks so the sim advances deterministically regardless of render framerate — the way the
 /// original engine ticks its update. `dt` equals `fixed_dt` during a step; `elapsed`/`tick` count

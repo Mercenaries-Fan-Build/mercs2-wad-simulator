@@ -8,12 +8,12 @@
 //!   cargo run -p mercs2_engine -- <model.bin>      # render a real model container (point cloud)
 //!   cargo run -p mercs2_engine -- --dump <model.bin>  # headless: parse + print stats, no window
 
-mod mesh;
-mod pose;
 mod scene;
-mod wad;
+// Render-agnostic engine modules now live in the crate's library (`lib.rs`) so the sibling
+// mercs2_game / mercs2_probe binaries share them; the bin consumes them via the crate name.
+use mercs2_engine::{mesh, pose, wad};
 
-use mesh::Vertex;
+use mercs2_engine::mesh::Vertex;
 use std::sync::Arc;
 use winit::{
     event::{Event, KeyEvent, WindowEvent},
@@ -47,19 +47,45 @@ fn make_bc_view(
         (TexFormat::Bc3, true) => (wgpu::TextureFormat::Bc3RgbaUnormSrgb, 16u32),
         (TexFormat::Bc3, false) => (wgpu::TextureFormat::Bc3RgbaUnorm, 16u32),
     };
-    let blocks_wide = (td.width + 3) / 4;
-    let blocks_high = (td.height + 3) / 4;
-    let need = (blocks_wide * block_bytes * blocks_high) as usize;
-    if td.width == 0 || td.height == 0 || td.mip0.len() < need {
-        return None; // partial/streamed resident tail — not enough for mip 0
+    if td.width == 0 || td.height == 0 {
+        return None;
     }
+    let mip_bytes = |lvl: u32| -> usize {
+        let w = (td.width >> lvl).max(1);
+        let h = (td.height >> lvl).max(1);
+        (((w + 3) / 4) * block_bytes * ((h + 3) / 4)) as usize
+    };
+    let mip0_need = mip_bytes(0);
+    // Full mip 0 present → upload it at native resolution. Otherwise these are STREAMED textures
+    // that only shipped the resident low-res mip TAIL (the high mips stream in via the global
+    // texture system) — build the texture from the largest resident level so it shows textured
+    // (low-res) instead of falling back to white.
+    let (base_w, base_h, base_bytes, src): (u32, u32, usize, &[u8]) = if td.mip0.len() >= mip0_need {
+        (td.width, td.height, mip0_need, td.mip0.as_slice())
+    } else {
+        let avail = td.all_mips.len();
+        let mut chosen = None;
+        for l in 1..td.mip_count.max(1) {
+            let tail: usize = (l..td.mip_count).map(mip_bytes).sum();
+            if tail > 0 && tail == avail {
+                chosen = Some((
+                    (td.width >> l).max(1),
+                    (td.height >> l).max(1),
+                    mip_bytes(l),
+                ));
+                break;
+            }
+        }
+        match chosen {
+            Some((w, h, sz)) if td.all_mips.len() >= sz => (w, h, sz, td.all_mips.as_slice()),
+            _ => return None, // couldn't reconcile the resident data with any mip level
+        }
+    };
+    let blocks_wide = (base_w + 3) / 4;
+    let blocks_high = (base_h + 3) / 4;
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("diffuse"),
-        size: wgpu::Extent3d {
-            width: td.width,
-            height: td.height,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: base_w, height: base_h, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -74,17 +100,13 @@ fn make_bc_view(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &td.mip0[..need],
+        &src[..base_bytes],
         wgpu::ImageDataLayout {
             offset: 0,
             bytes_per_row: Some(blocks_wide * block_bytes),
             rows_per_image: Some(blocks_high),
         },
-        wgpu::Extent3d {
-            width: td.width,
-            height: td.height,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width: base_w, height: base_h, depth_or_array_layers: 1 },
     );
     Some(tex.create_view(&wgpu::TextureViewDescriptor::default()))
 }
@@ -680,7 +702,7 @@ fn main() {
     // from the EA Games registry key (Install Dir\data\vz.wad).
     let wad_mode = args
         .iter()
-        .any(|a| matches!(a.as_str(), "--wad" | "--list" | "--model" | "--index" | "--world" | "--world-probe" | "--placement-probe" | "--interior-probe" | "--interior-list" | "--entity-find" | "--comp-probe"));
+        .any(|a| matches!(a.as_str(), "--wad" | "--list" | "--model" | "--index" | "--world" | "--world-index" | "--world-probe" | "--terrain-probe" | "--placement-probe" | "--interior-probe" | "--interior-list" | "--entity-find" | "--comp-probe" | "--comp-dump" | "--lod-probe" | "--block-grep" | "--block-probe" | "--terrain-consumer" | "--align-probe" | "--scan-hash" | "--find-ref" | "--placement-names" | "--export-c3-obj" | "--c3-meta" | "--placement-hashes" | "--terrainmesh-probe" | "--hires-terrain" | "--stream-probe" | "--stream"));
     if wad_mode {
         let val = |name: &str| {
             args.iter()
@@ -763,6 +785,15 @@ fn main() {
             }
             return;
         }
+        // Headless terrain splat/LOD RCA (Stage 1): per-tile MTRL materials + the @12 per-vertex
+        // scalar, checked against the terraintextures material set.
+        if args.iter().any(|a| a == "--terrain-probe") {
+            if let Err(e) = terrain_probe(&wadpath) {
+                eprintln!("--terrain-probe failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         // Headless placement probe: parse layers_static (block 29), print counts/ranges + interior hunt.
         if args.iter().any(|a| a == "--placement-probe") {
             if let Err(e) = placement_probe(&wadpath) {
@@ -809,6 +840,313 @@ fn main() {
                 eprintln!("--comp-probe failed: {e}");
                 std::process::exit(1);
             }
+            return;
+        }
+        // Headless COMP dump: hex-dump the data blobs of a NAMED COMP across layers_static (29),
+        // alongside the owning sub-block's Transform keys, to reverse the on-disk record stride.
+        if args.iter().any(|a| a == "--comp-dump") {
+            let name = val("--comp-dump")
+                .filter(|v| !v.is_empty() && !v.starts_with("--"))
+                .unwrap_or_else(|| "HibernationControl".into());
+            if let Err(e) = comp_dump(&wadpath, &name) {
+                eprintln!("--comp-dump failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless block-name grep: print block_index + path for every WAD block whose path
+        // contains the substring (case-insensitive). Reusable naming probe.
+        if args.iter().any(|a| a == "--block-grep") {
+            let needle = val("--block-grep").unwrap_or_default().to_lowercase();
+            match wad::open(&wadpath) {
+                Ok(w) => {
+                    let mut n = 0;
+                    for (i, p) in wad::block_paths(&w).iter().enumerate() {
+                        if needle.is_empty() || p.to_lowercase().contains(&needle) {
+                            println!("block={i:<5} {p}");
+                            n += 1;
+                        }
+                    }
+                    println!("[block-grep] {n} blocks match '{needle}'");
+                }
+                Err(e) => eprintln!("--block-grep failed: {e}"),
+            }
+            return;
+        }
+        // Headless hash scan: report where given hex hashes appear (LE u32) in low_res_terrain (3121)
+        // + layers_static (29) — used to find the terrainmesh->tile placement mapping.
+        if args.iter().any(|a| a == "--scan-hash") {
+            let hashes: Vec<u32> = args
+                .iter()
+                .filter_map(|a| a.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok()))
+                .collect();
+            if let Ok(mut w) = wad::open(&wadpath) {
+                if let Ok((low, ls)) = find_terrain_blocks(&mut w) {
+                    for (label, blk) in [("low_res_terrain(3121)", &low), ("layers_static(29)", &ls)] {
+                        for &want in &hashes {
+                            let mut hits = Vec::new();
+                            let mut i = 0usize;
+                            while i + 4 <= blk.len() {
+                                if u32::from_le_bytes([blk[i], blk[i + 1], blk[i + 2], blk[i + 3]]) == want {
+                                    hits.push(i);
+                                }
+                                i += 1;
+                            }
+                            println!("[scan-hash] {label}: 0x{want:08X} -> {} hits {:?}", hits.len(), &hits.iter().take(6).collect::<Vec<_>>());
+                            if label.starts_with("layers") && !hits.is_empty() {
+                                // Which COMP owns the first hit?
+                                for c in mercs2_formats::placement::comp_inventory(blk) {
+                                    if let (Some(o), Some(s)) = (c.data_off, c.data_size) {
+                                        if hits[0] >= o && hits[0] < o + s {
+                                            println!("[scan-hash]     -> owning COMP: {:?} (sub_block {}, data@{o}+{s}, schm_stride={:?})", c.info_name, c.sub_block, c.payload_stride);
+                                        }
+                                    }
+                                }
+                            }
+                            if label.starts_with("layers") {
+                                for &h in hits.iter().take(1) {
+                                    let lo = h.saturating_sub(16);
+                                    for j in 0..12 {
+                                        let o = lo + j * 4;
+                                        if o + 4 <= blk.len() {
+                                            let u = u32::from_le_bytes([blk[o], blk[o + 1], blk[o + 2], blk[o + 3]]);
+                                            let f = f32::from_le_bytes([blk[o], blk[o + 1], blk[o + 2], blk[o + 3]]);
+                                            let mark = if o == h { " <<< hash" } else { "" };
+                                            println!("[scan-hash]     @{o}: u32=0x{u:08X} f32={f:.2}{mark}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // Headless hi-res terrain assembly check: load all 400 terrainmeshes (TerrainObject->Transform
+        // placement + POFF sub-tiles) and report the assembled world bounds / counts vs the low-res.
+        if args.iter().any(|a| a == "--hires-terrain") {
+            if let Err(e) = hires_terrain_probe(&wadpath) {
+                eprintln!("--hires-terrain failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless terrainmesh probe: extract the 0x7C569307 terrainmesh chunk from c3 cells and
+        // build its geometry — reveals whether its verts are WORLD-space (the real placement) and
+        // its material count (the terraintextures splat). `--terrainmesh-probe [block]`.
+        if args.iter().any(|a| a == "--terrainmesh-probe") {
+            let bi = val("--terrainmesh-probe").and_then(|s| s.parse::<u16>().ok());
+            if let Err(e) = terrainmesh_probe(&wadpath, bi) {
+                eprintln!("--terrainmesh-probe failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless alignment probe: measure how far object placements float above/below the terrain,
+        // and test coordinate transforms (transpose/flip) of the sampling XZ to reveal a mapping bug.
+        if args.iter().any(|a| a == "--align-probe") {
+            if let Err(e) = align_probe(&wadpath) {
+                eprintln!("--align-probe failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless placement-name analysis: the ~62k layers_static placements have a Name but mostly
+        // no ModelName. Count name frequency (instancing) + check which resolve to a real model via
+        // the name-hash recipe — finds the trees/bushes/props referenced thousands of times.
+        if args.iter().any(|a| a == "--placement-names") {
+            if let Ok(mut w) = wad::open(&wadpath) {
+                if let Ok((_low, ls)) = find_terrain_blocks(&mut w) {
+                    let places = mercs2_formats::placement::load_placements(&ls).unwrap_or_default();
+                    let mn: std::collections::HashSet<u32> = mercs2_formats::placement::load_model_placements(&ls).iter().map(|p| p.key).collect();
+                    let mut freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    let mut no_mn_with_name = 0usize;
+                    for p in &places {
+                        if let Some(n) = &p.name {
+                            let base = n.trim_start_matches('_').to_string();
+                            *freq.entry(base).or_insert(0) += 1;
+                            if !mn.contains(&p.key) { no_mn_with_name += 1; }
+                        }
+                    }
+                    println!("[pnames] {} placements, {} distinct base names; {} have a Name but NO ModelName", places.len(), freq.len(), no_mn_with_name);
+                    // Full coverage: distinct names + total placements whose name-hash resolves.
+                    let (mut names_ok, mut places_ok) = (0usize, 0usize);
+                    for (name, count) in &freq {
+                        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+                        if wad::extract_container(&mut w, h).is_ok() {
+                            names_ok += 1;
+                            places_ok += count;
+                        }
+                    }
+                    let total_named: usize = freq.values().sum();
+                    println!("[pnames] RESOLVE via name-hash: {names_ok}/{} distinct names; {places_ok}/{total_named} placements ({:.0}%)", freq.len(), 100.0 * places_ok as f32 / total_named.max(1) as f32);
+                    // Variant test: why don't the big instances (plantlarge/rockhuge) resolve? Try
+                    // hash-fn + name-form variants for a few non-resolving high-count names.
+                    let probes = ["jungle_env_plantlarge04", "Jungle_env_rockhuge01", "global_env_rocksbeach03", "global_lamppostA"];
+                    for name in probes {
+                        let lc = name.to_ascii_lowercase();
+                        let variants: [(&str, u32); 5] = [
+                            ("m2(name)", mercs2_formats::hash::pandemic_hash_m2(name)),
+                            ("hash(name)", mercs2_formats::hash::pandemic_hash(name)),
+                            ("m2(lower)", mercs2_formats::hash::pandemic_hash_m2(&lc)),
+                            ("hash(lower)", mercs2_formats::hash::pandemic_hash(&lc)),
+                            ("m2(name.mesh)", mercs2_formats::hash::pandemic_hash_m2(&format!("{name}.mesh"))),
+                        ];
+                        let hit: Vec<&str> = variants.iter().filter(|(_, h)| wad::extract_container(&mut w, *h).is_ok()).map(|(l, _)| *l).collect();
+                        let aset = wad::aset_types(&w, mercs2_formats::hash::pandemic_hash_m2(name));
+                        println!("[pnames]   variant {name}: resolves via {hit:?}; ASET(m2) types={aset:?}");
+                    }
+                    let mut top: Vec<(String, usize)> = freq.into_iter().collect();
+                    top.sort_by(|a, b| b.1.cmp(&a.1));
+                    for (name, count) in top.iter().take(30) {
+                        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+                        let resolves = wad::extract_container(&mut w, h).is_ok();
+                        println!("[pnames]   x{count:<5} {name:<40} 0x{h:08X} -> {}", if resolves { "MODEL" } else { "-" });
+                    }
+                }
+            }
+            return;
+        }
+        // Export the c3 building Models (0x5B724250, building-only cells) to OBJ into the viewer's
+        // review tree (<outdir>/c3build/<cell>/mesh.obj) for visual inspection in the three.js viewer.
+        if args.iter().any(|a| a == "--export-c3-obj") {
+            let outdir = val("--export-c3-obj")
+                .filter(|v| !v.is_empty() && !v.starts_with("--"))
+                .unwrap_or_else(|| "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/review".into());
+            if let Err(e) = export_c3_obj(&wadpath, &outdir) {
+                eprintln!("--export-c3-obj failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless reference finder: scan EVERY block for a given hex hash (LE u32) and report which
+        // blocks reference it (skips the huge terrainmesh cells to bound cost). Finds placement refs.
+        if args.iter().any(|a| a == "--find-ref") {
+            let wants: Vec<u32> = args
+                .iter()
+                .filter_map(|a| a.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok()))
+                .collect();
+            if let Ok(mut w) = wad::open(&wadpath) {
+                let nblocks = wad::block_paths(&w).len();
+                for &want in &wants {
+                    let mut hits = 0;
+                    for bi in 0..nblocks as u16 {
+                        let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
+                        if dec.len() > 6_000_000 { continue; } // skip huge terrainmesh/geom blocks
+                        let mut i = 0usize;
+                        let mut found = false;
+                        while i + 4 <= dec.len() {
+                            if u32::from_le_bytes([dec[i], dec[i + 1], dec[i + 2], dec[i + 3]]) == want {
+                                found = true;
+                                break;
+                            }
+                            i += 1;
+                        }
+                        if found {
+                            let path = wad::block_paths(&w).get(bi as usize).cloned().unwrap_or_default();
+                            println!("[find-ref] 0x{want:08X} in block={bi} {path}");
+                            hits += 1;
+                            if hits >= 10 { break; }
+                        }
+                    }
+                    println!("[find-ref] 0x{want:08X}: {hits} block(s) reference it");
+                }
+            }
+            return;
+        }
+        // Headless terrain-consumer hunt: find which blocks reference the 30 `terraintextures`
+        // material hashes (the hi-res terrain path — proven NOT in low_res_terrain/layers_static).
+        // Scans c3-class geometry blocks (the prime candidate) by raw LE-u32 hash match.
+        if args.iter().any(|a| a == "--terrain-consumer") {
+            if let Err(e) = terrain_consumer_scan(&wadpath) {
+                eprintln!("--terrain-consumer failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless block-content probe: decompress a block and list its chunk-entry table
+        // (type_hash, name_hash, size) + any textures' dimensions. `--block-probe <index>`.
+        if args.iter().any(|a| a == "--block-probe") {
+            let bi = val("--block-probe").and_then(|s| s.parse::<u16>().ok());
+            if let (Ok(mut w), Some(bi)) = (wad::open(&wadpath), bi) {
+                match wad::decompress_block_index(&mut w, bi) {
+                    Ok(dec) => {
+                        let path = wad::block_paths(&w).get(bi as usize).cloned().unwrap_or_default();
+                        println!("[block-probe] block={bi} {path} ({} B decompressed)", dec.len());
+                        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+                        println!("[block-probe] {count} entries:");
+                        for (i, e) in entries.iter().enumerate() {
+                            let tex = wad::extract_texture(&mut w, e.name_hash).ok();
+                            let tinfo = tex
+                                .map(|t| format!("  TEX {}x{} fmt={:?} mips={}", t.width, t.height, t.format, t.mip_count))
+                                .unwrap_or_default();
+                            println!(
+                                "[block-probe]   [{i}] type=0x{:08X} name=0x{:08X} size={}{tinfo}",
+                                e.type_hash, e.name_hash, e.chunk_size
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("[block-probe] decompress failed: {e}"),
+                }
+            } else {
+                eprintln!("[block-probe] usage: --block-probe <block-index>");
+            }
+            return;
+        }
+        // Dump the placement-side reference hashes so we can test whether c3 model blocks are placed
+        // upstream: every ModelName COMP model_hash (with reuse count) + every named-placement
+        // base-name hash (with reuse count), from layers_static. Emits JSON.
+        if args.iter().any(|a| a == "--placement-hashes") {
+            let outfile = val("--placement-hashes").unwrap_or_else(|| "placement_hashes.json".to_string());
+            if let Err(e) = placement_hashes(&wadpath, &outfile) {
+                eprintln!("--placement-hashes failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Dump FULL metadata for every c3 model block (the --export-c3-obj population): PTHS name,
+        // computed c3 grid centre, Model chunk name_hash, and the ENTIRE chunk entry table — to find
+        // any field beyond the Model geom that fingerpoints identity/placement. Emits NDJSON.
+        if args.iter().any(|a| a == "--c3-meta") {
+            let outfile = val("--c3-meta").unwrap_or_else(|| "c3_meta.ndjson".to_string());
+            if let Err(e) = c3_meta(&wadpath, &outfile) {
+                eprintln!("--c3-meta failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless LOD RCA: (a) per-prop SEGM state_mask distribution (does a prop mesh carry
+        // multi-tier LOD sub-objects?), (b) fine-cell leaf-block tier + extent structure.
+        if args.iter().any(|a| a == "--lod-probe") {
+            if let Err(e) = lod_probe(&wadpath) {
+                eprintln!("--lod-probe failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless Layer-1 World Block Index probe: catalog every block, print histogram +
+        // verification counts + sample proximity/LOD-chain queries.
+        if args.iter().any(|a| a == "--world-index") {
+            if let Err(e) = world_index_probe(&wadpath) {
+                eprintln!("--world-index failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless streaming-runtime probe: run the Layer-2 decision core over a scripted camera
+        // path and log per-step resident/awake/tier counts (no window).
+        if args.iter().any(|a| a == "--stream-probe") {
+            if let Err(e) = stream_probe(&wadpath) {
+                eprintln!("--stream-probe failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Control-driven streaming world with a free-fly camera (the default boot; also reachable
+        // explicitly via --stream). Loads/unloads blocks + wakes/hibernates props by proximity.
+        if args.iter().any(|a| a == "--stream") {
+            pollster::block_on(run_streaming_world(wadpath.clone()));
             return;
         }
         // Render the merged low_res world terrain under an elevated bird's-eye camera.
@@ -860,6 +1198,21 @@ fn main() {
             }
         }
         return;
+    }
+
+    // Default boot = the streaming world (user mandate). With NO positional file arg and no
+    // explicit `--triangle`, if a vz.wad is discoverable, boot the control-driven streaming world
+    // with a free-fly camera instead of the placeholder triangle. `--triangle`, an explicit file
+    // model path, or no discoverable wad all fall through to the file-model / triangle path below.
+    let has_positional = args.iter().skip(1).any(|a| !a.starts_with("--"));
+    let force_triangle = args.iter().any(|a| a == "--triangle");
+    if !has_positional && !force_triangle {
+        if let Some(wadpath) = wad::registry_vz_wad() {
+            eprintln!("vz.wad: {wadpath}");
+            eprintln!("[boot] no args -> streaming world (free-fly camera). Use --triangle for the skeleton.");
+            pollster::block_on(run_streaming_world(wadpath));
+            return;
+        }
     }
 
     // File model path, or the placeholder triangle.
@@ -965,6 +1318,1049 @@ fn find_terrain_blocks(w: &mut wad::Wad) -> Result<(Vec<u8>, Vec<u8>), String> {
     }
 
     Ok((low, ls))
+}
+
+/// Lowest block index whose PTHS path contains `needle` (case-insensitive).
+fn find_block_by_path(w: &wad::Wad, needle: &str) -> Option<u16> {
+    let needle = needle.to_lowercase();
+    wad::block_paths(w)
+        .iter()
+        .position(|p| p.to_lowercase().contains(&needle))
+        .map(|i| i as u16)
+}
+
+/// Name hashes of every texture asset in a `terraintextures*` block's entry table.
+fn terraintexture_hashes(w: &mut wad::Wad, needle: &str) -> Vec<u32> {
+    let Some(bi) = find_block_by_path(w, needle) else { return Vec::new() };
+    let Ok(dec) = wad::decompress_block_index(w, bi) else { return Vec::new() };
+    let (_n, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    entries.iter().map(|e| e.name_hash).collect()
+}
+
+/// Load one hi-res terrainmesh by its `0x7C569307` asset hash, built with POFF (16 sub-tiles) and
+/// translated to its world tile position `pos`. Y is world-absolute (pos.y is 0); XZ shifts by pos.
+/// Returns the placed `LoadedModel`. Textures may be empty (terrain materials live in separate
+/// `terraintextures` blocks — resolved later, the splat step).
+fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32; 3]) -> Option<LoadedModel> {
+    let container = wad::extract_container_typed(w, terrainmesh_hash, TERRAINMESH_TYPE_HASH).ok()?;
+    let (mut verts, indices, mut draws, stats) = mesh::build_indexed_from_container(&container).ok()?;
+    // World-place verts + synthesize a tiled world-XZ UV (the terrainmesh has no UV; detail materials
+    // tile every ~12 m via the Repeat sampler).
+    const UV_SCALE: f32 = 1.0 / 12.0;
+    for v in verts.iter_mut() {
+        v.pos[0] += pos[0];
+        v.pos[1] += pos[1];
+        v.pos[2] += pos[2];
+        v.uv = [v.pos[0] * UV_SCALE, v.pos[2] * UV_SCALE];
+    }
+    // SPLAT (first pass): bind each draw's representative detail layer (the reversed per-draw
+    // material -> terraintextures layers). Full per-vertex blend of all layers by the COLOR weights
+    // is the next stage; this shows the real per-region surface material.
+    let layers = mercs2_formats::texture::terrain_group_layers(&container);
+    if layers.len() == draws.len() {
+        for (d, l) in draws.iter_mut().zip(layers.iter()) {
+            // First detail (slot 2) for per-region variety; fall back to the base (slot 0).
+            if let Some(&h) = l.get(2).or_else(|| l.first()) {
+                d.diffuse = Some(h);
+            }
+            d.normal = None;
+        }
+    }
+    // Resolve the material textures (now the terraintextures detail layers, in separate blocks).
+    let mut textures: TexMap = std::collections::HashMap::new();
+    for d in &draws {
+        for h in [d.diffuse, d.normal].into_iter().flatten() {
+            if !textures.contains_key(&h) {
+                if let Ok(t) = wad::extract_texture(w, h) {
+                    textures.insert(h, t);
+                }
+            }
+        }
+    }
+    let mut skin = stats.skin_data();
+    skin.center = [0.0, 0.0, 0.0];
+    skin.scale = 1.0;
+    Some(LoadedModel { hash: terrainmesh_hash, verts, indices, draws, textures, skin, clips: Vec::new() })
+}
+
+/// Headless hi-res terrain assembly check: place all 400 terrainmeshes via `TerrainObject`->Transform
+/// (POFF applied) and report the assembled world bounds / counts against the low-res terrain.
+fn hires_terrain_probe(wadpath: &str) -> Result<(), String> {
+    let mut w = wad::open(wadpath)?;
+    let (_low, ls) = find_terrain_blocks(&mut w)?;
+    let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+    println!("[hires] TerrainObject tiles: {}", tiles.len());
+
+    // Debug the first tile's resolution path.
+    if let Some(t) = tiles.first() {
+        match wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH) {
+            Ok(c) => match mesh::build_indexed_from_container(&c) {
+                Ok((v, _, _, _)) => println!("[hires] tile0 0x{:08X}: extract OK ({} B), build OK ({} verts)", t.terrainmesh_hash, c.len(), v.len()),
+                Err(e) => println!("[hires] tile0 0x{:08X}: extract OK ({} B), BUILD FAILED: {e}", t.terrainmesh_hash, c.len()),
+            },
+            Err(e) => println!("[hires] tile0 0x{:08X}: EXTRACT FAILED: {e}", t.terrainmesh_hash),
+        }
+    }
+
+    let (mut min, mut max) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    let (mut nverts, mut ntris, mut loaded, mut missing) = (0usize, 0usize, 0usize, 0usize);
+    let (mut n_tex, mut draws_diff, mut draws_tot) = (0usize, 0usize, 0usize);
+    for t in &tiles {
+        match load_terrainmesh_tile(&mut w, t.terrainmesh_hash, t.pos) {
+            Some(m) => {
+                loaded += 1;
+                n_tex += m.textures.len();
+                draws_diff += m.draws.iter().filter(|d| d.diffuse.is_some()).count();
+                draws_tot += m.draws.len();
+                nverts += m.verts.len();
+                ntris += m.indices.len() / 3;
+                for v in &m.verts {
+                    for k in 0..3 {
+                        min[k] = min[k].min(v.pos[k]);
+                        max[k] = max[k].max(v.pos[k]);
+                    }
+                }
+            }
+            None => missing += 1,
+        }
+    }
+    println!("[hires] placed {loaded}/{} tiles ({missing} missing) | {nverts} verts / {ntris} tris", tiles.len());
+    println!("[hires] SPLAT textures: {n_tex} total loaded; {draws_diff}/{draws_tot} draws have a diffuse layer bound");
+    println!("[hires] assembled world bounds: X[{:.0},{:.0}] Y[{:.0},{:.0}] Z[{:.0},{:.0}]", min[0], max[0], min[1], max[1], min[2], max[2]);
+    println!("[hires] (low-res terrain spans X/Z[-4000,4000] Y[-168,436]; hi-res should match)");
+    Ok(())
+}
+
+/// Export the c3 building `Model`s (`0x5B724250`) from building-only c3 cells (those WITHOUT a
+/// terrainmesh) to Wavefront OBJ, in the viewer's review-tree layout `<outdir>/c3build/<cell>/mesh.obj`
+/// (auto-scanned by the viewer's vite plugin). Geometry is LOCAL (unplaced) — the point is to VISUALLY
+/// inspect what these unplaced Models are, to crack their placement. No coordinate flips.
+fn export_c3_obj(wadpath: &str, outdir: &str) -> Result<(), String> {
+    use mercs2_formats::ucfx::parse_block_entry_table;
+    let mut w = wad::open(wadpath)?;
+    let paths: Vec<String> = wad::block_paths(&w).to_vec();
+    let mut exported = 0usize;
+    for (bi, path) in paths.iter().enumerate() {
+        let lname = path.to_lowercase();
+        // Bare c3 cell blocks only (the P000_Q3 tier).
+        let is_c3 = lname.contains("\\c3") && lname.contains("_p000_q3") && !lname.contains('-');
+        if !is_c3 {
+            continue;
+        }
+        let Ok(dec) = wad::decompress_block_index(&mut w, bi as u16) else { continue };
+        let (count, entries) = parse_block_entry_table(&dec);
+        // Building-only: has a Model but NO terrainmesh (terrain cells are placed separately).
+        if entries.iter().any(|e| e.type_hash == TERRAINMESH_TYPE_HASH) {
+            continue;
+        }
+        let mut pos = 4 + count as usize * 16;
+        let mut model: Option<(usize, usize)> = None;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == wad::MODEL_TYPE_HASH && end <= dec.len() {
+                model = Some((pos, end));
+                break;
+            }
+            pos = end;
+        }
+        let Some((s0, s1)) = model else { continue };
+        let Ok((verts, indices, _draws, _stats)) = mesh::build_indexed_from_container(&dec[s0..s1]) else { continue };
+        if verts.is_empty() || indices.len() < 3 {
+            continue;
+        }
+        // Cell name for the stem (e.g. c30140).
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.split("_P000").next().unwrap_or(s).rsplit(['\\', '/']).next().unwrap_or(s).to_string())
+            .unwrap_or_else(|| format!("block{bi}"));
+        let dir = format!("{outdir}/c3build/{stem}");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut obj = String::with_capacity(verts.len() * 48);
+        obj.push_str(&format!("# c3 building model {stem} (block {bi}) — LOCAL/unplaced geometry\n"));
+        for v in &verts {
+            obj.push_str(&format!("v {} {} {}\n", v.pos[0], v.pos[1], v.pos[2]));
+        }
+        for v in &verts {
+            obj.push_str(&format!("vn {} {} {}\n", v.normal[0], v.normal[1], v.normal[2]));
+        }
+        for t in indices.chunks_exact(3) {
+            let (a, b, c) = (t[0] + 1, t[1] + 1, t[2] + 1);
+            obj.push_str(&format!("f {a}//{a} {b}//{b} {c}//{c}\n"));
+        }
+        std::fs::write(format!("{dir}/mesh.obj"), obj).map_err(|e| e.to_string())?;
+        exported += 1;
+    }
+    println!("[export-c3-obj] wrote {exported} building-model OBJs to {outdir}/c3build/  (pack='c3build' in the viewer)");
+    Ok(())
+}
+
+/// Dump the placement-side reference hashes from layers_static: every `ModelName` COMP `model_hash`
+/// (with reuse count) and every named-placement base-name hash (`pandemic_hash_m2`, with reuse
+/// count). Intersecting these with the c3 blocks' model-chunk name_hashes tests whether c3 model
+/// blocks are placed upstream by reference (and how heavily reused). Emits JSON.
+fn placement_hashes(wadpath: &str, outfile: &str) -> Result<(), String> {
+    use std::collections::HashMap;
+    let mut w = wad::open(wadpath)?;
+    let (_low, ls) = find_terrain_blocks(&mut w)?;
+    let mut mh: HashMap<u32, usize> = HashMap::new();
+    for p in mercs2_formats::placement::load_model_placements(&ls) {
+        *mh.entry(p.model_hash).or_default() += 1;
+    }
+    let mut nh: HashMap<u32, usize> = HashMap::new();
+    for p in mercs2_formats::placement::load_placements(&ls)? {
+        if let Some(name) = &p.name {
+            let h = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));
+            *nh.entry(h).or_default() += 1;
+        }
+    }
+    let mut s = String::from("{\"model_hashes\":{");
+    for (i, (h, c)) in mh.iter().enumerate() {
+        if i > 0 { s.push(','); }
+        s.push_str(&format!("\"0x{h:08X}\":{c}"));
+    }
+    s.push_str("},\"name_hashes\":{");
+    for (i, (h, c)) in nh.iter().enumerate() {
+        if i > 0 { s.push(','); }
+        s.push_str(&format!("\"0x{h:08X}\":{c}"));
+    }
+    s.push_str("}}");
+    std::fs::write(outfile, &s).map_err(|e| e.to_string())?;
+    println!(
+        "[placement-hashes] ModelName: {} distinct model_hashes ({} total refs); named: {} distinct name_hashes ({} total refs) -> {outfile}",
+        mh.len(), mh.values().sum::<usize>(), nh.len(), nh.values().sum::<usize>()
+    );
+    Ok(())
+}
+
+/// Dump FULL metadata for every c3 model block (same population --export-c3-obj rendered): the
+/// block's PTHS name, its computed c3 grid centre (name→world formula), the Model chunk's own
+/// name_hash (the object's identity hash — resolve via the rainbow table), and its ENTIRE chunk
+/// entry table. Point: reveal any field beyond the Model geometry that fingerpoints what the object
+/// is or where it goes. NDJSON, one line per block; prints a chunk type_hash histogram at the end.
+fn c3_meta(wadpath: &str, outfile: &str) -> Result<(), String> {
+    use mercs2_formats::ucfx::parse_block_entry_table;
+    let mut w = wad::open(wadpath)?;
+    let paths: Vec<String> = wad::block_paths(&w).to_vec();
+    let mut out = String::new();
+    let mut n = 0usize;
+    let mut type_hist: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (bi, path) in paths.iter().enumerate() {
+        let lname = path.to_lowercase();
+        let is_c3 = lname.contains("\\c3") && lname.contains("_p000_q3") && !lname.contains('-');
+        if !is_c3 {
+            continue;
+        }
+        let Ok(dec) = wad::decompress_block_index(&mut w, bi as u16) else { continue };
+        let (_count, entries) = parse_block_entry_table(&dec);
+        let has_tm = entries.iter().any(|e| e.type_hash == TERRAINMESH_TYPE_HASH);
+        let has_model = entries.iter().any(|e| e.type_hash == wad::MODEL_TYPE_HASH);
+        if !has_model || has_tm {
+            continue; // same population as --export-c3-obj (Model, no terrainmesh)
+        }
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.split("_P000").next().unwrap_or(s).rsplit(['\\', '/']).next().unwrap_or(s).to_string())
+            .unwrap_or_default();
+        // c3 cell number from "c3NNNN" -> world grid centre (name→placement formula).
+        let cell = stem.strip_prefix('c').and_then(|d| d.parse::<u32>().ok());
+        let centre = cell.map(mercs2_formats::world_index::c3_cell_centre);
+        let model_name = entries
+            .iter()
+            .find(|e| e.type_hash == wad::MODEL_TYPE_HASH)
+            .map(|e| e.name_hash)
+            .unwrap_or(0);
+        // Union AABB over ALL model chunks in the block (decisive for placement: cell-local-offset
+        // vs origin-centred). Walk the entry table by offset to slice each model chunk.
+        let mut pos = 4 + entries.len() * 16;
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let mut n_models = 0usize;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == wad::MODEL_TYPE_HASH && end <= dec.len() {
+                if let Ok((verts, _idx, _d, _s)) = mesh::build_indexed_from_container(&dec[pos..end]) {
+                    for v in &verts {
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(v.pos[k]);
+                            hi[k] = hi[k].max(v.pos[k]);
+                        }
+                    }
+                    if !verts.is_empty() {
+                        n_models += 1;
+                    }
+                }
+            }
+            pos = end;
+        }
+        let aabb = if n_models > 0 {
+            format!("[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}]", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2])
+        } else {
+            "null".to_string()
+        };
+        let mut chunks = String::new();
+        for (i, e) in entries.iter().enumerate() {
+            *type_hist.entry(e.type_hash).or_default() += 1;
+            if i > 0 {
+                chunks.push(',');
+            }
+            chunks.push_str(&format!(
+                "[\"0x{:08X}\",\"0x{:08X}\",{}]",
+                e.type_hash, e.name_hash, e.chunk_size
+            ));
+        }
+        let (cx, cz) = centre.unwrap_or((f32::NAN, f32::NAN));
+        out.push_str(&format!(
+            "{{\"stem\":\"{stem}\",\"block\":{bi},\"path\":\"{}\",\"cell\":{},\"centre\":[{:.2},{:.2}],\"model_name\":\"0x{:08X}\",\"n_models\":{n_models},\"aabb\":{aabb},\"n_chunks\":{},\"chunks\":[{chunks}]}}\n",
+            path.replace('\\', "\\\\"),
+            cell.map(|c| c as i64).unwrap_or(-1),
+            cx, cz, model_name, entries.len(),
+        ));
+        n += 1;
+    }
+    std::fs::write(outfile, &out).map_err(|e| e.to_string())?;
+    let mut hist: Vec<(u32, usize)> = type_hist.into_iter().collect();
+    hist.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("[c3-meta] wrote {n} c3 model blocks -> {outfile}");
+    println!("[c3-meta] chunk type_hash histogram (across all {n} blocks):");
+    for (t, c) in hist.iter().take(30) {
+        println!("[c3-meta]   0x{t:08X}  x{c}");
+    }
+    Ok(())
+}
+
+/// The terrainmesh CHDR class hash (`0x7C569307`, "terrainmesh" — per-cell hi-res terrain geometry;
+/// docs/aset_format.md). Distinct from the small building `Model` (`MODEL_TYPE_HASH`).
+const TERRAINMESH_TYPE_HASH: u32 = 0x7C56_9307;
+
+/// Extract + build the `0x7C569307` terrainmesh from a c3 cell block (or auto-find one), reporting
+/// vertex bounds (WORLD vs cell-local — the real placement question) and draw/material count (the
+/// splat). This is the geometry `load_one_c3_cell` should be loading for terrain, not the small Model.
+fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String> {
+    use mercs2_formats::ucfx::parse_block_entry_table;
+    let mut w = wad::open(wadpath)?;
+
+    // Find candidate blocks: any with a terrainmesh entry. Auto-pick the first few if none given.
+    let candidates: Vec<u16> = match block {
+        Some(b) => vec![b],
+        None => {
+            let mut v = Vec::new();
+            for i in 0..wad::block_paths(&w).len() as u16 {
+                if v.len() >= 6 {
+                    break;
+                }
+                if let Ok(dec) = wad::decompress_block_index(&mut w, i) {
+                    let (_n, entries) = parse_block_entry_table(&dec);
+                    if entries.iter().any(|e| e.type_hash == TERRAINMESH_TYPE_HASH) {
+                        v.push(i);
+                    }
+                }
+            }
+            v
+        }
+    };
+    if candidates.is_empty() {
+        return Err("no block with a 0x7C569307 terrainmesh found".into());
+    }
+
+    // Low-res terrain heightmap (the VERIFIED-correct ground) + the TerrainObject->Transform tile
+    // placement map (terrainmesh_hash -> world pos), so we test placement against the REAL position.
+    let (hmap, tile_pos) = {
+        let (low, ls) = find_terrain_blocks(&mut w)?;
+        let tm = mercs2_formats::terrain::load_terrain(&low, &ls)?;
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let map: std::collections::HashMap<u32, [f32; 3]> =
+            tiles.iter().map(|t| (t.terrainmesh_hash, t.pos)).collect();
+        println!("[terrainmesh] TerrainObject tiles parsed: {} (distinct meshes {})", tiles.len(), map.len());
+        (HeightMap::build(&tm), map)
+    };
+
+    for bi in candidates {
+        let path = wad::block_paths(&w).get(bi as usize).cloned().unwrap_or_default();
+        let dec = match wad::decompress_block_index(&mut w, bi) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("[terrainmesh] block={bi} {path}: decompress failed: {e}");
+                continue;
+            }
+        };
+        let (count, entries) = parse_block_entry_table(&dec);
+        // Locate the terrainmesh chunk span (mirrors load_one_c3_cell's model walk).
+        let mut pos = 4 + count as usize * 16;
+        let mut span: Option<(usize, usize)> = None;
+        let mut tm_hash = 0u32;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == TERRAINMESH_TYPE_HASH && end <= dec.len() {
+                span = Some((pos, end));
+                tm_hash = e.name_hash;
+                break;
+            }
+            pos = end;
+        }
+        let Some((s0, s1)) = span else {
+            println!("[terrainmesh] block={bi} {path}: no terrainmesh chunk located");
+            continue;
+        };
+        // Terrain material RCA: parse_mtrl + group indices, and scan the MTRL body for terraintextures
+        // hashes (the ~30 material set) to see how the terrainmesh binds them.
+        {
+            let container = &dec[s0..s1];
+            let mats = mercs2_formats::texture::parse_mtrl(container);
+            let gmi = mercs2_formats::texture::group_material_indices(container);
+            println!("[terrainmesh]   MTRL: parse_mtrl -> {} materials; group_material_indices (per draw) {:?}", mats.len(), &gmi.iter().take(12).collect::<Vec<_>>());
+            for (mi, m) in mats.iter().enumerate().take(6) {
+                println!("[terrainmesh]     material[{mi}] textures={:08X?}", m.textures);
+            }
+            let tt: std::collections::HashSet<u32> = terraintexture_hashes(&mut w, "terraintextures_P002_Q1").into_iter().collect();
+            // RAW MTRL body dump (annotated) to reverse the terrainmesh record layout.
+            if std::env::var("MERCS2_MTRL_DUMP").is_ok() {
+                // Locate the MTRL chunk data span in the container.
+                let dao = u32::from_le_bytes([container[4], container[5], container[6], container[7]]) as usize;
+                let ndesc = u32::from_le_bytes([container[16], container[17], container[18], container[19]]) as usize;
+                let mut mtrl: Option<(usize, usize)> = None;
+                for d in 0..ndesc.min(6000) {
+                    let dp = 20 + d * 20;
+                    if dp + 20 > container.len() { break; }
+                    if &container[dp..dp + 4] == b"MTRL" {
+                        let off = u32::from_le_bytes([container[dp + 4], container[dp + 5], container[dp + 6], container[dp + 7]]);
+                        let sz = u32::from_le_bytes([container[dp + 8], container[dp + 9], container[dp + 10], container[dp + 11]]) as usize;
+                        if off != 0xFFFF_FFFF {
+                            let base = if dao > 0 { dao + off as usize } else { 8 + off as usize };
+                            mtrl = Some((base, sz));
+                        }
+                        break;
+                    }
+                }
+                if let Some((mb, ms)) = mtrl {
+                    println!("[mtrl-dump] MTRL body @{mb} size {ms}: annotated u32s (TT=terraintextures, M=A3CD72A7 marker, f=float):");
+                    let end = (mb + ms).min(container.len());
+                    let mut o = mb;
+                    let mut idx = 0;
+                    while o + 4 <= end && idx < 120 {
+                        let u = u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]);
+                        let f = f32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]);
+                        let tag = if u == 0xA3CD72A7 { "  <M".to_string() }
+                            else if tt.contains(&u) { "  <TT".to_string() }
+                            else if u <= 16 { format!("  int={u}") }
+                            else if f.abs() > 1e-6 && f.abs() < 1e6 { format!("  f={f:.3}") }
+                            else { String::new() };
+                        println!("[mtrl-dump]   +{:04}: 0x{u:08X}{tag}", o - mb);
+                        o += 4;
+                        idx += 1;
+                    }
+                }
+            }
+            // Re-locate the MTRL chunk raw bytes and scan for tt hashes.
+            let dec2 = wad::decompress_block_index(&mut w, bi).unwrap_or_default();
+            let hits: Vec<(usize, u32)> = {
+                let mut v = Vec::new();
+                let mut i = s0;
+                while i + 4 <= (s1).min(dec2.len()) {
+                    let h = u32::from_le_bytes([dec2[i], dec2[i + 1], dec2[i + 2], dec2[i + 3]]);
+                    if tt.contains(&h) { v.push((i - s0, h)); }
+                    i += 1;
+                }
+                v
+            };
+            println!("[terrainmesh]   terraintextures hashes present in this terrainmesh chunk: {} {:08X?}", hits.len(), hits.iter().take(8).map(|(_, h)| h).collect::<Vec<_>>());
+            // Reverse draw->material: collect each MTRL record's ID (first u32) + its layer textures
+            // via the standard stride (116 + tex_count*4), then check the PRMT refs against those IDs.
+            {
+                let dao = u32::from_le_bytes([container[4], container[5], container[6], container[7]]) as usize;
+                let ndesc = u32::from_le_bytes([container[16], container[17], container[18], container[19]]) as usize;
+                let mut mbody: Option<(usize, usize)> = None;
+                for d in 0..ndesc.min(6000) {
+                    let dp = 20 + d * 20;
+                    if dp + 4 > container.len() { break; }
+                    if &container[dp..dp + 4] == b"MTRL" {
+                        let off = u32::from_le_bytes([container[dp + 4], container[dp + 5], container[dp + 6], container[dp + 7]]);
+                        let sz = u32::from_le_bytes([container[dp + 8], container[dp + 9], container[dp + 10], container[dp + 11]]) as usize;
+                        if off != 0xFFFF_FFFF { mbody = Some((if dao > 0 { dao + off as usize } else { 8 + off as usize }, sz)); }
+                        break;
+                    }
+                }
+                if let Some((mb, ms)) = mbody {
+                    let g = |o: usize| u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]);
+                    let mut ids: Vec<u32> = Vec::new();
+                    let mut p = mb;
+                    let end = (mb + ms).min(container.len());
+                    while p + 108 <= end {
+                        let id = g(p);
+                        let cnt = u16::from_le_bytes([container[p + 106], container[p + 107]]) as usize;
+                        if cnt == 0 || cnt > 12 { break; }
+                        if p + 108 + cnt * 4 > end { break; }
+                        ids.push(id);
+                        p += 116 + cnt * 4;
+                    }
+                    let id_set: std::collections::HashSet<u32> = ids.iter().copied().collect();
+                    let gmi = mercs2_formats::texture::group_material_indices(container);
+                    let refs: Vec<u32> = gmi.iter().map(|&r| r as u32).collect();
+                    let matches = refs.iter().filter(|r| id_set.contains(r)).count();
+                    let matches_rev = refs.iter().filter(|r| id_set.contains(&r.swap_bytes())).count();
+                    let as_index = refs.iter().filter(|&&r| (r as usize) < ids.len()).count();
+                    println!("[terrainmesh]   REVERSE: {} MTRL records parsed (ids), {} draws; PRMT-ref matches material id: {}/{}, byte-rev: {}/{}, valid-index(<{}): {}", ids.len(), refs.len(), matches, refs.len(), matches_rev, refs.len(), ids.len(), as_index);
+                    println!("[terrainmesh]     first material ids: {:08X?}", &ids.iter().take(6).collect::<Vec<_>>());
+                    println!("[terrainmesh]     first PRMT refs:    {:08X?}", &refs.iter().take(6).collect::<Vec<_>>());
+                    // PRMG group INFO leaf -> material binding? Dump each group's first INFO (before
+                    // STRM) as u32s + flag any field that is a valid material index (<n_records) or id.
+                    if std::env::var("MERCS2_MTRL_DUMP").is_ok() {
+                        let nrec = ids.len();
+                        let marker = |dp: usize| g(dp + 4) == 0xFFFF_FFFF;
+                        let mut gi = 0;
+                        let mut d = 0usize;
+                        while d < ndesc && gi < 6 {
+                            let dp = 20 + d * 20;
+                            if dp + 20 > container.len() { break; }
+                            if &container[dp..dp + 4] == b"PRMG" && marker(dp) {
+                                // find first INFO leaf before a STRM/IBUF marker in this group
+                                let mut j = d + 1;
+                                let mut info: Option<usize> = None;
+                                while j < ndesc {
+                                    let jp = 20 + j * 20;
+                                    if jp + 20 > container.len() { break; }
+                                    let t = &container[jp..jp + 4];
+                                    if (t == b"PRMG") && marker(jp) { break; }
+                                    if (t == b"STRM" || t == b"IBUF") && marker(jp) { break; }
+                                    if t == b"INFO" && !marker(jp) { info = Some(jp); break; }
+                                    j += 1;
+                                }
+                                if let Some(jp) = info {
+                                    let off = g(jp + 4) as usize;
+                                    let sz = g(jp + 8) as usize;
+                                    let base = if dao > 0 { dao + off } else { 8 + off };
+                                    let n = (sz / 4).min(12);
+                                    let mut fields = Vec::new();
+                                    for r in 0..n {
+                                        let o = base + r * 4;
+                                        if o + 4 > container.len() { break; }
+                                        let val = g(o);
+                                        let asidx = (val as usize) < nrec;
+                                        let asid = ids.iter().position(|&x| x == val).is_some();
+                                        fields.push(format!("{val:08X}{}{}", if asidx { "<idx" } else { "" }, if asid { "<ID" } else { "" }));
+                                    }
+                                    println!("[terrainmesh]     grp{gi} INFO({sz}B): {}", fields.join(" "));
+                                }
+                                gi += 1;
+                            }
+                            d += 1;
+                        }
+                    }
+                    // Where do the recurring PRMT hashes live? (Are they material NAME fields in MTRL?)
+                    if std::env::var("MERCS2_MTRL_DUMP").is_ok() {
+                        for want in [0x16E4944Bu32, 0xDC351FCB, 0x1E3E7DD4] {
+                            let mut locs = Vec::new();
+                            let mut o = 0usize;
+                            while o + 4 <= container.len() {
+                                if g(o) == want {
+                                    let in_mtrl = o >= mb && o < mb + ms;
+                                    // offset within the nearest preceding material record start
+                                    let rel = if in_mtrl {
+                                        let mut rp = mb; let mut prev = mb;
+                                        while rp + 108 <= o { prev = rp; let c = u16::from_le_bytes([container[rp+106],container[rp+107]]) as usize; if c==0||c>12 {break;} rp += 116 + c*4; }
+                                        Some(o - prev)
+                                    } else { None };
+                                    locs.push((o, in_mtrl, rel));
+                                }
+                                o += 4;
+                            }
+                            println!("[terrainmesh]     hash 0x{want:08X}: {} occurrences; first {:?}", locs.len(), locs.iter().take(4).map(|(o,m,r)| (o,m,r)).collect::<Vec<_>>());
+                        }
+                    }
+                    // Dump full 16-byte PRMT records for the first 3 PRMG groups (all 4 u32 fields).
+                    if std::env::var("MERCS2_MTRL_DUMP").is_ok() {
+                        let mut gi = 0;
+                        for d in 0..ndesc.min(6000) {
+                            let dp = 20 + d * 20;
+                            if dp + 20 > container.len() { break; }
+                            let is_marker = u32::from_le_bytes([container[dp + 4], container[dp + 5], container[dp + 6], container[dp + 7]]) == 0xFFFF_FFFF;
+                            if &container[dp..dp + 4] == b"PRMT" && !is_marker {
+                                let off = u32::from_le_bytes([container[dp + 4], container[dp + 5], container[dp + 6], container[dp + 7]]) as usize;
+                                let sz = u32::from_le_bytes([container[dp + 8], container[dp + 9], container[dp + 10], container[dp + 11]]) as usize;
+                                let base = if dao > 0 { dao + off } else { 8 + off };
+                                let nrec = sz / 16;
+                                for r in 0..nrec.min(3) {
+                                    let o = base + r * 16;
+                                    if o + 16 > container.len() { break; }
+                                    let idx_of = |h: u32| ids.iter().position(|&x| x == h);
+                                    println!("[terrainmesh]     PRMT[grp?]: [{:08X} {:08X} {:08X} {:08X}] (field->matID idx: {:?} {:?} {:?} {:?})",
+                                        g(o), g(o+4), g(o+8), g(o+12), idx_of(g(o)), idx_of(g(o+4)), idx_of(g(o+8)), idx_of(g(o+12)));
+                                }
+                                gi += 1;
+                                if gi >= 4 { break; }
+                            }
+                        }
+                    }
+                }
+            }
+            // Per-draw splat layers (the reversed model): each group's material -> detail layers.
+            {
+                let layers = mercs2_formats::texture::terrain_group_layers(container);
+                let midx = mercs2_formats::texture::terrain_group_material_index(container);
+                let all: std::collections::HashSet<u32> = layers.iter().flatten().copied().collect();
+                let mut resolvable = 0usize;
+                for &h in &all {
+                    if wad::extract_texture(&mut w, h).is_ok() {
+                        resolvable += 1;
+                    }
+                }
+                let counts: Vec<usize> = layers.iter().map(|l| l.len()).collect();
+                println!(
+                    "[terrainmesh]   SPLAT LAYERS: {} draws, material idx (first 8) {:?}; layers/draw (first 8) {:?}; {} distinct layer textures, {resolvable} resolve",
+                    layers.len(), &midx.iter().take(8).collect::<Vec<_>>(), &counts.iter().take(8).collect::<Vec<_>>(), all.len()
+                );
+                for l in layers.iter().take(4) {
+                    println!("[terrainmesh]     draw layers: {:08X?}", l);
+                }
+            }
+            // Vertex COLOR (splat weights)?
+            if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(container) {
+                let with_col = meshes.iter().filter(|m| !m.colors.is_empty()).count();
+                let mut distinct: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
+                let mut sample = Vec::new();
+                for m in &meshes {
+                    for c in &m.colors {
+                        distinct.insert(*c);
+                        if sample.len() < 8 { sample.push(*c); }
+                    }
+                }
+                println!("[terrainmesh]   vertex COLOR (splat weights): {}/{} groups carry it; {} distinct values; sample {:?}", with_col, meshes.len(), distinct.len(), sample);
+            }
+        }
+        match mesh::build_indexed_from_container(&dec[s0..s1]) {
+            Ok((verts, indices, draws, stats)) => {
+                let cell = c3_cell_id_from_path(&path);
+                let cc = cell.map(c3_cell_centre);
+                println!(
+                    "[terrainmesh] block={bi} {path}: {} verts / {} tris / {} draws | bbox X[{:.1},{:.1}] Y[{:.1},{:.1}] Z[{:.1},{:.1}]",
+                    verts.len(), indices.len() / 3, draws.len(),
+                    stats.bbox_min[0], stats.bbox_max[0], stats.bbox_min[1], stats.bbox_max[1], stats.bbox_min[2], stats.bbox_max[2]
+                );
+                let _ = cc;
+                // REAL placement from the TerrainObject->Transform map (not the c3 cell-id).
+                match tile_pos.get(&tm_hash) {
+                    Some(&p) => {
+                        // Terrainmesh verts are local (POFF-collapsed here); Transform gives world XZ.
+                        // Test Y: low-res ground at the tile position should fall within the
+                        // terrainmesh Y range (Y is world-absolute) once placed at (pos.x, pos.z).
+                        let lo = hmap.height_at(p[0], p[2]);
+                        let straddles = lo.is_finite() && lo >= stats.bbox_min[1] - 8.0 && lo <= stats.bbox_max[1] + 8.0;
+                        println!(
+                            "[terrainmesh]   TerrainObject pos=({:.0},{:.0},{:.0}); low-res ground there={lo:.1}; terrainmesh Y[{:.1},{:.1}] -> {}",
+                            p[0], p[1], p[2], stats.bbox_min[1], stats.bbox_max[1],
+                            if straddles { "MATCH (placement correct, Y world-absolute)" } else { "MISMATCH" }
+                        );
+                    }
+                    None => println!("[terrainmesh]   mesh 0x{tm_hash:08X} not in TerrainObject map"),
+                }
+                // Material/diffuse hashes = the splat set.
+                let diffuse: Vec<u32> = draws.iter().filter_map(|d| d.diffuse).collect();
+                println!("[terrainmesh]   {} draws carry a diffuse texture (multi-material = the splat)", diffuse.len());
+                // POFF (Position OFFset) chunks — the suspected per-GEOM world anchor the builder
+                // ignores. Walk the UCFX descriptor table of the terrainmesh chunk and read each
+                // POFF's 3 floats; compare to the grid cell centre.
+                let c = &dec[s0..s1];
+                if c.len() > 20 && &c[0..4] == b"UCFX" {
+                    let dao = u32::from_le_bytes([c[4], c[5], c[6], c[7]]) as usize;
+                    let ndesc = u32::from_le_bytes([c[16], c[17], c[18], c[19]]) as usize;
+                    let mut poffs: Vec<[f32; 3]> = Vec::new();
+                    for d in 0..ndesc.min(4000) {
+                        let dp = 20 + d * 20;
+                        if dp + 20 > c.len() {
+                            break;
+                        }
+                        if &c[dp..dp + 4] == b"POFF" {
+                            let off = u32::from_le_bytes([c[dp + 4], c[dp + 5], c[dp + 6], c[dp + 7]]) as usize;
+                            let base = dao + off;
+                            if base + 12 <= c.len() {
+                                let f = |o: usize| f32::from_le_bytes([c[o], c[o + 1], c[o + 2], c[o + 3]]);
+                                poffs.push([f(base), f(base + 4), f(base + 8)]);
+                            }
+                        }
+                    }
+                    let uniq: std::collections::HashSet<[u32; 3]> =
+                        poffs.iter().map(|p| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()]).collect();
+                    println!("[terrainmesh]   POFF chunks: {} ({} distinct)", poffs.len(), uniq.len());
+                    for p in poffs.iter().take(4) {
+                        println!("[terrainmesh]     POFF = ({:.2}, {:.2}, {:.2})", p[0], p[1], p[2]);
+                    }
+                }
+            }
+            Err(e) => println!("[terrainmesh] block={bi} {path}: build failed: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Alignment probe: are placements and terrain in the SAME frame? Objects rest ON the ground in-game,
+/// so the authored placement Y should ≈ terrain height at the placement XZ. Measures |Y - terrain_h|
+/// under the IDENTITY sampling and under transpose/flip transforms of the sampling XZ — if a
+/// transformed sampling fits far better than identity, that transform IS the terrain↔world mapping
+/// bug (transpose = row/col swap, flip = axis-sign error). No clamping; pure diagnosis.
+fn align_probe(wadpath: &str) -> Result<(), String> {
+    let mut w = wad::open(wadpath)?;
+    let (low, ls) = find_terrain_blocks(&mut w)?;
+    let tm = mercs2_formats::terrain::load_terrain(&low, &ls)?;
+    let hmap = HeightMap::build(&tm);
+    let placements = mercs2_formats::placement::load_placements(&ls)?;
+
+    // Report the raw extents so an origin/scale mismatch shows up immediately.
+    let (mut pmin, mut pmax) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for p in &placements {
+        for k in 0..3 {
+            pmin[k] = pmin[k].min(p.pos[k]);
+            pmax[k] = pmax[k].max(p.pos[k]);
+        }
+    }
+    let (mut tmin, mut tmax) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for p in &tm.positions {
+        for k in 0..3 {
+            tmin[k] = tmin[k].min(p[k]);
+            tmax[k] = tmax[k].max(p[k]);
+        }
+    }
+    println!("[align] placements: {} | X[{:.0},{:.0}] Y[{:.0},{:.0}] Z[{:.0},{:.0}]", placements.len(), pmin[0], pmax[0], pmin[1], pmax[1], pmin[2], pmax[2]);
+    println!("[align] terrain   :        X[{:.0},{:.0}] Y[{:.0},{:.0}] Z[{:.0},{:.0}]", tmin[0], tmax[0], tmin[1], tmax[1], tmin[2], tmax[2]);
+
+    // Candidate samplings of (x,z): the 8 axis-aligned symmetries (4 rotations × mirror).
+    let transforms: &[(&str, fn(f32, f32) -> (f32, f32))] = &[
+        ("identity   ( x, z)", |x, z| (x, z)),
+        ("flipX      (-x, z)", |x, z| (-x, z)),
+        ("flipZ      ( x,-z)", |x, z| (x, -z)),
+        ("flipXZ     (-x,-z)", |x, z| (-x, -z)),
+        ("transpose  ( z, x)", |x, z| (z, x)),
+        ("transp flipX(-z, x)", |x, z| (-z, x)),
+        ("transp flipZ( z,-x)", |x, z| (z, -x)),
+        ("transp flipXZ(-z,-x)", |x, z| (-z, -x)),
+    ];
+
+    for (name, f) in transforms {
+        let mut deltas: Vec<f32> = Vec::new();
+        for p in &placements {
+            let (sx, sz) = f(p.pos[0], p.pos[2]);
+            if sx < -3900.0 || sx > 3800.0 || sz < -3900.0 || sz > 3800.0 {
+                continue; // sample outside the terrain footprint
+            }
+            let h = hmap.height_at(sx, sz);
+            if !h.is_finite() {
+                continue;
+            }
+            deltas.push((p.pos[1] - h).abs());
+        }
+        if deltas.is_empty() {
+            println!("[align]   {name}: no in-bounds samples");
+            continue;
+        }
+        deltas.sort_by(|a, b| a.total_cmp(b));
+        let n = deltas.len();
+        let med = deltas[n / 2];
+        let within10 = deltas.iter().filter(|&&d| d < 10.0).count();
+        let within30 = deltas.iter().filter(|&&d| d < 30.0).count();
+        println!(
+            "[align]   {name}: n={n:<6} median|dY|={med:7.1}m  within10m={:5.1}%  within30m={:5.1}%",
+            100.0 * within10 as f32 / n as f32,
+            100.0 * within30 as f32 / n as f32
+        );
+    }
+    println!("[align] NOTE: objects rest on the ground, so the BEST-fitting sampling reveals the true terrain↔world mapping. If identity is not clearly best, the terrain assembly frame is wrong.");
+
+    // --- c3 CELL placement check: the streamed buildings/hi-res-terrain. Load a sample of c3
+    // geometry cells the SAME way the streamer does (load_one_c3_cell) and measure whether the
+    // placed geometry sits on the terrain, and how the world-space-vs-cell-local heuristic decided.
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        mercs2_formats::world_index::WorldIndex::build(archive, file)
+    };
+    let c3_geom: Vec<u16> = idx
+        .by_class(mercs2_formats::world_index::BlockClass::C3Cell)
+        .filter(|b| b.has_model_geometry)
+        .map(|b| b.block_index)
+        .collect();
+    let step = (c3_geom.len() / 200).max(1);
+    let mut n = 0usize;
+    let mut offset_applied = 0usize;
+    let mut floats: Vec<f32> = Vec::new();
+    for &bi in c3_geom.iter().step_by(step) {
+        // Raw (pre-offset) bounds for the first few, to see local-vs-world per axis.
+        let raw = load_one_c3_cell(&mut w, bi);
+        let Some((m, off)) = raw else { continue };
+        n += 1;
+        if off != [0.0, 0.0, 0.0] {
+            offset_applied += 1;
+        }
+        // Placed geometry: min corner + centre XZ.
+        let (mut rmn, mut rmx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for v in &m.verts {
+            for k in 0..3 {
+                rmn[k] = rmn[k].min(v.pos[k]);
+                rmx[k] = rmx[k].max(v.pos[k]);
+            }
+        }
+        if n <= 6 {
+            let path = wad::block_paths(&w).get(bi as usize).cloned().unwrap_or_default();
+            let cxp = (rmn[0] + rmx[0]) * 0.5 + off[0];
+            let czp = (rmn[2] + rmx[2]) * 0.5 + off[2];
+            let th = hmap.height_at(cxp, czp);
+            println!(
+                "[align]   c3 {path}: RAW x[{:.1},{:.1}] y[{:.1},{:.1}] z[{:.1},{:.1}] | off=({:.1},{:.1}) placedXZ=({:.0},{:.0}) terrainY={th:.1}",
+                rmn[0], rmx[0], rmn[1], rmx[1], rmn[2], rmx[2], off[0], off[2], cxp, czp
+            );
+            // Does the block ENCODE the cell's world position (an authored transform)? Scan the
+            // decompressed bytes for an f32 within 8 m of the expected world X (= off[0]) and print
+            // the surrounding float triple — an authored translation would sit here with the real Y.
+            if let Ok(dec) = wad::decompress_block_index(&mut w, bi) {
+                let want = off[0];
+                let mut hits = 0;
+                let mut i = 0usize;
+                while i + 4 <= dec.len() && hits < 4 {
+                    let v = f32::from_le_bytes([dec[i], dec[i + 1], dec[i + 2], dec[i + 3]]);
+                    if v.is_finite() && (v - want).abs() < 8.0 && off[0].abs() > 100.0 {
+                        let g = |o: usize| f32::from_le_bytes([dec[o], dec[o + 1], dec[o + 2], dec[o + 3]]);
+                        let a = if i >= 4 { g(i - 4) } else { 0.0 };
+                        let b = if i + 8 <= dec.len() { g(i + 4) } else { 0.0 };
+                        println!("[align]     world-X-like f32 @{i}: [.. {a:.1} | {v:.1} | {b:.1} ..]");
+                        hits += 1;
+                    }
+                    i += 4;
+                }
+                if hits == 0 && off[0].abs() > 100.0 {
+                    println!("[align]     (no f32 within 8m of world-X {want:.0} found in block — no authored translation present)");
+                }
+            }
+        }
+        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for v in &m.verts {
+            for k in 0..3 {
+                mn[k] = mn[k].min(v.pos[k] + off[k]);
+                mx[k] = mx[k].max(v.pos[k] + off[k]);
+            }
+        }
+        let (cxp, czp) = ((mn[0] + mx[0]) * 0.5, (mn[2] + mx[2]) * 0.5);
+        if cxp < -3900.0 || cxp > 3800.0 || czp < -3900.0 || czp > 3800.0 {
+            continue;
+        }
+        let h = hmap.height_at(cxp, czp);
+        if h.is_finite() {
+            // base of the cell geometry vs terrain height beneath it
+            floats.push((mn[1] - h).abs());
+        }
+    }
+    floats.sort_by(|a, b| a.total_cmp(b));
+    if !floats.is_empty() {
+        let med = floats[floats.len() / 2];
+        let within10 = floats.iter().filter(|&&d| d < 10.0).count();
+        println!(
+            "[align] c3 cells sampled={n} | cell-local offset applied to {offset_applied} | base-vs-terrain median|dY|={med:.1}m within10m={:.1}%",
+            100.0 * within10 as f32 / floats.len() as f32
+        );
+    } else {
+        println!("[align] c3 cells sampled={n} | offset applied to {offset_applied} | (no in-bounds height samples)");
+    }
+    Ok(())
+}
+
+/// Terrain-consumer hunt: which blocks reference the 30 `terraintextures` material hashes? (The
+/// hi-res terrain path — proven absent from low_res_terrain/layers_static.) Scans every C3Cell
+/// geometry block by raw LE-u32 hash match and reports hits (block name + which materials).
+fn terrain_consumer_scan(wadpath: &str) -> Result<(), String> {
+    use mercs2_formats::world_index::BlockClass;
+    let mut w = wad::open(wadpath)?;
+    let tt: Vec<u32> = terraintexture_hashes(&mut w, "terraintextures_P002_Q1");
+    let tt_set: std::collections::HashSet<u32> = tt.iter().copied().collect();
+    if tt_set.is_empty() {
+        return Err("no terraintextures hashes found".into());
+    }
+    println!("[terrain-consumer] scanning for {} terraintextures material hashes", tt_set.len());
+
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        mercs2_formats::world_index::WorldIndex::build(archive, file)
+    };
+    let c3_geom: Vec<u16> = idx
+        .by_class(BlockClass::C3Cell)
+        .filter(|b| b.has_model_geometry)
+        .map(|b| b.block_index)
+        .collect();
+    println!("[terrain-consumer] candidate C3Cell geometry blocks: {}", c3_geom.len());
+
+    let mut hit_blocks = 0usize;
+    let mut total_refs = 0usize;
+    for (n, &bi) in c3_geom.iter().enumerate() {
+        let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
+        let mut found: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut i = 0usize;
+        while i + 4 <= dec.len() {
+            let v = u32::from_le_bytes([dec[i], dec[i + 1], dec[i + 2], dec[i + 3]]);
+            if tt_set.contains(&v) {
+                found.insert(v);
+            }
+            i += 1;
+        }
+        if !found.is_empty() {
+            hit_blocks += 1;
+            total_refs += found.len();
+            if hit_blocks <= 20 {
+                let path = wad::block_paths(&w).get(bi as usize).cloned().unwrap_or_default();
+                println!("[terrain-consumer]   HIT block={bi} {path} — {} materials", found.len());
+            }
+        }
+        if n % 400 == 399 {
+            eprintln!("[terrain-consumer]   ...scanned {}/{}", n + 1, c3_geom.len());
+        }
+    }
+    println!(
+        "[terrain-consumer] RESULT: {hit_blocks}/{} c3 geometry blocks reference terraintextures ({total_refs} total refs)",
+        c3_geom.len()
+    );
+    if hit_blocks == 0 {
+        println!("[terrain-consumer] -> terraintextures NOT consumed by c3 geometry blocks; the hi-res terrain path is elsewhere (candidates: a resident material-def block, or TerrainKey/FUN_004a88a0 runtime).");
+    }
+    Ok(())
+}
+
+/// Stage-1 terrain splat/LOD RCA: per-tile MTRL materials + the `@12` per-vertex scalar,
+/// cross-checked against the `terraintextures` material set. Headless; prints verifiable numbers.
+fn terrain_probe(wadpath: &str) -> Result<(), String> {
+    let mut w = wad::open(wadpath)?;
+    let (low, ls) = find_terrain_blocks(&mut w)?;
+
+    // The terrain-material set = terraintextures_P002_Q1 (the finest resident rung, 30 materials).
+    let tt_set: std::collections::HashSet<u32> =
+        terraintexture_hashes(&mut w, "terraintextures_P002_Q1").into_iter().collect();
+    let detail = [
+        ("mountain01", terraintexture_hashes(&mut w, "tt_mountain01_P003_Q0")),
+        ("rock", terraintexture_hashes(&mut w, "tt_rock_P003_Q0")),
+        ("pmcgrass02", terraintexture_hashes(&mut w, "tt_pmcgrass02_P003_Q0")),
+    ];
+    println!("[terrain-probe] terraintextures_P002_Q1 material set: {} hashes", tt_set.len());
+    for (name, hs) in &detail {
+        let in_set = hs.iter().all(|h| tt_set.contains(h));
+        println!(
+            "[terrain-probe]   detail tt_{name}: {} hash(es) {:08X?} -> in P002 set: {in_set}",
+            hs.len(), hs
+        );
+    }
+
+    // Where else might the terraintextures splat be authored? Scan the terrain blocks' raw bytes
+    // for any of the 30 material hashes (LE u32), and surface splat/control-like block names.
+    let scan_hashes = |buf: &[u8], set: &std::collections::HashSet<u32>| -> usize {
+        let mut hits = std::collections::HashSet::new();
+        let mut i = 0;
+        while i + 4 <= buf.len() {
+            let h = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+            if set.contains(&h) {
+                hits.insert(h);
+            }
+            i += 1;
+        }
+        hits.len()
+    };
+    println!(
+        "[terrain-probe] terraintextures-hash presence (raw LE u32 scan): low_res_terrain={} / {} distinct, layers_static={} / {}",
+        scan_hashes(&low, &tt_set), tt_set.len(), scan_hashes(&ls, &tt_set), tt_set.len()
+    );
+    let splat_names = ["splat", "blend", "control", "heightfield", "hfield", "tt_", "terrainkey"];
+    let mut cand = Vec::new();
+    for (i, p) in wad::block_paths(&w).iter().enumerate() {
+        let pl = p.to_lowercase();
+        if splat_names.iter().any(|n| pl.contains(n)) {
+            cand.push((i, p.clone()));
+        }
+    }
+    println!("[terrain-probe] splat/control-like block names ({}):", cand.len());
+    for (i, p) in cand.iter().take(20) {
+        println!("[terrain-probe]     block={i} {p}");
+    }
+
+    let probes = mercs2_formats::terrain::probe_terrain(&low);
+    let tiles = probes.len();
+    let with_mtrl = probes.iter().filter(|p| !p.materials.is_empty()).count();
+
+    // Materials-per-tile histogram + membership in the terraintextures set.
+    let mut per_tile_hist: std::collections::BTreeMap<usize, usize> = Default::default();
+    let mut distinct: std::collections::HashSet<u32> = Default::default();
+    let mut refs_total = 0usize;
+    let mut refs_in_set = 0usize;
+    for p in &probes {
+        *per_tile_hist.entry(p.materials.len()).or_default() += 1;
+        for &h in &p.materials {
+            distinct.insert(h);
+            refs_total += 1;
+            if tt_set.contains(&h) {
+                refs_in_set += 1;
+            }
+        }
+    }
+    let distinct_in_set = distinct.iter().filter(|h| tt_set.contains(h)).count();
+
+    println!("[terrain-probe] tiles decoded: {tiles}; tiles with a parsed MTRL: {with_mtrl}");
+    println!("[terrain-probe] materials-per-tile histogram (mat_count -> tiles):");
+    for (k, v) in &per_tile_hist {
+        println!("[terrain-probe]     {k} materials -> {v} tiles");
+    }
+    println!(
+        "[terrain-probe] material refs: {refs_total} total, {refs_in_set} in terraintextures set \
+         ({} distinct hashes, {distinct_in_set} of them in-set)",
+        distinct.len()
+    );
+    // List distinct referenced hashes NOT in the terraintextures set (should be none if the
+    // hypothesis holds).
+    let strays: Vec<u32> = distinct.iter().copied().filter(|h| !tt_set.contains(h)).collect();
+    if strays.is_empty() {
+        println!("[terrain-probe]   -> ALL referenced material hashes are members of the terraintextures set");
+    } else {
+        println!("[terrain-probe]   -> {} referenced hashes NOT in set: {:08X?}", strays.len(), strays);
+    }
+    // Is the single referenced hash actually the baked composite atlas (vz_lrterrain)?
+    let atlas_hash = mercs2_formats::hash::pandemic_hash_m2("vz_lrterrain");
+    println!(
+        "[terrain-probe]   pandemic_hash_m2(\"vz_lrterrain\") = 0x{atlas_hash:08X}; \
+         referenced-by-tiles = {:08X?} (match: {})",
+        distinct, distinct.contains(&atlas_hash)
+    );
+
+    // The @12 per-vertex scalar.
+    let (mut gmin, mut gmax, mut gsum, mut gn) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f64, 0usize);
+    let mut in01_verts = 0usize;
+    let mut total_verts = 0usize;
+    let mut lane6_ok = 0usize;
+    let mut lane14_ok = 0usize;
+    let mut const_tiles = 0usize; // tiles whose @12 min==max (constant per tile)
+    let mut unit_normal_verts = 0usize;
+    for p in &probes {
+        gmin = gmin.min(p.w12.0);
+        gmax = gmax.max(p.w12.1);
+        gsum += p.w12.2 as f64 * p.verts as f64;
+        gn += p.verts;
+        in01_verts += p.w12_in01;
+        total_verts += p.verts;
+        unit_normal_verts += p.unit_normal_verts;
+        if p.lane6_all_one {
+            lane6_ok += 1;
+        }
+        if p.lane14_all_one {
+            lane14_ok += 1;
+        }
+        if (p.w12.1 - p.w12.0).abs() < 1e-4 {
+            const_tiles += 1;
+        }
+    }
+    println!("[terrain-probe] @12 scalar across {total_verts} verts / {tiles} tiles:");
+    println!(
+        "[terrain-probe]     range [{gmin:.5}, {gmax:.5}] mean {:.5}; in [0,1]: {in01_verts}/{total_verts} ({:.1}%)",
+        if gn > 0 { gsum / gn as f64 } else { 0.0 },
+        100.0 * in01_verts as f32 / total_verts.max(1) as f32
+    );
+    println!(
+        "[terrain-probe]     constant-per-tile (@12 min==max): {const_tiles}/{tiles} tiles; \
+         lane@6==1.0 all: {lane6_ok}/{tiles}; lane@14==1.0 all: {lane14_ok}/{tiles}"
+    );
+    println!(
+        "[terrain-probe] NORMAL test: vertices where (f16@8,@10,@12) is unit-length (|len-1|<0.03): \
+         {unit_normal_verts}/{total_verts} ({:.1}%)",
+        100.0 * unit_normal_verts as f32 / total_verts.max(1) as f32
+    );
+    Ok(())
 }
 
 fn parse_hash(s: &str) -> Option<u32> {
@@ -2273,9 +3669,13 @@ const WORLD_SPAN_M: f32 = 8000.0;
 /// [0,1,0], color = white, tangent = [1,0,0,1], joints = 0, weights = [255,0,0,0]
 /// (binds every vertex to identity bone 0).
 fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: bool) -> Vec<Vertex> {
+    // Real per-vertex normals (decoded from the tile verts, verified unit-length) drive terrain
+    // relief shading. Fall back to up if the normals vec is short (shouldn't happen).
+    let up = [0.0f32, 1.0, 0.0];
     tm.positions
         .iter()
-        .map(|&p| {
+        .enumerate()
+        .map(|(i, &p)| {
             let uv = if textured {
                 let u = (p[0] - WORLD_MIN_M) / WORLD_SPAN_M;
                 let v = 1.0 - (p[2] - WORLD_MIN_M) / WORLD_SPAN_M; // retail V-flip
@@ -2287,7 +3687,7 @@ fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: bool
                 pos: p,
                 color: [1.0, 1.0, 1.0],
                 uv,
-                normal: [0.0, 1.0, 0.0],
+                normal: tm.normals.get(i).copied().unwrap_or(up),
                 tangent: [1.0, 0.0, 0.0, 1.0],
                 joints: [0, 0, 0, 0],
                 weights: [255, 0, 0, 0],
@@ -2553,6 +3953,528 @@ fn placement_probe(wadpath: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Headless Layer-1 World Block Index probe (VERIFIABLE proof, spec §10): build the full
+/// `WorldIndex`, print total blocks, a per-class histogram, the proven verification counts
+/// (models / c3-mesh / lrterrain / placements / grid anchor), and sample `blocks_near` +
+/// `lod_chain` queries. No rendering, no streaming loop — index only.
+fn world_index_probe(wadpath: &str) -> Result<(), String> {
+    use mercs2_formats::world_index::{BlockClass, WorldIndex};
+    use std::time::Instant;
+
+    let mut w = wad::open(wadpath)?;
+
+    // Build the index (times the full scan; placement AABBs are lazy so this is the eager cost).
+    let t0 = Instant::now();
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        WorldIndex::build(archive, file)
+    };
+    let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    println!("[world-index] total blocks = {}", idx.len());
+
+    // Histogram by class.
+    let classes = [
+        BlockClass::Model,
+        BlockClass::C3Cell,
+        BlockClass::LayersStatic,
+        BlockClass::VzStateOverlay,
+        BlockClass::LowResTerrain,
+        BlockClass::Texture,
+        BlockClass::Animation,
+        BlockClass::Other,
+    ];
+    println!("[world-index] class histogram:");
+    for c in classes {
+        let n = idx.by_class(c).count();
+        println!("[world-index]   {:<16} {}", c.name(), n);
+    }
+
+    // --- Verification counts vs the proven totals ---
+    // 1,771 primary model ASETs (from the ASET table directly).
+    let model_asets = wad::model_list(&w).len();
+    // c3 blocks carrying model-format geometry (~1,849).
+    let c3_mesh = idx
+        .by_class(BlockClass::C3Cell)
+        .filter(|b| b.has_model_geometry)
+        .count();
+    let c3_total = idx.by_class(BlockClass::C3Cell).count();
+
+    println!("[world-index] --- verification ---");
+    println!(
+        "[world-index] primary model ASETs      = {model_asets}  (expect 1771) {}",
+        if model_asets == 1771 { "MATCH" } else { "DIFF" }
+    );
+    println!(
+        "[world-index] c3 blocks (total)        = {c3_total}"
+    );
+    println!(
+        "[world-index] c3 blocks w/ model geom  = {c3_mesh}  (expect ~1849)"
+    );
+
+    // 400 lrterrain tiles + 62,624 placements — via the format loaders on blocks 29/3121.
+    let (low, ls) = find_terrain_blocks(&mut w)?;
+    let tm = mercs2_formats::terrain::load_terrain(&low, &ls)?;
+    println!(
+        "[world-index] lrterrain tiles placed   = {}  (expect 400) {}",
+        tm.tiles_placed,
+        if tm.tiles_placed == 400 { "MATCH" } else { "DIFF" }
+    );
+    let placements = mercs2_formats::placement::load_placements(&ls)?;
+    println!(
+        "[world-index] layers_static placements = {}  (expect 62624) {}",
+        placements.len(),
+        if placements.len() == 62624 { "MATCH" } else { "DIFF" }
+    );
+
+    // c3 grid anchor: c30123 -> (-2156.25, -3783.75).
+    let (ax, az) = mercs2_formats::world_index::c3_cell_centre(30123);
+    let anchor_ok = (ax - (-2156.25)).abs() < 0.01 && (az - (-3783.75)).abs() < 0.01;
+    println!(
+        "[world-index] c3 anchor c30123         = ({ax:.2}, {az:.2})  (expect -2156.25,-3783.75) {}",
+        if anchor_ok { "MATCH" } else { "DIFF" }
+    );
+
+    // --- Sample proximity queries (blocks_near) ---
+    for (qx, qz, r) in [(2560.0f32, -926.0f32, 300.0f32), (0.0, 0.0, 500.0)] {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        // A fresh index for the lazy-extent query so we don't hold a mutable borrow across w reuse.
+        let mut idx2 = WorldIndex::build(archive, file);
+        let (archive, file) = wad::archive_and_file(&mut w);
+        let hits = idx2.blocks_near(qx, qz, r, archive, file);
+        println!(
+            "[world-index] blocks_near({qx:.0},{qz:.0}, r={r:.0}) = {} blocks",
+            hits.len()
+        );
+        for bi in hits.iter().take(8) {
+            if let Some(b) = idx2.block(*bi) {
+                let e = b.extent.map(|a| {
+                    format!(
+                        "X[{:.0},{:.0}] Z[{:.0},{:.0}]",
+                        a.min[0], a.max[0], a.min[2], a.max[2]
+                    )
+                });
+                println!(
+                    "[world-index]   blk {:<5} {:<14} {:<28} {}",
+                    bi,
+                    b.class.name(),
+                    b.name,
+                    e.unwrap_or_else(|| "(no extent)".into())
+                );
+            }
+        }
+    }
+
+    // Leading-tier histogram across c3-class blocks (how the name's FIRST cell token distributes).
+    let mut lead_tier: [usize; 4] = [0; 4];
+    let mut chain_blocks = 0usize;
+    for b in idx.by_class(BlockClass::C3Cell) {
+        if let Some(t) = b.lod.tier {
+            if (t as usize) < 4 {
+                lead_tier[t as usize] += 1;
+            }
+        }
+        if b.lod.chain.len() > 1 {
+            chain_blocks += 1;
+        }
+    }
+    println!(
+        "[world-index] c3 leading-tier hist    = c0:{} c1:{} c2:{} c3:{}  ({} chain-named)",
+        lead_tier[0], lead_tier[1], lead_tier[2], lead_tier[3], chain_blocks
+    );
+
+    // --- Does a cell carry GEOMETRY at more than one tier? (Decides whether a coarse<->fine LOD
+    // swap even exists in the data, or whether geometry is authored at a single granularity per
+    // region.) Group geometry-bearing c3 blocks by base cell; count distinct geometry tiers each.
+    let mut geom_tiers_per_cell: std::collections::HashMap<u32, std::collections::HashSet<u8>> =
+        std::collections::HashMap::new();
+    for b in idx.by_class(BlockClass::C3Cell) {
+        if !b.has_model_geometry {
+            continue;
+        }
+        if let (Some(cid), Some(t)) = (b.lod.base_cell_id, b.lod.tier) {
+            geom_tiers_per_cell.entry(cid).or_default().insert(t);
+        }
+    }
+    let cells_geom = geom_tiers_per_cell.len();
+    let multi_tier = geom_tiers_per_cell.values().filter(|s| s.len() > 1).count();
+    let mut per_cell_geom_block_count: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+    for b in idx.by_class(BlockClass::C3Cell) {
+        if b.has_model_geometry {
+            if let Some(cid) = b.lod.base_cell_id {
+                *per_cell_geom_block_count.entry(cid).or_insert(0) += 1;
+            }
+        }
+    }
+    let multi_block = per_cell_geom_block_count.values().filter(|n| **n > 1).count();
+    let max_geom_blocks = per_cell_geom_block_count.values().copied().max().unwrap_or(0);
+    println!(
+        "[world-index] geometry-bearing base cells = {cells_geom}; with geom at >1 TIER = {multi_tier}; \
+         with >1 geom BLOCK = {multi_block} (max {max_geom_blocks} geom blocks/cell)"
+    );
+
+    // --- Sample LOD chain for one c3 cell: prefer a cell that actually ships multiple tiers
+    // (a chain-named block), else fall back to the first c3 cell.
+    let mut tier_count: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for b in idx.by_class(BlockClass::C3Cell) {
+        if let Some(cid) = b.lod.base_cell_id {
+            *tier_count.entry(cid).or_insert(0) += 1;
+        }
+    }
+    let sample_cell = tier_count
+        .iter()
+        .filter(|(_, n)| **n > 1)
+        .max_by_key(|(_, n)| **n)
+        .map(|(cid, _)| *cid)
+        .or_else(|| {
+            idx.by_class(BlockClass::C3Cell)
+                .find_map(|b| b.lod.base_cell_id)
+        });
+    if let Some(cid) = sample_cell {
+        println!("[world-index] lod_chain(base_cell {cid}):");
+        let chain = idx.lod_chain(cid);
+        for (tier, slot) in chain.iter().enumerate() {
+            match slot {
+                Some(b) => println!(
+                    "[world-index]   tier c{tier}: blk {} {} (P{:?} Q{:?})",
+                    b.block_index, b.name, b.lod.p, b.lod.q
+                ),
+                None => println!("[world-index]   tier c{tier}: (none)"),
+            }
+        }
+    }
+
+    println!("[world-index] build time = {build_ms:.1} ms (eager scan; placement AABBs lazy)");
+    Ok(())
+}
+
+/// One streamable prop's spawn recipe: the mesh it renders as + its authored world Transform
+/// (pos + full quat, native game space, no flip), joined from the `ModelName`/`Transform` COMPs.
+/// Keyed by entity key in the map `build_streaming_catalog` returns, so the streaming executor can
+/// instantiate the prop on WAKE.
+#[derive(Clone, Copy)]
+struct PropSpawn {
+    model_hash: u32,
+    pos: [f32; 3],
+    quat: [f32; 4],
+}
+
+/// Build the Layer-2 streaming DECISION catalog (spec §10) from a WAD's world index + the
+/// decompressed `layers_static` block. Returns the pure `StreamingManager` (blocks + per-entity
+/// placements, with each entity's own `HibernationControl` distances — class defaults 100/160/60/20
+/// when absent) plus the key->`PropSpawn` map the executor needs to instantiate a prop on WAKE.
+///
+/// - **Coarse LOAD units:** every c3 cell that carries model-format geometry (buildings are baked
+///   into c3 cells — spec §2B), with its grid-square extent. `layers_static` (block 29) is the
+///   always-resident base layer; its entities stream PER-ENTITY (below), never by block.
+/// - **Per-entity placements:** every `ModelName` prop in `layers_static` (the entity->mesh recipe,
+///   spec §2A), each carrying its own hibernation/LOD distances or the class defaults.
+fn build_streaming_catalog(
+    _idx: &mercs2_formats::world_index::WorldIndex,
+    layers_static: &[u8],
+    cfg: mercs2_core::streaming::StreamingConfig,
+) -> (
+    mercs2_core::streaming::StreamingManager,
+    std::collections::HashMap<u32, PropSpawn>,
+    std::collections::HashMap<u32, (u32, [f32; 3])>,
+) {
+    use mercs2_core::streaming::{EntityUnit, StreamingManager};
+
+    let mut mgr = StreamingManager::new(cfg);
+    let default_dist = cfg.default_distances;
+
+    // NOTE (2026-07-02): the c3-block residency path (`load_one_c3_cell` → the small 0x5B724250
+    // building `Model`) is DISABLED. That path placed the Model with a SYNTHESIZED position (c3-grid
+    // XZ + Y=0), which floated ~80 m off the terrain — the misalignment the user reported. The real
+    // per-cell hi-res content is the `0x7C569307` terrainmesh, now streamed correctly via the
+    // `TerrainObject`->Transform tiles (below). The building `Model`'s authored transform is a
+    // separate unsolved RCA (its position source is not the c3 cell-id); until it's recovered, we do
+    // NOT stream it rather than render floating geometry. Re-enable once that placement is known.
+
+    // Per-entity placements: ModelName props in layers_static, keyed by entity key with their own
+    // hibernation directive (or the class defaults).
+    let mut props: std::collections::HashMap<u32, PropSpawn> = std::collections::HashMap::new();
+    for p in mercs2_formats::placement::load_model_placements(layers_static) {
+        let dist = p.hibernation.map(|h| h.dist).unwrap_or(default_dist);
+        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
+        props.insert(p.key, PropSpawn { model_hash: p.model_hash, pos: p.pos, quat: p.quat });
+    }
+
+    // Hi-res terrain tiles: the 400 `0x7C569307` terrainmesh tiles, placed via TerrainObject->Transform
+    // (POFF-composed 400 m tiles). Streamed per-tile with a large stream-out (terrain reads from far).
+    // Added BEFORE the named pass so a terrain-tile entity (which also has a Name) is never
+    // double-added with a smaller stream-out — that double-add made the manager emit conflicting
+    // wake(d<1000)/hibernate(d>400) for the same key each tick, flickering the low-res hide/show.
+    let mut terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])> = std::collections::HashMap::new();
+    for t in mercs2_formats::placement::load_terrain_tiles(layers_static) {
+        mgr.add_entity(EntityUnit { key: t.key, pos: t.pos, dist: [1000, 160, 60, 20] });
+        terrain_tiles.insert(t.key, (t.terrainmesh_hash, t.pos));
+    }
+
+    // Named world content — the INSTANCED trees/rocks/bushes/fences/lamps/props: ~5,000 distinct
+    // models referenced 60k+ times (e.g. jungle_env_plantlarge04 ×1912), placed via Name + Transform
+    // with the mesh resolved by NAME-HASH (`pandemic_hash_m2`). These have a Name but no ModelName, so
+    // they were never loaded before. Add every such entity; the executor resolves the mesh on WAKE
+    // (caching non-mesh names like Road/Light/Lane as wake-failures). Instances of the same model
+    // share one GPU upload (`scene.has_model`). Env objects get a larger stream-out (visible farther).
+    for p in mercs2_formats::placement::load_placements(layers_static).unwrap_or_default() {
+        if props.contains_key(&p.key) || terrain_tiles.contains_key(&p.key) {
+            continue; // already a ModelName prop or a hi-res terrain tile
+        }
+        let Some(name) = &p.name else { continue };
+        let base = name.trim_start_matches('_');
+        let h = mercs2_formats::hash::pandemic_hash_m2(base);
+        // Big env props (rocks/plants/trees) read from farther; small props use the class default.
+        let lname = base.to_ascii_lowercase();
+        let far = lname.contains("env") || lname.contains("rock") || lname.contains("huge")
+            || lname.contains("large") || lname.contains("tree") || lname.contains("building");
+        let dist = if far { [400, 160, 60, 20] } else { default_dist };
+        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
+        props.insert(p.key, PropSpawn { model_hash: h, pos: p.pos, quat: p.quat });
+    }
+
+    (mgr, props, terrain_tiles)
+}
+
+/// Headless LOD reverse-engineering probe. Answers two build-blocking questions with real data:
+///  (a) PER-PROP LOD: do the 464 `ModelName` prop meshes carry multi-tier LOD sub-objects (distinct
+///      `SEGM.state_mask` values within one container), or is LOD a building/vehicle-only feature?
+///      The renderer currently hardcodes `LOD_BIT=0x01` (keeps tier-0 sub-objects, skips the rest).
+///  (b) FINE-CELL QUADTREE: for a multi-tier c3 cell, are the fine leaf blocks spatially DISJOINT
+///      (a real quadtree we can stream per-subregion by distance) or overlapping?
+fn lod_probe(wadpath: &str) -> Result<(), String> {
+    use mercs2_formats::model_cubeize::parse_segm;
+    use mercs2_formats::placement::load_model_placements;
+    use mercs2_formats::world_index::BlockClass;
+    let mut w = wad::open(wadpath)?;
+
+    // ---- (a) per-prop SEGM state_mask distribution --------------------------------------------
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        mercs2_formats::world_index::WorldIndex::build(archive, file)
+    };
+    let (_low, ls) = find_terrain_blocks(&mut w)?;
+    let mut prop_hashes: Vec<u32> = load_model_placements(&ls).iter().map(|p| p.model_hash).collect();
+    prop_hashes.sort_unstable();
+    prop_hashes.dedup();
+
+    let mut mask_hist: std::collections::BTreeMap<u8, usize> = std::collections::BTreeMap::new();
+    let mut models_resolved = 0usize;
+    let mut models_multi_mask = 0usize; // >1 distinct non-trivial state_mask among sub-objects
+    let mut models_with_higher_tier = 0usize; // any sub-object needing a bit other than 0x01
+    let mut examples: Vec<(u32, Vec<u8>)> = Vec::new();
+    for &h in &prop_hashes {
+        let Ok(container) = wad::extract_container(&mut w, h) else { continue };
+        let segs = parse_segm(&container);
+        if segs.is_empty() {
+            continue;
+        }
+        models_resolved += 1;
+        let mut distinct: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
+        for s in &segs {
+            *mask_hist.entry(s.state_mask).or_insert(0) += 1;
+            distinct.insert(s.state_mask);
+        }
+        // "Multi-tier" = sub-objects disagree on their mask (some tier-restricted).
+        let nontrivial: std::collections::BTreeSet<u8> =
+            distinct.iter().copied().filter(|&m| m != 0 && m != 0x0F).collect();
+        if distinct.len() > 1 {
+            models_multi_mask += 1;
+            if examples.len() < 8 {
+                examples.push((h, segs.iter().map(|s| s.state_mask).collect()));
+            }
+        }
+        if segs.iter().any(|s| s.state_mask != 0 && s.state_mask != 0x0F && (s.state_mask & 0x01) == 0) {
+            models_with_higher_tier += 1;
+        }
+        let _ = nontrivial;
+    }
+    println!("[lod-probe] (a) PER-PROP LOD — distinct prop meshes: {}, resolved w/ SEGM: {models_resolved}", prop_hashes.len());
+    println!("[lod-probe]   sub-object state_mask histogram (mask -> sub-object count):");
+    for (mask, count) in &mask_hist {
+        let note = match mask {
+            0 => " (unmasked = always drawn)",
+            0x0F => " (all tiers)",
+            0x01 => " (tier-0 / finest only — what the renderer keeps today)",
+            _ => "",
+        };
+        println!("[lod-probe]     0x{mask:02x} x{count}{note}");
+    }
+    println!("[lod-probe]   models with >1 distinct sub-object mask (intra-model LOD): {models_multi_mask}");
+    println!("[lod-probe]   models with a sub-object NOT visible at tier-0 (would need a swap): {models_with_higher_tier}");
+    for (h, masks) in &examples {
+        println!("[lod-probe]     e.g. 0x{h:08X}: masks {masks:02x?}");
+    }
+
+    // ---- (b) fine-cell quadtree structure ------------------------------------------------------
+    // Pick the multi-tier cell with the most fine (tier<3) geometry blocks and dump their extents.
+    let mut per_cell: std::collections::HashMap<u32, Vec<(u16, u8, [f32; 6])>> =
+        std::collections::HashMap::new();
+    for b in idx.by_class(BlockClass::C3Cell) {
+        if !b.has_model_geometry {
+            continue;
+        }
+        let (Some(cid), Some(a)) = (b.lod.base_cell_id, b.extent) else { continue };
+        per_cell.entry(cid).or_default().push((
+            b.block_index,
+            b.lod.tier.unwrap_or(3),
+            [a.min[0], a.min[1], a.min[2], a.max[0], a.max[1], a.max[2]],
+        ));
+    }
+    let sample = per_cell
+        .iter()
+        .filter(|(_, v)| v.iter().any(|(_, t, _)| *t >= 3) && v.iter().filter(|(_, t, _)| *t < 3).count() >= 2)
+        .max_by_key(|(_, v)| v.iter().filter(|(_, t, _)| *t < 3).count());
+    match sample {
+        Some((cid, blocks)) => {
+            let fine = blocks.iter().filter(|(_, t, _)| *t < 3).count();
+            println!("[lod-probe] (b) FINE QUADTREE — sample cell {cid}: {} blocks ({fine} fine tier<3, {} coarse tier3)", blocks.len(), blocks.len() - fine);
+            println!("[lod-probe]   index extent is formula-derived (all == cell AABB); loading REAL geometry bounds:");
+            let mut sorted = blocks.clone();
+            sorted.sort_by_key(|(_, t, _)| std::cmp::Reverse(*t));
+            // Load each block's TRUE world-space vertex bounds to see if fine blocks subdivide the
+            // cell (distinct sub-region AABBs = a real quadtree) or are redundant full-cell detail.
+            let mut distinct_real: std::collections::HashSet<(i32, i32, i32, i32)> =
+                std::collections::HashSet::new();
+            for (blk, tier, _) in sorted.iter().take(16) {
+                match load_one_c3_cell(&mut w, *blk) {
+                    Some((m, off)) => {
+                        let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+                        for v in &m.verts {
+                            let p = [v.pos[0] + off[0], v.pos[1] + off[1], v.pos[2] + off[2]];
+                            for k in 0..3 {
+                                mn[k] = mn[k].min(p[k]);
+                                mx[k] = mx[k].max(p[k]);
+                            }
+                        }
+                        distinct_real.insert((mn[0] as i32, mn[2] as i32, mx[0] as i32, mx[2] as i32));
+                        println!(
+                            "[lod-probe]     blk {blk:<5} tier c{tier}  REAL x[{:>8.1},{:>8.1}] z[{:>8.1},{:>8.1}]  ({:.0}x{:.0} m, {} v)",
+                            mn[0], mx[0], mn[2], mx[2], mx[0] - mn[0], mx[2] - mn[2], m.verts.len()
+                        );
+                    }
+                    None => println!("[lod-probe]     blk {blk:<5} tier c{tier}  (no geometry loaded)"),
+                }
+            }
+            println!(
+                "[lod-probe]   -> {} DISTINCT real XZ footprints among the {} sampled blocks {}",
+                distinct_real.len(),
+                sorted.len().min(16),
+                if distinct_real.len() > 1 { "= fine blocks SUBDIVIDE (real quadtree)" } else { "= redundant full-cell detail (NO subdivision)" }
+            );
+        }
+        None => println!("[lod-probe] (b) FINE QUADTREE — no multi-tier cell with >=2 fine blocks found"),
+    }
+
+    // ---- (c) tier <-> real object SIZE across a sample: is `tier` a LOD level (a cell's tiers
+    // share one footprint at different detail) or a spatial-index depth (each block a distinct
+    // object, small objects bucketed deeper)? Load real AABBs for up to N blocks per tier. --------
+    let mut by_tier: [Vec<u16>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for b in idx.by_class(BlockClass::C3Cell) {
+        if b.has_model_geometry {
+            let t = b.lod.tier.unwrap_or(3).min(3) as usize;
+            by_tier[t].push(b.block_index);
+        }
+    }
+    println!("[lod-probe] (c) TIER<->SIZE — median real XZ extent per tier (sampled):");
+    for t in 0..4 {
+        let sample: Vec<u16> = by_tier[t].iter().step_by((by_tier[t].len() / 60).max(1)).copied().take(60).collect();
+        let mut sizes: Vec<f32> = Vec::new();
+        let mut vsum = 0usize;
+        for &blk in &sample {
+            if let Some((m, _)) = load_one_c3_cell(&mut w, blk) {
+                let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+                for v in &m.verts {
+                    for k in 0..3 {
+                        mn[k] = mn[k].min(v.pos[k]);
+                        mx[k] = mx[k].max(v.pos[k]);
+                    }
+                }
+                sizes.push((mx[0] - mn[0]).max(mx[2] - mn[2]));
+                vsum += m.verts.len();
+            }
+        }
+        sizes.sort_by(|a, b| a.total_cmp(b));
+        let med = sizes.get(sizes.len() / 2).copied().unwrap_or(0.0);
+        let maxs = sizes.last().copied().unwrap_or(0.0);
+        println!(
+            "[lod-probe]   tier c{t}: {} blocks total, sampled {} -> median max-XZ-extent {med:.1} m, largest {maxs:.1} m, avg {} v",
+            by_tier[t].len(), sizes.len(), if sizes.is_empty() { 0 } else { vsum / sizes.len() }
+        );
+    }
+    Ok(())
+}
+
+/// Headless streaming-runtime probe (spec §10 verification): build the Layer-2 decision core over a
+/// scripted camera path from the PMC exterior spawn outward, and log per-step resident-block count,
+/// awake/hibernated entity counts, and the awake LOD-tier distribution — WITHOUT opening a window.
+/// This proves the control-driven runtime independently of the GPU executor.
+fn stream_probe(wadpath: &str) -> Result<(), String> {
+    use mercs2_core::streaming::StreamingConfig;
+    use std::time::Instant;
+
+    let mut w = wad::open(wadpath)?;
+    let t0 = Instant::now();
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        mercs2_formats::world_index::WorldIndex::build(archive, file)
+    };
+    // layers_static (block 29) — the always-loaded base placement layer.
+    let (_low, ls) = find_terrain_blocks(&mut w)?;
+    let cfg = StreamingConfig::default();
+    let (mut mgr, props, _terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    println!("[stream-probe] catalog: {} geometry blocks (per-object, tier-scaled distance), {} per-entity props (of {} keyed spawns)", mgr.block_count(), mgr.entity_count(), props.len());
+    println!(
+        "[stream-probe] config: tier_stream_out(c0..c3)={:?} unload_margin={:.0} block_budget={} entity_budget={} scan_cap={:.0} hysteresis={:.0}",
+        cfg.tier_stream_out, cfg.block_unload_margin, cfg.block_budget, cfg.entity_budget, cfg.entity_scan_cap, cfg.entity_hysteresis
+    );
+    println!("[stream-probe] built in {build_ms:.1} ms");
+
+    // Scripted camera path: start at the PMC exterior/pool spawn, sweep outward (roughly NE across
+    // the map) so blocks/entities load then hibernate as the camera passes. Each waypoint is settled
+    // over several ticks so the throttled load budget can catch up before we read counts.
+    let start = EXTERIOR_SPAWN; // (2560.26, -13.18, -926.25)
+    let path: [[f32; 3]; 8] = [
+        [start[0], start[1], start[2]],
+        [start[0] + 200.0, start[1], start[2] + 200.0],
+        [start[0] + 600.0, start[1], start[2] + 600.0],
+        [start[0] + 1200.0, start[1], start[2] + 1200.0],
+        [1000.0, 0.0, 1000.0],
+        [0.0, 0.0, 0.0],
+        [-1500.0, 0.0, -1500.0],
+        [-3000.0, 50.0, -3000.0],
+    ];
+    const SETTLE_TICKS: u32 = 12; // enough for the per-frame budgets to converge at each waypoint
+
+    for (wi, p) in path.iter().enumerate() {
+        let mut last = mercs2_core::streaming::StreamDiff::default();
+        let (mut loaded, mut unloaded, mut woke, mut hib) = (0usize, 0usize, 0usize, 0usize);
+        for _ in 0..SETTLE_TICKS {
+            let d = mgr.update(*p);
+            loaded += d.load_blocks.len();
+            unloaded += d.unload_blocks.len();
+            woke += d.wake.len();
+            hib += d.hibernate.len();
+            last = d;
+        }
+        println!(
+            "[stream-probe] wp{} ({:>7.0},{:>7.0}): resident={:<4} awake={:<5} | +load {:<3} -load {:<3} +wake {:<4} -hib {:<4} | settled_diff_empty={}",
+            wi, p[0], p[2],
+            mgr.resident_count(), mgr.awake_count(),
+            loaded, unloaded, woke, hib,
+            last.is_empty()
+        );
+    }
+    println!(
+        "[stream-probe] final: resident={} awake={} (of {} props / {} blocks)",
+        mgr.resident_count(), mgr.awake_count(), mgr.entity_count(), mgr.block_count()
+    );
+    Ok(())
+}
+
 /// Headless terrain probe (VERIFIABLE proof): parse blocks 29 + 3121, load the
 /// merged terrain, and print TOC entry count, tiles decoded/placed, total
 /// verts/tris, and world-space position min/max on X/Y/Z.
@@ -2575,6 +4497,14 @@ fn world_probe(wadpath: &str) -> Result<(), String> {
     println!("[world-probe] tiles placed         = {}", tm.tiles_placed);
     println!("[world-probe] total vertices       = {}", tm.positions.len());
     println!("[world-probe] total triangles      = {ntris}");
+    // Terrain normals: prove they're real (varied), not the old flat up-normal.
+    let n_nonup = tm.normals.iter().filter(|n| (n[1] - 1.0).abs() > 0.02).count();
+    let ny_min = tm.normals.iter().map(|n| n[1]).fold(f32::INFINITY, f32::min);
+    println!(
+        "[world-probe] terrain normals        = {} verts, {n_nonup} non-flat ({:.0}%), min normal.y {ny_min:.3}",
+        tm.normals.len(),
+        100.0 * n_nonup as f32 / tm.normals.len().max(1) as f32
+    );
     println!(
         "[world-probe] position X range     = [{:.2}, {:.2}]",
         min[0], max[0]
@@ -3530,6 +5460,16 @@ fn load_model_by_hash(w: &mut wad::Wad, hash: u32) -> Option<(LoadedModel, [f32;
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0; // native metres; world placement is the authored Transform, no offset
+    if std::env::var("MERCS2_TEXDBG").is_ok() {
+        let n_diff = draws.iter().filter(|d| d.diffuse.is_some()).count();
+        let want: std::collections::HashSet<u32> =
+            draws.iter().filter_map(|d| d.diffuse).collect();
+        let got = want.iter().filter(|h| textures.contains_key(h)).count();
+        eprintln!(
+            "[texdbg] mesh 0x{hash:08X}: {} draws ({n_diff} w/ diffuse), {} distinct diffuse hashes, {got} extracted, {} textures total",
+            draws.len(), want.len(), textures.len()
+        );
+    }
     Some((
         LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() },
         stats.bbox_min,
@@ -3601,6 +5541,14 @@ fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3], [f3
             for c in 0..3 {
                 wmin[c] = wmin[c].min(p.pos[c] + bmin[c]);
                 wmax[c] = wmax[c].max(p.pos[c] + bmax[c]);
+            }
+            // Flag large / floor-like meshes (big XZ footprint) — candidates for the hall/floor shell.
+            let (dx, dy, dz) = (bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]);
+            if dx > 18.0 || dz > 18.0 {
+                println!(
+                    "[interior]   LARGE mesh 0x{hash:08X} '{}' {}v dims=({:.1},{:.1},{:.1}) @ ({:.1},{:.1},{:.1})",
+                    p.name.as_deref().unwrap_or("?"), m.verts.len(), dx, dy, dz, p.pos[0], p.pos[1], p.pos[2]
+                );
             }
             *distinct.entry(hash).or_insert(0) += 1;
             resolved += 1;
@@ -3824,6 +5772,14 @@ fn interior_list(wadpath: &str) -> Result<(), String> {
         "pmcoutpost_bld_hqsuites", "_pmcoutpost_bld_hqsuites", "pmcoutpost_bld_hqgarage",
         "groutpost_interior_job", "aloutpost_interior_job", "ocoutpost_interior_job",
         "chinaoutpost_interior_job",
+        // PMC main-hall / HQ-interior guesses following the resolving patterns
+        // (`Xoutpost_interior_job`, `pmcoutpost_interior_*`, merida = the PMC town)
+        "pmcoutpost_interior_job", "pmcoutpost_interior_hq", "pmcoutpost_interior_mainhall",
+        "pmcoutpost_interior", "pmcoutpost_interior_main", "pmcoutpost_interior_hall",
+        "pmcoutpost_interior_room", "pmcoutpost_interior_recruitfiona", "pmcoutpost_interior_base",
+        "pmcoutpost_interior_recruit", "pmcoutpost_bld_hq_interior", "pmchq_interior",
+        "pmc_interior_hq", "merida_bld_pmchq_interior", "meridahq_interior", "merida_interior_job",
+        "merida_bld_pmc_interior", "pmcoutpost_interior_hqmain", "pmcoutpost_mainhall",
     ];
     for n in template_probe {
         let h = mercs2_formats::hash::pandemic_hash_m2(n);
@@ -4038,6 +5994,119 @@ const MODEL_COMP_HASH: u32 = 0x5B72_4250;
 ///  3. When an anchor is found: report COMP type, byte offset in the record, and the owning entity.
 ///  4. Cross-check the winning COMP against the ECS `Model` class (0x5b724250, stride 4).
 ///  5. Prove one entity end-to-end: key -> Model COMP -> mesh hash -> extract_container -> verts/tris.
+/// Hex-dump the data blobs of a named COMP across `layers_static` (block 29), alongside the owning
+/// sub-block's Transform keys, so the on-disk record stride can be reversed empirically (the `schm`
+/// payload_stride is the in-memory footprint, not the on-disk stride — Transform is 42 on disk vs
+/// schm 52). Prints, per COMP occurrence: sub_block, data span, hex of the first bytes, and the
+/// set of entity keys present in the same sub-block (Transform records) so leading-u32 keys in the
+/// blob can be recognised.
+fn comp_dump(wadpath: &str, target: &str) -> Result<(), String> {
+    use mercs2_formats::placement::{comp_inventory, load_placements};
+    let mut w = wad::open(wadpath)?;
+    let (_low, ls) = find_terrain_blocks(&mut w)?;
+
+    // Per sub-block key set (from Transform/Name records) to recognise keys inside the target blob.
+    let placements = load_placements(&ls).unwrap_or_default();
+    let mut keys_by_sub: std::collections::HashMap<u16, std::collections::HashSet<u32>> =
+        std::collections::HashMap::new();
+    let mut name_by_key: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    for p in &placements {
+        keys_by_sub.entry(p.sub_block).or_default().insert(p.key);
+        if let Some(n) = &p.name {
+            name_by_key.entry(p.key).or_insert_with(|| n.clone());
+        }
+    }
+
+    let inv = comp_inventory(&ls);
+    let mut shown = 0usize;
+    for c in &inv {
+        if c.info_name.as_deref() != Some(target) {
+            continue;
+        }
+        let (Some(off), Some(size)) = (c.data_off, c.data_size) else { continue };
+        if off + size > ls.len() {
+            continue;
+        }
+        let blob = &ls[off..off + size];
+        let known = keys_by_sub.get(&c.sub_block);
+        println!(
+            "[comp-dump] {target} sub_block={} data_off={off} size={size} schm_stride={:?}",
+            c.sub_block, c.payload_stride
+        );
+        // Hex dump in 16-byte rows.
+        for (row, chunk) in blob.chunks(16).enumerate().take(8) {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            println!("[comp-dump]   +{:04x}: {}", row * 16, hex.join(" "));
+        }
+        // Try to recognise entity keys at every 4-byte-aligned offset that match this sub-block.
+        if let Some(known) = known {
+            let mut hits: Vec<(usize, u32)> = Vec::new();
+            let mut i = 0usize;
+            while i + 4 <= blob.len() {
+                let v = u32::from_le_bytes([blob[i], blob[i + 1], blob[i + 2], blob[i + 3]]);
+                if known.contains(&v) {
+                    hits.push((i, v));
+                }
+                i += 1;
+            }
+            print!("[comp-dump]   key-hits (off:key):");
+            for (o, k) in hits.iter().take(24) {
+                print!(" {o}:0x{k:08x}");
+            }
+            println!();
+            // Infer stride = gap between the first two key hits (if regular).
+            if hits.len() >= 2 {
+                let strides: Vec<usize> = hits.windows(2).map(|w| w[1].0 - w[0].0).collect();
+                println!("[comp-dump]   key-hit gaps: {strides:?}");
+            }
+        }
+        shown += 1;
+        if shown >= 6 {
+            break;
+        }
+    }
+    if shown == 0 {
+        println!("[comp-dump] no '{target}' COMP found in layers_static(29)");
+    }
+
+    // World-wide summary for HibernationControl: the per-entity distance distribution + how many
+    // props (ModelName placements) actually carry one vs fall back to class defaults.
+    if target == "HibernationControl" {
+        use mercs2_formats::placement::{load_hibernation, load_model_placements};
+        let hib = load_hibernation(&ls);
+        let mut d0: Vec<u16> = hib.values().map(|h| h.dist[0]).collect();
+        d0.sort_unstable();
+        let n = d0.len();
+        if n > 0 {
+            let min = d0[0];
+            let max = d0[n - 1];
+            let med = d0[n / 2];
+            let over400 = d0.iter().filter(|&&v| v > 400).count();
+            // Confirm dist[1..4] are the constant class defaults across every record.
+            let non_default = hib
+                .values()
+                .filter(|h| h.dist[1] != 160 || h.dist[2] != 60 || h.dist[3] != 20)
+                .count();
+            let flagged = hib.values().filter(|h| h.flag != 0).count();
+            println!(
+                "[comp-dump] --- HibernationControl world summary (layers_static) ---\n\
+                 [comp-dump]   entities with directive: {n}\n\
+                 [comp-dump]   dist0 (hibernation): min={min} median={med} max={max}  (>400: {over400})\n\
+                 [comp-dump]   dist1..3 != default(160/60/20): {non_default} entities\n\
+                 [comp-dump]   flag != 0: {flagged} entities"
+            );
+        }
+        let props = load_model_placements(&ls);
+        let with = props.iter().filter(|p| p.hibernation.is_some()).count();
+        println!(
+            "[comp-dump]   ModelName props: {} total, {with} carry a HibernationControl \
+             (rest use class defaults)",
+            props.len()
+        );
+    }
+    Ok(())
+}
+
 fn comp_probe(wadpath: &str) -> Result<(), String> {
     use mercs2_formats::placement::{comp_inventory, load_placements, yaw_from_quat, CompInfo};
     let mut w = wad::open(wadpath)?;
@@ -4951,6 +7020,494 @@ async fn run_scene_world_loading(
             _ => {}
         })
         .expect("event loop run");
+}
+
+/// Load ONE c3 streaming cell's baked geometry by block index (the single-cell form of
+/// `load_c3_cells`, used by the streaming executor on a LOAD_BLOCK event). Slices the `model`
+/// container out of the block, builds it, extracts its textures, and returns the model + the
+/// world offset to place it at (zero when the verts prove already world-space; else the cell
+/// grid-centre). `None` on any decode failure or if the block carries no model container.
+fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f32; 3])> {
+    use mercs2_formats::ucfx::parse_block_entry_table;
+    let path = wad::block_paths(w).get(block as usize)?.clone();
+    let cell_id = c3_cell_id_from_path(&path)?;
+    let (cx, cz) = c3_cell_centre(cell_id);
+    let dec = wad::decompress_block_index(w, block).ok()?;
+    let (count, entries) = parse_block_entry_table(&dec);
+    let mut pos = 4 + count as usize * 16;
+    let mut model: Option<(u32, usize, usize)> = None;
+    for e in &entries {
+        let end = pos + e.chunk_size as usize;
+        if e.type_hash == wad::MODEL_TYPE_HASH && end <= dec.len() {
+            model = Some((e.name_hash, pos, end));
+            break;
+        }
+        pos = end;
+    }
+    let (hash, s0, s1) = model?;
+    let (verts, indices, draws, stats) = mesh::build_indexed_from_container(&dec[s0..s1]).ok()?;
+    // World-space check (identical to load_c3_cells): bbox centre already inside this cell's bounds
+    // => verts are world-space (identity); else cell-local (offset to the cell centre).
+    let bcx = (stats.bbox_min[0] + stats.bbox_max[0]) * 0.5;
+    let bcz = (stats.bbox_min[2] + stats.bbox_max[2]) * 0.5;
+    let half = C3_CELL_SIZE * 0.5;
+    let world_space = (bcx - cx).abs() <= half && (bcz - cz).abs() <= half;
+    let offset = if world_space { [0.0, 0.0, 0.0] } else { [cx, 0.0, cz] };
+    let mut textures: TexMap = std::collections::HashMap::new();
+    for d in &draws {
+        for h in [d.diffuse, d.normal].into_iter().flatten() {
+            if !textures.contains_key(&h) {
+                if let Ok(t) = wad::extract_texture(w, h) {
+                    textures.insert(h, t);
+                }
+            }
+        }
+    }
+    let mut skin = stats.skin_data();
+    skin.center = [0.0, 0.0, 0.0];
+    skin.scale = 1.0;
+    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() }, offset))
+}
+
+/// Everything the streaming runtime needs, produced on the background loader thread (all `Send`):
+/// the WAD handle (moved to the render thread for on-demand wake extraction), the base terrain, its
+/// heightmap, the pure streaming decision manager (blocks + per-entity props with hibernation), and
+/// the key->spawn recipe map the executor uses on WAKE.
+struct StreamingWorldData {
+    wad: wad::Wad,
+    terrain: LoadedModel,
+    manager: mercs2_core::streaming::StreamingManager,
+    props: std::collections::HashMap<u32, PropSpawn>,
+    terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])>,
+    /// Low-res terrain grid cell (row*20+col) -> its draw-group index in the `terrain` model, so the
+    /// executor can hide that tile when the hi-res terrainmesh at the same cell is resident.
+    lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
+}
+
+/// Load the streaming world off-thread: open the WAD, merge the base terrain, build the world block
+/// index + Layer-2 streaming catalog (c3-cell LOAD units + per-entity `ModelName` props with their
+/// `HibernationControl` distances). Returns the data (incl. the WAD handle) for the render thread.
+fn load_streaming_world_data(
+    wadpath: &str,
+    cfg: mercs2_core::streaming::StreamingConfig,
+    progress: &LoadProgress,
+) -> Result<StreamingWorldData, String> {
+    let mut w = wad::open(wadpath)?;
+    let (low, ls) = find_terrain_blocks(&mut w)?;
+    progress.step("blocks");
+
+    // Base terrain (the bottom LOD rung — one merged mesh, always present).
+    let tm = mercs2_formats::terrain::load_terrain(&low, &ls)?;
+    let textured = tm.texture.is_some();
+    let verts = terrain_to_vertices(&tm, textured);
+    let mut textures: TexMap = std::collections::HashMap::new();
+    let diffuse = if let Some(t) = tm.texture.clone() {
+        textures.insert(0, t);
+        Some(0)
+    } else {
+        None
+    };
+    // One draw group PER TILE (all sharing the atlas view), so a low-res tile can be hidden when its
+    // hi-res terrainmesh is resident. `lowres_draw_by_cell[cell] = draw index` maps the 20x20 grid.
+    let mut draws = Vec::with_capacity(tm.tile_draws.len());
+    let mut lowres_draw_by_cell: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for (i, &(cell, start, count)) in tm.tile_draws.iter().enumerate() {
+        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, normal: None });
+        lowres_draw_by_cell.insert(cell, i);
+    }
+    let terrain = LoadedModel {
+        hash: 0x7E44_A100,
+        verts,
+        indices: tm.indices.clone(),
+        draws,
+        textures,
+        skin: mesh::SkinData::identity(),
+        clips: Vec::new(),
+    };
+    println!("[stream] terrain: {} verts / {} tris / {} tiles", terrain.verts.len(), terrain.indices.len() / 3, tm.tiles_placed);
+    progress.step("terrain");
+
+    // World block index (c3-cell extents) + the streaming catalog.
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        mercs2_formats::world_index::WorldIndex::build(archive, file)
+    };
+    progress.step("world index");
+    let (manager, props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    println!(
+        "[stream] catalog: {} c3-cell blocks, {} per-entity props, {} hi-res terrain tiles",
+        manager.block_count(), props.len(), terrain_tiles.len()
+    );
+    progress.step("streaming catalog");
+
+    Ok(StreamingWorldData { wad: w, terrain, manager, props, terrain_tiles, lowres_draw_by_cell })
+}
+
+/// The control-driven streaming world with a free-fly camera (the no-arg default boot; also
+/// `--stream`). Mirrors the original engine's ONE streaming system (spec §10): a background loader
+/// builds the block index + Layer-2 decision catalog, then each frame the pure `StreamingManager`
+/// turns the camera position into a load/unload/wake/hibernate diff, and this executor performs the
+/// GPU work — LOAD c3-cell geometry + WAKE `ModelName` props (via the proven recipes), and the
+/// net-new UNLOAD path (despawn + free GPU). Free-fly camera reuses the Shadow-PC dual-source mouse
+/// input (CursorMoved+recentre fallback, never DeviceEvent on absolute-coordinate streams).
+async fn run_streaming_world(wadpath: String) {
+    use crate::scene::Scene;
+    use mercs2_core::glam::{Mat4, Quat, Vec3};
+    use mercs2_core::streaming::StreamingConfig;
+    use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
+    use std::collections::{HashMap, HashSet};
+    use std::f32::consts::PI;
+    use winit::event::{DeviceEvent, ElementState};
+    use winit::window::CursorGrabMode;
+
+    const IDENTITY: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    // Runtime config: tighter per-frame budgets than the probe so wake/load disk I/O (container +
+    // texture extraction) doesn't stall a frame; proximity radii are generous for an aerial cam.
+    let cfg = StreamingConfig {
+        block_unload_margin: 200.0,
+        block_budget: 2,
+        entity_budget: 6,
+        entity_hysteresis: 15.0,
+        entity_scan_cap: 700.0,
+        grid_cell: 128.0,
+        ..StreamingConfig::default()
+    };
+
+    let event_loop = EventLoop::new().expect("event loop");
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("Mercenaries 2 — streaming world (free-fly)")
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
+            .build(&event_loop)
+            .expect("window"),
+    );
+    if let Err(e) = window
+        .set_cursor_grab(CursorGrabMode::Confined)
+        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
+    {
+        eprintln!("[stream] cursor grab unavailable ({e}); arrow keys still steer");
+    }
+    window.set_cursor_visible(false);
+    let mut scene = Scene::new(window.clone()).await;
+    scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
+    match wad::shell_loading_plate(&wadpath) {
+        Ok(td) => scene.set_loading_art(&td),
+        Err(e) => eprintln!("[stream] loading art unavailable ({e}); spinner only"),
+    }
+
+    // Background loader.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<StreamingWorldData, String>>();
+    let progress = Arc::new(LoadProgress::new(4));
+    let loader_progress = progress.clone();
+    let loader_wadpath = wadpath.clone();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let r = load_streaming_world_data(&loader_wadpath, cfg, &loader_progress);
+        if r.is_ok() {
+            println!("[stream] loaded in {:.1}s", t0.elapsed().as_secs_f64());
+        }
+        let _ = tx.send(r);
+    });
+
+    let mut world = World::new();
+    // Streaming state, wired in on loader completion.
+    let mut wad_opt: Option<wad::Wad> = None;
+    let mut manager: Option<mercs2_core::streaming::StreamingManager> = None;
+    let mut props: HashMap<u32, PropSpawn> = HashMap::new();
+    let mut terrain_tiles: HashMap<u32, (u32, [f32; 3])> = HashMap::new(); // key -> (terrainmesh hash, pos)
+    let mut lowres_draw_by_cell: HashMap<usize, usize> = HashMap::new(); // grid cell -> low-res draw idx
+    let mut terrain_hash: u32 = 0; // the low-res terrain model hash (for the tile LOD swap)
+    // Map a world XZ to the 20x20 low-res grid cell (row*20+col); tiles are 400 m from -3800.
+    let pos_to_cell = |p: [f32; 3]| -> Option<usize> {
+        let col = ((p[0] + 3800.0) / 400.0).round() as i32;
+        let row = ((p[2] + 3800.0) / 400.0).round() as i32;
+        (0..20).contains(&col).then(|| ())?;
+        (0..20).contains(&row).then(|| ())?;
+        Some(row as usize * 20 + col as usize)
+    };
+    // Live executor bookkeeping.
+    let mut prop_ents: HashMap<u32, Entity> = HashMap::new(); // entity key -> ECS entity
+    let mut block_ents: HashMap<u16, Entity> = HashMap::new(); // c3 block -> ECS entity
+    let mut model_refs: HashMap<u32, u32> = HashMap::new(); // model hash -> live entity count
+    let mut wake_failed: HashSet<u32> = HashSet::new(); // keys whose mesh wouldn't resolve (logged once)
+
+    // Free-fly camera. Start over the PMC exterior spawn at a moderate height so nearby cells +
+    // props stream in immediately; WASDQE + mouse-look fly around.
+    let mut free_pos = Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]);
+    let mut free_yaw: f32 = PI;
+    let mut free_pitch: f32 = -0.35;
+    let mut held: HashSet<KeyCode> = HashSet::new();
+    let mut loading = true;
+    let load_start = std::time::Instant::now();
+    let mut bar_shown = 0.0f32;
+    let mut bar_last_t = 0.0f32;
+    let mut last = std::time::Instant::now();
+    let mut mouse_acc: (f32, f32) = (0.0, 0.0);
+    let mut mouse_raw_acc: (f32, f32) = (0.0, 0.0);
+    let mut mouse_src: u8 = 0;
+    let mut mouse_sane_events: u32 = 0;
+    let mut stat_last = std::time::Instant::now();
+
+    event_loop
+        .run(move |event, elwt| match event {
+            Event::WindowEvent { window_id, event } if window_id == scene.window.id() => match event {
+                WindowEvent::CloseRequested => elwt.exit(),
+                WindowEvent::KeyboardInput {
+                    event: KeyEvent { physical_key: PhysicalKey::Code(code), state, .. },
+                    ..
+                } => match (code, state) {
+                    (KeyCode::Escape, _) => elwt.exit(),
+                    (c, ElementState::Pressed) => { held.insert(c); }
+                    (c, ElementState::Released) => { held.remove(&c); }
+                },
+                WindowEvent::Resized(size) => scene.resize(size),
+                WindowEvent::CursorMoved { position, .. } => {
+                    let (cx, cy) = (scene.size.width as f64 / 2.0, scene.size.height as f64 / 2.0);
+                    mouse_acc.0 += (position.x - cx) as f32;
+                    mouse_acc.1 += (position.y - cy) as f32;
+                    let _ = scene.window.set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
+                }
+                WindowEvent::RedrawRequested => {
+                    if loading {
+                        match rx.try_recv() {
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                let t = load_start.elapsed().as_secs_f32();
+                                let dt = (t - bar_last_t).max(0.0);
+                                bar_last_t = t;
+                                bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
+                                match scene.render_loading(t, bar_shown) {
+                                    Ok(()) => {}
+                                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
+                                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                                    Err(e) => eprintln!("surface error: {e:?}"),
+                                }
+                                return;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                eprintln!("[stream] loader thread died"); elwt.exit(); return;
+                            }
+                            Ok(Err(e)) => { eprintln!("[stream] load failed: {e}"); elwt.exit(); return; }
+                            Ok(Ok(data)) => {
+                                // Base terrain: one static entity at identity (verts already world-space).
+                                let terrain = data.terrain;
+                                terrain_hash = terrain.hash;
+                                scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
+                                world.spawn((
+                                    Transform::IDENTITY,
+                                    ModelRef { model: terrain.hash },
+                                    AnimState::default(),
+                                    SkinPalette { mats: vec![IDENTITY] },
+                                ));
+                                wad_opt = Some(data.wad);
+                                manager = Some(data.manager);
+                                props = data.props;
+                                terrain_tiles = data.terrain_tiles;
+                                lowres_draw_by_cell = data.lowres_draw_by_cell;
+                                loading = false;
+                            }
+                        }
+                    }
+
+                    let now = std::time::Instant::now();
+                    let dt = (now - last).as_secs_f32().min(0.1);
+                    last = now;
+                    let look = 1.6 * dt;
+
+                    // --- mouse-look (dual-source; see run_scene_world_loading) ---
+                    const MOUSE_SENS: f32 = 0.0008;
+                    let src = if mouse_src == 1 { mouse_raw_acc } else { mouse_acc };
+                    let mdx = src.0.clamp(-80.0, 80.0) * MOUSE_SENS;
+                    let mdy = src.1.clamp(-80.0, 80.0) * MOUSE_SENS;
+                    mouse_acc = (0.0, 0.0);
+                    mouse_raw_acc = (0.0, 0.0);
+                    free_yaw += mdx;
+                    free_pitch = (free_pitch - mdy).clamp(-1.5, 1.5);
+
+                    // --- free-fly movement ---
+                    if held.contains(&KeyCode::ArrowUp) { free_pitch += look; }
+                    if held.contains(&KeyCode::ArrowDown) { free_pitch -= look; }
+                    if held.contains(&KeyCode::ArrowLeft) { free_yaw -= look; }
+                    if held.contains(&KeyCode::ArrowRight) { free_yaw += look; }
+                    free_pitch = free_pitch.clamp(-1.5, 1.5);
+                    let fwd = Vec3::new(free_pitch.cos() * free_yaw.sin(), free_pitch.sin(), free_pitch.cos() * free_yaw.cos()).normalize();
+                    let right = Vec3::Y.cross(fwd).normalize();
+                    let mut mv = Vec3::ZERO;
+                    if held.contains(&KeyCode::KeyW) { mv += fwd; }
+                    if held.contains(&KeyCode::KeyS) { mv -= fwd; }
+                    if held.contains(&KeyCode::KeyD) { mv += right; }
+                    if held.contains(&KeyCode::KeyA) { mv -= right; }
+                    if held.contains(&KeyCode::KeyE) { mv += Vec3::Y; }
+                    if held.contains(&KeyCode::KeyQ) { mv -= Vec3::Y; }
+                    let sp = if held.contains(&KeyCode::ShiftLeft) { 900.0 } else { 260.0 };
+                    if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * dt; }
+                    let view = Mat4::look_to_lh(free_pos, fwd, Vec3::Y);
+
+                    // --- streaming tick: decide, then execute the diff on the GPU/ECS ---
+                    if let (Some(mgr), Some(w)) = (manager.as_mut(), wad_opt.as_mut()) {
+                        let diff = mgr.update([free_pos.x, free_pos.y, free_pos.z]);
+
+                        // UNLOAD first (free GPU): blocks that left the working radius.
+                        for b in &diff.unload_blocks {
+                            if let Some(e) = block_ents.remove(b) {
+                                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
+                                    dec_model_ref(&mut model_refs, mr, &mut scene);
+                                }
+                                let _ = world.despawn(e);
+                                scene.forget_entity(e);
+                            }
+                        }
+                        // HIBERNATE (free GPU): props beyond their stream-out distance.
+                        for k in &diff.hibernate {
+                            // If a hi-res terrain tile hibernates, un-hide its low-res tile again.
+                            if let Some(&(_, pos)) = terrain_tiles.get(k) {
+                                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
+                                    scene.set_draw_hidden(terrain_hash, *di, false);
+                                }
+                            }
+                            if let Some(e) = prop_ents.remove(k) {
+                                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
+                                    dec_model_ref(&mut model_refs, mr, &mut scene);
+                                }
+                                let _ = world.despawn(e);
+                                scene.forget_entity(e);
+                            }
+                        }
+                        // LOAD c3-cell blocks (throttled by the manager's block budget).
+                        for b in &diff.load_blocks {
+                            if block_ents.contains_key(b) { continue; }
+                            if let Some((m, off)) = load_one_c3_cell(w, *b) {
+                                if !scene.has_model(m.hash) {
+                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                }
+                                let e = world.spawn((
+                                    Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
+                                    ModelRef { model: m.hash },
+                                    AnimState::default(),
+                                    SkinPalette { mats: vec![IDENTITY] },
+                                ));
+                                *model_refs.entry(m.hash).or_insert(0) += 1;
+                                block_ents.insert(*b, e);
+                            }
+                        }
+                        // WAKE props (throttled by the manager's entity budget): instantiate the
+                        // ModelName mesh at the authored Transform (identity fit + bone-count palette).
+                        for k in &diff.wake {
+                            if prop_ents.contains_key(k) { continue; }
+                            // Hi-res terrain tile? Load the terrainmesh (POFF-composed, world-placed via
+                            // TerrainObject->Transform) and spawn at identity (verts already world-space).
+                            if let Some(&(tm_hash, pos)) = terrain_tiles.get(k) {
+                                if !scene.has_model(tm_hash) {
+                                    match load_terrainmesh_tile(w, tm_hash, pos) {
+                                        Some(m) => scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin),
+                                        None => { wake_failed.insert(*k); continue; }
+                                    }
+                                }
+                                let e = world.spawn((
+                                    Transform::IDENTITY,
+                                    ModelRef { model: tm_hash },
+                                    AnimState::default(),
+                                    SkinPalette { mats: vec![IDENTITY] },
+                                ));
+                                *model_refs.entry(tm_hash).or_insert(0) += 1;
+                                prop_ents.insert(*k, e);
+                                // Hide the low-res tile beneath this hi-res tile (the LOD swap).
+                                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
+                                    scene.set_draw_hidden(terrain_hash, *di, true);
+                                }
+                                continue;
+                            }
+                            let Some(spawn) = props.get(k).copied() else { continue };
+                            if !scene.has_model(spawn.model_hash) {
+                                match load_model_by_hash(w, spawn.model_hash) {
+                                    Some((m, _, _)) => {
+                                        scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                    }
+                                    None => {
+                                        if wake_failed.insert(*k) {
+                                            // Mesh hash has no primary model ASET (the documented ~10/465 gap).
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            let nbones = scene.model_bone_count(spawn.model_hash).max(1);
+                            let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
+                            t.rotation = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
+                            let e = world.spawn((
+                                t,
+                                ModelRef { model: spawn.model_hash },
+                                AnimState::default(),
+                                SkinPalette { mats: vec![IDENTITY; nbones] },
+                            ));
+                            *model_refs.entry(spawn.model_hash).or_insert(0) += 1;
+                            prop_ents.insert(*k, e);
+                        }
+                        // Each geometry block streams independently by its own tier-scaled distance
+                        // (per-object; the c3 chain is a size-keyed spatial index, not LOD levels).
+                        // diff.tier_changes carries the per-PROP hibernation LOD tier — informational
+                        // only; props don't ship alternate-LOD meshes (verified --lod-probe: 2/446).
+
+                        // Periodic streaming stats to the console (proof the runtime is live).
+                        if stat_last.elapsed().as_secs_f32() >= 1.0 {
+                            stat_last = std::time::Instant::now();
+                            println!(
+                                "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} | live_blk_ents={} props={} models={}",
+                                free_pos.x, free_pos.y, free_pos.z,
+                                mgr.resident_count(), mgr.awake_count(),
+                                block_ents.len(), prop_ents.len(), model_refs.len()
+                            );
+                        }
+                    }
+
+                    scene.set_view(view, 0.5, 30000.0);
+                    match scene.render(&world) {
+                        Ok(()) => {}
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
+                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                        Err(e) => eprintln!("surface error: {e:?}"),
+                    }
+                }
+                _ => {}
+            },
+            Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
+                let (dx, dy) = (delta.0 as f32, delta.1 as f32);
+                if mouse_src != 2 {
+                    if dx.abs() > 2000.0 || dy.abs() > 2000.0 {
+                        mouse_src = 2;
+                        eprintln!("[stream] absolute-coordinate raw input detected -> cursor-recentre mode");
+                    } else {
+                        mouse_raw_acc.0 += dx;
+                        mouse_raw_acc.1 += dy;
+                        if mouse_src == 0 && (dx != 0.0 || dy != 0.0) {
+                            mouse_sane_events += 1;
+                            if mouse_sane_events >= 10 { mouse_src = 1; }
+                        }
+                    }
+                }
+            }
+            Event::AboutToWait => scene.window.request_redraw(),
+            _ => {}
+        })
+        .expect("event loop run");
+}
+
+/// Decrement a model's live-reference count; free its GPU resources when it reaches zero (net-new
+/// UNLOAD path — nothing freed GPU before the streaming runtime). Shared meshes stay resident until
+/// the last referencing entity hibernates/unloads.
+fn dec_model_ref(refs: &mut std::collections::HashMap<u32, u32>, hash: u32, scene: &mut crate::scene::Scene) {
+    if let Some(c) = refs.get_mut(&hash) {
+        *c = c.saturating_sub(1);
+        if *c == 0 {
+            refs.remove(&hash);
+            scene.unload_model(hash);
+        }
+    }
 }
 
 type TexMap = std::collections::HashMap<u32, mercs2_formats::texture::TextureData>;

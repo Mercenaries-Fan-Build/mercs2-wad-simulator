@@ -27,3 +27,4 @@ pub mod texture;
 pub mod types;
 pub mod ucfx;
 pub mod world;
+pub mod world_index;

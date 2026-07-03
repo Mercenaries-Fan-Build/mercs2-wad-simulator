@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu). Phase 1 skeleton."
 
+# Engine library surface (render-agnostic modules: wad/mesh/pose) shared by the engine binary and
+# the sibling mercs2_game / mercs2_probe binaries. The wgpu render path stays in the binary for now.
+[lib]
+name = "mercs2_engine"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mercs2_engine"
 path = "src/main.rs"

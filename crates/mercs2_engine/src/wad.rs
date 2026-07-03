@@ -48,6 +48,17 @@ pub fn open(path: &str) -> Result<Wad, String> {
     Ok(Wad { file, archive })
 }
 
+/// Every ASET `(type_id, is_primary, block_index)` a hash appears under (any type). For diagnosing
+/// what asset type a name-hash resolves to (e.g. model=19 vs a foliage/other type).
+pub fn aset_types(wad: &Wad, name_hash: u32) -> Vec<(u32, bool, u16)> {
+    wad.archive
+        .aset
+        .iter()
+        .filter(|e| e.asset_hash == name_hash)
+        .map(|e| (e.type_id, e.is_primary(), e.block_index()))
+        .collect()
+}
+
 /// All model assets as `(name_hash, block_index)` from primary ASET entries, sorted + deduped.
 pub fn model_list(wad: &Wad) -> Vec<(u32, u16)> {
     let mut v: Vec<(u32, u16)> = wad
@@ -162,17 +173,61 @@ pub fn animgroup_blocks(wad: &Wad) -> Vec<u16> {
     v
 }
 
-/// Extract the UCFX model container for `name_hash` (via its primary ASET block).
+/// Split the `Wad` into its raw FFCS archive + backing file, for consumers (e.g.
+/// `mercs2_formats::world_index::WorldIndex::build`) that read blocks directly through the
+/// format-crate primitives rather than the engine wrapper.
+pub fn archive_and_file(wad: &mut Wad) -> (&FfcsArchive, &mut File) {
+    (&wad.archive, &mut wad.file)
+}
+
+/// Extract the UCFX model container for `name_hash` via its ASET block. Prefers the PRIMARY model
+/// entry, but falls back to a SUB-ENTRY (`is_primary == false`) — the instanced world content
+/// (trees/rocks/bushes/lamps like `jungle_env_plantlarge04`) is a shared model carried as a sub-entry
+/// in another block, not a primary asset; those were previously unresolvable.
 pub fn extract_container(wad: &mut Wad, name_hash: u32) -> Result<Vec<u8>, String> {
     let block = wad
         .archive
         .aset
         .iter()
         .find(|e| e.asset_hash == name_hash && e.type_id == MODEL_ASET_TYPE_ID && e.is_primary())
+        .or_else(|| {
+            wad.archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == name_hash && e.type_id == MODEL_ASET_TYPE_ID)
+        })
         .map(|e| e.block_index())
-        .ok_or_else(|| format!("no primary model ASET for 0x{name_hash:08X}"))?;
+        .ok_or_else(|| format!("no model ASET for 0x{name_hash:08X}"))?;
     let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
     let (s, e) = find_model_span(&dec, Some(name_hash))
         .ok_or_else(|| format!("model 0x{name_hash:08X} not found in block {block}"))?;
     Ok(dec[s..e].to_vec())
+}
+
+/// Extract a container chunk of a given CHDR class `chunk_type` (e.g. the `0x7C569307` terrainmesh)
+/// by its asset hash — resolves the block via ANY primary ASET for the hash (not just MODEL), then
+/// walks the block entry table to the chunk whose `type_hash == chunk_type` and `name_hash` matches.
+pub fn extract_container_typed(
+    wad: &mut Wad,
+    name_hash: u32,
+    chunk_type: u32,
+) -> Result<Vec<u8>, String> {
+    let block = wad
+        .archive
+        .aset
+        .iter()
+        .find(|e| e.asset_hash == name_hash && e.is_primary())
+        .map(|e| e.block_index())
+        .ok_or_else(|| format!("no primary ASET for 0x{name_hash:08X}"))?;
+    let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    let mut pos = 4 + count as usize * 16;
+    for e in &entries {
+        let end = pos + e.chunk_size as usize;
+        if e.type_hash == chunk_type && e.name_hash == name_hash && end <= dec.len() {
+            return Ok(dec[pos..end].to_vec());
+        }
+        pos = end;
+    }
+    Err(format!("chunk type 0x{chunk_type:08X} name 0x{name_hash:08X} not found in block {block}"))
 }

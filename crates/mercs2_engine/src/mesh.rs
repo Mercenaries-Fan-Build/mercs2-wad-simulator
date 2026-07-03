@@ -187,6 +187,10 @@ pub fn build_indexed_from_container(
         tangents: Vec<[f32; 4]>,
     }
 
+    // Per-PRMG-group POFF (parent GEOM position offset). Needed so multi-GEOM meshes (the terrainmesh:
+    // 16 sub-tiles at ±150/±50) don't collapse onto each other; single-GEOM models get [0,0,0].
+    let poffs = mercs2_formats::model_cubeize::prmg_geom_offsets(container);
+
     let mut skipped = 0usize;
     let mut kept: Vec<Placed> = Vec::new();
     for m in &meshes {
@@ -200,7 +204,7 @@ pub fn build_indexed_from_container(
         } else {
             None
         };
-        let (positions, normals, tangents) = if let Some(w) = bonemat {
+        let (mut positions, normals, tangents) = if let Some(w) = bonemat {
             (
                 m.positions.iter().map(|&p| transform_point(&w, p)).collect(),
                 m.normals.iter().map(|&n| transform_dir(&w, n)).collect(),
@@ -215,6 +219,16 @@ pub fn build_indexed_from_container(
         } else {
             (m.positions.clone(), m.normals.clone(), m.tangents.clone())
         };
+        // Apply the group's POFF (parent-GEOM translation). Non-zero only for multi-GEOM meshes.
+        if let Some(off) = poffs.get(m.group_index) {
+            if *off != [0.0, 0.0, 0.0] {
+                for p in positions.iter_mut() {
+                    p[0] += off[0];
+                    p[1] += off[1];
+                    p[2] += off[2];
+                }
+            }
+        }
         kept.push(Placed { m, positions, normals, tangents });
     }
     if kept.is_empty() {

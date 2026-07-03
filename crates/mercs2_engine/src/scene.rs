@@ -14,7 +14,9 @@ use winit::window::Window;
 use mercs2_core::{Entity, ModelRef, SkinPalette, Transform, World};
 
 use crate::{make_bc_view, make_depth, make_flat_normal_view, make_tex_bind, make_white_view};
-use crate::{mesh, pose, ClipAnim, TexMap, Vertex, DEPTH_FORMAT};
+use crate::{ClipAnim, TexMap, DEPTH_FORMAT};
+use mercs2_engine::mesh::{self, Vertex};
+use mercs2_engine::pose;
 
 /// CPU-side per-model data the animation system needs (read-only after load, shared via `Rc`).
 pub struct ModelAnim {
@@ -70,6 +72,9 @@ pub struct Scene {
     depth_view: wgpu::TextureView,
     models: HashMap<u32, ModelGpu>,
     entities: HashMap<Entity, EntityGpu>,
+    /// Per-model set of draw-call indices to SKIP at render (e.g. low-res terrain tiles hidden where
+    /// their hi-res terrainmesh counterpart is resident — the terrain LOD swap).
+    hidden_draws: HashMap<u32, HashSet<usize>>,
     start: std::time::Instant,
     /// Explicit view matrix + (near, far) supplied per frame by a caller-driven camera
     /// (the fly / third-person camera). `None` = default close orbit around the origin (`--ecs`).
@@ -389,6 +394,7 @@ impl Scene {
             flat_normal,
             depth_view,
             models: HashMap::new(),
+            hidden_draws: HashMap::new(),
             entities: HashMap::new(),
             start: std::time::Instant::now(),
             view_cam: None,
@@ -495,6 +501,11 @@ impl Scene {
             let srgb = !normal_hashes.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
                 views.insert(*h, v);
+            } else if std::env::var("MERCS2_TEXDBG").is_ok() {
+                eprintln!(
+                    "[texdbg] make_bc_view FAILED for 0x{h:08X}: {}x{} fmt={:?} {}mips {}B",
+                    td.width, td.height, td.format, td.mip_count, td.all_mips.len()
+                );
             }
         }
         let mut tex_binds =
@@ -550,6 +561,44 @@ impl Scene {
                 fit,
             },
         );
+    }
+
+    /// Whether a model is currently uploaded (keyed by hash).
+    pub fn has_model(&self, hash: u32) -> bool {
+        self.models.contains_key(&hash)
+    }
+
+    /// Hide or show a single draw call of a model (by draw-call index). Used for the terrain LOD
+    /// swap: hide a low-res tile's draw group while its hi-res terrainmesh is resident.
+    pub fn set_draw_hidden(&mut self, hash: u32, draw_index: usize, hidden: bool) {
+        let set = self.hidden_draws.entry(hash).or_default();
+        if hidden {
+            set.insert(draw_index);
+        } else {
+            set.remove(&draw_index);
+        }
+    }
+
+    /// Bone count of a loaded model (>=1; 1 = unskinned identity). 0 if the model isn't loaded.
+    /// The streaming executor sizes a woken prop's identity `SkinPalette` to this so a rigged prop's
+    /// verts (weighted to bone >= 1) don't collapse to the origin under a 1-bone palette.
+    pub fn model_bone_count(&self, hash: u32) -> usize {
+        self.models.get(&hash).map(|m| m.bone_count).unwrap_or(0)
+    }
+
+    /// Free a model's GPU resources (geometry + material bind groups), if loaded. The streaming
+    /// executor calls this once the last entity referencing a model hibernates/unloads — net-new
+    /// GPU UNLOAD (nothing in the codebase freed GPU before the streaming runtime). wgpu buffers
+    /// and bind groups drop with the removed `ModelGpu`.
+    pub fn unload_model(&mut self, hash: u32) {
+        self.models.remove(&hash);
+    }
+
+    /// Drop a despawned entity's per-entity GPU resources (its MVP uniform + bone palette buffer).
+    /// Call when the ECS entity is despawned so its buffers/bind groups are freed and the entity
+    /// map does not leak. Safe to call for an unknown entity.
+    pub fn forget_entity(&mut self, e: Entity) {
+        self.entities.remove(&e);
     }
 
     /// Create per-entity GPU resources (MVP + bone palette) sized to the model, once.
@@ -695,7 +744,11 @@ impl Scene {
                 pass.set_vertex_buffer(0, mg.vbuf.slice(..));
                 if let Some(ib) = &mg.ibuf {
                     pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    for &(start, count, bind) in &mg.draw_calls {
+                    let hidden = self.hidden_draws.get(model_hash);
+                    for (di, &(start, count, bind)) in mg.draw_calls.iter().enumerate() {
+                        if hidden.is_some_and(|h| h.contains(&di)) {
+                            continue; // e.g. low-res terrain tile hidden under resident hi-res
+                        }
                         pass.set_bind_group(1, &mg.tex_binds[bind], &[]);
                         pass.draw_indexed(start..start + count, 0, 0..1);
                     }

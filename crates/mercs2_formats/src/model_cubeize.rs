@@ -291,6 +291,9 @@ pub struct ModelMesh {
     pub joints: Vec<[u8; 4]>,
     /// BLENDWEIGHT per vertex (decl usage 1, UBYTE4N): 4 weights summing to 255. Empty if absent.
     pub weights: Vec<[u8; 4]>,
+    /// COLOR per vertex (decl usage 10, UBYTE4/D3DCOLOR). On the terrainmesh these are the terrain
+    /// SPLAT WEIGHTS. Empty if absent. Byte order is as stored (D3DCOLOR = B,G,R,A).
+    pub colors: Vec<[u8; 4]>,
     /// Triangle-list indices into `positions` (the IBUF triangle strip, de-stripped).
     pub tris: Vec<[u32; 3]>,
 }
@@ -330,6 +333,52 @@ fn map_prmg_subobjects(
         } else {
             r += 1;
         }
+    }
+    out
+}
+
+/// Per-PRMG-group `POFF` (Position OFFset) — the world/parent translation of the group's parent
+/// `GEOM` (a leaf `POFF` = 3 floats). Returned in the SAME order as [`read_model_meshes`]'s PRMG scan
+/// (`(0..n_desc).filter(PRMG && marker)`), so `offset[group_index]` is the translation to add to that
+/// group's local vertices. Multi-GEOM meshes (e.g. the `0x7C569307` terrainmesh: 16 GEOM sub-tiles at
+/// X/Z ∈ {-150,-50,50,150}) need this or all sub-tiles collapse onto each other. Single-GEOM models
+/// with no `POFF` yield `[0,0,0]` (no change).
+pub fn prmg_geom_offsets(container: &[u8]) -> Vec<[f32; 3]> {
+    let mut out = Vec::new();
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return out;
+    }
+    let data_area_off = read_u32_le(container, 4) as usize;
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max_desc = container.len().saturating_sub(20) / 20;
+    if n_desc > max_desc {
+        return out;
+    }
+    let tag = |i: usize| &container[20 + i * 20..20 + i * 20 + 4];
+    let u0 = |i: usize| read_u32_le(container, 20 + i * 20 + 4);
+    let marker = |i: usize| u0(i) == 0xFFFF_FFFF;
+    let x3 = |i: usize| read_u32_le(container, 20 + i * 20 + 16) as usize;
+
+    let mut cur = [0.0f32, 0.0, 0.0];
+    let mut i = 0usize;
+    while i < n_desc {
+        if tag(i) == b"GEOM" && marker(i) {
+            // Reset, then find this GEOM's direct POFF leaf (appears before its PRMGs).
+            cur = [0.0, 0.0, 0.0];
+            let end = (i + 1 + x3(i)).min(n_desc);
+            for c in (i + 1)..end {
+                if tag(c) == b"POFF" && !marker(c) {
+                    let base = if data_area_off > 0 { data_area_off + u0(c) as usize } else { 8 + u0(c) as usize };
+                    if base + 12 <= container.len() {
+                        cur = [read_f32_le(container, base), read_f32_le(container, base + 4), read_f32_le(container, base + 8)];
+                    }
+                    break;
+                }
+            }
+        } else if tag(i) == b"PRMG" && marker(i) {
+            out.push(cur);
+        }
+        i += 1;
     }
     out
 }
@@ -422,6 +471,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         let tan_el = decl_slice.and_then(|d| find_element(d, USAGE_TANGENT));
         let jnt_el = decl_slice.and_then(|d| find_element(d, USAGE_BLENDINDICES));
         let wgt_el = decl_slice.and_then(|d| find_element(d, USAGE_BLENDWEIGHT));
+        let col_el = decl_slice.and_then(|d| find_element(d, USAGE_COLOR));
         let read4 = |o: usize| -> Option<[u8; 4]> {
             (o + 4 <= sde).then(|| [container[o], container[o + 1], container[o + 2], container[o + 3]])
         };
@@ -434,6 +484,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         let mut tangents = Vec::new();
         let mut joints = Vec::new();
         let mut weights = Vec::new();
+        let mut colors = Vec::new();
         for v in 0..vcount {
             let base = sds + v * stride;
             match decode_pos(container, base + pos_off, sde, pos_type) {
@@ -465,6 +516,11 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
                     weights.push(w);
                 }
             }
+            if let Some((co, _)) = col_el {
+                if let Some(c) = read4(base + co) {
+                    colors.push(c);
+                }
+            }
         }
         if positions.is_empty() {
             continue;
@@ -475,6 +531,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         tangents.truncate(positions.len());
         joints.truncate(positions.len());
         weights.truncate(positions.len());
+        colors.truncate(positions.len());
 
         // BLENDINDICES are palette-relative, not global: the group's INFO leaf carries a
         // bone-range table (`+20 u32 range_count`, then `range_count × {u16 hier_base,
@@ -541,6 +598,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
             tangents,
             joints,
             weights,
+            colors,
             tris,
         });
     }
@@ -767,6 +825,9 @@ const USAGE_BLENDINDICES: u8 = 2;
 const USAGE_NORMAL: u8 = 3;
 const USAGE_TEXCOORD: u8 = 5;
 const USAGE_TANGENT: u8 = 6;
+/// D3DDECLUSAGE_COLOR. On the terrainmesh this UBYTE4/D3DCOLOR element carries the per-vertex terrain
+/// SPLAT WEIGHTS (the blend between the material's detail layers), not a lit vertex colour.
+const USAGE_COLOR: u8 = 10;
 
 /// Find a decl element by D3DDECLUSAGE. Each element is 8 bytes:
 /// `[stream:u16][offset:u16][type:u16][usage:u16]`, terminated by `stream == 0x00FF`.

@@ -257,6 +257,56 @@ pub fn group_prmt_material_indices(container: &[u8]) -> Vec<Vec<usize>> {
     out
 }
 
+/// The `A3CD72A7` (BE `a772cda3`) marker that delimits detail layers inside a terrainmesh MTRL record.
+pub const TERRAIN_LAYER_MARKER: u32 = 0xA3CD_72A7;
+
+/// Per PRMG drawing group, the MTRL material-record INDEX bound to it. The terrainmesh binds the
+/// material via the group's `INFO` leaf (byte-verified: field @+8 = the material index, `< records`),
+/// NOT the PRMT (whose first word is geometry data on terrain). Order matches the draw order of
+/// [`super::model_cubeize::read_model_meshes`] / `build_indexed_from_container`.
+pub fn terrain_group_material_index(container: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(v) = UcfxView::new(container) else {
+        return out;
+    };
+    let prmg: Vec<usize> = (0..v.n_desc).filter(|&i| v.tag(i) == b"PRMG" && v.is_marker(i)).collect();
+    for (gi, &pr) in prmg.iter().enumerate() {
+        let nxt = prmg.get(gi + 1).copied().unwrap_or(v.n_desc);
+        let mut mi = 0usize;
+        for i in (pr + 1)..nxt {
+            let t = v.tag(i);
+            if (t == b"STRM" || t == b"IBUF") && v.is_marker(i) {
+                break;
+            }
+            if t == b"INFO" && !v.is_marker(i) {
+                if let Some((s, e)) = v.resolve(i) {
+                    if s + 12 <= e {
+                        mi = read_u32_le(container, s + 8) as usize;
+                    }
+                }
+                break;
+            }
+        }
+        out.push(mi);
+    }
+    out
+}
+
+/// Per PRMG drawing group, the ordered terrain DETAIL-LAYER texture hashes (≤~4) the group blends:
+/// its material (via [`terrain_group_material_index`]) minus the `A3CD72A7` layer markers. The
+/// per-vertex COLOR weights blend these layers. Empty vec = group has no valid material.
+pub fn terrain_group_layers(container: &[u8]) -> Vec<Vec<u32>> {
+    let mats = parse_mtrl(container);
+    terrain_group_material_index(container)
+        .into_iter()
+        .map(|mi| {
+            mats.get(mi)
+                .map(|m| m.textures.iter().copied().filter(|&h| h != TERRAIN_LAYER_MARKER).collect())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Texture resolution
 // ---------------------------------------------------------------------------

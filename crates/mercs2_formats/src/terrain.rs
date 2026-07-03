@@ -33,8 +33,14 @@ const CONTAINER_SENTINEL: u32 = 0xFFFF_FFFF;
 /// A merged, world-space terrain mesh in native game coordinates.
 pub struct TerrainMesh {
     pub positions: Vec<[f32; 3]>,
-    pub uvs: Vec<[f32; 2]>,
+    /// Per-vertex unit normals, decoded from the tile vertex (`normal.xyz` f16 @8-13 — verified
+    /// 100% unit-length via `--terrain-probe`). Tiles are only translated on assembly, so these
+    /// pass through unrotated. Used for real terrain relief shading (replacing a flat up-normal).
+    pub normals: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// Per-tile index ranges `(cell = row*20+col, index_start, index_count)` so the renderer can hide
+    /// an individual low-res tile when its hi-res terrainmesh counterpart is resident (the LOD swap).
+    pub tile_draws: Vec<(usize, u32, u32)>,
     /// Number of grid cells that got a placed tile (expect 400).
     pub tiles_placed: usize,
     /// Number of tile UCFX containers decoded (expect 400).
@@ -248,6 +254,8 @@ fn read_lrterrain_object_records(layers_static: &[u8]) -> Vec<u32> {
 // ---------------------------------------------------------------------------
 
 struct Container {
+    /// Absolute offset of this container's `UCFX` magic in the block.
+    ucfx_off: usize,
     data_base: usize,
     /// Flat chunk rows: (tag, [u0,u1,u2,u3]).
     chunks: Vec<([u8; 4], [u32; 4])>,
@@ -285,7 +293,7 @@ fn iter_ucfx_containers(data: &[u8]) -> Vec<Container> {
             ];
             chunks.push((tag, cu));
         }
-        out.push(Container { data_base, chunks });
+        out.push(Container { ucfx_off, data_base, chunks });
     }
     out
 }
@@ -395,15 +403,15 @@ fn strip_to_tris(indices: &[u16]) -> Vec<[u32; 3]> {
 }
 
 /// Decode one terrain tile: flat f16 vertex buffer + triangle-strip IBUF.
-/// Returns (local positions, uvs, triangles). Mirrors `decode_submesh` for the
-/// flat-STRM terrain case: stride = vb_len / n_verts (typically 16 B =
-/// pos f16x3 + uv f16x2 + 2 B pad), positions are f16 vec3 at offset 0, UVs
-/// f16x2 at offset 8. NO coordinate flips.
+/// Returns (local positions, per-vertex normals, triangles). Vertex layout (16 B stride, verified
+/// via `--terrain-probe`): `pos.xyz f16 @0-5, w=1.0 @6, normal.xyz f16 @8-13, 1.0 @14` — the @8-13
+/// lanes are a unit normal (NOT a UV; the render UV is synthesized from world XZ downstream). NO
+/// coordinate flips.
 fn decode_tile(
     data: &[u8],
     data_base: usize,
     sub: &PrmgBody,
-) -> Option<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u32; 3]>)> {
+) -> Option<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>)> {
     let vb_abs = data_base + sub.vb_off;
     let ib_abs = data_base + sub.ib_off;
     if vb_abs + sub.vb_len > data.len() || ib_abs + sub.ib_len > data.len() {
@@ -427,8 +435,20 @@ fn decode_tile(
         return None;
     }
 
+    // RCA: dump the raw per-vertex stride bytes (esp. the tail beyond pos+w+uv @12) to reveal
+    // whether the terrain verts carry splat weights / vertex colour / a 2nd UV. Gated by env.
+    if std::env::var("MERCS2_TERRAIN_DBG").is_ok() {
+        eprintln!("[terrain-dbg] tile: {n_verts} verts, stride {stride} B, vb_len {}", sub.vb_len);
+        for v in 0..n_verts.min(8) {
+            let o = vb_abs + v * stride;
+            let row: Vec<String> = (0..stride).map(|k| format!("{:02x}", data[o + k])).collect();
+            let tail: Vec<u8> = (12..stride).map(|k| data[o + k]).collect();
+            eprintln!("[terrain-dbg]   v{v}: {}  | tail@12 = {tail:?}", row.join(" "));
+        }
+    }
+
     let mut positions = Vec::with_capacity(n_verts);
-    let mut uvs = Vec::with_capacity(n_verts);
+    let mut normals = Vec::with_capacity(n_verts);
     for v in 0..n_verts {
         let o = vb_abs + v * stride;
         let x = read_f16_le(data, o);
@@ -438,13 +458,19 @@ fn decode_tile(
             return None;
         }
         positions.push([x, y, z]);
-        // UV at offset 8 (pos f16x3 @0, w f16 @6, uv f16x2 @8).
-        let (u, vv) = if stride >= 12 {
-            (read_f16_le(data, o + 8), read_f16_le(data, o + 10))
+        // Normal.xyz f16 @8-13 (verified unit-length). Renormalise defensively; fall back to up.
+        let n = if stride >= 14 {
+            let (nx, ny, nz) = (read_f16_le(data, o + 8), read_f16_le(data, o + 10), read_f16_le(data, o + 12));
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if len > 1e-4 && nx.is_finite() && ny.is_finite() && nz.is_finite() {
+                [nx / len, ny / len, nz / len]
+            } else {
+                [0.0, 1.0, 0.0]
+            }
         } else {
-            (0.0, 0.0)
+            [0.0, 1.0, 0.0]
         };
-        uvs.push([u, vv]);
+        normals.push(n);
     }
 
     let tris = strip_to_tris(&indices);
@@ -455,7 +481,7 @@ fn decode_tile(
     if need > positions.len() {
         return None;
     }
-    Some((positions, uvs, tris))
+    Some((positions, normals, tris))
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +588,7 @@ pub fn load_terrain(
 ) -> Result<TerrainMesh, String> {
     // 1) Decode every UCFX tile in file (iteration) order.
     let containers = iter_ucfx_containers(low_res_block);
-    let mut tiles: Vec<(Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u32; 3]>)> = Vec::new();
+    let mut tiles: Vec<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>)> = Vec::new();
     for c in &containers {
         for rows in geom_child_row_slices(&c.chunks) {
             if let Some(sub) = parse_prmg_body(&rows) {
@@ -627,40 +653,158 @@ pub fn load_terrain(
         }
     }
 
-    // 5) Merge: offset each cell's tile to its world placement center.
+    // 5) Merge: offset each cell's tile to its world placement center. Tiles are only translated,
+    //    so per-vertex normals pass through unrotated. Record each tile's index range so the renderer
+    //    can hide a low-res tile when its hi-res terrainmesh counterpart is resident (LOD swap).
     let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    let mut tile_draws: Vec<(usize, u32, u32)> = Vec::new();
     let mut tiles_placed = 0usize;
     for row in 0..GRID {
         for col in 0..GRID {
             let cell = row * GRID + col;
             let Some(idx) = grid_idx[cell] else { continue };
-            let (verts, tuvs, tris) = &tiles[idx];
+            let (verts, tnorms, tris) = &tiles[idx];
             let (cx, cz) = tile_world_center(row, col);
             let base = positions.len() as u32;
-            for (p, uv) in verts.iter().zip(tuvs.iter()) {
+            let idx_start = indices.len() as u32;
+            for (p, n) in verts.iter().zip(tnorms.iter()) {
                 positions.push([p[0] + cx, p[1], p[2] + cz]);
-                uvs.push(*uv);
+                normals.push(*n);
             }
             for t in tris {
                 indices.push(base + t[0]);
                 indices.push(base + t[1]);
                 indices.push(base + t[2]);
             }
+            tile_draws.push((cell, idx_start, indices.len() as u32 - idx_start));
             tiles_placed += 1;
         }
     }
 
     Ok(TerrainMesh {
         positions,
-        uvs,
+        normals,
         indices,
+        tile_draws,
         tiles_placed,
         tiles_decoded,
         toc_entry_count,
         texture,
     })
+}
+
+// ---------------------------------------------------------------------------
+//   Stage-1 RCA probe: per-tile MTRL materials + the @12 per-vertex scalar
+// ---------------------------------------------------------------------------
+
+/// Per-tile RCA facts, in the SAME iteration order as [`load_terrain`]'s tiles.
+pub struct TileProbe {
+    /// MTRL texture-asset hashes referenced by this tile (empty if no MTRL parsed).
+    pub materials: Vec<u32>,
+    /// Vertex count decoded for the tile.
+    pub verts: usize,
+    /// Byte stride of the tile's vertex buffer (expected 16).
+    pub stride: usize,
+    /// The per-vertex f16 scalar at byte offset 12: (min, max, mean).
+    pub w12: (f32, f32, f32),
+    /// Count of this tile's vertices whose @12 value lies in [0,1].
+    pub w12_in01: usize,
+    /// The two constant lanes @6 and @14 were 1.0 for every vertex of the tile.
+    pub lane6_all_one: bool,
+    pub lane14_all_one: bool,
+    /// Count of vertices where the vec3 (f16@8, f16@10, f16@12) has |length-1| < 0.03,
+    /// i.e. the @8-13 lanes read as a unit NORMAL rather than uv+scalar.
+    pub unit_normal_verts: usize,
+}
+
+/// Headless RCA over the low_res terrain block (Stage 1 of the splat/LOD spec):
+/// for every decoded tile, parse its `MTRL` chunk (reusing the verified
+/// [`crate::texture::parse_mtrl`]) and characterise the `@12` per-vertex f16
+/// scalar. Produces the numbers the shader stages are gated on — it does NOT
+/// build a mesh and applies no coordinate transforms.
+pub fn probe_terrain(low_res_block: &[u8]) -> Vec<TileProbe> {
+    let containers = iter_ucfx_containers(low_res_block);
+    let mut out = Vec::new();
+    for c in &containers {
+        let Some(sub) = geom_child_row_slices(&c.chunks)
+            .iter()
+            .find_map(|rows| parse_prmg_body(rows))
+        else {
+            continue; // not a mesh tile (matches load_terrain's per-tile gate)
+        };
+        // MTRL: reuse the verified packed-record parser on this container's slice
+        // (offsets in parse_mtrl are resolved relative to the UCFX magic).
+        let materials: Vec<u32> = crate::texture::parse_mtrl(&low_res_block[c.ucfx_off..])
+            .into_iter()
+            .flat_map(|m| m.textures)
+            .collect();
+
+        // Walk the vertex buffer to characterise the @12 scalar + the two 1.0 lanes.
+        let vb_abs = c.data_base + sub.vb_off;
+        let ib_abs = c.data_base + sub.ib_off;
+        if vb_abs + sub.vb_len > low_res_block.len() || ib_abs + sub.ib_len > low_res_block.len() {
+            continue;
+        }
+        let n_idx = sub.ib_len / 2;
+        let mut max_idx = 0usize;
+        for k in 0..n_idx {
+            let idx = read_u16_le(low_res_block, ib_abs + k * 2);
+            if idx != 0xFFFF {
+                max_idx = max_idx.max(idx as usize);
+            }
+        }
+        let n_verts = max_idx + 1;
+        if n_verts == 0 || sub.vb_len % n_verts != 0 {
+            continue;
+        }
+        let stride = sub.vb_len / n_verts;
+        if stride < 16 {
+            continue;
+        }
+        let (mut wmin, mut wmax, mut wsum) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f32);
+        let mut in01 = 0usize;
+        let (mut lane6, mut lane14) = (true, true);
+        let mut unit_normal = 0usize;
+        for v in 0..n_verts {
+            let o = vb_abs + v * stride;
+            let w = read_f16_le(low_res_block, o + 12);
+            if w.is_finite() {
+                wmin = wmin.min(w);
+                wmax = wmax.max(w);
+                wsum += w;
+                if (0.0..=1.0).contains(&w) {
+                    in01 += 1;
+                }
+            }
+            if (read_f16_le(low_res_block, o + 6) - 1.0).abs() > 1e-3 {
+                lane6 = false;
+            }
+            if (read_f16_le(low_res_block, o + 14) - 1.0).abs() > 1e-3 {
+                lane14 = false;
+            }
+            // Test the @8-13 lanes as a unit normal vec3.
+            let nx = read_f16_le(low_res_block, o + 8);
+            let ny = read_f16_le(low_res_block, o + 10);
+            let nz = w;
+            let len = (nx * nx + ny * ny + nz * nz).sqrt();
+            if (len - 1.0).abs() < 0.03 {
+                unit_normal += 1;
+            }
+        }
+        out.push(TileProbe {
+            materials,
+            verts: n_verts,
+            stride,
+            w12: (wmin, wmax, wsum / n_verts.max(1) as f32),
+            w12_in01: in01,
+            lane6_all_one: lane6,
+            lane14_all_one: lane14,
+            unit_normal_verts: unit_normal,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -684,6 +828,32 @@ mod tests {
         assert_eq!(tile_world_center(0, 0), (-3800.0, -3800.0));
         assert_eq!(tile_world_center(19, 19), (3800.0, 3800.0));
         assert_eq!(tile_world_center(1, 2), (-3000.0, -3400.0));
+    }
+
+    #[test]
+    fn terrain_vertex_layout_from_captured_bytes() {
+        // A real captured 16-byte terrain vertex (tile 1, v0; MERCS2_TERRAIN_DBG). RCA-corrected
+        // layout: pos.xyz f16 @0-5, w=1.0 @6, NORMAL.xyz f16 @8-13, 1.0 @14. (The spec's
+        // "uv @8-11, scalar @12" is wrong: @8-13 is a unit normal; @12 is normal.z, not a weight.)
+        let v: [u8; 16] = [
+            0x80, 0x58, 0xa4, 0x4d, 0x40, 0xda, 0x00, 0x3c, 0x7c, 0x33, 0xc4, 0x3b, 0xb2, 0x2a,
+            0x00, 0x3c,
+        ];
+        // Position decodes finite (x = 144.0, z = -200.0 for this vertex).
+        assert!((read_f16_le(&v, 0) - 144.0).abs() < 0.5);
+        assert!(read_f16_le(&v, 2).is_finite());
+        assert!((read_f16_le(&v, 4) - (-200.0)).abs() < 0.5);
+        // The two constant lanes @6 and @14 are exactly 1.0.
+        assert_eq!(read_f16_le(&v, 6), 1.0);
+        assert_eq!(read_f16_le(&v, 14), 1.0);
+        // @8/@10/@12 form a UNIT normal — the decisive RCA finding.
+        let nx = read_f16_le(&v, 8);
+        let ny = read_f16_le(&v, 10);
+        let nz = read_f16_le(&v, 12);
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        assert!((len - 1.0).abs() < 0.03, "@8-13 not unit-length: len={len}");
+        // @12 (= normal.z) is a signed component, NOT a [0,1] blend weight.
+        assert!((-1.0..=1.0).contains(&nz));
     }
 
     #[test]

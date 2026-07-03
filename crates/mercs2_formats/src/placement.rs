@@ -383,6 +383,154 @@ pub fn load_placements(layers_static_block: &[u8]) -> Result<Vec<Placement>, Str
     Ok(out)
 }
 
+/// Per-entity streaming/LOD directive parsed from a `HibernationControl` COMP (ECS class
+/// `0xe18afd65`). The engine caches an object out (hibernates it) once the player is beyond its
+/// hibernation distance, and picks its LOD tier by the LOD distances; this is the per-object
+/// control INPUT that drives the streaming manager's load/hibernate/LOD decision (NOT a blanket
+/// per-class radius). See `docs/modernization/world_streaming_spec.md` §10 and
+/// `docs/mercs2-pdb-analysis/world-streaming.md` §Hibernation.
+///
+/// On-disk record (verified against retail `layers_static`, 10-byte stride):
+/// `{key:u32, dist0:u16, dist1:u8, dist2:u8, dist3:u8, flag:u8}`. `dist0` is the per-object
+/// hibernation distance (default 100, here overridden 213–500; the engine warns if > 400 — "may
+/// fall through terrain"); `dist1..3` are the LOD-tier distances (class defaults 160 / 60 / 20 in
+/// every sampled record, i.e. stored as single bytes because they fit). `flag` is a bool (0 in
+/// every sampled record — likely `NoDelOnHibernateIfPreplaced` or a runtime marker).
+#[derive(Debug, Clone, Copy)]
+pub struct Hibernation {
+    /// The 4 LOD/hibernation distances, in schema order (defaults 100 / 160 / 60 / 20).
+    /// `dist[0]` is the per-object hibernation (stream-out) distance; `dist[1..4]` are LOD tiers.
+    pub dist: [u16; 4],
+    /// Trailing bool byte (0 in all sampled retail records).
+    pub flag: u8,
+}
+
+impl Hibernation {
+    /// The distance past which the engine caches this object out (`dist[0]`, the per-object field).
+    pub fn hibernation_distance(&self) -> u16 {
+        self.dist[0]
+    }
+}
+
+/// Parse a `HibernationControl` COMP `data` blob into (key -> [`Hibernation`]) records. Each record
+/// is 10 bytes: `{u32 key, u16 dist0, u8 dist1, u8 dist2, u8 dist3, u8 flag}` (empirically verified
+/// — the on-disk stride is 10, not the `schm` in-memory footprint). `dist1..3` are widened to u16.
+fn parse_hibernation_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, Hibernation)> {
+    const STRIDE: usize = 10;
+    let mut out = Vec::new();
+    if off + size > data.len() {
+        return out;
+    }
+    let n = size / STRIDE;
+    for i in 0..n {
+        let r = off + i * STRIDE;
+        if r + STRIDE > data.len() {
+            break;
+        }
+        let key = read_u32_le(data, r);
+        let dist0 = u16::from_le_bytes([data[r + 4], data[r + 5]]);
+        let h = Hibernation {
+            dist: [dist0, data[r + 6] as u16, data[r + 7] as u16, data[r + 8] as u16],
+            flag: data[r + 9],
+        };
+        out.push((key, h));
+    }
+    out
+}
+
+/// Parse the `TerrainObject` COMP into (entity_key -> hi-res terrainmesh asset hash) records. Each
+/// record is 8 bytes `{u32 entity_key, u32 terrainmesh_hash}`; the hash is a `0x7C569307`
+/// "terrainmesh" asset (`extract_container`). Join with the entity's `Transform` (same key) for the
+/// world placement — this is how the 400 hi-res terrain tiles are positioned (the c3 cell-id in the
+/// block NAME is unrelated to the tile's world position).
+fn parse_terrain_object_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, u32)> {
+    const STRIDE: usize = 8;
+    let mut out = Vec::new();
+    if off + size > data.len() {
+        return out;
+    }
+    let n = size / STRIDE;
+    for i in 0..n {
+        let r = off + i * STRIDE;
+        if r + STRIDE > data.len() {
+            break;
+        }
+        out.push((read_u32_le(data, r), read_u32_le(data, r + 4)));
+    }
+    out
+}
+
+/// One hi-res terrain tile placement: its `0x7C569307` terrainmesh asset hash and the world
+/// transform (pos + quat, native game space) of its owning entity.
+#[derive(Debug, Clone)]
+pub struct TerrainTile {
+    pub key: u32,
+    pub terrainmesh_hash: u32,
+    pub pos: [f32; 3],
+    pub quat: [f32; 4],
+}
+
+/// Load every hi-res terrain-tile placement from a decompressed UCFX block: parse the `TerrainObject`
+/// COMP (`key -> terrainmesh_hash`) and join it to the `Transform` COMP (`key -> pos/quat`) by entity
+/// key within each sub-block. Coordinates stay native game space (LH, +Y up); no flips.
+pub fn load_terrain_tiles(block: &[u8]) -> Vec<TerrainTile> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out: Vec<TerrainTile> = Vec::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = if si + 1 < ucfx_positions.len() {
+            ucfx_positions[si + 1]
+        } else {
+            block.len()
+        };
+        let mut xform: std::collections::HashMap<u32, ([f32; 3], [f32; 4])> =
+            std::collections::HashMap::new();
+        let mut terr: Vec<(u32, u32)> = Vec::new();
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let Some((off, size)) = c.data else { continue };
+            match c.info_name.as_deref() {
+                Some("Transform") => {
+                    for (k, p, q) in parse_transform_records(block, off, size) {
+                        xform.entry(k).or_insert((p, q));
+                    }
+                }
+                Some("TerrainObject") => {
+                    terr.extend(parse_terrain_object_records(block, off, size));
+                }
+                _ => {}
+            }
+        }
+        for (key, terrainmesh_hash) in terr {
+            let Some(&(pos, quat)) = xform.get(&key) else { continue };
+            out.push(TerrainTile { key, terrainmesh_hash, pos, quat });
+        }
+    }
+    out
+}
+
+/// Load every `HibernationControl` per-entity streaming directive from a decompressed UCFX block,
+/// keyed by entity key (matched across sub-blocks; keys are block-unique). This is the per-object
+/// control data the streaming runtime joins to each placement to decide stream-in/out + LOD tier.
+pub fn load_hibernation(block: &[u8]) -> std::collections::HashMap<u32, Hibernation> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out: std::collections::HashMap<u32, Hibernation> = std::collections::HashMap::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = if si + 1 < ucfx_positions.len() {
+            ucfx_positions[si + 1]
+        } else {
+            block.len()
+        };
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let Some((off, size)) = c.data else { continue };
+            if c.info_name.as_deref() == Some("HibernationControl") {
+                for (k, h) in parse_hibernation_records(block, off, size) {
+                    out.entry(k).or_insert(h);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Yaw (radians) around +Y from a placement quaternion: `2 * atan2(qy, qw)`.
 pub fn yaw_from_quat(quat: &[f32; 4]) -> f32 {
     2.0 * quat[1].atan2(quat[3])
@@ -399,6 +547,9 @@ pub struct ModelPlacement {
     pub pos: [f32; 3],
     pub quat: [f32; 4],
     pub name: Option<String>,
+    /// Per-entity streaming/LOD directive (from a `HibernationControl` COMP on the same entity),
+    /// if present. `None` = the object uses class-default distances (100 / 160 / 60 / 20).
+    pub hibernation: Option<Hibernation>,
 }
 
 /// Parse a `ModelName` COMP `data` blob into (key -> model_hash) records. Each record is
@@ -444,6 +595,7 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
         let mut xform: std::collections::HashMap<u32, ([f32; 3], [f32; 4])> =
             std::collections::HashMap::new();
         let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut hib: std::collections::HashMap<u32, Hibernation> = std::collections::HashMap::new();
         let mut models: Vec<(u32, u32)> = Vec::new();
         for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
             let Some((off, size)) = c.data else { continue };
@@ -456,6 +608,11 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
                 Some("Name") => {
                     for (k, n) in parse_name_records(block, off, size) {
                         names.entry(k).or_insert(n);
+                    }
+                }
+                Some("HibernationControl") => {
+                    for (k, h) in parse_hibernation_records(block, off, size) {
+                        hib.entry(k).or_insert(h);
                     }
                 }
                 Some("ModelName") => {
@@ -473,6 +630,7 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
                 pos,
                 quat,
                 name: names.get(&key).cloned(),
+                hibernation: hib.get(&key).copied(),
             });
         }
     }
@@ -526,6 +684,27 @@ mod tests {
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0], (0xAAAA_0001, 0x5B72_4250));
         assert_eq!(recs[1], (0xAAAA_0002, 0xDEAD_BEEF));
+    }
+
+    /// A HibernationControl record is 10 bytes: {u32 key, u16 dist0, u8 dist1, u8 dist2, u8 dist3,
+    /// u8 flag}. Bytes are the first two real retail records from layers_static sub_block 2.
+    #[test]
+    fn hibernation_record_stride_10() {
+        // rec0: key 0x00095b1d, dist0=0x00df=223, 160/60/20, flag 0.
+        // rec3: key 0x00095b59, dist0=0x01f4=500 (>400 warn), 160/60/20, flag 0.
+        let d: Vec<u8> = vec![
+            0x1d, 0x5b, 0x09, 0x00, 0xdf, 0x00, 0xa0, 0x3c, 0x14, 0x00, //
+            0x59, 0x5b, 0x09, 0x00, 0xf4, 0x01, 0xa0, 0x3c, 0x14, 0x00,
+        ];
+        let recs = parse_hibernation_records(&d, 0, d.len());
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].0, 0x0009_5b1d);
+        assert_eq!(recs[0].1.dist, [223, 160, 60, 20]);
+        assert_eq!(recs[0].1.hibernation_distance(), 223);
+        assert_eq!(recs[0].1.flag, 0);
+        assert_eq!(recs[1].0, 0x0009_5b59);
+        assert_eq!(recs[1].1.dist, [500, 160, 60, 20]);
+        assert!(recs[1].1.hibernation_distance() > 400); // triggers the fall-through-terrain warning
     }
 
     /// A pure-yaw quaternion sample is unit length, and yaw round-trips.
