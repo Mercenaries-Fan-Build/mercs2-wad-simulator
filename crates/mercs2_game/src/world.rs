@@ -160,6 +160,7 @@ fn load_world_data(
     load_placements: bool,
     spawn_interior: bool,
     load_props: bool,
+    recruits: crate::pmc::RecruitUnlocks,
     progress: &LoadProgress,
 ) -> Result<WorldData, String> {
     let mut w = wad::open(wadpath)?;
@@ -292,7 +293,7 @@ fn load_world_data(
     // PMC interior (`--interior`): placement-driven interior geometry from state block 667, placed
     // at authored world coords (floor Y≈450.8) so the spawn drops the player inside the room.
     let interior = if spawn_interior {
-        match load_pmc_interior(&mut w) {
+        match load_pmc_interior(&mut w, recruits) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[interior] load failed: {e}");
@@ -563,6 +564,7 @@ pub async fn run_scene_world_loading(
     spawn_interior: bool,
     load_props: bool,
     interior_orbit: bool,
+    recruits: crate::pmc::RecruitUnlocks,
 ) {
     use mercs2_engine::scene::{AssetStore, ModelAnim, Scene};
     use mercs2_core::glam::{Mat4, Quat, Vec3};
@@ -638,7 +640,7 @@ pub async fn run_scene_world_loading(
     let loader_progress = progress.clone();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let r = load_world_data(&wadpath, load_cells, load_placements, spawn_interior, load_props, &loader_progress);
+        let r = load_world_data(&wadpath, load_cells, load_placements, spawn_interior, load_props, recruits, &loader_progress);
         if r.is_ok() {
             println!("[load] done in {:.1}s", t0.elapsed().as_secs_f64());
         }

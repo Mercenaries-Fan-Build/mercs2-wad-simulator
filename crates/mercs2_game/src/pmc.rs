@@ -21,12 +21,41 @@ use mercs2_formats::placement::{load_model_placements, load_placements};
 /// position with NO synthetic offset.
 pub const PMC_INTERIOR_SPAWN: [f32; 3] = [3794.0427, 450.7505, -3911.0322];
 
-/// Assemble the PMC HQ interior from its keyed entities: the block-{667,711,461,703} `ModelName` /
-/// name-hash furniture placed at authored Transforms, plus the actor-anchored shell buildings + recruit
-/// bays. Returns (model, world pos, world quat) per instance. See the memory `pmc-teleport-coords-and-
-/// interior` for the full derivation (hall shell = `pmcoutpost_bld_hq_livedin` 0x3E629E14, intact tier
-/// mask 0x04, floor seated at the hero-feet Y).
-pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3], [f32; 4])>, String> {
+/// Which Villa recruits are unlocked (from the save's `tStarterData`). Drives which PMC-interior state
+/// layers + recruit bays load — the game shows only the unlocked recruits (wifpmcinterior.lua
+/// `_GetStarterLayers`), NOT all of them. Derive with [`RecruitUnlocks::from_starters`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RecruitUnlocks {
+    /// Ewen (`HelPmcBoss`) → `Vz_State_PmcInterior_Hel` (703); recruitheli mesh is absent from vz.wad.
+    pub hel: bool,
+    /// Eva (`MecPmcBoss`) → `Vz_State_PmcInterior_Mec` (461) if unlocked, else `_MecAbsent` (291);
+    /// recruitmechanic mesh 0xE8EB75D7.
+    pub mec: bool,
+    /// Misha (`JetPmcBoss`) → `Vz_State_PmcInterior_Jet` (711); recruitjet mesh 0x86D7CF92.
+    pub jet: bool,
+}
+
+impl RecruitUnlocks {
+    /// Derive from the save's unlocked starter ids (`SaveState::unlocked_starters`). `PmcBoss` (Fiona)
+    /// is the always-present base and is ignored.
+    pub fn from_starters(starters: &[String]) -> Self {
+        let has = |n: &str| starters.iter().any(|s| s == n);
+        RecruitUnlocks {
+            hel: has("HelPmcBoss"),
+            mec: has("MecPmcBoss"),
+            jet: has("JetPmcBoss"),
+        }
+    }
+}
+
+/// Assemble the PMC HQ interior from its keyed entities for the given recruit-unlock state: the base
+/// `Vz_State_PmcInterior` (667) always, plus each recruit's PRESENT state layer + bay if unlocked (else
+/// the ABSENT layer — only Eva/Mec has one). Plus the actor-anchored shell buildings. Returns
+/// (model, world pos, world quat) per instance. See memory `pmc-teleport-coords-and-interior`.
+pub fn load_pmc_interior(
+    w: &mut wad::Wad,
+    recruits: RecruitUnlocks,
+) -> Result<Vec<(LoadedModel, [f32; 3], [f32; 4])>, String> {
     let mut out: Vec<(LoadedModel, [f32; 3], [f32; 4])> = Vec::new();
     let (mut tv, mut tt) = (0usize, 0usize);
     let mut distinct: HashMap<u32, usize> = HashMap::new();
@@ -37,8 +66,22 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
     // hash if present, else the entity name hashed (asset names drop the leading `_` and ` 0xKEY`
     // suffix), and place it at its authored Transform. Locators/hardpoints (no mesh) simply skip.
     let (mut furn_ymin, mut furn_ymax) = (f32::MAX, f32::MIN);
-    const INTERIOR_STATE_BLOCKS: &[u16] = &[667, 711, 461, 703]; // base + jet + mec + hel variants
-    for &blk in INTERIOR_STATE_BLOCKS {
+    // Per wifpmcinterior.lua `_GetStarterLayers`: base always; each recruit contributes its PRESENT
+    // layer if unlocked, else its ABSENT layer (only Eva/Mec has one). Loading all of them (the old
+    // behavior) shows every recruit's bay regardless of the save — wrong for an early game.
+    let mut state_blocks: Vec<u16> = vec![667]; // Vz_State_PmcInterior (base)
+    state_blocks.push(if recruits.mec { 461 } else { 291 }); // Eva: _Mec present / _MecAbsent
+    if recruits.jet {
+        state_blocks.push(711); // Misha: _Jet
+    }
+    if recruits.hel {
+        state_blocks.push(703); // Ewen: _Hel
+    }
+    println!(
+        "[interior] recruits unlocked: hel={} mec={} jet={} -> state blocks {:?}",
+        recruits.hel, recruits.mec, recruits.jet, state_blocks
+    );
+    for &blk in &state_blocks {
         let Ok(data) = wad::decompress_block_index(w, blk) else { continue };
         let model_by_key: HashMap<u32, u32> = load_model_placements(&data)
             .into_iter()
@@ -93,14 +136,19 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
     const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
     const IDENT_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
     let hall_origin = [ACTOR_ORIGIN[0], PMC_INTERIOR_SPAWN[1], ACTOR_ORIGIN[2]]; // Y = 450.75
-    let interior_actor_meshes: &[(&str, u32, u8, [f32; 3])] = &[
+    // The HQ shell buildings (Fiona's HQ) are always present; the recruit bays only when unlocked.
+    let mut interior_actor_meshes: Vec<(&str, u32, u8, [f32; 3])> = vec![
         ("pmcoutpost_bld_hq_livedin", 0x3E629E14, 0x04, hall_origin), // MAIN HALL — floor at hero level
         ("pmcoutpost_bld_hqsuites", 0xD5D65249, 0x04, hall_origin),   // suites room (hall level)
         ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183, 0x04, ACTOR_ORIGIN), // garage (own level)
-        ("recruitjet", 0x86D7CF92, 0x01, ACTOR_ORIGIN),              // starter bay (own floor ≈458)
-        ("recruitmechanic", 0xE8EB75D7, 0x01, ACTOR_ORIGIN),         // starter bay (recruitheli absent)
     ];
-    for &(name, hash, state_bit, pos) in interior_actor_meshes {
+    if recruits.mec {
+        interior_actor_meshes.push(("recruitmechanic", 0xE8EB75D7, 0x01, ACTOR_ORIGIN));
+    }
+    if recruits.jet {
+        interior_actor_meshes.push(("recruitjet", 0x86D7CF92, 0x01, ACTOR_ORIGIN));
+    }
+    for &(name, hash, state_bit, pos) in &interior_actor_meshes {
         if let Some((m, bmin, bmax)) = load_model_by_hash_state(w, hash, state_bit) {
             for c in 0..3 {
                 wmin[c] = wmin[c].min(pos[c] + bmin[c]);

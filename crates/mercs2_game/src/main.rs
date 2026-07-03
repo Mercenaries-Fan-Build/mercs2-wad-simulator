@@ -38,6 +38,17 @@ fn save_games_dir() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
+/// Recruit-unlock state from the newest save (for dev tools that don't already hold a `SaveState`).
+fn newest_save_recruits() -> pmc::RecruitUnlocks {
+    save_games_dir()
+        .and_then(|d| newest_profile(&d))
+        .and_then(|p| std::fs::read(&p).ok())
+        .and_then(|b| save::parse(&b).ok())
+        .and_then(|prof| prof.save_state().ok())
+        .map(|s| pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
+        .unwrap_or_default()
+}
+
 /// The most-recently-modified `.profile` in `dir` (the game's autosave/continue slot).
 fn newest_profile(dir: &Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
@@ -59,9 +70,10 @@ fn main() {
     // for the GAME to parse its own args for dev modes — the ENGINE never does. `MERCS2_FURNDBG=1`
     // adds per-item floor Ys.
     if args.iter().any(|a| a == "--interior-assemble") {
+        let recruits = newest_save_recruits();
         match mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
             Some(mut w) => {
-                let _ = pmc::load_pmc_interior(&mut w);
+                let _ = pmc::load_pmc_interior(&mut w, recruits);
             }
             None => eprintln!("--interior-assemble: no vz.wad found"),
         }
@@ -188,6 +200,11 @@ fn main() {
     // Default boot = the FULL game world: player + third-person camera + PMC interior + c3 cells +
     // placements + props — all core components ON. `--stream` selects the alternate streaming free-fly
     // world; `--interior-orbit` adds the debug orbit camera.
+    // Which Villa recruits the save has unlocked drives which PMC-interior state layers + bays load.
+    let recruits = state
+        .as_ref()
+        .map(|s| pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
+        .unwrap_or_default();
     if args.iter().any(|a| a == "--stream") {
         println!(
             "[mercs2_game] streaming world (free-fly): spawn=({:.1},{:.1},{:.1}) overlays={}",
@@ -197,13 +214,13 @@ fn main() {
             wadpath,
             Some(PMC_INTERIOR_SPAWN),
             layers,
-            populate_pmc_interior,
+            move |world, scene, wad| populate_pmc_interior(world, scene, wad, recruits),
         ));
     } else {
         println!("[mercs2_game] full world: TPS + PMC interior + c3 cells + placements + props");
         let orbit = args.iter().any(|a| a == "--interior-orbit");
         pollster::block_on(world::run_scene_world_loading(
-            wadpath, true, true, true, true, true, orbit,
+            wadpath, true, true, true, true, true, orbit, recruits,
         ));
     }
 }
@@ -220,6 +237,7 @@ fn populate_pmc_interior(
     world: &mut mercs2_core::World,
     scene: &mut mercs2_engine::scene::Scene,
     wad: &mut mercs2_engine::wad::Wad,
+    recruits: pmc::RecruitUnlocks,
 ) {
     use mercs2_core::glam::{Quat, Vec3};
     use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
@@ -243,7 +261,7 @@ fn populate_pmc_interior(
     if !want {
         return;
     }
-    match pmc::load_pmc_interior(wad) {
+    match pmc::load_pmc_interior(wad, recruits) {
         Ok(pieces) => {
             let n = pieces.len();
             for (m, pos, quat) in pieces {

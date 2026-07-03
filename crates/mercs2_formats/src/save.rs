@@ -279,6 +279,11 @@ pub struct SaveState {
     /// (`"[vehicle.wz10]"`, `"[support.airstrike.fuelairbomb.name]"`, …), may be
     /// empty. FACT (matches `savefile_parser.py` vehicle/support harvest).
     pub equipped_support: Vec<String>,
+    /// `tStarterData` keys — the UNLOCKED starter/recruit ids in this save. `PmcBoss` (Fiona) is the
+    /// always-present HQ boss; `HelPmcBoss`/`MecPmcBoss`/`JetPmcBoss` are the Villa recruits (Ewen/Eva/
+    /// Misha), each present only after its unlock mission. `MrxStarterManager.SaveSingleton` writes only
+    /// unlocked starters, so this is the source of truth for which PMC-interior recruit layers load. FACT.
+    pub unlocked_starters: Vec<String>,
 }
 
 impl SaveState {
@@ -527,6 +532,12 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
         .unwrap_or_default();
 
+    // `tStarterData` = { ["PmcBoss"] = {..}, ["MecPmcBoss"] = {..}, … } — its keys are the unlocked
+    // starters (recruits appear only once their mission unlocks them).
+    let unlocked_starters = table_body(lua, "tStarterData")
+        .map(|b| parse_table(b).into_iter().map(|(k, _)| k).collect())
+        .unwrap_or_default();
+
     Ok(SaveState {
         flow_chain,
         active_missions,
@@ -534,6 +545,7 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         layers,
         time_elapsed_secs,
         equipped_support,
+        unlocked_starters,
     })
 }
 
