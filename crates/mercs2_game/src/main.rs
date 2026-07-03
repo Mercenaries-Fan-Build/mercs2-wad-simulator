@@ -19,9 +19,10 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::save;
 
-/// Authentic game-start spawn: the PMC interior (off-map, high-Y; the game's `MrxUtil._TeleportHero`
-/// drops the hero here on a new/continued game). This is GAME data — it belongs in the game layer.
-const PMC_INTERIOR_SPAWN: [f32; 3] = [3794.0427, 450.7505, -3911.0322];
+mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
+mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
+
+use pmc::PMC_INTERIOR_SPAWN;
 
 /// The engine loads the PMC interior ROOM (shells + furniture, by PATH) as static geometry at the
 /// spawn (`mercs2_engine::game_world`), because the room shells don't resolve via the streaming
@@ -52,6 +53,20 @@ fn newest_profile(dir: &Path) -> Option<PathBuf> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // GAME dev tool: headless PMC interior assembly + floor/furniture Y check (no window). It is fine
+    // for the GAME to parse its own args for dev modes — the ENGINE never does. `MERCS2_FURNDBG=1`
+    // adds per-item floor Ys.
+    if args.iter().any(|a| a == "--interior-assemble") {
+        match mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            Some(mut w) => {
+                let _ = pmc::load_pmc_interior(&mut w);
+            }
+            None => eprintln!("--interior-assemble: no vz.wad found"),
+        }
+        return;
+    }
+
     let plan_only = args.iter().any(|a| a == "--plan");
     // Optional explicit profile path (positional); else newest in the save folder.
     let explicit = args
@@ -193,7 +208,7 @@ fn populate_pmc_interior(
         [0.0, 0.0, 0.0, 1.0],
     ];
 
-    let intents = mercs2_engine::script_host::run_interior_boot();
+    let intents = script_host::run_interior_boot();
     for r in &intents {
         println!(
             "[lua] Pg.Spawn '{}' (name={}) at ({:.1},{:.1},{:.1}) -> guid 0x{:x}",
@@ -202,11 +217,11 @@ fn populate_pmc_interior(
     }
     let want = intents
         .iter()
-        .any(|r| r.template.eq_ignore_ascii_case(mercs2_engine::script_host::PMC_INTERIOR_TEMPLATE));
+        .any(|r| r.template.eq_ignore_ascii_case(script_host::PMC_INTERIOR_TEMPLATE));
     if !want {
         return;
     }
-    match mercs2_engine::game_world::load_pmc_interior(wad) {
+    match pmc::load_pmc_interior(wad) {
         Ok(pieces) => {
             let n = pieces.len();
             for (m, pos, quat) in pieces {

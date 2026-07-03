@@ -4,15 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu). Phase 1 skeleton."
 
-# Engine library surface (render-agnostic modules: wad/mesh/pose) shared by the engine binary and
-# the sibling mercs2_game / mercs2_probe binaries. The wgpu render path stays in the binary for now.
+# PURE LIBRARY — no binary. The engine is asset-agnostic machinery (WAD/mesh/render/stream + a typed
+# API + the `run_game_world` populate seam). Game exes (`mercs2_game`) and tooling (`mercs2_probe`)
+# depend on it and configure it; the engine never parses args or knows any Mercenaries specifics.
 [lib]
 name = "mercs2_engine"
 path = "src/lib.rs"
-
-[[bin]]
-name = "mercs2_engine"
-path = "src/main.rs"
 
 [dependencies]
 winit = "0.29"
@@ -24,8 +21,6 @@ glam = "0.27" # matrix/vector math for the camera (left-handed Y-up)
 mercs2_formats = { path = "../mercs2_formats" }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
 mercs2_core = { path = "../mercs2_core" }
-# script host — the game's Lua drives the engine through the EngineHost seam (Pg.Spawn/Object.*).
-mercs2_script = { path = "../mercs2_script" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key

@@ -20,6 +20,5 @@ pub mod mesh;
 pub mod pose;
 pub mod render;
 pub mod scene;
-pub mod script_host;
 pub mod wad;
 pub mod worldutil;
