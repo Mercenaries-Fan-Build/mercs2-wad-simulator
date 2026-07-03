@@ -48,6 +48,57 @@ impl RecruitUnlocks {
     }
 }
 
+/// Save-driven stockpile quantities (cash + per-support-type qty). The villa's physical money/supply
+/// PILES appear tier-by-tier as these grow (wifpmcinterior.lua `_tStockpile` thresholds +
+/// `_SetStockpileCategoryQty`). NOTE: currently only `pmcoutpost_stockpile_money 1` is placed in the
+/// interior blocks, and its mesh is NOT resolvable in vz.wad (no ModelName COMP, name-hash misses) —
+/// the general placement→mesh gap — so this gates correctly but renders nothing until that mesh is
+/// found. Support piles + higher money tiers aren't placed at all.
+#[derive(Clone, Debug, Default)]
+pub struct Stockpile {
+    pub cash: i64,
+    pub support: std::collections::HashMap<String, i64>,
+}
+
+impl Stockpile {
+    fn qty(&self, cat: &str) -> i64 {
+        if cat == "money" {
+            self.cash
+        } else {
+            self.support.get(cat).copied().unwrap_or(0)
+        }
+    }
+    /// `_tStockpile[cat]` thresholds; pile tier `i` (1-based) is visible iff `qty >= threshold[i-1]`.
+    fn thresholds(cat: &str) -> &'static [i64] {
+        match cat {
+            "money" => &[
+                1000, 976562, 1953125, 3906250, 7812500, 15625000, 31250000, 625000000, 125000000,
+                250000000, 500000000, 1000000000,
+            ],
+            "moab" => &[1, 2, 2],
+            "bunkerbuster" | "fuelairbomb" => &[1, 2, 3],
+            // artillery/bombingrun/clusterbomb/combatairpatrol/laserguidedbomb/rocketartillery/…
+            _ => &[1, 5, 9],
+        }
+    }
+    /// Is stockpile pile `<cat> <tier>` visible for this save's quantities?
+    pub fn tier_visible(&self, cat: &str, tier: usize) -> bool {
+        Self::thresholds(cat)
+            .get(tier.saturating_sub(1))
+            .map(|&t| self.qty(cat) >= t)
+            .unwrap_or(false)
+    }
+}
+
+/// Parse a `pmcoutpost_stockpile_<category> <tier>` placement name → (category, tier); `None` otherwise.
+fn parse_stockpile_name(name: Option<&str>) -> Option<(String, usize)> {
+    let n = name?;
+    let core = n.split(" 0x").next().unwrap_or(n).trim_start_matches('_');
+    let rest = core.strip_prefix("pmcoutpost_stockpile_")?;
+    let (cat, tier) = rest.rsplit_once(' ')?;
+    Some((cat.to_string(), tier.parse().ok()?))
+}
+
 /// Assemble the PMC HQ interior from its keyed entities for the given recruit-unlock state: the base
 /// `Vz_State_PmcInterior` (667) always, plus each recruit's PRESENT state layer + bay if unlocked (else
 /// the ABSENT layer — only Eva/Mec has one). Plus the actor-anchored shell buildings. Returns
@@ -55,6 +106,7 @@ impl RecruitUnlocks {
 pub fn load_pmc_interior(
     w: &mut wad::Wad,
     recruits: RecruitUnlocks,
+    stockpile: &Stockpile,
 ) -> Result<Vec<(LoadedModel, [f32; 3], [f32; 4])>, String> {
     let mut out: Vec<(LoadedModel, [f32; 3], [f32; 4])> = Vec::new();
     let (mut tv, mut tt) = (0usize, 0usize);
@@ -77,6 +129,9 @@ pub fn load_pmc_interior(
     if recruits.hel {
         state_blocks.push(703); // Ewen: _Hel
     }
+    if std::env::var("MERCS2_ALLBLOCKS").is_ok() {
+        state_blocks = vec![667, 711, 461, 703, 291]; // dev: dump every interior variant
+    }
     println!(
         "[interior] recruits unlocked: hel={} mec={} jet={} -> state blocks {:?}",
         recruits.hel, recruits.mec, recruits.jet, state_blocks
@@ -90,6 +145,17 @@ pub fn load_pmc_interior(
         let placements = load_placements(&data).unwrap_or_default();
         let mut resolved = 0usize;
         for p in &placements {
+            if std::env::var("MERCS2_ALLNAMES").is_ok() {
+                println!("[name] blk{blk} '{}'", p.name.as_deref().unwrap_or("?"));
+            }
+            // Stockpile piles (`pmcoutpost_stockpile_<cat> <tier>`) grow with the player's cash/supplies:
+            // tier `i` is visible only once the save's quantity reaches `_tStockpile[cat][i]`
+            // (wifpmcinterior.lua `_SetStockpileCategoryQty`). Hide the tiers the save hasn't reached.
+            if let Some((cat, tier)) = parse_stockpile_name(p.name.as_deref()) {
+                if !stockpile.tier_visible(&cat, tier) {
+                    continue;
+                }
+            }
             let hash = model_by_key.get(&p.key).copied().or_else(|| {
                 p.name.as_deref().map(|n| {
                     let base = n.split(" 0x").next().unwrap_or(n).trim_start_matches('_');

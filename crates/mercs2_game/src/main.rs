@@ -38,15 +38,22 @@ fn save_games_dir() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Recruit-unlock state from the newest save (for dev tools that don't already hold a `SaveState`).
-fn newest_save_recruits() -> pmc::RecruitUnlocks {
-    save_games_dir()
+/// Recruit-unlock + stockpile state from the newest save (for dev tools without a `SaveState` in hand).
+fn newest_save_interior() -> (pmc::RecruitUnlocks, pmc::Stockpile) {
+    let prof = save_games_dir()
         .and_then(|d| newest_profile(&d))
         .and_then(|p| std::fs::read(&p).ok())
-        .and_then(|b| save::parse(&b).ok())
-        .and_then(|prof| prof.save_state().ok())
+        .and_then(|b| save::parse(&b).ok());
+    let recruits = prof
+        .as_ref()
+        .and_then(|p| p.save_state().ok())
         .map(|s| pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let stockpile = pmc::Stockpile {
+        cash: prof.as_ref().map(|p| p.cash as i64).unwrap_or(0),
+        ..Default::default()
+    };
+    (recruits, stockpile)
 }
 
 /// The most-recently-modified `.profile` in `dir` (the game's autosave/continue slot).
@@ -70,10 +77,10 @@ fn main() {
     // for the GAME to parse its own args for dev modes — the ENGINE never does. `MERCS2_FURNDBG=1`
     // adds per-item floor Ys.
     if args.iter().any(|a| a == "--interior-assemble") {
-        let recruits = newest_save_recruits();
+        let (recruits, stockpile) = newest_save_interior();
         match mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
             Some(mut w) => {
-                let _ = pmc::load_pmc_interior(&mut w, recruits);
+                let _ = pmc::load_pmc_interior(&mut w, recruits, &stockpile);
             }
             None => eprintln!("--interior-assemble: no vz.wad found"),
         }
@@ -200,27 +207,30 @@ fn main() {
     // Default boot = the FULL game world: player + third-person camera + PMC interior + c3 cells +
     // placements + props — all core components ON. `--stream` selects the alternate streaming free-fly
     // world; `--interior-orbit` adds the debug orbit camera.
-    // Which Villa recruits the save has unlocked drives which PMC-interior state layers + bays load.
+    // The save drives the interior: which recruits are unlocked (state layers + bays) and how much
+    // cash/supplies the player has (stockpile piles).
     let recruits = state
         .as_ref()
         .map(|s| pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
         .unwrap_or_default();
+    let stockpile = pmc::Stockpile { cash: profile.cash as i64, ..Default::default() };
     if args.iter().any(|a| a == "--stream") {
         println!(
             "[mercs2_game] streaming world (free-fly): spawn=({:.1},{:.1},{:.1}) overlays={}",
             spawn[0], spawn[1], spawn[2], layers.len()
         );
+        let sp = stockpile.clone();
         pollster::block_on(mercs2_engine::game_world::run_game_world(
             wadpath,
             Some(PMC_INTERIOR_SPAWN),
             layers,
-            move |world, scene, wad| populate_pmc_interior(world, scene, wad, recruits),
+            move |world, scene, wad| populate_pmc_interior(world, scene, wad, recruits, &sp),
         ));
     } else {
         println!("[mercs2_game] full world: TPS + PMC interior + c3 cells + placements + props");
         let orbit = args.iter().any(|a| a == "--interior-orbit");
         pollster::block_on(world::run_scene_world_loading(
-            wadpath, true, true, true, true, true, orbit, recruits,
+            wadpath, true, true, true, true, true, orbit, recruits, stockpile,
         ));
     }
 }
@@ -238,6 +248,7 @@ fn populate_pmc_interior(
     scene: &mut mercs2_engine::scene::Scene,
     wad: &mut mercs2_engine::wad::Wad,
     recruits: pmc::RecruitUnlocks,
+    stockpile: &pmc::Stockpile,
 ) {
     use mercs2_core::glam::{Quat, Vec3};
     use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
@@ -261,7 +272,7 @@ fn populate_pmc_interior(
     if !want {
         return;
     }
-    match pmc::load_pmc_interior(wad, recruits) {
+    match pmc::load_pmc_interior(wad, recruits, stockpile) {
         Ok(pieces) => {
             let n = pieces.len();
             for (m, pos, quat) in pieces {
