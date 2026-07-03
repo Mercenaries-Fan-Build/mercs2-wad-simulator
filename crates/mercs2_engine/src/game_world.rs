@@ -691,7 +691,17 @@ fn load_streaming_world_data(
 /// `mercs2_game` (the game exe) both `pollster::block_on(run_game_world(..))`. `spawn` is the
 /// authored start position (`mercs2_game` passes the authentic PMC-interior start); `overlays` are
 /// the active vz_state layer names the save selects.
-pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: Vec<String>) {
+pub async fn run_game_world(
+    wadpath: String,
+    spawn: Option<[f32; 3]>,
+    overlays: Vec<String>,
+    // GAME hook: once the streaming world's base geometry has loaded, the engine hands the game the
+    // live World / Scene / Wad so the GAME can spawn its own entities (player, PMC interior, mission
+    // objects…). The engine itself is asset-agnostic and knows nothing about any of that — game
+    // specifics live in `mercs2_game`, not here.
+    mut populate: impl FnMut(&mut mercs2_core::World, &mut crate::scene::Scene, &mut crate::wad::Wad)
+        + 'static,
+) {
     use crate::scene::Scene;
     use mercs2_core::glam::{Mat4, Quat, Vec3};
     use mercs2_core::streaming::StreamingConfig;
@@ -872,57 +882,10 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
                                     AnimState::default(),
                                     SkinPalette { mats: vec![IDENTITY] },
                                 ));
-                                // PMC interior, DRIVEN BY THE GAME'S LUA: run the authentic
-                                // MrxUtil.SpawnActor body (Pg.Spawn + Object.*) through mercs2_script.
-                                // The interior spawns because the script asked for it — not a hardcoded
-                                // engine call. The engine then realizes each returned actor intent by
-                                // resolving its template -> geometry.
-                                let interior_intents = crate::script_host::run_interior_boot();
-                                for r in &interior_intents {
-                                    println!(
-                                        "[lua] Pg.Spawn '{}' (name={}) at ({:.1},{:.1},{:.1}) -> guid 0x{:x}",
-                                        r.template, r.name, r.pos[0], r.pos[1], r.pos[2], r.guid
-                                    );
-                                }
-                                // Engine template resolver: PMC_INTERIOR_TEMPLATE -> the PMC interior
-                                // geometry. Shells (`pmcoutpost_bld_*`) load by PATH (never via the
-                                // streaming name-hash wake recipe), so load_pmc_interior IS the resolver
-                                // body for this template. The enclosing hall SHELL mesh is the open
-                                // sub-problem that lives right here, inside this resolution.
-                                let want_interior = interior_intents.iter().any(|r| {
-                                    r.template.eq_ignore_ascii_case(crate::script_host::PMC_INTERIOR_TEMPLATE)
-                                });
-                                if want_interior {
-                                    match load_pmc_interior(&mut data.wad) {
-                                        Ok(pieces) => {
-                                            let n = pieces.len();
-                                            for (m, pos, quat) in pieces {
-                                                if !scene.has_model(m.hash) {
-                                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                                }
-                                                // Palette needs ONE identity per bone (like the WAKE path) — a
-                                                // 1-entry palette on a multi-bone mesh under-runs the skin buffer
-                                                // and flings the verts off-screen (why the room was invisible).
-                                                let nbones = scene.model_bone_count(m.hash).max(1);
-                                                world.spawn((
-                                                    Transform {
-                                                        translation: Vec3::new(pos[0], pos[1], pos[2]),
-                                                        rotation: Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]),
-                                                        scale: Vec3::ONE,
-                                                    },
-                                                    ModelRef { model: m.hash },
-                                                    AnimState::default(),
-                                                    SkinPalette { mats: vec![IDENTITY; nbones] },
-                                                ));
-                                            }
-                                            println!(
-                                                "[stream] PMC interior (Lua-driven, template '{}'): {n} pieces placed",
-                                                crate::script_host::PMC_INTERIOR_TEMPLATE
-                                            );
-                                        }
-                                        Err(e) => eprintln!("[stream] PMC interior load failed: {e}"),
-                                    }
-                                }
+                                // GAME world population: hand the game the live World/Scene/Wad so it
+                                // can spawn its own entities (player, PMC interior, …). The engine does
+                                // not know what a "PMC interior" is — that lives in `mercs2_game`.
+                                populate(&mut world, &mut scene, &mut data.wad);
                                 wad_opt = Some(data.wad);
                                 manager = Some(data.manager);
                                 props = data.props;

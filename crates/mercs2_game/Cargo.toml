@@ -13,4 +13,6 @@ path = "src/main.rs"
 # streaming-world render IN-PROCESS (no separate engine binary): mercs2_game IS the game exe.
 mercs2_formats = { path = "../mercs2_formats" }
 mercs2_engine = { path = "../mercs2_engine" }
+# ECS components (Transform/ModelRef/AnimState/SkinPalette) the game spawns into the engine's World.
+mercs2_core = { path = "../mercs2_core" }
 pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread

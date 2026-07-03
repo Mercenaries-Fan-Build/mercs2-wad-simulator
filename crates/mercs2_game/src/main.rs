@@ -167,5 +167,66 @@ fn main() {
         wadpath,
         Some(PMC_INTERIOR_SPAWN),
         layers,
+        populate_pmc_interior,
     ));
+}
+
+/// GAME world population: once the engine's streaming world has loaded, spawn the PMC interior into
+/// the engine's World/Scene. The interior spawns because the GAME asks for it — the engine has no
+/// concept of a "PMC interior". Runs the authentic `MrxUtil.SpawnActor` path (`run_interior_boot`)
+/// then realizes the resolved geometry (`load_pmc_interior`) as ECS entities.
+///
+/// (Phase-1 seam: `load_pmc_interior` / `run_interior_boot` still physically live in `mercs2_engine`
+/// and are called here through its public API; a follow-up moves those bodies into this crate so the
+/// engine holds none of it.)
+fn populate_pmc_interior(
+    world: &mut mercs2_core::World,
+    scene: &mut mercs2_engine::scene::Scene,
+    wad: &mut mercs2_engine::wad::Wad,
+) {
+    use mercs2_core::glam::{Quat, Vec3};
+    use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
+    const IDENTITY: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    let intents = mercs2_engine::script_host::run_interior_boot();
+    for r in &intents {
+        println!(
+            "[lua] Pg.Spawn '{}' (name={}) at ({:.1},{:.1},{:.1}) -> guid 0x{:x}",
+            r.template, r.name, r.pos[0], r.pos[1], r.pos[2], r.guid
+        );
+    }
+    let want = intents
+        .iter()
+        .any(|r| r.template.eq_ignore_ascii_case(mercs2_engine::script_host::PMC_INTERIOR_TEMPLATE));
+    if !want {
+        return;
+    }
+    match mercs2_engine::game_world::load_pmc_interior(wad) {
+        Ok(pieces) => {
+            let n = pieces.len();
+            for (m, pos, quat) in pieces {
+                if !scene.has_model(m.hash) {
+                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                }
+                let nbones = scene.model_bone_count(m.hash).max(1);
+                world.spawn((
+                    Transform {
+                        translation: Vec3::new(pos[0], pos[1], pos[2]),
+                        rotation: Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]),
+                        scale: Vec3::ONE,
+                    },
+                    ModelRef { model: m.hash },
+                    AnimState::default(),
+                    SkinPalette { mats: vec![IDENTITY; nbones] },
+                ));
+            }
+            println!("[game] PMC interior: {n} pieces placed");
+        }
+        Err(e) => eprintln!("[game] PMC interior load failed: {e}"),
+    }
 }

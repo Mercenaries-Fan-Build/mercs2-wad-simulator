@@ -631,7 +631,8 @@ fn main() {
         // Control-driven streaming world with a free-fly camera (the default boot; also reachable
         // explicitly via --stream). Loads/unloads blocks + wakes/hibernates props by proximity.
         if args.iter().any(|a| a == "--stream") {
-            pollster::block_on(run_game_world(wadpath.clone(), spawn_arg(&args), overlays_arg(&args)));
+            // Engine dev boot: generic streaming world, no game-specific population (that's mercs2_game).
+            pollster::block_on(run_game_world(wadpath.clone(), spawn_arg(&args), overlays_arg(&args), |_, _, _| {}));
             return;
         }
         // Render the merged low_res world terrain under an elevated bird's-eye camera.
@@ -695,7 +696,7 @@ fn main() {
         if let Some(wadpath) = wad::registry_vz_wad() {
             eprintln!("vz.wad: {wadpath}");
             eprintln!("[boot] no args -> streaming world (free-fly camera). Use --triangle for the skeleton.");
-            pollster::block_on(run_game_world(wadpath, spawn_arg(&args), overlays_arg(&args)));
+            pollster::block_on(run_game_world(wadpath, spawn_arg(&args), overlays_arg(&args), |_, _, _| {}));
             return;
         }
     }
