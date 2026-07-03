@@ -13,10 +13,10 @@ use winit::window::Window;
 
 use mercs2_core::{Entity, ModelRef, SkinPalette, Transform, World};
 
-use crate::{make_bc_view, make_depth, make_flat_normal_view, make_tex_bind, make_white_view};
-use crate::{ClipAnim, TexMap, DEPTH_FORMAT};
-use mercs2_engine::mesh::{self, Vertex};
-use mercs2_engine::pose;
+use crate::render::{make_bc_view, make_depth, make_flat_normal_view, make_tex_bind, make_white_view};
+use crate::render::{ClipAnim, TexMap, DEPTH_FORMAT};
+use crate::mesh::{self, Vertex};
+use crate::pose;
 
 /// CPU-side per-model data the animation system needs (read-only after load, shared via `Rc`).
 pub struct ModelAnim {

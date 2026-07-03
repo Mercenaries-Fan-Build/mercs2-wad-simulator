@@ -9,5 +9,8 @@ name = "mercs2_game"
 path = "src/main.rs"
 
 [dependencies]
-# The game reads the player's save through the format layer; it launches the engine binary to render.
+# The game reads the player's save through the format layer, then drives the engine library's
+# streaming-world render IN-PROCESS (no separate engine binary): mercs2_game IS the game exe.
 mercs2_formats = { path = "../mercs2_formats" }
+mercs2_engine = { path = "../mercs2_engine" }
+pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread

@@ -5,14 +5,17 @@
 //! 1. find the newest `.profile` in the player's save folder,
 //! 2. parse it → header + `SaveState` (active contract, mission flow, the `vz_state_*` world-state
 //!    overlays to activate, playtime — see `mercs2_formats::save`),
-//! 3. launch the engine's streaming world at the authentic **PMC-interior spawn**
+//! 3. render the engine's streaming world IN-PROCESS at the authentic **PMC-interior spawn**
 //!    (`MrxUtil._TeleportHero` = `(3794, 451, -3911)`, off-map high-Y).
 //!
+//! There is NO separate engine binary: `mercs2_game` IS the game exe. It calls the engine library's
+//! public render entry point (`mercs2_engine::game_world::run_game_world`) directly, so
+//! `cargo run -p mercs2_game` always rebuilds a fresh engine and opens the window itself.
+//!
 //! See `docs/modernization/pangea_engine_alignment.md` for the engine/game split this realizes.
-//! Run `mercs2_game` to boot; `mercs2_game --plan` to print the boot-state without launching.
+//! Run `mercs2_game` to boot; `mercs2_game --plan` to print the boot-state without rendering.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use mercs2_formats::save;
 
@@ -44,15 +47,6 @@ fn newest_profile(dir: &Path) -> Option<PathBuf> {
                 .is_some_and(|s| s.eq_ignore_ascii_case("profile"))
         })
         .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-}
-
-/// The engine binary sitting in the same target dir (cargo builds both into `target/<profile>/`).
-fn find_engine_exe() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    ["mercs2_engine.exe", "mercs2_engine"]
-        .iter()
-        .map(|n| dir.join(n))
-        .find(|p| p.is_file())
 }
 
 fn main() {
@@ -137,57 +131,40 @@ fn main() {
     println!("{line}");
 
     if plan_only {
-        println!("[mercs2_game] --plan: boot-state only; not launching the engine.");
+        println!("[mercs2_game] --plan: boot-state only; not rendering the world.");
         return;
     }
 
-    // ── Launch the engine's streaming world at the spawn ─────────────────────
-    // (The wgpu render path lives in the engine binary for now; the game drives it via the spawn.
-    //  Activating the `s.layers` overlays is the next engine brick - fold into the streaming manager.)
-    match find_engine_exe() {
-        Some(engine) => {
-            let spawn_arg = format!("--spawn={},{},{}", spawn[0], spawn[1], spawn[2]);
-            let mut cmd = Command::new(&engine);
-            cmd.arg(&spawn_arg);
-            // Hand the active vz_state overlay set to the engine via a temp file (253 names is too
-            // many for argv). The engine resolves each -> its WAD block and folds it into the world.
-            // The save's world-state overlays PLUS the PMC interior overlay (spawn = interior).
-            let mut layers: Vec<String> = state.as_ref().map(|s| s.layers.clone()).unwrap_or_default();
-            for l in INTERIOR_OVERLAYS {
-                if !layers.iter().any(|x| x == *l) {
-                    layers.push((*l).to_string());
-                }
-            }
-            let overlays_arg = if layers.is_empty() {
-                None
-            } else {
-                let path = std::env::temp_dir().join("mercs2_overlays.txt");
-                std::fs::write(&path, layers.join("\n"))
-                    .ok()
-                    .map(|_| format!("--overlays={}", path.display()))
-            };
-            if let Some(ov) = &overlays_arg {
-                cmd.arg(ov);
-            }
-            println!(
-                "[mercs2_game] launching {} {spawn_arg}{}",
-                engine.display(),
-                overlays_arg.as_ref().map(|o| format!(" {o}")).unwrap_or_default()
-            );
-            match cmd.status() {
-                Ok(st) => std::process::exit(st.code().unwrap_or(0)),
-                Err(e) => {
-                    eprintln!("mercs2_game: launch {}: {e}", engine.display());
-                    std::process::exit(1);
-                }
-            }
-        }
-        None => {
-            eprintln!("[mercs2_game] engine binary not found next to this exe. Run it directly:");
-            eprintln!(
-                "    cargo run -p mercs2_engine -- --spawn={},{},{}",
-                spawn[0], spawn[1], spawn[2]
-            );
+    // ── Render the engine's streaming world IN-PROCESS at the spawn ──────────
+    // No separate engine binary: mercs2_game calls the engine library's public render entry point
+    // directly. The active vz_state overlays are the save's world-state layers PLUS the PMC interior
+    // overlay (the game-start spawn IS the interior); the engine resolves each -> its WAD block and
+    // folds it into the streaming manager.
+    let mut layers: Vec<String> = state.as_ref().map(|s| s.layers.clone()).unwrap_or_default();
+    for l in INTERIOR_OVERLAYS {
+        if !layers.iter().any(|x| x == *l) {
+            layers.push((*l).to_string());
         }
     }
+
+    // The engine consumes the original game's assets from vz.wad (EA Games registry install dir).
+    let wadpath = match mercs2_engine::wad::registry_vz_wad() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "mercs2_game: no vz.wad found — install Mercenaries 2 so that the EA Games registry \
+                 key resolves to a folder containing data\\vz.wad."
+            );
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "[mercs2_game] rendering in-process: vz.wad={wadpath}  spawn=({:.1},{:.1},{:.1})  overlays={}",
+        spawn[0], spawn[1], spawn[2], layers.len()
+    );
+    pollster::block_on(mercs2_engine::game_world::run_game_world(
+        wadpath,
+        Some(PMC_INTERIOR_SPAWN),
+        layers,
+    ));
 }
