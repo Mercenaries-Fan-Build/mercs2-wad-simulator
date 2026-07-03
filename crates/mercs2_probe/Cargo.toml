@@ -1,0 +1,14 @@
+[package]
+name = "mercs2_probe"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — headless WAD diagnostic/export tool. Runs the carved-out diagnostics from mercs2_engine::diag as subcommands (no window)."
+
+[[bin]]
+name = "mercs2_probe"
+path = "src/main.rs"
+
+[dependencies]
+# The diagnostics + shared world helpers live in the engine library.
+mercs2_engine = { path = "../mercs2_engine" }
+mercs2_formats = { path = "../mercs2_formats" }

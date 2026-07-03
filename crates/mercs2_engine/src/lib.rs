@@ -12,6 +12,8 @@
 //! `docs/modernization/pangea_engine_alignment.md` §6 and the staged crate split it drives (next:
 //! peel the diagnostic/export functions into a `diag` module the `mercs2_probe` bin consumes).
 
+pub mod diag;
 pub mod mesh;
 pub mod pose;
 pub mod wad;
+pub mod worldutil;
