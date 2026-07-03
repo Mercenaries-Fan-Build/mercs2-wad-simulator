@@ -792,7 +792,7 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
                                 eprintln!("[stream] loader thread died"); elwt.exit(); return;
                             }
                             Ok(Err(e)) => { eprintln!("[stream] load failed: {e}"); elwt.exit(); return; }
-                            Ok(Ok(data)) => {
+                            Ok(Ok(mut data)) => {
                                 // Base terrain: one static entity at identity (verts already world-space).
                                 let terrain = data.terrain;
                                 terrain_hash = terrain.hash;
@@ -803,6 +803,33 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
                                     AnimState::default(),
                                     SkinPalette { mats: vec![IDENTITY] },
                                 ));
+                                // PMC interior ROOM as static geometry at the spawn. The room shells
+                                // (`pmcoutpost_bld_*`) load by PATH, so they never resolve via the
+                                // streaming name-hash wake recipe (only the ModelName furniture does).
+                                // Place the whole interior — shells + furniture + recruit bays — directly
+                                // via the proven loader, once, always present around the spawn.
+                                match load_pmc_interior(&mut data.wad) {
+                                    Ok(pieces) => {
+                                        let n = pieces.len();
+                                        for (m, pos, quat) in pieces {
+                                            if !scene.has_model(m.hash) {
+                                                scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                            }
+                                            world.spawn((
+                                                Transform {
+                                                    translation: Vec3::new(pos[0], pos[1], pos[2]),
+                                                    rotation: Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]),
+                                                    scale: Vec3::ONE,
+                                                },
+                                                ModelRef { model: m.hash },
+                                                AnimState::default(),
+                                                SkinPalette { mats: vec![IDENTITY] },
+                                            ));
+                                        }
+                                        println!("[stream] PMC interior: {n} static room/furniture pieces placed at the spawn");
+                                    }
+                                    Err(e) => eprintln!("[stream] PMC interior load failed: {e}"),
+                                }
                                 wad_opt = Some(data.wad);
                                 manager = Some(data.manager);
                                 props = data.props;

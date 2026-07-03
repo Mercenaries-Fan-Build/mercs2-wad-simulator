@@ -23,10 +23,11 @@ use mercs2_formats::save;
 /// drops the hero here on a new/continued game). This is GAME data — it belongs in the game layer.
 const PMC_INTERIOR_SPAWN: [f32; 3] = [3794.0427, 450.7505, -3911.0322];
 
-/// The PMC interior's own vz_state overlay (block 667). The save's `tLayerData` does NOT list it (the
-/// interior is Lua/mission-loaded), but the game-start spawn IS the interior — so the game activates
-/// it explicitly, streaming the room shells + furniture around the spawn.
-const INTERIOR_OVERLAYS: &[&str] = &["vz_state_pmcinterior"];
+/// The engine loads the PMC interior ROOM (shells + furniture, by PATH) as static geometry at the
+/// spawn (`mercs2_engine::game_world`), because the room shells don't resolve via the streaming
+/// name-hash overlay recipe. So the game does NOT fold `vz_state_pmcinterior` here (that would
+/// double-load the furniture). Extra interior overlays (recruit variants) could be added later.
+const INTERIOR_OVERLAYS: &[&str] = &[];
 
 /// `%USERPROFILE%\Documents\My Games\Mercenaries 2\SaveGames`, if it exists.
 fn save_games_dir() -> Option<PathBuf> {
