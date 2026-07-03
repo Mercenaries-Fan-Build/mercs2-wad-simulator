@@ -509,7 +509,7 @@ fn main() {
         .iter()
         // Diagnostic/export flags moved to the `mercs2_probe` binary (`mercs2_engine::diag`); only the
         // render/run modes + the render-coupled probes that still drag bin-local render types remain.
-        .any(|a| matches!(a.as_str(), "--wad" | "--model" | "--index" | "--world" | "--world-probe" | "--interior-probe" | "--interior-list" | "--lod-probe" | "--align-probe" | "--hires-terrain" | "--stream"));
+        .any(|a| matches!(a.as_str(), "--wad" | "--model" | "--index" | "--world" | "--world-probe" | "--interior-probe" | "--interior-list" | "--pmc-shell" | "--lod-probe" | "--align-probe" | "--hires-terrain" | "--stream"));
     if wad_mode {
         let val = |name: &str| {
             args.iter()
@@ -562,6 +562,15 @@ fn main() {
         if args.iter().any(|a| a == "--interior-list") {
             if let Err(e) = interior_list(&wadpath) {
                 eprintln!("--interior-list failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless PMC shell resolver: resolve wifpmcinterior.lua's `_tBuildings` shell names (the
+        // interior "livedin" HQ buildings) -> their meshes, by NAME. Identifies the hall/floor mesh.
+        if args.iter().any(|a| a == "--pmc-shell") {
+            if let Err(e) = pmc_shell_probe(&wadpath) {
+                eprintln!("--pmc-shell failed: {e}");
                 std::process::exit(1);
             }
             return;
@@ -1963,6 +1972,51 @@ fn interior_probe(wadpath: &str) -> Result<(), String> {
 /// Pure logging; no rendering. The player-lands-inside signal per candidate is computed here too
 /// (bbox centre + the authored (+44,0,-71) hardpoint offset vs the room-local bbox) so the caller
 /// can pick the room without a render pass.
+/// Resolve the PMC interior shell buildings named in `wifpmcinterior.lua` `_tBuildings` to their
+/// meshes — identifying the enclosing hall/floor mesh by NAME (no geometric guessing). For each,
+/// report the mesh's bbox/size and whether it contains the player hardpoint-local offset.
+fn pmc_shell_probe(wadpath: &str) -> Result<(), String> {
+    use mercs2_formats::hash::pandemic_hash_m2;
+    let mut w = wad::open(wadpath)?;
+    const HP_LOCAL: [f32; 3] = [
+        PMC_INTERIOR_SPAWN[0] - 3750.0,
+        PMC_INTERIOR_SPAWN[1] - 450.0,
+        PMC_INTERIOR_SPAWN[2] - (-3840.0),
+    ];
+    println!(
+        "[pmc-shell] player hardpoint-local (spawn - actor@(3750,450,-3840)) = ({:.1},{:.1},{:.1})",
+        HP_LOCAL[0], HP_LOCAL[1], HP_LOCAL[2]
+    );
+    // wifpmcinterior.lua _tBuildings = the interior "livedin" HQ buildings; plus exterior counterparts
+    // and generic fallbacks for comparison.
+    const NAMES: &[&str] = &[
+        "pmcoutpost_bld_hq_livedin",
+        "pmcoutpost_bld_hqgarage_livedin",
+        "pmcoutpost_bld_hqsuites",
+        "pmcoutpost_bld_hq",
+        "pmcoutpost_bld_hqgarage",
+        "pmcoutpost_interior",
+        "pmcoutpost_interior_job",
+    ];
+    for n in NAMES {
+        let hash = pandemic_hash_m2(n);
+        print!("[pmc-shell] '{n}' -> 0x{hash:08X} : ");
+        match load_model_by_hash(&mut w, hash) {
+            Some((m, bmin, bmax)) => {
+                let (dx, dy, dz) = (bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]);
+                let inside = (0..3).all(|k| HP_LOCAL[k] >= bmin[k] - 0.5 && HP_LOCAL[k] <= bmax[k] + 0.5);
+                println!(
+                    "MESH {}v/{}t bbox min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1}) dims=({:.1},{:.1},{:.1}) hardpoint-inside={}",
+                    m.verts.len(), m.indices.len() / 3,
+                    bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2], dx, dy, dz, inside
+                );
+            }
+            None => println!("no mesh ASET for this hash"),
+        }
+    }
+    Ok(())
+}
+
 fn interior_list(wadpath: &str) -> Result<(), String> {
     let mut w = wad::open(wadpath)?;
     let models = wad::model_list(&w);

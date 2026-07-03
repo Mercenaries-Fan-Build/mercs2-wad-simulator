@@ -389,12 +389,23 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
         );
     }
 
-    // The starter-room bays are Lua-spawned actors anchored to the HqInterior origin (mrxstarter.lua
-    // SpawnActor, anchor "HqInterior" @ (3750,450,-3840)), NOT vz_state placements — so add them
-    // explicitly at that origin: recruitjet + recruitmechanic (recruitheli's mesh is absent from vz.wad).
+    // The interior SHELL buildings + starter bays are actor meshes anchored to the HqInterior origin
+    // (wifpmcinterior.lua `_tBuildings` + mrxstarter SpawnActor, anchor "HqInterior" @ (3750,450,-3840)),
+    // NOT vz_state placements — so add them explicitly at that origin. The `_livedin` HQ building is the
+    // enclosing MAIN HALL the player stands in: mesh `pmcoutpost_bld_hq_livedin` (0x3E629E14), whose
+    // local bbox contains the player hardpoint-local (44,0.8,-71) — verified via `--pmc-shell`.
     const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
     const IDENT_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    for hash in [0x86D7CF92u32, 0xE8EB75D7] {
+    // (name, model-hash), hashes verified by `mercs2_engine --pmc-shell` (pandemic_hash_m2 of the
+    // wifpmcinterior building name; recruit bays keep their known placement-name hashes).
+    const INTERIOR_ACTOR_MESHES: &[(&str, u32)] = &[
+        ("pmcoutpost_bld_hq_livedin", 0x3E629E14),       // MAIN HALL shell — the floor/walls
+        ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183), // garage room
+        ("pmcoutpost_bld_hqsuites", 0xD5D65249),         // suites room
+        ("recruitjet", 0x86D7CF92),                      // starter bay
+        ("recruitmechanic", 0xE8EB75D7),                 // starter bay (recruitheli mesh absent)
+    ];
+    for &(name, hash) in INTERIOR_ACTOR_MESHES {
         if let Some((m, bmin, bmax)) = load_model_by_hash(w, hash) {
             for c in 0..3 {
                 wmin[c] = wmin[c].min(ACTOR_ORIGIN[c] + bmin[c]);
@@ -403,8 +414,14 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
             tv += m.verts.len();
             tt += m.indices.len() / 3;
             *distinct.entry(hash).or_insert(0) += 1;
-            println!("[interior] recruit bay 0x{hash:08X}: {} v / {} t @ actor-origin", m.verts.len(), m.indices.len() / 3);
+            println!(
+                "[interior] actor mesh '{name}' 0x{hash:08X}: {} v / {} t @ actor-origin",
+                m.verts.len(),
+                m.indices.len() / 3
+            );
             out.push((m, ACTOR_ORIGIN, IDENT_QUAT));
+        } else {
+            println!("[interior] actor mesh '{name}' 0x{hash:08X}: NOT FOUND in vz.wad");
         }
     }
 
