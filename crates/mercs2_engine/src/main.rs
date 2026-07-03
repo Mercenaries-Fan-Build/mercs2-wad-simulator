@@ -795,7 +795,7 @@ fn main() {
         // Control-driven streaming world with a free-fly camera (the default boot; also reachable
         // explicitly via --stream). Loads/unloads blocks + wakes/hibernates props by proximity.
         if args.iter().any(|a| a == "--stream") {
-            pollster::block_on(run_streaming_world(wadpath.clone()));
+            pollster::block_on(run_streaming_world(wadpath.clone(), spawn_arg(&args)));
             return;
         }
         // Render the merged low_res world terrain under an elevated bird's-eye camera.
@@ -859,7 +859,7 @@ fn main() {
         if let Some(wadpath) = wad::registry_vz_wad() {
             eprintln!("vz.wad: {wadpath}");
             eprintln!("[boot] no args -> streaming world (free-fly camera). Use --triangle for the skeleton.");
-            pollster::block_on(run_streaming_world(wadpath));
+            pollster::block_on(run_streaming_world(wadpath, spawn_arg(&args)));
             return;
         }
     }
@@ -3388,7 +3388,21 @@ fn load_streaming_world_data(
 /// GPU work — LOAD c3-cell geometry + WAKE `ModelName` props (via the proven recipes), and the
 /// net-new UNLOAD path (despawn + free GPU). Free-fly camera reuses the Shadow-PC dual-source mouse
 /// input (CursorMoved+recentre fallback, never DeviceEvent on absolute-coordinate streams).
-async fn run_streaming_world(wadpath: String) {
+/// Parse `--spawn=X,Y,Z` (comma-separated world coords) into an initial free-fly camera position.
+/// `mercs2_game` passes the authentic PMC-interior start; absent = the default exterior bird's-eye.
+fn spawn_arg(args: &[String]) -> Option<[f32; 3]> {
+    let v = args.iter().find_map(|a| a.strip_prefix("--spawn="))?;
+    let mut it = v.split(',').map(|s| s.trim().parse::<f32>());
+    match (it.next(), it.next(), it.next()) {
+        (Some(Ok(x)), Some(Ok(y)), Some(Ok(z))) => Some([x, y, z]),
+        _ => {
+            eprintln!("[spawn] ignoring malformed --spawn={v} (want X,Y,Z)");
+            None
+        }
+    }
+}
+
+async fn run_streaming_world(wadpath: String, spawn: Option<[f32; 3]>) {
     use crate::scene::Scene;
     use mercs2_core::glam::{Mat4, Quat, Vec3};
     use mercs2_core::streaming::StreamingConfig;
@@ -3477,7 +3491,12 @@ async fn run_streaming_world(wadpath: String) {
 
     // Free-fly camera. Start over the PMC exterior spawn at a moderate height so nearby cells +
     // props stream in immediately; WASDQE + mouse-look fly around.
-    let mut free_pos = Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]);
+    // Free-fly camera start: the authored spawn if given (mercs2_game passes the authentic
+    // PMC-interior start), else an elevated bird's-eye over the exterior pool for free exploration.
+    let mut free_pos = match spawn {
+        Some(s) => Vec3::new(s[0], s[1], s[2]),
+        None => Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]),
+    };
     let mut free_yaw: f32 = PI;
     let mut free_pitch: f32 = -0.35;
     let mut held: HashSet<KeyCode> = HashSet::new();

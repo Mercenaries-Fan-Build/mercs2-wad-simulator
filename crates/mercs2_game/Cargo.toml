@@ -1,0 +1,13 @@
+[package]
+name = "mercs2_game"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 — the game exe: boots the engine from the player's save (profile → SaveState → world). Game-specific config lives here, driving the asset-agnostic engine."
+
+[[bin]]
+name = "mercs2_game"
+path = "src/main.rs"
+
+[dependencies]
+# The game reads the player's save through the format layer; it launches the engine binary to render.
+mercs2_formats = { path = "../mercs2_formats" }
