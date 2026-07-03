@@ -3459,6 +3459,12 @@ async fn run_streaming_world(wadpath: String, spawn: Option<[f32; 3]>, overlays:
 
     // Runtime config: tighter per-frame budgets than the probe so wake/load disk I/O (container +
     // texture extraction) doesn't stall a frame; proximity radii are generous for an aerial cam.
+    match spawn {
+        Some(s) => eprintln!("[boot] spawn = ({:.1}, {:.1}, {:.1})  <- from --spawn (PMC interior via mercs2_game)", s[0], s[1], s[2]),
+        None => eprintln!("[boot] spawn = DEFAULT exterior bird's-eye (NO --spawn received)"),
+    }
+    eprintln!("[boot] {} vz_state overlay layer(s) requested via --overlays", overlays.len());
+
     let cfg = StreamingConfig {
         block_unload_margin: 200.0,
         block_budget: 2,
