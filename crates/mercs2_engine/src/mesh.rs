@@ -113,14 +113,32 @@ pub struct DrawGroup {
     pub diffuse: Option<u32>,
     /// Normal-map texture asset hash (MTRL slot 2), if any.
     pub normal: Option<u32>,
+    /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
+    /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
+    /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
+    pub group_index: usize,
+}
+
+/// Build INDEXED triangle geometry, selecting the render/destruction tier bit `0x01` (the default
+/// active LOD / intact-for-most-models state). See [`build_indexed_state`].
+pub fn build_indexed_from_container(
+    container: &[u8],
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_state(container, 0x01)
 }
 
 /// Build INDEXED triangle geometry from a model container (1d/1e): per-`PRMG` drawing group
 /// vertices + de-stripped triangles, accessory groups skipped, fitted to a common transform, plus
-/// per-group draw ranges tagged with the group's diffuse texture (via MTRL). Returns
-/// (vertices, indices, draw-groups, stats).
-pub fn build_indexed_from_container(
+/// per-group draw ranges tagged with the group's diffuse texture (via MTRL).
+///
+/// `active_bit` selects which SEGM `state_mask` tier to render: a segment is kept iff its mask is 0
+/// (always-on) or shares a bit with `active_bit`. Default `0x01` is the top LOD / the intact state for
+/// most models — but destructible "livedin" building shells invert this (mask `0x03` = ruined, `0x04`
+/// = intact), so the PMC interior loads them with `active_bit = 0x04` to show the pristine building.
+/// Returns (vertices, indices, draw-groups, stats).
+pub fn build_indexed_state(
     container: &[u8],
+    active_bit: u8,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
     use mercs2_formats::model_cubeize::ModelMesh;
     use mercs2_formats::skeleton::{
@@ -176,8 +194,9 @@ pub fn build_indexed_from_container(
     };
 
     // Active LOD/state tier: body sub-objects carry a single-bit mask (0x01/02/04/08), accessories
-    // 0x0f (all). Render only tier 0x01 + accessories → no LOD/state overdraw (the triple hair).
-    const LOD_BIT: u8 = 0x01;
+    // 0x0f (all). Render only the caller's tier + accessories → no LOD/state overdraw (the triple hair
+    // / the intact-vs-ruined building states). `active_bit` defaults to 0x01 (see build_indexed_state).
+    let lod_bit = active_bit;
 
     // Per kept group: world-space geometry (rigid MESH groups transformed by their bone's rest).
     struct Placed<'a> {
@@ -194,7 +213,7 @@ pub fn build_indexed_from_container(
     let mut skipped = 0usize;
     let mut kept: Vec<Placed> = Vec::new();
     for m in &meshes {
-        if m.state_mask != 0 && (m.state_mask & LOD_BIT) == 0 {
+        if m.state_mask != 0 && (m.state_mask & lod_bit) == 0 {
             skipped += 1; // inactive LOD/state tier
             continue;
         }
@@ -298,6 +317,7 @@ pub fn build_indexed_from_container(
             index_count,
             diffuse,
             normal,
+            group_index: m.group_index,
         });
     }
 

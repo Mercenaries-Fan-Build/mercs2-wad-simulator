@@ -509,7 +509,7 @@ fn main() {
         .iter()
         // Diagnostic/export flags moved to the `mercs2_probe` binary (`mercs2_engine::diag`); only the
         // render/run modes + the render-coupled probes that still drag bin-local render types remain.
-        .any(|a| matches!(a.as_str(), "--wad" | "--model" | "--index" | "--world" | "--world-probe" | "--interior-probe" | "--interior-list" | "--pmc-shell" | "--lod-probe" | "--align-probe" | "--hires-terrain" | "--stream"));
+        .any(|a| matches!(a.as_str(), "--wad" | "--model" | "--index" | "--world" | "--world-probe" | "--interior-probe" | "--interior-list" | "--pmc-shell" | "--destruct" | "--lod-probe" | "--align-probe" | "--hires-terrain" | "--stream"));
     if wad_mode {
         let val = |name: &str| {
             args.iter()
@@ -571,6 +571,18 @@ fn main() {
         if args.iter().any(|a| a == "--pmc-shell") {
             if let Err(e) = pmc_shell_probe(&wadpath) {
                 eprintln!("--pmc-shell failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Headless destruction probe: is a model destructible (has SWIT), and how do its mesh groups
+        // split into intact / break_piece / static? `--destruct <hexhash>`.
+        if args.iter().any(|a| a == "--destruct") {
+            let h = val("--destruct")
+                .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0x3E629E14);
+            if let Err(e) = destruction_probe(&wadpath, h) {
+                eprintln!("--destruct failed: {e}");
                 std::process::exit(1);
             }
             return;
@@ -1122,6 +1134,7 @@ fn build_placement_markers(
         index_count: indices.len() as u32,
         diffuse: None, // vertex-color only (white fallback texture)
         normal: None,
+        group_index: 0,
     }];
     (verts, indices, draws)
 }
@@ -1485,6 +1498,7 @@ fn load_world_data(
             index_count: tm.indices.len() as u32,
             diffuse: Some(0),
             normal: None,
+            group_index: 0,
         }]
     } else {
         Vec::new()
@@ -1975,6 +1989,115 @@ fn interior_probe(wadpath: &str) -> Result<(), String> {
 /// Resolve the PMC interior shell buildings named in `wifpmcinterior.lua` `_tBuildings` to their
 /// meshes — identifying the enclosing hall/floor mesh by NAME (no geometric guessing). For each,
 /// report the mesh's bbox/size and whether it contains the player hardpoint-local offset.
+/// Is `hash` a destructible model (has `SWIT`), and how do its mesh groups split into
+/// intact / break_piece / static? Confirms whether a "ruined"-looking building is really the intact
+/// body co-rendered WITH its break pieces (fixable by hiding break pieces) vs. an inherently ruined mesh.
+fn destruction_probe(wadpath: &str, hash: u32) -> Result<(), String> {
+    use mercs2_formats::orchestrator::{self, DestructionState};
+    let mut w = wad::open(wadpath)?;
+    let container = wad::extract_container(&mut w, hash).map_err(|e| format!("{e:?}"))?;
+    let hier = orchestrator::parse_hier(&container);
+    let swit = orchestrator::parse_swit(&container);
+    let indx = orchestrator::parse_indx(&container);
+    println!(
+        "[destruct] 0x{hash:08X}: HIER {} nodes, SWIT {} entries, INDX {} mesh->node",
+        hier.len(),
+        swit.len(),
+        indx.len()
+    );
+    match orchestrator::classify(&container) {
+        None => println!(
+            "[destruct] NOT destructible (no SWIT/HIER) — single-state mesh; a 'ruined' look is \
+             inherent to this mesh, not co-rendered break pieces."
+        ),
+        Some(d) => {
+            let (mut s, mut i, mut b) = (0usize, 0, 0);
+            for n in &d.nodes {
+                match n.state {
+                    DestructionState::Static => s += 1,
+                    DestructionState::Intact => i += 1,
+                    DestructionState::BreakPiece => b += 1,
+                }
+            }
+            println!(
+                "[destruct] DESTRUCTIBLE: {} switch group(s); NODES static={s} intact={i} break_piece={b}",
+                d.switch_group_count
+            );
+            // Per mesh-group (INDX order) state tally — this is what a render filter would key on.
+            let mut tally: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            for mg in 0..d.indx.len() {
+                let st = d.state_of_mesh(mg).map(|x| x.as_str()).unwrap_or("?(no-indx)");
+                *tally.entry(st).or_insert(0) += 1;
+            }
+            println!("[destruct] per-mesh-group states (INDX order): {tally:?}");
+            for w in &d.warnings {
+                println!("[destruct]   warning: {w}");
+            }
+            // Raw SEGM tiers: build_indexed renders ONLY state_mask&0x01 (or mask==0). If the intact
+            // room is on a non-0x01 tier it gets dropped and we render a damaged tier -> ruined look.
+            if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(&container) {
+                println!("[destruct] {} raw SEGM mesh group(s):", meshes.len());
+                for m in &meshes {
+                    let mut mn = [f32::MAX; 3];
+                    let mut mx = [f32::MIN; 3];
+                    for p in &m.positions {
+                        for c in 0..3 {
+                            mn[c] = mn[c].min(p[c]);
+                            mx[c] = mx[c].max(p[c]);
+                        }
+                    }
+                    let kept = m.state_mask == 0 || (m.state_mask & 0x01) != 0;
+                    println!(
+                        "[destruct]   grp {} mask=0x{:02X} {} rigid={} bone={}: {} verts {} tris bbox ({:.1},{:.1},{:.1})..({:.1},{:.1},{:.1})",
+                        m.group_index, m.state_mask, if kept { "KEEP" } else { "SKIP" }, m.rigid, m.bone,
+                        m.positions.len(), m.tris.len(), mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]
+                    );
+                    // Export this tier as its own OBJ into the three.js viewer (batch_hqstates pack)
+                    // so intact-vs-rubble can be judged visually.
+                    let outdir = format!(
+                        "{}/../../../../output/review/batch_hqstates/{:08x}_grp{}_mask{:02x}",
+                        env!("CARGO_MANIFEST_DIR"), hash, m.group_index, m.state_mask
+                    );
+                    if std::fs::create_dir_all(&outdir).is_ok() {
+                        let mut obj = format!("# 0x{hash:08X} grp {} mask 0x{:02X} — LOCAL geometry\n", m.group_index, m.state_mask);
+                        for p in &m.positions {
+                            obj.push_str(&format!("v {} {} {}\n", p[0], p[1], p[2]));
+                        }
+                        for t in &m.tris {
+                            obj.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+                        }
+                        let _ = std::fs::write(format!("{outdir}/mesh.obj"), obj);
+                    }
+                }
+                println!("[destruct] exported per-tier OBJs to output/review/batch_hqstates/ (view pack 'hqstates')");
+            }
+            // Correlate real draw geometry to state so intact-vs-rubble is distinguishable by shape.
+            if let Ok((verts, indices, draws, _)) = mesh::build_indexed_from_container(&container) {
+                println!("[destruct] {} draw group(s) (group_index -> INDX node -> state, geometry):", draws.len());
+                for dg in &draws {
+                    let node = d.indx.get(dg.group_index).copied();
+                    let st = d.state_of_mesh(dg.group_index).map(|x| x.as_str()).unwrap_or("?");
+                    let mut mn = [f32::MAX; 3];
+                    let mut mx = [f32::MIN; 3];
+                    for i in dg.index_start..dg.index_start + dg.index_count {
+                        let p = verts[indices[i as usize] as usize].pos;
+                        for c in 0..3 {
+                            mn[c] = mn[c].min(p[c]);
+                            mx[c] = mx[c].max(p[c]);
+                        }
+                    }
+                    println!(
+                        "[destruct]   grp {} node={node:?} state={st}: {} tris, bbox ({:.1},{:.1},{:.1})..({:.1},{:.1},{:.1}) dims({:.1},{:.1},{:.1})",
+                        dg.group_index, dg.index_count / 3,
+                        mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn pmc_shell_probe(wadpath: &str) -> Result<(), String> {
     use mercs2_formats::hash::pandemic_hash_m2;
     let mut w = wad::open(wadpath)?;

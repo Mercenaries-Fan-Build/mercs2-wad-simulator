@@ -164,8 +164,19 @@ pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f
 /// textures + skin), with `skin.center=0 / scale=1` so world placement comes purely from the entity
 /// Transform. Returns the model + its local bbox. `None` if the hash has no primary ASET / fails.
 pub fn load_model_by_hash(w: &mut wad::Wad, hash: u32) -> Option<(LoadedModel, [f32; 3], [f32; 3])> {
+    load_model_by_hash_state(w, hash, 0x01)
+}
+
+/// Like [`load_model_by_hash`] but selects the SEGM `state_mask` tier `active_bit` (see
+/// `mesh::build_indexed_state`). The PMC interior "livedin" shells invert the usual convention —
+/// mask `0x04` is the intact/pristine building, `0x03` the ruined one — so they load with `0x04`.
+pub fn load_model_by_hash_state(
+    w: &mut wad::Wad,
+    hash: u32,
+    active_bit: u8,
+) -> Option<(LoadedModel, [f32; 3], [f32; 3])> {
     let container = wad::extract_container(w, hash).ok()?;
-    let (verts, indices, draws, stats) = mesh::build_indexed_from_container(&container).ok()?;
+    let (verts, indices, draws, stats) = mesh::build_indexed_state(&container, active_bit).ok()?;
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
         for h in [d.diffuse, d.normal].into_iter().flatten() {
@@ -396,17 +407,18 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
     // local bbox contains the player hardpoint-local (44,0.8,-71) — verified via `--pmc-shell`.
     const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
     const IDENT_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    // (name, model-hash), hashes verified by `mercs2_engine --pmc-shell` (pandemic_hash_m2 of the
-    // wifpmcinterior building name; recruit bays keep their known placement-name hashes).
-    const INTERIOR_ACTOR_MESHES: &[(&str, u32)] = &[
-        ("pmcoutpost_bld_hq_livedin", 0x3E629E14),       // MAIN HALL shell — the floor/walls
-        ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183), // garage room
-        ("pmcoutpost_bld_hqsuites", 0xD5D65249),         // suites room
-        ("recruitjet", 0x86D7CF92),                      // starter bay
-        ("recruitmechanic", 0xE8EB75D7),                 // starter bay (recruitheli mesh absent)
+    // (name, model-hash, state_bit). Hashes verified by `--pmc-shell`; state_bit verified by
+    // `--destruct` + the three.js viewer: the "livedin" shells render mask 0x04 = INTACT (mask 0x03 =
+    // ruined, which the default 0x01 filter wrongly picked). Recruit bays are non-destructible (0x01).
+    const INTERIOR_ACTOR_MESHES: &[(&str, u32, u8)] = &[
+        ("pmcoutpost_bld_hq_livedin", 0x3E629E14, 0x04),       // MAIN HALL shell — intact floor/walls
+        ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183, 0x04), // garage room (intact)
+        ("pmcoutpost_bld_hqsuites", 0xD5D65249, 0x04),         // suites room (intact)
+        ("recruitjet", 0x86D7CF92, 0x01),                      // starter bay
+        ("recruitmechanic", 0xE8EB75D7, 0x01),                 // starter bay (recruitheli mesh absent)
     ];
-    for &(name, hash) in INTERIOR_ACTOR_MESHES {
-        if let Some((m, bmin, bmax)) = load_model_by_hash(w, hash) {
+    for &(name, hash, state_bit) in INTERIOR_ACTOR_MESHES {
+        if let Some((m, bmin, bmax)) = load_model_by_hash_state(w, hash, state_bit) {
             for c in 0..3 {
                 wmin[c] = wmin[c].min(ACTOR_ORIGIN[c] + bmin[c]);
                 wmax[c] = wmax[c].max(ACTOR_ORIGIN[c] + bmax[c]);
@@ -593,7 +605,7 @@ fn load_streaming_world_data(
     let mut draws = Vec::with_capacity(tm.tile_draws.len());
     let mut lowres_draw_by_cell: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     for (i, &(cell, start, count)) in tm.tile_draws.iter().enumerate() {
-        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, normal: None });
+        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, normal: None, group_index: 0 });
         lowres_draw_by_cell.insert(cell, i);
     }
     let terrain = LoadedModel {
