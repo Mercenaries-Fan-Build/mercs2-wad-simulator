@@ -764,10 +764,20 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
     // props stream in immediately; WASDQE + mouse-look fly around.
     // Free-fly camera start: the authored spawn if given (mercs2_game passes the authentic
     // PMC-interior start), else an elevated bird's-eye over the exterior pool for free exploration.
+    // The authored spawn Y (MrxUtil._TeleportHero) is the hero ROOT — feet on the floor. A free-fly
+    // camera sitting exactly there views from floor level, which makes the room floor read as ~2 m too
+    // high. Start at standing EYE height above it so the floor sits where a standing player would see it.
+    const EYE_HEIGHT: f32 = 1.7;
     let mut free_pos = match spawn {
-        Some(s) => Vec3::new(s[0], s[1], s[2]),
+        Some(s) => Vec3::new(s[0], s[1] + EYE_HEIGHT, s[2]),
         None => Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]),
     };
+    if let Some(s) = spawn {
+        eprintln!(
+            "[boot] interior camera at eye height: hero root Y {:.2} + {:.1} = {:.2}  (shell floor world Y = {:.1} = actor origin)",
+            s[1], EYE_HEIGHT, s[1] + EYE_HEIGHT, 450.0
+        );
+    }
     // Initial heading: at a provided spawn (the PMC interior) face +Z, level — the room extends +Z
     // from the spawn's near edge, so you look INTO it rather than at the wall behind. The exterior
     // default is a downward bird's-eye facing -Z over the pool.
