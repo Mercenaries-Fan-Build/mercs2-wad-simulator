@@ -24,6 +24,13 @@ pub mod streaming;
 pub mod registry;
 pub use registry::{ComponentDescriptor, ComponentRegistry};
 
+/// Keystone B — the serialized event / RPC bus (see `event.rs`): the one name-hash-keyed event bus
+/// the engine shares across GUI (`ToggleHud`), Networking (`NetEventCallback`), and AI
+/// (`DirectAction`). Typed args (≤7), an immediate dispatch path, and a bounded deferred queue
+/// drained once per fixed tick from the [`Schedule`] below.
+pub mod event;
+pub use event::{Event, EventArg, EventBus, EventError, SubId};
+
 /// Fixed-timestep simulation clock. Real frame deltas are accumulated and drained in `fixed_dt`
 /// chunks so the sim advances deterministically regardless of render framerate — the way the
 /// original engine ticks its update. `dt` equals `fixed_dt` during a step; `elapsed`/`tick` count
