@@ -509,7 +509,7 @@ fn main() {
         .iter()
         // Diagnostic/export flags moved to the `mercs2_probe` binary (`mercs2_engine::diag`); only the
         // render/run modes + the render-coupled probes that still drag bin-local render types remain.
-        .any(|a| matches!(a.as_str(), "--wad" | "--model" | "--index" | "--world" | "--world-probe" | "--interior-probe" | "--interior-list" | "--pmc-shell" | "--destruct" | "--lod-probe" | "--align-probe" | "--hires-terrain" | "--stream"));
+        .any(|a| matches!(a.as_str(), "--wad" | "--model" | "--index" | "--world" | "--world-probe" | "--interior-probe" | "--interior-list" | "--pmc-shell" | "--destruct" | "--interior-assemble" | "--lod-probe" | "--align-probe" | "--hires-terrain" | "--stream"));
     if wad_mode {
         let val = |name: &str| {
             args.iter()
@@ -572,6 +572,20 @@ fn main() {
             if let Err(e) = pmc_shell_probe(&wadpath) {
                 eprintln!("--pmc-shell failed: {e}");
                 std::process::exit(1);
+            }
+            return;
+        }
+        // Headless interior assembly: run load_pmc_interior and print its floor/furniture Y diagnostics
+        // (no game window needed) to pin the shell-floor-vs-furniture height mismatch.
+        if args.iter().any(|a| a == "--interior-assemble") {
+            match wad::open(&wadpath) {
+                Ok(mut w) => {
+                    let _ = load_pmc_interior(&mut w);
+                }
+                Err(e) => {
+                    eprintln!("--interior-assemble failed: {e}");
+                    std::process::exit(1);
+                }
             }
             return;
         }

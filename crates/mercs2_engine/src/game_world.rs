@@ -356,6 +356,9 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
     // (`pandemic_hash_m2`; asset names drop the leading `_`) — and place it at its authored Transform.
     // No manual mesh identification: we render the block the game renders. Locators/hardpoints (no
     // mesh) simply fail to resolve and are skipped.
+    // Track the WORLD-space bottom Y of the block-667 furniture (where each cooler/crate/etc. sits)
+    // so we can compare it to the shell floor Y and see if furniture floats above / sinks through it.
+    let (mut furn_ymin, mut furn_ymax) = (f32::MAX, f32::MIN);
     const INTERIOR_STATE_BLOCKS: &[u16] = &[667, 711, 461, 703]; // base + jet + mec + hel variants
     for &blk in INTERIOR_STATE_BLOCKS {
         let Ok(data) = wad::decompress_block_index(w, blk) else { continue };
@@ -382,6 +385,14 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
                 wmin[c] = wmin[c].min(p.pos[c] + bmin[c]);
                 wmax[c] = wmax[c].max(p.pos[c] + bmax[c]);
             }
+            furn_ymin = furn_ymin.min(p.pos[1] + bmin[1]);
+            furn_ymax = furn_ymax.max(p.pos[1] + bmin[1]);
+            if std::env::var("MERCS2_FURNDBG").is_ok() {
+                println!(
+                    "[furn] blk{blk} '{}' floor Y {:.2} (pos {:.2}, mesh bmin {:.2})",
+                    p.name.as_deref().unwrap_or("?"), p.pos[1] + bmin[1], p.pos[1], bmin[1]
+                );
+            }
             // Flag large / floor-like meshes (big XZ footprint) — candidates for the hall/floor shell.
             let (dx, dy, dz) = (bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]);
             if dx > 18.0 || dz > 18.0 {
@@ -407,31 +418,38 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
     // local bbox contains the player hardpoint-local (44,0.8,-71) — verified via `--pmc-shell`.
     const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
     const IDENT_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    // (name, model-hash, state_bit). Hashes verified by `--pmc-shell`; state_bit verified by
-    // `--destruct` + the three.js viewer: the "livedin" shells render mask 0x04 = INTACT (mask 0x03 =
-    // ruined, which the default 0x01 filter wrongly picked). Recruit bays are non-destructible (0x01).
-    const INTERIOR_ACTOR_MESHES: &[(&str, u32, u8)] = &[
-        ("pmcoutpost_bld_hq_livedin", 0x3E629E14, 0x04),       // MAIN HALL shell — intact floor/walls
-        ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183, 0x04), // garage room (intact)
-        ("pmcoutpost_bld_hqsuites", 0xD5D65249, 0x04),         // suites room (intact)
-        ("recruitjet", 0x86D7CF92, 0x01),                      // starter bay
-        ("recruitmechanic", 0xE8EB75D7, 0x01),                 // starter bay (recruitheli mesh absent)
+    // The HALL floor is at the hero-feet / block-667-furniture level (Y 450.75), 0.75 m ABOVE the
+    // actor origin — the hall shell mesh's floor is local Y 0, so seating it at the actor origin (450.0)
+    // leaves the hall furniture (icebox/wardrobe/cot/IV, all at Y 450.75) floating. So the hall + suites
+    // shells are placed at the HALL floor Y; the recruit bays + garage keep the actor anchor (their
+    // own-block furniture already matches: mechanic bay ≈450, jet bay ≈458). Verified by
+    // `MERCS2_FURNDBG=1 --interior-assemble`.
+    let hall_origin = [ACTOR_ORIGIN[0], PMC_INTERIOR_SPAWN[1], ACTOR_ORIGIN[2]]; // Y = 450.75
+    // (name, model-hash, state_bit, placement). state_bit verified by `--destruct` + viewer: livedin
+    // shells render mask 0x04 = INTACT (0x03 = ruined, which the default 0x01 filter wrongly picked).
+    let interior_actor_meshes: &[(&str, u32, u8, [f32; 3])] = &[
+        ("pmcoutpost_bld_hq_livedin", 0x3E629E14, 0x04, hall_origin), // MAIN HALL — floor at hero level
+        ("pmcoutpost_bld_hqsuites", 0xD5D65249, 0x04, hall_origin),   // suites room (hall level)
+        ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183, 0x04, ACTOR_ORIGIN), // garage (own level)
+        ("recruitjet", 0x86D7CF92, 0x01, ACTOR_ORIGIN),              // starter bay (own floor ≈458)
+        ("recruitmechanic", 0xE8EB75D7, 0x01, ACTOR_ORIGIN),         // starter bay (own floor ≈450)
     ];
-    for &(name, hash, state_bit) in INTERIOR_ACTOR_MESHES {
+    for &(name, hash, state_bit, pos) in interior_actor_meshes {
         if let Some((m, bmin, bmax)) = load_model_by_hash_state(w, hash, state_bit) {
             for c in 0..3 {
-                wmin[c] = wmin[c].min(ACTOR_ORIGIN[c] + bmin[c]);
-                wmax[c] = wmax[c].max(ACTOR_ORIGIN[c] + bmax[c]);
+                wmin[c] = wmin[c].min(pos[c] + bmin[c]);
+                wmax[c] = wmax[c].max(pos[c] + bmax[c]);
             }
             tv += m.verts.len();
             tt += m.indices.len() / 3;
             *distinct.entry(hash).or_insert(0) += 1;
             println!(
-                "[interior] actor mesh '{name}' 0x{hash:08X}: {} v / {} t @ actor-origin",
-                m.verts.len(),
-                m.indices.len() / 3
+                "[interior] actor mesh '{name}' 0x{hash:08X}: {} v / {} t @ ({:.2},{:.2},{:.2}); \
+                 FLOOR world Y = {:.2} .. TOP {:.2}",
+                m.verts.len(), m.indices.len() / 3, pos[0], pos[1], pos[2],
+                pos[1] + bmin[1], pos[1] + bmax[1]
             );
-            out.push((m, ACTOR_ORIGIN, IDENT_QUAT));
+            out.push((m, pos, IDENT_QUAT));
         } else {
             println!("[interior] actor mesh '{name}' 0x{hash:08X}: NOT FOUND in vz.wad");
         }
@@ -441,6 +459,13 @@ pub fn load_pmc_interior(w: &mut wad::Wad) -> Result<Vec<(LoadedModel, [f32; 3],
         "[interior] assembled {} instance(s) ({} distinct meshes), {tv} verts / {tt} tris; spawn @ ({:.1},{:.1},{:.1})",
         out.len(), distinct.len(), PMC_INTERIOR_SPAWN[0], PMC_INTERIOR_SPAWN[1], PMC_INTERIOR_SPAWN[2]
     );
+    if furn_ymin <= furn_ymax {
+        println!(
+            "[interior] FLOOR CHECK: furniture bottoms sit at world Y {:.2}..{:.2}; hero feet (spawn) Y {:.2}; \
+             shell floor should match — mismatch => floating/sunk furniture",
+            furn_ymin, furn_ymax, PMC_INTERIOR_SPAWN[1]
+        );
+    }
     if !out.is_empty() {
         println!(
             "[interior] WORLD BBOX min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1}) center=({:.1},{:.1},{:.1}) dims=({:.1},{:.1},{:.1})",
