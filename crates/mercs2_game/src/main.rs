@@ -21,6 +21,7 @@ use mercs2_formats::save;
 
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
 mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
+mod world; // GAME render/boot: full TPS/free world render path (player avatar, 10-stage load)
 
 use pmc::PMC_INTERIOR_SPAWN;
 
@@ -64,6 +65,30 @@ fn main() {
             }
             None => eprintln!("--interior-assemble: no vz.wad found"),
         }
+        return;
+    }
+
+    // GAME render mode: the full TPS/free world (player avatar, 10-stage load, third-person camera).
+    //   mercs2_game --world [--tps] [--interior] [--cells] [--placements] [--props] [--interior-orbit]
+    // Restores the pre-teardown `--world --tps` experience. (Default boot below = the streaming world.)
+    if args.iter().any(|a| a == "--world") {
+        let wadpath = match mercs2_engine::wad::registry_vz_wad() {
+            Some(p) => p,
+            None => {
+                eprintln!("--world: no vz.wad found");
+                std::process::exit(1);
+            }
+        };
+        let has = |f: &str| args.iter().any(|a| a == f);
+        pollster::block_on(world::run_scene_world_loading(
+            wadpath,
+            has("--tps"),
+            has("--cells"),
+            has("--placements"),
+            has("--interior"),
+            has("--props"),
+            has("--interior-orbit"),
+        ));
         return;
     }
 
