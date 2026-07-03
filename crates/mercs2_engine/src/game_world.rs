@@ -808,36 +808,56 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
                                     AnimState::default(),
                                     SkinPalette { mats: vec![IDENTITY] },
                                 ));
-                                // PMC interior ROOM as static geometry at the spawn. The room shells
-                                // (`pmcoutpost_bld_*`) load by PATH, so they never resolve via the
-                                // streaming name-hash wake recipe (only the ModelName furniture does).
-                                // Place the whole interior — shells + furniture + recruit bays — directly
-                                // via the proven loader, once, always present around the spawn.
-                                match load_pmc_interior(&mut data.wad) {
-                                    Ok(pieces) => {
-                                        let n = pieces.len();
-                                        for (m, pos, quat) in pieces {
-                                            if !scene.has_model(m.hash) {
-                                                scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                // PMC interior, DRIVEN BY THE GAME'S LUA: run the authentic
+                                // MrxUtil.SpawnActor body (Pg.Spawn + Object.*) through mercs2_script.
+                                // The interior spawns because the script asked for it — not a hardcoded
+                                // engine call. The engine then realizes each returned actor intent by
+                                // resolving its template -> geometry.
+                                let interior_intents = crate::script_host::run_interior_boot();
+                                for r in &interior_intents {
+                                    println!(
+                                        "[lua] Pg.Spawn '{}' (name={}) at ({:.1},{:.1},{:.1}) -> guid 0x{:x}",
+                                        r.template, r.name, r.pos[0], r.pos[1], r.pos[2], r.guid
+                                    );
+                                }
+                                // Engine template resolver: PMC_INTERIOR_TEMPLATE -> the PMC interior
+                                // geometry. Shells (`pmcoutpost_bld_*`) load by PATH (never via the
+                                // streaming name-hash wake recipe), so load_pmc_interior IS the resolver
+                                // body for this template. The enclosing hall SHELL mesh is the open
+                                // sub-problem that lives right here, inside this resolution.
+                                let want_interior = interior_intents.iter().any(|r| {
+                                    r.template.eq_ignore_ascii_case(crate::script_host::PMC_INTERIOR_TEMPLATE)
+                                });
+                                if want_interior {
+                                    match load_pmc_interior(&mut data.wad) {
+                                        Ok(pieces) => {
+                                            let n = pieces.len();
+                                            for (m, pos, quat) in pieces {
+                                                if !scene.has_model(m.hash) {
+                                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                                }
+                                                // Palette needs ONE identity per bone (like the WAKE path) — a
+                                                // 1-entry palette on a multi-bone mesh under-runs the skin buffer
+                                                // and flings the verts off-screen (why the room was invisible).
+                                                let nbones = scene.model_bone_count(m.hash).max(1);
+                                                world.spawn((
+                                                    Transform {
+                                                        translation: Vec3::new(pos[0], pos[1], pos[2]),
+                                                        rotation: Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]),
+                                                        scale: Vec3::ONE,
+                                                    },
+                                                    ModelRef { model: m.hash },
+                                                    AnimState::default(),
+                                                    SkinPalette { mats: vec![IDENTITY; nbones] },
+                                                ));
                                             }
-                                            // Palette needs ONE identity per bone (like the WAKE path) — a
-                                            // 1-entry palette on a multi-bone mesh under-runs the skin buffer
-                                            // and flings the verts off-screen (why the room was invisible).
-                                            let nbones = scene.model_bone_count(m.hash).max(1);
-                                            world.spawn((
-                                                Transform {
-                                                    translation: Vec3::new(pos[0], pos[1], pos[2]),
-                                                    rotation: Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]),
-                                                    scale: Vec3::ONE,
-                                                },
-                                                ModelRef { model: m.hash },
-                                                AnimState::default(),
-                                                SkinPalette { mats: vec![IDENTITY; nbones] },
-                                            ));
+                                            println!(
+                                                "[stream] PMC interior (Lua-driven, template '{}'): {n} pieces placed",
+                                                crate::script_host::PMC_INTERIOR_TEMPLATE
+                                            );
                                         }
-                                        println!("[stream] PMC interior: {n} static room/furniture pieces placed at the spawn");
+                                        Err(e) => eprintln!("[stream] PMC interior load failed: {e}"),
                                     }
-                                    Err(e) => eprintln!("[stream] PMC interior load failed: {e}"),
                                 }
                                 wad_opt = Some(data.wad);
                                 manager = Some(data.manager);

@@ -24,6 +24,8 @@ glam = "0.27" # matrix/vector math for the camera (left-handed Y-up)
 mercs2_formats = { path = "../mercs2_formats" }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
 mercs2_core = { path = "../mercs2_core" }
+# script host — the game's Lua drives the engine through the EngineHost seam (Pg.Spawn/Object.*).
+mercs2_script = { path = "../mercs2_script" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key
