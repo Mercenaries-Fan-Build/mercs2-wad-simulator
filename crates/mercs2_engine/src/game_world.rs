@@ -820,6 +820,10 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
                                             if !scene.has_model(m.hash) {
                                                 scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                                             }
+                                            // Palette needs ONE identity per bone (like the WAKE path) — a
+                                            // 1-entry palette on a multi-bone mesh under-runs the skin buffer
+                                            // and flings the verts off-screen (why the room was invisible).
+                                            let nbones = scene.model_bone_count(m.hash).max(1);
                                             world.spawn((
                                                 Transform {
                                                     translation: Vec3::new(pos[0], pos[1], pos[2]),
@@ -828,7 +832,7 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
                                                 },
                                                 ModelRef { model: m.hash },
                                                 AnimState::default(),
-                                                SkinPalette { mats: vec![IDENTITY] },
+                                                SkinPalette { mats: vec![IDENTITY; nbones] },
                                             ));
                                         }
                                         println!("[stream] PMC interior: {n} static room/furniture pieces placed at the spawn");
