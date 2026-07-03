@@ -87,6 +87,42 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: search EVERY WAD in the install (vz/English/shell/Loading) for a mesh by name or
+    // 0xHASH — to locate assets missing from vz.wad. `--find-mesh <name|0xHASH>`.
+    if let Some(i) = args.iter().position(|a| a == "--find-mesh") {
+        let arg = args.get(i + 1).cloned().unwrap_or_default();
+        let hash = arg
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
+        println!("[find-mesh] '{arg}' -> 0x{hash:08X}");
+        if let Some(vz) = mercs2_engine::wad::registry_vz_wad() {
+            if let Some(dir) = Path::new(&vz).parent() {
+                for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("wad")) {
+                        let Some(ps) = p.to_str() else { continue };
+                        match mercs2_engine::wad::open(ps) {
+                            Ok(mut w) => {
+                                let models = mercs2_engine::wad::model_list(&w);
+                                let present = models.iter().any(|(h, _)| *h == hash);
+                                let mesh = mercs2_engine::game_world::load_model_by_hash(&mut w, hash)
+                                    .map(|(m, _, _)| format!("MESH {}v/{}t", m.verts.len(), m.indices.len() / 3))
+                                    .unwrap_or_else(|| "no-mesh".into());
+                                println!(
+                                    "  {:<14} {} models, hash-present={present}, {mesh}",
+                                    p.file_name().unwrap().to_string_lossy(), models.len()
+                                );
+                            }
+                            Err(err) => println!("  {}: open failed: {err}", p.file_name().unwrap().to_string_lossy()),
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {

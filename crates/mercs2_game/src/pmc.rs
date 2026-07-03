@@ -214,6 +214,12 @@ pub fn load_pmc_interior(
     if recruits.jet {
         interior_actor_meshes.push(("recruitjet", 0x86D7CF92, 0x01, ACTOR_ORIGIN));
     }
+    if recruits.hel {
+        // recruitheli mesh (0x634F1F65) IS in vz.wad — 10,247v — buildable via load_model_by_hash even
+        // though it's not registered as a primary model ASET (the old "absent" note was wrong; found
+        // via --find-mesh scanning all WADs).
+        interior_actor_meshes.push(("recruitheli", 0x634F1F65, 0x01, ACTOR_ORIGIN));
+    }
     for &(name, hash, state_bit, pos) in &interior_actor_meshes {
         if let Some((m, bmin, bmax)) = load_model_by_hash_state(w, hash, state_bit) {
             for c in 0..3 {
