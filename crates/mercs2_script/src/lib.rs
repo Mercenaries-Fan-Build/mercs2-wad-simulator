@@ -49,14 +49,34 @@ pub trait EngineHost {
     fn start_with_resources(&self) -> bool {
         false
     }
-    /// `Pg.GetGuidByName` — resolve a placed-object name to its runtime GUID (0 if unknown).
+    /// `Pg.GetGuidByName` — resolve a placed-object name to its runtime GUID (0 = not found; the
+    /// binding maps 0 → Lua `nil` so the game's `if not uGuid` control flow is authentic).
     fn guid_by_name(&mut self, name: &str) -> u64;
-    /// The bottom-out of `MrxUtil.SpawnActor(template, name, {vPosition, nRotation, …})`: instantiate
-    /// an actor template (e.g. the `HqInterior` room shell) at a world position. Returns its GUID.
-    fn spawn_actor(&mut self, template: &str, name: &str, pos: [f32; 3], rot_deg: f32) -> u64;
-    /// `MrxUtil._TeleportHero` — move the player to a world position.
+    /// `Pg.Spawn(template, x,y,z,yaw, bLink, bHighDetail)` — instantiate a template actor. This is the
+    /// bottom-out of `MrxUtil.SpawnActor`, and where a template NAME (e.g. `HqInterior`) is resolved
+    /// into geometry. Returns the new actor's GUID (0 on failure → Lua `nil`).
+    fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, high_detail: bool) -> u64;
+    /// `Object.SetName` — bind a placed name to a runtime GUID.
+    fn object_set_name(&mut self, guid: u64, name: &str);
+    /// `Object.SetPosition` — move an actor to a world position.
+    fn object_set_position(&mut self, guid: u64, pos: [f32; 3]);
+    /// `Object.SetYaw` — set an actor's heading (degrees).
+    fn object_set_yaw(&mut self, guid: u64, yaw: f32);
+    /// `Object.GetPosition`.
+    fn object_get_position(&mut self, guid: u64) -> [f32; 3] {
+        let _ = guid;
+        [0.0; 3]
+    }
+    /// `Object.GetYaw`.
+    fn object_get_yaw(&mut self, guid: u64) -> f32 {
+        let _ = guid;
+        0.0
+    }
+    /// `MrxUtil._TeleportHero` — move the player to a world position. (Lua binding wired in a later
+    /// phase, once its C-binding bottom-out is pinned; the seam is final.)
     fn teleport_hero(&mut self, pos: [f32; 3]);
-    /// The bottom-out of `MrxLayerManager.Add({..})`: request a set of `vz_state_*` world-state layers.
+    /// The bottom-out of `MrxLayerManager.Add({..})`: request `vz_state_*` world-state layers. (Lua
+    /// binding wired in a later phase; the seam is final.)
     fn add_layers(&mut self, layers: &[String]);
 }
 
@@ -235,16 +255,103 @@ impl ScriptHost {
         )?;
         g.set("Sys", sys)?;
 
-        // ---- Pg.* (name → GUID) ----
+        // ---- Pg.* (name → GUID; template Spawn) ----
         let pg = self.lua.create_table()?;
         let h = host.clone();
         pg.set(
             "GetGuidByName",
             self.lua.create_function(move |_, name: String| {
-                Ok(h.borrow_mut().guid_by_name(&name) as i64)
+                let guid = h.borrow_mut().guid_by_name(&name);
+                Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
             })?,
         )?;
+        let h = host.clone();
+        // Pg.Spawn(template, x, y, z, yaw, [bLink], [bHighDetail]) -> guid | nil
+        pg.set(
+            "Spawn",
+            self.lua.create_function(
+                move |_,
+                      (template, x, y, z, yaw, _link, high): (
+                    String,
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    Option<bool>,
+                    Option<bool>,
+                )| {
+                    let guid =
+                        h.borrow_mut().pg_spawn(&template, [x, y, z], yaw, high.unwrap_or(false));
+                    Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
+                },
+            )?,
+        )?;
         g.set("Pg", pg)?;
+
+        // ---- Object.* (the transform/name mutators the SpawnActor recipe uses) ----
+        let object = self.lua.create_table()?;
+        let h = host.clone();
+        object.set(
+            "SetName",
+            self.lua.create_function(move |_, (guid, name): (i64, String)| {
+                h.borrow_mut().object_set_name(guid as u64, &name);
+                Ok(())
+            })?,
+        )?;
+        let h = host.clone();
+        object.set(
+            "SetPosition",
+            self.lua
+                .create_function(move |_, (guid, x, y, z): (i64, f32, f32, f32)| {
+                    h.borrow_mut().object_set_position(guid as u64, [x, y, z]);
+                    Ok(())
+                })?,
+        )?;
+        let h = host.clone();
+        object.set(
+            "SetYaw",
+            self.lua.create_function(move |_, (guid, yaw): (i64, f32)| {
+                h.borrow_mut().object_set_yaw(guid as u64, yaw);
+                Ok(())
+            })?,
+        )?;
+        let h = host.clone();
+        object.set(
+            "GetPosition",
+            self.lua.create_function(move |_, guid: i64| {
+                let p = h.borrow_mut().object_get_position(guid as u64);
+                Ok((p[0], p[1], p[2]))
+            })?,
+        )?;
+        let h = host.clone();
+        object.set(
+            "GetYaw",
+            self.lua
+                .create_function(move |_, guid: i64| Ok(h.borrow_mut().object_get_yaw(guid as u64)))?,
+        )?;
+        // Anchor/attachment + physics toggles: accepted as no-ops so the FULL SpawnActor body and its
+        // `_SpawnActorComplete` run without erroring. Wired to real behavior in a later phase.
+        object.set(
+            "SetTransformToObject",
+            self.lua.create_function(|_, _: MultiValue| Ok(()))?,
+        )?;
+        object.set("Attach", self.lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+        object.set(
+            "DisablePhysics",
+            self.lua.create_function(|_, _: MultiValue| Ok(()))?,
+        )?;
+        g.set("Object", object)?;
+
+        // ---- Ai.* / Vehicle.* (only the stubs `_SpawnActorComplete` hits for animate actors) ----
+        let ai = self.lua.create_table()?;
+        ai.set("Enable", self.lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+        g.set("Ai", ai)?;
+        let vehicle = self.lua.create_table()?;
+        vehicle.set(
+            "EnableTurret",
+            self.lua.create_function(|_, _: MultiValue| Ok(()))?,
+        )?;
+        g.set("Vehicle", vehicle)?;
 
         // ---- Event.* (constants + a Create stub so boot scripts register without erroring) ----
         let event = self.lua.create_table()?;
@@ -276,44 +383,6 @@ impl ScriptHost {
         )?;
         g.set("Event", event)?;
 
-        // ---- _Engine.* (PROVISIONAL seam for actor/layer spawning) ----
-        // These back MrxUtil.SpawnActor / _TeleportHero / MrxLayerManager.Add. They are exposed under
-        // `_Engine` until each is bound to its real C-binding-table name (pending mrxutil.lua ×
-        // binding_map.json). The seam itself — EngineHost — is final; only the Lua name is provisional.
-        let engine = self.lua.create_table()?;
-        let h = host.clone();
-        engine.set(
-            "SpawnActor",
-            self.lua.create_function(
-                move |_, (template, name, params): (String, String, Option<Table>)| {
-                    let (pos, rot) = params
-                        .as_ref()
-                        .map(actor_pos_rot)
-                        .unwrap_or(([0.0; 3], 0.0));
-                    Ok(h.borrow_mut().spawn_actor(&template, &name, pos, rot) as i64)
-                },
-            )?,
-        )?;
-        let h = host.clone();
-        engine.set(
-            "TeleportHero",
-            self.lua.create_function(move |_, params: Table| {
-                let (pos, _) = actor_pos_rot(&params);
-                h.borrow_mut().teleport_hero(pos);
-                Ok(())
-            })?,
-        )?;
-        let h = host.clone();
-        engine.set(
-            "AddLayers",
-            self.lua.create_function(move |_, layers: Table| {
-                let names: Vec<String> = layers.sequence_values::<String>().flatten().collect();
-                h.borrow_mut().add_layers(&names);
-                Ok(())
-            })?,
-        )?;
-        g.set("_Engine", engine)?;
-
         Ok(())
     }
 
@@ -336,24 +405,6 @@ impl ScriptHost {
     pub fn eval<T: mlua::FromLuaMulti>(&self, src: &str) -> LuaResult<T> {
         self.lua.load(src).eval()
     }
-}
-
-/// Pull `vPosition` (`{x,y,z}` or `{[1],[2],[3]}`) and `nRotation` (degrees) out of a SpawnActor param
-/// table. Missing fields default to origin / 0.
-fn actor_pos_rot(params: &Table) -> ([f32; 3], f32) {
-    let pos = params
-        .get::<Table>("vPosition")
-        .ok()
-        .map(|t| {
-            [
-                t.get::<f32>(1).unwrap_or(0.0),
-                t.get::<f32>(2).unwrap_or(0.0),
-                t.get::<f32>(3).unwrap_or(0.0),
-            ]
-        })
-        .unwrap_or([0.0; 3]);
-    let rot = params.get::<f32>("nRotation").unwrap_or(0.0);
-    (pos, rot)
 }
 
 /// Recursively index `*.lua` files under `dir` by lowercased file stem → path. First writer wins on a
@@ -382,9 +433,14 @@ mod tests {
     #[derive(Default)]
     struct RecordingHost {
         logs: Vec<String>,
-        spawns: Vec<(String, [f32; 3], f32)>,
+        /// (template, spawn-pos, yaw, high_detail) per `Pg.Spawn`.
+        spawns: Vec<(String, [f32; 3], f32, bool)>,
+        names: Vec<(u64, String)>,
+        positions: Vec<(u64, [f32; 3])>,
+        yaws: Vec<(u64, f32)>,
         layers: Vec<String>,
         teleports: Vec<[f32; 3]>,
+        next_guid: u64,
     }
     impl EngineHost for RecordingHost {
         fn log(&mut self, _source: &str, msg: &str) {
@@ -396,13 +452,22 @@ mod tests {
         fn start_with_resources(&self) -> bool {
             true
         }
-        fn guid_by_name(&mut self, name: &str) -> u64 {
-            // deterministic fake GUID so tests can assert routing
-            name.bytes().fold(0u64, |a, b| a.wrapping_mul(131).wrapping_add(b as u64))
+        fn guid_by_name(&mut self, _name: &str) -> u64 {
+            0 // "not yet spawned" → binding returns nil, so `if not uGuid` takes the Spawn path
         }
-        fn spawn_actor(&mut self, template: &str, _name: &str, pos: [f32; 3], rot: f32) -> u64 {
-            self.spawns.push((template.to_string(), pos, rot));
-            self.spawns.len() as u64
+        fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, high_detail: bool) -> u64 {
+            self.next_guid += 1;
+            self.spawns.push((template.to_string(), pos, yaw, high_detail));
+            self.next_guid
+        }
+        fn object_set_name(&mut self, guid: u64, name: &str) {
+            self.names.push((guid, name.to_string()));
+        }
+        fn object_set_position(&mut self, guid: u64, pos: [f32; 3]) {
+            self.positions.push((guid, pos));
+        }
+        fn object_set_yaw(&mut self, guid: u64, yaw: f32) {
+            self.yaws.push((guid, yaw));
         }
         fn teleport_hero(&mut self, pos: [f32; 3]) {
             self.teleports.push(pos);
@@ -453,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_bindings_route_to_host() {
+    fn authentic_spawnactor_recipe_routes_to_host() {
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
         h.register_engine(host.clone()).unwrap();
@@ -464,23 +529,34 @@ mod tests {
             .unwrap();
         assert_eq!(lvl, "vz");
 
-        // Pg.GetGuidByName routes and returns a nonzero integer
-        let guid: i64 = h.eval("return Pg.GetGuidByName(\"HqInterior\")").unwrap();
-        assert_ne!(guid, 0);
+        // Pg.GetGuidByName returns nil for an unspawned name → the game's `if not uGuid` is authentic.
+        let is_nil: bool = h.eval("return Pg.GetGuidByName(\"Nope\") == nil").unwrap();
+        assert!(is_nil);
 
-        // The provisional actor seam: SpawnActor + AddLayers reach the host with parsed args.
-        h.exec(
-            "_Engine.SpawnActor(\"HqInterior\", \"HqInterior\", { vPosition = {3750, 450, -3840}, nRotation = 0 })\n\
-             _Engine.AddLayers({\"vz_state_pmcinterior\", \"vz_state_pmcinterior_jet\"})",
-            "@slice",
-        )
-        .unwrap();
+        // Run the EXACT MrxUtil.SpawnActor body for the inanimate HqInterior against the real
+        // Pg.Spawn / Object.* bindings (mrxutil.lua:463-490).
+        let guid: i64 = h
+            .eval(
+                r#"
+                local uGuid = Pg.GetGuidByName("HqInterior")
+                if not uGuid then uGuid = Pg.Spawn("PmcHqInterior", 0, 0, 0, 0, false, true) end
+                Object.SetName(uGuid, "HqInterior")
+                Object.SetPosition(uGuid, 3750, 450, -3840)
+                Object.SetYaw(uGuid, 0)
+                return uGuid
+                "#,
+            )
+            .unwrap();
+        assert_eq!(guid, 1);
 
         let hb = host.borrow();
         assert_eq!(hb.logs, vec!["gui loaded".to_string()]);
-        assert_eq!(hb.spawns.len(), 1);
-        assert_eq!(hb.spawns[0].0, "HqInterior");
-        assert_eq!(hb.spawns[0].1, [3750.0, 450.0, -3840.0]);
-        assert_eq!(hb.layers.len(), 2);
+        assert_eq!(
+            hb.spawns,
+            vec![("PmcHqInterior".to_string(), [0.0, 0.0, 0.0], 0.0, true)]
+        );
+        assert_eq!(hb.names, vec![(1u64, "HqInterior".to_string())]);
+        assert_eq!(hb.positions, vec![(1u64, [3750.0, 450.0, -3840.0])]);
+        assert_eq!(hb.yaws, vec![(1u64, 0.0)]);
     }
 }
