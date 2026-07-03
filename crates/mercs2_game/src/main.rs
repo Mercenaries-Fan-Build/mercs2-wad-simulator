@@ -123,6 +123,21 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: dump the COMP-type inventory of a WAD block (default 667, the PMC interior
+    // overlay) — to see which components each placement carries (Transform/Name/ModelName/Model/…).
+    if let Some(i) = args.iter().position(|a| a == "--comps") {
+        let blk: u16 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(667);
+        if let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            if let Ok(data) = mercs2_engine::wad::decompress_block_index(&mut w, blk) {
+                println!("[comps] block {blk} COMP inventory:");
+                for ci in mercs2_formats::placement::comp_inventory(&data) {
+                    println!("  {ci:?}");
+                }
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {
