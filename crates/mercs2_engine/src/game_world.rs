@@ -739,8 +739,13 @@ pub async fn run_game_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: 
         Some(s) => Vec3::new(s[0], s[1], s[2]),
         None => Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]),
     };
-    let mut free_yaw: f32 = PI;
-    let mut free_pitch: f32 = -0.35;
+    // Initial heading: at a provided spawn (the PMC interior) face +Z, level — the room extends +Z
+    // from the spawn's near edge, so you look INTO it rather than at the wall behind. The exterior
+    // default is a downward bird's-eye facing -Z over the pool.
+    let (mut free_yaw, mut free_pitch): (f32, f32) = match spawn {
+        Some(_) => (0.0, 0.0),
+        None => (PI, -0.35),
+    };
     let mut held: HashSet<KeyCode> = HashSet::new();
     let mut loading = true;
     let load_start = std::time::Instant::now();
