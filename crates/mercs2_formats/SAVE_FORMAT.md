@@ -61,12 +61,71 @@ Diff result: `const=4363  vary=9041` bytes. Varying regions (start–end inclusi
 | auto_6A0BE454 | PmcCon001 | 1 | 0x6A0CFE39 | 50,000 | 0 | auto_6A0BE454 |
 | auto_6A447BF8 | PmcCon001 | 1 | 0x6A45586A | 200,000 | 25 | auto_6A447BF8 |
 
+## SaveSingleton Lua boot-state
+
+`Profile::decompress_lua()` inflates to **readable Lua source** (24.8K–54K) — a
+serialized `SaveSingleton` table, *not* bytecode. `parse_save_state(&str)` (and
+the convenience `Profile::save_state()`) decode it into a `SaveState` so
+`mercs2_game` can restore the real start-state. Extraction mirrors the legacy
+regex harvest in `tools/savefile_parser.py` (`harvest_from_lua`); the Lua is
+plain text, so a light brace/quote-aware table walker is used (no interpreter).
+
+Observed top-level shape (verified on `auto_6A447BF8.profile`):
+
+```lua
+{
+  ["vEquippedSupport"] = { [1]="[vehicle.wz10]", ... },   -- ordered tokens (may be empty)
+  ["nTimeElapsed"]     = 964.000000,                      -- playtime seconds
+  ["tFlowData"] = {                                       -- mission-flow container
+    ["tCulledBindings"] = { [1]="Start", [2]="VzaCon001", [3]="PmcCon001" },
+    ["tActiveMissions"] = { ["PmcJob001"] = { ["nState"]=1, ["_nTargetsComplete"]=1,
+                                              ["tCollected"]={ Sys.StringToGuid('0x0013E2C6') } }, ... },
+    ["tMyFlowData"]     = { ["PmcCon001"]=1, ["VzaCon001"]=1 },  -- completed-flow flags
+  },
+  ["tLayerData"] = { [1]="vz_state_mer_big_lineregion", ... },   -- 238–299 world overlays
+}
+```
+
+Each key (`tCulledBindings` / `tActiveMissions` / `tMyFlowData` / `tLayerData` /
+`nTimeElapsed` / `vEquippedSupport`) appears **exactly once** per file, so they
+are located globally by name; per-mission `nState` / `_nTargetsComplete` /
+`tCollected` are scoped to their own mission body (avoids colliding with the
+same mission ids in `tMyFlowData`). Numbers are Lua floats → `f64`.
+
+| `SaveState` field | Lua source | Status | Drives |
+|-------------------|-----------|--------|--------|
+| `flow_chain: Vec<String>` | `tFlowData.tCulledBindings` (ordered) | FACT | seeds mission-flow FSM binding chain |
+| `active_missions: Vec<ActiveMission>` | `tFlowData.tActiveMissions` | FACT | restores in-progress contracts |
+| `ActiveMission.state: f64` | `["nState"]` | FACT key / INFERRED code meaning | mission FSM state |
+| `ActiveMission.targets_complete: Option<f64>` | `["_nTargetsComplete"]` | FACT | objective progress |
+| `ActiveMission.collected: Vec<u32>` | `["tCollected"]` → `Sys.StringToGuid('0x…')` | FACT | collectible entity guids gathered |
+| `completed_flow: BTreeMap<String,f64>` | `tFlowData.tMyFlowData` | FACT key / INFERRED per-value | seen/complete flow flags (`1`=seen, higher=later stage) |
+| `layers: Vec<String>` | `tLayerData` (ordered) | FACT | `vz_state_*` world overlays to stream — **`world_streaming_spec.md §5`** (destruction/staging/faction/pristine) |
+| `time_elapsed_secs: f64` | `nTimeElapsed` | FACT key / INFERRED unit | playtime (matches header `play_time_seconds`) |
+| `equipped_support: Vec<String>` | `vEquippedSupport` (ordered) | FACT | equipped vehicle/support tokens (`[vehicle.*]`, `[support.*]`) |
+
+Per-file decode (all six saves):
+
+| File | flow_chain | active | layers | time (s) | equipped | contract |
+|------|-----------:|-------:|-------:|---------:|---------:|----------|
+| Mattias Nilsson_63430745 | 15 | — | 299 | 24266 | — | OilCon001 |
+| Mattias Nilsson_6A0E523C | 63+ | many | 238 | 246050 | 3 | PmcJob001 |
+| _______ ________48EFABFB | 63+ | many | 238 | 246031 | 3 | PmcJob001 |
+| auto_634304EA | 15 | many | 295 | 24006 | — | OilCon003 |
+| auto_6A0BE454 | 3 | few | 255 | 966 | — | PmcCon001 |
+| auto_6A447BF8 | 3 | 3 | 253 | 964 | — | PmcCon001 |
+
+The `tLayerData` sets are genuinely per-save (differ in both membership and
+count) — every entry, in every file, begins with `vz_state_`.
+
 ## Not yet reversed
 
 - `checksum` algorithm (integrity hash at `0x00`).
 - `0x462`–`0x467`: two u16 immediately before the zlib stream; not the
   compressed/uncompressed lengths (verified) — purpose unknown.
 - Byte `0xAC`, and the `0x4C`/`0x4F–0x51` flag bit meanings.
-- The Lua payload is exposed raw (`Profile::decompress_lua()`); its internal
-  table structure is deliberately not parsed here (legacy regex harvest lives in
-  `tools/savefile_parser.py`).
+- The Lua payload is exposed raw (`Profile::decompress_lua()`) and decoded into
+  a `SaveState` (see "SaveSingleton Lua boot-state" above). Tables beyond the
+  boot-state set (economy/faction/support catalogs, `_tRequirementsObtained`,
+  `tLockedGates`, per-vehicle unlock tables) are present in the Lua but not yet
+  decoded.

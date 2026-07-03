@@ -16,6 +16,7 @@
 //! structural sentinels are `version == 4` (`@0x04`), `data_size == len-4`
 //! (`@0x08`), and the zlib header byte `0x78` at `0x468`. See `SAVE_FORMAT.md`.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 /// Fixed on-disk size of every retail `.profile` (bytes).
@@ -199,6 +200,343 @@ fn read_utf16z(bytes: &[u8], off: usize, max_chars: usize) -> String {
     String::from_utf16_lossy(&units)
 }
 
+// ===========================================================================
+// SaveSingleton Lua boot-state
+// ===========================================================================
+//
+// `decompress_lua()` yields the serialized `SaveSingleton` table as **readable
+// Lua source** (not bytecode): 24.8K–54K of text. This section decodes the
+// boot-relevant fields into structured Rust so `mercs2_game` can restore the
+// real start-state (mission flow, active missions, world overlay layers, ...).
+//
+// Grounding: the field set and extraction mirror the legacy regex harvest in
+// `tools/savefile_parser.py` (`harvest_from_lua`) and the observed layout of
+// the six retail saves. The Lua is plain text — a light brace/quote-aware
+// table walker is sufficient; no Lua interpreter is needed.
+//
+// Observed top-level shape (verified on `auto_6A447BF8.profile`):
+// ```text
+// {
+//   ["vEquippedSupport"] = { [1]="[vehicle.wz10]", ... },   -- ordered tokens
+//   ["nTimeElapsed"]     = 964.000000,                      -- playtime seconds
+//   ["tFlowData"] = {                                       -- mission-flow container
+//     ["tCulledBindings"] = { [1]="Start", [2]="VzaCon001", [3]="PmcCon001" },
+//     ["tActiveMissions"] = { ["PmcJob001"] = { ["nState"]=1, ["_nTargetsComplete"]=1,
+//                                               ["tCollected"]={ Sys.StringToGuid('0x0013E2C6') } }, ... },
+//     ["tMyFlowData"]     = { ["PmcCon001"]=1, ["VzaCon001"]=1 },  -- completed flow flags
+//   },
+//   ["tLayerData"] = { [1]="vz_state_mer_big_lineregion", ... },   -- ~200-300 world overlays
+// }
+// ```
+// Each of `tCulledBindings` / `tActiveMissions` / `tMyFlowData` / `tLayerData`
+// / `nTimeElapsed` / `vEquippedSupport` appears exactly once per file, so they
+// are located by key name globally; per-mission fields are scoped to their own
+// mission body to avoid colliding with `tMyFlowData` (same mission ids).
+
+/// One entry of `tFlowData.tActiveMissions` — a mission currently in progress.
+#[derive(Debug, Clone)]
+pub struct ActiveMission {
+    /// Mission id / key (e.g. `"PmcJob001"`, `"OilCon020"`). FACT.
+    pub id: String,
+    /// `["nState"]` — mission state code (0 = queued/available, 1 = active/…).
+    /// Stored as `f64` because the Lua serializes every number as a float. FACT
+    /// that it is `nState`; the numeric *meaning* of each code is INFERRED.
+    pub state: f64,
+    /// `["_nTargetsComplete"]` — number of objectives ticked off, when present.
+    /// FACT (key name); absent for freshly-queued missions.
+    pub targets_complete: Option<f64>,
+    /// `["tCollected"]` — GUIDs collected for this mission, decoded from
+    /// `Sys.StringToGuid('0x........')`. FACT (these are collectible entity guids).
+    pub collected: Vec<u32>,
+}
+
+/// Decoded boot-state from the `SaveSingleton` Lua payload.
+///
+/// Drives `mercs2_game` start-up: `flow_chain` seeds the mission-flow FSM,
+/// `active_missions` restores in-progress contracts, `layers` selects the
+/// `vz_state_*` world overlays to stream (see
+/// `docs/modernization/world_streaming_spec.md §5`).
+#[derive(Debug, Clone, Default)]
+pub struct SaveState {
+    /// `tFlowData.tCulledBindings` — the mission-flow binding chain, **in order**
+    /// (e.g. `["Start", "VzaCon001", "PmcCon001"]`). FACT.
+    pub flow_chain: Vec<String>,
+    /// `tFlowData.tActiveMissions` — in-progress missions. FACT.
+    pub active_missions: Vec<ActiveMission>,
+    /// `tFlowData.tMyFlowData` — completed / advanced flow flags, mission-id →
+    /// flag value (`1` = seen/complete, higher = later stage). FACT (key name);
+    /// per-value meaning INFERRED. Sorted by id (`BTreeMap`).
+    pub completed_flow: BTreeMap<String, f64>,
+    /// `tLayerData` — active `vz_state_*` world-overlay layer names, **order
+    /// preserved** (destruction / staging / faction / pristine overlays). This
+    /// is the overlay set the streamer must load. FACT.
+    pub layers: Vec<String>,
+    /// `nTimeElapsed` — total playtime in seconds. FACT (key name); value is a
+    /// float in the Lua. INFERRED that the unit is seconds (matches header
+    /// `play_time_seconds`).
+    pub time_elapsed_secs: f64,
+    /// `vEquippedSupport` — ordered equipped support/vehicle tokens
+    /// (`"[vehicle.wz10]"`, `"[support.airstrike.fuelairbomb.name]"`, …), may be
+    /// empty. FACT (matches `savefile_parser.py` vehicle/support harvest).
+    pub equipped_support: Vec<String>,
+}
+
+impl SaveState {
+    /// Total collectibles gathered across all active missions (`tCollected`).
+    pub fn collected_count(&self) -> usize {
+        self.active_missions.iter().map(|m| m.collected.len()).sum()
+    }
+}
+
+impl Profile {
+    /// Decompress the Lua payload and decode it into structured [`SaveState`].
+    pub fn save_state(&self) -> Result<SaveState, String> {
+        let lua = self.decompress_lua()?;
+        let text = String::from_utf8_lossy(&lua);
+        parse_save_state(&text)
+    }
+}
+
+/// Strip one layer of surrounding `"…"` from a Lua string literal.
+fn unquote(s: &str) -> String {
+    let t = s.trim();
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        t[1..t.len() - 1].to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Return the inner text of the first Lua table keyed by `["key"]` in `s`
+/// (between the matching `{`…`}`, exclusive), or `None` if absent.
+///
+/// Brace matching skips over `"…"` / `'…'` string literals so braces inside a
+/// string can never be miscounted (none occur in these saves, but be safe).
+fn table_body<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("[\"{key}\"]");
+    let start = s.find(&needle)? + needle.len();
+    let b = s.as_bytes();
+    let mut i = start;
+    while i < b.len() && b[i] != b'{' {
+        i += 1;
+    }
+    if i >= b.len() {
+        return None;
+    }
+    let open = i;
+    let mut depth = 0usize;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += 1;
+                }
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[open + 1..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Read the scalar value assigned to `["key"]` in `s` (up to the next comma or
+/// newline), trimmed. Used for `nState` / `_nTargetsComplete` / `nTimeElapsed`.
+fn scalar_value<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("[\"{key}\"]");
+    let start = s.find(&needle)? + needle.len();
+    let rest = &s[start..];
+    let eq = rest.find('=')?;
+    let after = &rest[eq + 1..];
+    let end = after.find([',', '\n']).unwrap_or(after.len());
+    Some(after[..end].trim())
+}
+
+/// Walk one Lua table body (the text *inside* the braces) and return its
+/// top-level `(key, raw_value)` entries **in source order**. Keys are unquoted;
+/// values are returned verbatim (a `{…}` block keeps its braces, scalars are
+/// trimmed). Nested tables are skipped as whole values, so `tActiveMissions`
+/// entries do not leak their inner `tCollected` / `tTargets` keys.
+fn parse_table(inner: &str) -> Vec<(String, String)> {
+    let b = inner.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    while i < n {
+        while i < n && (b[i].is_ascii_whitespace() || b[i] == b',') {
+            i += 1;
+        }
+        if i >= n || b[i] != b'[' {
+            if i < n {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1; // past '['
+        let key: String;
+        if i < n && b[i] == b'"' {
+            i += 1;
+            let ks = i;
+            while i < n && b[i] != b'"' {
+                i += 1;
+            }
+            key = inner[ks..i].to_string();
+        } else {
+            let ks = i;
+            while i < n && b[i] != b']' {
+                i += 1;
+            }
+            key = inner[ks..i].trim().to_string();
+        }
+        while i < n && b[i] != b']' {
+            i += 1;
+        }
+        if i < n {
+            i += 1; // past ']'
+        }
+        while i < n && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < n && b[i] == b'=' {
+            i += 1;
+        }
+        while i < n && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let vs = i;
+        if i < n && b[i] == b'{' {
+            let mut depth = 0usize;
+            while i < n {
+                match b[i] {
+                    q @ (b'"' | b'\'') => {
+                        i += 1;
+                        while i < n && b[i] != q {
+                            i += 1;
+                        }
+                    }
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            out.push((key, inner[vs..i].to_string()));
+        } else {
+            while i < n && b[i] != b',' && b[i] != b'\n' {
+                i += 1;
+            }
+            out.push((key, inner[vs..i].trim().to_string()));
+        }
+    }
+    out
+}
+
+/// Decode every `0x........` hex literal in a `tCollected` block (each is the
+/// argument of `Sys.StringToGuid('0x........')`) into a `u32` GUID.
+fn extract_guids(block: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut rest = block;
+    while let Some(p) = rest.find("0x") {
+        let hex = &rest[p + 2..];
+        let end = hex
+            .find(|c: char| !c.is_ascii_hexdigit())
+            .unwrap_or(hex.len());
+        if end > 0 {
+            if let Ok(v) = u32::from_str_radix(&hex[..end], 16) {
+                out.push(v);
+            }
+        }
+        rest = &hex[end..];
+    }
+    out
+}
+
+/// Decode a decompressed `SaveSingleton` Lua string into a [`SaveState`].
+///
+/// Errors only if `lua` contains no recognizable `SaveSingleton` table keys.
+pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
+    // Sanity: must look like the serialized SaveSingleton table.
+    let has_any = ["tLayerData", "tCulledBindings", "tFlowData", "nTimeElapsed"]
+        .iter()
+        .any(|k| lua.contains(&format!("[\"{k}\"]")));
+    if !has_any {
+        return Err("not a SaveSingleton Lua table (no known keys found)".into());
+    }
+
+    let flow_chain = table_body(lua, "tCulledBindings")
+        .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
+        .unwrap_or_default();
+
+    let mut active_missions = Vec::new();
+    if let Some(am) = table_body(lua, "tActiveMissions") {
+        for (id, val) in parse_table(am) {
+            // `val` is the mission's `{ … }` table; strip the outer braces.
+            let body = val.trim();
+            let body = body
+                .strip_prefix('{')
+                .and_then(|b| b.strip_suffix('}'))
+                .unwrap_or(body);
+            let state = scalar_value(body, "nState")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let targets_complete =
+                scalar_value(body, "_nTargetsComplete").and_then(|s| s.parse::<f64>().ok());
+            let collected = table_body(body, "tCollected")
+                .map(extract_guids)
+                .unwrap_or_default();
+            active_missions.push(ActiveMission {
+                id,
+                state,
+                targets_complete,
+                collected,
+            });
+        }
+    }
+
+    let completed_flow = table_body(lua, "tMyFlowData")
+        .map(|b| {
+            parse_table(b)
+                .into_iter()
+                .filter_map(|(k, v)| v.parse::<f64>().ok().map(|n| (k, n)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let layers = table_body(lua, "tLayerData")
+        .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
+        .unwrap_or_default();
+
+    let time_elapsed_secs = scalar_value(lua, "nTimeElapsed")
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    let equipped_support = table_body(lua, "vEquippedSupport")
+        .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
+        .unwrap_or_default();
+
+    Ok(SaveState {
+        flow_chain,
+        active_missions,
+        completed_flow,
+        layers,
+        time_elapsed_secs,
+        equipped_support,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +610,105 @@ mod tests {
             let p = parse(&load(name)).unwrap();
             assert_eq!(p.active_contract(), contract, "{name}");
         }
+    }
+
+    #[test]
+    fn all_six_decode_save_state() {
+        for name in ALL_SAVES {
+            let p = parse(&load(name)).unwrap();
+            let st = p.save_state().unwrap_or_else(|e| panic!("save_state {name}: {e}"));
+
+            // Every retail save carries a non-empty world-overlay set, and every
+            // entry is a vz_state_* layer (world_streaming_spec §5 overlays).
+            assert!(!st.layers.is_empty(), "{name} has layers");
+            assert!(
+                st.layers.iter().all(|l| l.starts_with("vz_state_")),
+                "{name} all layers vz_state_*"
+            );
+            // Flow chain always begins the mission-flow FSM.
+            assert!(!st.flow_chain.is_empty(), "{name} flow_chain non-empty");
+            // Playtime is present and non-negative.
+            assert!(st.time_elapsed_secs >= 0.0, "{name} time_elapsed");
+        }
+    }
+
+    #[test]
+    fn target_file_save_state_decoded() {
+        let p = parse(&load("auto_6A447BF8.profile")).unwrap();
+        let st = p.save_state().unwrap();
+
+        // Mission-flow binding chain, in order.
+        assert_eq!(st.flow_chain, ["Start", "VzaCon001", "PmcCon001"]);
+        assert!(st.flow_chain.contains(&"PmcCon001".to_string()));
+
+        // 253 world-overlay layers, all vz_state_*.
+        assert_eq!(st.layers.len(), 253, "layer count");
+        assert!(st.layers.iter().all(|l| l.starts_with("vz_state_")));
+        assert_eq!(st.layers[0], "vz_state_mer_big_lineregion");
+
+        // Playtime seconds (matches the raw header count).
+        assert_eq!(st.time_elapsed_secs, 964.0);
+        assert_eq!(st.time_elapsed_secs as u32, p.play_time_seconds);
+
+        // Active missions incl. PmcJob001 with one collected guid.
+        let ids: Vec<&str> = st.active_missions.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"PmcJob001"), "active missions: {ids:?}");
+        let pmcjob = st
+            .active_missions
+            .iter()
+            .find(|m| m.id == "PmcJob001")
+            .unwrap();
+        assert_eq!(pmcjob.state, 1.0);
+        assert_eq!(pmcjob.targets_complete, Some(1.0));
+        assert_eq!(pmcjob.collected, vec![0x0013E2C6]);
+        assert_eq!(st.collected_count(), 1);
+
+        // Completed-flow flags.
+        assert_eq!(st.completed_flow.get("PmcCon001"), Some(&1.0));
+        assert_eq!(st.completed_flow.get("VzaCon001"), Some(&1.0));
+
+        // This save has no equipped support.
+        assert!(st.equipped_support.is_empty());
+    }
+
+    #[test]
+    fn layer_sets_differ_across_files() {
+        // Cross-file: the overlay sets are genuinely per-save (not a shared
+        // constant), and every entry everywhere is a vz_state_* layer.
+        let a = parse(&load("auto_6A447BF8.profile"))
+            .unwrap()
+            .save_state()
+            .unwrap()
+            .layers;
+        let b = parse(&load("Mattias Nilsson_6A0E523C.profile"))
+            .unwrap()
+            .save_state()
+            .unwrap()
+            .layers;
+        assert_ne!(a, b, "layer lists must differ across saves");
+        assert_ne!(a.len(), b.len(), "layer counts differ (253 vs 238)");
+        for set in [&a, &b] {
+            assert!(set.iter().all(|l| l.starts_with("vz_state_")));
+        }
+    }
+
+    #[test]
+    fn equipped_support_harvested_when_present() {
+        // The high-progress save equips support/vehicle tokens.
+        let st = parse(&load("Mattias Nilsson_6A0E523C.profile"))
+            .unwrap()
+            .save_state()
+            .unwrap();
+        assert!(!st.equipped_support.is_empty());
+        assert_eq!(st.equipped_support[0], "[vehicle.wz10]");
+        // Later-game save advances many flow flags.
+        assert!(st.completed_flow.len() > 100, "flow flags: {}", st.completed_flow.len());
+    }
+
+    #[test]
+    fn rejects_non_savestate_lua() {
+        assert!(parse_save_state("print('hello')").is_err());
+        assert!(parse_save_state("").is_err());
     }
 
     #[test]
