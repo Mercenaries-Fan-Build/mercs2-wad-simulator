@@ -12,3 +12,5 @@ path = "src/main.rs"
 # The diagnostics + shared world helpers live in the engine library.
 mercs2_engine = { path = "../mercs2_engine" }
 mercs2_formats = { path = "../mercs2_formats" }
+# `overlays` reuses the streaming catalog fold (StreamingManager) to count what each vz_state overlay adds.
+mercs2_core = { path = "../mercs2_core" }

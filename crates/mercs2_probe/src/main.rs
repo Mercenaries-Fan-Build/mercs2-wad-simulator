@@ -73,6 +73,67 @@ fn first_positional(args: &[String]) -> Option<String> {
     None
 }
 
+/// Headless verification of vz_state overlay activation: parse a `.profile` → its active `SaveState`
+/// layers → resolve each to a WAD block → run the REAL streaming fold (`add_overlay_to_catalog`) and
+/// report how many resolve + how many entities each adds. Proves the boot-state overlay path without
+/// a window (the engine's streaming render uses the same `worldutil` fold).
+fn overlays_report(wadpath: &str, profile_path: &str) -> Result<(), String> {
+    use mercs2_core::streaming::{StreamingConfig, StreamingManager};
+    use mercs2_engine::worldutil::{add_overlay_to_catalog, find_block_by_path, PropSpawn};
+    use std::collections::HashMap;
+
+    let bytes = std::fs::read(profile_path).map_err(|e| format!("read {profile_path}: {e}"))?;
+    let profile = mercs2_formats::save::parse(&bytes)?;
+    let state = profile.save_state()?;
+    let layers = &state.layers;
+    println!(
+        "[overlays] profile '{}' — contract {}, {} active vz_state layers",
+        profile.save_name(),
+        profile.active_contract(),
+        layers.len()
+    );
+
+    let mut w = wad::open(wadpath)?;
+    let cfg = StreamingConfig::default();
+    let mut mgr = StreamingManager::new(cfg);
+    let mut props: HashMap<u32, PropSpawn> = HashMap::new();
+
+    let (mut resolved, mut tot_mn, mut tot_named) = (0usize, 0usize, 0usize);
+    let mut unresolved: Vec<&str> = Vec::new();
+    let mut per: Vec<(String, usize)> = Vec::new();
+    for l in layers {
+        match find_block_by_path(&w, l) {
+            Some(bi) => {
+                let dec = wad::decompress_block_index(&mut w, bi).map_err(|e| format!("block {bi}: {e}"))?;
+                let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut mgr, &mut props);
+                resolved += 1;
+                tot_mn += mn;
+                tot_named += nm;
+                if mn + nm > 0 {
+                    per.push((l.clone(), mn + nm));
+                }
+            }
+            None => unresolved.push(l),
+        }
+    }
+    println!("[overlays] resolved {resolved}/{} layers to blocks", layers.len());
+    println!(
+        "[overlays] entities added: {tot_mn} ModelName + {tot_named} named = {} ({} distinct streamable keys)",
+        tot_mn + tot_named,
+        props.len()
+    );
+    per.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("[overlays] top overlays by entity count:");
+    for (n, c) in per.iter().take(10) {
+        println!("    {c:>5}  {n}");
+    }
+    if !unresolved.is_empty() {
+        let sample: Vec<&str> = unresolved.iter().take(6).copied().collect();
+        println!("[overlays] {} unresolved (sample): {sample:?}", unresolved.len());
+    }
+    Ok(())
+}
+
 fn main() {
     let all: Vec<String> = std::env::args().collect();
     if all.len() < 2 {
@@ -153,6 +214,13 @@ fn main() {
             }
         },
         "placement-names" => diag::placement_names(&wadpath),
+        "overlays" => {
+            let prof = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("overlays: usage: mercs2_probe overlays <profile-path>");
+                std::process::exit(2);
+            });
+            run(overlays_report(&wadpath, &prof));
+        }
         "-h" | "--help" | "help" => usage(),
         other => {
             eprintln!("unknown subcommand '{other}'");

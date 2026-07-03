@@ -366,6 +366,51 @@ pub fn build_streaming_catalog(
     (mgr, props, terrain_tiles)
 }
 
+/// Fold one `vz_state` OVERLAY block's placements into an existing streaming catalog, using the SAME
+/// recipe [`build_streaming_catalog`] applies to `layers_static`: the overlay's `ModelName` props +
+/// named-hash props are registered with `mgr` (proximity streaming) and `props` (the wake recipe).
+/// Overlays carry no terrain tiles. Returns `(modelname_added, named_added)`. Any key already present
+/// (the base layer or a previously-folded overlay) is skipped, so an overlay never double-streams an
+/// entity — matching the game's model where vz_state overlays layer ON TOP of the always-loaded base.
+pub fn add_overlay_to_catalog(
+    block: &[u8],
+    default_dist: [u16; 4],
+    mgr: &mut mercs2_core::streaming::StreamingManager,
+    props: &mut std::collections::HashMap<u32, PropSpawn>,
+) -> (usize, usize) {
+    use mercs2_core::streaming::EntityUnit;
+
+    let mut n_mn = 0usize;
+    for p in mercs2_formats::placement::load_model_placements(block) {
+        if props.contains_key(&p.key) {
+            continue;
+        }
+        let dist = p.hibernation.map(|h| h.dist).unwrap_or(default_dist);
+        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
+        props.insert(p.key, PropSpawn { model_hash: p.model_hash, pos: p.pos, quat: p.quat });
+        n_mn += 1;
+    }
+
+    let mut n_named = 0usize;
+    for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
+        if props.contains_key(&p.key) {
+            continue;
+        }
+        let Some(name) = &p.name else { continue };
+        let base = name.trim_start_matches('_');
+        let h = mercs2_formats::hash::pandemic_hash_m2(base);
+        let lname = base.to_ascii_lowercase();
+        let far = lname.contains("env") || lname.contains("rock") || lname.contains("huge")
+            || lname.contains("large") || lname.contains("tree") || lname.contains("building");
+        let dist = if far { [400, 160, 60, 20] } else { default_dist };
+        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
+        props.insert(p.key, PropSpawn { model_hash: h, pos: p.pos, quat: p.quat });
+        n_named += 1;
+    }
+
+    (n_mn, n_named)
+}
+
 /// Keyed by entity key in the map `build_streaming_catalog` returns, so the streaming executor can
 /// instantiate the prop on WAKE.
 #[derive(Clone, Copy)]

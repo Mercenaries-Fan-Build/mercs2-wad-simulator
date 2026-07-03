@@ -142,8 +142,27 @@ fn main() {
     match find_engine_exe() {
         Some(engine) => {
             let spawn_arg = format!("--spawn={},{},{}", spawn[0], spawn[1], spawn[2]);
-            println!("[mercs2_game] launching {} {spawn_arg}", engine.display());
-            match Command::new(&engine).arg(&spawn_arg).status() {
+            let mut cmd = Command::new(&engine);
+            cmd.arg(&spawn_arg);
+            // Hand the active vz_state overlay set to the engine via a temp file (253 names is too
+            // many for argv). The engine resolves each -> its WAD block and folds it into the world.
+            let overlays_arg = state
+                .as_ref()
+                .filter(|s| !s.layers.is_empty())
+                .and_then(|s| {
+                    let path = std::env::temp_dir().join("mercs2_overlays.txt");
+                    std::fs::write(&path, s.layers.join("\n")).ok()?;
+                    Some(format!("--overlays={}", path.display()))
+                });
+            if let Some(ov) = &overlays_arg {
+                cmd.arg(ov);
+            }
+            println!(
+                "[mercs2_game] launching {} {spawn_arg}{}",
+                engine.display(),
+                overlays_arg.as_ref().map(|o| format!(" {o}")).unwrap_or_default()
+            );
+            match cmd.status() {
                 Ok(st) => std::process::exit(st.code().unwrap_or(0)),
                 Err(e) => {
                     eprintln!("mercs2_game: launch {}: {e}", engine.display());

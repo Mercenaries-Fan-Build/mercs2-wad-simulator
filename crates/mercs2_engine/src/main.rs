@@ -795,7 +795,7 @@ fn main() {
         // Control-driven streaming world with a free-fly camera (the default boot; also reachable
         // explicitly via --stream). Loads/unloads blocks + wakes/hibernates props by proximity.
         if args.iter().any(|a| a == "--stream") {
-            pollster::block_on(run_streaming_world(wadpath.clone(), spawn_arg(&args)));
+            pollster::block_on(run_streaming_world(wadpath.clone(), spawn_arg(&args), overlays_arg(&args)));
             return;
         }
         // Render the merged low_res world terrain under an elevated bird's-eye camera.
@@ -859,7 +859,7 @@ fn main() {
         if let Some(wadpath) = wad::registry_vz_wad() {
             eprintln!("vz.wad: {wadpath}");
             eprintln!("[boot] no args -> streaming world (free-fly camera). Use --triangle for the skeleton.");
-            pollster::block_on(run_streaming_world(wadpath, spawn_arg(&args)));
+            pollster::block_on(run_streaming_world(wadpath, spawn_arg(&args), overlays_arg(&args)));
             return;
         }
     }
@@ -3328,6 +3328,7 @@ struct StreamingWorldData {
 fn load_streaming_world_data(
     wadpath: &str,
     cfg: mercs2_core::streaming::StreamingConfig,
+    overlays: &[String],
     progress: &LoadProgress,
 ) -> Result<StreamingWorldData, String> {
     let mut w = wad::open(wadpath)?;
@@ -3371,10 +3372,28 @@ fn load_streaming_world_data(
         mercs2_formats::world_index::WorldIndex::build(archive, file)
     };
     progress.step("world index");
-    let (manager, props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    let base_props = props.len();
+
+    // Activate the save's vz_state OVERLAYS on top of the always-loaded base: resolve each active
+    // layer name -> its WAD block, then fold its placements into the same streaming catalog so they
+    // stream by proximity like the base. This is the game-state world (destruction/staging/faction +
+    // the PMC interior) the save selects. Empty `overlays` = base world only.
+    let (mut ov_resolved, mut ov_entities) = (0usize, 0usize);
+    for layer in overlays {
+        let Some(bi) = find_block_by_path(&w, layer) else { continue };
+        let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
+        let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut manager, &mut props);
+        ov_resolved += 1;
+        ov_entities += mn + nm;
+    }
+    if !overlays.is_empty() {
+        println!("[stream] overlays: {ov_resolved}/{} vz_state layers resolved, +{ov_entities} entities", overlays.len());
+    }
+
     println!(
-        "[stream] catalog: {} c3-cell blocks, {} per-entity props, {} hi-res terrain tiles",
-        manager.block_count(), props.len(), terrain_tiles.len()
+        "[stream] catalog: {} c3-cell blocks, {} per-entity props ({base_props} base + {} overlay), {} hi-res terrain tiles",
+        manager.block_count(), props.len(), props.len() - base_props, terrain_tiles.len()
     );
     progress.step("streaming catalog");
 
@@ -3402,7 +3421,26 @@ fn spawn_arg(args: &[String]) -> Option<[f32; 3]> {
     }
 }
 
-async fn run_streaming_world(wadpath: String, spawn: Option<[f32; 3]>) {
+/// Read the active vz_state overlay layer names from `--overlays=<file>` (one per line; `mercs2_game`
+/// writes them from the save's `SaveState`). Absent/unreadable = base world only.
+fn overlays_arg(args: &[String]) -> Vec<String> {
+    let Some(path) = args.iter().find_map(|a| a.strip_prefix("--overlays=")) else {
+        return Vec::new();
+    };
+    match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(e) => {
+            eprintln!("[overlays] read {path}: {e}");
+            Vec::new()
+        }
+    }
+}
+
+async fn run_streaming_world(wadpath: String, spawn: Option<[f32; 3]>, overlays: Vec<String>) {
     use crate::scene::Scene;
     use mercs2_core::glam::{Mat4, Quat, Vec3};
     use mercs2_core::streaming::StreamingConfig;
@@ -3458,9 +3496,10 @@ async fn run_streaming_world(wadpath: String, spawn: Option<[f32; 3]>) {
     let progress = Arc::new(LoadProgress::new(4));
     let loader_progress = progress.clone();
     let loader_wadpath = wadpath.clone();
+    let loader_overlays = overlays;
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
-        let r = load_streaming_world_data(&loader_wadpath, cfg, &loader_progress);
+        let r = load_streaming_world_data(&loader_wadpath, cfg, &loader_overlays, &loader_progress);
         if r.is_ok() {
             println!("[stream] loaded in {:.1}s", t0.elapsed().as_secs_f64());
         }
