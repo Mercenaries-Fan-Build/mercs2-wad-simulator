@@ -724,9 +724,10 @@ pub async fn run_scene_world_loading(
     }
     let mut mode = CamMode::Free; // switched to third-person when the loaded player spawns
     let mut free_pos = Vec3::new(0.0, 2500.0, 4500.0);
-    let mut free_yaw: f32 = PI;
+    // Spawn camera rotated 180° from the original (was PI, facing -Z) so it opens looking INTO the room.
+    let mut free_yaw: f32 = 0.0;
     let mut free_pitch: f32 = -0.5;
-    let mut tp_yaw: f32 = PI;
+    let mut tp_yaw: f32 = 0.0;
     let mut tp_pitch: f32 = -0.12;
     let mut held: HashSet<KeyCode> = HashSet::new();
     let mut loading = true;

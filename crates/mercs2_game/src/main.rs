@@ -68,30 +68,6 @@ fn main() {
         return;
     }
 
-    // GAME render mode: the full TPS/free world (player avatar, 10-stage load, third-person camera).
-    //   mercs2_game --world [--tps] [--interior] [--cells] [--placements] [--props] [--interior-orbit]
-    // Restores the pre-teardown `--world --tps` experience. (Default boot below = the streaming world.)
-    if args.iter().any(|a| a == "--world") {
-        let wadpath = match mercs2_engine::wad::registry_vz_wad() {
-            Some(p) => p,
-            None => {
-                eprintln!("--world: no vz.wad found");
-                std::process::exit(1);
-            }
-        };
-        let has = |f: &str| args.iter().any(|a| a == f);
-        pollster::block_on(world::run_scene_world_loading(
-            wadpath,
-            has("--tps"),
-            has("--cells"),
-            has("--placements"),
-            has("--interior"),
-            has("--props"),
-            has("--interior-orbit"),
-        ));
-        return;
-    }
-
     let plan_only = args.iter().any(|a| a == "--plan");
     // Optional explicit profile path (positional); else newest in the save folder.
     let explicit = args
@@ -199,16 +175,27 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!(
-        "[mercs2_game] rendering in-process: vz.wad={wadpath}  spawn=({:.1},{:.1},{:.1})  overlays={}",
-        spawn[0], spawn[1], spawn[2], layers.len()
-    );
-    pollster::block_on(mercs2_engine::game_world::run_game_world(
-        wadpath,
-        Some(PMC_INTERIOR_SPAWN),
-        layers,
-        populate_pmc_interior,
-    ));
+    // Default boot = the FULL game world: player + third-person camera + PMC interior + c3 cells +
+    // placements + props — all core components ON. `--stream` selects the alternate streaming free-fly
+    // world; `--interior-orbit` adds the debug orbit camera.
+    if args.iter().any(|a| a == "--stream") {
+        println!(
+            "[mercs2_game] streaming world (free-fly): spawn=({:.1},{:.1},{:.1}) overlays={}",
+            spawn[0], spawn[1], spawn[2], layers.len()
+        );
+        pollster::block_on(mercs2_engine::game_world::run_game_world(
+            wadpath,
+            Some(PMC_INTERIOR_SPAWN),
+            layers,
+            populate_pmc_interior,
+        ));
+    } else {
+        println!("[mercs2_game] full world: TPS + PMC interior + c3 cells + placements + props");
+        let orbit = args.iter().any(|a| a == "--interior-orbit");
+        pollster::block_on(world::run_scene_world_loading(
+            wadpath, true, true, true, true, true, orbit,
+        ));
+    }
 }
 
 /// GAME world population: once the engine's streaming world has loaded, spawn the PMC interior into
