@@ -225,7 +225,12 @@ impl Scene {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Cw,
-                cull_mode: Some(wgpu::Face::Back),
+                // Double-sided. The building shells (e.g. `pmcoutpost_bld_hq_livedin`, the PMC hall)
+                // are wound outward-facing like exterior buildings, so back-face culling hides their
+                // floor+walls when viewed from INSIDE — you'd see through the room and catch only stray
+                // front-facing tris. Rendering both sides encloses the interior. (Interim: the correct
+                // fix is a per-material two-sided flag from MTRL; negligible perf cost at this scale.)
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {

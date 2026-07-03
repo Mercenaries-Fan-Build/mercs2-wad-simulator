@@ -75,7 +75,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Vertex color modulates the sampled albedo. Textured geometry (terrain/player/props) authors
     // color = (1,1,1) so this is a no-op there; the untextured placement markers use it (white
     // fallback texture) to category-tint via vertex color.
-    let albedo = textureSample(t_diffuse, s_linear, in.uv).rgb * in.color;
+    let tex = textureSample(t_diffuse, s_linear, in.uv);
+    // Alpha-tested cutout. Opaque diffuse (DXT1 / authored a=1, and the white fallback a=1) reads
+    // alpha ≈ 1 and never discards; DXT5 / 1-bit-alpha diffuse carries the cutout mask, so foliage,
+    // railings, fences and window/arch openings in the building shells render see-through instead of
+    // as solid quads. (True alpha-BLEND — glass — is a later, sort-order pass.)
+    if (tex.a < 0.5) { discard; }
+    let albedo = tex.rgb * in.color;
 
     // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
     let nsamp = textureSample(t_normal, s_linear, in.uv);
