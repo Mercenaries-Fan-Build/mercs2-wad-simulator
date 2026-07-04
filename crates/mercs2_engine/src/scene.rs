@@ -20,6 +20,10 @@ use crate::render::{ClipAnim, GpuLight, TexMap, DEPTH_FORMAT, MAX_LIGHTS};
 use crate::mesh::{self, Vertex};
 use crate::pose;
 
+/// Directional shadow-map resolution (square). Kept in sync with the `texel = 1/2048` PCF step in
+/// `shader.wgsl`; change both together.
+const SHADOW_SIZE: u32 = 2048;
+
 /// CPU-side per-model data the animation system needs (read-only after load, shared via `Rc`).
 pub struct ModelAnim {
     pub rig: Vec<mesh::BoneRig>,
@@ -82,6 +86,13 @@ pub struct Scene {
     lights_buf: wgpu::Buffer,
     lights_bind: wgpu::BindGroup,
     lights: Vec<GpuLight>,
+    /// Directional shadow map (depth-only render from the key light) + its light view-proj uniform.
+    /// The depth view is sampled by the main shader (folded into group 3); `shadow_vp_bind` is the
+    /// shadow pass's group-1 (light view-proj). Built once; the matrix is refreshed by `set_shadow`.
+    shadow_view: wgpu::TextureView,
+    shadow_vp_buf: wgpu::Buffer,
+    shadow_vp_bind: wgpu::BindGroup,
+    shadow_pipeline: wgpu::RenderPipeline,
     models: HashMap<u32, ModelGpu>,
     entities: HashMap<Entity, EntityGpu>,
     /// Per-model set of draw-call indices to SKIP at render (e.g. low-res terrain tiles hidden where
@@ -224,19 +235,88 @@ impl Scene {
         let flat_normal = make_flat_normal_view(&device, &queue);
         let black = make_black_view(&device, &queue);
 
-        // group 3: the per-frame dynamic light array (uniform).
+        // Directional shadow map: a depth-only render of the scene from the key light, PCF-sampled by
+        // the main shader for real cast-shadows. Built here so the group-3 lights bind group (below)
+        // can fold in its depth view + comparison sampler + light view-proj (staying within wgpu's
+        // 4-bind-group limit).
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow map"),
+            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // PCF comparison sampler: linear filter + LessEqual so `textureSampleCompareLevel` returns a
+        // smoothed 0..1 occlusion across the 2×2 depth footprint.
+        let shadow_cmp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow comparison sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        // Light view-proj (one mat4 = 64 B). Init to identity so a path that never calls `set_shadow`
+        // (e.g. `--ecs`) still has a valid (w=1) matrix and reads unshadowed instead of dividing by 0.
+        let shadow_vp_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow light view-proj"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &shadow_vp_buf,
+            0,
+            bytemuck::cast_slice(&glam::Mat4::IDENTITY.to_cols_array()),
+        );
+
+        // group 3: the per-frame dynamic light array (uniform) + the folded-in shadow map.
         let lights_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lights bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         // vec4 count (16) + MAX_LIGHTS * (vec4 pos_radius + vec4 color_intensity = 32 B) bytes.
         let lights_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -248,7 +328,18 @@ impl Scene {
         let lights_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lights bind"),
             layout: &lights_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: lights_buf.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: lights_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_cmp),
+                },
+                wgpu::BindGroupEntry { binding: 3, resource: shadow_vp_buf.as_entire_binding() },
+            ],
         });
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
@@ -307,6 +398,65 @@ impl Scene {
         };
         let pipeline = build_geom_pipeline(config.format);
         let depth_view = make_depth(&device, &config);
+
+        // Shadow pass: depth-only render of the scene from the key light into `shadow_tex`. Its own
+        // small group-1 bind group carries the light view-proj (group 0 = camera for `model`, group 2
+        // = bones — reused from the color pass). Vertex-only (no fragment); a slope+constant depth
+        // bias fights shadow acne.
+        let shadow_vp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow vp bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let shadow_vp_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow vp bind"),
+            layout: &shadow_vp_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_vp_buf.as_entire_binding() }],
+        });
+        let shadow_shader = device.create_shader_module(wgpu::include_wgsl!("shadow.wgsl"));
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow pipeline layout"),
+            bind_group_layouts: &[&camera_bgl, &shadow_vp_bgl, &bone_bgl],
+            push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: "vs_shadow",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None, // match the geom pipeline (double-sided shells)
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
 
         // Sky pass (PLACEHOLDER for the game's PgSky/PgSun/PgCloud shader stack): a fullscreen
         // gradient dome, no vertex buffers, drawn first at the far plane with depth writes off.
@@ -496,6 +646,10 @@ impl Scene {
             lights_buf,
             lights_bind,
             lights: Vec::new(),
+            shadow_view,
+            shadow_vp_buf,
+            shadow_vp_bind,
+            shadow_pipeline,
             models: HashMap::new(),
             hidden_draws: HashMap::new(),
             entities: HashMap::new(),
@@ -646,6 +800,32 @@ impl Scene {
     /// (lights are static placements) or whenever the set changes. Empty = sun/ambient only.
     pub fn set_lights(&mut self, lights: Vec<GpuLight>) {
         self.lights = lights;
+    }
+
+    /// Aim the directional shadow map for this frame. `center` = the world point the orthographic
+    /// shadow frustum is centred on (typically the player/focus); `dir` = the key light's travel
+    /// direction (points FROM the light TOWARD the scene — downward-ish); `half_extent` = half the
+    /// frustum width in metres (the shadowed radius around `center`). Builds a self-consistent LH
+    /// light view-proj (`look_at_lh` * `orthographic_lh`, NO camera X-flip — the main shader projects
+    /// true world space with this same matrix) and uploads it. Call each frame in the world path.
+    pub fn set_shadow(&mut self, center: [f32; 3], dir: [f32; 3], half_extent: f32) {
+        let c = glam::Vec3::from(center);
+        let mut d = glam::Vec3::from(dir);
+        if d.length_squared() < 1e-8 {
+            d = glam::Vec3::new(0.0, -1.0, 0.0);
+        }
+        d = d.normalize();
+        // Guard against dir ∥ up: pick +Z as the up reference when the light is near-vertical.
+        let up = if d.dot(glam::Vec3::Y).abs() > 0.99 { glam::Vec3::Z } else { glam::Vec3::Y };
+        let distance = 40.0f32;
+        let eye = c - d * distance;
+        let view = glam::Mat4::look_at_lh(eye, c, up);
+        let proj = glam::Mat4::orthographic_lh(
+            -half_extent, half_extent, -half_extent, half_extent, 0.1, 2.0 * distance,
+        );
+        let light_vp = proj * view;
+        self.queue
+            .write_buffer(&self.shadow_vp_buf, 0, bytemuck::cast_slice(&light_vp.to_cols_array()));
     }
 
     /// Upload a model's geometry + materials into the store, keyed by hash. Idempotent per hash.
@@ -986,6 +1166,44 @@ impl Scene {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene frame") });
+
+        // Shadow pass (FIRST): depth-only render of the scene from the key light into the shadow map
+        // (cleared to 1.0 = far). The color pass' main shader PCF-samples this for real cast-shadows.
+        // Same entities as the color pass, whole index range per model (depth only — materials/
+        // draw-group split are irrelevant here). Uses the per-entity mvp_bind (for `model`) + bone_bind
+        // uploaded in phase 1.
+        {
+            let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            spass.set_pipeline(&self.shadow_pipeline);
+            spass.set_bind_group(1, &self.shadow_vp_bind, &[]);
+            for (e, _m, model_hash, _p) in &items {
+                let Some(mg) = self.models.get(model_hash) else { continue };
+                let Some(eg) = self.entities.get(e) else { continue };
+                spass.set_bind_group(0, &eg.mvp_bind, &[]);
+                spass.set_bind_group(2, &eg.bone_bind, &[]);
+                spass.set_vertex_buffer(0, mg.vbuf.slice(..));
+                if let Some(ib) = &mg.ibuf {
+                    spass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    spass.draw_indexed(0..mg.nindices, 0, 0..1);
+                } else {
+                    spass.draw(0..mg.nverts, 0..1);
+                }
+            }
+        }
+
         // Prefer the HDR world path (scene → Rgba16Float → tone-map + bloom → swapchain); fall back to
         // a direct forward present when the post chain is absent (default `--ecs`/`--animate`, or if
         // HDR-target setup failed — nothing regresses). draw_geometry binds the group-3 lights itself.
@@ -1107,6 +1325,7 @@ mod tests {
     #[test]
     fn shaders_parse_and_validate() {
         validate_wgsl("shader.wgsl", include_str!("shader.wgsl"));
+        validate_wgsl("shadow.wgsl", include_str!("shadow.wgsl"));
         validate_wgsl("sky.wgsl", include_str!("sky.wgsl"));
         validate_wgsl("loading.wgsl", include_str!("loading.wgsl"));
     }

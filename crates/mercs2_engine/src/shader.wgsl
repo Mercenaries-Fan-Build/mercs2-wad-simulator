@@ -34,6 +34,37 @@ struct Lights {
 };
 @group(3) @binding(0) var<uniform> lights: Lights;
 
+// Directional shadow map (folded into group 3 so the shader stays within wgpu's 4-group limit):
+// a depth-only render of the scene from the key light, PCF-sampled to cast real cast-shadows.
+@group(3) @binding(1) var shadow_map: texture_depth_2d;
+@group(3) @binding(2) var shadow_cmp: sampler_comparison;
+struct ShadowVp { mat: mat4x4<f32> };  // light view-proj (LH look_at_lh * orthographic_lh, NO cam X-flip)
+@group(3) @binding(3) var<uniform> shadow_vp: ShadowVp;
+
+// 3×3 PCF shadow factor for a WORLD-space fragment: 1 = fully lit, 0 = fully shadowed. Projects the
+// fragment with the light view-proj, converts to shadow-map UV (wgpu y-flip), and compares depth.
+// Uses textureSampleCompareLevel (no derivatives) so it is valid under the early-out control flow.
+fn shadow_factor(wpos: vec3<f32>) -> f32 {
+    let lc = shadow_vp.mat * vec4<f32>(wpos, 1.0);
+    if (lc.w <= 0.0) { return 1.0; }
+    let ndc = lc.xyz / lc.w;
+    // orthographic_lh already maps z to [0,1] (wgpu depth range), so ndc.z is the compare ref directly.
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
+        return 1.0; // outside the shadow frustum -> treat as lit
+    }
+    let bias = 0.0015;          // constant depth bias vs shadow acne (pairs with the pipeline slope bias)
+    let texel = 1.0 / 2048.0;   // shadow map is 2048² (see scene.rs SHADOW_SIZE)
+    var sum = 0.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let off = vec2<f32>(f32(x), f32(y)) * texel;
+            sum += textureSampleCompareLevel(shadow_map, shadow_cmp, uv + off, ndc.z - bias);
+        }
+    }
+    return sum / 9.0;
+}
+
 struct VSOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -131,13 +162,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
     let ambient = 0.35;
     let sun_ndl = max(dot(N, sun_dir), 0.0);
-    var lit = mix(albedo * (ambient + 0.9 * sun_ndl), albedo, prelit);
+    // Split lighting into an unshadowed FLOOR (ambient / baked) and the shadowable DIRECT term, so the
+    // shadow map darkens only direct light — shadowed areas keep the floor and never go pure black.
+    // Prelit static geometry bakes its lighting into vertex COLOR, so its baked albedo IS the floor and
+    // it takes no sun key light; dynamic geometry (characters/props) uses ambient*albedo as the floor
+    // plus the sun key light as its direct term.
+    let ambient_floor = mix(albedo * ambient, albedo, prelit);
+    var direct = albedo * (0.9 * sun_ndl) * (1.0 - prelit);
     if (sun_ndl > 0.0 && prelit < 0.5) {
         let sun_h = normalize(sun_dir + V);
-        lit += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
+        direct += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
     }
 
     // Dynamic point lights: the nearest N (uploaded per frame). Smooth radius falloff + Blinn-Phong.
+    // These add to the shadowable direct term (a caster occluding the key light darkens them too).
     let count = min(lights.count.x, 32u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = lights.items[i].pos_radius.xyz;
@@ -153,13 +191,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let atten = (1.0 - x * x);
         let att = atten * atten;
         let ndl = max(dot(N, Ld), 0.0);
-        lit += albedo * lcol * (linten * ndl * att);
+        direct += albedo * lcol * (linten * ndl * att);
         if (ndl > 0.0) {
             let H = normalize(Ld + V);
             let ndh = max(dot(N, H), 0.0);
-            lit += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
+            direct += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
         }
     }
+
+    // Directional shadow: the key light casts real shadows onto the direct term.
+    let shadow = shadow_factor(in.wpos);
+    var lit = ambient_floor + shadow * direct;
 
     // Distance fog (PLACEHOLDER for PgSky/PgSun/PgCloud): exponential falloff past the start distance.
     var rgb = lit;

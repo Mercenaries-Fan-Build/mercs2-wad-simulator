@@ -1347,6 +1347,11 @@ pub async fn run_scene_world_loading(
                     }
 
                     schedule.run_fixed(&mut world, &mut time, dt);
+                    // Directional shadow key light, centred on the player. The travel direction is the
+                    // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
+                    // so the cast shadows line up with the sun shading. half_extent ~18 m covers the
+                    // over-the-shoulder view around the player. (All three are tuning knobs.)
+                    scene.set_shadow(player_pos.to_array(), [-0.4, -0.7, 0.5], 18.0);
                     scene.set_view(view, if interior_orbit { 1.0 } else { 0.5 }, 30000.0);
                     match scene.render(&world) {
                         Ok(()) => {}
