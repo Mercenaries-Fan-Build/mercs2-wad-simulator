@@ -730,11 +730,11 @@ pub async fn run_scene_world_loading(
     // color, density 0.00016 (~30% haze at 2.5 km, ~50% at 4.5 km — depth cue at ground level
     // without white-out from the aerial free cam; 0.00035 washed out the whole map), start 60 m.
     // Fog + sun differ indoors vs out. INTERIOR: no outdoor sun (windowless — baked lighting + interior
-    // point lights + ambient) and a LIGHT room-scale haze (warm-neutral, denser than the exterior since
-    // interior depths are metres not kilometres, start ~2 m). EXTERIOR: directional key light + the thin
-    // aerial haze. All tunable.
+    // point lights + ambient) and a DARK neutral-gray fog so distance recedes into shadow (a vignette
+    // feel), denser than the exterior since interior depths are metres not kilometres, start ~2 m.
+    // EXTERIOR: directional key light + the thin aerial haze. All tunable.
     if spawn_interior {
-        scene.set_fog([0.46, 0.44, 0.42], 0.0055, 2.0);
+        scene.set_fog([0.16, 0.17, 0.18], 0.0075, 2.0);
         scene.set_sun(0.0, 0.30);
     } else {
         scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
