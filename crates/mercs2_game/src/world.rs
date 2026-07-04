@@ -1274,11 +1274,14 @@ pub async fn run_scene_world_loading(
                                 }
                             }
                             let dir = Vec3::new(tp_pitch.cos() * tp_yaw.sin(), tp_pitch.sin(), tp_pitch.cos() * tp_yaw.cos()).normalize();
-                            let focus = player_pos + Vec3::Y * 2.2;
+                            // Over-the-shoulder rig tuned to the retail framing (tight, low): focus at the
+                            // character's upper back/shoulder (~1.6 m), a short boom, and a small lateral
+                            // shoulder offset. The retail exact values live in the binary's .rdata
+                            // (CameraOffset / CameraOffsetZ / HumanCameraModifier) — recoverable via x32dbg.
+                            let focus = player_pos + Vec3::Y * 1.6;
                             let right = Vec3::Y.cross(dir).normalize();
-                            // Desired over-the-shoulder eye 6 m back + 1.2 m to the side of the focus.
-                            const BOOM: f32 = 6.0;
-                            let want_eye = focus - dir * BOOM + right * 1.2;
+                            const BOOM: f32 = 3.0; // eye distance behind the focus (was 6 m — read as a wide shot)
+                            let want_eye = focus - dir * BOOM + right * 0.55;
                             // Boom collision: cast from the focus toward the desired eye and pull the eye in
                             // to just short of the nearest wall (CAM_RADIUS margin = the engine's camera
                             // collision radius²). Without this the boom clips straight through geometry.
