@@ -1,9 +1,0 @@
-diff a/Cargo.lock b/Cargo.lock	(rejected hunks)
-@@ -1228,6 +1228,7 @@ dependencies = [
-  "glam",
-  "mercs2_core",
-  "mercs2_formats",
-+ "naga",
-  "pollster",
-  "wgpu",
-  "winit",
