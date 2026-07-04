@@ -1020,6 +1020,19 @@ pub async fn run_scene_world_loading(
                                 // Feed the harvested dynamic point lights to the renderer (nearest set
                                 // uploaded per frame). Without this the villa/world has no local lighting.
                                 scene.set_lights(std::mem::take(&mut data.lights));
+                                // Particle pipeline proof (MERCS2_FXDEMO=1): a smoke plume + fire near the
+                                // spawn. The FX SYSTEM is wired into render; what's still missing for a
+                                // FAITHFUL hook is (a) the EffectTemplate->EmitterDesc auto-map (spec —
+                                // EMIT/FRCE/COLR float roles unpinned) and (b) harvesting the interior's
+                                // `global_particle_*` placements / honouring Lua ObjectState.StartEmitter.
+                                if std::env::var_os("MERCS2_FXDEMO").is_some() {
+                                    use mercs2_engine::particles::EmitterDesc;
+                                    let f = [player_pos.x + 2.0, player_pos.y, player_pos.z + 4.0];
+                                    let s = [player_pos.x - 2.0, player_pos.y, player_pos.z + 4.0];
+                                    scene.fx_start_desc(EmitterDesc::demo_fire(), f);
+                                    scene.fx_start_desc(EmitterDesc::demo_smoke(), s);
+                                    println!("[world] MERCS2_FXDEMO: started demo fire + smoke emitters at spawn");
+                                }
                                 if start_tps && player_entity.is_some() {
                                     mode = CamMode::ThirdPerson;
                                 }
