@@ -181,6 +181,59 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: positively ID the real PMC interior HALL shell (the `HqInterior` actor mesh,
+    // unnamed hash). Scan every vz.wad model; a room-sized HOLLOW mesh whose LOCAL bbox contains the
+    // player-enter hardpoint (spawn - actor_origin = (44, 0.75, -71), any sign combo) is the hall.
+    // Report room-sized candidates sorted by footprint. `--hall-hunt`.
+    if args.iter().any(|a| a == "--hall-hunt") {
+        if let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            // Hardpoint local offset (spawn - actor origin (3750,450,-3840)); try all 4 XZ signs since
+            // the mesh's local axes/origin corner are unknown.
+            let hp = [
+                pmc::PMC_INTERIOR_SPAWN[0] - 3750.0,
+                pmc::PMC_INTERIOR_SPAWN[1] - 450.0,
+                pmc::PMC_INTERIOR_SPAWN[2] - (-3840.0),
+            ];
+            let corners: [[f32; 3]; 4] = [
+                [hp[0], hp[1], hp[2]], [-hp[0], hp[1], hp[2]],
+                [hp[0], hp[1], -hp[2]], [-hp[0], hp[1], -hp[2]],
+            ];
+            let models = mercs2_engine::wad::model_list(&w);
+            println!("[hall-hunt] scanning {} models for a room enclosing hardpoint ±({:.1},{:.1},±{:.1})...", models.len(), hp[0], hp[1], hp[2]);
+            let mut cands: Vec<(u32, usize, usize, [f32; 3], [f32; 3], bool)> = Vec::new();
+            for (hash, _blk) in &models {
+                let Some((m, bmin, bmax)) = mercs2_engine::game_world::load_model_by_hash(&mut w, *hash) else { continue };
+                let (dx, dy, dz) = (bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]);
+                // Room-sized: big XZ footprint, plausible ceiling height (not a tower / flat plane).
+                if dx.max(dz) < 30.0 || dy < 2.5 || dy > 25.0 {
+                    continue;
+                }
+                let inside = |c: &[f32; 3]| (0..3).all(|k| c[k] >= bmin[k] - 1.0 && c[k] <= bmax[k] + 1.0);
+                let encloses = corners.iter().any(inside);
+                cands.push((*hash, m.verts.len(), m.indices.len() / 3, bmin, bmax, encloses));
+            }
+            // Enclosing candidates first, then by footprint (dx*dz) desc.
+            cands.sort_by(|a, b| {
+                let fa = (a.4[0] - a.3[0]) * (a.4[2] - a.3[2]);
+                let fb = (b.4[0] - b.3[0]) * (b.4[2] - b.3[2]);
+                b.5.cmp(&a.5).then(fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            println!("[hall-hunt] {} room-sized candidates (ENCLOSES=hardpoint inside local bbox):", cands.len());
+            let hashes: std::collections::BTreeSet<u32> = cands.iter().map(|c| c.0).collect();
+            let names = mercs2_engine::worldutil::rainbow_names(&hashes); // hash -> name if reversible
+            for (hash, v, t, bmin, bmax, enc) in cands.iter().take(40) {
+                let nm = names.get(hash).map(|s| s.as_str()).unwrap_or("<unreversed>");
+                println!(
+                    "  {}0x{hash:08X} {nm:<38} {v:>6}v/{t:>6}t  bbox x[{:.1},{:.1}] y[{:.1},{:.1}] z[{:.1},{:.1}] ({:.0}x{:.0}x{:.0})",
+                    if *enc { "ENCLOSES " } else { "         " },
+                    bmin[0], bmax[0], bmin[1], bmax[1], bmin[2], bmax[2],
+                    bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]
+                );
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {

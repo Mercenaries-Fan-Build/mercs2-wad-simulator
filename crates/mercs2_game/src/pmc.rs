@@ -212,18 +212,18 @@ pub fn load_pmc_interior(
         );
     }
 
-    // Actor-anchored shell buildings + recruit bays (wifpmcinterior.lua `_tBuildings` + mrxstarter
-    // SpawnActor @ (3750,450,-3840)). The `_livedin` HQ building is the enclosing MAIN HALL; it renders
-    // its INTACT destruction tier (mask 0x04; 0x03 = ruined). The hall + suites are seated at the hero
-    // floor Y (450.75, where the block-667 furniture sits); the bays/garage keep the actor anchor.
+    // Actor-anchored interior meshes. The player teleports onto the `HqInterior` actor (mrxbriefing.lua
+    // `Object.SetName(tActors[1],"HqInterior")`; player at hardpoint `hp_playerA`), spawned at
+    // (3750,450,-3840). The enclosing MAIN HALL is the `pmcoutpost_interior_hq` mesh (0x39AF17DC, a
+    // NON-primary type-19 model — 131,834 tris, the ornate columned hall with the tiled floor), NOT the
+    // `_pmcoutpost_bld_hq_livedin` EXTERIOR building (wifpmcinterior.lua distinguishes them: uRealPmc =
+    // the _bld_ exterior vs uFakePmc = "HqInterior"). Recruit bays (`pmcoutpost_interior_recruit*`) attach
+    // to the same actor origin when unlocked. All share the interior naming `pmcoutpost_interior_<room>`.
     const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
     const IDENT_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    let hall_origin = [ACTOR_ORIGIN[0], PMC_INTERIOR_SPAWN[1], ACTOR_ORIGIN[2]]; // Y = 450.75
-    // The HQ shell buildings (Fiona's HQ) are always present; the recruit bays only when unlocked.
+    // The main hall is always present; the recruit bays only when unlocked.
     let mut interior_actor_meshes: Vec<(&str, u32, u8, [f32; 3])> = vec![
-        ("pmcoutpost_bld_hq_livedin", 0x3E629E14, 0x04, hall_origin), // MAIN HALL — floor at hero level
-        ("pmcoutpost_bld_hqsuites", 0xD5D65249, 0x04, hall_origin),   // suites room (hall level)
-        ("pmcoutpost_bld_hqgarage_livedin", 0x33AC0183, 0x04, ACTOR_ORIGIN), // garage (own level)
+        ("pmcoutpost_interior_hq", 0x39AF17DC, 0x01, ACTOR_ORIGIN), // REAL MAIN HALL (HqInterior actor)
     ];
     if recruits.mec {
         interior_actor_meshes.push(("recruitmechanic", 0xE8EB75D7, 0x01, ACTOR_ORIGIN));
