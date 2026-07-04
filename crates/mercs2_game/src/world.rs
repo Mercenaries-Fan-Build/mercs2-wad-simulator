@@ -146,6 +146,9 @@ struct WorldData {
     /// Dynamic `LightObject` point lights harvested from layers_static + the interior state blocks
     /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
     lights: Vec<mercs2_engine::render::GpuLight>,
+    /// Authored `global_particle_*` FX placements (effect name + world position) — each starts an
+    /// emitter (classified by name). The faithful producer for environmental effects.
+    particle_fx: Vec<(String, [f32; 3])>,
 }
 
 /// Number of `progress.step` calls in `load_world_data` (keep in sync when adding stages).
@@ -341,16 +344,44 @@ fn load_world_data(
     let mut lights = mercs2_engine::game_world::placed_lights_to_gpu(
         &mercs2_formats::placement::light_inventory(&ls),
     );
+    // Environmental particle FX placements (Name-keyed `global_particle_*` Transforms) in the interior.
+    let mut particle_fx: Vec<(String, [f32; 3])> = Vec::new();
     if spawn_interior {
         if let Ok(dec) = wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK) {
             lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(
                 &mercs2_formats::placement::light_inventory(&dec),
             ));
+            for p in mercs2_formats::placement::load_placements(&dec).unwrap_or_default() {
+                let raw = p.name.as_deref().unwrap_or("");
+                let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
+                if name.starts_with("global_particle") {
+                    particle_fx.push((name.to_string(), p.pos));
+                }
+            }
         }
     }
-    println!("[world] dynamic lights harvested: {}", lights.len());
+    println!("[world] dynamic lights harvested: {}; particle placements: {}", lights.len(), particle_fx.len());
 
-    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap, lights })
+    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap, lights, particle_fx })
+}
+
+/// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`], or `None` when the
+/// billboard system can't render that type faithfully (e.g. `godray` light-shafts — those need a
+/// volumetric/light-shaft renderer we don't have yet; skipped rather than faked as smoke). Interim,
+/// name-heuristic mapping until the `EffectTemplate → EmitterDesc` decode is pinned.
+fn classify_particle(name: &str) -> Option<mercs2_engine::particles::EmitterDesc> {
+    use mercs2_engine::particles::EmitterDesc;
+    let n = name.to_ascii_lowercase();
+    if n.contains("godray") || n.contains("lightshaft") || n.contains("_env_light") {
+        return None; // light shaft — not a billboard puff
+    }
+    if n.contains("fire") || n.contains("flame") || n.contains("ember") {
+        return Some(EmitterDesc::demo_fire());
+    }
+    if n.contains("smoke") || n.contains("dust") || n.contains("steam") || n.contains("fog") {
+        return Some(EmitterDesc::demo_smoke());
+    }
+    None // unknown effect type — don't fabricate one
 }
 
 /// Attempt to resolve the PMC-base subset of placements to REAL model geometry (Task 3).
@@ -1020,18 +1051,22 @@ pub async fn run_scene_world_loading(
                                 // Feed the harvested dynamic point lights to the renderer (nearest set
                                 // uploaded per frame). Without this the villa/world has no local lighting.
                                 scene.set_lights(std::mem::take(&mut data.lights));
-                                // Particle pipeline proof (MERCS2_FXDEMO=1): a smoke plume + fire near the
-                                // spawn. The FX SYSTEM is wired into render; what's still missing for a
-                                // FAITHFUL hook is (a) the EffectTemplate->EmitterDesc auto-map (spec —
-                                // EMIT/FRCE/COLR float roles unpinned) and (b) harvesting the interior's
-                                // `global_particle_*` placements / honouring Lua ObjectState.StartEmitter.
-                                if std::env::var_os("MERCS2_FXDEMO").is_some() {
-                                    use mercs2_engine::particles::EmitterDesc;
-                                    let f = [player_pos.x + 2.0, player_pos.y, player_pos.z + 4.0];
-                                    let s = [player_pos.x - 2.0, player_pos.y, player_pos.z + 4.0];
-                                    scene.fx_start_desc(EmitterDesc::demo_fire(), f);
-                                    scene.fx_start_desc(EmitterDesc::demo_smoke(), s);
-                                    println!("[world] MERCS2_FXDEMO: started demo fire + smoke emitters at spawn");
+                                // Environmental particle FX: start an emitter at each authored
+                                // `global_particle_*` placement, classified by name → descriptor. Real,
+                                // always-on, data-driven (no flag). Effect types the billboard system
+                                // can't render faithfully yet (godray light-shafts) are skipped + logged
+                                // — an honest gap (needs a volumetric/light-shaft renderer), not faked.
+                                {
+                                    let (mut started, mut skipped) = (0usize, 0usize);
+                                    for (name, pos) in std::mem::take(&mut data.particle_fx) {
+                                        match classify_particle(&name) {
+                                            Some(desc) => { scene.fx_start_desc(desc, pos); started += 1; }
+                                            None => skipped += 1,
+                                        }
+                                    }
+                                    if started + skipped > 0 {
+                                        println!("[world] particle FX: {started} started, {skipped} unsupported (e.g. godray light-shafts) skipped");
+                                    }
                                 }
                                 if start_tps && player_entity.is_some() {
                                     mode = CamMode::ThirdPerson;
