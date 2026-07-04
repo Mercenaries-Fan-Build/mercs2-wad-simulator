@@ -364,6 +364,12 @@ fn load_world_data(
             for p in mercs2_formats::placement::load_placements(&dec).unwrap_or_default() {
                 let raw = p.name.as_deref().unwrap_or("");
                 let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
+                // Named interior lights (`Light_small_<hue>[_dim]`) carry no LightObject COMP — their
+                // colour/brightness is the NAME convention. Turn each into a coloured point light.
+                if let Some(l) = interior_named_light(name, p.pos) {
+                    lights.push(l);
+                    continue;
+                }
                 if !name.starts_with("global_particle") {
                     continue;
                 }
@@ -390,6 +396,32 @@ fn load_world_data(
 fn is_light_shaft_fx(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("godray") || n.contains("lightshaft") || n.contains("light_shaft") || n.contains("_env_light")
+}
+
+/// A named interior light placement (`Light_small_<hue>[_dim]`) → a coloured point light. These have
+/// no `LightObject` COMP; the game reads the light from the NAME. Colour = hue token, brightness =
+/// `dim`, range = `small`. Returns `None` for non-light names. Values are first-pass tunables.
+fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::render::GpuLight> {
+    let n = name.to_ascii_lowercase();
+    if !n.starts_with("light_") {
+        return None;
+    }
+    let color = if n.contains("darkblue") {
+        [0.18, 0.30, 0.85]
+    } else if n.contains("blue") {
+        [0.35, 0.55, 1.0]
+    } else if n.contains("yellow") {
+        [1.0, 0.82, 0.42]
+    } else if n.contains("red") {
+        [1.0, 0.32, 0.22]
+    } else if n.contains("green") {
+        [0.40, 1.0, 0.45]
+    } else {
+        [1.0, 0.97, 0.88]
+    };
+    let intensity = if n.contains("dim") { 1.6 } else { 3.2 };
+    let radius = if n.contains("small") { 7.0 } else { 12.0 };
+    Some(mercs2_engine::render::GpuLight::point(pos, color, intensity, radius))
 }
 
 /// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`] for the particle sim.
