@@ -766,6 +766,11 @@ pub async fn run_game_world(
     window.set_cursor_visible(false);
     let mut scene = Scene::new(window.clone()).await;
     scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
+    // Sky/atmosphere + HDR tone-map + bloom. The base-game default ("afternoon", from
+    // mrxbootstrap.lua SetDefaultAtmosphere) drives the Rayleigh/Mie sky + fBloom* post chain. A
+    // world's Lua can override this by parsing its `Graphics.Atmosphere.*` block into an
+    // `Atmosphere` and calling `set_atmosphere` again (see mercs2_formats::atmosphere).
+    scene.set_atmosphere(mercs2_formats::atmosphere::Atmosphere::default());
     match wad::shell_loading_plate(&wadpath) {
         Ok(td) => scene.set_loading_art(&td),
         Err(e) => eprintln!("[stream] loading art unavailable ({e}); spinner only"),

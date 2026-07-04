@@ -91,7 +91,19 @@ pub struct Scene {
     /// Distance-fog params (color, density, start). `None` = fog + sky pass disabled, so the
     /// `--ecs` / `--animate` visuals are unchanged. PLACEHOLDER for PgSky/PgSun/PgCloud.
     fog: Option<([f32; 3], f32, f32)>,
+    /// Whether the sky pass + HDR/bloom world path is active (enabled by `set_fog`/`set_atmosphere`).
+    /// `--ecs`/`--animate` leave this false and render directly to the swapchain (no regression).
+    sky_enabled: bool,
+    /// Sky/atmosphere + HDR/bloom parameters (the game's `Graphics.Atmosphere.*` model). Defaults to
+    /// the base-game "afternoon" preset (`mrxbootstrap.lua`).
+    atmo: mercs2_formats::atmosphere::Atmosphere,
     sky_pipeline: wgpu::RenderPipeline,
+    /// Sky pipeline targeting the HDR format (world path). `None` if the post chain is unavailable.
+    sky_pipeline_hdr: Option<wgpu::RenderPipeline>,
+    /// Geometry pipeline targeting the HDR format (world path). `None` if the post chain is unavailable.
+    world_pipeline: Option<wgpu::RenderPipeline>,
+    /// HDR + bloom post chain. `None` = fall back to direct swapchain present.
+    post: Option<crate::post::Post>,
     sky_buf: wgpu::Buffer,
     sky_bind: wgpu::BindGroup,
     loading_pipeline: wgpu::RenderPipeline,
@@ -242,51 +254,55 @@ impl Scene {
             bind_group_layouts: &[&camera_bgl, &tex_bgl, &bone_bgl, &lights_bgl],
             push_constant_ranges: &[],
         });
-        let vbuf_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+        // Geometry pipeline builder, parameterised by color-target format so the SAME shader/layout
+        // (incl. the group-3 lights) serve BOTH the direct-to-swapchain path (default `--ecs`/
+        // `--animate`) and the HDR world path (`Rgba16Float` target → tone-map + bloom post chain).
+        let build_geom_pipeline = |format: wgpu::TextureFormat| {
+            let vbuf_layout = wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+            };
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("scene geometry pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[vbuf_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Cw,
+                    // Double-sided — the building shells are wound outward-facing, so back-face culling
+                    // would hide their floor+walls when viewed from inside. (Interim: per-material
+                    // two-sided flag from MTRL; negligible perf cost at this scale.)
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            })
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene geometry pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[vbuf_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Cw,
-                // Double-sided. The building shells (e.g. `pmcoutpost_bld_hq_livedin`, the PMC hall)
-                // are wound outward-facing like exterior buildings, so back-face culling hides their
-                // floor+walls when viewed from INSIDE — you'd see through the room and catch only stray
-                // front-facing tris. Rendering both sides encloses the interior. (Interim: the correct
-                // fix is a per-material two-sided flag from MTRL; negligible perf cost at this scale.)
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
+        let pipeline = build_geom_pipeline(config.format);
         let depth_view = make_depth(&device, &config);
 
         // Sky pass (PLACEHOLDER for the game's PgSky/PgSun/PgCloud shader stack): a fullscreen
@@ -305,10 +321,10 @@ impl Scene {
                 count: None,
             }],
         });
-        // mat4 inv_view_proj (64) + vec4 sun_dir (16) + vec4 params (16) = 96 B.
+        // mat4 inv_view_proj (64) + sun_dir (16) + horizon (16) + zenith (16) + scatter (16) = 128 B.
         let sky_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky uniform"),
-            size: 96,
+            size: 128,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -322,40 +338,58 @@ impl Scene {
             bind_group_layouts: &[&sky_bgl],
             push_constant_ranges: &[],
         });
-        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sky pipeline"),
-            layout: Some(&sky_layout),
-            vertex: wgpu::VertexState {
-                module: &sky_shader,
-                entry_point: "vs_main",
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &sky_shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-        });
+        // Sky pipeline builder, parameterised by color-target format (swapchain for the fallback
+        // path, HDR for the tone-mapped world path).
+        let build_sky_pipeline = |format: wgpu::TextureFormat| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sky pipeline"),
+                layout: Some(&sky_layout),
+                vertex: wgpu::VertexState {
+                    module: &sky_shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sky_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            })
+        };
+        let sky_pipeline = build_sky_pipeline(config.format);
+
+        // HDR + bloom post chain (see `post.rs`). Fallible: on `None` the world path falls back to a
+        // direct forward present, so nothing regresses. When present, build HDR-format geometry + sky
+        // pipelines that render into the HDR target.
+        let post = crate::post::Post::new(&device, config.format, config.width, config.height);
+        let (world_pipeline, sky_pipeline_hdr) = if post.is_some() {
+            (
+                Some(build_geom_pipeline(crate::post::HDR_FORMAT)),
+                Some(build_sky_pipeline(crate::post::HDR_FORMAT)),
+            )
+        } else {
+            (None, None)
+        };
 
         // Loading-screen pass: the same fullscreen-triangle trick as the sky, drawn alone (no
         // world) while the background loader runs; the uniform carries (time, aspect) for the
@@ -465,7 +499,12 @@ impl Scene {
             start: std::time::Instant::now(),
             view_cam: None,
             fog: None,
+            sky_enabled: false,
+            atmo: mercs2_formats::atmosphere::Atmosphere::default(),
             sky_pipeline,
+            sky_pipeline_hdr,
+            world_pipeline,
+            post,
             sky_buf,
             sky_bind,
             loading_pipeline,
@@ -548,6 +587,15 @@ impl Scene {
     /// `density` drives `1 - exp(-density * (view_depth - start))`; the sky horizon matches `color`.
     pub fn set_fog(&mut self, color: [f32; 3], density: f32, start: f32) {
         self.fog = Some((color, density, start));
+        self.sky_enabled = true;
+    }
+
+    /// Set the sky/atmosphere + HDR-bloom parameters (the game's `Graphics.Atmosphere.*` model —
+    /// see `mercs2_formats::atmosphere`). Enables the sky + HDR/bloom world path. Fog (the geometry
+    /// haze) stays governed by `set_fog`; call both for the full look.
+    pub fn set_atmosphere(&mut self, atmo: mercs2_formats::atmosphere::Atmosphere) {
+        self.atmo = atmo;
+        self.sky_enabled = true;
     }
 
     /// Register a named particle-effect template (key = effect name hash, as Lua's `StartEmitter`
@@ -748,6 +796,48 @@ impl Scene {
             self.config.height = new.height;
             self.surface.configure(&self.device, &self.config);
             self.depth_view = make_depth(&self.device, &self.config);
+            if let Some(post) = &mut self.post {
+                post.resize(&self.device, new.width, new.height);
+            }
+        }
+    }
+
+    /// Record the entity draws into an already-begun render pass with the given geometry pipeline.
+    /// Shared by the direct-swapchain path and the HDR world path (they differ only in target
+    /// format, hence pipeline). Per-entity uniforms/palettes must already be uploaded.
+    fn draw_geometry<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        items: &[(Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)],
+        pipeline: &'a wgpu::RenderPipeline,
+    ) {
+        pass.set_pipeline(pipeline);
+        // Group 3 = the per-frame dynamic light array (uploaded before the pass). Set once for all draws.
+        pass.set_bind_group(3, &self.lights_bind, &[]);
+        for (e, _m, model_hash, _p) in items {
+            let Some(mg) = self.models.get(model_hash) else { continue };
+            let Some(eg) = self.entities.get(e) else { continue };
+            pass.set_bind_group(0, &eg.mvp_bind, &[]);
+            pass.set_bind_group(2, &eg.bone_bind, &[]);
+            pass.set_vertex_buffer(0, mg.vbuf.slice(..));
+            if let Some(ib) = &mg.ibuf {
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                let hidden = self.hidden_draws.get(model_hash);
+                for (di, &(start, count, bind)) in mg.draw_calls.iter().enumerate() {
+                    if hidden.is_some_and(|h| h.contains(&di)) {
+                        continue; // e.g. low-res terrain tile hidden under resident hi-res
+                    }
+                    pass.set_bind_group(1, &mg.tex_binds[bind], &[]);
+                    pass.draw_indexed(start..start + count, 0, 0..1);
+                }
+                if mg.draw_calls.is_empty() {
+                    pass.set_bind_group(1, &mg.tex_binds[0], &[]);
+                    pass.draw_indexed(0..mg.nindices, 0, 0..1);
+                }
+            } else {
+                pass.set_bind_group(1, &mg.tex_binds[0], &[]);
+                pass.draw(0..mg.nverts, 0..1);
+            }
         }
     }
 
@@ -818,15 +908,22 @@ impl Scene {
             }
         }
 
-        // Sky uniform: inverse view-proj (for per-pixel ray reconstruction) + sun dir + horizon
-        // color (= fog color). Only when the fog/sky pass is enabled.
-        if let Some((color, _density, _start)) = self.fog {
+        // Sky uniform (128 B): inverse view-proj (per-pixel ray reconstruction) + sun direction +
+        // horizon/zenith colors + Rayleigh/Mie scattering, from the atmosphere model. Fog color, if
+        // set, drives the horizon so distant geometry dissolves into the sky.
+        if self.sky_enabled {
             let inv = view_proj.inverse();
-            let sun = glam::Vec3::new(0.3, 0.35, 0.6).normalize();
-            let mut su = [0f32; 24];
+            let sun = self.atmo.sun_dir();
+            let sc = self.atmo.scatter;
+            let horizon = self.fog.map(|(c, _, _)| c).unwrap_or([0.70, 0.66, 0.58]);
+            let zenith = [0.16, 0.33, 0.60];
+            let li = self.atmo.light_intensity.max(0.05);
+            let mut su = [0f32; 32];
             su[..16].copy_from_slice(&inv.to_cols_array());
-            su[16..20].copy_from_slice(&[sun.x, sun.y, sun.z, 0.0]);
-            su[20..23].copy_from_slice(&color);
+            su[16..20].copy_from_slice(&[sun[0], sun[1], sun[2], 6.0]); // w = sun-disc intensity (HDR)
+            su[20..24].copy_from_slice(&[horizon[0], horizon[1], horizon[2], li]);
+            su[24..28].copy_from_slice(&[zenith[0], zenith[1], zenith[2], sc.henyey_greenstein]);
+            su[28..32].copy_from_slice(&[sc.beta_ray, sc.beta_mie, sc.inscattering, sc.extinction]);
             self.queue.write_buffer(&self.sky_buf, 0, bytemuck::cast_slice(&su));
         }
 
@@ -870,7 +967,42 @@ impl Scene {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene frame") });
-        {
+        // Prefer the HDR world path (scene → Rgba16Float → tone-map + bloom → swapchain); fall back to
+        // a direct forward present when the post chain is absent (default `--ecs`/`--animate`, or if
+        // HDR-target setup failed — nothing regresses). draw_geometry binds the group-3 lights itself.
+        let hdr_world = self.sky_enabled
+            && self.post.is_some()
+            && self.world_pipeline.is_some()
+            && self.sky_pipeline_hdr.is_some();
+        if hdr_world {
+            let post = self.post.as_ref().unwrap();
+            post.update(&self.queue, &self.atmo);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("scene hdr pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: post.hdr_view(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(self.sky_pipeline_hdr.as_ref().unwrap());
+                pass.set_bind_group(0, &self.sky_bind, &[]);
+                pass.draw(0..3, 0..1);
+                self.draw_geometry(&mut pass, &items, self.world_pipeline.as_ref().unwrap());
+            }
+            post.run(&mut encoder, &view_tex); // bright-pass → blur → composite + tone-map → swapchain
+        } else {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -883,51 +1015,38 @@ impl Scene {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            // Sky first (fullscreen triangle at the far plane); entities then draw over it.
-            if self.fog.is_some() {
+            if self.sky_enabled {
                 pass.set_pipeline(&self.sky_pipeline);
                 pass.set_bind_group(0, &self.sky_bind, &[]);
                 pass.draw(0..3, 0..1);
             }
-            pass.set_pipeline(&self.pipeline);
-            // group 3 (dynamic lights) is constant across the frame — bind once.
-            pass.set_bind_group(3, &self.lights_bind, &[]);
-            for (e, _m, model_hash, _p) in &items {
-                let Some(mg) = self.models.get(model_hash) else { continue };
-                let Some(eg) = self.entities.get(e) else { continue };
-                pass.set_bind_group(0, &eg.mvp_bind, &[]);
-                pass.set_bind_group(2, &eg.bone_bind, &[]);
-                pass.set_vertex_buffer(0, mg.vbuf.slice(..));
-                if let Some(ib) = &mg.ibuf {
-                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    let hidden = self.hidden_draws.get(model_hash);
-                    for (di, &(start, count, bind)) in mg.draw_calls.iter().enumerate() {
-                        if hidden.is_some_and(|h| h.contains(&di)) {
-                            continue; // e.g. low-res terrain tile hidden under resident hi-res
-                        }
-                        pass.set_bind_group(1, &mg.tex_binds[bind], &[]);
-                        pass.draw_indexed(start..start + count, 0, 0..1);
-                    }
-                    if mg.draw_calls.is_empty() {
-                        pass.set_bind_group(1, &mg.tex_binds[0], &[]);
-                        pass.draw_indexed(0..mg.nindices, 0, 0..1);
-                    }
-                } else {
-                    pass.set_bind_group(1, &mg.tex_binds[0], &[]);
-                    pass.draw(0..mg.nverts, 0..1);
-                }
-            }
-            // Transparent particle FX pass, AFTER the opaque geometry (reads depth, doesn't write).
-            self.particles.draw(&mut pass);
+            self.draw_geometry(&mut pass, &items, &self.pipeline);
+        }
+        // Transparent particle FX: a separate pass on the SWAPCHAIN (particles are swapchain-format),
+        // after the world/post, blending over the final image. Depth = the scene depth (read-only test).
+        if self.particles.active_emitter_count() > 0 || self.particles.live_particle_count() > 0 {
+            let mut ppass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("particle pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view_tex,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.particles.draw(&mut ppass);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

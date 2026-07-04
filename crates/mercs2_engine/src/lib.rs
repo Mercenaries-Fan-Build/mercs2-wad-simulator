@@ -20,6 +20,7 @@ pub mod input;
 pub mod mesh;
 pub mod particles;
 pub mod pose;
+pub mod post;
 pub mod render;
 pub mod scene;
 pub mod wad;

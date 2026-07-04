@@ -1,12 +1,16 @@
-// PLACEHOLDER sky pass for the game's real PgSky/PgSun/PgCloud shader stack:
-// a fullscreen-triangle gradient dome (horizon -> zenith) + a subtle sun glow.
-// Drawn first, at depth 1.0 (far plane), depth writes off, so geometry covers it.
-// Game space is left-handed, +Y up (docs/coordinate_systems.md).
+// Sky / atmosphere pass — analytic Rayleigh/Mie gradient dome + sun disc, driven by the game's
+// PgSky/PgSun scattering parameters (SetBetaRayMultiplier / SetBetaMieMultiplier /
+// SetHenyeyGreensteinConst / SetInscatteringMultiplier / SetExtinctionMultiplier — see
+// mercs2_formats::atmosphere). Rendered as a fullscreen triangle at the far plane (depth writes
+// off), so world geometry draws over it. Output is HDR (linear, may exceed 1 near the sun so the
+// bloom bright-pass catches it). Game space is left-handed, +Y up.
 
 struct Sky {
     inv_view_proj: mat4x4<f32>,
-    sun_dir: vec4<f32>, // xyz = direction toward the sun (normalized), w reserved
-    params: vec4<f32>,  // rgb = horizon color (matches the fog color), w reserved
+    sun_dir: vec4<f32>,  // xyz = direction toward the sun (unit), w = sun-disc intensity
+    horizon: vec4<f32>,  // rgb = horizon color, w = light_intensity (HDR scale)
+    zenith:  vec4<f32>,  // rgb = zenith color,  w = Henyey-Greenstein g (Mie asymmetry)
+    scatter: vec4<f32>,  // x = beta_ray, y = beta_mie, z = inscattering, w = extinction
 };
 @group(0) @binding(0) var<uniform> sky: Sky;
 
@@ -22,30 +26,54 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
     var out: VSOut;
     let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
     let ndc = uv * 2.0 - 1.0;
-    // z = w so the post-divide depth is 1.0 (far plane); LessEqual lets it pass the clear.
+    // z = w so post-divide depth is 1.0 (far plane); LessEqual lets it pass the depth clear.
     out.clip_pos = vec4<f32>(ndc, 1.0, 1.0);
     out.ndc = ndc;
     return out;
 }
 
+const PI: f32 = 3.14159265;
+
+// Henyey-Greenstein phase function (Mie forward-scatter lobe toward the sun).
+fn hg_phase(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = pow(max(1.0 + g2 - 2.0 * g * cos_theta, 1e-4), 1.5);
+    return (1.0 - g2) / (4.0 * PI * denom);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    // Reconstruct the world-space view ray by unprojecting this pixel at the near
-    // and far clip planes (wgpu depth range 0..1).
+    // Reconstruct the world-space view ray by unprojecting at the near & far clip planes.
     let p_near = sky.inv_view_proj * vec4<f32>(in.ndc, 0.0, 1.0);
     let p_far = sky.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let ray = normalize(p_far.xyz / p_far.w - p_near.xyz / p_near.w);
 
-    // Gradient dome: horizon color (= fog color) blending to a deeper-blue zenith.
-    // Below the horizon stays at the horizon color (max(ray.y, 0)).
-    let horizon = sky.params.rgb;
-    let zenith = vec3<f32>(0.18, 0.32, 0.55);
-    let t = smoothstep(0.0, 0.45, max(ray.y, 0.0));
-    var rgb = mix(horizon, zenith, t);
+    let up = max(ray.y, 0.0);
+    let light = max(sky.horizon.w, 0.05);
+    let beta_ray = sky.scatter.x;
+    let beta_mie = sky.scatter.y;
+    let inscatter = sky.scatter.z;
+    let g = clamp(sky.zenith.w, -0.95, 0.95);
 
-    // Simple sun disc: tight white-ish glow toward sun_dir, kept subtle.
-    let s = pow(max(dot(ray, sky.sun_dir.xyz), 0.0), 512.0);
-    rgb += vec3<f32>(1.0, 0.95, 0.85) * s * 0.8;
+    // Rayleigh gradient: horizon -> zenith. A softer curve near the horizon reads as haze; the
+    // beta_ray term deepens the blue with altitude (more air mass scattered out low, blue up high).
+    let grad = smoothstep(0.0, 0.55, up);
+    var col = mix(sky.horizon.rgb, sky.zenith.rgb, grad);
+    // Extra Rayleigh blue-lift with altitude, scaled by beta_ray * inscattering.
+    let rayleigh = clamp(beta_ray * inscatter * 20.0 * grad, 0.0, 1.0);
+    col += vec3<f32>(0.05, 0.12, 0.30) * rayleigh;
 
-    return vec4<f32>(rgb, 1.0);
+    // Mie inscatter: broad forward glow around the sun (haze halo), Henyey-Greenstein weighted.
+    let cos_sun = dot(ray, normalize(sky.sun_dir.xyz));
+    let mie = beta_mie * inscatter * hg_phase(cos_sun, g);
+    let sun_col = vec3<f32>(1.0, 0.86, 0.65);
+    col += sun_col * mie;
+
+    // Sun disc: a tight high-intensity core (HDR) so the bloom pass blooms it.
+    let disc = pow(max(cos_sun, 0.0), 2200.0);
+    col += sun_col * disc * sky.sun_dir.w;
+
+    // Overall HDR exposure by the key-light intensity.
+    col *= light;
+    return vec4<f32>(col, 1.0);
 }

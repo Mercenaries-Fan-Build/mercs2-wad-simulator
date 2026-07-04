@@ -4,7 +4,7 @@
 //!
 //!   cargo run -p mercs2_engine --bin tex_dump -- 0x39AF17DC <out_dir>
 
-use mercs2_engine::{game_world, wad};
+use mercs2_engine::wad;
 use mercs2_formats::texture::{TexFormat, TextureData};
 
 fn rgb565(c: u16) -> [u8; 3] {

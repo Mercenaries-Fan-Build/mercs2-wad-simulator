@@ -1,5 +1,6 @@
 pub mod anim;
 pub mod animgroup;
+pub mod atmosphere;
 pub mod aset_type_ids;
 pub mod chunk_validate;
 pub mod crc32;
