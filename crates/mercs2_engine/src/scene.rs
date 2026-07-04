@@ -46,6 +46,9 @@ struct ModelGpu {
     bone_count: usize,
     /// Model-fit (centre + uniform scale) so each model is normalised for viewing.
     fit: glam::Mat4,
+    /// Baked-lighting flag: this model bakes its lighting into vertex color, so the shader must NOT
+    /// stamp the fixed exterior sun over it (fed to the per-entity uniform `fog_misc.z`).
+    prelit: bool,
 }
 
 /// Per-entity GPU resources: its own MVP uniform (group 0) and skinning palette (group 2).
@@ -726,6 +729,7 @@ impl Scene {
                 tex_binds,
                 bone_count,
                 fit,
+                prelit: skin.prelit,
             },
         );
     }
@@ -895,7 +899,7 @@ impl Scene {
         // Phase 1: ensure per-entity resources and upload their MVP + palette.
         for (e, entity_model, model_hash, palette) in &items {
             let Some(mg) = self.models.get(model_hash) else { continue };
-            let (bone_count, fit) = (mg.bone_count, mg.fit);
+            let (bone_count, fit, prelit) = (mg.bone_count, mg.fit, mg.prelit);
             self.ensure_entity(*e, bone_count);
             let model = *entity_model * fit; // model -> world (fit=identity in the streaming/world path)
             let mvp = view_proj * model; // entity transform placed in fitted world space, + handedness flip
@@ -911,6 +915,7 @@ impl Scene {
                 uni[40] = 1.0; // fog enable
                 uni[41] = fog_start;
             }
+            uni[42] = if prelit { 1.0 } else { 0.0 }; // fog_misc.z = prelit (skip exterior sun)
             self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
                 // Clamp to the entity's allocated bone count so a mismatched palette can't overflow.

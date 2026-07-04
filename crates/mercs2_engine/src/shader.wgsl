@@ -121,14 +121,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // View vector (world space) for Blinn-Phong.
     let V = normalize(cam.cam_pos.xyz - in.wpos);
 
-    // Fixed world-space key light (upper-front-right) + ambient fill — the sun term. Kept identical
-    // to the previous baseline so the character viewer (no dynamic lights) is unchanged, plus a
-    // sun specular lobe gated by the spec map.
+    // Fixed world-space key light (upper-front-right) + ambient fill — the sun term. PRELIT static
+    // geometry (interiors/buildings) bakes its lighting into the vertex COLOR, so the exterior sun
+    // must NOT be stamped over it — the baked term IS the lighting. `fog_misc.z` (prelit flag,
+    // 1 = baked) selects: baked geometry uses `albedo` (baked light) alone; dynamic geometry
+    // (characters/props, white vertex color) keeps the sun+ambient key light unchanged. Dynamic point
+    // lights (below) add to both.
+    let prelit = cam.fog_misc.z;
     let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
     let ambient = 0.35;
     let sun_ndl = max(dot(N, sun_dir), 0.0);
-    var lit = albedo * (ambient + 0.9 * sun_ndl);
-    if (sun_ndl > 0.0) {
+    var lit = mix(albedo * (ambient + 0.9 * sun_ndl), albedo, prelit);
+    if (sun_ndl > 0.0 && prelit < 0.5) {
         let sun_h = normalize(sun_dir + V);
         lit += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
     }

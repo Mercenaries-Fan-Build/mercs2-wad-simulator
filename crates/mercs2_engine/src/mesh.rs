@@ -37,6 +37,11 @@ pub struct ModelStats {
     pub bones: Vec<[[f32; 4]; 4]>,
     /// Per-bone rig (parent/inv-bind/local-bind) for re-posing under animation. Empty when no skeleton.
     pub rig: Vec<BoneRig>,
+    /// PRELIT: the mesh bakes monochrome lighting into per-vertex COLOR (interior/building shells).
+    /// The renderer then uses that baked term as the lighting and skips the fixed exterior sun. Detected
+    /// data-driven (non-white, near-grayscale colors) so terrain SPLAT weights — colored, also in COLOR —
+    /// don't trip it. False for characters/props (white vertex color) and terrain.
+    pub prelit: bool,
 }
 
 /// One bone's rig data — enough to recompose an animated pose. All matrices are row-major,
@@ -62,6 +67,8 @@ pub struct SkinData {
     pub scale: f32,
     pub bones: Vec<[[f32; 4]; 4]>,
     pub rig: Vec<BoneRig>,
+    /// Baked-lighting flag (see [`ModelStats::prelit`]) — the renderer skips the exterior sun for it.
+    pub prelit: bool,
 }
 
 impl SkinData {
@@ -77,6 +84,7 @@ impl SkinData {
                 [0.0, 0.0, 0.0, 1.0],
             ]],
             rig: Vec::new(),
+            prelit: false,
         }
     }
 }
@@ -88,6 +96,7 @@ impl ModelStats {
             scale: self.fit_scale,
             bones: self.bones.clone(),
             rig: self.rig.clone(),
+            prelit: self.prelit,
         }
     }
 }
@@ -355,6 +364,16 @@ pub fn build_indexed_state(
         }
     }
 
+    // PRELIT detection: a vertex COLOR that is non-white AND near-grayscale = baked monochrome interior
+    // lighting (the shells), distinct from colored terrain SPLAT weights (also stored in COLOR).
+    let prelit = meshes.iter().any(|m| {
+        m.colors.iter().any(|c| {
+            let (r, g, b) = (c[2] as i32, c[1] as i32, c[0] as i32); // D3DCOLOR stored B,G,R,A
+            let mx = r.max(g).max(b);
+            let mn = r.min(g).min(b);
+            mx < 242 && (mx - mn) < 20
+        })
+    });
     let stats = ModelStats {
         meshes: kept.len(),
         vertices: verts.len(),
@@ -365,6 +384,7 @@ pub fn build_indexed_state(
         fit_scale: scale,
         bones,
         rig,
+        prelit,
     };
     Ok((verts, indices, draws, stats))
 }
@@ -462,6 +482,7 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
         fit_scale: 1.0,
         bones: Vec::new(),
         rig: Vec::new(),
+        prelit: false, // position-only path carries no vertex colors
     };
     Ok((verts, stats))
 }
