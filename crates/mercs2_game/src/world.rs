@@ -147,8 +147,14 @@ struct WorldData {
     /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
     lights: Vec<mercs2_engine::render::GpuLight>,
     /// Authored `global_particle_*` FX placements (effect name + world position) — each starts an
-    /// emitter (classified by name). The faithful producer for environmental effects.
+    /// emitter (classified by name). The faithful producer for environmental particle effects
+    /// (fire/smoke/steam). Static environmental *glows* (god-ray light shafts) are split out into
+    /// `glow_cards` at load, where the WAD is open to read their effect template.
     particle_fx: Vec<(String, [f32; 3])>,
+    /// Static additive glow cards for the environmental light-shaft FX (`global_particle_env_godray2`
+    /// — the PMC hall god rays descending from the dome). Position/size/tint are data-driven from the
+    /// placement + the effect's `TRFM`/`COLR` (see `mercs2_engine::game_world::glow_card_for_effect`).
+    glow_cards: Vec<mercs2_engine::particles::GlowCard>,
 }
 
 /// Number of `progress.step` calls in `load_world_data` (keep in sync when adding stages).
@@ -344,8 +350,12 @@ fn load_world_data(
     let mut lights = mercs2_engine::game_world::placed_lights_to_gpu(
         &mercs2_formats::placement::light_inventory(&ls),
     );
-    // Environmental particle FX placements (Name-keyed `global_particle_*` Transforms) in the interior.
+    // Environmental FX placements (Name-keyed `global_particle_*` Transforms) in the interior. These
+    // split by kind: static environmental light-shaft glows (god rays) become additive glow cards
+    // resolved against their effect template here (WAD open); fire/smoke/steam stay as particle
+    // emitters classified by name at render-thread start.
     let mut particle_fx: Vec<(String, [f32; 3])> = Vec::new();
+    let mut glow_cards: Vec<mercs2_engine::particles::GlowCard> = Vec::new();
     if spawn_interior {
         if let Ok(dec) = wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK) {
             lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(
@@ -354,27 +364,40 @@ fn load_world_data(
             for p in mercs2_formats::placement::load_placements(&dec).unwrap_or_default() {
                 let raw = p.name.as_deref().unwrap_or("");
                 let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
-                if name.starts_with("global_particle") {
+                if !name.starts_with("global_particle") {
+                    continue;
+                }
+                if is_light_shaft_fx(name) {
+                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(&mut w, name, p.pos));
+                } else {
                     particle_fx.push((name.to_string(), p.pos));
                 }
             }
         }
     }
-    println!("[world] dynamic lights harvested: {}; particle placements: {}", lights.len(), particle_fx.len());
+    println!(
+        "[world] dynamic lights harvested: {}; particle placements: {}; light-shaft glows: {}",
+        lights.len(), particle_fx.len(), glow_cards.len()
+    );
 
-    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap, lights, particle_fx })
+    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap, lights, particle_fx, glow_cards })
 }
 
-/// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`], or `None` when the
-/// billboard system can't render that type faithfully (e.g. `godray` light-shafts — those need a
-/// volumetric/light-shaft renderer we don't have yet; skipped rather than faked as smoke). Interim,
-/// name-heuristic mapping until the `EffectTemplate → EmitterDesc` decode is pinned.
+/// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
+/// authored as additive textured cards, not spewing emitters — reversed from `global_env_godray2`
+/// (effects block: GEOM + TRFM + additive COLR, `EMTR` empty). Routed to a static additive glow card,
+/// NOT the particle sim.
+fn is_light_shaft_fx(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("godray") || n.contains("lightshaft") || n.contains("light_shaft") || n.contains("_env_light")
+}
+
+/// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`] for the particle sim.
+/// Static light-shaft FX are handled separately (see [`is_light_shaft_fx`] / glow cards) and never
+/// reach here. Name-heuristic mapping until the `EffectTemplate → EmitterDesc` decode is pinned.
 fn classify_particle(name: &str) -> Option<mercs2_engine::particles::EmitterDesc> {
     use mercs2_engine::particles::EmitterDesc;
     let n = name.to_ascii_lowercase();
-    if n.contains("godray") || n.contains("lightshaft") || n.contains("_env_light") {
-        return None; // light shaft — not a billboard puff
-    }
     if n.contains("fire") || n.contains("flame") || n.contains("ember") {
         return Some(EmitterDesc::demo_fire());
     }
@@ -1051,12 +1074,15 @@ pub async fn run_scene_world_loading(
                                 // Feed the harvested dynamic point lights to the renderer (nearest set
                                 // uploaded per frame). Without this the villa/world has no local lighting.
                                 scene.set_lights(std::mem::take(&mut data.lights));
-                                // Environmental particle FX: start an emitter at each authored
-                                // `global_particle_*` placement, classified by name → descriptor. Real,
-                                // always-on, data-driven (no flag). Effect types the billboard system
-                                // can't render faithfully yet (godray light-shafts) are skipped + logged
-                                // — an honest gap (needs a volumetric/light-shaft renderer), not faked.
+                                // Environmental FX (real, always-on, data-driven — no flag):
+                                //  * particle emitters (fire/smoke/steam) — classified by name → desc;
+                                //  * static light-shaft glows (god rays) — additive glow cards, already
+                                //    resolved from their effect template at load. Both are faithful; the
+                                //    god rays are the era-appropriate additive card, not a skipped gap.
                                 {
+                                    let cards = std::mem::take(&mut data.glow_cards);
+                                    let glows = cards.len();
+                                    scene.set_glow_cards(&cards);
                                     let (mut started, mut skipped) = (0usize, 0usize);
                                     for (name, pos) in std::mem::take(&mut data.particle_fx) {
                                         match classify_particle(&name) {
@@ -1064,8 +1090,8 @@ pub async fn run_scene_world_loading(
                                             None => skipped += 1,
                                         }
                                     }
-                                    if started + skipped > 0 {
-                                        println!("[world] particle FX: {started} started, {skipped} unsupported (e.g. godray light-shafts) skipped");
+                                    if started + skipped + glows > 0 {
+                                        println!("[world] particle FX: {started} emitters + {glows} light-shaft glows started, {skipped} unsupported skipped");
                                     }
                                 }
                                 if start_tps && player_entity.is_some() {

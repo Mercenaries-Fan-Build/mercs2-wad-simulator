@@ -625,6 +625,18 @@ impl Scene {
         self.particles.active_emitter_count()
     }
 
+    /// Set the authored static environmental glow cards (`global_particle_env_godray2` etc.). Replaces
+    /// any prior set; an empty slice clears them. Rendered as additive soft billboards in the
+    /// transparent FX pass (see `particles::GlowCard`).
+    pub fn set_glow_cards(&mut self, cards: &[crate::particles::GlowCard]) {
+        self.particles.set_glow_cards(cards);
+    }
+
+    /// Number of active glow cards (diagnostic).
+    pub fn glow_card_count(&self) -> usize {
+        self.particles.glow_card_count()
+    }
+
     /// Set the world-space dynamic light set (harvested from `LightObject` COMPs via
     /// `mercs2_formats::placement::light_inventory` → [`GpuLight`]). The full set is retained; each
     /// frame `render` uploads the [`MAX_LIGHTS`] nearest to the camera. Call once after world load
@@ -1028,11 +1040,15 @@ impl Scene {
             }
             self.draw_geometry(&mut pass, &items, &self.pipeline);
         }
-        // Transparent particle FX: a separate pass on the SWAPCHAIN (particles are swapchain-format),
-        // after the world/post, blending over the final image. Depth = the scene depth (read-only test).
-        if self.particles.active_emitter_count() > 0 || self.particles.live_particle_count() > 0 {
+        // Transparent FX (particles + light shafts): a separate pass on the SWAPCHAIN (both are
+        // swapchain-format), after the world/post, blending over the final image. Depth = the scene
+        // depth (read-only test), so both are occluded by nearer opaque geometry.
+        let has_fx = self.particles.active_emitter_count() > 0
+            || self.particles.live_particle_count() > 0
+            || self.particles.glow_card_count() > 0;
+        if has_fx {
             let mut ppass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("particle pass"),
+                label: Some("transparent fx pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view_tex,
                     resolve_target: None,

@@ -608,6 +608,139 @@ pub fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -
         .collect()
 }
 
+/// Build a static additive glow card for an environmental light-shaft placement
+/// (`global_particle_env_godray2` — the PMC hall god rays). Faithful + data-driven:
+///  * position = the placement world position;
+///  * size = the effect `TRFM` horizontal footprint (`0.5·(|sx|+|sz|)`), scaled up so the soft
+///    additive sprite reads as a shaft of dusty light rather than a pinpoint;
+///  * tint = the effect `COLR` peak colour (dim white ~0.25) lifted for the additive/HDR path.
+///
+/// The effect template name is the placement name with `"particle_"` removed (verified:
+/// `global_particle_env_godray2` → `global_env_godray2`, m2 `0xDB331999`, in the `effects` block).
+/// Falls back to the reversed retail constants if the effect can't be resolved.
+pub fn glow_card_for_effect(w: &mut wad::Wad, placement_name: &str, pos: [f32; 3]) -> crate::particles::GlowCard {
+    let (scale, color, alpha) = env_shaft_effect_params(w, placement_name)
+        .unwrap_or(([2.892, 0.805, 2.892], [0.25, 0.24, 0.20], 0.16));
+    let footprint = 0.5 * (scale[0].abs() + scale[2].abs()); // ~2.89
+    // The retail COLR is dim (~0.25 white, alpha ~0.16); lift into an additive/HDR-friendly tint so
+    // the soft glow is visible and blooms, without washing out (clamped).
+    let boost = (alpha * 4.0 + 0.6).clamp(0.8, 2.5);
+    let a = (alpha * 3.5).clamp(0.25, 0.85);
+    crate::particles::GlowCard {
+        pos,
+        size: (footprint * 3.0).clamp(4.0, 24.0),
+        color: [
+            (color[0] * boost).min(1.5),
+            (color[1] * boost).min(1.5),
+            (color[2] * boost).min(1.5),
+            a,
+        ],
+    }
+}
+
+/// Read an environmental light-shaft effect template and recover `(TRFM scale, COLR peak RGB, COLR
+/// peak alpha)`. Returns `None` if the `effects` block or the effect can't be found.
+fn env_shaft_effect_params(w: &mut wad::Wad, placement_name: &str) -> Option<([f32; 3], [f32; 3], f32)> {
+    use mercs2_formats::hash::pandemic_hash_m2;
+    use mercs2_formats::types::TYPE_HASH_EFFECT;
+
+    let effect_name = placement_name.replace("particle_", "");
+    let want = pandemic_hash_m2(&effect_name);
+    let paths: Vec<String> = wad::block_paths(w).to_vec();
+    let blk = paths.iter().position(|p| p.to_ascii_lowercase().contains("effect"))? as u16;
+    let dec = wad::decompress_block_index(w, blk).ok()?;
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    let mut pos = 4 + count as usize * 16;
+    for e in &entries {
+        let end = pos + e.chunk_size as usize;
+        if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == want && end <= dec.len() {
+            let c = &dec[pos..end];
+            let mut scale = [1.0f32, 1.0, 1.0];
+            let mut color = [0.25f32, 0.24, 0.20];
+            let mut alpha = 0.16f32;
+            for (tag, s, en) in ucfx_child_chunks(c) {
+                let body = &c[s..en];
+                match &tag {
+                    b"TRFM" if body.len() >= 64 => {
+                        scale = [rf32le(body, 0), rf32le(body, 20), rf32le(body, 40)];
+                    }
+                    b"COLR" => {
+                        if let Some((rgb, a)) = colr_peak_bc(body) {
+                            if rgb.iter().any(|&v| v > 0.02) {
+                                color = rgb;
+                            }
+                            alpha = a;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Some((scale, color, alpha));
+        }
+        pos = end;
+    }
+    None
+}
+
+fn rf32le(b: &[u8], o: usize) -> f32 {
+    f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+/// Walk a UCFX container's descriptor rows → `(tag, start, end)` for each child body (data-relative
+/// offsets; `u0 == 0xFFFFFFFF` = container sentinel, skipped).
+fn ucfx_child_chunks(c: &[u8]) -> Vec<([u8; 4], usize, usize)> {
+    let mut out = Vec::new();
+    if c.len() < 20 || &c[0..4] != b"UCFX" {
+        return out;
+    }
+    let dao = u32::from_le_bytes([c[4], c[5], c[6], c[7]]) as usize;
+    let n = u32::from_le_bytes([c[16], c[17], c[18], c[19]]) as usize;
+    for i in 0..n {
+        let row = 20 + i * 20;
+        if row + 20 > c.len() {
+            break;
+        }
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(&c[row..row + 4]);
+        let u0 = u32::from_le_bytes([c[row + 4], c[row + 5], c[row + 6], c[row + 7]]);
+        if u0 == 0xFFFF_FFFF {
+            continue;
+        }
+        let size = u32::from_le_bytes([c[row + 8], c[row + 9], c[row + 10], c[row + 11]]) as usize;
+        let start = if dao > 0 { dao + u0 as usize } else { 8 + u0 as usize };
+        let end = start + size;
+        if end <= c.len() {
+            out.push((tag, start, end));
+        }
+    }
+    out
+}
+
+/// Decode the `global_env_godray2` `COLR` peak tint. Layout (reversed this session): 8-byte-stride
+/// records `[0xBC, 0, 0, R, G, B, A, 0]` (RGBA8). Returns the greatest-luminance stop, or `None` if
+/// the body isn't that shape.
+fn colr_peak_bc(body: &[u8]) -> Option<([f32; 3], f32)> {
+    if body.len() < 8 {
+        return None;
+    }
+    let mut best = None;
+    let mut best_lum = -1.0f32;
+    let mut i = 0;
+    while i + 8 <= body.len() {
+        if body[i] != 0xBC {
+            return None; // not the observed stop format — don't misread
+        }
+        let (r, g, b, a) = (body[i + 3], body[i + 4], body[i + 5], body[i + 6]);
+        let lum = r as f32 + g as f32 + b as f32;
+        if lum > best_lum {
+            best_lum = lum;
+            best = Some(([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], a as f32 / 255.0));
+        }
+        i += 8;
+    }
+    best
+}
+
 /// Load the streaming world off-thread: open the WAD, merge the base terrain, build the world block
 /// index + Layer-2 streaming catalog (c3-cell LOAD units + per-entity `ModelName` props with their
 /// `HibernationControl` distances). Returns the data (incl. the WAD handle) for the render thread.
@@ -1157,6 +1290,50 @@ fn dec_model_ref(refs: &mut std::collections::HashMap<u32, u32>, hash: u32, scen
             refs.remove(&hash);
             scene.unload_model(hash);
         }
+    }
+}
+
+#[cfg(test)]
+mod glow_card_tests {
+    use super::*;
+
+    #[test]
+    fn colr_peak_bc_picks_brightest_and_guards_format() {
+        // Two 0xBC-tagged RGBA8 stops: dim then bright.
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0xBC, 0, 0, 10, 10, 10, 5, 0]);
+        body.extend_from_slice(&[0xBC, 0, 0, 63, 63, 60, 40, 0]);
+        let (rgb, a) = colr_peak_bc(&body).unwrap();
+        assert!((rgb[0] - 63.0 / 255.0).abs() < 1e-4);
+        assert!((a - 40.0 / 255.0).abs() < 1e-4);
+        // A body that isn't the 0xBC stop layout must not be misread.
+        assert!(colr_peak_bc(&[0u8; 16]).is_none());
+        assert!(colr_peak_bc(&[0xBC, 0]).is_none());
+    }
+
+    #[test]
+    fn ucfx_child_chunks_walks_descriptor_rows() {
+        // Minimal UCFX: header (dao=0 → abs = 8 + u0), 1 descriptor "TRFM" at u0=0, size=4.
+        let mut c = Vec::new();
+        c.extend_from_slice(b"UCFX");
+        c.extend_from_slice(&0u32.to_le_bytes()); // data_area_off
+        c.extend_from_slice(&0u32.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes());
+        c.extend_from_slice(&1u32.to_le_bytes()); // n_desc
+        c.extend_from_slice(b"TRFM");
+        c.extend_from_slice(&0u32.to_le_bytes()); // u0 (rel offset into 8-based body)
+        c.extend_from_slice(&4u32.to_le_bytes()); // size
+        c.extend_from_slice(&0u32.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes());
+        // Body region begins at abs = 8; push 8 bytes of padding then the 4-byte payload.
+        while c.len() < 8 {
+            c.push(0);
+        }
+        // Ensure at least 8+4 bytes exist from the 8-based origin.
+        c.resize(c.len().max(12), 0xAB);
+        let out = ucfx_child_chunks(&c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0].0, b"TRFM");
     }
 }
 

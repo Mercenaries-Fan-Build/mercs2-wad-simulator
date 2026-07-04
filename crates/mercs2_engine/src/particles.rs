@@ -167,6 +167,21 @@ impl EmitterDesc {
     }
 }
 
+/// A static, persistent additive glow billboard — the faithful cheap rendering of an authored
+/// *static* environmental FX that is a single textured card, not a spewing emitter. Used for the PMC
+/// hall's `global_particle_env_godray2` light shafts: era-appropriate (2007) additive soft "god-ray"
+/// glows descending from the dome/skylight, placed high above the floor. Position/size/tint come from
+/// the authored placement + the effect's `TRFM`/`COLR` (see `mercs2_game::world`). Rendered as a
+/// camera-facing additive soft sprite (the same pipeline the additive particles use).
+#[derive(Debug, Clone, Copy)]
+pub struct GlowCard {
+    pub pos: [f32; 3],
+    /// World-space diameter of the glow.
+    pub size: f32,
+    /// Straight RGBA tint; alpha weights the additive contribution.
+    pub color: [f32; 4],
+}
+
 /// A single live particle.
 #[derive(Clone, Copy)]
 struct Particle {
@@ -302,6 +317,9 @@ pub struct ParticleSystem {
     templates: HashMap<u32, EmitterDesc>,
     emitters: Vec<ActiveEmitter>,
     next_id: u64,
+    /// Static additive glow cards (e.g. the PMC hall god-ray light shafts). Persistent; drawn every
+    /// frame into the additive bucket, no simulation.
+    glow_cards: Vec<GlowCard>,
 }
 
 const INSTANCE_SIZE: usize = std::mem::size_of::<InstanceRaw>();
@@ -434,7 +452,19 @@ impl ParticleSystem {
             templates: HashMap::new(),
             emitters: Vec::new(),
             next_id: 1,
+            glow_cards: Vec::new(),
         }
+    }
+
+    /// Replace the set of static additive glow cards (persistent environmental FX like the PMC hall
+    /// god-ray light shafts). An empty slice clears them.
+    pub fn set_glow_cards(&mut self, cards: &[GlowCard]) {
+        self.glow_cards = cards.to_vec();
+    }
+
+    /// Number of active glow cards (diagnostic / transparent-pass gate).
+    pub fn glow_card_count(&self) -> usize {
+        self.glow_cards.len()
     }
 
     /// Register a named effect template (key = the effect name hash Lua's `StartEmitter` uses).
@@ -525,6 +555,10 @@ impl ParticleSystem {
                 BlendMode::Additive => e.emit_instances(&mut add_inst),
                 BlendMode::Alpha => e.emit_instances(&mut alpha_inst),
             }
+        }
+        // Static glow cards are additive, persistent billboards (no sim).
+        for g in &self.glow_cards {
+            add_inst.push(InstanceRaw { center: g.pos, size: g.size, color: g.color });
         }
         // Sort alpha particles back-to-front for correct over-blending (additive is order-free).
         alpha_inst.sort_by(|a, b| {
