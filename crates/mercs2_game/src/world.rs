@@ -678,6 +678,12 @@ pub async fn run_scene_world_loading(
     let mut has_run = false;
     let (mut dur_walk, mut dur_run) = (1.0f32, 1.0f32);
 
+    // World-space collision triangle soup, filled from the structural geometry (interior shells +
+    // c3 building cells) when the loader delivers. Consumed by the camera boom (raycast, so it
+    // stops clipping through walls) and the player (capsule push-out, so you can't walk through
+    // buildings). See `crate::collision`.
+    let mut collision_tris: Vec<[Vec3; 3]> = Vec::new();
+
     // Animation system (idles/walks the avatar), same as the ECS scene except clips are selected
     // by `AnimState.clip` and root locomotion is stripped (the entity Transform drives movement).
     let mut time = Time::new(60.0);
@@ -852,10 +858,20 @@ pub async fn run_scene_world_loading(
                                 }
 
                                 // Hi-res c3 cell geometry (`--cells`): static entities at their grid-cell origins.
+                                // These building cells are structural — collect their world-space triangles for
+                                // collision (walls the player and camera must not pass through).
                                 for (m, off) in data.cells {
                                     scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                    let tr = Vec3::new(off[0], off[1], off[2]);
+                                    for idx in m.indices.chunks_exact(3) {
+                                        collision_tris.push([
+                                            Vec3::from(m.verts[idx[0] as usize].pos) + tr,
+                                            Vec3::from(m.verts[idx[1] as usize].pos) + tr,
+                                            Vec3::from(m.verts[idx[2] as usize].pos) + tr,
+                                        ]);
+                                    }
                                     world.spawn((
-                                        Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
+                                        Transform::from_translation(tr),
                                         ModelRef { model: m.hash },
                                         AnimState::default(),
                                         SkinPalette { mats: vec![IDENTITY] },
@@ -869,8 +885,17 @@ pub async fn run_scene_world_loading(
                                 // on the hash key so repeats are cheap.
                                 for (m, pos, quat) in data.interior {
                                     scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                    let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
-                                    t.rotation = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
+                                    let tr = Vec3::new(pos[0], pos[1], pos[2]);
+                                    let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
+                                    let mut t = Transform::from_translation(tr);
+                                    t.rotation = q;
+                                    // Interior shells (hall/suites/garage/bays) are the walls — collect their
+                                    // world-space triangles for collision. Rigged furniture rides the props
+                                    // path (interior_props) and is intentionally left non-solid.
+                                    for idx in m.indices.chunks_exact(3) {
+                                        let w = |i: usize| q * Vec3::from(m.verts[i].pos) + tr;
+                                        collision_tris.push([w(idx[0] as usize), w(idx[1] as usize), w(idx[2] as usize)]);
+                                    }
                                     // Identity palette sized to the mesh's bone count — a rigged prop's
                                     // verts index several bones; a 1-bone palette collapses the rest to origin.
                                     let nbones = m.skin.bones.len().max(1);
@@ -953,6 +978,7 @@ pub async fn run_scene_world_loading(
                                     )));
                                 }
                                 hmap = Some(data.hmap);
+                                println!("[world] collision: {} world-space triangles (buildings + interior shells)", collision_tris.len());
                                 if start_tps && player_entity.is_some() {
                                     mode = CamMode::ThirdPerson;
                                 }
@@ -1036,6 +1062,19 @@ pub async fn run_scene_world_loading(
                             let moving = player_speed > 1e-3;
                             if moving {
                                 player_pos += player_move_dir * player_speed * dt;
+                                // Wall collision: push the character capsule out of any building/shell
+                                // it entered this step (horizontal only — the ground/floor snap owns Y).
+                                // Mirrors the engine's MatchCapsuleToPose character capsule.
+                                if !collision_tris.is_empty() {
+                                    const PLAYER_RADIUS: f32 = 0.45;
+                                    const PLAYER_HEIGHT: f32 = 1.8;
+                                    player_pos = crate::collision::push_out(
+                                        &collision_tris,
+                                        player_pos,
+                                        PLAYER_RADIUS,
+                                        PLAYER_HEIGHT,
+                                    );
+                                }
                             }
                             // Ground snap: feet follow the terrain heightmap. Hinted by the
                             // current ground Y so overhangs don't teleport the player up. Skipped
@@ -1092,7 +1131,24 @@ pub async fn run_scene_world_loading(
                             let dir = Vec3::new(tp_pitch.cos() * tp_yaw.sin(), tp_pitch.sin(), tp_pitch.cos() * tp_yaw.cos()).normalize();
                             let focus = player_pos + Vec3::Y * 2.2;
                             let right = Vec3::Y.cross(dir).normalize();
-                            let eye = focus - dir * 6.0 + right * 1.2;
+                            // Desired over-the-shoulder eye 6 m back + 1.2 m to the side of the focus.
+                            const BOOM: f32 = 6.0;
+                            let want_eye = focus - dir * BOOM + right * 1.2;
+                            // Boom collision: cast from the focus toward the desired eye and pull the eye in
+                            // to just short of the nearest wall (CAM_RADIUS margin = the engine's camera
+                            // collision radius²). Without this the boom clips straight through geometry.
+                            let eye = if collision_tris.is_empty() {
+                                want_eye
+                            } else {
+                                const CAM_RADIUS: f32 = 0.35;
+                                let boom_vec = want_eye - focus;
+                                let boom_len = boom_vec.length();
+                                let boom_dir = boom_vec / boom_len;
+                                match crate::collision::raycast(&collision_tris, focus, boom_dir, boom_len) {
+                                    Some(hit) => focus + boom_dir * (hit - CAM_RADIUS).max(0.6),
+                                    None => want_eye,
+                                }
+                            };
                             Mat4::look_to_lh(eye, (focus - eye).normalize(), Vec3::Y)
                         }
                     };
