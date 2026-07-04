@@ -106,11 +106,18 @@ fn main() {
                             Ok(mut w) => {
                                 let models = mercs2_engine::wad::model_list(&w);
                                 let present = models.iter().any(|(h, _)| *h == hash);
+                                let types = mercs2_engine::wad::aset_types(&w, hash);
                                 let mesh = mercs2_engine::game_world::load_model_by_hash(&mut w, hash)
                                     .map(|(m, _, _)| format!("MESH {}v/{}t", m.verts.len(), m.indices.len() / 3))
                                     .unwrap_or_else(|| "no-mesh".into());
+                                // Type-agnostic: resolve the block by ANY primary ASET, walk to a model chunk.
+                                let typed = mercs2_engine::wad::extract_container_typed(&mut w, hash, mercs2_engine::wad::MODEL_TYPE_HASH)
+                                    .ok()
+                                    .and_then(|c| mercs2_engine::mesh::build_indexed_from_container(&c).ok())
+                                    .map(|(v, i, _, _)| format!("typed-model {}v/{}t", v.len(), i.len() / 3))
+                                    .unwrap_or_else(|| "no-typed-model".into());
                                 println!(
-                                    "  {:<14} {} models, hash-present={present}, {mesh}",
+                                    "  {:<14} {} models, present={present}, types={types:?}, {mesh}, {typed}",
                                     p.file_name().unwrap().to_string_lossy(), models.len()
                                 );
                             }
