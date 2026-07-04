@@ -17,6 +17,9 @@ wgpu = "0.20"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.27" # matrix/vector math for the camera (left-handed Y-up)
+# gamepad input — pure-Rust, cross-platform (Linux evdev / Windows XInput+DInput / macOS), works on
+# SteamOS/Steam Deck via evdev + bundles SDL_GameControllerDB for consistent layouts. No C linking.
+gilrs = "0.10"
 # asset layer — the reimplementation consumes the original game's data through this crate.
 mercs2_formats = { path = "../mercs2_formats" }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).

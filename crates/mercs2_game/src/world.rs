@@ -748,6 +748,7 @@ pub async fn run_scene_world_loading(
     let bindings = mercs2_engine::input::find_mercs2_ini()
         .map(|p| mercs2_engine::input::Bindings::load(&p))
         .unwrap_or_default();
+    let mut gamepad = mercs2_engine::input::Gamepad::new();
     use mercs2_engine::input::Action;
     let mut loading = true;
     let load_start = std::time::Instant::now();
@@ -1033,44 +1034,46 @@ pub async fn run_scene_world_loading(
                         }
                     }
 
-                    let inp = mercs2_engine::input::Input { bindings: &bindings, keys: &held, mouse: &mouse_btns };
+                    gamepad.update();
+                    let inp = mercs2_engine::input::Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
+                    // Gamepad right-stick look (analog) this frame, shared by both cameras.
+                    let (gp_yaw, gp_pitch) = inp.look_delta(dt);
                     let mut view = match mode {
                         CamMode::Free => {
-                            // Keyboard look: ini LookUp/Down/Left/Right (I/K/J/L) plus the arrow keys.
-                            if held.contains(&KeyCode::ArrowUp) || inp.held(Action::LookUp) { free_pitch += look; }
-                            if held.contains(&KeyCode::ArrowDown) || inp.held(Action::LookDown) { free_pitch -= look; }
-                            if held.contains(&KeyCode::ArrowLeft) || inp.held(Action::LookLeft) { free_yaw -= look; }
-                            if held.contains(&KeyCode::ArrowRight) || inp.held(Action::LookRight) { free_yaw += look; }
-                            free_pitch = free_pitch.clamp(-1.5, 1.5);
+                            // Keyboard look: ini LookUp/Down/Left/Right (I/K/J/L) + arrows (kb-only, so the
+                            // right stick isn't double-counted); plus the analog right-stick delta.
+                            if held.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { free_pitch += look; }
+                            if held.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { free_pitch -= look; }
+                            if held.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { free_yaw -= look; }
+                            if held.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { free_yaw += look; }
+                            free_yaw += gp_yaw;
+                            free_pitch = (free_pitch + gp_pitch).clamp(-1.5, 1.5);
                             let fwd = Vec3::new(free_pitch.cos() * free_yaw.sin(), free_pitch.sin(), free_pitch.cos() * free_yaw.cos()).normalize();
                             // Strafe right is negated (fwd×Y, not Y×fwd) to match the clip-space X flip
                             // (handedness fix in scene.rs) — otherwise A/D are swapped on the correct image.
                             let right = fwd.cross(Vec3::Y).normalize();
-                            let mut mv = Vec3::ZERO;
-                            if inp.held(Action::Forward) { mv += fwd; }
-                            if inp.held(Action::Backward) { mv -= fwd; }
-                            if inp.held(Action::MoveRight) { mv += right; }
-                            if inp.held(Action::MoveLeft) { mv -= right; }
+                            // Analog planar move (KB + left stick), then free-fly vertical on Jump/Crouch.
+                            let (mx, my) = inp.move_vec();
+                            let mut mv = fwd * my + right * mx;
                             if inp.held(Action::Jump) { mv += Vec3::Y; }     // fly up (ini Jump)
                             if inp.held(Action::Crouch) { mv -= Vec3::Y; }   // fly down (ini Crouch)
                             let sp = if inp.held(Action::Sprint) { 3200.0 } else { 800.0 };
-                            if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * dt; }
+                            if mv.length_squared() > 1e-6 { free_pos += mv.clamp_length_max(1.0) * sp * dt; }
                             Mat4::look_to_lh(free_pos, fwd, Vec3::Y)
                         }
                         CamMode::ThirdPerson => {
-                            if held.contains(&KeyCode::ArrowUp) || inp.held(Action::LookUp) { tp_pitch += look; }
-                            if held.contains(&KeyCode::ArrowDown) || inp.held(Action::LookDown) { tp_pitch -= look; }
-                            if held.contains(&KeyCode::ArrowLeft) || inp.held(Action::LookLeft) { tp_yaw -= look; }
-                            if held.contains(&KeyCode::ArrowRight) || inp.held(Action::LookRight) { tp_yaw += look; }
-                            tp_pitch = tp_pitch.clamp(-1.2, 0.6);
+                            if held.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { tp_pitch += look; }
+                            if held.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { tp_pitch -= look; }
+                            if held.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { tp_yaw -= look; }
+                            if held.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { tp_yaw += look; }
+                            tp_yaw += gp_yaw;
+                            tp_pitch = (tp_pitch + gp_pitch).clamp(-1.2, 0.6);
                             let fwd_flat = Vec3::new(tp_yaw.sin(), 0.0, tp_yaw.cos()).normalize();
                             // Negated (fwd×Y) to match the clip-space X flip (handedness fix), so D=right.
                             let right_flat = fwd_flat.cross(Vec3::Y).normalize();
-                            let mut mv = Vec3::ZERO;
-                            if inp.held(Action::Forward) { mv += fwd_flat; }
-                            if inp.held(Action::Backward) { mv -= fwd_flat; }
-                            if inp.held(Action::MoveRight) { mv += right_flat; }
-                            if inp.held(Action::MoveLeft) { mv -= right_flat; }
+                            // Analog planar move (KB WASD + left stick).
+                            let (mx, my) = inp.move_vec();
+                            let mv = fwd_flat * my + right_flat * mx;
                             // Speed ramp: ease the ground speed toward the walk/run target (or 0)
                             // so starts, stops and gait changes aren't instant. Sprint = ini Sprint (LSHIFT).
                             let target_sp = if mv != Vec3::ZERO {
