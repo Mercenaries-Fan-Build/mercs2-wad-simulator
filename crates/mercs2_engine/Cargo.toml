@@ -27,3 +27,9 @@ mercs2_core = { path = "../mercs2_core" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key
+
+[dev-dependencies]
+# Shader compiler front-end (same version wgpu 0.20 already pulls in) — dev-only, used to statically
+# parse + validate the WGSL in a unit test so a shader syntax/binding error is caught by `cargo test`
+# without needing a GPU/surface. Not linked into the library.
+naga = { version = "0.20", features = ["wgsl-in"] }

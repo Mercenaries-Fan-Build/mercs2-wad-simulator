@@ -111,6 +111,8 @@ pub struct DrawGroup {
     pub index_count: u32,
     /// Diffuse (albedo) texture asset hash for this group's material, if any.
     pub diffuse: Option<u32>,
+    /// Specular/gloss (`_sm`) texture asset hash (MTRL slot 1), if any.
+    pub specular: Option<u32>,
     /// Normal-map texture asset hash (MTRL slot 2), if any.
     pub normal: Option<u32>,
     /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
@@ -311,11 +313,13 @@ pub fn build_indexed_state(
         let index_count = indices.len() as u32 - index_start;
         let material = group_mat.get(m.group_index).and_then(|&mi| materials.get(mi));
         let diffuse = material.and_then(|mat| mat.diffuse());
+        let specular = material.and_then(|mat| mat.specular());
         let normal = material.and_then(|mat| mat.textures.get(2).copied());
         draws.push(DrawGroup {
             index_start,
             index_count,
             diffuse,
+            specular,
             normal,
             group_index: m.group_index,
         });

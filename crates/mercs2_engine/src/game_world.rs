@@ -432,6 +432,26 @@ struct StreamingWorldData {
     /// Low-res terrain grid cell (row*20+col) -> its draw-group index in the `terrain` model, so the
     /// executor can hide that tile when the hi-res terrainmesh at the same cell is resident.
     lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
+    /// Dynamic lights harvested from `LightObject` COMPs (base `layers_static` + active overlays),
+    /// in world space. Handed to `Scene::set_lights`; the scene uploads the nearest set each frame.
+    lights: Vec<crate::render::GpuLight>,
+}
+
+/// Convert a harvested `LightObject` placement to a GPU point light, dropping degenerate lights
+/// (non-positive / non-finite radius) so the inferred `params[0]=intensity`/`params[1]=radius`
+/// mapping can never flood the scene. Color/intensity/radius are the authored on-disk values.
+fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -> Vec<crate::render::GpuLight> {
+    placed
+        .iter()
+        .filter_map(|pl| {
+            let radius = pl.light.radius();
+            let intensity = pl.light.intensity();
+            if !radius.is_finite() || radius <= 0.0 || !intensity.is_finite() {
+                return None;
+            }
+            Some(crate::render::GpuLight::point(pl.pos, pl.light.color, intensity, radius))
+        })
+        .collect()
 }
 
 /// Load the streaming world off-thread: open the WAD, merge the base terrain, build the world block
@@ -463,7 +483,7 @@ fn load_streaming_world_data(
     let mut draws = Vec::with_capacity(tm.tile_draws.len());
     let mut lowres_draw_by_cell: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     for (i, &(cell, start, count)) in tm.tile_draws.iter().enumerate() {
-        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, normal: None, group_index: 0 });
+        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, specular: None, normal: None, group_index: 0 });
         lowres_draw_by_cell.insert(cell, i);
     }
     let terrain = LoadedModel {
@@ -487,6 +507,10 @@ fn load_streaming_world_data(
     let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
     let base_props = props.len();
 
+    // Dynamic lights: harvest LightObject COMPs (joined to their entity Transform for a world
+    // position) from the base layers_static block; overlays fold theirs in below.
+    let mut lights = placed_lights_to_gpu(&mercs2_formats::placement::light_inventory(&ls));
+
     // Activate the save's vz_state OVERLAYS on top of the always-loaded base: resolve each active
     // layer name -> its WAD block, then fold its placements into the same streaming catalog so they
     // stream by proximity like the base. This is the game-state world (destruction/staging/faction +
@@ -496,6 +520,7 @@ fn load_streaming_world_data(
         let Some(bi) = resolve_overlay_block(&w, layer) else { continue };
         let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
         let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut manager, &mut props);
+        lights.extend(placed_lights_to_gpu(&mercs2_formats::placement::light_inventory(&dec)));
         ov_resolved += 1;
         ov_entities += mn + nm;
     }
@@ -509,7 +534,8 @@ fn load_streaming_world_data(
     );
     progress.step("streaming catalog");
 
-    Ok(StreamingWorldData { wad: w, terrain, manager, props, terrain_tiles, lowres_draw_by_cell })
+    println!("[stream] dynamic lights: {} LightObject placements harvested", lights.len());
+    Ok(StreamingWorldData { wad: w, terrain, manager, props, terrain_tiles, lowres_draw_by_cell, lights })
 }
 
 /// The control-driven streaming world with a free-fly camera (the no-arg default boot; also
@@ -719,6 +745,9 @@ pub async fn run_game_world(
                                 // can spawn its own entities (player, PMC interior, …). The engine does
                                 // not know what a "PMC interior" is — that lives in `mercs2_game`.
                                 populate(&mut world, &mut scene, &mut data.wad);
+                                // Hand the harvested world lights to the scene (static placements;
+                                // the scene uploads the nearest set to the camera each frame).
+                                scene.set_lights(std::mem::take(&mut data.lights));
                                 wad_opt = Some(data.wad);
                                 manager = Some(data.manager);
                                 props = data.props;

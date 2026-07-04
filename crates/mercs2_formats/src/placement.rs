@@ -531,6 +531,155 @@ pub fn load_hibernation(block: &[u8]) -> std::collections::HashMap<u32, Hibernat
     out
 }
 
+/// A parsed `LightObject` ECS component record (reflection class `0x97e8ee92`) — a placed dynamic
+/// light. The field order is taken verbatim from the reflection deserialize template
+/// `FUN_006622e0` (Ghidra decomp) and `docs/mercs2-ecs/05_presentation_audio_fx.md`:
+///
+/// ```text
+/// FUN_00656210(0)          -> int   light_type / id     (reflected field 0)
+/// FUN_00656610(0)          -> rgb   color  (3 floats)    (reflected fields 1..3)
+/// FUN_00656320(0) x 9      -> float params[9]            (reflected fields 4..12)
+/// ```
+///
+/// giving a reflection stride of `0x34` (4 + 12 + 36 = 52 bytes). On disk each COMP `data` record
+/// is prefixed with the u32 entity key (the same `[key][payload]` layout every other COMP uses —
+/// Transform, Name, HibernationControl), so the on-disk record stride is `4 + 0x34 = 56` bytes.
+///
+/// The nine floats all default to `0.0` in the shipping `.rdata` (their live values arrive from the
+/// level stream); the semantic *names* below are INFERRED from the class purpose and corroborated by
+/// the UE port bindings (`docs/ue_game_bindings.md` → PointLight: color, `Intensity`,
+/// `AttenuationRadius`). We therefore keep all nine raw floats and expose `intensity()`/`radius()`
+/// as the best-known mapping (`params[0]` / `params[1]`) — a downstream consumer can re-map without
+/// re-parsing if a live capture pins a different slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightObject {
+    /// Reflected int field 0 — light type / id (point vs spot vs ..., engine-internal enum).
+    pub light_type: u32,
+    /// Reflected rgb color (fields 1..3), linear 0..1.
+    pub color: [f32; 3],
+    /// Reflected floats (fields 4..12): intensity, radius/attenuation, falloff, cone angles, …
+    /// (exact per-slot semantics inferred; see the type doc). Kept raw so nothing is lost.
+    pub params: [f32; 9],
+}
+
+impl LightObject {
+    /// Reflection class hash (`pandemic_hash_m2("LightObject")`).
+    pub const HASH: u32 = 0x97e8_ee92;
+    /// Reflected payload stride (int + rgb + 9 floats) = 52 bytes.
+    pub const PAYLOAD_STRIDE: usize = 0x34;
+    /// On-disk COMP record stride: u32 entity key + reflected payload = 56 bytes.
+    pub const RECORD_STRIDE: usize = 4 + Self::PAYLOAD_STRIDE;
+
+    /// Inferred light intensity (`params[0]`; UE `Intensity`).
+    pub fn intensity(&self) -> f32 {
+        self.params[0]
+    }
+    /// Inferred attenuation radius in native game metres (`params[1]`; UE `AttenuationRadius`).
+    pub fn radius(&self) -> f32 {
+        self.params[1]
+    }
+}
+
+/// Parse a `LightObject` COMP `data` blob into (entity_key -> [`LightObject`]) records. Each record
+/// is [`LightObject::RECORD_STRIDE`] (56) bytes: `{u32 key, u32 light_type, f32 r,g,b, f32 params[9]}`.
+fn parse_light_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, LightObject)> {
+    const STRIDE: usize = LightObject::RECORD_STRIDE;
+    let mut out = Vec::new();
+    if off + size > data.len() {
+        return out;
+    }
+    let n = size / STRIDE;
+    for i in 0..n {
+        let r = off + i * STRIDE;
+        if r + STRIDE > data.len() {
+            break;
+        }
+        let key = read_u32_le(data, r);
+        let light_type = read_u32_le(data, r + 4);
+        let color = [
+            read_f32_le(data, r + 8),
+            read_f32_le(data, r + 12),
+            read_f32_le(data, r + 16),
+        ];
+        let mut params = [0f32; 9];
+        for (j, p) in params.iter_mut().enumerate() {
+            *p = read_f32_le(data, r + 20 + j * 4);
+        }
+        out.push((key, LightObject { light_type, color, params }));
+    }
+    out
+}
+
+/// One placed dynamic light: its `LightObject` params joined to the owning entity's `Transform`
+/// (world position) by u32 key within the sub-block, plus the optional gameplay `Name`.
+#[derive(Debug, Clone)]
+pub struct PlacedLight {
+    pub key: u32,
+    pub name: Option<String>,
+    pub pos: [f32; 3],
+    pub light: LightObject,
+    pub sub_block: u16,
+}
+
+impl PlacedLight {
+    /// World position (native game space, LH +Y up) — the light's placement.
+    pub fn position(&self) -> [f32; 3] {
+        self.pos
+    }
+}
+
+/// Harvest every placed `LightObject` from a decompressed UCFX block (`layers_static` or a
+/// `vz_state` overlay), joining each light to its entity `Transform` (world position) and `Name`
+/// by key within the sub-block. Records without a matching `Transform` are skipped (their world
+/// position is unknown). Coordinates stay native game space; no flips.
+pub fn light_inventory(block: &[u8]) -> Vec<PlacedLight> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out: Vec<PlacedLight> = Vec::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = if si + 1 < ucfx_positions.len() {
+            ucfx_positions[si + 1]
+        } else {
+            block.len()
+        };
+        let comps = walk_sub_block_comps(block, ucfx_pos, block_end);
+
+        let mut transforms: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
+        let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut lights: Vec<(u32, LightObject)> = Vec::new();
+        for c in &comps {
+            let Some((off, size)) = c.data else { continue };
+            match c.info_name.as_deref() {
+                Some("Transform") => {
+                    for (k, p, _q) in parse_transform_records(block, off, size) {
+                        transforms.entry(k).or_insert(p);
+                    }
+                }
+                Some("Name") => {
+                    for (k, n) in parse_name_records(block, off, size) {
+                        names.entry(k).or_insert(n);
+                    }
+                }
+                Some("LightObject") => {
+                    lights.extend(parse_light_records(block, off, size));
+                }
+                _ => {}
+            }
+        }
+
+        for (key, light) in lights {
+            let Some(&pos) = transforms.get(&key) else { continue };
+            out.push(PlacedLight {
+                key,
+                name: names.get(&key).cloned(),
+                pos,
+                light,
+                sub_block: si as u16,
+            });
+        }
+    }
+    out
+}
+
 /// Yaw (radians) around +Y from a placement quaternion: `2 * atan2(qy, qw)`.
 pub fn yaw_from_quat(quat: &[f32; 4]) -> f32 {
     2.0 * quat[1].atan2(quat[3])
@@ -705,6 +854,133 @@ mod tests {
         assert_eq!(recs[1].0, 0x0009_5b59);
         assert_eq!(recs[1].1.dist, [500, 160, 60, 20]);
         assert!(recs[1].1.hibernation_distance() > 400); // triggers the fall-through-terrain warning
+    }
+
+    /// A LightObject record is 56 bytes: {u32 key, u32 type, f32 r,g,b, f32 params[9]} — the
+    /// reflection field order from FUN_006622e0 (int + rgb + 9 floats), prefixed by the entity key.
+    #[test]
+    fn light_object_record_stride_56() {
+        assert_eq!(LightObject::RECORD_STRIDE, 56);
+        assert_eq!(LightObject::PAYLOAD_STRIDE, 0x34);
+        let mut d = vec![0u8; LightObject::RECORD_STRIDE * 2];
+        // rec0
+        d[0..4].copy_from_slice(&0x0009_5c10u32.to_le_bytes()); // key
+        d[4..8].copy_from_slice(&1u32.to_le_bytes()); // light_type
+        d[8..12].copy_from_slice(&1.0f32.to_le_bytes()); // r
+        d[12..16].copy_from_slice(&0.5f32.to_le_bytes()); // g
+        d[16..20].copy_from_slice(&0.25f32.to_le_bytes()); // b
+        d[20..24].copy_from_slice(&8.0f32.to_le_bytes()); // params[0] = intensity
+        d[24..28].copy_from_slice(&12.5f32.to_le_bytes()); // params[1] = radius
+        d[52..56].copy_from_slice(&0.75f32.to_le_bytes()); // params[8] (last float, at +32)
+        // rec1 key must be read exactly at +56.
+        d[56..60].copy_from_slice(&0x0009_5c11u32.to_le_bytes());
+        d[60..64].copy_from_slice(&2u32.to_le_bytes());
+
+        let recs = parse_light_records(&d, 0, d.len());
+        assert_eq!(recs.len(), 2);
+        let (k0, l0) = recs[0];
+        assert_eq!(k0, 0x0009_5c10);
+        assert_eq!(l0.light_type, 1);
+        assert_eq!(l0.color, [1.0, 0.5, 0.25]);
+        assert_eq!(l0.intensity(), 8.0);
+        assert_eq!(l0.radius(), 12.5);
+        assert_eq!(l0.params[8], 0.75);
+        assert_eq!(recs[1].0, 0x0009_5c11);
+        assert_eq!(recs[1].1.light_type, 2);
+        assert_eq!(LightObject::HASH, 0x97e8_ee92);
+    }
+
+    /// `light_inventory` joins each LightObject to its entity Transform by key and drops any light
+    /// whose key has no Transform (unknown world position).
+    #[test]
+    fn light_inventory_joins_transform_and_drops_orphan() {
+        // Build a minimal one-sub-block UCFX/CHDR/COMP fixture with a Transform COMP and a
+        // LightObject COMP. Layout mirrors walk_sub_block_comps: UCFX(hdr) .. CHDR(hdr, entries) ..
+        // COMP rows (each: 20B hdr + child descriptors) .. data area (children, offsets relative to
+        // the end of the descriptor table).
+        fn u32b(v: u32) -> [u8; 4] {
+            v.to_le_bytes()
+        }
+        // --- data-area children (built first so we know their sizes/offsets) ---
+        // Transform: two records (light key 0x10 present, plus an orphan-free extra 0x11).
+        let mut xform = Vec::new();
+        for (key, x) in [(0x10u32, 100.0f32), (0x11u32, 7.0f32)] {
+            let mut r = vec![0u8; 42];
+            r[0..4].copy_from_slice(&u32b(key));
+            r[4..8].copy_from_slice(&x.to_le_bytes()); // pos.x
+            r[32..36].copy_from_slice(&1.0f32.to_le_bytes()); // qw
+            xform.extend_from_slice(&r);
+        }
+        // LightObject: key 0x10 (joins) + key 0x99 (orphan, no Transform -> dropped).
+        let mut lights = Vec::new();
+        for (key, inten) in [(0x10u32, 5.0f32), (0x99u32, 9.0f32)] {
+            let mut r = vec![0u8; LightObject::RECORD_STRIDE];
+            r[0..4].copy_from_slice(&u32b(key));
+            r[8..12].copy_from_slice(&1.0f32.to_le_bytes()); // r
+            r[20..24].copy_from_slice(&inten.to_le_bytes()); // intensity
+            lights.extend_from_slice(&r);
+        }
+        let info_t = b"Transform\0";
+        let info_l = b"LightObject\0";
+
+        // Descriptor table = 2 COMP rows. Each COMP row: 20B header (tag, _, _, _, num_children) +
+        // num_children * 20B child descriptors {ctag, coff(rel data_area), csz, _, _}.
+        // COMP0 (Transform): children info, data. COMP1 (LightObject): children info, data.
+        let comp_hdr = |num_children: u32| {
+            let mut h = vec![0u8; CHUNK_HDR];
+            h[0..4].copy_from_slice(b"COMP");
+            h[16..20].copy_from_slice(&u32b(num_children));
+            h
+        };
+        let child = |tag: &[u8; 4], coff: u32, csz: u32| {
+            let mut h = vec![0u8; CHUNK_HDR];
+            h[0..4].copy_from_slice(tag);
+            h[4..8].copy_from_slice(&u32b(coff));
+            h[8..12].copy_from_slice(&u32b(csz));
+            h
+        };
+        // Compute data-area child offsets (relative to data_area_start), laid out in order:
+        // [info_t][xform][info_l][lights].
+        let off_info_t = 0u32;
+        let off_xform = off_info_t + info_t.len() as u32;
+        let off_info_l = off_xform + xform.len() as u32;
+        let off_lights = off_info_l + info_l.len() as u32;
+
+        let mut table = Vec::new();
+        table.extend(comp_hdr(2));
+        table.extend(child(b"info", off_info_t, info_t.len() as u32));
+        table.extend(child(b"data", off_xform, xform.len() as u32));
+        table.extend(comp_hdr(2));
+        table.extend(child(b"info", off_info_l, info_l.len() as u32));
+        table.extend(child(b"data", off_lights, lights.len() as u32));
+
+        let mut data_area = Vec::new();
+        data_area.extend_from_slice(info_t);
+        data_area.extend_from_slice(&xform);
+        data_area.extend_from_slice(info_l);
+        data_area.extend_from_slice(&lights);
+
+        // Assemble block: UCFX header (size covers CHDR onwards is not required by the walker beyond
+        // the +200 search window), CHDR header (entries=2), the descriptor table, then the data area.
+        let mut chdr = vec![0u8; 20];
+        chdr[0..4].copy_from_slice(b"CHDR");
+        chdr[12..16].copy_from_slice(&u32b(2)); // chdr_entries
+        let mut block = Vec::new();
+        let mut ucfx = vec![0u8; 8];
+        ucfx[0..4].copy_from_slice(b"UCFX");
+        // ucfx_size: any value; the CHDR search window is ucfx_pos..ucfx_pos+ucfx_size+200.
+        ucfx[4..8].copy_from_slice(&u32b(8));
+        block.extend_from_slice(&ucfx);
+        block.extend_from_slice(&chdr);
+        block.extend_from_slice(&table);
+        block.extend_from_slice(&data_area);
+
+        let placed = light_inventory(&block);
+        assert_eq!(placed.len(), 1, "only the light with a matching Transform survives");
+        assert_eq!(placed[0].key, 0x10);
+        assert_eq!(placed[0].pos, [100.0, 0.0, 0.0]);
+        assert_eq!(placed[0].light.intensity(), 5.0);
+        assert_eq!(placed[0].light.color, [1.0, 0.0, 0.0]);
     }
 
     /// A pure-yaw quaternion sample is unit length, and yaw round-trips.

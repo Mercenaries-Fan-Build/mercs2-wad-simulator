@@ -13,8 +13,10 @@ use winit::window::Window;
 
 use mercs2_core::{Entity, ModelRef, SkinPalette, Transform, World};
 
-use crate::render::{make_bc_view, make_depth, make_flat_normal_view, make_tex_bind, make_white_view};
-use crate::render::{ClipAnim, TexMap, DEPTH_FORMAT};
+use crate::render::{
+    make_bc_view, make_black_view, make_depth, make_flat_normal_view, make_tex_bind, make_white_view,
+};
+use crate::render::{ClipAnim, GpuLight, TexMap, DEPTH_FORMAT, MAX_LIGHTS};
 use crate::mesh::{self, Vertex};
 use crate::pose;
 
@@ -69,7 +71,14 @@ pub struct Scene {
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
+    /// 1×1 black specular fallback (matte) for materials with no `_sm` map.
+    black: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    /// Group 3: the per-frame dynamic light array (uniform) + its bind group. `lights` holds the full
+    /// harvested set; `render` uploads the nearest `MAX_LIGHTS` to the camera each frame.
+    lights_buf: wgpu::Buffer,
+    lights_bind: wgpu::BindGroup,
+    lights: Vec<GpuLight>,
     models: HashMap<u32, ModelGpu>,
     entities: HashMap<Entity, EntityGpu>,
     /// Per-model set of draw-call indices to SKIP at render (e.g. low-res terrain tiles hidden where
@@ -156,7 +165,7 @@ impl Scene {
                 count: None,
             }],
         });
-        // group 1: material (diffuse + normal + sampler).
+        // group 1: material (diffuse + normal + sampler + specular).
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -170,14 +179,15 @@ impl Scene {
         let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material bgl"),
             entries: &[
-                tex_entry(0),
-                tex_entry(1),
+                tex_entry(0), // diffuse
+                tex_entry(1), // normal
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                tex_entry(3), // specular / gloss (`_sm`)
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -192,11 +202,39 @@ impl Scene {
         });
         let white = make_white_view(&device, &queue);
         let flat_normal = make_flat_normal_view(&device, &queue);
+        let black = make_black_view(&device, &queue);
+
+        // group 3: the per-frame dynamic light array (uniform).
+        let lights_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lights bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        // vec4 count (16) + MAX_LIGHTS * (vec4 pos_radius + vec4 color_intensity = 32 B) bytes.
+        let lights_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lights uniform"),
+            size: (16 + MAX_LIGHTS * 32) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lights_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lights bind"),
+            layout: &lights_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: lights_buf.as_entire_binding() }],
+        });
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene pipeline layout"),
-            bind_group_layouts: &[&camera_bgl, &tex_bgl, &bone_bgl],
+            bind_group_layouts: &[&camera_bgl, &tex_bgl, &bone_bgl, &lights_bgl],
             push_constant_ranges: &[],
         });
         let vbuf_layout = wgpu::VertexBufferLayout {
@@ -343,7 +381,8 @@ impl Scene {
             layout: &loading_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: loading_buf.as_entire_binding() }],
         });
-        let loading_art_bind = make_tex_bind(&device, &tex_bgl, &sampler, &white, &flat_normal);
+        let loading_art_bind =
+            make_tex_bind(&device, &tex_bgl, &sampler, &white, &flat_normal, &black);
         let loading_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("loading pipeline layout"),
             bind_group_layouts: &[&loading_bgl, &tex_bgl],
@@ -398,7 +437,11 @@ impl Scene {
             sampler,
             white,
             flat_normal,
+            black,
             depth_view,
+            lights_buf,
+            lights_bind,
+            lights: Vec::new(),
             models: HashMap::new(),
             hidden_draws: HashMap::new(),
             entities: HashMap::new(),
@@ -420,8 +463,9 @@ impl Scene {
     /// record its aspect; `render_loading` letterboxes it behind the spinner from then on.
     pub fn set_loading_art(&mut self, td: &mercs2_formats::texture::TextureData) {
         if let Some(v) = make_bc_view(&self.device, &self.queue, td, true) {
-            self.loading_art_bind =
-                make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, &v, &self.flat_normal);
+            self.loading_art_bind = make_tex_bind(
+                &self.device, &self.tex_bgl, &self.sampler, &v, &self.flat_normal, &self.black,
+            );
             self.loading_art_aspect = td.width as f32 / td.height.max(1) as f32;
         }
     }
@@ -487,6 +531,14 @@ impl Scene {
         self.fog = Some((color, density, start));
     }
 
+    /// Set the world-space dynamic light set (harvested from `LightObject` COMPs via
+    /// `mercs2_formats::placement::light_inventory` → [`GpuLight`]). The full set is retained; each
+    /// frame `render` uploads the [`MAX_LIGHTS`] nearest to the camera. Call once after world load
+    /// (lights are static placements) or whenever the set changes. Empty = sun/ambient only.
+    pub fn set_lights(&mut self, lights: Vec<GpuLight>) {
+        self.lights = lights;
+    }
+
     /// Upload a model's geometry + materials into the store, keyed by hash. Idempotent per hash.
     pub fn load_model(
         &mut self,
@@ -500,11 +552,12 @@ impl Scene {
         if self.models.contains_key(&hash) {
             return;
         }
-        // Decode each texture to a view (normal maps linear, diffuse sRGB).
+        // Decode each texture to a view (normal + specular maps linear, diffuse sRGB).
         let normal_hashes: HashSet<u32> = draws.iter().filter_map(|d| d.normal).collect();
+        let spec_hashes: HashSet<u32> = draws.iter().filter_map(|d| d.specular).collect();
         let mut views: HashMap<u32, wgpu::TextureView> = HashMap::new();
         for (h, td) in textures {
-            let srgb = !normal_hashes.contains(h);
+            let srgb = !normal_hashes.contains(h) && !spec_hashes.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
                 views.insert(*h, v);
             } else if std::env::var("MERCS2_TEXDBG").is_ok() {
@@ -514,14 +567,16 @@ impl Scene {
                 );
             }
         }
-        let mut tex_binds =
-            vec![make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, &self.white, &self.flat_normal)];
+        let mut tex_binds = vec![make_tex_bind(
+            &self.device, &self.tex_bgl, &self.sampler, &self.white, &self.flat_normal, &self.black,
+        )];
         let mut draw_calls: Vec<(u32, u32, usize)> = Vec::new();
         for d in draws {
             let diff = d.diffuse.and_then(|h| views.get(&h)).unwrap_or(&self.white);
             let norm = d.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
+            let spec = d.specular.and_then(|h| views.get(&h)).unwrap_or(&self.black);
             let idx = tex_binds.len();
-            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm));
+            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, spec));
             draw_calls.push((d.index_start, d.index_count, idx));
         }
 
@@ -614,7 +669,9 @@ impl Scene {
         }
         let mvp_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("entity mvp"),
-            size: 96, // mat4 mvp (64) + vec4 fog_color_density (16) + vec4 fog_misc (16)
+            // mat4 mvp (64) + mat4 model (64) + vec4 cam_pos (16) + vec4 fog_color_density (16)
+            // + vec4 fog_misc (16) = 176 bytes (matches the shader `Camera` struct).
+            size: 176,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -652,18 +709,21 @@ impl Scene {
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let raw_vp = if let Some((view, near, far)) = self.view_cam {
+        let (raw_vp, view) = if let Some((view, near, far)) = self.view_cam {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
             let proj = glam::Mat4::perspective_lh(60f32.to_radians(), aspect, near, far);
-            proj * view
+            (proj * view, view)
         } else {
             let angle = t * 0.5;
             let radius = 3.4f32;
             let eye = glam::Vec3::new(radius * angle.sin(), 0.3, radius * angle.cos());
             let view = glam::Mat4::look_at_lh(eye, glam::Vec3::ZERO, glam::Vec3::Y);
             let proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, 0.1, 100.0);
-            proj * view
+            (proj * view, view)
         };
+        // Camera world position (game space, pre-handedness-flip) — the inverse view's translation.
+        // Used by the fragment stage for the Blinn-Phong view vector, in the same space as the lights.
+        let cam_world = view.inverse().w_axis.truncate();
         // HANDEDNESS FIX: the Mercs2 asset space is RIGHT-HANDED (+X right, +Y up, +Z out); wgpu's NDC
         // is left-handed. Our camera math is built in the LH frame, so we convert at the very end by
         // negating clip-space X. VERIFIED against retail: interior prop sides (light heads left, coolers
@@ -684,15 +744,19 @@ impl Scene {
             let Some(mg) = self.models.get(model_hash) else { continue };
             let (bone_count, fit) = (mg.bone_count, mg.fit);
             self.ensure_entity(*e, bone_count);
-            let mvp = view_proj * (*entity_model * fit); // entity transform placed in fitted world space
+            let model = *entity_model * fit; // model -> world (fit=identity in the streaming/world path)
+            let mvp = view_proj * model; // entity transform placed in fitted world space, + handedness flip
             let eg = &self.entities[e];
-            // mvp (16 floats) + fog_color_density + fog_misc (fog disabled unless set_fog was called).
-            let mut uni = [0f32; 24];
+            // Camera uniform (176 B = 44 f32): mvp(16) + model(16) + cam_pos(4) + fog_color_density(4)
+            // + fog_misc(4). Fog stays disabled unless set_fog was called.
+            let mut uni = [0f32; 44];
             uni[..16].copy_from_slice(&mvp.to_cols_array());
+            uni[16..32].copy_from_slice(&model.to_cols_array());
+            uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
             if let Some((color, density, fog_start)) = self.fog {
-                uni[16..20].copy_from_slice(&[color[0], color[1], color[2], density]);
-                uni[20] = 1.0; // fog enable
-                uni[21] = fog_start;
+                uni[36..40].copy_from_slice(&[color[0], color[1], color[2], density]);
+                uni[40] = 1.0; // fog enable
+                uni[41] = fog_start;
             }
             self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
@@ -713,6 +777,30 @@ impl Scene {
             su[16..20].copy_from_slice(&[sun.x, sun.y, sun.z, 0.0]);
             su[20..23].copy_from_slice(&color);
             self.queue.write_buffer(&self.sky_buf, 0, bytemuck::cast_slice(&su));
+        }
+
+        // Dynamic lights: upload the MAX_LIGHTS nearest to the camera this frame. The full set lives
+        // in `self.lights`; we partial-sort by squared distance to `cam_world` and pack the head.
+        {
+            let mut order: Vec<usize> = (0..self.lights.len()).collect();
+            if order.len() > MAX_LIGHTS {
+                order.sort_by(|&a, &b| {
+                    let da = light_dist2(&self.lights[a], cam_world);
+                    let db = light_dist2(&self.lights[b], cam_world);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            let n = order.len().min(MAX_LIGHTS);
+            // vec4 count (4 f32) then MAX_LIGHTS * (pos_radius[4] + color_intensity[4]).
+            let mut buf = vec![0f32; 4 + MAX_LIGHTS * 8];
+            buf[0] = f32::from_bits(n as u32); // count.x, read as u32 in the shader
+            for (slot, &li) in order.iter().take(n).enumerate() {
+                let l = &self.lights[li];
+                let base = 4 + slot * 8;
+                buf[base..base + 4].copy_from_slice(&l.pos_radius);
+                buf[base + 4..base + 8].copy_from_slice(&l.color_intensity);
+            }
+            self.queue.write_buffer(&self.lights_buf, 0, bytemuck::cast_slice(&buf));
         }
 
         // Phase 2: record the pass.
@@ -750,6 +838,8 @@ impl Scene {
                 pass.draw(0..3, 0..1);
             }
             pass.set_pipeline(&self.pipeline);
+            // group 3 (dynamic lights) is constant across the frame — bind once.
+            pass.set_bind_group(3, &self.lights_bind, &[]);
             for (e, _m, model_hash, _p) in &items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
                 let Some(eg) = self.entities.get(e) else { continue };
@@ -779,5 +869,49 @@ impl Scene {
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
+    }
+}
+
+/// Squared distance from a light's world position to `p` (light-selection sort key).
+fn light_dist2(l: &GpuLight, p: glam::Vec3) -> f32 {
+    let dx = l.pos_radius[0] - p.x;
+    let dy = l.pos_radius[1] - p.y;
+    let dz = l.pos_radius[2] - p.z;
+    dx * dx + dy * dy + dz * dz
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Statically parse + validate every WGSL module the scene loads, so a shader syntax error or a
+    /// bad binding is caught by `cargo test` (pipeline creation — the only runtime WGSL check —
+    /// needs a GPU). Uses `naga` (dev-dependency; the same version wgpu already pulls in).
+    fn validate_wgsl(name: &str, src: &str) {
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("{name}: WGSL parse failed:\n{}", e.emit_to_string(src)));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: WGSL validation failed: {e:?}"));
+    }
+
+    #[test]
+    fn shaders_parse_and_validate() {
+        validate_wgsl("shader.wgsl", include_str!("shader.wgsl"));
+        validate_wgsl("sky.wgsl", include_str!("sky.wgsl"));
+        validate_wgsl("loading.wgsl", include_str!("loading.wgsl"));
+    }
+
+    /// The camera uniform we upload (44 f32 = 176 B) matches the shader `Camera` struct size, and the
+    /// lights uniform packing (16 B count + MAX_LIGHTS * 32 B) matches the buffer we allocate.
+    #[test]
+    fn uniform_sizes_match() {
+        assert_eq!(44 * 4, 176); // mvp(64)+model(64)+cam_pos(16)+fog_color_density(16)+fog_misc(16)
+        assert_eq!(std::mem::size_of::<GpuLight>(), 32);
+        assert_eq!(16 + MAX_LIGHTS * 32, 16 + 32 * 32);
     }
 }

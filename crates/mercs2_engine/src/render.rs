@@ -149,6 +149,7 @@ pub fn make_tex_bind(
     sampler: &wgpu::Sampler,
     diffuse: &wgpu::TextureView,
     normal: &wgpu::TextureView,
+    specular: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("material bind"),
@@ -165,6 +166,11 @@ pub fn make_tex_bind(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            // binding 3 = specular/gloss (`_sm`, MTRL slot 1). Black fallback = no highlight.
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(specular),
             },
         ],
     })
@@ -205,6 +211,33 @@ pub fn make_flat_normal_view(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu
             height: 1,
             depth_or_array_layers: 1,
         },
+    );
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// A 1×1 black (linear) RGBA texture view — fallback specular/gloss map: a group without an `_sm`
+/// map samples black here, so its Blinn-Phong specular term is zeroed out (matte).
+pub fn make_black_view(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("black spec"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm, // linear (spec mask is data, not color)
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[0u8, 0, 0, 0],
+        wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
@@ -307,6 +340,35 @@ pub struct ClipAnim {
     pub num_transform_tracks: usize,
     pub name_hash: u32,
 }
+
+/// One dynamic point light, in the layout the forward shader's uniform array expects.
+///
+/// Positions/radii are in the SAME world space as the entity `Transform`s the scene renders (native
+/// game metres, LH +Y up). The game harvests these from `LightObject` COMPs via
+/// [`mercs2_formats::placement::light_inventory`] and hands them to [`crate::scene::Scene::set_lights`];
+/// the scene uploads the N nearest to the camera each frame. `std140`-friendly: two `vec4`s = 32 B.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuLight {
+    /// `xyz` = world position, `w` = attenuation radius (metres; ≤0 disables the light).
+    pub pos_radius: [f32; 4],
+    /// `rgb` = linear color, `w` = intensity scalar.
+    pub color_intensity: [f32; 4],
+}
+
+impl GpuLight {
+    /// Build a point light from a world position, linear color, intensity and radius.
+    pub fn point(pos: [f32; 3], color: [f32; 3], intensity: f32, radius: f32) -> Self {
+        GpuLight {
+            pos_radius: [pos[0], pos[1], pos[2], radius],
+            color_intensity: [color[0], color[1], color[2], intensity],
+        }
+    }
+}
+
+/// Maximum lights uploaded per frame — the fixed size of the shader's uniform light array. The scene
+/// keeps the full harvested set and uploads the nearest `MAX_LIGHTS` to the camera each frame.
+pub const MAX_LIGHTS: usize = 32;
 
 /// A model loaded from the WAD, ready to hand to the scene (GPU) + asset store (CPU).
 pub struct LoadedModel {

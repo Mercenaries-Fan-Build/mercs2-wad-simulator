@@ -75,6 +75,12 @@ impl MtrlMaterial {
     pub fn diffuse(&self) -> Option<u32> {
         self.textures.first().copied()
     }
+
+    /// Specular / gloss (`_sm`) texture hash — slot 1, or `None`. (Slot 0 = diffuse, slot 1 =
+    /// specular, slot 2 = normal — the authored MTRL slot order.)
+    pub fn specular(&self) -> Option<u32> {
+        self.textures.get(1).copied()
+    }
 }
 
 /// A ready-to-upload texture: raw DXT/BC bytes plus dimensions and format.

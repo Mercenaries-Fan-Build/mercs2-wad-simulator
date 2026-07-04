@@ -76,6 +76,7 @@ fn build_placement_markers(
         index_start: 0,
         index_count: indices.len() as u32,
         diffuse: None, // vertex-color only (white fallback texture)
+        specular: None,
         normal: None,
         group_index: 0,
     }];
@@ -190,6 +191,7 @@ fn load_world_data(
             index_start: 0,
             index_count: tm.indices.len() as u32,
             diffuse: Some(0),
+            specular: None,
             normal: None,
             group_index: 0,
         }]
