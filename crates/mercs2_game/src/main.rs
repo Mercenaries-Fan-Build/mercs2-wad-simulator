@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use mercs2_formats::save;
 
 mod collision; // GAME collision: world triangle soup + camera-boom raycast + player capsule push-out
-mod input; // GAME input: Mercs2.ini-driven action bindings (KB/mouse; controller TODO)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
 mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
 mod world; // GAME render/boot: full TPS/free world render path (player avatar, 10-stage load)

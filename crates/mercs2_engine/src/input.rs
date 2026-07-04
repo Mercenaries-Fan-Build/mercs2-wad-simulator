@@ -1,8 +1,9 @@
-//! Data-driven input, honouring the retail `Mercs2.ini` bindings so the game uses the player's own
-//! key/mouse map (and their edits) instead of hardcoded keys. Actions (Forward, MoveRight, Sprint, …)
-//! are resolved from `[Actions1]` + `[Actions2]` (primary + alternate binds); mouse look reads
-//! `[Mouse]` Sensitivity/InvertY. Controller (`[Controller …]`) is a follow-up (needs a gamepad
-//! backend); the action layer here is already the seam it will plug into.
+//! Engine-level data-driven input: a reusable action/binding layer configured by an ini. The mapping
+//! is generic infrastructure (not game logic) — the game just points it at a config file and queries
+//! [`Action`]s; it never names raw keys. Bindings are read from `[Actions1]` + `[Actions2]` (primary +
+//! alternate binds) and mouse look from `[Mouse]` Sensitivity/InvertY, matching the retail `Mercs2.ini`
+//! format, so the player's own key/mouse map (and their edits) apply. Controller (`[Controller …]`) is
+//! a follow-up (needs a gamepad backend); the action layer here is already the seam it will plug into.
 
 use std::collections::{HashMap, HashSet};
 use winit::keyboard::KeyCode;
@@ -211,7 +212,7 @@ fn key_from_name(s: &str) -> Option<KeyCode> {
 
 /// Locate `Mercs2.ini` next to the game install (sibling of the `data/` dir that holds `vz.wad`).
 pub fn find_mercs2_ini() -> Option<std::path::PathBuf> {
-    let vz = mercs2_engine::wad::registry_vz_wad()?;
+    let vz = crate::wad::registry_vz_wad()?;
     // …/<game>/data/vz.wad → …/<game>/Mercs2.ini
     let p = std::path::Path::new(&vz).parent()?.parent()?.join("Mercs2.ini");
     p.exists().then_some(p)

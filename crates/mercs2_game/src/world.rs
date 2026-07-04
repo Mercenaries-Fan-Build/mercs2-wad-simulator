@@ -745,10 +745,10 @@ pub async fn run_scene_world_loading(
     let mut held: HashSet<KeyCode> = HashSet::new();
     let mut mouse_btns: HashSet<winit::event::MouseButton> = HashSet::new();
     // Input bindings from the retail Mercs2.ini (falls back to retail defaults if absent).
-    let bindings = crate::input::find_mercs2_ini()
-        .map(|p| crate::input::Bindings::load(&p))
+    let bindings = mercs2_engine::input::find_mercs2_ini()
+        .map(|p| mercs2_engine::input::Bindings::load(&p))
         .unwrap_or_default();
-    use crate::input::Action;
+    use mercs2_engine::input::Action;
     let mut loading = true;
     let load_start = std::time::Instant::now();
     // Bar fill shown on the loading screen: eased toward the loader's staged fraction each
@@ -1033,7 +1033,7 @@ pub async fn run_scene_world_loading(
                         }
                     }
 
-                    let inp = crate::input::Input { bindings: &bindings, keys: &held, mouse: &mouse_btns };
+                    let inp = mercs2_engine::input::Input { bindings: &bindings, keys: &held, mouse: &mouse_btns };
                     let mut view = match mode {
                         CamMode::Free => {
                             // Keyboard look: ini LookUp/Down/Left/Right (I/K/J/L) plus the arrow keys.
