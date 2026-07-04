@@ -171,7 +171,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Prelit static geometry bakes its lighting into vertex COLOR, so its baked albedo IS the floor and
     // it takes no sun key light; dynamic geometry (characters/props) uses ambient*albedo as the floor
     // plus the sun key light (when the scene enables it) as its direct term.
-    let ambient_floor = mix(albedo * ambient, albedo, prelit);
+    // Baked vertex lighting reads bright (hall mean ~0.79); scale the prelit baked term down so
+    // interiors aren't washed out. (0.7 = baked-lighting brightness knob.)
+    let baked_scale = 0.7;
+    let ambient_floor = mix(albedo * ambient, albedo * baked_scale, prelit);
     var direct = albedo * (sun_i * sun_ndl) * (1.0 - prelit);
     if (sun_ndl > 0.0 && prelit < 0.5 && sun_i > 0.0) {
         let sun_h = normalize(sun_dir + V);
