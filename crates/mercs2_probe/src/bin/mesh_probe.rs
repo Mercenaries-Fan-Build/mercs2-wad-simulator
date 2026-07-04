@@ -109,18 +109,26 @@ fn main() {
     // material should now appear).
     if let Ok((_v, _i, draws, s)) = mercs2_engine::mesh::build_indexed_from_container(&c) {
         println!("== prelit (baked vertex lighting): {} ==", s.prelit);
-        let (ar, fl) = wad::archive_and_file(&mut w);
-        let mut names: BTreeMap<String, usize> = BTreeMap::new();
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
         for d in &draws {
             if let Some(h) = d.diffuse {
-                let nm = mercs2_formats::texture::extract_texture_name(fl, ar, h)
-                    .unwrap_or_else(|| format!("0x{h:08X}"));
-                *names.entry(nm).or_default() += 1;
+                *counts.entry(h).or_default() += 1;
             }
         }
-        println!("== build_indexed_state: {} draw groups; {} distinct diffuse textures bound ==", draws.len(), names.len());
-        for (n, c) in &names {
-            println!("   {c:3} x {n}");
+        println!(
+            "== build_indexed_state: {} draw groups; {} distinct diffuse textures (game loads via extract_texture_hires — FAIL = white/blank draw) ==",
+            draws.len(), counts.len()
+        );
+        for (h, cnt) in &counts {
+            let nm = {
+                let (ar, fl) = wad::archive_and_file(&mut w);
+                mercs2_formats::texture::extract_texture_name(fl, ar, *h).unwrap_or_else(|| format!("0x{h:08X}"))
+            };
+            let status = match wad::extract_texture_hires(&mut w, *h) {
+                Ok(t) => format!("{}x{} {:?}", t.width, t.height, t.format),
+                Err(e) => format!("*** HIRES FAIL ({e}) -> WHITE"),
+            };
+            println!("   {cnt:2} x {nm:<42} {status}");
         }
     }
     println!("== {} draw groups (group: sub-object seg_mask -> material slot0 name) ==", meshes.len());
