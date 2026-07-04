@@ -403,7 +403,13 @@ fn is_light_shaft_fx(name: &str) -> bool {
 /// `dim`, range = `small`. Returns `None` for non-light names. Values are first-pass tunables.
 fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::render::GpuLight> {
     let n = name.to_ascii_lowercase();
-    if !n.starts_with("light_") {
+    // Two kinds of interior light: authored `Light_<hue>` markers, and lamp/stage-light PROPS that are
+    // also physical meshes (the floating military lamp heads) — both illuminate the room.
+    let is_lamp = n.contains("lamppost")
+        || n.contains("portablelight")
+        || n.contains("spotlight")
+        || n.contains("stagelight");
+    if !n.starts_with("light_") && !is_lamp {
         return None;
     }
     let color = if n.contains("darkblue") {
@@ -417,13 +423,20 @@ fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::rend
     } else if n.contains("green") {
         [0.40, 1.0, 0.45]
     } else {
-        [1.0, 0.97, 0.88]
+        [1.0, 0.95, 0.85] // warm white (lamps + default)
     };
-    // Intensity multiplies the surface albedo, so these are ACCENT values (< 1): the interior is
-    // already lit by baked vertex colour; the named lights add a subtle coloured pool, not a floodlight
-    // (3.2/1.6 blew the villa out). Tunable.
-    let intensity = if n.contains("dim") { 0.20 } else { 0.45 };
-    let radius = if n.contains("small") { 7.0 } else { 12.0 };
+    // Intensity multiplies the surface albedo, so these stay < 1 (accent) to not blow out the baked
+    // room. Lamp/stage-light PROPS are the room's REAL sources → brighter + wider than the small
+    // authored markers. All tunable.
+    let (intensity, radius) = if is_lamp {
+        (0.60, 12.0)
+    } else if n.contains("dim") {
+        (0.20, 7.0)
+    } else if n.contains("small") {
+        (0.45, 7.0)
+    } else {
+        (0.45, 12.0)
+    };
     Some(mercs2_engine::render::GpuLight::point(pos, color, intensity, radius))
 }
 
