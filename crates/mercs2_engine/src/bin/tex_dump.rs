@@ -95,38 +95,53 @@ fn main() {
     // diffuse(0)/normal(2) the mesh builder keeps. Dump EVERY texture in EVERY slot so nothing is hidden.
     let container = wad::extract_container(&mut w, mhash).expect("extract container");
     let mats = mercs2_formats::texture::parse_mtrl(&container);
-    println!("model 0x{mhash:08X}: {} materials", mats.len());
+    println!("model 0x{mhash:08X}: {} materials (slot roles: 0=diffuse, 1=?middle, 2=normal)", mats.len());
     let mut texs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for (i, mat) in mats.iter().enumerate() {
         let slots: Vec<String> = mat.textures.iter().map(|h| format!("0x{h:08X}")).collect();
-        println!("  material {i:2}: {} tex slots [{}]", mat.textures.len(), slots.join(", "));
+        println!("  material {i:2}: {} slots [{}]", mat.textures.len(), slots.join(", "));
         for &h in &mat.textures {
             if h != 0 && h != 0xFFFFFFFF {
                 texs.insert(h);
             }
         }
     }
-    println!("== {} distinct textures across all slots; dumping (mip0) ==", texs.len());
-    let (mut ok, mut fail) = (0u32, 0u32);
-    for th in texs {
+    // Metadata names: the texture's own NAME leaf (asset name), else a rainbow-table reverse of the hash.
+    let rainbow = mercs2_engine::worldutil::rainbow_names(&texs);
+    println!("== {} distinct textures; dumping (mip0), labelled by NAME leaf / rainbow reverse ==", texs.len());
+    let (mut ok, mut named, mut fail) = (0u32, 0u32, 0u32);
+    for th in &texs {
+        let th = *th;
+        // Container NAME leaf (borrow the wad's file+archive briefly).
+        let leaf_name = {
+            let (archive, file) = wad::archive_and_file(&mut w);
+            mercs2_formats::texture::extract_texture_name(file, archive, th)
+                .map(|s| s.trim().trim_end_matches('\0').to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let name = leaf_name.clone().or_else(|| rainbow.get(&th).cloned());
+        if name.is_some() {
+            named += 1;
+        }
         match wad::extract_texture_hires(&mut w, th) {
             Ok(hi) => match decode_mip0(&hi) {
                 Some((tw, tht, px)) => {
-                    let p = format!("{out}/tex_{th:08X}_{tw}x{tht}.bmp");
+                    let tag = name
+                        .as_deref()
+                        .map(|n| {
+                            let s: String = n.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                            format!("_{}", &s[..s.len().min(48)])
+                        })
+                        .unwrap_or_default();
+                    let p = format!("{out}/tex_{th:08X}{tag}_{tw}x{tht}.bmp");
                     write_bmp(&p, tw, tht, &px);
-                    println!("  wrote tex_{th:08X}_{tw}x{tht}.bmp  ({:?} mips={})", hi.format, hi.mip_count);
+                    println!("  0x{th:08X}  {tw}x{tht} {:?}  name={}", hi.format, name.as_deref().unwrap_or("<none>"));
                     ok += 1;
                 }
-                None => {
-                    println!("  0x{th:08X}: decode failed ({}x{} {:?})", hi.width, hi.height, hi.format);
-                    fail += 1;
-                }
+                None => { println!("  0x{th:08X}: decode failed"); fail += 1; }
             },
-            Err(e) => {
-                println!("  0x{th:08X}: NOT a resolvable texture ({e})");
-                fail += 1;
-            }
+            Err(e) => { println!("  0x{th:08X}: unresolved ({e})"); fail += 1; }
         }
     }
-    println!("== dumped {ok}, {fail} unresolved ==");
+    println!("== dumped {ok}, {named} named (of {}), {fail} unresolved ==", texs.len());
 }
