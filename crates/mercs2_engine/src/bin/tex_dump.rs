@@ -90,18 +90,43 @@ fn main() {
     let mhash = args.get(1).and_then(|a| a.strip_prefix("0x")).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0x39AF17DC);
     let out = args.get(2).cloned().unwrap_or_else(|| ".".into());
     let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
-    let (m, _, _) = game_world::load_model_by_hash_state(&mut w, mhash, 0x01).expect("build model");
-    let mut texs: Vec<u32> = m.draws.iter().filter_map(|d| d.diffuse).collect();
-    texs.sort_unstable();
-    texs.dedup();
-    println!("model 0x{mhash:08X}: {} distinct diffuse textures", texs.len());
-    for th in texs {
-        if let Ok(hi) = wad::extract_texture_hires(&mut w, th) {
-            if let Some((tw, tht, px)) = decode_mip0(&hi) {
-                let p = format!("{out}/tex_{th:08X}_hires_{tw}x{tht}.bmp", );
-                write_bmp(&p, tw, tht, &px);
-                println!("  wrote {p}  ({:?} mips={})", hi.format, hi.mip_count);
+
+    // Work at the MTRL level: every material carries a FULL texture list (all slots), not just the
+    // diffuse(0)/normal(2) the mesh builder keeps. Dump EVERY texture in EVERY slot so nothing is hidden.
+    let container = wad::extract_container(&mut w, mhash).expect("extract container");
+    let mats = mercs2_formats::texture::parse_mtrl(&container);
+    println!("model 0x{mhash:08X}: {} materials", mats.len());
+    let mut texs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for (i, mat) in mats.iter().enumerate() {
+        let slots: Vec<String> = mat.textures.iter().map(|h| format!("0x{h:08X}")).collect();
+        println!("  material {i:2}: {} tex slots [{}]", mat.textures.len(), slots.join(", "));
+        for &h in &mat.textures {
+            if h != 0 && h != 0xFFFFFFFF {
+                texs.insert(h);
             }
         }
     }
+    println!("== {} distinct textures across all slots; dumping (mip0) ==", texs.len());
+    let (mut ok, mut fail) = (0u32, 0u32);
+    for th in texs {
+        match wad::extract_texture_hires(&mut w, th) {
+            Ok(hi) => match decode_mip0(&hi) {
+                Some((tw, tht, px)) => {
+                    let p = format!("{out}/tex_{th:08X}_{tw}x{tht}.bmp");
+                    write_bmp(&p, tw, tht, &px);
+                    println!("  wrote tex_{th:08X}_{tw}x{tht}.bmp  ({:?} mips={})", hi.format, hi.mip_count);
+                    ok += 1;
+                }
+                None => {
+                    println!("  0x{th:08X}: decode failed ({}x{} {:?})", hi.width, hi.height, hi.format);
+                    fail += 1;
+                }
+            },
+            Err(e) => {
+                println!("  0x{th:08X}: NOT a resolvable texture ({e})");
+                fail += 1;
+            }
+        }
+    }
+    println!("== dumped {ok}, {fail} unresolved ==");
 }
