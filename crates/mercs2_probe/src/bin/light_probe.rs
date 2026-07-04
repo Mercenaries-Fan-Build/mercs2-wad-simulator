@@ -94,6 +94,54 @@ fn main() {
         }
     }
 
+    // Interior STRUCTURE meshes (stockpile/sickbay/scaffold/money/recruit) — are we missing them?
+    // The registry lists 17 _pmcoutpost_interior_*; we only hardcode the hall. Try resolving each the
+    // furniture way: pandemic_hash_m2(name without leading '_') -> extract_container -> build.
+    for name in [
+        "pmcoutpost_interior_stockpile",
+        "pmcoutpost_interior_sickbay",
+        "pmcoutpost_interior_scaffold",
+        "pmcoutpost_interior_money",
+        "pmcoutpost_interior_money_a",
+        "pmcoutpost_interior_recruitmechanic",
+        "pmcoutpost_interior_recruitjet",
+        "pmcoutpost_interior_recruitheli",
+        "pmcoutpost_interior_hq",
+    ] {
+        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+        let status = match wad::extract_container(&mut w, h) {
+            Ok(c) => match mercs2_engine::mesh::build_indexed_from_container(&c) {
+                Ok((v, _, d, _)) => format!("OK {} verts / {} draws", v.len(), d.len()),
+                Err(e) => format!("BUILD FAIL: {e}"),
+            },
+            Err(_) => "MISS (no container)".to_string(),
+        };
+        println!("[interior-mesh] {name:<38} 0x{h:08X} -> {status}");
+    }
+
+    // ARCHITECTURE: does the base layer block 667 REFERENCE the structure mesh hashes (data-driven), or
+    // are they only in the undecoded HqInterior actor template? Search the decompressed block for each.
+    if let Ok(dec) = wad::decompress_block_index(&mut w, 667) {
+        println!("== structure mesh hashes referenced in block 667? ==");
+        for (nm, h) in [
+            ("hall", 0x39AF17DCu32),
+            ("sickbay", 0x757EAE95),
+            ("scaffold", 0x1FBFBB4B),
+            ("recruitmechanic", 0xE8EB75D7),
+            ("recruitjet", 0x86D7CF92),
+            ("recruitheli", 0x634F1F65),
+        ] {
+            let needle = h.to_le_bytes();
+            let found: Vec<usize> = dec
+                .windows(4)
+                .enumerate()
+                .filter(|(_, w)| *w == needle)
+                .map(|(i, _)| i)
+                .collect();
+            println!("   {nm:<16} 0x{h:08X}: {} occurrence(s) {:?}", found.len(), &found[..found.len().min(4)]);
+        }
+    }
+
     // Baked-lighting check: does the PMC hall carry non-white vertex COLORS (static lightmap baked to
     // verts, the Pandemic-era interior lighting) — or flat white (no baked light)?
     for (name, hash) in [
