@@ -6,6 +6,7 @@ pub mod crc32;
 pub mod dlc_input;
 pub mod dlc_stfs;
 pub mod ffcs;
+pub mod fxdict;
 pub mod hash;
 pub mod havok;
 pub mod mannequin;

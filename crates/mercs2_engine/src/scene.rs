@@ -101,6 +101,11 @@ pub struct Scene {
     /// (white fallback + aspect 0.0 = "no art", the shader keeps the plain clear color).
     loading_art_bind: wgpu::BindGroup,
     loading_art_aspect: f32,
+    /// Billboard particle / FX runtime (registry §7). Drawn AFTER the opaque forward pass.
+    /// Empty by default (zero cost) until an effect is started via `fx_start*`.
+    particles: crate::particles::ParticleSystem,
+    /// Last-frame timestamp for the particle sim's per-frame dt.
+    last_frame: std::time::Instant,
 }
 
 impl Scene {
@@ -423,6 +428,18 @@ impl Scene {
             multiview: None,
         });
 
+        let mut particles = crate::particles::ParticleSystem::new(&device, config.format, DEPTH_FORMAT);
+        // Opt-in visible smoke test: `MERCS2_FX_TEST=1` starts a demo smoke plume + fire jet at the
+        // origin (framed by the default orbit camera in `--ecs`/`--animate`). Off by default so no
+        // existing path changes.
+        if std::env::var("MERCS2_FX_TEST").is_ok() {
+            particles.start_emitter_desc(crate::particles::EmitterDesc::demo_smoke(), glam::Vec3::ZERO);
+            particles.start_emitter_desc(
+                crate::particles::EmitterDesc::demo_fire(),
+                glam::Vec3::new(1.2, 0.0, 0.0),
+            );
+        }
+
         Scene {
             window,
             surface,
@@ -456,6 +473,8 @@ impl Scene {
             loading_bind,
             loading_art_bind,
             loading_art_aspect: 0.0,
+            particles,
+            last_frame: std::time::Instant::now(),
         }
     }
 
@@ -529,6 +548,33 @@ impl Scene {
     /// `density` drives `1 - exp(-density * (view_depth - start))`; the sky horizon matches `color`.
     pub fn set_fog(&mut self, color: [f32; 3], density: f32, start: f32) {
         self.fog = Some((color, density, start));
+    }
+
+    /// Register a named particle-effect template (key = effect name hash, as Lua's `StartEmitter`
+    /// names them). Populate `desc` from a parsed `mercs2_formats::fxdict::EffectTemplate`.
+    pub fn fx_register(&mut self, name_hash: u32, desc: crate::particles::EmitterDesc) {
+        self.particles.register_template(name_hash, desc);
+    }
+
+    /// Start a registered effect at a world position (mirrors `ObjectState.StartEmitter`). `None` if
+    /// no template with that hash is registered.
+    pub fn fx_start(&mut self, name_hash: u32, pos: [f32; 3]) -> Option<crate::particles::EmitterId> {
+        self.particles.start_emitter(name_hash, glam::Vec3::from(pos))
+    }
+
+    /// Start an ad-hoc effect from an explicit descriptor at a world position.
+    pub fn fx_start_desc(&mut self, desc: crate::particles::EmitterDesc, pos: [f32; 3]) -> crate::particles::EmitterId {
+        self.particles.start_emitter_desc(desc, glam::Vec3::from(pos))
+    }
+
+    /// Stop a started effect (ceases spawning; live particles finish). Mirrors `StopEmitter`.
+    pub fn fx_stop(&mut self, id: crate::particles::EmitterId) {
+        self.particles.stop_emitter(id);
+    }
+
+    /// Live emitter count (diagnostic).
+    pub fn fx_active_count(&self) -> usize {
+        self.particles.active_emitter_count()
     }
 
     /// Set the world-space dynamic light set (harvested from `LightObject` COMPs via
@@ -708,6 +754,11 @@ impl Scene {
     /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
+        // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
+        // particles), then reap finished emitters. No-op when no effect is active.
+        let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
+        self.last_frame = std::time::Instant::now();
+        self.particles.update(dt);
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let (raw_vp, view) = if let Some((view, near, far)) = self.view_cam {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
@@ -803,6 +854,16 @@ impl Scene {
             self.queue.write_buffer(&self.lights_buf, 0, bytemuck::cast_slice(&buf));
         }
 
+        // Particle FX: upload the camera uniform + instance buffers before the pass. The billboard
+        // shader uses the SAME (flipped) view_proj so particles register with the world; the
+        // camera-facing basis (right/up) + eye come from the un-flipped view.
+        let view_inv = view.inverse();
+        let cam_right = view_inv.transform_vector3(glam::Vec3::X);
+        let cam_up = view_inv.transform_vector3(glam::Vec3::Y);
+        let eye = view_inv.transform_point3(glam::Vec3::ZERO);
+        self.particles
+            .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, eye);
+
         // Phase 2: record the pass.
         let output = self.surface.get_current_texture()?;
         let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -865,6 +926,8 @@ impl Scene {
                     pass.draw(0..mg.nverts, 0..1);
                 }
             }
+            // Transparent particle FX pass, AFTER the opaque geometry (reads depth, doesn't write).
+            self.particles.draw(&mut pass);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

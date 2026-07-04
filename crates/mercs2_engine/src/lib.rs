@@ -18,6 +18,7 @@ pub mod diag;
 pub mod game_world;
 pub mod input;
 pub mod mesh;
+pub mod particles;
 pub mod pose;
 pub mod render;
 pub mod scene;
