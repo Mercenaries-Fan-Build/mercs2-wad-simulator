@@ -751,6 +751,10 @@ pub async fn run_scene_world_loading(
     let mut player_move_dir = Vec3::new(0.0, 0.0, 1.0); // last input direction (kept while decelerating)
     let mut has_run = false;
     let (mut dur_walk, mut dur_run) = (1.0f32, 1.0f32);
+    // Ground speeds are DERIVED from each clip's baked root stride at load (see below) so the model
+    // advances exactly as fast as its feet — WALK_SPEED/RUN_SPEED are only the fallback if a clip has
+    // no root locomotion.
+    let (mut walk_speed, mut run_speed) = (WALK_SPEED, RUN_SPEED);
 
     // World-space collision triangle soup, filled from the structural geometry (interior shells +
     // c3 building cells) when the loader delivers. Consumed by the camera boom (raycast, so it
@@ -1027,10 +1031,24 @@ pub async fn run_scene_world_loading(
                                 if let Some(p) = data.player {
                                     has_run = p.clips.iter().any(|c| c.name_hash == CLIP_RUN);
                                     for c in &p.clips {
+                                        let d = c.clip.duration.max(1e-3);
+                                        // Authentic ground speed = the clip's baked root stride / duration.
+                                        let sp = pose::clip_root_speed(
+                                            &p.skin.rig,
+                                            &c.clip.sample_local(0.0),
+                                            &c.clip.sample_local(d * 0.999),
+                                            &c.track_to_hier,
+                                            c.num_transform_tracks,
+                                            d * 0.999,
+                                        );
                                         if c.name_hash == CLIP_WALK {
-                                            dur_walk = c.clip.duration.max(1e-3);
+                                            dur_walk = d;
+                                            if sp > 0.1 { walk_speed = sp; }
+                                            println!("[world] walk clip stride -> {sp:.2} m/s (fallback {WALK_SPEED})");
                                         } else if c.name_hash == CLIP_RUN {
-                                            dur_run = c.clip.duration.max(1e-3);
+                                            dur_run = d;
+                                            if sp > 0.1 { run_speed = sp; }
+                                            println!("[world] run clip stride -> {sp:.2} m/s (fallback {RUN_SPEED})");
                                         }
                                     }
                                     scene.load_model(p.hash, &p.verts, &p.indices, &p.draws, &p.textures, &p.skin);
@@ -1174,7 +1192,7 @@ pub async fn run_scene_world_loading(
                             // Speed ramp: ease the ground speed toward the walk/run target (or 0)
                             // so starts, stops and gait changes aren't instant. Sprint = ini Sprint (LSHIFT).
                             let target_sp = if mv != Vec3::ZERO {
-                                if inp.held(Action::Sprint) { RUN_SPEED } else { WALK_SPEED }
+                                if inp.held(Action::Sprint) { run_speed } else { walk_speed }
                             } else {
                                 0.0
                             };

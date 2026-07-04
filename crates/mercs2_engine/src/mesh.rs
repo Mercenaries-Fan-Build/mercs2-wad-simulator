@@ -365,15 +365,23 @@ pub fn build_indexed_state(
     }
 
     // PRELIT detection: a vertex COLOR that is non-white AND near-grayscale = baked monochrome interior
-    // lighting (the shells), distinct from colored terrain SPLAT weights (also stored in COLOR).
-    let prelit = meshes.iter().any(|m| {
-        m.colors.iter().any(|c| {
-            let (r, g, b) = (c[2] as i32, c[1] as i32, c[0] as i32); // D3DCOLOR stored B,G,R,A
-            let mx = r.max(g).max(b);
-            let mn = r.min(g).min(b);
-            mx < 242 && (mx - mn) < 20
-        })
-    });
+    // lighting (the shells), distinct from colored terrain SPLAT weights (also in COLOR). Gate on
+    // RIGID (non-skinned) geometry: SKINNED characters carry baked ambient-occlusion in COLOR too
+    // (Mattias mean ~0.72, blended across bones) but must keep their dynamic sun/point lighting — only
+    // the static building shells (each vertex rigidly bound to ONE bone) bake their FULL lighting and
+    // should drop the sun. Skinned = any vertex weights across >1 bone.
+    let skinned = meshes
+        .iter()
+        .any(|m| m.weights.iter().any(|w| w[1] != 0 || w[2] != 0 || w[3] != 0));
+    let prelit = !skinned
+        && meshes.iter().any(|m| {
+            m.colors.iter().any(|c| {
+                let (r, g, b) = (c[2] as i32, c[1] as i32, c[0] as i32); // D3DCOLOR stored B,G,R,A
+                let mx = r.max(g).max(b);
+                let mn = r.min(g).min(b);
+                mx < 242 && (mx - mn) < 20
+            })
+        });
     let stats = ModelStats {
         meshes: kept.len(),
         vertices: verts.len(),

@@ -167,6 +167,30 @@ pub fn havok_palette_in_place(
     skin_palette(rig, &model_poses(rig, &local))
 }
 
+/// The horizontal distance the ROOT bone travels between two clip samples (its BAKED locomotion),
+/// divided by the elapsed time = the clip's authentic ground SPEED (m/s). The world movement code
+/// uses this to advance the entity Transform exactly as fast as the feet stride — so nothing slides
+/// and FOOT_SYNC doesn't have to squash the step cadence to hide a hardcoded-speed mismatch. Pass
+/// samples at t≈0 and t≈duration; returns 0 for clips whose root doesn't translate (idle).
+pub fn clip_root_speed(
+    rig: &[BoneRig],
+    start_sample: &[QsTransform],
+    end_sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+    elapsed: f32,
+) -> f32 {
+    let Some(root) = rig.iter().position(|b| b.parent < 0) else { return 0.0 };
+    let a = havok_locals(rig, start_sample, track_to_hier, num_transform_tracks);
+    let b = havok_locals(rig, end_sample, track_to_hier, num_transform_tracks);
+    if root >= a.len() || root >= b.len() {
+        return 0.0;
+    }
+    let (dx, dz) = (b[root].translation[0] - a[root].translation[0],
+                    b[root].translation[2] - a[root].translation[2]);
+    (dx * dx + dz * dz).sqrt() / elapsed.max(1e-3)
+}
+
 /// Crossfade variant of [`havok_palette_in_place`]: sampleAndCombine BOTH clip samples into
 /// per-bone locals, blend them per bone (hkaSkeletonUtils::blendPoses math — `w` = weight of
 /// sample B), strip root locomotion, then compose. Used by the world scene during clip switches.
