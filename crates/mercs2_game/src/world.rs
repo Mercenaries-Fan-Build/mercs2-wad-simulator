@@ -672,9 +672,9 @@ pub async fn run_scene_world_loading(
     };
     let mut player_foot = 0.0f32;
     let mut player_entity: Option<Entity> = None;
-    let mut player_yaw = PI; // matches the spawn rotation below
+    let mut player_yaw = 0.0; // matches the spawn rotation below (faces +Z, into the open hall)
     let mut player_speed = 0.0f32; // eased ground speed (m/s)
-    let mut player_move_dir = Vec3::new(0.0, 0.0, -1.0); // last input direction (kept while decelerating)
+    let mut player_move_dir = Vec3::new(0.0, 0.0, 1.0); // last input direction (kept while decelerating)
     let mut has_run = false;
     let (mut dur_walk, mut dur_run) = (1.0f32, 1.0f32);
 
@@ -737,10 +737,10 @@ pub async fn run_scene_world_loading(
     // Spawn camera rotated 180° from the original (was PI, facing -Z) so it opens looking INTO the room.
     let mut free_yaw: f32 = 0.0;
     let mut free_pitch: f32 = -0.5;
-    // Third-person camera sits BEHIND the player (who spawns facing -Z), looking over the shoulder.
-    // tp_yaw = PI => camera dir = -Z, eye on the +Z side of the focus. (An earlier 0.0 put the eye
-    // in FRONT of the player, a face-cam, which swaps left/right on screen — the "flipped" view.)
-    let mut tp_yaw: f32 = PI;
+    // Third-person camera sits BEHIND the player (who spawns facing +Z), looking over the shoulder.
+    // tp_yaw = 0 => camera dir = +Z, eye on the -Z side of the focus (behind the player). Player facing
+    // and tp_yaw MUST stay consistent — a mismatch puts the eye in front (a face-cam) and swaps left/right.
+    let mut tp_yaw: f32 = 0.0;
     let mut tp_pitch: f32 = -0.12;
     let mut held: HashSet<KeyCode> = HashSet::new();
     let mut loading = true;
@@ -969,10 +969,11 @@ pub async fn run_scene_world_loading(
                                     } else {
                                         AnimState::default()
                                     };
-                                    // Spawn facing -Z (away from the third-person camera, which starts on the +Z side) so
-                                    // the over-the-shoulder view opens behind the player's back, matching tp_yaw = PI.
+                                    // Spawn facing +Z (into the open hall / toward the exit archway, matching the
+                                    // retail spawn), with the third-person camera behind on the -Z side (tp_yaw = 0)
+                                    // so the over-the-shoulder view opens behind the player's back.
                                     let mut t = Transform::from_translation(player_pos);
-                                    t.rotation = Quat::from_rotation_y(PI);
+                                    t.rotation = Quat::from_rotation_y(0.0);
                                     player_entity = Some(world.spawn((
                                         t,
                                         ModelRef { model: p.hash },
