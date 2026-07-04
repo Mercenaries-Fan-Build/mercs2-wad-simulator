@@ -743,6 +743,12 @@ pub async fn run_scene_world_loading(
     let mut tp_yaw: f32 = 0.0;
     let mut tp_pitch: f32 = -0.12;
     let mut held: HashSet<KeyCode> = HashSet::new();
+    let mut mouse_btns: HashSet<winit::event::MouseButton> = HashSet::new();
+    // Input bindings from the retail Mercs2.ini (falls back to retail defaults if absent).
+    let bindings = crate::input::find_mercs2_ini()
+        .map(|p| crate::input::Bindings::load(&p))
+        .unwrap_or_default();
+    use crate::input::Action;
     let mut loading = true;
     let load_start = std::time::Instant::now();
     // Bar fill shown on the loading screen: eased toward the loader's staged fraction each
@@ -779,6 +785,13 @@ pub async fn run_scene_world_loading(
                         held.remove(&c);
                     }
                 },
+                WindowEvent::MouseInput { button, state, .. } => {
+                    if state == ElementState::Pressed {
+                        mouse_btns.insert(button);
+                    } else {
+                        mouse_btns.remove(&button);
+                    }
+                }
                 WindowEvent::Resized(size) => scene.resize(size),
                 // Cursor-position look: delta from window centre, then recentre. Works on
                 // absolute-input setups (streamed/cloud) where raw deltas are meaningless.
@@ -997,10 +1010,12 @@ pub async fn run_scene_world_loading(
 
                     // Drain the frame's mouse input from the active source onto the ACTIVE camera.
                     // Per-frame total is clamped so event storms can't slam the pitch to a rail.
-                    const MOUSE_SENS: f32 = 0.0008; // rad per px
+                    // Sensitivity + InvertY come from Mercs2.ini [Mouse].
+                    let sens = bindings.mouse_rad_per_px; // rad per px (from [Mouse] Sensitivity)
+                    let inv_y = if bindings.invert_y { -1.0 } else { 1.0 };
                     let src = if mouse_src == 1 { mouse_raw_acc } else { mouse_acc };
-                    let mdx = src.0.clamp(-80.0, 80.0) * MOUSE_SENS;
-                    let mdy = src.1.clamp(-80.0, 80.0) * MOUSE_SENS;
+                    let mdx = src.0.clamp(-80.0, 80.0) * sens;
+                    let mdy = src.1.clamp(-80.0, 80.0) * sens * inv_y;
                     if src != (0.0, 0.0) && mouse_dbg_frames < 20 {
                         eprintln!("[mouse] src={} in=({:+.1},{:+.1}) applied=({:+.4},{:+.4})", mouse_src, src.0, src.1, mdx, mdy);
                         mouse_dbg_frames += 1;
@@ -1018,46 +1033,48 @@ pub async fn run_scene_world_loading(
                         }
                     }
 
+                    let inp = crate::input::Input { bindings: &bindings, keys: &held, mouse: &mouse_btns };
                     let mut view = match mode {
                         CamMode::Free => {
-                            if held.contains(&KeyCode::ArrowUp) { free_pitch += look; }
-                            if held.contains(&KeyCode::ArrowDown) { free_pitch -= look; }
-                            if held.contains(&KeyCode::ArrowLeft) { free_yaw -= look; }
-                            if held.contains(&KeyCode::ArrowRight) { free_yaw += look; }
+                            // Keyboard look: ini LookUp/Down/Left/Right (I/K/J/L) plus the arrow keys.
+                            if held.contains(&KeyCode::ArrowUp) || inp.held(Action::LookUp) { free_pitch += look; }
+                            if held.contains(&KeyCode::ArrowDown) || inp.held(Action::LookDown) { free_pitch -= look; }
+                            if held.contains(&KeyCode::ArrowLeft) || inp.held(Action::LookLeft) { free_yaw -= look; }
+                            if held.contains(&KeyCode::ArrowRight) || inp.held(Action::LookRight) { free_yaw += look; }
                             free_pitch = free_pitch.clamp(-1.5, 1.5);
                             let fwd = Vec3::new(free_pitch.cos() * free_yaw.sin(), free_pitch.sin(), free_pitch.cos() * free_yaw.cos()).normalize();
                             // Strafe right is negated (fwd×Y, not Y×fwd) to match the clip-space X flip
                             // (handedness fix in scene.rs) — otherwise A/D are swapped on the correct image.
                             let right = fwd.cross(Vec3::Y).normalize();
                             let mut mv = Vec3::ZERO;
-                            if held.contains(&KeyCode::KeyW) { mv += fwd; }
-                            if held.contains(&KeyCode::KeyS) { mv -= fwd; }
-                            if held.contains(&KeyCode::KeyD) { mv += right; }
-                            if held.contains(&KeyCode::KeyA) { mv -= right; }
-                            if held.contains(&KeyCode::KeyE) { mv += Vec3::Y; }
-                            if held.contains(&KeyCode::KeyQ) { mv -= Vec3::Y; }
-                            let sp = if held.contains(&KeyCode::ShiftLeft) { 3200.0 } else { 800.0 };
+                            if inp.held(Action::Forward) { mv += fwd; }
+                            if inp.held(Action::Backward) { mv -= fwd; }
+                            if inp.held(Action::MoveRight) { mv += right; }
+                            if inp.held(Action::MoveLeft) { mv -= right; }
+                            if inp.held(Action::Jump) { mv += Vec3::Y; }     // fly up (ini Jump)
+                            if inp.held(Action::Crouch) { mv -= Vec3::Y; }   // fly down (ini Crouch)
+                            let sp = if inp.held(Action::Sprint) { 3200.0 } else { 800.0 };
                             if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * dt; }
                             Mat4::look_to_lh(free_pos, fwd, Vec3::Y)
                         }
                         CamMode::ThirdPerson => {
-                            if held.contains(&KeyCode::ArrowUp) { tp_pitch += look; }
-                            if held.contains(&KeyCode::ArrowDown) { tp_pitch -= look; }
-                            if held.contains(&KeyCode::ArrowLeft) { tp_yaw -= look; }
-                            if held.contains(&KeyCode::ArrowRight) { tp_yaw += look; }
+                            if held.contains(&KeyCode::ArrowUp) || inp.held(Action::LookUp) { tp_pitch += look; }
+                            if held.contains(&KeyCode::ArrowDown) || inp.held(Action::LookDown) { tp_pitch -= look; }
+                            if held.contains(&KeyCode::ArrowLeft) || inp.held(Action::LookLeft) { tp_yaw -= look; }
+                            if held.contains(&KeyCode::ArrowRight) || inp.held(Action::LookRight) { tp_yaw += look; }
                             tp_pitch = tp_pitch.clamp(-1.2, 0.6);
                             let fwd_flat = Vec3::new(tp_yaw.sin(), 0.0, tp_yaw.cos()).normalize();
                             // Negated (fwd×Y) to match the clip-space X flip (handedness fix), so D=right.
                             let right_flat = fwd_flat.cross(Vec3::Y).normalize();
                             let mut mv = Vec3::ZERO;
-                            if held.contains(&KeyCode::KeyW) { mv += fwd_flat; }
-                            if held.contains(&KeyCode::KeyS) { mv -= fwd_flat; }
-                            if held.contains(&KeyCode::KeyD) { mv += right_flat; }
-                            if held.contains(&KeyCode::KeyA) { mv -= right_flat; }
+                            if inp.held(Action::Forward) { mv += fwd_flat; }
+                            if inp.held(Action::Backward) { mv -= fwd_flat; }
+                            if inp.held(Action::MoveRight) { mv += right_flat; }
+                            if inp.held(Action::MoveLeft) { mv -= right_flat; }
                             // Speed ramp: ease the ground speed toward the walk/run target (or 0)
-                            // so starts, stops and gait changes aren't instant.
+                            // so starts, stops and gait changes aren't instant. Sprint = ini Sprint (LSHIFT).
                             let target_sp = if mv != Vec3::ZERO {
-                                if held.contains(&KeyCode::ShiftLeft) { RUN_SPEED } else { WALK_SPEED }
+                                if inp.held(Action::Sprint) { RUN_SPEED } else { WALK_SPEED }
                             } else {
                                 0.0
                             };
@@ -1113,7 +1130,7 @@ pub async fn run_scene_world_loading(
                                 // cycle phase so the feet stay in step (idle restarts at 0).
                                 if let Ok(mut a) = world.get::<&mut AnimState>(e) {
                                     let want = if mv != Vec3::ZERO {
-                                        if held.contains(&KeyCode::ShiftLeft) && has_run { CLIP_RUN } else { CLIP_WALK }
+                                        if inp.held(Action::Sprint) && has_run { CLIP_RUN } else { CLIP_WALK }
                                     } else {
                                         CLIP_IDLE
                                     };
