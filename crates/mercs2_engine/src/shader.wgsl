@@ -203,11 +203,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Directional shadow. The shadow map now contains ONLY dynamic casters (characters/props — the
-    // baked shell is excluded), so `shadow < 1` means "occluded by a moving object from the key light":
-    // a contact shadow. Multiply the WHOLE result so it lands on the baked floor too, clamped to a floor
-    // so shadowed areas darken rather than turn black. (0.35 = shadow strength knob.)
-    let shadow = max(shadow_factor(in.wpos), 0.35);
+    // Directional shadow — ONLY when there is a sun (sun_i > 0). Indoors the sun is off, so there is no
+    // directional light and therefore NO directional shadow (a shadow with no sun reads as a phantom
+    // noon sun). Outdoors the shadow map (dynamic casters only) darkens the result, clamped to a floor
+    // so shadowed areas darken rather than blacken. (0.35 = shadow strength knob.)
+    var shadow = 1.0;
+    if (sun_i > 0.0) {
+        shadow = max(shadow_factor(in.wpos), 0.35);
+    }
     var lit = (ambient_floor + direct) * shadow;
 
     // Distance fog (PLACEHOLDER for PgSky/PgSun/PgCloud): exponential falloff past the start distance.

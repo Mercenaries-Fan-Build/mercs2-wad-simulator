@@ -1188,8 +1188,9 @@ impl Scene {
         // (cleared to 1.0 = far). The color pass' main shader PCF-samples this for real cast-shadows.
         // Same entities as the color pass, whole index range per model (depth only — materials/
         // draw-group split are irrelevant here). Uses the per-entity mvp_bind (for `model`) + bone_bind
-        // uploaded in phase 1.
-        {
+        // uploaded in phase 1. SKIPPED when the sun is off (interiors) — no sun means no directional
+        // shadow, and the shader gates on the same condition.
+        if self.sun_intensity > 0.0 {
             let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow pass"),
                 color_attachments: &[],
