@@ -193,6 +193,9 @@ pub fn load_model_by_hash_state(
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0; // native metres; world placement is the authored Transform, no offset
+    // Data-driven: give a rigged model its own clips (empty for a static prop / no-match — see
+    // `load_clips_for_model`). This is what lets an interior prop / door / NPC animate.
+    let clips = load_clips_for_model(w, &skin.rig);
     if std::env::var("MERCS2_TEXDBG").is_ok() {
         let n_diff = draws.iter().filter(|d| d.diffuse.is_some()).count();
         let want: std::collections::HashSet<u32> =
@@ -204,7 +207,7 @@ pub fn load_model_by_hash_state(
         );
     }
     Some((
-        LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() },
+        LoadedModel { hash, verts, indices, draws, textures, skin, clips },
         stats.bbox_min,
         stats.bbox_max,
     ))
@@ -292,11 +295,13 @@ pub fn load_model_props(
         let mut skin = stats.skin_data();
         skin.center = [0.0, 0.0, 0.0];
         skin.scale = 1.0; // native metres; world placement comes from each instance Transform
+        // Rigged prop → its own clips (empty for the static furniture that dominates this path).
+        let clips = load_clips_for_model(w, &skin.rig);
         placed_meshes += 1;
         placed_instances += instances.len();
         out.push((
             hash,
-            LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() },
+            LoadedModel { hash, verts, indices, draws, textures, skin, clips },
             instances,
         ));
     }
@@ -413,6 +418,155 @@ pub fn load_clips_for_rig(w: &mut wad::Wad, hier: &[u32], wants: &[u32]) -> Vec<
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+//   Generalised prop / object clip loading (data-driven, reuses the Havok decode)
+// ---------------------------------------------------------------------------
+//
+// The player path (mercs2_game) hard-codes Mattias' idle/walk/run clip hashes. Every other model —
+// interior props, doors, machines, NPCs, DLC/mod content — was left with `clips: Vec::new()`, so it
+// could never animate even if the WAD ships clips for its rig. The functions below lift that hard
+// coding into a data-driven discovery layer: index every animation clip once, then for ANY loaded
+// model resolve its own clips by matching its HIER node name-hashes against each clip's `trnm`
+// binding (`AnimBinding::resolve_to_hier`). Decode stays the existing wavelet/Havok path — this only
+// adds the *selection* the player did by hand.
+//
+// RE NOTE (verified against retail vz.wad, 2026-07): retail *props* ship no clip of their own. A full
+// census — 0/335 rigged `ModelName` placement props, and 0 of 1248 rigged models across all 1771
+// model ASETs — has a clip whose `trnm` resolves into its rig; all 4261 animgroup clips are the
+// character skeleton family (60–105 tracks). The native `sequ/SINF/TRCK/MINF/MANM/VALU` chunk cluster
+// (concentrated in blocks 3183/3185, alongside the known Mattias clip 0x547C0A27) is the *character*
+// animation binding/registry, not a prop-clip system; retail interior props/doors are moved by script
+// or procedural bone controllers, not shipped clips. So this path is the correct, faithful mechanism
+// and animates any model that DOES carry clips (characters/NPCs/DLC/mods); it is a deliberate no-op
+// for clip-less retail props. See docs/modernization/rendering_fx_lighting_gap.md §H.
+
+/// One clip's identity + rig binding, indexed once over every animgroup block so a model's clips can
+/// be discovered by name-hash rig match without re-scanning the archive per model.
+pub struct ClipIndexEntry {
+    /// The animgroup WAD block this clip lives in.
+    pub block: u16,
+    /// Pandemic name-hash of the clip.
+    pub name_hash: u32,
+    /// Number of transform tracks (`hkaAnimation::numTransformTracks` == `trnm` length).
+    pub num_transform_tracks: usize,
+    /// Per-track bone name-hash binding (the `trnm` chunk).
+    pub bones: Vec<u32>,
+}
+
+/// An index of every animation clip in the WAD (built once) enabling data-driven clip discovery for
+/// any rigged model. Reuses the existing `animgroup`/`anim` Havok decode; this only adds the
+/// *selection* layer the player path hard-coded.
+pub struct AnimClipIndex {
+    pub clips: Vec<ClipIndexEntry>,
+}
+
+impl AnimClipIndex {
+    /// Scan every animgroup block once and record each clip's `trnm` binding.
+    pub fn build(w: &mut wad::Wad) -> AnimClipIndex {
+        use mercs2_formats::animgroup::parse_animgroup;
+        let mut clips = Vec::new();
+        for blk in wad::animgroup_blocks(w) {
+            let Ok(data) = wad::decompress_block_index(w, blk) else { continue };
+            let Ok(ag) = parse_animgroup(&data) else { continue };
+            for c in &ag.clips {
+                clips.push(ClipIndexEntry {
+                    block: blk,
+                    name_hash: c.name_hash,
+                    num_transform_tracks: c.num_transform_tracks as usize,
+                    bones: c.binding.track_to_bone_hash.clone(),
+                });
+            }
+        }
+        clips.sort_by_key(|c| c.name_hash);
+        clips.dedup_by_key(|c| c.name_hash);
+        AnimClipIndex { clips }
+    }
+
+    /// Select the clips that BELONG to a rig, by name-hash match. A clip belongs when at least 2 of
+    /// its tracks resolve into the rig AND a MAJORITY of its tracks do (`resolved*2 >= tracks`): the
+    /// clip was authored for THIS skeleton, not merely sharing a couple of common node names. This
+    /// cleanly separates a small prop/door clip (all its 2–10 tracks map into the prop rig) from the
+    /// character body clips (60–105 tracks, of which a prop rig resolves ~0). Ranked by tracks
+    /// resolved (desc), then track count (desc), capped at `max`. Pure — unit-testable without a WAD.
+    pub fn select_for_rig(&self, hier: &[u32], max: usize) -> Vec<u32> {
+        let set: std::collections::HashSet<u32> = hier.iter().copied().collect();
+        let mut scored: Vec<(usize, usize, u32)> = Vec::new(); // (resolved, ntt, name_hash)
+        for c in &self.clips {
+            if c.num_transform_tracks == 0 {
+                continue;
+            }
+            let resolved = c.bones.iter().filter(|b| set.contains(b)).count();
+            if resolved >= 2 && resolved * 2 >= c.num_transform_tracks {
+                scored.push((resolved, c.num_transform_tracks, c.name_hash));
+            }
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+        scored.truncate(max);
+        scored.into_iter().map(|(_, _, h)| h).collect()
+    }
+
+    /// Decode ONE indexed clip (its block is already known — no re-scan) and bind its tracks to
+    /// `hier`. Returns `None` for a non-decoded (delta header-only) clip.
+    fn decode(&self, w: &mut wad::Wad, hier: &[u32], name_hash: u32) -> Option<ClipAnim> {
+        use mercs2_formats::animgroup::parse_animgroup;
+        let entry = self.clips.iter().find(|c| c.name_hash == name_hash)?;
+        let data = wad::decompress_block_index(w, entry.block).ok()?;
+        let ag = parse_animgroup(&data).ok()?;
+        let c = ag.clips.iter().find(|c| c.name_hash == name_hash)?;
+        let clip = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]).ok()?;
+        if !clip.decoded {
+            return None;
+        }
+        Some(ClipAnim {
+            track_to_hier: c.binding.resolve_to_hier(hier),
+            num_transform_tracks: c.num_transform_tracks as usize,
+            name_hash,
+            clip,
+        })
+    }
+}
+
+static CLIP_INDEX: std::sync::OnceLock<AnimClipIndex> = std::sync::OnceLock::new();
+
+/// Process-wide cached clip index, built from the first WAD handle to ask for it (the WAD is fixed
+/// per process). Building scans the ~190 animgroup blocks once (a few seconds); every later lookup is
+/// cheap integer comparison over the flat clip list.
+pub fn clip_index(w: &mut wad::Wad) -> &'static AnimClipIndex {
+    if let Some(ix) = CLIP_INDEX.get() {
+        return ix;
+    }
+    let ix = AnimClipIndex::build(w);
+    CLIP_INDEX.get_or_init(|| ix)
+}
+
+/// Minimum HIER bone count for a model to be treated as animatable (below this it is a static prop:
+/// a single skin bone, nothing to pose).
+const MIN_ANIM_RIG_BONES: usize = 2;
+
+/// How many discovered clips to auto-populate onto a model. Bounds decode cost — a character rig
+/// matches thousands of body clips; a working set proves/drives playback without loading them all.
+const MAX_AUTO_CLIPS: usize = 6;
+
+/// Populate a model's own animation clips by matching its rig against the cached WAD clip index.
+/// Returns EMPTY for a static (`rig < 2`) model or one with no matching clip (every retail prop — see
+/// the RE note above). This is the data-driven generalisation of the hard-coded player idle/walk/run
+/// load; decode reuses the existing Havok path.
+pub fn load_clips_for_model(w: &mut wad::Wad, rig: &[mesh::BoneRig]) -> Vec<ClipAnim> {
+    if rig.len() < MIN_ANIM_RIG_BONES {
+        return Vec::new();
+    }
+    let hier: Vec<u32> = rig.iter().map(|b| b.name_hash).collect();
+    let ix = clip_index(w); // &'static — independent of the &mut w decode borrows below
+    let wanted = ix.select_for_rig(&hier, MAX_AUTO_CLIPS);
+    let mut out = Vec::new();
+    for h in wanted {
+        if let Some(ca) = ix.decode(w, &hier, h) {
+            out.push(ca);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +807,12 @@ pub async fn run_game_world(
     let mut block_ents: HashMap<u16, Entity> = HashMap::new(); // c3 block -> ECS entity
     let mut model_refs: HashMap<u32, u32> = HashMap::new(); // model hash -> live entity count
     let mut wake_failed: HashSet<u32> = HashSet::new(); // keys whose mesh wouldn't resolve (logged once)
+    // CPU animation store: model hash -> (rig + its decoded clips). A woken model that ships clips
+    // (rigged prop / NPC / DLC content) registers here so the per-frame animation pass below samples
+    // its clip into the entity `SkinPalette`, exactly as the player avatar is driven in mercs2_game.
+    // Empty for every clip-less retail prop, so existing static behaviour is byte-for-byte unchanged.
+    let mut anim_store: HashMap<u32, crate::scene::ModelAnim> = HashMap::new();
+    let anim_dt = 1.0f32 / 60.0; // fixed animation step (matches the game's Time(60))
 
     // Free-fly camera. Start over the PMC exterior spawn at a moderate height so nearby cells +
     // props stream in immediately; WASDQE + mouse-look fly around.
@@ -871,6 +1031,14 @@ pub async fn run_game_world(
                                 match load_model_by_hash(w, spawn.model_hash) {
                                     Some((m, _, _)) => {
                                         scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                        // A rigged model that ships clips registers its rig + clips so the
+                                        // per-frame animation pass can pose it (no-op for clip-less props).
+                                        if !m.clips.is_empty() {
+                                            anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
+                                                rig: m.skin.rig.clone(),
+                                                clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
+                                            });
+                                        }
                                     }
                                     None => {
                                         if wake_failed.insert(*k) {
@@ -883,10 +1051,15 @@ pub async fn run_game_world(
                             let nbones = scene.model_bone_count(spawn.model_hash).max(1);
                             let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
                             t.rotation = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
+                            // Play the first discovered clip if this model has any; else stay static.
+                            let anim = match anim_store.get(&spawn.model_hash).and_then(|ma| ma.clips.keys().next()) {
+                                Some(&clip) => AnimState::playing(clip),
+                                None => AnimState::default(),
+                            };
                             let e = world.spawn((
                                 t,
                                 ModelRef { model: spawn.model_hash },
-                                AnimState::default(),
+                                anim,
                                 SkinPalette { mats: vec![IDENTITY; nbones] },
                             ));
                             *model_refs.entry(spawn.model_hash).or_insert(0) += 1;
@@ -905,6 +1078,34 @@ pub async fn run_game_world(
                                 free_pos.x, free_pos.y, free_pos.z,
                                 mgr.resident_count(), mgr.awake_count(),
                                 block_ents.len(), prop_ents.len(), model_refs.len()
+                            );
+                        }
+                    }
+
+                    // --- animation pass: sample each playing entity's clip into its SkinPalette ---
+                    // Same drive as the mercs2_game player system (pose::havok_palette_in_place); scoped
+                    // to entities whose model registered clips, so clip-less static content is untouched.
+                    if !anim_store.is_empty() {
+                        for (_e, (state, palette, mref)) in world
+                            .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
+                            .iter()
+                        {
+                            if !state.playing {
+                                continue;
+                            }
+                            let Some(ma) = anim_store.get(&mref.model) else { continue };
+                            let Some(ca) = ma.clips.get(&state.clip).or_else(|| ma.clips.values().next())
+                            else {
+                                continue;
+                            };
+                            let clip_dur = ca.clip.duration.max(1e-3);
+                            state.time = (state.time + anim_dt * state.speed) % clip_dur;
+                            let sample = ca.clip.sample_local(state.time);
+                            palette.mats = crate::pose::havok_palette_in_place(
+                                &ma.rig,
+                                &sample,
+                                &ca.track_to_hier,
+                                ca.num_transform_tracks,
                             );
                         }
                     }
@@ -950,6 +1151,95 @@ fn dec_model_ref(refs: &mut std::collections::HashMap<u32, u32>, hash: u32, scen
         if *c == 0 {
             refs.remove(&hash);
             scene.unload_model(hash);
+        }
+    }
+}
+
+#[cfg(test)]
+mod prop_anim_tests {
+    use super::*;
+
+    fn entry(name: u32, bones: &[u32]) -> ClipIndexEntry {
+        ClipIndexEntry {
+            block: 0,
+            name_hash: name,
+            num_transform_tracks: bones.len(),
+            bones: bones.to_vec(),
+        }
+    }
+
+    /// The selection rule must pick a small prop/door clip whose few tracks all map into the prop
+    /// rig, and REJECT a character body clip that only shares one node name with the prop — this is
+    /// exactly what stops interior props from being flung by the human idle/walk animations.
+    #[test]
+    fn selects_prop_clip_rejects_character_clip() {
+        let door_rig = [0xD00D_0001u32, 0xD00D_0002];
+        let door_clip = entry(0x0000_AABB, &[0xD00D_0001, 0xD00D_0002]); // 2/2 tracks into the rig
+        let body_clip = entry(0x0000_CCDD, &[0xD00D_0001, 1, 2, 3, 4, 5]); // 1/6 tracks into the rig
+        let ix = AnimClipIndex { clips: vec![door_clip, body_clip] };
+        assert_eq!(ix.select_for_rig(&door_rig, 8), vec![0x0000_AABB]);
+    }
+
+    /// A single-bone (static) rig can never resolve the ≥2 tracks a real clip needs, so it selects
+    /// nothing — the same gate `load_clips_for_model` applies via `MIN_ANIM_RIG_BONES`.
+    #[test]
+    fn static_rig_selects_nothing() {
+        let ix = AnimClipIndex { clips: vec![entry(1, &[10, 11])] };
+        assert!(ix.select_for_rig(&[10], 8).is_empty());
+    }
+
+    /// A full character rig selects its authored full-body clip (every track resolves).
+    #[test]
+    fn character_rig_selects_body_clip() {
+        let hier: Vec<u32> = (0..60u32).collect();
+        let body: Vec<u32> = (0..60u32).collect();
+        let ix = AnimClipIndex { clips: vec![entry(0x1234_5678, &body)] };
+        assert_eq!(ix.select_for_rig(&hier, 4), vec![0x1234_5678]);
+    }
+
+    /// `max` bounds how many clips are auto-populated (decode-cost cap), keeping the highest-
+    /// resolving ones first.
+    #[test]
+    fn selection_is_capped_and_ranked() {
+        let hier: Vec<u32> = (0..10u32).collect();
+        let clips = vec![
+            entry(0xA, &[0, 1]),          // resolved 2
+            entry(0xB, &[0, 1, 2, 3]),    // resolved 4 (ranks first)
+            entry(0xC, &[0, 1, 2]),       // resolved 3
+        ];
+        let ix = AnimClipIndex { clips };
+        assert_eq!(ix.select_for_rig(&hier, 2), vec![0xB, 0xC]);
+    }
+
+    /// Live: a KNOWN animated model (the Mattias avatar `0xA3C1FABC`) must auto-populate >0 clips
+    /// through the generalised load path — the core deliverable. SKIPS (passes) when vz.wad is
+    /// absent so `cargo test` stays green in CI.
+    #[test]
+    fn live_known_animated_model_yields_clips() {
+        let path = std::env::var("VZ_WAD").unwrap_or_else(|_| {
+            "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
+        });
+        let Ok(mut w) = wad::open(&path) else {
+            eprintln!("skip: vz.wad not present at {path}");
+            return;
+        };
+        let Some((m, _, _)) = load_model_by_hash(&mut w, 0xA3C1_FABC) else {
+            eprintln!("skip: player model 0xA3C1FABC not in this WAD");
+            return;
+        };
+        assert!(
+            m.skin.rig.len() >= MIN_ANIM_RIG_BONES,
+            "avatar must be rigged, got {} bones",
+            m.skin.rig.len()
+        );
+        assert!(
+            !m.clips.is_empty(),
+            "known animated model 0xA3C1FABC must auto-populate clips, got {}",
+            m.clips.len()
+        );
+        // Every populated clip actually decoded to sampleable frames.
+        for c in &m.clips {
+            assert!(c.clip.num_tracks > 0, "clip 0x{:08X} decoded 0 tracks", c.name_hash);
         }
     }
 }
