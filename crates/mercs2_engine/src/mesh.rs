@@ -280,7 +280,6 @@ pub fn build_indexed_state(
     for pl in &kept {
         let m = pl.m;
         let base = verts.len() as u32;
-        let index_start = indices.len() as u32;
         // Rigid accessories are pre-transformed into bind space above; bind them 100% to their
         // attach bone so the same LBS palette carries them (and follows the bone under animation).
         // Skinned bodies keep their extracted BLENDINDICES/BLENDWEIGHT. Positions stay in model
@@ -313,24 +312,47 @@ pub fn build_indexed_state(
                 weights,
             });
         }
-        for t in &m.tris {
-            indices.push(base + t[0]);
-            indices.push(base + t[1]);
-            indices.push(base + t[2]);
+        // One DrawGroup per PRMT sub-strip material. A PRMG group frequently concatenates several
+        // sub-strips with DIFFERENT materials (the PMC hall's floor/walls/trim share group 1's 23
+        // materials); binding only the first textured the floor with a neighbour's map. `submeshes`
+        // is empty for clean single-strip groups → fall back to the group's first material.
+        let emit = |draws: &mut Vec<DrawGroup>,
+                    indices: &[u32],
+                    index_start: u32,
+                    mat: Option<&mercs2_formats::texture::MtrlMaterial>| {
+            let index_count = indices.len() as u32 - index_start;
+            if index_count == 0 {
+                return;
+            }
+            draws.push(DrawGroup {
+                index_start,
+                index_count,
+                diffuse: mat.and_then(|m| m.diffuse()),
+                specular: mat.and_then(|m| m.specular()),
+                normal: mat.and_then(|m| m.textures.get(2).copied()),
+                group_index: m.group_index,
+            });
+        };
+        if m.submeshes.is_empty() {
+            let index_start = indices.len() as u32;
+            for t in &m.tris {
+                indices.push(base + t[0]);
+                indices.push(base + t[1]);
+                indices.push(base + t[2]);
+            }
+            let material = group_mat.get(m.group_index).and_then(|&mi| materials.get(mi));
+            emit(&mut draws, &indices, index_start, material);
+        } else {
+            for sm in &m.submeshes {
+                let index_start = indices.len() as u32;
+                for t in &m.tris[sm.tri_start..sm.tri_start + sm.tri_count] {
+                    indices.push(base + t[0]);
+                    indices.push(base + t[1]);
+                    indices.push(base + t[2]);
+                }
+                emit(&mut draws, &indices, index_start, materials.get(sm.material_index));
+            }
         }
-        let index_count = indices.len() as u32 - index_start;
-        let material = group_mat.get(m.group_index).and_then(|&mi| materials.get(mi));
-        let diffuse = material.and_then(|mat| mat.diffuse());
-        let specular = material.and_then(|mat| mat.specular());
-        let normal = material.and_then(|mat| mat.textures.get(2).copied());
-        draws.push(DrawGroup {
-            index_start,
-            index_count,
-            diffuse,
-            specular,
-            normal,
-            group_index: m.group_index,
-        });
     }
 
     let stats = ModelStats {

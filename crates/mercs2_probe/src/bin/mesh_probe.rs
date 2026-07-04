@@ -90,6 +90,38 @@ fn main() {
     let meshes = mercs2_formats::model_cubeize::read_model_meshes(&c).unwrap_or_default();
     let group_mat = mercs2_formats::texture::group_material_indices(&c);
     let mats = mercs2_formats::texture::parse_mtrl(&c);
+
+    // MULTI-MATERIAL groups: a PRMG can carry several PRMT records, each a sub-strip with its OWN
+    // material. group_material_indices() keeps only the FIRST — so a floor sub-strip sharing a group
+    // with e.g. a wall would render with the wall material. Dump every group's FULL material list.
+    let group_all = mercs2_formats::texture::group_prmt_material_indices(&c);
+    let multi = group_all.iter().filter(|l| l.len() > 1).count();
+    println!("== {} materials total; {} of {} groups are MULTI-material ==", mats.len(), multi, group_all.len());
+    for (gi, list) in group_all.iter().enumerate() {
+        let hashes: Vec<String> = list.iter().map(|&mi|
+            mats.get(mi).and_then(|mt| mt.textures.first().copied())
+                .map(|h| format!("0x{h:08X}")).unwrap_or_else(|| "-".into())).collect();
+        println!("  group {gi}: mat_idx={:?} tex0={:?}", list, hashes);
+    }
+
+    // After the multi-material fix: build_indexed_state emits one draw per PRMT sub-strip material.
+    // Dump the resulting draw count + the distinct diffuse texture NAMES actually bound (the floor
+    // material should now appear).
+    if let Ok((_v, _i, draws, _s)) = mercs2_engine::mesh::build_indexed_from_container(&c) {
+        let (ar, fl) = wad::archive_and_file(&mut w);
+        let mut names: BTreeMap<String, usize> = BTreeMap::new();
+        for d in &draws {
+            if let Some(h) = d.diffuse {
+                let nm = mercs2_formats::texture::extract_texture_name(fl, ar, h)
+                    .unwrap_or_else(|| format!("0x{h:08X}"));
+                *names.entry(nm).or_default() += 1;
+            }
+        }
+        println!("== build_indexed_state: {} draw groups; {} distinct diffuse textures bound ==", draws.len(), names.len());
+        for (n, c) in &names {
+            println!("   {c:3} x {n}");
+        }
+    }
     println!("== {} draw groups (group: sub-object seg_mask -> material slot0 name) ==", meshes.len());
     let (archive, file) = wad::archive_and_file(&mut w);
     // Cache names to avoid re-extracting.

@@ -296,6 +296,23 @@ pub struct ModelMesh {
     pub colors: Vec<[u8; 4]>,
     /// Triangle-list indices into `positions` (the IBUF triangle strip, de-stripped).
     pub tris: Vec<[u32; 3]>,
+    /// Per-PRMT sub-strip material ranges into `tris`. A single PRMG group frequently carries
+    /// SEVERAL PRMT records, each an independent sub-strip with its OWN material (e.g. the PMC hall:
+    /// group 1 = 23 materials, its floor/walls/trim all in one group). Binding only the first material
+    /// to the whole group textured the floor with a neighbour's map. Empty when the group is a single
+    /// clean strip (no PRMT split) — callers then fall back to the group's first material.
+    pub submeshes: Vec<SubMesh>,
+}
+
+/// One contiguous run of `ModelMesh::tris` that shares a single material (a PRMT sub-strip).
+#[derive(Debug, Clone, Copy)]
+pub struct SubMesh {
+    /// Index into the MTRL material records (PRMT record first word, `parse_mtrl` order).
+    pub material_index: usize,
+    /// First triangle of this run within `ModelMesh::tris`.
+    pub tri_start: usize,
+    /// Triangle count of this run.
+    pub tri_count: usize,
 }
 
 /// Map each PRMG-marker row to its parent top-level sub-object: `(ordinal k, is_rigid)`. Walks
@@ -584,7 +601,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         // next, spanning a stray triangle across the mesh (the hand->back sliver). So de-strip each
         // PRMT range separately — with a sanity gate; if the ranges don't cover the strip cleanly
         // (e.g. PRMT layout differs), fall back to whole-strip de-stripping.
-        let tris = destrip_by_prmt(container, &strip, prmt, vmax);
+        let (tris, submeshes) = destrip_by_prmt(container, &strip, prmt, vmax);
 
         out.push(ModelMesh {
             group_index: gi,
@@ -600,6 +617,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
             weights,
             colors,
             tris,
+            submeshes,
         });
     }
     Ok(out)
@@ -615,31 +633,54 @@ fn destrip_by_prmt(
     strip: &[u32],
     prmt: Option<(usize, usize)>,
     vmax: u32,
-) -> Vec<[u32; 3]> {
+) -> (Vec<[u32; 3]>, Vec<SubMesh>) {
     let mut out = Vec::new();
+    let mut subs = Vec::new();
     if let Some((ps, pe)) = prmt {
         let nrec = (pe - ps) / 16;
         if nrec >= 1 {
-            // Primitive boundaries = PRMT.index_start (@4), plus 0 and the strip end.
-            let mut bounds: Vec<usize> = (0..nrec)
-                .map(|r| read_u32_le(container, ps + r * 16 + 4) as usize)
-                .filter(|&s| s <= strip.len())
+            // Each PRMT record = (index_start @4, material_index @0). Sort by start (monotonic on real
+            // models), dedup coincident starts (same-texture instances), and ensure the first range
+            // begins at 0 so no strip triangles are dropped. Each [start_i, start_{i+1}) is an
+            // independent sub-strip carrying material_i.
+            let mut recs: Vec<(usize, usize)> = (0..nrec)
+                .map(|r| {
+                    (
+                        read_u32_le(container, ps + r * 16 + 4) as usize, // index_start
+                        read_u32_le(container, ps + r * 16) as usize,     // material index
+                    )
+                })
+                .filter(|&(s, _)| s <= strip.len())
                 .collect();
-            bounds.push(0);
-            bounds.push(strip.len());
-            bounds.sort_unstable();
-            bounds.dedup();
-            for w in bounds.windows(2) {
-                strip_range_to_tris(strip, w[0], w[1], vmax, &mut out);
+            if !recs.is_empty() {
+                recs.sort_by_key(|&(s, _)| s);
+                recs.dedup_by_key(|&mut (s, _)| s);
+                if recs[0].0 != 0 {
+                    recs.insert(0, (0, recs[0].1));
+                }
+                for i in 0..recs.len() {
+                    let (start, mat) = recs[i];
+                    let end = recs.get(i + 1).map(|r| r.0).unwrap_or(strip.len());
+                    if end <= start {
+                        continue;
+                    }
+                    let tri_start = out.len();
+                    strip_range_to_tris(strip, start, end, vmax, &mut out);
+                    let tri_count = out.len() - tri_start;
+                    if tri_count > 0 {
+                        subs.push(SubMesh { material_index: mat, tri_start, tri_count });
+                    }
+                }
+                if !out.is_empty() {
+                    return (out, subs);
+                }
+                out.clear();
+                subs.clear();
             }
-            if !out.is_empty() {
-                return out;
-            }
-            out.clear();
         }
     }
     strip_range_to_tris(strip, 0, strip.len(), vmax, &mut out);
-    out
+    (out, subs)
 }
 
 /// De-strip `strip[start..end]` into `out`. Winding parity uses the ABSOLUTE strip index (so a
