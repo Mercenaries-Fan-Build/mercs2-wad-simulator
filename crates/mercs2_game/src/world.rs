@@ -1280,7 +1280,7 @@ pub async fn run_scene_world_loading(
                             // (CameraOffset / CameraOffsetZ / HumanCameraModifier) — recoverable via x32dbg.
                             let focus = player_pos + Vec3::Y * 1.6;
                             let right = Vec3::Y.cross(dir).normalize();
-                            const BOOM: f32 = 3.0; // eye distance behind the focus (was 6 m — read as a wide shot)
+                            const BOOM: f32 = 2.2; // eye distance behind the focus (6 m/3 m both read too far back)
                             let want_eye = focus - dir * BOOM + right * 0.55;
                             // Boom collision: cast from the focus toward the desired eye and pull the eye in
                             // to just short of the nearest wall (CAM_RADIUS margin = the engine's camera
