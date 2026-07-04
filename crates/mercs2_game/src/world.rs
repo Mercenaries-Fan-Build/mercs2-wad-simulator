@@ -737,7 +737,10 @@ pub async fn run_scene_world_loading(
     // Spawn camera rotated 180° from the original (was PI, facing -Z) so it opens looking INTO the room.
     let mut free_yaw: f32 = 0.0;
     let mut free_pitch: f32 = -0.5;
-    let mut tp_yaw: f32 = 0.0;
+    // Third-person camera sits BEHIND the player (who spawns facing -Z), looking over the shoulder.
+    // tp_yaw = PI => camera dir = -Z, eye on the +Z side of the focus. (An earlier 0.0 put the eye
+    // in FRONT of the player, a face-cam, which swaps left/right on screen — the "flipped" view.)
+    let mut tp_yaw: f32 = PI;
     let mut tp_pitch: f32 = -0.12;
     let mut held: HashSet<KeyCode> = HashSet::new();
     let mut loading = true;

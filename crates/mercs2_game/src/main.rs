@@ -157,6 +157,30 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: dump every ModelName furniture placement in a block (default 667, PMC interior)
+    // as {model_hash, pos, quat, yaw} sorted by X — to see the authored layout (is the wardrobe
+    // really on one side, or is the view flipped?). `--interior-placements [block]`.
+    if let Some(i) = args.iter().position(|a| a == "--interior-placements") {
+        let blk: u16 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(667);
+        if let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            if let Ok(data) = mercs2_engine::wad::decompress_block_index(&mut w, blk) {
+                let mut ps = mercs2_formats::placement::load_model_placements(&data);
+                ps.sort_by(|a, b| a.pos[0].total_cmp(&b.pos[0]));
+                let spawn = pmc::PMC_INTERIOR_SPAWN;
+                println!("[interior-placements] block {blk}: {} ModelName placements (spawn {spawn:?}):", ps.len());
+                for p in &ps {
+                    let yaw = 2.0 * p.quat[1].atan2(p.quat[3]);
+                    let (dx, dz) = (p.pos[0] - spawn[0], p.pos[2] - spawn[2]);
+                    println!(
+                        "  0x{:08X}  pos [{:8.2},{:8.2},{:8.2}]  yaw {:+.2}  d_from_spawn [dx {:+7.2}, dz {:+7.2}]",
+                        p.model_hash, p.pos[0], p.pos[1], p.pos[2], yaw, dx, dz
+                    );
+                }
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {
