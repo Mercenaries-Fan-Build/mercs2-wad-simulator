@@ -62,6 +62,33 @@ fn main() {
         }
     }
 
+    // REAL interior light params: the placement records carry 0 (values arrive at runtime), so the
+    // authoritative color/intensity/radius live in each Light_small_* TEMPLATE asset. Extract them and
+    // dump the LightObject values directly — no guessing.
+    for (nm, h) in [
+        ("Light_small_blue", 0x9DDE617Au32),
+        ("Light_small_blue_dim", 0x8E4C0966),
+        ("Light_small_darkblue", 0xA86337B4),
+        ("Light_small_yellow", 0xD965157E),
+        ("Light_small_yellow_dim", 0x1419DF50),
+        ("Light_small_white", 0xBE090CAF),
+        ("Light_small_orange", 0x192CEFA8),
+    ] {
+        match wad::extract_container(&mut w, h) {
+            Ok(c) => {
+                let li = mercs2_formats::placement::light_inventory(&c);
+                println!("[template {nm} 0x{h:08X}] {} bytes, {} LightObject(s)", c.len(), li.len());
+                for l in &li {
+                    println!(
+                        "    type {} color ({:.3},{:.3},{:.3}) params {:?}",
+                        l.light.light_type, l.light.color[0], l.light.color[1], l.light.color[2], l.light.params
+                    );
+                }
+            }
+            Err(e) => println!("[template {nm} 0x{h:08X}] extract FAILED: {e}"),
+        }
+    }
+
     // Baked-lighting check: does the PMC hall carry non-white vertex COLORS (static lightmap baked to
     // verts, the Pandemic-era interior lighting) — or flat white (no baked light)?
     for (name, hash) in [
