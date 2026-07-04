@@ -38,27 +38,32 @@ fn main() {
         }
     }
 
-    // Block-667 named furniture: does each name resolve to a mesh the way load_pmc_interior does
-    // (pandemic_hash_m2(base name) -> extract_container)? A miss = a silently-skipped "missing" prop.
+    // Block-667 named furniture: POSITION + distance from the player spawn (which room?) + whether it
+    // resolves. Props far from the spawn are in the main hall / recruit bays, not the initial room.
     if let Ok(dec) = wad::decompress_block_index(&mut w, 667) {
         let pls = mercs2_formats::placement::load_placements(&dec).unwrap_or_default();
-        let mut seen: std::collections::BTreeSet<String> = Default::default();
-        println!("== block 667: name -> pandemic_hash_m2 -> container resolution ==");
+        println!("== block 667 named placements: pos + dist from spawn {:?} ==", SPAWN);
+        let mut rows: Vec<(f32, String)> = Vec::new();
         for p in &pls {
             let Some(raw) = p.name.as_deref() else { continue };
             let base = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
-            if base.is_empty() || !seen.insert(base.to_string()) {
+            if base.is_empty() {
                 continue;
             }
             let h = mercs2_formats::hash::pandemic_hash_m2(base);
-            let status = match wad::extract_container(&mut w, h) {
-                Ok(c) => match mercs2_engine::mesh::build_indexed_from_container(&c) {
-                    Ok((v, _, d, _)) => format!("OK {} verts / {} draws", v.len(), d.len()),
-                    Err(e) => format!("BUILD FAIL: {e}"),
-                },
-                Err(_) => "MISS (no container)".to_string(),
-            };
-            println!("   {base:<34} 0x{h:08X} -> {status}");
+            let ok = wad::extract_container(&mut w, h).is_ok();
+            let dist = d2(p.pos, SPAWN).sqrt();
+            rows.push((
+                dist,
+                format!(
+                    "   {base:<30} pos [{:7.1},{:6.1},{:8.1}] dist {dist:6.1}m  {}",
+                    p.pos[0], p.pos[1], p.pos[2], if ok { "resolves" } else { "MISS" }
+                ),
+            ));
+        }
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, line) in &rows {
+            println!("{line}");
         }
     }
 
