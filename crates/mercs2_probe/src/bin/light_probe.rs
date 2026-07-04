@@ -38,28 +38,29 @@ fn main() {
         }
     }
 
-    // The 3 "unsupported" particle FX: list EVERY global_particle_* placement in block 667 verbatim,
-    // flagging which classify_particle currently SKIPS (name contains godray/lightshaft/_env_light).
+    // ALL block-667 placements: name histogram (what furniture/props/content is authored in the
+    // interior), so we can see paintings/boxes/money/crew vs what we actually load/render.
     if let Ok(dec) = wad::decompress_block_index(&mut w, 667) {
-        println!("== global_particle_* placements in block 667 ==");
-        for p in mercs2_formats::placement::load_placements(&dec).unwrap_or_default() {
-            let raw = p.name.as_deref().unwrap_or("");
+        let pls = mercs2_formats::placement::load_placements(&dec).unwrap_or_default();
+        let mut hist: std::collections::BTreeMap<String, usize> = Default::default();
+        for p in &pls {
+            let raw = p.name.as_deref().unwrap_or("<unnamed>");
             let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
-            if name.starts_with("global_particle") {
-                let n = name.to_ascii_lowercase();
-                let skipped = n.contains("godray") || n.contains("lightshaft") || n.contains("_env_light");
-                println!(
-                    "   {:<44} pos [{:8.1},{:7.1},{:8.1}]  {}",
-                    name, p.pos[0], p.pos[1], p.pos[2],
-                    if skipped { "<= SKIPPED" } else { "" }
-                );
-            }
+            *hist.entry(name.to_string()).or_default() += 1;
+        }
+        println!("== block 667: {} placements, {} distinct names ==", pls.len(), hist.len());
+        for (n, c) in &hist {
+            println!("   {c:3} x {n}");
         }
     }
 
     // Baked-lighting check: does the PMC hall carry non-white vertex COLORS (static lightmap baked to
     // verts, the Pandemic-era interior lighting) — or flat white (no baked light)?
-    for (name, hash) in [("PMC hall", 0x39AF17DCu32), ("lamppostmilitary", 0xA6AD0346)] {
+    for (name, hash) in [
+        ("PMC hall", 0x39AF17DCu32),
+        ("lamppostmilitary", 0xA6AD0346),
+        ("wardrobe", 0x8AAA90D1),
+    ] {
         if let Some((m, _, _)) = mercs2_engine::game_world::load_model_by_hash_state(&mut w, hash, 0x01) {
             let n = m.verts.len().max(1) as f32;
             let mut mn = [1.0f32; 3];
