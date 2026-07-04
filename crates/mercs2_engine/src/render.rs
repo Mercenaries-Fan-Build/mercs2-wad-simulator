@@ -43,30 +43,75 @@ pub fn make_bc_view(
         (((w + 3) / 4) * block_bytes * ((h + 3) / 4)) as usize
     };
     let mip0_need = mip_bytes(0);
-    // Full mip 0 present → upload it at native resolution. Otherwise these are STREAMED textures
-    // that only shipped the resident low-res mip TAIL (the high mips stream in via the global
-    // texture system) — build the texture from the largest resident level so it shows textured
-    // (low-res) instead of falling back to white.
-    let (base_w, base_h, base_bytes, src): (u32, u32, usize, &[u8]) = if td.mip0.len() >= mip0_need {
-        (td.width, td.height, mip0_need, td.mip0.as_slice())
-    } else {
-        let avail = td.all_mips.len();
-        let mut chosen = None;
-        for l in 1..td.mip_count.max(1) {
-            let tail: usize = (l..td.mip_count).map(mip_bytes).sum();
-            if tail > 0 && tail == avail {
-                chosen = Some((
-                    (td.width >> l).max(1),
-                    (td.height >> l).max(1),
-                    mip_bytes(l),
-                ));
+    // When the FULL chain (mip 0 first) is present — a hi-res texture assembled from the streaming LOD
+    // blocks, or a small fully-resident texture — upload EVERY mip level so the sampler mips down and
+    // doesn't shimmer at distance/grazing angles. Otherwise these are STREAMED textures that only
+    // shipped the resident low-res TAIL (high mips not fetched) — upload the largest resident level so
+    // they show textured (low-res) instead of white.
+    if td.mip0.len() >= mip0_need && td.all_mips.len() >= mip0_need {
+        // Count whole mip levels present in all_mips from level 0.
+        let mut levels = 0u32;
+        let mut acc = 0usize;
+        for l in 0..td.mip_count.max(1) {
+            let mb = mip_bytes(l);
+            if mb > 0 && acc + mb <= td.all_mips.len() {
+                acc += mb;
+                levels += 1;
+            } else {
                 break;
             }
         }
-        match chosen {
-            Some((w, h, sz)) if td.all_mips.len() >= sz => (w, h, sz, td.all_mips.as_slice()),
-            _ => return None, // couldn't reconcile the resident data with any mip level
+        let levels = levels.max(1);
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("diffuse"),
+            size: wgpu::Extent3d { width: td.width, height: td.height, depth_or_array_layers: 1 },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut off = 0usize;
+        for l in 0..levels {
+            let w = (td.width >> l).max(1);
+            let h = (td.height >> l).max(1);
+            let bw = (w + 3) / 4;
+            let bh = (h + 3) / 4;
+            let sz = (bw * block_bytes * bh) as usize;
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &tex,
+                    mip_level: l,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &td.all_mips[off..off + sz],
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bw * block_bytes),
+                    rows_per_image: Some(bh),
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            off += sz;
         }
+        return Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+    }
+
+    // Resident-tail-only fallback: build from the largest resident mip level (low-res, single level).
+    let avail = td.all_mips.len();
+    let mut chosen = None;
+    for l in 1..td.mip_count.max(1) {
+        let tail: usize = (l..td.mip_count).map(mip_bytes).sum();
+        if tail > 0 && tail == avail {
+            chosen = Some(((td.width >> l).max(1), (td.height >> l).max(1), mip_bytes(l)));
+            break;
+        }
+    }
+    let (base_w, base_h, base_bytes) = match chosen {
+        Some((w, h, sz)) if avail >= sz => (w, h, sz),
+        _ => return None,
     };
     let blocks_wide = (base_w + 3) / 4;
     let blocks_high = (base_h + 3) / 4;
@@ -87,7 +132,7 @@ pub fn make_bc_view(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &src[..base_bytes],
+        &td.all_mips[..base_bytes],
         wgpu::ImageDataLayout {
             offset: 0,
             bytes_per_row: Some(blocks_wide * block_bytes),

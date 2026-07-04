@@ -234,6 +234,109 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: audit texture streaming. For a MODEL hash, build it, collect its distinct
+    // diffuse texture hashes, and for each show EVERY ASET row (block + primary) the texture hash
+    // appears under, extracting each block's chunk to report dims + resident body + whether that
+    // block carries the FULL mip0 (high-res) or only the streamed resident tail. `--tex-audit <0xMODEL>`.
+    if let Some(i) = args.iter().position(|a| a == "--tex-audit") {
+        let arg = args.get(i + 1).cloned().unwrap_or_default();
+        let mhash = arg.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
+        if let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            let Some((m, _, _)) = mercs2_engine::game_world::load_model_by_hash(&mut w, mhash) else {
+                eprintln!("--tex-audit: model 0x{mhash:08X} did not build");
+                return;
+            };
+            let mut texs: Vec<u32> = m.draws.iter().filter_map(|d| d.diffuse).collect();
+            texs.sort_unstable();
+            texs.dedup();
+            println!("[tex-audit] model 0x{mhash:08X}: {} draws, {} distinct diffuse textures", m.draws.len(), texs.len());
+            for th in texs.iter().take(12) {
+                let rows = mercs2_engine::wad::aset_types(&w, *th);
+                let tex_rows: Vec<(bool, u16)> = rows.iter().filter(|(t, _, _)| *t == 27).map(|(_, p, b)| (*p, *b)).collect();
+                println!("  texture 0x{th:08X}: {} ASET texture-rows {:?}", tex_rows.len(), tex_rows);
+                for (prim, blk) in &tex_rows {
+                    match mercs2_engine::wad::tex_from_block(&mut w, *blk, *th) {
+                        Some(td) => {
+                            use mercs2_formats::texture::TexFormat;
+                            let bb = if matches!(td.format, TexFormat::Bc1) { 8 } else { 16 };
+                            let full0 = ((td.width as usize + 3) / 4) * ((td.height as usize + 3) / 4) * bb;
+                            let has_full = td.mip0.len() >= full0;
+                            println!(
+                                "      block {blk:>4} (primary={prim}): {}x{} {:?} mips={} body={}B mip0={}B/{}B {}",
+                                td.width, td.height, td.format, td.mip_count, td.all_mips.len(), td.mip0.len(), full0,
+                                if has_full { "<< FULL mip0 (HIGH-RES)" } else { "resident tail only" }
+                            );
+                        }
+                        None => println!("      block {blk:>4} (primary={prim}): no texture chunk 0x{th:08X}"),
+                    }
+                }
+                // Full hi-res assembly across the cell subtree.
+                if let Ok(hd) = mercs2_engine::wad::extract_texture_hires(&mut w, *th) {
+                    use mercs2_formats::texture::TexFormat;
+                    let bb = if matches!(hd.format, TexFormat::Bc1) { 8 } else { 16 };
+                    let full0 = ((hd.width as usize + 3) / 4) * ((hd.height as usize + 3) / 4) * bb;
+                    println!(
+                        "      => HIRES assembled: {}x{} mips={} body={}B mip0={}B/{}B {}",
+                        hd.width, hd.height, hd.mip_count, hd.all_mips.len(), hd.mip0.len(), full0,
+                        if hd.mip0.len() >= full0 { "<< FULL mip0 ✓" } else { "still tail-only" }
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    // GAME dev tool: EXHAUSTIVELY locate every block that carries a texture chunk for a hash (by
+    // scanning every block's entry table, not just the ASET table) — to find the high-res streaming
+    // copy that isn't ASET-indexed. Reports (block, chunk_size) sorted big-first + parses the largest.
+    // `--tex-locate <0xHASH>`.
+    if let Some(i) = args.iter().position(|a| a == "--tex-locate") {
+        let arg = args.get(i + 1).cloned().unwrap_or_default();
+        let th = arg.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
+        if let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
+            let nblocks = mercs2_engine::wad::block_paths(&w).len();
+            println!("[tex-locate] 0x{th:08X}: scanning {nblocks} block entry tables...");
+            let mut hits: Vec<(u16, u32)> = Vec::new();
+            for blk in 0..nblocks as u16 {
+                let Ok(head) = mercs2_engine::wad::peek_block_head(&mut w, blk, 512 * 1024) else { continue };
+                let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&head);
+                if count == 0 { continue; }
+                for e in &entries {
+                    if e.type_hash == 0xF011157A && e.name_hash == th {
+                        hits.push((blk, e.chunk_size));
+                    }
+                }
+            }
+            hits.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("[tex-locate] {} block(s) carry a texture chunk for 0x{th:08X}:", hits.len());
+            for (blk, sz) in &hits {
+                let path = mercs2_engine::wad::block_paths(&w).get(*blk as usize).cloned().unwrap_or_default();
+                println!("  block {blk:>4}  chunk_size {sz:>8}B  {path}");
+            }
+            // Inspect the raw chunk bytes of each hit block (are the finer LOD blocks UCFX containers
+            // with INFO, or raw mip payloads?).
+            for (blk, sz) in &hits {
+                if let Ok(dec) = mercs2_engine::wad::decompress_block_index(&mut w, *blk) {
+                    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+                    let mut off = 4 + count as usize * 16;
+                    for e in &entries {
+                        let end = off + e.chunk_size as usize;
+                        if e.type_hash == 0xF011157A && e.name_hash == th && end <= dec.len() {
+                            let head: Vec<String> = dec[off..(off + 40).min(end)].iter().map(|b| format!("{b:02x}")).collect();
+                            let tag = String::from_utf8_lossy(&dec[off..(off + 4).min(end)]).to_string();
+                            println!("  block {blk} ({sz}B) chunk[0..40]: {}  tag='{tag}'", head.join(" "));
+                            break;
+                        }
+                        off = end;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {

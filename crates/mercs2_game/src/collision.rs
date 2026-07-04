@@ -87,27 +87,36 @@ fn closest_on_tri(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     a + ab * (vb * denom) + ac * (vc * denom)
 }
 
-/// Push a vertical capsule (feet at `pos`, `height` tall, `radius`) out of any triangle it penetrates,
-/// horizontally only (Y is owned by the terrain/floor snap). A couple of relaxation passes resolve
-/// corners. Samples the capsule axis at a few heights.
+/// Push a vertical capsule (feet at `pos`, `height` tall, `radius`) out of the WALLS it penetrates,
+/// horizontally only (Y is owned by the terrain/floor snap). Two rules keep a detailed interior mesh
+/// from spawning phantom blocks:
+///  * Only NEAR-VERTICAL triangles count as walls (`|n.y| < 0.5`). Floors, ceilings, ramps, low
+///    thresholds and overhead beams (horizontal-ish surfaces) never block horizontal movement — so
+///    the player walks over door sills and under lintels, and through archways, freely.
+///  * The capsule is tested at CHEST height only, so a floor step or a head-height moulding can't
+///    catch it. A couple of relaxation passes resolve inside corners.
 pub fn push_out(tris: &[[Vec3; 3]], mut pos: Vec3, radius: f32, height: f32) -> Vec3 {
-    let samples = [0.3_f32, height * 0.5, height - 0.2];
+    let chest = height * 0.55;
     let cull = radius + height + 4.0;
     let cull2 = cull * cull;
-    for _ in 0..3 {
-        for &h in &samples {
-            let c = pos + Vec3::Y * h;
-            for t in tris {
-                if (t[0] - pos).length_squared() > cull2 {
-                    continue;
-                }
-                let cp = closest_on_tri(c, t[0], t[1], t[2]);
-                let mut d = c - cp;
-                d.y = 0.0; // horizontal resolution only
-                let dist = d.length();
-                if dist < radius && dist > 1e-4 {
-                    pos += d / dist * (radius - dist);
-                }
+    for _ in 0..2 {
+        let c = pos + Vec3::Y * chest;
+        for t in tris {
+            if (t[0] - pos).length_squared() > cull2 {
+                continue;
+            }
+            // Wall test: skip triangles whose normal is more vertical than horizontal.
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            let nlen = n.length();
+            if nlen < 1e-6 || (n.y / nlen).abs() > 0.5 {
+                continue;
+            }
+            let cp = closest_on_tri(c, t[0], t[1], t[2]);
+            let mut d = c - cp;
+            d.y = 0.0; // horizontal resolution only
+            let dist = d.length();
+            if dist < radius && dist > 1e-4 {
+                pos += d / dist * (radius - dist);
             }
         }
     }

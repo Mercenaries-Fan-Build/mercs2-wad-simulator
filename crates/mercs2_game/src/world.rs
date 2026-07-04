@@ -1070,7 +1070,7 @@ pub async fn run_scene_world_loading(
                                 // it entered this step (horizontal only — the ground/floor snap owns Y).
                                 // Mirrors the engine's MatchCapsuleToPose character capsule.
                                 if !collision_tris.is_empty() {
-                                    const PLAYER_RADIUS: f32 = 0.45;
+                                    const PLAYER_RADIUS: f32 = 0.35;
                                     const PLAYER_HEIGHT: f32 = 1.8;
                                     player_pos = crate::collision::push_out(
                                         &collision_tris,

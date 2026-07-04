@@ -181,7 +181,10 @@ pub fn load_model_by_hash_state(
     for d in &draws {
         for h in [d.diffuse, d.normal].into_iter().flatten() {
             if !textures.contains_key(&h) {
-                if let Ok(t) = wad::extract_texture(w, h) {
+                // Hi-res: this loader backs the always-visible PMC interior shells (the hall walls,
+                // floor, columns, pictures), so assemble the full streamed mip chain, not the coarse
+                // resident tail. Falls back to the resident tail for non-streaming (global) textures.
+                if let Ok(t) = wad::extract_texture_hires(w, h) {
                     textures.insert(h, t);
                 }
             }

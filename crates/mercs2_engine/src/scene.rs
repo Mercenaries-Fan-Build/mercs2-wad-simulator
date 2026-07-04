@@ -187,6 +187,7 @@ impl Scene {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear, // trilinear: blend across the uploaded mip chain
             ..Default::default()
         });
         let white = make_white_view(&device, &queue);

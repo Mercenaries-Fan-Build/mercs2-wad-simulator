@@ -16,6 +16,10 @@ pub const MODEL_ASET_TYPE_ID: u32 = 19;
 pub struct Wad {
     file: File,
     archive: FfcsArchive,
+    /// Small MRU cache of recently decompressed blocks (most-recent last). The hi-res texture
+    /// assembler re-reads the same c3 finer-LOD blocks for every texture of a model that shares a
+    /// cell subtree; caching the (often multi-MB) decompressed blocks avoids re-inflating them.
+    block_cache: Vec<(u16, std::sync::Arc<Vec<u8>>)>,
 }
 
 /// Discover `vz.wad` from the game's EA Games registry key
@@ -45,7 +49,7 @@ pub fn open(path: &str) -> Result<Wad, String> {
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let archive =
         load_ffcs_archive(&mut file, size).map_err(|e| format!("parse FFCS archive: {e}"))?;
-    Ok(Wad { file, archive })
+    Ok(Wad { file, archive, block_cache: Vec::new() })
 }
 
 /// Every ASET `(type_id, is_primary, block_index)` a hash appears under (any type). For diagnosing
@@ -105,6 +109,88 @@ fn find_model_span(decompressed: &[u8], want: Option<u32>) -> Option<(usize, usi
     None
 }
 
+/// Extract + decode the texture chunk `name_hash` from ONE specific block (not the ASET-resolved
+/// primary). For auditing texture streaming: the same texture hash appears in several blocks (a
+/// resident low-res tail in the model's block + a higher-res copy in a global texture block), and
+/// the game's global registry keeps whichever is loaded last. Returns None if the block has no
+/// matching texture chunk.
+pub fn tex_from_block(
+    wad: &mut Wad,
+    block: u16,
+    name_hash: u32,
+) -> Option<mercs2_formats::texture::TextureData> {
+    let dec = decompress_block_index(wad, block).ok()?;
+    let (count, entries) = parse_block_entry_table(&dec);
+    let mut off = 4 + count as usize * 16;
+    for e in &entries {
+        let end = off + e.chunk_size as usize;
+        if e.type_hash == mercs2_formats::types::TYPE_HASH_TEXTURE && e.name_hash == name_hash && end <= dec.len() {
+            return mercs2_formats::texture::parse_texture_container(&dec[off..end]).ok();
+        }
+        off = end;
+    }
+    None
+}
+
+/// Cell prefix of a block path (`…\c33286_P000_Q3.block` → `c33286`), or None for non-cell blocks.
+/// c3 streaming blocks name their cell subtree before the `_P<level>` LOD suffix.
+fn block_cell_prefix(paths: &[String], blk: u16) -> Option<String> {
+    let p = paths.get(blk as usize)?;
+    let fname = p.rsplit(['\\', '/']).next()?;
+    let idx = fname.find("_P")?;
+    Some(fname[..idx].to_string())
+}
+
+/// Full-resolution texture extraction: the resident ASET block ships only a coarse mip tail; the
+/// higher mips stream from FINER LOD blocks in the SAME c3 cell subtree (`c33286_P000_Q3` resident →
+/// `c33286-…_P00N_Q(3-N)` finer, each a lone BODY chunk = one finer mip). Gather every BODY the hash
+/// carries across its subtree and assemble the full linear chain. Falls back to the resident (low-res)
+/// texture for non-cell/global textures that don't stream. See memory `world-streaming-spec` §6.
+pub fn extract_texture_hires(
+    wad: &mut Wad,
+    name_hash: u32,
+) -> Result<mercs2_formats::texture::TextureData, String> {
+    let resident = extract_texture(wad, name_hash)?;
+    // Resident block (primary texture ASET row, else any) → its cell subtree prefix.
+    let rblk = wad.archive.aset.iter()
+        .find(|e| e.asset_hash == name_hash && e.type_id == mercs2_formats::types::TYPE_ID_TEXTURE && e.is_primary())
+        .or_else(|| wad.archive.aset.iter().find(|e| e.asset_hash == name_hash && e.type_id == mercs2_formats::types::TYPE_ID_TEXTURE))
+        .map(|e| e.block_index());
+    let Some(rblk) = rblk else { return Ok(resident) };
+    let Some(prefix) = block_cell_prefix(&wad.archive.paths, rblk) else { return Ok(resident) };
+    let dash_prefix = format!("{prefix}-");
+
+    // Blocks in this cell subtree (the cell itself + finer descendants that append child cell ids).
+    let subtree: Vec<u16> = (0..wad.archive.paths.len() as u16)
+        .filter(|&b| match block_cell_prefix(&wad.archive.paths, b) {
+            Some(cp) => cp == prefix || cp.starts_with(&dash_prefix),
+            None => false,
+        })
+        .collect();
+
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    for b in subtree {
+        if let Some(dec) = decompress_block_index(wad, b).ok() {
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut off = 4 + count as usize * 16;
+            for e in &entries {
+                let end = off + e.chunk_size as usize;
+                if e.type_hash == mercs2_formats::types::TYPE_HASH_TEXTURE && e.name_hash == name_hash && end <= dec.len() {
+                    if let Some(body) = mercs2_formats::texture::texture_body(&dec[off..end]) {
+                        bodies.push(body);
+                    }
+                    break;
+                }
+                off = end;
+            }
+        }
+    }
+    if bodies.len() <= 1 {
+        return Ok(resident); // only the resident tail present → nothing finer to assemble
+    }
+    Ok(mercs2_formats::texture::assemble_hires(resident.width, resident.height, resident.format, bodies))
+}
+
 /// Extract + decode a texture asset (DXT/BC bytes + dims) by its hash.
 pub fn extract_texture(
     wad: &mut Wad,
@@ -159,7 +245,15 @@ fn crop_loading_plate(td: mercs2_formats::texture::TextureData) -> mercs2_format
 /// Decompress a raw block by index (for animgroup blocks, which `animgroup::parse_animgroup`
 /// consumes whole — they are not `type_hash=="model"` containers).
 pub fn decompress_block_index(wad: &mut Wad, block: u16) -> Result<Vec<u8>, String> {
-    decompress_block(&mut wad.file, &wad.archive.indx, block)
+    if let Some((_, data)) = wad.block_cache.iter().find(|(b, _)| *b == block) {
+        return Ok((**data).clone());
+    }
+    let data = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
+    wad.block_cache.push((block, std::sync::Arc::new(data.clone())));
+    if wad.block_cache.len() > 6 {
+        wad.block_cache.remove(0);
+    }
+    Ok(data)
 }
 
 /// Block path strings (PTHS), indexed by block index (e.g. `…\c30123\…` names cell blocks).

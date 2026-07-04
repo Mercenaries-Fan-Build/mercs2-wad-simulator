@@ -478,6 +478,57 @@ pub fn parse_texture_container(container: &[u8]) -> Result<TextureData, String> 
     })
 }
 
+/// Return just the raw BODY leaf bytes of a UCFX texture container. Works for the resident full
+/// container (`NAME`/`INFO`/`BODY`) AND for the streaming higher-mip containers, which ship a lone
+/// `BODY` chunk (one finer mip level's raw DXT bytes, no INFO/NAME). `None` if there's no BODY leaf.
+pub fn texture_body(container: &[u8]) -> Option<Vec<u8>> {
+    let v = UcfxView::new(container)?;
+    for i in 0..v.n_desc {
+        if v.tag(i) == b"BODY" {
+            let (s, e) = v.resolve(i)?;
+            return Some(container[s..e].to_vec());
+        }
+    }
+    None
+}
+
+/// Assemble a full-resolution [`TextureData`] from a resident container (dims/format + its resident
+/// mip tail) plus the higher-mip BODY payloads streamed from finer LOD blocks. Each `body` is a
+/// contiguous mip-chain segment (a lone finer mip, or the resident tail); the geometric 4× mip ratio
+/// guarantees that ordering them by size DESCENDING and concatenating reproduces the full linear
+/// chain mip0..mipN. Duplicate-sized segments are de-duped (the resident block may be scanned twice).
+pub fn assemble_hires(width: u32, height: u32, format: TexFormat, mut bodies: Vec<Vec<u8>>) -> TextureData {
+    bodies.sort_by(|a, b| b.len().cmp(&a.len()));
+    let mut seen = std::collections::HashSet::new();
+    let mut all_mips = Vec::new();
+    for body in bodies {
+        if seen.insert(body.len()) {
+            all_mips.extend_from_slice(&body);
+        }
+    }
+    let (block_px, texel_pitch, _) = dxt_format(format.fourcc()).unwrap_or((4, 8, 3));
+    let wb = (width as usize).div_ceil(block_px).max(1);
+    let hb = (height as usize).div_ceil(block_px).max(1);
+    let mip0_len = (wb * hb * texel_pitch).min(all_mips.len());
+    let mip0 = all_mips[..mip0_len].to_vec();
+    let full_chain = linear_mip_chain_size(width as usize, height as usize, format.fourcc(), dxt_mip_count(width as usize, height as usize));
+    let mip_count = if all_mips.len() >= full_chain {
+        dxt_mip_count(width as usize, height as usize) as u32
+    } else {
+        // Partial: count whole mip levels present from the top.
+        let mut n = 0u32;
+        let mut acc = 0usize;
+        for l in 0..dxt_mip_count(width as usize, height as usize) {
+            let wl = (width as usize >> l).div_ceil(block_px).max(1);
+            let hl = (height as usize >> l).div_ceil(block_px).max(1);
+            acc += wl * hl * texel_pitch;
+            if acc <= all_mips.len() { n += 1; } else { break; }
+        }
+        n.max(1)
+    };
+    TextureData { width, height, format, mip0, all_mips, mip_count }
+}
+
 /// Read a texture container's `NAME` leaf (for diagnostics / naming), if present.
 pub fn texture_name(container: &[u8]) -> Option<String> {
     let v = UcfxView::new(container)?;
