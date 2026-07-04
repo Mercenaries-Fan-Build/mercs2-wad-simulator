@@ -1191,6 +1191,12 @@ impl Scene {
             spass.set_bind_group(1, &self.shadow_vp_bind, &[]);
             for (e, _m, model_hash, _p) in &items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
+                // Only DYNAMIC geometry casts: the prelit building shell already bakes its own light +
+                // shadow into vertex colour, so casting it into the map would double-darken the baked
+                // walls. Casting only characters/props gives clean contact shadows on the baked floor.
+                if mg.prelit {
+                    continue;
+                }
                 let Some(eg) = self.entities.get(e) else { continue };
                 spass.set_bind_group(0, &eg.mvp_bind, &[]);
                 spass.set_bind_group(2, &eg.bone_bind, &[]);

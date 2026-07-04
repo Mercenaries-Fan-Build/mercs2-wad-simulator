@@ -199,9 +199,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Directional shadow: the key light casts real shadows onto the direct term.
-    let shadow = shadow_factor(in.wpos);
-    var lit = ambient_floor + shadow * direct;
+    // Directional shadow. The shadow map now contains ONLY dynamic casters (characters/props — the
+    // baked shell is excluded), so `shadow < 1` means "occluded by a moving object from the key light":
+    // a contact shadow. Multiply the WHOLE result so it lands on the baked floor too, clamped to a floor
+    // so shadowed areas darken rather than turn black. (0.35 = shadow strength knob.)
+    let shadow = max(shadow_factor(in.wpos), 0.35);
+    var lit = (ambient_floor + direct) * shadow;
 
     // Distance fog (PLACEHOLDER for PgSky/PgSun/PgCloud): exponential falloff past the start distance.
     var rgb = lit;

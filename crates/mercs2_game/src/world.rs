@@ -419,7 +419,10 @@ fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::rend
     } else {
         [1.0, 0.97, 0.88]
     };
-    let intensity = if n.contains("dim") { 1.6 } else { 3.2 };
+    // Intensity multiplies the surface albedo, so these are ACCENT values (< 1): the interior is
+    // already lit by baked vertex colour; the named lights add a subtle coloured pool, not a floodlight
+    // (3.2/1.6 blew the villa out). Tunable.
+    let intensity = if n.contains("dim") { 0.20 } else { 0.45 };
     let radius = if n.contains("small") { 7.0 } else { 12.0 };
     Some(mercs2_engine::render::GpuLight::point(pos, color, intensity, radius))
 }
