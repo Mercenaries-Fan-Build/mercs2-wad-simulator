@@ -652,7 +652,7 @@ impl Scene {
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let view_proj = if let Some((view, near, far)) = self.view_cam {
+        let raw_vp = if let Some((view, near, far)) = self.view_cam {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
             let proj = glam::Mat4::perspective_lh(60f32.to_radians(), aspect, near, far);
             proj * view
@@ -664,6 +664,14 @@ impl Scene {
             let proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, 0.1, 100.0);
             proj * view
         };
+        // HANDEDNESS FIX: the Mercs2 asset space is RIGHT-HANDED (+X right, +Y up, +Z out); wgpu's NDC
+        // is left-handed. Our camera math is built in the LH frame, so we convert at the very end by
+        // negating clip-space X. VERIFIED against retail: interior prop sides (light heads left, coolers
+        // right, wardrobe placement) match only with this applied — without it the whole game renders
+        // horizontally MIRRORED. cull_mode is None everywhere, so the winding this flips is a no-op; if
+        // backface culling is enabled later, flip front_face to compensate. (Movement strafe is likewise
+        // built in the LH frame and negates its right vector to match — see world.rs.)
+        let view_proj = glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0)) * raw_vp;
 
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
         let mut items: Vec<(Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)> = Vec::new();

@@ -1026,7 +1026,9 @@ pub async fn run_scene_world_loading(
                             if held.contains(&KeyCode::ArrowRight) { free_yaw += look; }
                             free_pitch = free_pitch.clamp(-1.5, 1.5);
                             let fwd = Vec3::new(free_pitch.cos() * free_yaw.sin(), free_pitch.sin(), free_pitch.cos() * free_yaw.cos()).normalize();
-                            let right = Vec3::Y.cross(fwd).normalize();
+                            // Strafe right is negated (fwd×Y, not Y×fwd) to match the clip-space X flip
+                            // (handedness fix in scene.rs) — otherwise A/D are swapped on the correct image.
+                            let right = fwd.cross(Vec3::Y).normalize();
                             let mut mv = Vec3::ZERO;
                             if held.contains(&KeyCode::KeyW) { mv += fwd; }
                             if held.contains(&KeyCode::KeyS) { mv -= fwd; }
@@ -1045,7 +1047,8 @@ pub async fn run_scene_world_loading(
                             if held.contains(&KeyCode::ArrowRight) { tp_yaw += look; }
                             tp_pitch = tp_pitch.clamp(-1.2, 0.6);
                             let fwd_flat = Vec3::new(tp_yaw.sin(), 0.0, tp_yaw.cos()).normalize();
-                            let right_flat = Vec3::Y.cross(fwd_flat).normalize();
+                            // Negated (fwd×Y) to match the clip-space X flip (handedness fix), so D=right.
+                            let right_flat = fwd_flat.cross(Vec3::Y).normalize();
                             let mut mv = Vec3::ZERO;
                             if held.contains(&KeyCode::KeyW) { mv += fwd_flat; }
                             if held.contains(&KeyCode::KeyS) { mv -= fwd_flat; }
