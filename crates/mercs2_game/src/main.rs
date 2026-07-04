@@ -337,6 +337,67 @@ fn main() {
         return;
     }
 
+    // GAME dev tool: diagnose the interior collision — build the hall collision triangles exactly as
+    // the game does (mesh 0x39AF17DC at actor origin), then simulate the player walking +Z from spawn
+    // into the archway, applying push_out each step, and report where they stick + the blocking walls.
+    // `--coll-probe`.
+    if args.iter().any(|a| a == "--coll-probe") {
+        use mercs2_core::glam::Vec3;
+        let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) else { return; };
+        // Same as pmc.rs: hall at actor origin (3750,450,-3840), identity quat.
+        let origin = Vec3::new(3750.0, 450.0, -3840.0);
+        let Some((m, _, _)) = mercs2_engine::game_world::load_model_by_hash_state(&mut w, 0x39AF17DC, 0x01) else {
+            eprintln!("--coll-probe: hall mesh did not build"); return;
+        };
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        for idx in m.indices.chunks_exact(3) {
+            tris.push([
+                Vec3::from(m.verts[idx[0] as usize].pos) + origin,
+                Vec3::from(m.verts[idx[1] as usize].pos) + origin,
+                Vec3::from(m.verts[idx[2] as usize].pos) + origin,
+            ]);
+        }
+        let spawn = Vec3::new(pmc::PMC_INTERIOR_SPAWN[0], pmc::PMC_INTERIOR_SPAWN[1], pmc::PMC_INTERIOR_SPAWN[2]);
+        println!("[coll-probe] {} hall tris; walking +Z from spawn {spawn:?}", tris.len());
+        let (radius, height, step_h) = (0.35f32, 1.8f32, 0.5f32);
+        // Walk in each cardinal direction; report total distance travelled before it stalls (a wall
+        // stops it in a metre or two; the open archway lets it travel far).
+        for (name, dir) in [("+Z (arch)", Vec3::Z), ("-Z (back)", -Vec3::Z), ("+X", Vec3::X), ("-X", -Vec3::X)] {
+            let mut pos = spawn;
+            let mut travelled = 0.0f32;
+            for _ in 0..160 {
+                let resolved = crate::collision::move_character(&tris, pos, dir * 0.2, radius, height, step_h, true);
+                let adv = (resolved - pos).length();
+                travelled += adv;
+                pos = resolved;
+                if adv < 0.02 {
+                    break;
+                }
+            }
+            println!("  walk {name:12}: travelled {travelled:5.1} m -> end {pos:?}");
+        }
+        let stuck_at: Option<Vec3> = None;
+        // Dump the near-vertical walls around the stuck point at chest height.
+        if let Some(p) = stuck_at {
+            let c = p + Vec3::Y * (height * 0.55);
+            println!("[coll-probe] near-vertical walls within 1.5 m of chest {c:?}:");
+            let mut near: Vec<(f32, Vec3, [Vec3; 3])> = Vec::new();
+            for t in &tris {
+                let n = (t[1] - t[0]).cross(t[2] - t[0]);
+                let nl = n.length();
+                if nl < 1e-6 || (n.y / nl).abs() > 0.5 { continue; }
+                let ctr = (t[0] + t[1] + t[2]) / 3.0;
+                let d = ((ctr - c) * Vec3::new(1.0, 0.0, 1.0)).length();
+                if d < 1.5 { near.push((d, n / nl, *t)); }
+            }
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (d, n, t) in near.iter().take(12) {
+                println!("   d={d:.2} normal=({:+.2},{:+.2},{:+.2}) v0={:?} v1={:?} v2={:?}", n.x, n.y, n.z, t[0], t[1], t[2]);
+            }
+        }
+        return;
+    }
+
     // GAME dev tool: scan c3 models for flat, floor-sized meshes (PMC-floor candidates).
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {

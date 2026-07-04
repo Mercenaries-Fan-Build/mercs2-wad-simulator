@@ -1065,19 +1065,22 @@ pub async fn run_scene_world_loading(
                             }
                             let moving = player_speed > 1e-3;
                             if moving {
-                                player_pos += player_move_dir * player_speed * dt;
-                                // Wall collision: push the character capsule out of any building/shell
-                                // it entered this step (horizontal only — the ground/floor snap owns Y).
-                                // Mirrors the engine's MatchCapsuleToPose character capsule.
+                                let horiz = player_move_dir * player_speed * dt;
                                 if !collision_tris.is_empty() {
+                                    // Capsule character controller: collide-and-slide against walls +
+                                    // (interior) a downward ground probe so stairs/steps/ramps work and
+                                    // the capsule rests AGAINST walls instead of penetrating then bouncing.
+                                    // Mirrors the engine's Havok capsule (MatchCapsuleToPose). The exterior
+                                    // still gets Y from the terrain heightmap below (follow_ground = false).
                                     const PLAYER_RADIUS: f32 = 0.35;
                                     const PLAYER_HEIGHT: f32 = 1.8;
-                                    player_pos = crate::collision::push_out(
-                                        &collision_tris,
-                                        player_pos,
-                                        PLAYER_RADIUS,
-                                        PLAYER_HEIGHT,
+                                    const STEP: f32 = 0.5;
+                                    player_pos = crate::collision::move_character(
+                                        &collision_tris, player_pos, horiz,
+                                        PLAYER_RADIUS, PLAYER_HEIGHT, STEP, spawn_interior,
                                     );
+                                } else {
+                                    player_pos += horiz;
                                 }
                             }
                             // Ground snap: feet follow the terrain heightmap. Hinted by the
