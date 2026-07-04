@@ -297,7 +297,15 @@ pub fn build_indexed_state(
             };
             verts.push(Vertex {
                 pos: [p[0], p[1], p[2]],
-                color: [0.5, 0.5, 0.5], // unused by the textured shader
+                // Per-vertex COLOR (D3DCOLOR, stored B,G,R,A) → RGB. For static interior/building meshes
+                // this is BAKED vertex lighting (the Pandemic-era interior light); the shader multiplies
+                // it into albedo. Default WHITE (no-op) for meshes with no COLOR element — NOT 0.5, which
+                // was silently halving every texture.
+                color: m
+                    .colors
+                    .get(vi)
+                    .map(|c| [c[2] as f32 / 255.0, c[1] as f32 / 255.0, c[0] as f32 / 255.0])
+                    .unwrap_or([1.0, 1.0, 1.0]),
                 uv: m.uvs.get(vi).copied().unwrap_or([0.0, 0.0]),
                 normal: pl.normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0]),
                 tangent: pl.tangents.get(vi).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
