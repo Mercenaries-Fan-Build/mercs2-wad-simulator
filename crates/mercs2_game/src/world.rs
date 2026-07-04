@@ -734,7 +734,7 @@ pub async fn run_scene_world_loading(
     // runs on baked vertex lighting + the interior point lights + a higher ambient fill). Exterior keeps
     // the directional key light. Tunable.
     if spawn_interior {
-        scene.set_sun(0.0, 0.55);
+        scene.set_sun(0.0, 0.30);
     } else {
         scene.set_sun(0.9, 0.35);
     }
