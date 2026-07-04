@@ -38,19 +38,27 @@ fn main() {
         }
     }
 
-    // ALL block-667 placements: name histogram (what furniture/props/content is authored in the
-    // interior), so we can see paintings/boxes/money/crew vs what we actually load/render.
+    // Block-667 named furniture: does each name resolve to a mesh the way load_pmc_interior does
+    // (pandemic_hash_m2(base name) -> extract_container)? A miss = a silently-skipped "missing" prop.
     if let Ok(dec) = wad::decompress_block_index(&mut w, 667) {
         let pls = mercs2_formats::placement::load_placements(&dec).unwrap_or_default();
-        let mut hist: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        println!("== block 667: name -> pandemic_hash_m2 -> container resolution ==");
         for p in &pls {
-            let raw = p.name.as_deref().unwrap_or("<unnamed>");
-            let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
-            *hist.entry(name.to_string()).or_default() += 1;
-        }
-        println!("== block 667: {} placements, {} distinct names ==", pls.len(), hist.len());
-        for (n, c) in &hist {
-            println!("   {c:3} x {n}");
+            let Some(raw) = p.name.as_deref() else { continue };
+            let base = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
+            if base.is_empty() || !seen.insert(base.to_string()) {
+                continue;
+            }
+            let h = mercs2_formats::hash::pandemic_hash_m2(base);
+            let status = match wad::extract_container(&mut w, h) {
+                Ok(c) => match mercs2_engine::mesh::build_indexed_from_container(&c) {
+                    Ok((v, _, d, _)) => format!("OK {} verts / {} draws", v.len(), d.len()),
+                    Err(e) => format!("BUILD FAIL: {e}"),
+                },
+                Err(_) => "MISS (no container)".to_string(),
+            };
+            println!("   {base:<34} 0x{h:08X} -> {status}");
         }
     }
 

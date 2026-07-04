@@ -167,7 +167,7 @@ fn seg_tri_closest(a: Vec3, b: Vec3, t0: Vec3, t1: Vec3, t2: Vec3) -> (Vec3, Vec
     // Otherwise the closest pair is on the boundary: segment vs each edge, and each endpoint vs face.
     let mut best = (a, closest_on_tri(a, t0, t1, t2));
     let mut best_d = (best.0 - best.1).length_squared();
-    let mut consider = |sp: Vec3, tp: Vec3, best: &mut (Vec3, Vec3), best_d: &mut f32| {
+    let consider = |sp: Vec3, tp: Vec3, best: &mut (Vec3, Vec3), best_d: &mut f32| {
         let d = (sp - tp).length_squared();
         if d < *best_d {
             *best_d = d;
