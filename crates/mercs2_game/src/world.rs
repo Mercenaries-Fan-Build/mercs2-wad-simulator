@@ -143,6 +143,9 @@ struct WorldData {
     /// Interior `ModelName` furniture (`--interior`): distinct mesh + its placement instances (all).
     interior_props: Vec<(u32, LoadedModel, Vec<PropInstance>)>,
     hmap: HeightMap,
+    /// Dynamic `LightObject` point lights harvested from layers_static + the interior state blocks
+    /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
+    lights: Vec<mercs2_engine::render::GpuLight>,
 }
 
 /// Number of `progress.step` calls in `load_world_data` (keep in sync when adding stages).
@@ -332,7 +335,22 @@ fn load_world_data(
     };
     progress.step(if spawn_interior { "interior props" } else { "interior props (skipped)" });
 
-    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap })
+    // Dynamic point lights: harvest `LightObject` COMPs (world-space) from layers_static (exterior) +
+    // the interior state block (the villa's `Light_small_*`). The block cache makes the re-decompress
+    // of the interior block a hit. Fed to Scene::set_lights so the shell/props are actually lit.
+    let mut lights = mercs2_engine::game_world::placed_lights_to_gpu(
+        &mercs2_formats::placement::light_inventory(&ls),
+    );
+    if spawn_interior {
+        if let Ok(dec) = wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK) {
+            lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(
+                &mercs2_formats::placement::light_inventory(&dec),
+            ));
+        }
+    }
+    println!("[world] dynamic lights harvested: {}", lights.len());
+
+    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap, lights })
 }
 
 /// Attempt to resolve the PMC-base subset of placements to REAL model geometry (Task 3).
@@ -835,7 +853,7 @@ pub async fn run_scene_world_loading(
                                 elwt.exit();
                                 return;
                             }
-                            Ok(Ok(data)) => {
+                            Ok(Ok(mut data)) => {
                                 // Terrain: one static entity at identity (its verts are already world-space).
                                 // Skipped in --interior mode: the interior is off-map at Y~450 sitting above
                                 // the SE-corner terrain peak (~Y400), which otherwise occludes the whole room.
@@ -999,6 +1017,9 @@ pub async fn run_scene_world_loading(
                                 }
                                 hmap = Some(data.hmap);
                                 println!("[world] collision: {} world-space triangles (buildings + interior shells)", collision_tris.len());
+                                // Feed the harvested dynamic point lights to the renderer (nearest set
+                                // uploaded per frame). Without this the villa/world has no local lighting.
+                                scene.set_lights(std::mem::take(&mut data.lights));
                                 if start_tps && player_entity.is_some() {
                                     mode = CamMode::ThirdPerson;
                                 }

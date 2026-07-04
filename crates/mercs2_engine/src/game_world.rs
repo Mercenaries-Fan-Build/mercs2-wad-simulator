@@ -594,7 +594,7 @@ struct StreamingWorldData {
 /// Convert a harvested `LightObject` placement to a GPU point light, dropping degenerate lights
 /// (non-positive / non-finite radius) so the inferred `params[0]=intensity`/`params[1]=radius`
 /// mapping can never flood the scene. Color/intensity/radius are the authored on-disk values.
-fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -> Vec<crate::render::GpuLight> {
+pub fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -> Vec<crate::render::GpuLight> {
     placed
         .iter()
         .filter_map(|pl| {
