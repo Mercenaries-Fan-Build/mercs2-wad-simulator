@@ -868,9 +868,9 @@ impl Scene {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         let (raw_vp, view) = if let Some((view, near, far)) = self.view_cam {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
-            // Vertical FOV tuned to the retail over-the-shoulder framing (was 60°, read as too
-            // wide-angle vs vanilla). Drop toward 52° for a tighter zoom.
-            let proj = glam::Mat4::perspective_lh(55f32.to_radians(), aspect, near, far);
+            // Vertical FOV tuned to the retail over-the-shoulder framing (60° and 55° both read too
+            // wide-angle vs vanilla). 45° gives the tighter, more zoomed retail look.
+            let proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, near, far);
             (proj * view, view)
         } else {
             let angle = t * 0.5;
