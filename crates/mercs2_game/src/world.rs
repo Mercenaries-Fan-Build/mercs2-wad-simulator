@@ -729,13 +729,15 @@ pub async fn run_scene_world_loading(
     // Placeholder distance fog + sky (stand-in for PgSky/PgSun/PgCloud). Tunables: warm-haze
     // color, density 0.00016 (~30% haze at 2.5 km, ~50% at 4.5 km — depth cue at ground level
     // without white-out from the aerial free cam; 0.00035 washed out the whole map), start 60 m.
-    scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
-    // Sun: OFF indoors (the PMC interior is windowless — no outdoor sun should light or shadow it; it
-    // runs on baked vertex lighting + the interior point lights + a higher ambient fill). Exterior keeps
-    // the directional key light. Tunable.
+    // Fog + sun differ indoors vs out. INTERIOR: no outdoor sun (windowless — baked lighting + interior
+    // point lights + ambient) and a LIGHT room-scale haze (warm-neutral, denser than the exterior since
+    // interior depths are metres not kilometres, start ~2 m). EXTERIOR: directional key light + the thin
+    // aerial haze. All tunable.
     if spawn_interior {
+        scene.set_fog([0.46, 0.44, 0.42], 0.0055, 2.0);
         scene.set_sun(0.0, 0.30);
     } else {
+        scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
         scene.set_sun(0.9, 0.35);
     }
     // Real loading-screen art: the lti_precache1 plate from shell.wad (sibling of vz.wad),
