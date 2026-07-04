@@ -160,16 +160,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // lights (below) add to both.
     let prelit = cam.fog_misc.z;
     let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
-    let ambient = 0.35;
+    // Sun intensity (`fog_misc.w`) and ambient (`cam_pos.w`) are SCENE-controlled: the exterior sets a
+    // bright sun; the INTERIOR sets sun = 0 (no sun indoors) and a higher ambient fill, so the room is
+    // lit only by baked vertex colour + the interior point lights, not a phantom outdoor sun.
+    let sun_i = cam.fog_misc.w;
+    let ambient = cam.cam_pos.w;
     let sun_ndl = max(dot(N, sun_dir), 0.0);
     // Split lighting into an unshadowed FLOOR (ambient / baked) and the shadowable DIRECT term, so the
     // shadow map darkens only direct light — shadowed areas keep the floor and never go pure black.
     // Prelit static geometry bakes its lighting into vertex COLOR, so its baked albedo IS the floor and
     // it takes no sun key light; dynamic geometry (characters/props) uses ambient*albedo as the floor
-    // plus the sun key light as its direct term.
+    // plus the sun key light (when the scene enables it) as its direct term.
     let ambient_floor = mix(albedo * ambient, albedo, prelit);
-    var direct = albedo * (0.9 * sun_ndl) * (1.0 - prelit);
-    if (sun_ndl > 0.0 && prelit < 0.5) {
+    var direct = albedo * (sun_i * sun_ndl) * (1.0 - prelit);
+    if (sun_ndl > 0.0 && prelit < 0.5 && sun_i > 0.0) {
         let sun_h = normalize(sun_dir + V);
         direct += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
     }

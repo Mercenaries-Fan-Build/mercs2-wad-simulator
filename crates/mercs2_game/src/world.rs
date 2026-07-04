@@ -730,6 +730,14 @@ pub async fn run_scene_world_loading(
     // color, density 0.00016 (~30% haze at 2.5 km, ~50% at 4.5 km — depth cue at ground level
     // without white-out from the aerial free cam; 0.00035 washed out the whole map), start 60 m.
     scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
+    // Sun: OFF indoors (the PMC interior is windowless — no outdoor sun should light or shadow it; it
+    // runs on baked vertex lighting + the interior point lights + a higher ambient fill). Exterior keeps
+    // the directional key light. Tunable.
+    if spawn_interior {
+        scene.set_sun(0.0, 0.55);
+    } else {
+        scene.set_sun(0.9, 0.35);
+    }
     // Real loading-screen art: the lti_precache1 plate from shell.wad (sibling of vz.wad),
     // extracted up front (fast) so the loading phase shows it; spinner-only if unavailable.
     match wad::shell_loading_plate(&wadpath) {
@@ -1354,7 +1362,11 @@ pub async fn run_scene_world_loading(
                     // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
                     // so the cast shadows line up with the sun shading. half_extent ~18 m covers the
                     // over-the-shoulder view around the player. (All three are tuning knobs.)
-                    scene.set_shadow(player_pos.to_array(), [-0.4, -0.7, 0.5], 18.0);
+                    // Indoors (sun off) the shadow comes from OVERHEAD (ceiling/interior lighting) so it
+                    // reads as a grounding contact shadow under the character, not an outdoor sun shadow;
+                    // outdoors it aligns to the sun. (Direction/extent are tuning knobs.)
+                    let shadow_dir = if spawn_interior { [-0.15, -1.0, 0.1] } else { [-0.4, -0.7, 0.5] };
+                    scene.set_shadow(player_pos.to_array(), shadow_dir, 18.0);
                     scene.set_view(view, if interior_orbit { 1.0 } else { 0.5 }, 30000.0);
                     match scene.render(&world) {
                         Ok(()) => {}

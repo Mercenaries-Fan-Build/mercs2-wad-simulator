@@ -105,6 +105,11 @@ pub struct Scene {
     /// Distance-fog params (color, density, start). `None` = fog + sky pass disabled, so the
     /// `--ecs` / `--animate` visuals are unchanged. PLACEHOLDER for PgSky/PgSun/PgCloud.
     fog: Option<([f32; 3], f32, f32)>,
+    /// Directional-sun intensity + ambient fill, SCENE-controlled (see `set_sun`). Exterior defaults;
+    /// the interior sets sun = 0 (no phantom outdoor sun indoors) + a higher ambient. Written into the
+    /// per-entity camera uniform (`fog_misc.w` / `cam_pos.w`).
+    sun_intensity: f32,
+    ambient: f32,
     /// Whether the sky pass + HDR/bloom world path is active (enabled by `set_fog`/`set_atmosphere`).
     /// `--ecs`/`--animate` leave this false and render directly to the swapchain (no regression).
     sky_enabled: bool,
@@ -656,6 +661,8 @@ impl Scene {
             start: std::time::Instant::now(),
             view_cam: None,
             fog: None,
+            sun_intensity: 0.9, // exterior default (matches the previous hardcoded key light)
+            ambient: 0.35,
             sky_enabled: false,
             atmo: mercs2_formats::atmosphere::Atmosphere::default(),
             sky_pipeline,
@@ -745,6 +752,14 @@ impl Scene {
     pub fn set_fog(&mut self, color: [f32; 3], density: f32, start: f32) {
         self.fog = Some((color, density, start));
         self.sky_enabled = true;
+    }
+
+    /// Directional-sun intensity + ambient fill. `intensity = 0` disables the sun entirely (interiors:
+    /// no phantom outdoor sun — the room is lit by baked vertex colour + point lights + `ambient`).
+    /// Exterior default is `0.9 / 0.35`.
+    pub fn set_sun(&mut self, intensity: f32, ambient: f32) {
+        self.sun_intensity = intensity;
+        self.ambient = ambient;
     }
 
     /// Set the sky/atmosphere + HDR-bloom parameters (the game's `Graphics.Atmosphere.*` model —
@@ -1092,12 +1107,14 @@ impl Scene {
             uni[..16].copy_from_slice(&mvp.to_cols_array());
             uni[16..32].copy_from_slice(&model.to_cols_array());
             uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
+            uni[35] = self.ambient; // cam_pos.w = ambient fill (scene-controlled)
             if let Some((color, density, fog_start)) = self.fog {
                 uni[36..40].copy_from_slice(&[color[0], color[1], color[2], density]);
                 uni[40] = 1.0; // fog enable
                 uni[41] = fog_start;
             }
             uni[42] = if prelit { 1.0 } else { 0.0 }; // fog_misc.z = prelit (skip exterior sun)
+            uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
             self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
                 // Clamp to the entity's allocated bone count so a mismatched palette can't overflow.
