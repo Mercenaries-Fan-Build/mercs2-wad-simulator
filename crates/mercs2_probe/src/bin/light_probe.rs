@@ -55,6 +55,19 @@ fn main() {
             println!();
         }
     }
+    // CHRIS (block 3278) full clip table — for matching the live-captured idle (Chris is loaded in
+    // x32dbg). Sorted by poses so a captured numPoses (LtSampleWave [ecx+0x28]) pinpoints the clip.
+    if let Ok(cb) = wad::decompress_block_index(&mut w, 3278) {
+        if let Ok(cg) = mercs2_formats::animgroup::parse_animgroup(&cb) {
+            let mut cc: Vec<&_> = cg.clips.iter().collect();
+            cc.sort_by(|a, b| b.num_poses.cmp(&a.num_poses));
+            println!("[chris] {} clips (hash | tt | poses | dur) sorted by poses:", cg.clips.len());
+            for c in &cc {
+                println!("   0x{:08X}  {:3}tt  {:3} poses  {:.2}s", c.name_hash, c.num_transform_tracks, c.num_poses, c.duration);
+            }
+        }
+    }
+
     // Find MATTIAS's idle: Jennifer's idle is 0x24F8C8E6; match it to Mattias's block 3154 by parallel
     // clip index AND by profile (same transform-track count + duration).
     {
