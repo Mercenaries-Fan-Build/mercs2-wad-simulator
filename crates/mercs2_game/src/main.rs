@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use mercs2_formats::save;
 
 mod collision; // GAME collision: world triangle soup + camera-boom raycast + player capsule push-out
+mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
+mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
 mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
 mod world; // GAME render/boot: full TPS/free world render path (player avatar, 10-stage load)
@@ -41,13 +43,29 @@ fn save_games_dir() -> Option<PathBuf> {
 
 /// Recruit-unlock + stockpile state from the newest save (for dev tools without a `SaveState` in hand).
 fn newest_save_interior() -> (pmc::RecruitUnlocks, pmc::Stockpile) {
-    let prof = save_games_dir()
-        .and_then(|d| newest_profile(&d))
-        .and_then(|p| std::fs::read(&p).ok())
-        .and_then(|b| save::parse(&b).ok());
-    let recruits = prof
+    let dir = save_games_dir();
+    let path = dir.as_ref().and_then(|d| newest_profile(d));
+    eprintln!("[save] SaveGames dir = {dir:?}");
+    eprintln!("[save] newest .profile = {path:?}");
+    let prof = path
         .as_ref()
-        .and_then(|p| p.save_state().ok())
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| match save::parse(&b) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("[save] parse FAILED: {e}");
+                None
+            }
+        });
+    let ss = prof.as_ref().and_then(|p| match p.save_state() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("[save] save_state FAILED: {e}");
+            None
+        }
+    });
+    eprintln!("[save] unlocked_starters = {:?}", ss.as_ref().map(|s| &s.unlocked_starters));
+    let recruits = ss
         .map(|s| pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
         .unwrap_or_default();
     let stockpile = pmc::Stockpile {
@@ -416,6 +434,32 @@ fn main() {
         .find(|a| !a.starts_with("--"))
         .map(PathBuf::from);
 
+    // ── Default boot = the SHELL MENU (retail flow) ──────────────────────────
+    // No explicit .profile and no dev mode: open on the main menu; the player picks
+    // Continue / New Game / Load Game (save browser) / Quit and the selected save drives the
+    // world boot in-loop. An explicit .profile arg, `--plan` and `--stream` keep the direct
+    // no-menu boots (dev workflows).
+    if explicit.is_none() && !plan_only && !args.iter().any(|a| a == "--stream") {
+        let slots = menu::scan_slots(save_games_dir());
+        println!("[shell] main menu: {} save(s) available", slots.len());
+        let wadpath = require_vz_wad();
+        let orbit = args.iter().any(|a| a == "--interior-orbit");
+        pollster::block_on(world::run_scene_world_loading(
+            wadpath,
+            true,
+            true,
+            true,
+            true,
+            true,
+            orbit,
+            pmc::RecruitUnlocks::default(),
+            pmc::Stockpile::default(),
+            hero::player_model_candidates(1, 0, 0), // retail new game: Mattias, tier 0, default skin
+            Some(menu::Menu::new(slots)),
+        ));
+        return;
+    }
+
     let profile_path = match explicit.or_else(|| save_games_dir().and_then(|d| newest_profile(&d))) {
         Some(p) => p,
         None => {
@@ -505,16 +549,7 @@ fn main() {
     }
 
     // The engine consumes the original game's assets from vz.wad (EA Games registry install dir).
-    let wadpath = match mercs2_engine::wad::registry_vz_wad() {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "mercs2_game: no vz.wad found — install Mercenaries 2 so that the EA Games registry \
-                 key resolves to a folder containing data\\vz.wad."
-            );
-            std::process::exit(1);
-        }
-    };
+    let wadpath = require_vz_wad();
     // Default boot = the FULL game world: player + third-person camera + PMC interior + c3 cells +
     // placements + props — all core components ON. `--stream` selects the alternate streaming free-fly
     // world; `--interior-orbit` adds the debug orbit camera.
@@ -540,9 +575,32 @@ fn main() {
     } else {
         println!("[mercs2_game] full world: TPS + PMC interior + c3 cells + placements + props");
         let orbit = args.iter().any(|a| a == "--interior-orbit");
+        // Direct boot: the player model comes from THIS profile's hero + upgrade tier, like a
+        // menu boot (costume file byte not yet located; 0 = wardrobe unused in all known saves).
+        let hero_idx = profile.character_index; // header @0x4D, 1-based
+        let models = hero::player_model_candidates(hero_idx, profile.upgrade_index, 0);
+        println!(
+            "[mercs2_game] character: {} [{}]",
+            hero::hero(hero_idx).display,
+            hero::look_label(hero_idx, profile.upgrade_index, 0)
+        );
         pollster::block_on(world::run_scene_world_loading(
-            wadpath, true, true, true, true, true, orbit, recruits, stockpile,
+            wadpath, true, true, true, true, true, orbit, recruits, stockpile, models, None,
         ));
+    }
+}
+
+/// Resolve the install's `vz.wad` via the EA Games registry key, or exit with the install hint.
+fn require_vz_wad() -> String {
+    match mercs2_engine::wad::registry_vz_wad() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "mercs2_game: no vz.wad found — install Mercenaries 2 so that the EA Games registry \
+                 key resolves to a folder containing data\\vz.wad."
+            );
+            std::process::exit(1);
+        }
     }
 }
 

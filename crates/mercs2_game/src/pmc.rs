@@ -221,38 +221,41 @@ pub fn load_pmc_interior(
     // to the same actor origin when unlocked. All share the interior naming `pmcoutpost_interior_<room>`.
     const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
     const IDENT_QUAT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    // The main hall is always present; the recruit bays only when unlocked.
-    let mut interior_actor_meshes: Vec<(&str, u32, u8, [f32; 3])> = vec![
-        ("pmcoutpost_interior_hq", 0x39AF17DC, 0x01, ACTOR_ORIGIN), // REAL MAIN HALL (HqInterior actor)
+    // HqInterior actor parts, resolved by NAME (pandemic_hash_m2 — the live registry is the identity
+    // source, no hardcoded hashes). BASE structures are always present; recruit bays are added per
+    // _GetStarterLayers by unlock. See docs/modernization/pmc_interior_loading.md.
+    let mut interior_parts: Vec<&str> = vec![
+        "pmcoutpost_interior_hq",       // the ornate main hall
+        "pmcoutpost_interior_sickbay",  // sickbay
+        "pmcoutpost_interior_scaffold", // scaffolding
+        "proutpost_interior_job",       // base job room
     ];
     if recruits.mec {
-        interior_actor_meshes.push(("recruitmechanic", 0xE8EB75D7, 0x01, ACTOR_ORIGIN));
+        interior_parts.push("pmcoutpost_interior_recruitmechanic");
     }
     if recruits.jet {
-        interior_actor_meshes.push(("recruitjet", 0x86D7CF92, 0x01, ACTOR_ORIGIN));
+        interior_parts.push("pmcoutpost_interior_recruitjet");
     }
     if recruits.hel {
-        // recruitheli mesh (0x634F1F65) IS in vz.wad — 10,247v — buildable via load_model_by_hash even
-        // though it's not registered as a primary model ASET (the old "absent" note was wrong; found
-        // via --find-mesh scanning all WADs).
-        interior_actor_meshes.push(("recruitheli", 0x634F1F65, 0x01, ACTOR_ORIGIN));
+        interior_parts.push("pmcoutpost_interior_recruitheli");
     }
-    for &(name, hash, state_bit, pos) in &interior_actor_meshes {
-        if let Some((m, bmin, bmax)) = load_model_by_hash_state(w, hash, state_bit) {
+    for name in &interior_parts {
+        let hash = pandemic_hash_m2(name);
+        if let Some((m, bmin, bmax)) = load_model_by_hash_state(w, hash, 0x01) {
             for c in 0..3 {
-                wmin[c] = wmin[c].min(pos[c] + bmin[c]);
-                wmax[c] = wmax[c].max(pos[c] + bmax[c]);
+                wmin[c] = wmin[c].min(ACTOR_ORIGIN[c] + bmin[c]);
+                wmax[c] = wmax[c].max(ACTOR_ORIGIN[c] + bmax[c]);
             }
             tv += m.verts.len();
             tt += m.indices.len() / 3;
             *distinct.entry(hash).or_insert(0) += 1;
             println!(
-                "[interior] actor mesh '{name}' 0x{hash:08X}: {} v / {} t @ ({:.2},{:.2},{:.2}); FLOOR Y {:.2}",
-                m.verts.len(), m.indices.len() / 3, pos[0], pos[1], pos[2], pos[1] + bmin[1]
+                "[interior] actor part '{name}' 0x{hash:08X}: {} v / {} t @ origin; FLOOR Y {:.2}",
+                m.verts.len(), m.indices.len() / 3, ACTOR_ORIGIN[1] + bmin[1]
             );
-            out.push((m, pos, IDENT_QUAT));
+            out.push((m, ACTOR_ORIGIN, IDENT_QUAT));
         } else {
-            println!("[interior] actor mesh '{name}' 0x{hash:08X}: NOT FOUND in vz.wad");
+            println!("[interior] actor part '{name}' 0x{hash:08X}: NOT FOUND in vz.wad");
         }
     }
 

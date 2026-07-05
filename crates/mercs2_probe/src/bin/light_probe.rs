@@ -29,6 +29,66 @@ fn dump(tag: &str, block: &[u8]) {
 
 fn main() {
     let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    {
+        // The WAD's OWN name->block index (PTHS): enumerate every interior/hq/vz_state block path so we
+        // can drive the interior loader from data instead of hardcoded block numbers.
+        let paths = wad::block_paths(&w);
+        println!("== interior/hq/vz_state block PATHS ({} total blocks) ==", paths.len());
+        for (i, p) in paths.iter().enumerate() {
+            let pl = p.to_ascii_lowercase();
+            if pl.contains("animgroup") || pl.contains("charactername") {
+                println!("   block {i:5}: {p}");
+            }
+        }
+    }
+    // Which merc animgroup contains each of the 3 CURRENT player clips? (are they Mattias's or Jenn's?)
+    for (label, blk) in [("mattias", 3154u16), ("chris", 3278), ("jennifer", 3362)] {
+        if let Ok(dec) = wad::decompress_block_index(&mut w, blk) {
+            print!("[animgroup {label:<9} blk{blk}] current player clips present:");
+            for (cn, ch) in [("idle", 0x24F8C8E6u32), ("walk", 0x53682784), ("run", 0x867B166D)] {
+                let n = ch.to_le_bytes();
+                let cnt = dec.windows(4).filter(|w| *w == n).count();
+                if cnt > 0 {
+                    print!(" {cn}(0x{ch:08X} x{cnt})");
+                }
+            }
+            println!();
+        }
+    }
+    // Find MATTIAS's idle: Jennifer's idle is 0x24F8C8E6; match it to Mattias's block 3154 by parallel
+    // clip index AND by profile (same transform-track count + duration).
+    {
+        let jen = wad::decompress_block_index(&mut w, 3362)
+            .ok()
+            .and_then(|b| mercs2_formats::animgroup::parse_animgroup(&b).ok());
+        let mat = wad::decompress_block_index(&mut w, 3154)
+            .ok()
+            .and_then(|b| mercs2_formats::animgroup::parse_animgroup(&b).ok());
+        if let (Some(jen), Some(mat)) = (jen, mat) {
+            println!("[animset] jennifer clips={} mattias clips={}", jen.clips.len(), mat.clips.len());
+            if let Some((ji, jc)) = jen.clips.iter().enumerate().find(|(_, c)| c.name_hash == 0x24F8C8E6) {
+                println!(
+                    "[animset] Jennifer idle 0x24F8C8E6 @ index {ji}: {}tt {:.2}s {} poses",
+                    jc.num_transform_tracks, jc.duration, jc.num_poses
+                );
+                if let Some(mc) = mat.clips.get(ji) {
+                    println!(
+                        "[animset] Mattias clip @ same index {ji}: 0x{:08X} {}tt {:.2}s {} poses (parallel-index idle candidate)",
+                        mc.name_hash, mc.num_transform_tracks, mc.duration, mc.num_poses
+                    );
+                }
+                // No role in the entry table (type_hash = Havok class, field_c = 0). The idle is a LONG,
+                // low-motion clip — list Mattias's clips by duration; the longest non-64-track-locomotion
+                // one is the idle candidate (verify against the live Mattias).
+                let mut byd: Vec<&_> = mat.clips.iter().collect();
+                byd.sort_by(|a, b| b.duration.total_cmp(&a.duration));
+                println!("[animset] Mattias's 12 longest clips (idle candidate = longest):");
+                for c in byd.iter().take(12) {
+                    println!("   0x{:08X}  {}tt  {:.2}s  {} poses", c.name_hash, c.num_transform_tracks, c.duration, c.num_poses);
+                }
+            }
+        }
+    }
     let (_low, ls) = worldutil::find_terrain_blocks(&mut w).expect("layers_static");
     dump("layers_static", &ls);
     for blk in [667u16, 461, 291, 703, 711] {
@@ -117,6 +177,43 @@ fn main() {
             Err(_) => "MISS (no container)".to_string(),
         };
         println!("[interior-mesh] {name:<38} 0x{h:08X} -> {status}");
+    }
+
+    // Does the interior TEMPLATE / actor container ENUMERATE its structure meshes (the data-driven part
+    // list)? Extract each template and search its bytes for the structure mesh hashes.
+    {
+        let struct_hashes = [
+            ("hall", 0x39AF17DCu32),
+            ("sickbay", 0x757EAE95),
+            ("scaffold", 0x1FBFBB4B),
+            ("stockpile_nameH", 0x2258BD11),
+            ("recruitmech", 0xE8EB75D7),
+            ("recruitjet", 0x86D7CF92),
+            ("recruitheli", 0x634F1F65),
+        ];
+        for (label, th) in [
+            ("HqInterior", mercs2_formats::hash::pandemic_hash_m2("HqInterior")),
+            ("_proutpost_interior_job", 0x39394E37u32),
+            ("proutpost_interior_job", mercs2_formats::hash::pandemic_hash_m2("proutpost_interior_job")),
+            ("AllHq_Interior", 0xC8EF281E),
+        ] {
+            match wad::extract_container(&mut w, th) {
+                Ok(c) => {
+                    print!("[template {label:<24} 0x{th:08X}] {} bytes; references:", c.len());
+                    let mut any = false;
+                    for (nm, sh) in struct_hashes {
+                        let n = sh.to_le_bytes();
+                        let cnt = c.windows(4).filter(|w| *w == n).count();
+                        if cnt > 0 {
+                            print!(" {nm}(x{cnt})");
+                            any = true;
+                        }
+                    }
+                    println!("{}", if any { "" } else { " NONE" });
+                }
+                Err(e) => println!("[template {label:<24} 0x{th:08X}] extract FAIL: {e}"),
+            }
+        }
     }
 
     // ARCHITECTURE: does the base layer block 667 REFERENCE the structure mesh hashes (data-driven), or
