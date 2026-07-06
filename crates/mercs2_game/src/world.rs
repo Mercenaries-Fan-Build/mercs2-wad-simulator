@@ -167,6 +167,38 @@ const EXTERIOR_PROP_CAP: usize = 200;
 
 /// The `--world` loading work (WAD open, terrain merge, heightmap, player avatar + clips,
 /// optional c3 cells + placement markers) — the former inline `run_world` body plus placements.
+/// Resolve a character's primary idle clip through the resident AnimationLookup
+/// (data-driven: `ActionTable → Handle → AnimationLookup[CharacterName] → ASTO → clip`,
+/// see `docs/modernization/human_animation_selection.md`). Tries the base resident
+/// block first, then any `resident`-named block; `None` if the tables aren't present.
+fn resolve_player_idle(w: &mut wad::Wad, character: u32) -> Option<u32> {
+    use mercs2_formats::anim_select::AnimSelector;
+    if let Ok(dec) = wad::decompress_block_index(w, 3185) {
+        if let Some(c) = AnimSelector::from_resident_block(&dec).and_then(|s| s.primary_idle(character)) {
+            return Some(c);
+        }
+    }
+    // Collect resident-named block indices first (ends the block_paths borrow before we
+    // take `w` mutably to decompress).
+    let resident: Vec<usize> = {
+        let paths = wad::block_paths(w);
+        paths
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| *i != 3185 && p.to_ascii_lowercase().contains("resident"))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    for i in resident {
+        if let Ok(dec) = wad::decompress_block_index(w, i as u16) {
+            if let Some(c) = AnimSelector::from_resident_block(&dec).and_then(|s| s.primary_idle(character)) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
 fn load_world_data(
     wadpath: &str,
     load_cells: bool,
@@ -175,6 +207,7 @@ fn load_world_data(
     load_props: bool,
     recruits: crate::pmc::RecruitUnlocks,
     stockpile: &crate::pmc::Stockpile,
+    player_models: &[String],
     progress: &LoadProgress,
 ) -> Result<WorldData, String> {
     let mut w = wad::open(wadpath)?;
@@ -222,19 +255,53 @@ fn load_world_data(
     };
     progress.step("vertices");
 
-    // Player avatar (Mattias) for the third-person view, at RAW model scale (identity fit) so it
-    // sits in world metres alongside the terrain rather than fit-normalised. Idle clip 0x24F8C8E6
-    // plus the walk clip 0x53682784 for WASD locomotion.
+    // Player avatar for the third-person view, at RAW model scale (identity fit) so it sits in
+    // world metres alongside the terrain rather than fit-normalised. The MODEL comes from the
+    // SAVE (hero + wardrobe outfit, `crate::hero::player_model_candidates`) — candidates are
+    // tried in order (saved outfit → hero Original → proven-good fallback).
     // NOTE: world scale and facing are first-pass and not yet calibrated.
     // animate=false: skip load_from_wad's own animgroup scan — all three clips (idle/walk/run)
     // come from ONE cached scan below instead of three full-archive passes (~20 s -> ~7 s load).
-    let player = match load_from_wad(wadpath, Some("0xA3C1FABC".to_string()), None, false, None) {
+    //
+    // Per-character idle, DATA-DRIVEN (was hardcoded to Jennifer's `0x24F8C8E6` for everyone —
+    // the hip-swing that warped Mattias). The merc identity is the hero's base model, always in
+    // the candidate list (`pmc_hum_{mattias,chris,jen}`). Resolve their real idle through the
+    // resident AnimationLookup; fall back to the validated per-merc hash, then the old constant.
+    let merc = if player_models.iter().any(|m| m.contains("_jen")) {
+        "jennifer"
+    } else if player_models.iter().any(|m| m.contains("_chris")) {
+        "chris"
+    } else {
+        "mattias"
+    };
+    let character = mercs2_formats::anim_select::AnimSelector::character_name(merc);
+    let idle_clip = resolve_player_idle(&mut w, character)
+        .or_else(|| mercs2_formats::anim_select::fallback_idle(character))
+        .unwrap_or(0x24F8_C8E6);
+    println!("[world] player merc '{merc}' (CharacterName 0x{character:08X}) → idle clip 0x{idle_clip:08X}");
+
+    let mut player_loaded = None;
+    for name in player_models {
+        let hash = name
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(name));
+        match load_from_wad(wadpath, Some(format!("0x{hash:08X}")), None, false, None) {
+            Ok(ok) => {
+                println!("[world] player model: {name} (0x{hash:08X})");
+                player_loaded = Some(ok);
+                break;
+            }
+            Err(e) => eprintln!("[world] player model {name} (0x{hash:08X}) failed ({e}); trying next"),
+        }
+    }
+    let player = match player_loaded.ok_or_else(|| "no player-model candidate built".to_string()) {
         Ok((v, i, d, t, mut s, _c, h, _)) => {
             progress.step("player");
             s.center = [0.0, 0.0, 0.0];
             s.scale = 1.0;
             let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
-            let wanted = [0x24F8_C8E6u32, 0x5368_2784, 0x867B_166D]; // idle, walk, run
+            let wanted = [idle_clip, 0x5368_2784, 0x867B_166D]; // idle (per-merc, data-driven), walk, run
             let names = ["idle", "walk", "run"];
             let mut clips: Vec<ClipAnim> = Vec::new();
             for (found, (&h, name)) in load_clips_for_rig(&mut w, &hier, &wanted)
@@ -255,7 +322,7 @@ fn load_world_data(
             Some(LoadedModel { hash: h, verts: v, indices: i, draws: d, textures: t, skin: s, clips })
         }
         Err(e) => {
-            eprintln!("[world] player avatar 0xA3C1FABC load failed: {e}");
+            eprintln!("[world] player avatar load failed: {e}");
             progress.step("player");
             None
         }
@@ -679,6 +746,11 @@ fn tri_height_at(x: f32, z: f32, vx: [f32; 3], vz: [f32; 3], vy: [f32; 3]) -> Op
 ///
 /// The window + `Scene` open IMMEDIATELY with an animated loading spinner; `load_world_data`
 /// runs on a background thread and the loaded world is wired in when its result arrives.
+///
+/// `menu`: `Some` = open on the SHELL MENU (main menu + save browser, `crate::menu`) and only
+/// start the world load when the player picks a save / new game — the retail boot flow. The
+/// `recruits`/`stockpile` arguments are then the NEW-GAME defaults, overridden by the selected
+/// save. `None` = boot straight into the load (explicit `.profile` CLI arg / dev flows).
 pub async fn run_scene_world_loading(
     wadpath: String,
     start_tps: bool,
@@ -689,6 +761,8 @@ pub async fn run_scene_world_loading(
     interior_orbit: bool,
     recruits: crate::pmc::RecruitUnlocks,
     stockpile: crate::pmc::Stockpile,
+    player_models: Vec<String>,
+    menu: Option<crate::menu::Menu>,
 ) {
     use mercs2_engine::scene::{AssetStore, ModelAnim, Scene};
     use mercs2_core::glam::{Mat4, Quat, Vec3};
@@ -730,14 +804,20 @@ pub async fn run_scene_world_loading(
             .expect("window"),
     );
     // Mouse-look: grab + hide the cursor on the world window (Confined preferred, Locked
-    // fallback). Arrow keys stay as a fallback steer; Esc still exits.
-    if let Err(e) = window
-        .set_cursor_grab(CursorGrabMode::Confined)
-        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
-    {
-        eprintln!("[world] cursor grab unavailable ({e}); arrow keys still steer");
+    // fallback). Arrow keys stay as a fallback steer; Esc still exits. While the shell menu is
+    // up the cursor stays free/visible — the grab happens when the world boot starts.
+    let grab_cursor = |window: &winit::window::Window| {
+        if let Err(e) = window
+            .set_cursor_grab(CursorGrabMode::Confined)
+            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
+        {
+            eprintln!("[world] cursor grab unavailable ({e}); arrow keys still steer");
+        }
+        window.set_cursor_visible(false);
+    };
+    if menu.is_none() {
+        grab_cursor(&window);
     }
-    window.set_cursor_visible(false);
     let mut scene = Scene::new(window.clone()).await;
     // Placeholder distance fog + sky (stand-in for PgSky/PgSun/PgCloud). Tunables: warm-haze
     // color, density 0.00016 (~30% haze at 2.5 km, ~50% at 4.5 km — depth cue at ground level
@@ -768,18 +848,32 @@ pub async fn run_scene_world_loading(
     let mut world = World::new();
 
     // Background loader: all WAD/terrain/player parsing happens off the render thread; the
-    // result lands on this channel and is wired into the scene/world on arrival.
+    // result lands on this channel and is wired into the scene/world on arrival. With the shell
+    // menu up, the spawn is DEFERRED until the player picks a save (the retail flow); direct
+    // boots spawn it immediately as before.
     let (tx, rx) = std::sync::mpsc::channel::<Result<WorldData, String>>();
     let progress = Arc::new(LoadProgress::new(LOAD_STAGES));
-    let loader_progress = progress.clone();
-    std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
-        let r = load_world_data(&wadpath, load_cells, load_placements, spawn_interior, load_props, recruits, &stockpile, &loader_progress);
-        if r.is_ok() {
-            println!("[load] done in {:.1}s", t0.elapsed().as_secs_f64());
+    let spawn_loader = {
+        let progress = progress.clone();
+        let wadpath = wadpath.clone();
+        move |recruits: crate::pmc::RecruitUnlocks, stockpile: crate::pmc::Stockpile, player_models: Vec<String>| {
+            let tx = tx.clone();
+            let progress = progress.clone();
+            let wadpath = wadpath.clone();
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let r = load_world_data(&wadpath, load_cells, load_placements, spawn_interior, load_props, recruits, &stockpile, &player_models, &progress);
+                if r.is_ok() {
+                    println!("[load] done in {:.1}s", t0.elapsed().as_secs_f64());
+                }
+                let _ = tx.send(r);
+            });
         }
-        let _ = tx.send(r);
-    });
+    };
+    let mut menu = menu;
+    if menu.is_none() {
+        spawn_loader(recruits.clone(), stockpile.clone(), player_models.clone());
+    }
 
     // World-dependent state, wired in when the loader finishes (defaults until then).
     let mut hmap: Option<HeightMap> = None;
@@ -808,6 +902,9 @@ pub async fn run_scene_world_loading(
     let mut player_speed = 0.0f32; // eased ground speed (m/s)
     let mut player_move_dir = Vec3::new(0.0, 0.0, 1.0); // last input direction (kept while decelerating)
     let mut has_run = false;
+    // The per-merc idle clip hash (data-driven in load_world_data), captured when the player
+    // spawns; drives the locomotion state machine's idle state. CLIP_IDLE is only the fallback.
+    let mut player_idle = CLIP_IDLE;
     let (mut dur_walk, mut dur_run) = (1.0f32, 1.0f32);
     // Ground speeds are DERIVED from each clip's baked root stride at load (see below) so the model
     // advances exactly as fast as its feet — WALK_SPEED/RUN_SPEED are only the fallback if a clip has
@@ -887,7 +984,18 @@ pub async fn run_scene_world_loading(
     let mut gamepad = mercs2_engine::input::Gamepad::new();
     use mercs2_engine::input::Action;
     let mut loading = true;
-    let load_start = std::time::Instant::now();
+    let mut load_start = std::time::Instant::now();
+    // Shell-menu bookkeeping: a selection made in a keyboard/gamepad handler is parked here and
+    // executed at the top of the next redraw (ONE boot site). Gamepad nav is edge-detected
+    // against the previous frame's held-state.
+    let mut pending_boot: Option<Option<std::path::PathBuf>> = None;
+    let mut menu_gp_prev = [false; 4]; // up, down, select, back
+    let menu_open = std::time::Instant::now();
+    // Ignore menu activations for a short arm delay after opening: the keystroke that launched
+    // the exe from a terminal (locally or Shadow-streamed) can land on the freshly-focused window
+    // as a REAL keydown (winit's `is_synthetic` does not flag it) and would instantly select
+    // "Continue". Observed on the Shadow PC; retail shells latch input the same way.
+    const MENU_ARM_DELAY: f32 = 0.4;
     // Bar fill shown on the loading screen: eased toward the loader's staged fraction each
     // frame so stage completions animate instead of jumping.
     let mut bar_shown = 0.0f32;
@@ -909,8 +1017,37 @@ pub async fn run_scene_world_loading(
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::KeyboardInput {
                     event: KeyEvent { physical_key: PhysicalKey::Code(code), state, .. },
+                    is_synthetic,
                     ..
-                } => match (code, state) {
+                } => {
+                    // Shell menu owns the keyboard while it is up (retail shell state machine).
+                    // Synthetic presses (keys already down when the window gains focus — e.g. the
+                    // terminal Enter that launched the exe) must not activate a menu row.
+                    if let Some(m) = menu.as_mut() {
+                        if state == ElementState::Pressed
+                            && !is_synthetic
+                            && menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY
+                        {
+                            let nav = match code {
+                                KeyCode::ArrowUp | KeyCode::KeyW => Some(crate::menu::Nav::Up),
+                                KeyCode::ArrowDown | KeyCode::KeyS => Some(crate::menu::Nav::Down),
+                                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                                    Some(crate::menu::Nav::Select)
+                                }
+                                KeyCode::Escape | KeyCode::Backspace => Some(crate::menu::Nav::Back),
+                                _ => None,
+                            };
+                            if let Some(nav) = nav {
+                                match m.nav(nav) {
+                                    crate::menu::MenuAction::Boot(sel) => pending_boot = Some(sel),
+                                    crate::menu::MenuAction::Quit => elwt.exit(),
+                                    crate::menu::MenuAction::None => {}
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    match (code, state) {
                     (KeyCode::Escape, _) => elwt.exit(),
                     (KeyCode::Tab, ElementState::Pressed) => {
                         mode = if mode == CamMode::Free { CamMode::ThirdPerson } else { CamMode::Free };
@@ -921,7 +1058,8 @@ pub async fn run_scene_world_loading(
                     (c, ElementState::Released) => {
                         held.remove(&c);
                     }
-                },
+                    }
+                }
                 WindowEvent::MouseInput { button, state, .. } => {
                     if state == ElementState::Pressed {
                         mouse_btns.insert(button);
@@ -933,6 +1071,10 @@ pub async fn run_scene_world_loading(
                 // Cursor-position look: delta from window centre, then recentre. Works on
                 // absolute-input setups (streamed/cloud) where raw deltas are meaningless.
                 WindowEvent::CursorMoved { position, .. } => {
+                    // Shell menu: the cursor is free/visible — no look-accumulate, no recentre.
+                    if menu.is_some() {
+                        return;
+                    }
                     let (cx, cy) = (scene.size.width as f64 / 2.0, scene.size.height as f64 / 2.0);
                     mouse_acc.0 += (position.x - cx) as f32;
                     mouse_acc.1 += (position.y - cy) as f32;
@@ -941,6 +1083,60 @@ pub async fn run_scene_world_loading(
                         .set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
                 }
                 WindowEvent::RedrawRequested => {
+                    // ── Shell-menu phase (retail boot flow): draw the menu until a selection ──
+                    if menu.is_some() {
+                        // Execute a parked selection: resolve the save → boot config, start the
+                        // world load, hand the window over to the loading screen.
+                        if let Some(sel) = pending_boot.take() {
+                            let (r, sp, models, label) = boot_config_from(sel.as_deref());
+                            println!("[shell] boot: {label}");
+                            spawn_loader(r, sp, models);
+                            grab_cursor(&scene.window);
+                            load_start = std::time::Instant::now();
+                            menu = None;
+                        } else {
+                            let m = menu.as_mut().unwrap();
+                            // Gamepad nav, edge-detected: dpad/stick up/down, A/Start = select,
+                            // B = back (ini [Controller] Up/Down/Jump/Start/Crouch bindings).
+                            gamepad.update();
+                            let inp = mercs2_engine::input::Input {
+                                bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad,
+                            };
+                            let (_, my) = inp.move_vec();
+                            let now = [
+                                inp.held(Action::SelectUp) || my > 0.5,
+                                inp.held(Action::SelectDown) || my < -0.5,
+                                inp.held(Action::Jump) || inp.held(Action::Start),
+                                inp.held(Action::Crouch),
+                            ];
+                            let navs = [
+                                crate::menu::Nav::Up,
+                                crate::menu::Nav::Down,
+                                crate::menu::Nav::Select,
+                                crate::menu::Nav::Back,
+                            ];
+                            let armed = menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY;
+                            for i in 0..4 {
+                                if armed && now[i] && !menu_gp_prev[i] {
+                                    match m.nav(navs[i]) {
+                                        crate::menu::MenuAction::Boot(sel) => pending_boot = Some(sel),
+                                        crate::menu::MenuAction::Quit => elwt.exit(),
+                                        crate::menu::MenuAction::None => {}
+                                    }
+                                }
+                            }
+                            menu_gp_prev = now;
+                            let t = menu_open.elapsed().as_secs_f32();
+                            m.draw(&mut scene, t);
+                            match scene.render_menu(t) {
+                                Ok(()) => {}
+                                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
+                                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                                Err(e) => eprintln!("surface error: {e:?}"),
+                            }
+                        }
+                        return;
+                    }
                     // Loading phase: animate the spinner until the background loader delivers,
                     // then wire the world in (GPU uploads + entity spawns) and start playing.
                     if loading {
@@ -1088,6 +1284,11 @@ pub async fn run_scene_world_loading(
                                 // Player avatar (optional): near map centre, feet snapped to the terrain heightmap.
                                 if let Some(p) = data.player {
                                     has_run = p.clips.iter().any(|c| c.name_hash == CLIP_RUN);
+                                    // The idle clip = the loaded player clip that isn't walk/run
+                                    // (idle was resolved per-merc in load_world_data).
+                                    player_idle = p.clips.iter().map(|c| c.name_hash)
+                                        .find(|h| *h != CLIP_WALK && *h != CLIP_RUN)
+                                        .unwrap_or(CLIP_IDLE);
                                     for c in &p.clips {
                                         let d = c.clip.duration.max(1e-3);
                                         // Authentic ground speed = the clip's baked root stride / duration.
@@ -1129,7 +1330,7 @@ pub async fn run_scene_world_loading(
                                         clips: p.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
                                     });
                                     let anim = if playing {
-                                        AnimState::playing(CLIP_IDLE)
+                                        AnimState::playing(player_idle)
                                     } else {
                                         AnimState::default()
                                     };
@@ -1308,7 +1509,7 @@ pub async fn run_scene_world_loading(
                                     let want = if mv != Vec3::ZERO {
                                         if inp.held(Action::Sprint) && has_run { CLIP_RUN } else { CLIP_WALK }
                                     } else {
-                                        CLIP_IDLE
+                                        player_idle
                                     };
                                     if a.clip != want {
                                         a.prev_clip = a.clip;
@@ -1324,7 +1525,7 @@ pub async fn run_scene_world_loading(
                                         a.clip = want;
                                     }
                                     // Foot-slide reduction: playback rate tracks the eased speed.
-                                    a.speed = if FOOT_SYNC && want != CLIP_IDLE && target_sp > 0.0 {
+                                    a.speed = if FOOT_SYNC && want != player_idle && target_sp > 0.0 {
                                         (player_speed / target_sp).clamp(0.8, 1.2)
                                     } else {
                                         1.0
@@ -1417,6 +1618,52 @@ pub async fn run_scene_world_loading(
             _ => {}
         })
         .expect("event loop run");
+}
+
+/// Resolve a shell-menu selection into the boot configuration. `Some(path)` = parse that save
+/// (recruit unlocks from the save's unlocked starters, stockpile cash from the header, and the
+/// PLAYER MODEL from the saved hero + wardrobe outfit) — the same derivation `main.rs` uses for
+/// direct boots. `None`, or an unreadable save, = new-game defaults (Mattias, Original outfit).
+fn boot_config_from(
+    sel: Option<&std::path::Path>,
+) -> (crate::pmc::RecruitUnlocks, crate::pmc::Stockpile, Vec<String>, String) {
+    // Retail new game = Mattias, upgrade tier 0, wardrobe untouched → his base/default skin
+    // (matches the user's observed fresh retail saves).
+    let new_game_models = || crate::hero::player_model_candidates(1, 0, 0);
+    let Some(path) = sel else {
+        return (Default::default(), Default::default(), new_game_models(), "new game".into());
+    };
+    let parsed = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| mercs2_formats::save::parse(&b));
+    match parsed {
+        Ok(prof) => {
+            let recruits = prof
+                .save_state()
+                .ok()
+                .map(|s| crate::pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
+                .unwrap_or_default();
+            let stockpile = crate::pmc::Stockpile { cash: prof.cash as i64, ..Default::default() };
+            let hero_idx = prof.character_index; // header @0x4D, 1-based
+            // Costume file byte not yet located (0 in every observed save — wardrobe unused);
+            // the look is the upgrade tier's template model until then.
+            let models = crate::hero::player_model_candidates(hero_idx, prof.upgrade_index, 0);
+            let label = format!(
+                "{} ({}, ${}, {}s played) as {} [{}]",
+                prof.save_name(),
+                prof.active_contract(),
+                prof.cash,
+                prof.play_time_seconds,
+                crate::hero::hero(hero_idx).display,
+                crate::hero::look_label(hero_idx, prof.upgrade_index, 0),
+            );
+            (recruits, stockpile, models, label)
+        }
+        Err(e) => {
+            eprintln!("[shell] save {} unreadable ({e}) — booting new game", path.display());
+            (Default::default(), Default::default(), new_game_models(), "new game (save unreadable)".into())
+        }
+    }
 }
 
 
