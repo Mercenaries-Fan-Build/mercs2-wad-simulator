@@ -20,6 +20,13 @@ glam = "0.27" # matrix/vector math for the camera (left-handed Y-up)
 # gamepad input — pure-Rust, cross-platform (Linux evdev / Windows XInput+DInput / macOS), works on
 # SteamOS/Steam Deck via evdev + bundles SDL_GameControllerDB for consistent layouts. No C linking.
 gilrs = "0.10"
+# 8x8 public-domain bitmap font (pure const data, no_std) — the guaranteed-present FALLBACK glyph
+# source for the engine's 2D UI/text pass (shell menu, debug HUD).
+font8x8 = "0.3"
+# pure-Rust TTF rasterizer — bakes a system monospace font (Cascadia/Consolas/DejaVu…) into an
+# anti-aliased glyph atlas at UiPass creation, replacing the blocky 8x8 bitmap when available.
+# Same UiPass API/layout; falls back to font8x8 when no system font is found. No C linking.
+fontdue = "0.9"
 # asset layer — the reimplementation consumes the original game's data through this crate.
 mercs2_formats = { path = "../mercs2_formats" }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).

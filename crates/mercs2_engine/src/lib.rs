@@ -23,5 +23,6 @@ pub mod pose;
 pub mod post;
 pub mod render;
 pub mod scene;
+pub mod ui;
 pub mod wad;
 pub mod worldutil;

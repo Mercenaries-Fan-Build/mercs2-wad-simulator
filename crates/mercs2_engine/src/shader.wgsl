@@ -173,7 +173,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // plus the sun key light (when the scene enables it) as its direct term.
     // Baked vertex lighting reads bright (hall mean ~0.79); scale the prelit baked term down so
     // interiors aren't washed out. (0.7 = baked-lighting brightness knob.)
-    let baked_scale = 0.7;
+    let baked_scale = 0.21;
     let ambient_floor = mix(albedo * ambient, albedo * baked_scale, prelit);
     var direct = albedo * (sun_i * sun_ndl) * (1.0 - prelit);
     if (sun_ndl > 0.0 && prelit < 0.5 && sun_i > 0.0) {

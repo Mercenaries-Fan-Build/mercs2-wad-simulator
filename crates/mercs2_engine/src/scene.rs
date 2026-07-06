@@ -132,6 +132,9 @@ pub struct Scene {
     /// (white fallback + aspect 0.0 = "no art", the shader keeps the plain clear color).
     loading_art_bind: wgpu::BindGroup,
     loading_art_aspect: f32,
+    /// 2D UI overlay (quads + bitmap text, `crate::ui`). Staged via `ui_rect`/`ui_text`, drawn on
+    /// top of the shell/loading pass each frame (`render_loading`/`render_menu`). Empty = zero cost.
+    ui: crate::ui::UiPass,
     /// Billboard particle / FX runtime (registry §7). Drawn AFTER the opaque forward pass.
     /// Empty by default (zero cost) until an effect is started via `fx_start*`.
     particles: crate::particles::ParticleSystem,
@@ -566,10 +569,10 @@ impl Scene {
                 count: None,
             }],
         });
-        // vec4 params: (time, aspect, art aspect, progress) = 16 B.
+        // 2x vec4 params: (time, aspect, art aspect, progress) + (mode, reserved…) = 32 B.
         let loading_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("loading uniform"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -620,6 +623,7 @@ impl Scene {
             multiview: None,
         });
 
+        let ui = crate::ui::UiPass::new(&device, &queue, config.format);
         let mut particles = crate::particles::ParticleSystem::new(&device, config.format, DEPTH_FORMAT);
         // Opt-in visible smoke test: `MERCS2_FX_TEST=1` starts a demo smoke plume + fire jet at the
         // origin (framed by the default orbit camera in `--ecs`/`--animate`). Off by default so no
@@ -676,9 +680,20 @@ impl Scene {
             loading_bind,
             loading_art_bind,
             loading_art_aspect: 0.0,
+            ui,
             particles,
             last_frame: std::time::Instant::now(),
         }
+    }
+
+    /// The wgpu device (external overlay layers create their GPU resources against it).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The swapchain color format (external overlay layers must render in it).
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
     }
 
     /// Provide the real loading-screen background (the shell.wad plate): upload + bind it and
@@ -692,19 +707,65 @@ impl Scene {
         }
     }
 
+    /// Stage a solid UI rect for this frame's shell/loading pass (surface px, origin top-left).
+    pub fn ui_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        self.ui.rect(x, y, w, h, color);
+    }
+
+    /// Stage a monospace UI text run (8px base glyph × `scale`). Returns the run's pixel width.
+    pub fn ui_text(&mut self, x: f32, y: f32, scale: f32, color: [f32; 4], s: &str) -> f32 {
+        self.ui.text(x, y, scale, color, s)
+    }
+
+    /// Render the shell MENU frame: the letterboxed plate dimmed (no spinner/bar — the WGSL menu
+    /// mode, progress = -1) + this frame's staged UI overlay (`ui_rect`/`ui_text`).
+    pub fn render_menu(&mut self, t: f32) -> Result<(), wgpu::SurfaceError> {
+        self.render_loading(t, -1.0)
+    }
+
     /// Render the loading screen alone (no world): the letterboxed shell.wad plate (if
     /// `set_loading_art` was called) over the same dark clear color + the spinner arc.
     /// `t` = seconds since the loading screen appeared (drives the rotation);
-    /// `progress` = 0..1 staged-load fraction (fills the plate's bar frame).
+    /// `progress` = 0..1 staged-load fraction (fills the plate's bar frame); any staged UI
+    /// overlay (`ui_rect`/`ui_text`) is drawn on top (that is how `render_menu` draws the menu).
     pub fn render_loading(&mut self, t: f32, progress: f32) -> Result<(), wgpu::SurfaceError> {
+        self.render_loading_mode(t, progress, 0.0, None)
+    }
+
+    /// [`Self::render_menu`] with the external overlay hook (see [`Self::render_with`]) — the
+    /// workshop's browse screen draws its GUI over the shell plate through this.
+    pub fn render_menu_with(&mut self, t: f32, overlay: Option<Overlay<'_>>) -> Result<(), wgpu::SurfaceError> {
+        self.render_loading_mode(t, -1.0, 0.0, overlay)
+    }
+
+    /// Render the BOOT loading screen: black background, the bound art drawn as a centred
+    /// pulsing icon (bind the Loading.wad `global_loading_skull`) under an animated gold→green
+    /// sheen, arc spinner + gold progress bar (see `loading.wgsl` mode 1). Staged UI overlay
+    /// draws on top exactly like `render_loading`.
+    pub fn render_boot(&mut self, t: f32, progress: f32) -> Result<(), wgpu::SurfaceError> {
+        self.render_loading_mode(t, progress, 1.0, None)
+    }
+
+    fn render_loading_mode(
+        &mut self,
+        t: f32,
+        progress: f32,
+        mode: f32,
+        overlay: Option<Overlay<'_>>,
+    ) -> Result<(), wgpu::SurfaceError> {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         self.queue.write_buffer(
             &self.loading_buf,
             0,
-            bytemuck::cast_slice(&[t, aspect, self.loading_art_aspect, progress]),
+            bytemuck::cast_slice(&[
+                t, aspect, self.loading_art_aspect, progress,
+                mode, 0.0, 0.0, 0.0,
+            ]),
         );
         let output = self.surface.get_current_texture()?;
         let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Upload this frame's staged UI overlay (menu text etc.) before the pass opens.
+        let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("loading frame") });
@@ -734,6 +795,10 @@ impl Scene {
             pass.set_bind_group(0, &self.loading_bind, &[]);
             pass.set_bind_group(1, &self.loading_art_bind, &[]);
             pass.draw(0..3, 0..1);
+            self.ui.draw(&mut pass, ui_count);
+        }
+        if let Some(f) = overlay {
+            f(&self.device, &self.queue, &mut encoder, &view_tex, [self.config.width, self.config.height]);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -1054,6 +1119,18 @@ impl Scene {
 
     /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
+        self.render_with(world, None)
+    }
+
+    /// [`Self::render`] with an external OVERLAY hook: called with the frame's device/queue/
+    /// encoder/swapchain-view just before submit+present, after every internal pass — external
+    /// GUI layers (the workshop's egui inspector) render through this without the engine knowing
+    /// about them. `None` = plain render.
+    pub fn render_with(
+        &mut self,
+        world: &World,
+        overlay: Option<Overlay<'_>>,
+    ) -> Result<(), wgpu::SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
         // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
         // particles), then reap finished emitters. No-op when no effect is active.
@@ -1313,11 +1390,46 @@ impl Scene {
             });
             self.particles.draw(&mut ppass);
         }
+        // 2D UI overlay (tool panels / debug HUD): draw any quads staged via `ui_rect`/`ui_text`
+        // over the final image — the same overlay pass the shell menu uses. No-op when nothing is
+        // staged, so the game render path is unchanged unless a caller stages UI this frame.
+        let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
+        if ui_count > 0 {
+            let mut upass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui overlay pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view_tex,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.ui.draw(&mut upass, ui_count);
+        }
+        if let Some(f) = overlay {
+            f(&self.device, &self.queue, &mut encoder, &view_tex, [self.config.width, self.config.height]);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
     }
 }
+
+/// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,
+/// swapchain view, surface size in pixels.
+pub type Overlay<'a> = &'a mut dyn FnMut(
+    &wgpu::Device,
+    &wgpu::Queue,
+    &mut wgpu::CommandEncoder,
+    &wgpu::TextureView,
+    [u32; 2],
+);
 
 /// Squared distance from a light's world position to `p` (light-selection sort key).
 fn light_dist2(l: &GpuLight, p: glam::Vec3) -> f32 {

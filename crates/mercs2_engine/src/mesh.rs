@@ -138,6 +138,27 @@ pub fn build_indexed_from_container(
     build_indexed_state(container, 0x01)
 }
 
+/// The distinct SEGM state/LOD tier bits a model container carries (always-on `mask == 0` groups
+/// excluded). `[0x01]` for single-tier props; `[0x01, 0x02, 0x04]`-style for LOD chains; the
+/// destructible "livedin" shells pair `0x04` (intact) with `0x03` (ruined). Each returned bit is
+/// a valid `active_bit` for [`build_indexed_state`].
+pub fn state_tiers(container: &[u8]) -> Vec<u8> {
+    let Ok(meshes) = read_model_meshes(container) else {
+        return Vec::new();
+    };
+    let mut bits: Vec<u8> = Vec::new();
+    for m in &meshes {
+        for b in 0..8u8 {
+            let bit = 1u8 << b;
+            if m.state_mask & bit != 0 && !bits.contains(&bit) {
+                bits.push(bit);
+            }
+        }
+    }
+    bits.sort_unstable();
+    bits
+}
+
 /// Build INDEXED triangle geometry from a model container (1d/1e): per-`PRMG` drawing group
 /// vertices + de-stripped triangles, accessory groups skipped, fitted to a common transform, plus
 /// per-group draw ranges tagged with the group's diffuse texture (via MTRL).
@@ -212,6 +233,9 @@ pub fn build_indexed_state(
     // Per kept group: world-space geometry (rigid MESH groups transformed by their bone's rest).
     struct Placed<'a> {
         m: &'a ModelMesh,
+        /// The bone this group was placed by (SEGM bone for MESH accessories, INDX node for
+        /// blend-less PRMG groups) — the whole group binds 100% to it.
+        placed_bone: Option<usize>,
         positions: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
         tangents: Vec<[f32; 4]>,
@@ -221,6 +245,13 @@ pub fn build_indexed_state(
     // 16 sub-tiles at ±150/±50) don't collapse onto each other; single-GEOM models get [0,0,0].
     let poffs = mercs2_formats::model_cubeize::prmg_geom_offsets(container);
 
+    // INDX: mesh-group → HIER node. Groups with NO blend data (no BLENDINDICES/WEIGHT elements
+    // in their decl — game data, not inference) are NODE-RIGID: authored node-local and placed
+    // by their INDX node's world-rest, exactly the "INDX-based direct mapping (authoritative)"
+    // rule the export codec (`ucfx_mesh_codec.py`) applies. Without it, vehicle panels/wheels
+    // render piled around the origin instead of assembled.
+    let indx = mercs2_formats::orchestrator::parse_indx(container);
+
     let mut skipped = 0usize;
     let mut kept: Vec<Placed> = Vec::new();
     for m in &meshes {
@@ -228,12 +259,18 @@ pub fn build_indexed_state(
             skipped += 1; // inactive LOD/state tier
             continue;
         }
-        // Rigid accessories are authored in bone-local space -> apply the bone's world-rest.
-        let bonemat = if m.rigid {
-            skel.as_ref().and_then(|s| s.bones.get(m.bone as usize)).map(|b| b.world)
+        // Placement bone: MESH rigid accessories use their SEGM bone; blend-less PRMG groups use
+        // their INDX node (see above). Skinned groups (blend data present) are model-space.
+        let placed_bone: Option<usize> = if m.rigid {
+            Some(m.bone as usize)
+        } else if m.joints.is_empty() {
+            indx.get(m.group_index).copied()
         } else {
             None
         };
+        let bonemat = placed_bone
+            .and_then(|b| skel.as_ref().and_then(|s| s.bones.get(b)))
+            .map(|b| b.world);
         let (mut positions, normals, tangents) = if let Some(w) = bonemat {
             (
                 m.positions.iter().map(|&p| transform_point(&w, p)).collect(),
@@ -259,7 +296,7 @@ pub fn build_indexed_state(
                 }
             }
         }
-        kept.push(Placed { m, positions, normals, tangents });
+        kept.push(Placed { m, placed_bone, positions, normals, tangents });
     }
     if kept.is_empty() {
         return Err("model container had no placed drawing groups".into());
@@ -289,12 +326,13 @@ pub fn build_indexed_state(
     for pl in &kept {
         let m = pl.m;
         let base = verts.len() as u32;
-        // Rigid accessories are pre-transformed into bind space above; bind them 100% to their
-        // attach bone so the same LBS palette carries them (and follows the bone under animation).
-        // Skinned bodies keep their extracted BLENDINDICES/BLENDWEIGHT. Positions stay in model
-        // space — the fit (center/scale) is applied by the camera MVP so skinning is model-space.
+        // Placed groups (MESH accessories + blend-less node-rigid PRMG groups) are
+        // pre-transformed into bind space above; bind them 100% to their placement bone so the
+        // same LBS palette carries them (and follows the bone under animation). Skinned bodies
+        // keep their extracted BLENDINDICES/BLENDWEIGHT. Positions stay in model space — the fit
+        // (center/scale) is applied by the camera MVP so skinning is model-space.
         let rigid_bind: Option<([u8; 4], [u8; 4])> =
-            m.rigid.then_some(([m.bone as u8, 0, 0, 0], [255, 0, 0, 0]));
+            pl.placed_bone.map(|b| ([b as u8, 0, 0, 0], [255, 0, 0, 0]));
         for (vi, p) in pl.positions.iter().enumerate() {
             let (joints, weights) = match rigid_bind {
                 Some(jw) => jw,
