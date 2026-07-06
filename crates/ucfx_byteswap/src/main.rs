@@ -50,6 +50,21 @@ struct Cli {
     /// Faithful Rust replacement for dlc_port `_recompute_aset_sub_entries`.
     #[arg(long)]
     aset_recompute: bool,
+
+    /// Untile a raw tiled Xbox DXT BODY file into the PC-linear mip chain.
+    /// Requires --tex-w, --tex-h, --tex-fourcc, --tex-mips and --output.
+    #[arg(long)]
+    untile_tex: bool,
+
+    #[arg(long)]
+    tex_w: Option<usize>,
+    #[arg(long)]
+    tex_h: Option<usize>,
+    /// FourCC, e.g. DXT1 or DXT5.
+    #[arg(long)]
+    tex_fourcc: Option<String>,
+    #[arg(long)]
+    tex_mips: Option<usize>,
 }
 
 /// Handle `--aset-recompute`: read the per-block protocol from `input`, run the
@@ -139,6 +154,34 @@ fn main() {
 
     if cli.aset_recompute {
         std::process::exit(run_aset_recompute(&input_data));
+    }
+
+    if cli.untile_tex {
+        let w = cli.tex_w.expect("--tex-w required");
+        let h = cli.tex_h.expect("--tex-h required");
+        let fcc_s = cli.tex_fourcc.expect("--tex-fourcc required");
+        let mips = cli.tex_mips.expect("--tex-mips required");
+        let fb = fcc_s.as_bytes();
+        if fb.len() != 4 {
+            eprintln!("--tex-fourcc must be 4 chars");
+            std::process::exit(1);
+        }
+        let fourcc = [fb[0], fb[1], fb[2], fb[3]];
+        match convert::untile_tiled_dxt_body(&input_data, w, h, &fourcc, mips) {
+            Some(out) => {
+                let out_path = cli.output.expect("--output required");
+                if let Err(e) = std::fs::write(&out_path, &out) {
+                    eprintln!("Error writing {}: {}", out_path.display(), e);
+                    std::process::exit(1);
+                }
+                println!("untile-tex: wrote {} bytes to {}", out.len(), out_path.display());
+                std::process::exit(0);
+            }
+            None => {
+                eprintln!("untile-tex: conversion failed (body too short?)");
+                std::process::exit(1);
+            }
+        }
     }
 
     if cli.validate_only {

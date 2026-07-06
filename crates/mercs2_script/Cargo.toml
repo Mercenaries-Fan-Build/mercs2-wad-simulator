@@ -1,0 +1,14 @@
+[package]
+name = "mercs2_script"
+version = "0.1.0"
+edition = "2021"
+description = "The engine's Lua script host: VM + module system (import/inherit) + the Sys.*/engine binding mechanism. Asset-agnostic; the game's Mercenaries Lua runs ON it. Charter Phase 3 (embed Lua 5.4, Surface-B gated)."
+
+[lib]
+name = "mercs2_script"
+path = "src/lib.rs"
+
+[dependencies]
+# Lua 5.4 per charter D5 (5.1 = conservative fallback). Vendored builds Lua from source via the
+# MSVC `cc` toolchain (same one wgpu uses), so no system Lua is required.
+mlua = { version = "0.10", features = ["lua54", "vendored"] }

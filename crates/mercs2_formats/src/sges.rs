@@ -158,6 +158,76 @@ pub fn decompress_block(
     }
 }
 
+/// Decompress only the HEAD of a block (first ≤ `max_out` bytes) — enough to read the
+/// block entry table without inflating a whole multi-MB block. Reads at most the header,
+/// segment table and first segment; non-sges blocks return their leading bytes directly.
+pub fn decompress_block_head(
+    file: &mut File,
+    indx_entries: &[IndxEntry],
+    block_index: u16,
+    max_out: usize,
+) -> Result<Vec<u8>, String> {
+    let idx = block_index as usize;
+    if idx >= indx_entries.len() {
+        return Err(format!(
+            "block_index {idx} >= INDX count {}",
+            indx_entries.len()
+        ));
+    }
+    let indx = &indx_entries[idx];
+    let file_offset = indx.page_index as u64 * PAGE_SIZE;
+    let compressed_size = indx.compressed_page_count() as usize * PAGE_SIZE as usize;
+    // Header (16) + segment table + first segment (compressed ≤ 64 KB) fit in 128 KB.
+    let read_size = compressed_size.min(0x20000);
+    file.seek(SeekFrom::Start(file_offset))
+        .map_err(|e| format!("seek error: {e}"))?;
+    let mut head = vec![0u8; read_size];
+    file.read_exact(&mut head)
+        .map_err(|e| format!("read error: {e}"))?;
+
+    if head.len() < 24 || &head[0..4] != b"sges" {
+        head.truncate(max_out);
+        return Ok(head);
+    }
+    let segment_count = read_u16_le(&head, 6) as usize;
+    if segment_count == 0 {
+        return Err("sges head: no segments".into());
+    }
+    // First segment table row @0x10 (same decode as `decompress_sges`).
+    let compressed_size0 = read_u16_le(&head, 16) as usize;
+    let raw_uncomp = read_u16_le(&head, 18) as usize;
+    let uncompressed_size = if raw_uncomp == 0 {
+        DEFAULT_SEGMENT_SIZE
+    } else {
+        raw_uncomp
+    };
+    let offset_with_flag = read_u32_le(&head, 20);
+    let is_compressed = (offset_with_flag & 1) != 0;
+    let data_offset = (offset_with_flag & 0xFFFFFFFE) as usize;
+    if data_offset >= head.len() {
+        return Err("sges head: first segment offset out of range".into());
+    }
+    if !is_compressed {
+        let actual_sz = if compressed_size0 > 0 {
+            compressed_size0
+        } else {
+            uncompressed_size
+        };
+        let end = (data_offset + actual_sz.min(max_out)).min(head.len());
+        return Ok(head[data_offset..end].to_vec());
+    }
+    let chunk = &head[data_offset..(data_offset + 131072).min(head.len())];
+    let mut decompressor = Decompress::new(false);
+    let mut buf = vec![0u8; uncompressed_size.min(max_out.max(1))];
+    match decompressor.decompress(chunk, &mut buf, flate2::FlushDecompress::Finish) {
+        Ok(_) => {
+            buf.truncate(decompressor.total_out() as usize);
+            Ok(buf)
+        }
+        Err(e) => Err(format!("sges head inflate: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compression (inverse of `decompress_sges`).
 //

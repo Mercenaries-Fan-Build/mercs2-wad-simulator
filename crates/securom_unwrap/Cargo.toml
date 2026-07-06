@@ -1,0 +1,15 @@
+[package]
+name = "securom_unwrap"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "securom_unwrap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "securom_unwrap"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

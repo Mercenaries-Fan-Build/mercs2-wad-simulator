@@ -169,6 +169,14 @@ pub struct SimulateReport {
     /// chunks (registered-but-unvalidated UCFX tags, or non-UCFX subsystems). Each
     /// is a "requires deeper investigation" message; deduped across the run.
     pub needs_investigation: Vec<String>,
+    /// ADVISORY (NON-fatal) — DLC material texture-provenance render-correctness:
+    /// a model loaded from the PATCH wad whose material binds a DIFFUSE texture that
+    /// resolves in the BASE wad's ASET but is NOT shipped by the PATCH wad. In a
+    /// non-gameplay scene (menu/wardrobe) the base texture isn't resident, so the
+    /// engine renders a fallback (a face/skin material binding an unshipped base
+    /// texture renders the wrong content). One line per flagged (model,
+    /// material_index, diffuse_hash). Excluded from the fatal verdict.
+    pub dlc_texture_provenance: Vec<String>,
 }
 
 pub struct SimulateOptions<'a> {
@@ -271,6 +279,22 @@ pub fn run_simulate_with_options(
     let mut dispatched_textures: HashSet<(BlockKey, u32)> = HashSet::new();
     let loaded_hashes: HashSet<u32> = vd.resolved.keys().copied().collect();
 
+    // Per-wad ASET hash sets for the DLC material texture-provenance check: a
+    // patch-origin model whose material diffuse resolves in the BASE wad's ASET but
+    // is NOT shipped by the PATCH wad binds a base texture the DLC doesn't provide
+    // (wrong content in menu/wardrobe scenes). These are the RAW per-wad ASET sets,
+    // NOT the overlaid `resolved` (which collapses base+patch).
+    let base_aset_hashes: HashSet<u32> = vd
+        .base
+        .as_ref()
+        .map(|a| a.aset.iter().map(|e| e.asset_hash).collect())
+        .unwrap_or_default();
+    let patch_aset_hashes: HashSet<u32> = vd
+        .patch
+        .as_ref()
+        .map(|a| a.aset.iter().map(|e| e.asset_hash).collect())
+        .unwrap_or_default();
+
     // Sibling base WADs (English/shell/Loading) — ASET hashes only, for cross-ref
     // resolution. A ref into one of these is NOT a fault; the engine loads them too.
     let mut aux_aset_hashes: HashSet<u32> = HashSet::new();
@@ -368,6 +392,36 @@ pub fn run_simulate_with_options(
         for m in &result.texture_buffer_issues {
             report.texture_buffer_too_small += 1;
             report.texture_buffer_issues.push(format!("BUFFER_TOO_SMALL: {m}"));
+        }
+        // DLC material texture-provenance render-correctness check (ADVISORY).
+        // GENERIC + content-agnostic: for ANY model that originated from the PATCH
+        // overlay, walk its material diffuse hashes and flag each one that resolves
+        // in the BASE wad's ASET but is NOT shipped by the PATCH wad. Such a diffuse
+        // binds a base texture the DLC doesn't provide → fallback render in
+        // menu/wardrobe scenes. Works identically for any DLC character; no
+        // asset-specific constants.
+        if entry.source == crate::overlay::AsetSource::Patch
+            && !result.material_diffuse_hashes.is_empty()
+        {
+            for (mat_idx, &diffuse) in result.material_diffuse_hashes.iter().enumerate() {
+                if base_aset_hashes.contains(&diffuse) && !patch_aset_hashes.contains(&diffuse) {
+                    let name = opts
+                        .rainbow
+                        .and_then(|rt| rt.resolve(entry.asset_hash))
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default();
+                    let tex_name = opts
+                        .rainbow
+                        .and_then(|rt| rt.resolve(diffuse))
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default();
+                    report.dlc_texture_provenance.push(format!(
+                        "model 0x{:08X}{name} material[{mat_idx}] diffuse 0x{diffuse:08X}{tex_name} \
+                         is base-resident but not shipped by the patch (fallback render)",
+                        entry.asset_hash
+                    ));
+                }
+            }
         }
         for h in &result.xref_hashes {
             xref_sources.entry(*h).or_insert_with(|| label.clone());
@@ -944,6 +998,25 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
         if by_tag.len() > 40 {
             println!("    ... and {} more distinct tags", by_tag.len() - 40);
         }
+        println!();
+    }
+
+    if !report.dlc_texture_provenance.is_empty() {
+        println!(
+            "  {} {} patch-model material diffuse(s) bind a base texture not shipped by the patch",
+            "DLC TEXTURE-PROVENANCE (advisory, render-correctness):".yellow().bold(),
+            report.dlc_texture_provenance.len()
+        );
+        for m in report.dlc_texture_provenance.iter().take(40) {
+            println!("    {}", m.yellow());
+        }
+        if report.dlc_texture_provenance.len() > 40 {
+            println!(
+                "    ... and {} more",
+                report.dlc_texture_provenance.len() - 40
+            );
+        }
+        println!("    (not fatal — flags fallback-render risk in menu/wardrobe scenes)");
         println!();
     }
 

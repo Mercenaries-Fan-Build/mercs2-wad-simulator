@@ -1,0 +1,42 @@
+[package]
+name = "mercs2_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu). Phase 1 skeleton."
+
+# PURE LIBRARY — no binary. The engine is asset-agnostic machinery (WAD/mesh/render/stream + a typed
+# API + the `run_game_world` populate seam). Game exes (`mercs2_game`) and tooling (`mercs2_probe`)
+# depend on it and configure it; the engine never parses args or knows any Mercenaries specifics.
+[lib]
+name = "mercs2_engine"
+path = "src/lib.rs"
+
+[dependencies]
+winit = "0.29"
+wgpu = "0.20"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.27" # matrix/vector math for the camera (left-handed Y-up)
+# gamepad input — pure-Rust, cross-platform (Linux evdev / Windows XInput+DInput / macOS), works on
+# SteamOS/Steam Deck via evdev + bundles SDL_GameControllerDB for consistent layouts. No C linking.
+gilrs = "0.10"
+# 8x8 public-domain bitmap font (pure const data, no_std) — the guaranteed-present FALLBACK glyph
+# source for the engine's 2D UI/text pass (shell menu, debug HUD).
+font8x8 = "0.3"
+# pure-Rust TTF rasterizer — bakes a system monospace font (Cascadia/Consolas/DejaVu…) into an
+# anti-aliased glyph atlas at UiPass creation, replacing the blocky 8x8 bitmap when available.
+# Same UiPass API/layout; falls back to font8x8 when no system font is found. No C linking.
+fontdue = "0.9"
+# asset layer — the reimplementation consumes the original game's data through this crate.
+mercs2_formats = { path = "../mercs2_formats" }
+# simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
+mercs2_core = { path = "../mercs2_core" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key
+
+[dev-dependencies]
+# Shader compiler front-end (same version wgpu 0.20 already pulls in) — dev-only, used to statically
+# parse + validate the WGSL in a unit test so a shader syntax/binding error is caught by `cargo test`
+# without needing a GPU/surface. Not linked into the library.
+naga = { version = "0.20", features = ["wgsl-in"] }

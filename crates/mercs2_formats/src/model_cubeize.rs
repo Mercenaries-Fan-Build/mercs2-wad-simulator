@@ -21,7 +21,7 @@
 //! decl-derived extent.
 
 use crate::crc32::crc32_mercs2;
-use crate::ffcs::read_u32_le;
+use crate::ffcs::{read_f32_le, read_u32_le};
 
 /// Half-extent of the generated cube (cube spans `[-HALF, HALF]` in X/Z).
 const HALF: f32 = 0.5;
@@ -147,6 +147,843 @@ pub fn cubeize_model_container_with(
     }
 
     Ok((out, stats))
+}
+
+/// Read-only companion to [`cubeize_model_container`]: extract every STRM mesh's vertex
+/// positions (FLOAT16 vec3 at vertex offset 0; per-vertex stride from the STRM `info` chunk
+/// `u32` at +4). Returns one position list per STRM mesh, in descriptor order. Used by the
+/// reimplementation engine (`mercs2_engine`) to render real geometry straight from a model
+/// container — the descriptor walk is identical to the cube-ize pass, minus the mutation.
+pub fn read_model_positions(container: &[u8]) -> Result<Vec<Vec<[f32; 3]>>, String> {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
+    }
+    let data_area_off = read_u32_le(container, 4) as usize;
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max_desc = container.len().saturating_sub(20) / 20;
+    if n_desc > max_desc {
+        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+    }
+
+    let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
+        if u0 == 0xFFFF_FFFF {
+            return None;
+        }
+        let start = if data_area_off > 0 {
+            data_area_off + u0 as usize
+        } else {
+            8 + u0 as usize
+        };
+        let end = start.checked_add(size)?;
+        if end > container.len() {
+            None
+        } else {
+            Some((start, end))
+        }
+    };
+
+    let mut meshes: Vec<Vec<[f32; 3]>> = Vec::new();
+    let mut in_strm = false;
+    let mut stride: Option<usize> = None;
+    let mut decl: Option<(usize, usize)> = None;
+    let mut data: Option<(usize, usize)> = None;
+
+    for i in 0..n_desc {
+        let row = 20 + i * 20;
+        let tag = &container[row..row + 4];
+        let u0 = read_u32_le(container, row + 4);
+        let size = read_u32_le(container, row + 8) as usize;
+        if u0 == 0xFFFF_FFFF {
+            if in_strm {
+                collect_strm_positions(container, stride, decl, data, &mut meshes);
+            }
+            in_strm = tag == b"STRM";
+            stride = None;
+            decl = None;
+            data = None;
+            continue;
+        }
+        if in_strm {
+            match tag {
+                b"info" => {
+                    if let Some((s, _)) = resolve(u0, size) {
+                        if size >= 12 {
+                            stride = Some(read_u32_le(container, s + 4) as usize);
+                        }
+                    }
+                }
+                b"decl" => decl = resolve(u0, size),
+                b"data" => data = resolve(u0, size),
+                _ => {}
+            }
+        }
+    }
+    if in_strm {
+        collect_strm_positions(container, stride, decl, data, &mut meshes);
+    }
+    Ok(meshes)
+}
+
+/// One drawing group's geometry: local vertex positions + triangle-list indices into them.
+/// One `SEGM` record: which HIER bone a sub-object attaches to, and its LOD/state mask.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SegRec {
+    pub bone: u16,
+    pub seg_id: u8,
+    pub state_mask: u8,
+}
+
+/// Parse the `SEGM` chunk into records `{u16 bone@0, u8 seg_id@2, u8 state_mask@3}` (4 bytes each).
+/// The k-th top-level `SKIN`/`MESH` sub-object under `GEOM` binds to record `k` (seg_id == k).
+pub fn parse_segm(container: &[u8]) -> Vec<SegRec> {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return Vec::new();
+    }
+    let data_off = read_u32_le(container, 4) as usize;
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max = container.len().saturating_sub(20) / 20;
+    for i in 0..n_desc.min(max) {
+        let ro = 20 + i * 20;
+        if &container[ro..ro + 4] == b"SEGM" {
+            let u0 = read_u32_le(container, ro + 4);
+            if u0 == 0xFFFF_FFFF {
+                continue;
+            }
+            let start = data_off + u0 as usize;
+            let size = read_u32_le(container, ro + 8) as usize;
+            let end = (start + size).min(container.len());
+            let mut recs = Vec::new();
+            let mut o = start;
+            while o + 4 <= end {
+                recs.push(SegRec {
+                    bone: u16::from_le_bytes([container[o], container[o + 1]]),
+                    seg_id: container[o + 2],
+                    state_mask: container[o + 3],
+                });
+                o += 4;
+            }
+            return recs;
+        }
+    }
+    Vec::new()
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelMesh {
+    /// The PRMG group ordinal this mesh came from (for material/segment lookup by group).
+    pub group_index: usize,
+    /// Ordinal of the parent top-level `SKIN`/`MESH` sub-object under `GEOM` (== SEGM record index).
+    pub sub_object: usize,
+    /// True if the parent sub-object is `MESH` (rigid accessory in bone-local space); false = `SKIN`.
+    pub rigid: bool,
+    /// Attachment bone (HIER index) from `SEGM[sub_object]`. 0 = root for skinned body.
+    pub bone: u16,
+    /// LOD/state bitmask from `SEGM[sub_object]` (1/2/4/8 tiers; 0x0F = all).
+    pub state_mask: u8,
+    pub positions: Vec<[f32; 3]>,
+    /// TEXCOORD0 per vertex (decl usage 5, FLOAT16_2). Empty if the group has no UVs.
+    pub uvs: Vec<[f32; 2]>,
+    /// NORMAL per vertex (decl usage 3, FLOAT16_4 xyz). Empty if absent. For lighting.
+    pub normals: Vec<[f32; 3]>,
+    /// TANGENT per vertex (decl usage 6, FLOAT16_4: xyz + w handedness). Empty if absent.
+    pub tangents: Vec<[f32; 4]>,
+    /// BLENDINDICES per vertex (decl usage 2, UBYTE4): 4 GLOBAL HIER bone indices. Empty if absent.
+    pub joints: Vec<[u8; 4]>,
+    /// BLENDWEIGHT per vertex (decl usage 1, UBYTE4N): 4 weights summing to 255. Empty if absent.
+    pub weights: Vec<[u8; 4]>,
+    /// COLOR per vertex (decl usage 10, UBYTE4/D3DCOLOR). On the terrainmesh these are the terrain
+    /// SPLAT WEIGHTS. Empty if absent. Byte order is as stored (D3DCOLOR = B,G,R,A).
+    pub colors: Vec<[u8; 4]>,
+    /// Triangle-list indices into `positions` (the IBUF triangle strip, de-stripped).
+    pub tris: Vec<[u32; 3]>,
+    /// Per-PRMT sub-strip material ranges into `tris`. A single PRMG group frequently carries
+    /// SEVERAL PRMT records, each an independent sub-strip with its OWN material (e.g. the PMC hall:
+    /// group 1 = 23 materials, its floor/walls/trim all in one group). Binding only the first material
+    /// to the whole group textured the floor with a neighbour's map. Empty when the group is a single
+    /// clean strip (no PRMT split) — callers then fall back to the group's first material.
+    pub submeshes: Vec<SubMesh>,
+}
+
+/// One contiguous run of `ModelMesh::tris` that shares a single material (a PRMT sub-strip).
+#[derive(Debug, Clone, Copy)]
+pub struct SubMesh {
+    /// Index into the MTRL material records (PRMT record first word, `parse_mtrl` order).
+    pub material_index: usize,
+    /// First triangle of this run within `ModelMesh::tris`.
+    pub tri_start: usize,
+    /// Triangle count of this run.
+    pub tri_count: usize,
+}
+
+/// Map each PRMG-marker row to its parent top-level sub-object: `(ordinal k, is_rigid)`. Walks
+/// GEOM's direct children (each marker consumes `1 + x3` rows); the k-th `SKIN`/`MESH` child is
+/// sub-object k → `SEGM` record k. See docs/modernization/accessory_bone_binding_A.md (double-blind).
+fn map_prmg_subobjects(
+    container: &[u8],
+    n_desc: usize,
+) -> std::collections::HashMap<usize, (usize, bool)> {
+    let tag = |i: usize| &container[20 + i * 20..20 + i * 20 + 4];
+    let is_marker = |i: usize| read_u32_le(container, 20 + i * 20 + 4) == 0xFFFF_FFFF;
+    let x3 = |i: usize| read_u32_le(container, 20 + i * 20 + 16) as usize;
+
+    let mut out = std::collections::HashMap::new();
+    let Some(geom) = (0..n_desc).find(|&i| tag(i) == b"GEOM" && is_marker(i)) else {
+        return out;
+    };
+    let geom_end = (geom + 1 + x3(geom)).min(n_desc);
+    let mut k = 0usize;
+    let mut r = geom + 1;
+    while r < geom_end {
+        if is_marker(r) {
+            let child_end = (r + 1 + x3(r)).min(n_desc);
+            let t = tag(r);
+            if t == b"SKIN" || t == b"MESH" {
+                let rigid = t == b"MESH";
+                for p in (r + 1)..child_end {
+                    if is_marker(p) && tag(p) == b"PRMG" {
+                        out.insert(p, (k, rigid));
+                    }
+                }
+                k += 1;
+            }
+            r = child_end;
+        } else {
+            r += 1;
+        }
+    }
+    out
+}
+
+/// Per-PRMG-group `POFF` (Position OFFset) — the world/parent translation of the group's parent
+/// `GEOM` (a leaf `POFF` = 3 floats). Returned in the SAME order as [`read_model_meshes`]'s PRMG scan
+/// (`(0..n_desc).filter(PRMG && marker)`), so `offset[group_index]` is the translation to add to that
+/// group's local vertices. Multi-GEOM meshes (e.g. the `0x7C569307` terrainmesh: 16 GEOM sub-tiles at
+/// X/Z ∈ {-150,-50,50,150}) need this or all sub-tiles collapse onto each other. Single-GEOM models
+/// with no `POFF` yield `[0,0,0]` (no change).
+pub fn prmg_geom_offsets(container: &[u8]) -> Vec<[f32; 3]> {
+    let mut out = Vec::new();
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return out;
+    }
+    let data_area_off = read_u32_le(container, 4) as usize;
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max_desc = container.len().saturating_sub(20) / 20;
+    if n_desc > max_desc {
+        return out;
+    }
+    let tag = |i: usize| &container[20 + i * 20..20 + i * 20 + 4];
+    let u0 = |i: usize| read_u32_le(container, 20 + i * 20 + 4);
+    let marker = |i: usize| u0(i) == 0xFFFF_FFFF;
+    let x3 = |i: usize| read_u32_le(container, 20 + i * 20 + 16) as usize;
+
+    let mut cur = [0.0f32, 0.0, 0.0];
+    let mut i = 0usize;
+    while i < n_desc {
+        if tag(i) == b"GEOM" && marker(i) {
+            // Reset, then find this GEOM's direct POFF leaf (appears before its PRMGs).
+            cur = [0.0, 0.0, 0.0];
+            let end = (i + 1 + x3(i)).min(n_desc);
+            for c in (i + 1)..end {
+                if tag(c) == b"POFF" && !marker(c) {
+                    let base = if data_area_off > 0 { data_area_off + u0(c) as usize } else { 8 + u0(c) as usize };
+                    if base + 12 <= container.len() {
+                        cur = [read_f32_le(container, base), read_f32_le(container, base + 4), read_f32_le(container, base + 8)];
+                    }
+                    break;
+                }
+            }
+        } else if tag(i) == b"PRMG" && marker(i) {
+            out.push(cur);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Read a model container as INDEXED triangle meshes — one per `PRMG` drawing group. Each group
+/// pairs a `STRM` (vertex stream; POSITION read via its decl) with an `IBUF` (u16 triangle strip;
+/// index count at `ibuf_info+0`). The strip is de-stripped to a triangle list (winding-aware).
+/// This is the 1d path: solid surfaces instead of a point cloud.
+pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
+    }
+    let data_area_off = read_u32_le(container, 4) as usize;
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max_desc = container.len().saturating_sub(20) / 20;
+    if n_desc > max_desc {
+        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+    }
+    let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
+        if u0 == 0xFFFF_FFFF {
+            return None;
+        }
+        let start = if data_area_off > 0 {
+            data_area_off + u0 as usize
+        } else {
+            8 + u0 as usize
+        };
+        let end = start.checked_add(size)?;
+        (end <= container.len()).then_some((start, end))
+    };
+
+    // Row-level scan: find PRMG group markers, then collect each group's STRM + IBUF leaves.
+    let tag = |i: usize| &container[20 + i * 20..20 + i * 20 + 4];
+    let u0 = |i: usize| read_u32_le(container, 20 + i * 20 + 4);
+    let size = |i: usize| read_u32_le(container, 20 + i * 20 + 8) as usize;
+
+    let prmg: Vec<usize> = (0..n_desc)
+        .filter(|&i| tag(i) == b"PRMG" && u0(i) == 0xFFFF_FFFF)
+        .collect();
+
+    // Sub-object → bone/LOD binding (SEGM + GEOM tree walk).
+    let subobj = map_prmg_subobjects(container, n_desc);
+    let segm = parse_segm(container);
+
+    let mut out = Vec::new();
+    for (gi, &pr) in prmg.iter().enumerate() {
+        let (sub_object, rigid) = subobj.get(&pr).copied().unwrap_or((0, false));
+        let seg = segm.get(sub_object).copied().unwrap_or_default();
+        let nxt = prmg.get(gi + 1).copied().unwrap_or(n_desc);
+        let (mut strm_info, mut strm_decl, mut strm_data) = (None, None, None);
+        let (mut ibuf_info, mut ibuf_data, mut prmt) = (None, None, None);
+        let mut grp_info = None; // the group's INFO leaf (row right after PRMG)
+        let mut state = 0u8; // 1 = inside STRM, 2 = inside IBUF
+        for i in (pr + 1)..nxt {
+            let cm = u0(i) == 0xFFFF_FFFF;
+            match (tag(i), cm) {
+                (b"STRM", true) => state = 1,
+                (b"IBUF", true) => state = 2,
+                (b"INFO", false) if state == 0 && grp_info.is_none() => grp_info = resolve(u0(i), size(i)),
+                (b"PRMT", false) if prmt.is_none() => prmt = resolve(u0(i), size(i)),
+                (b"info", false) if state == 1 && strm_info.is_none() => strm_info = resolve(u0(i), size(i)),
+                (b"decl", false) if state == 1 && strm_decl.is_none() => strm_decl = resolve(u0(i), size(i)),
+                (b"data", false) if state == 1 && strm_data.is_none() => strm_data = resolve(u0(i), size(i)),
+                (b"info", false) if state == 2 && ibuf_info.is_none() => ibuf_info = resolve(u0(i), size(i)),
+                (b"data", false) if state == 2 && ibuf_data.is_none() => ibuf_data = resolve(u0(i), size(i)),
+                _ => {}
+            }
+        }
+
+        let (Some((si, _)), Some((sds, sde)), Some((iis, _)), Some((ids, ide))) =
+            (strm_info, strm_data, ibuf_info, ibuf_data)
+        else {
+            continue;
+        };
+        let stride = read_u32_le(container, si + 4) as usize;
+        if !(6..=256).contains(&stride) {
+            continue;
+        }
+        // POSITION (required) + optional TEXCOORD0 / NORMAL from the decl.
+        let decl_slice = strm_decl.map(|(ds, de)| &container[ds..de]);
+        let (pos_off, pos_type) = match decl_slice {
+            Some(d) => match find_element(d, USAGE_POSITION) {
+                Some(pe) => pe,
+                None => continue, // decl with no position -> not a drawing stream
+            },
+            None => (0, 16),
+        };
+        let uv_el = decl_slice.and_then(|d| find_element(d, USAGE_TEXCOORD));
+        let nrm_el = decl_slice.and_then(|d| find_element(d, USAGE_NORMAL));
+        let tan_el = decl_slice.and_then(|d| find_element(d, USAGE_TANGENT));
+        let jnt_el = decl_slice.and_then(|d| find_element(d, USAGE_BLENDINDICES));
+        let wgt_el = decl_slice.and_then(|d| find_element(d, USAGE_BLENDWEIGHT));
+        let col_el = decl_slice.and_then(|d| find_element(d, USAGE_COLOR));
+        let read4 = |o: usize| -> Option<[u8; 4]> {
+            (o + 4 <= sde).then(|| [container[o], container[o + 1], container[o + 2], container[o + 3]])
+        };
+
+        // Vertices.
+        let vcount = (sde - sds) / stride;
+        let mut positions = Vec::with_capacity(vcount);
+        let mut uvs = Vec::new();
+        let mut normals = Vec::new();
+        let mut tangents = Vec::new();
+        let mut joints = Vec::new();
+        let mut weights = Vec::new();
+        let mut colors = Vec::new();
+        for v in 0..vcount {
+            let base = sds + v * stride;
+            match decode_pos(container, base + pos_off, sde, pos_type) {
+                Some(p) => positions.push(p),
+                None => break,
+            }
+            if let Some((uo, ut)) = uv_el {
+                if let Some(uv) = decode_uv(container, base + uo, sde, ut) {
+                    uvs.push(uv);
+                }
+            }
+            if let Some((no, nt)) = nrm_el {
+                if let Some(n) = decode_pos(container, base + no, sde, nt) {
+                    normals.push(n);
+                }
+            }
+            if let Some((to, tt)) = tan_el {
+                if let Some(t) = decode_vec4(container, base + to, sde, tt) {
+                    tangents.push(t);
+                }
+            }
+            if let Some((jo, _)) = jnt_el {
+                if let Some(j) = read4(base + jo) {
+                    joints.push(j);
+                }
+            }
+            if let Some((wo, _)) = wgt_el {
+                if let Some(w) = read4(base + wo) {
+                    weights.push(w);
+                }
+            }
+            if let Some((co, _)) = col_el {
+                if let Some(c) = read4(base + co) {
+                    colors.push(c);
+                }
+            }
+        }
+        if positions.is_empty() {
+            continue;
+        }
+        // Keep per-vertex arrays aligned with positions.
+        uvs.truncate(positions.len());
+        normals.truncate(positions.len());
+        tangents.truncate(positions.len());
+        joints.truncate(positions.len());
+        weights.truncate(positions.len());
+        colors.truncate(positions.len());
+
+        // BLENDINDICES are palette-relative, not global: the group's INFO leaf carries a
+        // bone-range table (`+20 u32 range_count`, then `range_count × {u16 hier_base,
+        // u16 count}` pairs from +24), and the vertex indices address the CONCATENATION of
+        // those ranges. Engine oracle FUN_00479d90: per range, the shader-constant upload
+        // sources `pose + hier_base*0x30` for `count` matrices, with the destination offset
+        // accumulating counts. Expand the table and map each index to its global HIER bone.
+        // Groups without a valid table (rigid MESH INFO(60) holds different data; sanity
+        // gates reject it) keep their indices as-is.
+        if !joints.is_empty() {
+            if let Some((is_, ie_)) = grp_info {
+                let rc = if ie_ - is_ >= 28 { read_u32_le(container, is_ + 20) as usize } else { 0 };
+                if (1..=8).contains(&rc) && 24 + rc * 4 <= ie_ - is_ {
+                    let mut palette: Vec<u16> = Vec::new();
+                    let mut ok = true;
+                    for r in 0..rc {
+                        let o = is_ + 24 + r * 4;
+                        let base = u16::from_le_bytes([container[o], container[o + 1]]);
+                        let cnt = u16::from_le_bytes([container[o + 2], container[o + 3]]);
+                        if cnt == 0 || base as usize + cnt as usize > 4096 || palette.len() + cnt as usize > 256 {
+                            ok = false;
+                            break;
+                        }
+                        palette.extend(base..base + cnt);
+                    }
+                    if ok {
+                        for j4 in joints.iter_mut() {
+                            for j in j4.iter_mut() {
+                                *j = palette.get(*j as usize).copied().unwrap_or(*j as u16).min(255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Index strip (u16) → triangles. Index count at ibuf_info+0.
+        let ic = read_u32_le(container, iis) as usize;
+        let avail = (ide - ids) / 2;
+        let n = ic.min(avail);
+        let mut strip = Vec::with_capacity(n);
+        let vmax = positions.len() as u32;
+        for k in 0..n {
+            let idx = u16::from_le_bytes([container[ids + k * 2], container[ids + k * 2 + 1]]) as u32;
+            strip.push(idx);
+        }
+        // De-strip. A drawing group can hold several strips concatenated in one IBUF, one per
+        // PRMT primitive record (16 bytes: index_start@4, index_count@8). De-stripping the whole
+        // IBUF as one continuous strip would join the end of one sub-strip to the start of the
+        // next, spanning a stray triangle across the mesh (the hand->back sliver). So de-strip each
+        // PRMT range separately — with a sanity gate; if the ranges don't cover the strip cleanly
+        // (e.g. PRMT layout differs), fall back to whole-strip de-stripping.
+        let (tris, submeshes) = destrip_by_prmt(container, &strip, prmt, vmax);
+
+        out.push(ModelMesh {
+            group_index: gi,
+            sub_object,
+            rigid,
+            bone: seg.bone,
+            state_mask: seg.state_mask,
+            positions,
+            uvs,
+            normals,
+            tangents,
+            joints,
+            weights,
+            colors,
+            tris,
+            submeshes,
+        });
+    }
+    Ok(out)
+}
+
+/// De-strip a group's IBUF into triangles. A group's IBUF holds several sub-strips concatenated,
+/// one per `PRMT` primitive record (16 bytes; `index_start` @4). Verified on real models: those
+/// starts are monotonic strip boundaries (each primitive's count derives from the next start). We
+/// split the strip at those boundaries and de-strip each range independently, so no triangle spans
+/// across separate sub-strips (the hand→back sliver). Falls back to the whole strip if no PRMT.
+fn destrip_by_prmt(
+    container: &[u8],
+    strip: &[u32],
+    prmt: Option<(usize, usize)>,
+    vmax: u32,
+) -> (Vec<[u32; 3]>, Vec<SubMesh>) {
+    let mut out = Vec::new();
+    let mut subs = Vec::new();
+    if let Some((ps, pe)) = prmt {
+        let nrec = (pe - ps) / 16;
+        if nrec >= 1 {
+            // Each PRMT record = (index_start @4, material_index @0). Sort by start (monotonic on real
+            // models), dedup coincident starts (same-texture instances), and ensure the first range
+            // begins at 0 so no strip triangles are dropped. Each [start_i, start_{i+1}) is an
+            // independent sub-strip carrying material_i.
+            let mut recs: Vec<(usize, usize)> = (0..nrec)
+                .map(|r| {
+                    (
+                        read_u32_le(container, ps + r * 16 + 4) as usize, // index_start
+                        read_u32_le(container, ps + r * 16) as usize,     // material index
+                    )
+                })
+                .filter(|&(s, _)| s <= strip.len())
+                .collect();
+            if !recs.is_empty() {
+                recs.sort_by_key(|&(s, _)| s);
+                recs.dedup_by_key(|&mut (s, _)| s);
+                if recs[0].0 != 0 {
+                    recs.insert(0, (0, recs[0].1));
+                }
+                for i in 0..recs.len() {
+                    let (start, mat) = recs[i];
+                    let end = recs.get(i + 1).map(|r| r.0).unwrap_or(strip.len());
+                    if end <= start {
+                        continue;
+                    }
+                    let tri_start = out.len();
+                    strip_range_to_tris(strip, start, end, vmax, &mut out);
+                    let tri_count = out.len() - tri_start;
+                    if tri_count > 0 {
+                        subs.push(SubMesh { material_index: mat, tri_start, tri_count });
+                    }
+                }
+                if !out.is_empty() {
+                    return (out, subs);
+                }
+                out.clear();
+                subs.clear();
+            }
+        }
+    }
+    strip_range_to_tris(strip, 0, strip.len(), vmax, &mut out);
+    (out, subs)
+}
+
+/// De-strip `strip[start..end]` into `out`. Winding parity uses the ABSOLUTE strip index (so a
+/// sub-strip beginning at an odd offset is wound correctly — needed once backface culling is on).
+/// Degenerate and out-of-range triangles are dropped.
+fn strip_range_to_tris(strip: &[u32], start: usize, end: usize, vmax: u32, out: &mut Vec<[u32; 3]>) {
+    let end = end.min(strip.len());
+    let mut i = start;
+    while i + 2 < end {
+        let (a, b, c) = (strip[i], strip[i + 1], strip[i + 2]);
+        if a != b && b != c && a != c && a < vmax && b < vmax && c < vmax {
+            // Each PRMT sub-strip is an independent strip: parity resets at its start.
+            if (i - start) % 2 == 0 {
+                out.push([a, b, c]);
+            } else {
+                out.push([a, c, b]);
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Per-STRM diagnostic used to pinpoint mis-read submeshes (e.g. floating accessories).
+#[derive(Debug, Clone)]
+pub struct StrmInfo {
+    pub stride: usize,
+    pub vcount: usize,
+    pub decl_elems: usize,
+    /// POSITION element: (stream, offset, d3ddecltype). None = no decl / no position.
+    pub pos: Option<(u16, usize, u16)>,
+    /// Bounding box of the decoded positions, if we produced any.
+    pub bbox: Option<([f32; 3], [f32; 3])>,
+}
+
+/// Describe every STRM group in a model container (stride, vcount, decl, POSITION element, bbox).
+/// Read-only; used by the engine's `--meshes` diagnostic to find the group that renders wrong.
+pub fn describe_model_strms(container: &[u8]) -> Result<Vec<StrmInfo>, String> {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
+    }
+    let data_area_off = read_u32_le(container, 4) as usize;
+    let n_desc = read_u32_le(container, 16) as usize;
+    let max_desc = container.len().saturating_sub(20) / 20;
+    if n_desc > max_desc {
+        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+    }
+    let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
+        if u0 == 0xFFFF_FFFF {
+            return None;
+        }
+        let start = if data_area_off > 0 {
+            data_area_off + u0 as usize
+        } else {
+            8 + u0 as usize
+        };
+        let end = start.checked_add(size)?;
+        (end <= container.len()).then_some((start, end))
+    };
+
+    let mut out = Vec::new();
+    let mut in_strm = false;
+    let (mut stride, mut vcount): (Option<usize>, usize) = (None, 0);
+    let mut decl: Option<(usize, usize)> = None;
+    let mut data: Option<(usize, usize)> = None;
+
+    let flush = |stride: Option<usize>,
+                 vcount: usize,
+                 decl: Option<(usize, usize)>,
+                 data: Option<(usize, usize)>,
+                 out: &mut Vec<StrmInfo>| {
+        let Some(stride) = stride else { return };
+        let (decl_elems, pos) = match decl {
+            Some((ds, de)) => {
+                let d = &container[ds..de];
+                (d.len() / 8, find_position_stream(d))
+            }
+            None => (0, None),
+        };
+        let mut bbox = None;
+        if let (Some((start, end)), Some((_s, off, typ))) = (data, pos) {
+            let mut lo = [f32::INFINITY; 3];
+            let mut hi = [f32::NEG_INFINITY; 3];
+            let count = (end - start) / stride;
+            for i in 0..count {
+                let o = start + i * stride + off;
+                let p = decode_pos(container, o, end, typ);
+                if let Some(p) = p {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+            }
+            if lo[0].is_finite() {
+                bbox = Some((lo, hi));
+            }
+        }
+        out.push(StrmInfo {
+            stride,
+            vcount,
+            decl_elems,
+            pos,
+            bbox,
+        });
+    };
+
+    for i in 0..n_desc {
+        let row = 20 + i * 20;
+        let tag = &container[row..row + 4];
+        let u0 = read_u32_le(container, row + 4);
+        let size = read_u32_le(container, row + 8) as usize;
+        if u0 == 0xFFFF_FFFF {
+            if in_strm {
+                flush(stride, vcount, decl, data, &mut out);
+            }
+            in_strm = tag == b"STRM";
+            stride = None;
+            vcount = 0;
+            decl = None;
+            data = None;
+            continue;
+        }
+        if in_strm {
+            match tag {
+                b"info" => {
+                    if let Some((s, _)) = resolve(u0, size) {
+                        if size >= 12 {
+                            stride = Some(read_u32_le(container, s + 4) as usize);
+                            vcount = read_u32_le(container, s + 8) as usize;
+                        }
+                    }
+                }
+                b"decl" => decl = resolve(u0, size),
+                b"data" => data = resolve(u0, size),
+                _ => {}
+            }
+        }
+    }
+    if in_strm {
+        flush(stride, vcount, decl, data, &mut out);
+    }
+    Ok(out)
+}
+
+/// Like [`find_position_element`] but also reports the stream index.
+fn find_position_stream(decl: &[u8]) -> Option<(u16, usize, u16)> {
+    let mut i = 0;
+    while i + 8 <= decl.len() {
+        let stream = u16::from_le_bytes([decl[i], decl[i + 1]]);
+        if stream == 0x00FF {
+            break;
+        }
+        let offset = u16::from_le_bytes([decl[i + 2], decl[i + 3]]) as usize;
+        let typ = u16::from_le_bytes([decl[i + 4], decl[i + 5]]);
+        if decl[i + 6] == USAGE_POSITION {
+            return Some((stream, offset, typ));
+        }
+        i += 8;
+    }
+    None
+}
+
+fn decode_pos(c: &[u8], o: usize, end: usize, typ: u16) -> Option<[f32; 3]> {
+    match typ {
+        15 | 16 if o + 6 <= end => Some([
+            read_f16_le(c, o),
+            read_f16_le(c, o + 2),
+            read_f16_le(c, o + 4),
+        ]),
+        2 | 3 if o + 12 <= end => Some([
+            read_f32_le(c, o),
+            read_f32_le(c, o + 4),
+            read_f32_le(c, o + 8),
+        ]),
+        _ => None,
+    }
+}
+
+/// Vertex-declaration semantics we care about (D3DDECLUSAGE).
+const USAGE_POSITION: u8 = 0;
+const USAGE_BLENDWEIGHT: u8 = 1;
+const USAGE_BLENDINDICES: u8 = 2;
+const USAGE_NORMAL: u8 = 3;
+const USAGE_TEXCOORD: u8 = 5;
+const USAGE_TANGENT: u8 = 6;
+/// D3DDECLUSAGE_COLOR. On the terrainmesh this UBYTE4/D3DCOLOR element carries the per-vertex terrain
+/// SPLAT WEIGHTS (the blend between the material's detail layers), not a lit vertex colour.
+const USAGE_COLOR: u8 = 10;
+
+/// Find a decl element by D3DDECLUSAGE. Each element is 8 bytes:
+/// `[stream:u16][offset:u16][type:u16][usage:u16]`, terminated by `stream == 0x00FF`.
+/// `usage` low byte is the D3DDECLUSAGE; `type` is the D3DDECLTYPE. Returns `(offset, type)`.
+fn find_element(decl: &[u8], usage: u8) -> Option<(usize, u16)> {
+    let mut i = 0;
+    while i + 8 <= decl.len() {
+        let stream = u16::from_le_bytes([decl[i], decl[i + 1]]);
+        if stream == 0x00FF {
+            break; // END marker
+        }
+        let offset = u16::from_le_bytes([decl[i + 2], decl[i + 3]]) as usize;
+        let typ = u16::from_le_bytes([decl[i + 4], decl[i + 5]]);
+        if decl[i + 6] == usage {
+            return Some((offset, typ));
+        }
+        i += 8;
+    }
+    None
+}
+
+fn find_position_element(decl: &[u8]) -> Option<(usize, u16)> {
+    find_element(decl, USAGE_POSITION)
+}
+
+/// Decode a 2-component UV (FLOAT16_2 = type 15, or FLOAT2/3/4).
+fn decode_uv(c: &[u8], o: usize, end: usize, typ: u16) -> Option<[f32; 2]> {
+    match typ {
+        15 | 16 if o + 4 <= end => Some([read_f16_le(c, o), read_f16_le(c, o + 2)]),
+        1 | 2 | 3 if o + 8 <= end => Some([read_f32_le(c, o), read_f32_le(c, o + 4)]),
+        _ => None,
+    }
+}
+
+/// Decode a 4-component vector (FLOAT16_4 = type 16, or FLOAT4). Used for TANGENT (xyz + w).
+fn decode_vec4(c: &[u8], o: usize, end: usize, typ: u16) -> Option<[f32; 4]> {
+    match typ {
+        16 if o + 8 <= end => Some([
+            read_f16_le(c, o),
+            read_f16_le(c, o + 2),
+            read_f16_le(c, o + 4),
+            read_f16_le(c, o + 6),
+        ]),
+        3 if o + 16 <= end => Some([
+            read_f32_le(c, o),
+            read_f32_le(c, o + 4),
+            read_f32_le(c, o + 8),
+            read_f32_le(c, o + 12),
+        ]),
+        _ => None,
+    }
+}
+
+/// Decode one STRM group's vertex positions using its declaration so we read the POSITION
+/// element at the right offset/format — NOT a blind f16 @ offset 0 (which garbles groups whose
+/// position is float32 or at a non-zero offset, and mis-reads non-drawing streams).
+fn collect_strm_positions(
+    container: &[u8],
+    stride: Option<usize>,
+    decl: Option<(usize, usize)>,
+    data: Option<(usize, usize)>,
+    out: &mut Vec<Vec<[f32; 3]>>,
+) {
+    let (Some(stride), Some((start, end))) = (stride, data) else {
+        return;
+    };
+    if !(6..=256).contains(&stride) {
+        return;
+    }
+    // Position element from the decl. If a decl is present but has NO position, this is not a
+    // drawing vertex stream (e.g. a normal/UV/skin stream) — skip it. Only when there is no decl
+    // at all do we fall back to the legacy FLOAT16_4 @ 0 assumption.
+    let (pos_off, pos_type) = match decl {
+        Some((ds, de)) => match find_position_element(&container[ds..de]) {
+            Some(pe) => pe,
+            None => return,
+        },
+        None => (0, 16),
+    };
+
+    let count = (end - start) / stride;
+    let mut v = Vec::with_capacity(count);
+    for i in 0..count {
+        let o = start + i * stride + pos_off;
+        let p = match pos_type {
+            // FLOAT16_2 / FLOAT16_4 (xyz are the first 3 halfs)
+            15 | 16 => {
+                if o + 6 > end {
+                    break;
+                }
+                [
+                    read_f16_le(container, o),
+                    read_f16_le(container, o + 2),
+                    read_f16_le(container, o + 4),
+                ]
+            }
+            // FLOAT3 / FLOAT4
+            2 | 3 => {
+                if o + 12 > end {
+                    break;
+                }
+                [
+                    read_f32_le(container, o),
+                    read_f32_le(container, o + 4),
+                    read_f32_le(container, o + 8),
+                ]
+            }
+            // Unknown position format — skip this group rather than emit garbage.
+            _ => return,
+        };
+        v.push(p);
+    }
+    if !v.is_empty() {
+        out.push(v);
+    }
 }
 
 /// Reshape a STRM `data` buffer's FLOAT16 positions (offset 0) into the cube.

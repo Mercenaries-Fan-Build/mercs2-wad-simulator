@@ -102,9 +102,48 @@ impl Packfile {
     }
 }
 
-/// Parse a Havok packfile that begins at `pk[0]` (i.e. `pk` starts at, or before,
-/// the `__classnames__` section table). Reads little-endian (PC retail).
-pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
+/// The structural skeleton of a parsed packfile, shared by every class decoder.
+/// It is the output of the section-header + fixup walk that both the collision
+/// decode ([`parse_packfile`]) and the animation decode (`crate::anim`) build on.
+///
+/// All offsets are absolute indices into the `pk` slice that was parsed.
+#[derive(Debug, Clone)]
+pub struct RawPackfile {
+    /// Absolute offset of the `__data__` section body in the parsed slice.
+    pub data_pk: usize,
+    /// Total packfile byte size (max section `abs + end`).
+    pub size: usize,
+    /// Havok version string (e.g. `"Havok-5.5.0-r1"`).
+    pub version: String,
+    /// classname-body-relative name-string offset → class name.
+    pub names: HashMap<usize, String>,
+    /// Local fixups: object field-offset (relative to `data_pk`) → data offset
+    /// (relative to `data_pk`). Resolve a pointer field with
+    /// `data_pk + lf[&(obj_src + field_off)]`.
+    pub lf: HashMap<usize, usize>,
+    /// Virtual fixups in packfile order: `(object src offset relative to
+    /// `data_pk`, class name)`.
+    pub vfixups: Vec<(usize, String)>,
+}
+
+impl RawPackfile {
+    /// Absolute offset of an object whose virtual-fixup `src` is `src`.
+    #[inline]
+    pub fn obj_abs(&self, src: usize) -> usize {
+        self.data_pk + src
+    }
+    /// Resolve a pointer field at object-relative `obj_src + field_off` to an
+    /// absolute offset via the local-fixup table (`None` if unrelocated / null).
+    #[inline]
+    pub fn resolve_ptr(&self, obj_src: usize, field_off: usize) -> Option<usize> {
+        self.lf.get(&(obj_src + field_off)).map(|d| self.data_pk + d)
+    }
+}
+
+/// Walk a Havok packfile's section headers, classname table and fixup tables
+/// without decoding any class instances. This is the reusable structural pass
+/// shared by the collision reader and the animation reader.
+pub fn parse_packfile_raw(pk: &[u8]) -> Result<RawPackfile, String> {
     let sh = find_sub(pk, CLASSNAMES).ok_or("packfile missing __classnames__ section")?;
     if sh + 3 * SECTION_HDR > pk.len() {
         return Err("truncated section-header table".into());
@@ -163,9 +202,8 @@ pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
         k += 8;
     }
 
-    // virtual fixups: object → class name. Decode each shape we recognise.
-    let mut shapes = Vec::new();
-    let mut class_counts: BTreeMap<String, u32> = BTreeMap::new();
+    // virtual fixups: object → class name.
+    let mut vfixups = Vec::new();
     let vf_end = (data_pk + d_end).min(pk.len());
     let mut k = data_pk + d_vf;
     while k + 12 <= vf_end {
@@ -176,9 +214,45 @@ pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
         }
         k += 12;
         let cname = names.get(&cnoff).cloned().unwrap_or_else(|| "?".into());
-        *class_counts.entry(cname.clone()).or_insert(0) += 1;
+        vfixups.push((src, cname));
+    }
+
+    let version = find_sub(pk, b"Havok-")
+        .map(|o| {
+            let mut q = o;
+            while q < pk.len() && pk[q] != 0 && pk[q].is_ascii_graphic() {
+                q += 1;
+            }
+            String::from_utf8_lossy(&pk[o..q]).into_owned()
+        })
+        .unwrap_or_default();
+
+    Ok(RawPackfile {
+        data_pk,
+        size,
+        version,
+        names,
+        lf,
+        vfixups,
+    })
+}
+
+/// Parse a Havok packfile that begins at `pk[0]` (i.e. `pk` starts at, or before,
+/// the `__classnames__` section table). Reads little-endian (PC retail).
+pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
+    let raw = parse_packfile_raw(pk)?;
+    let data_pk = raw.data_pk;
+    let lf = &raw.lf;
+    let size = raw.size;
+
+    // virtual fixups: object → class name. Decode each shape we recognise.
+    let mut shapes = Vec::new();
+    let mut class_counts: BTreeMap<String, u32> = BTreeMap::new();
+    for (src, cname) in &raw.vfixups {
+        let (src, cname) = (*src, cname.as_str());
+        *class_counts.entry(cname.to_string()).or_insert(0) += 1;
         let obj = data_pk + src;
-        match cname.as_str() {
+        match cname {
             CONVEX => {
                 let nv = (u32_le(pk, obj + 76) as usize).min(4096);
                 let vptr = data_pk + lf.get(&(src + 64)).copied().unwrap_or(0);
@@ -220,18 +294,8 @@ pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
         }
     }
 
-    let version = find_sub(pk, b"Havok-")
-        .map(|o| {
-            let mut q = o;
-            while q < pk.len() && pk[q] != 0 && pk[q].is_ascii_graphic() {
-                q += 1;
-            }
-            String::from_utf8_lossy(&pk[o..q]).into_owned()
-        })
-        .unwrap_or_default();
-
     Ok(Packfile {
-        version,
+        version: raw.version,
         size,
         shapes,
         class_counts,

@@ -1,0 +1,45 @@
+{
+  "source": "live x32dbg capture, Mercenaries2.exe base 0x400000, LtSampleWave FUN_009f5e40 -> StRecomposeW FUN_009fb870",
+  "capture_frame_pos_float": "0x3fc148a7 (~1.5101)",
+  "clip": {
+    "object_addr": "0x21f21d90",
+    "vtable": "0x00b6aefc",
+    "duration_s": 2.5673,
+    "block_size_off28": 8,
+    "coeff_count_off30_uVar11": 246,
+    "static_mask_off40": 4,
+    "wavelet_data_off44": 124,
+    "data_base_off58": "0x21f21df0"
+  },
+  "entry_args": {
+    "param_1_clip": "0x21f21d90",
+    "param_2_framepos_float": "0x3fc148a7",
+    "param_3": 60,
+    "param_4_pose_out": "0x219143e0",
+    "param_5": 0,
+    "param_6_mask": "0x21914f30",
+    "param_7": "0x20047da0"
+  },
+  "recompose_call_site": {
+    "eip": "0x9f6396 (instr after call FUN_009fb870)",
+    "args": "FUN_009fb870(&header, coeffs_in, pose_out, mask)",
+    "header_addr": "0x3c0e658",
+    "coeffs_in_addr": "0x21916e10",
+    "pose_out_addr": "0x219143e0",
+    "mask_addr": "0x21914f30"
+  },
+  "header_parsed": {
+    "local_48_param3": 60,
+    "local_44_param5": 0,
+    "local_40_static_ptr": "0x21f21df4 (data_base+4)",
+    "local_3c_wavelet_ptr": "0x21f21e6c (data_base+124)"
+  },
+  "files": {
+    "clip_data.hex": "12288 bytes from data_base 0x21f21df0 (raw wavelet input; spills into next clip object near end, this clip fully contained)",
+    "coeffs_in.hex": "1024 bytes from 0x21916e10; first 246 floats = StRecomposeW input (dequantized+interpolated coeffs)",
+    "pose_out.hex": "3072 bytes from 0x219143e0; VALID region 2896 bytes (~60 hkQsTransforms), tail overlaps mask",
+    "mask.hex": "512 bytes from param_6 0x21914f30 (DOF/reference block)",
+    "header.hex": "16 bytes from 0x3c0e658"
+  },
+  "validation_plan": "raw(clip_data) --decompress+dequant+interp--> coeffs_in --StRecomposeW(header,mask)--> pose_out. Each arrow independently checkable against these fixtures."
+}

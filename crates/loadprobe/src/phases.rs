@@ -83,6 +83,11 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     KnownEip { eip: 0x0084DD5B, label: "MTRL texture-handle overrun", teardown: false },
     KnownEip { eip: 0x004CC064, label: "render/texture-component pool NULL-fallback", teardown: false },
     KnownEip { eip: 0x007E045E, label: "ECS texture-component type-confusion", teardown: false },
+    // 0x0085C8D0: texture-bind / null-surface fault in the wardrobe-preview (menu-open) path.
+    // Neighbor of the 0x750BD9 null-DXT1 site and the 0x84DD5B tex-handle-overrun; reached via
+    // model-instantiation frames 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. AV READ target=0
+    // with EAX = a texture handle/hash being looked up and not found. NOT a teardown artifact.
+    KnownEip { eip: 0x0085C8D0, label: "texture-bind/null-surface fault on wardrobe preview (menu-open)", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {

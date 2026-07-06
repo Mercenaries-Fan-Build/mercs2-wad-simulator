@@ -1,0 +1,23 @@
+[package]
+name = "mercs2_game"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 — the game exe: boots the engine from the player's save (profile → SaveState → world). Game-specific config lives here, driving the asset-agnostic engine."
+
+[[bin]]
+name = "mercs2_game"
+path = "src/main.rs"
+
+[dependencies]
+# The game reads the player's save through the format layer, then drives the engine library's
+# streaming-world render IN-PROCESS (no separate engine binary): mercs2_game IS the game exe.
+mercs2_formats = { path = "../mercs2_formats" }
+mercs2_engine = { path = "../mercs2_engine" }
+# ECS components (Transform/ModelRef/AnimState/SkinPalette) the game spawns into the engine's World.
+mercs2_core = { path = "../mercs2_core" }
+# Lua script host — the game's PMC interior boot (script_host.rs) drives the engine via EngineHost.
+mercs2_script = { path = "../mercs2_script" }
+pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread
+# The game's own render/boot path (world.rs, the TPS world loop) owns its window + event loop.
+winit = "0.29"
+wgpu = "0.20"
