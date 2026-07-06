@@ -60,10 +60,47 @@ fn main() {
     if let Ok(cb) = wad::decompress_block_index(&mut w, 3278) {
         if let Ok(cg) = mercs2_formats::animgroup::parse_animgroup(&cb) {
             let mut cc: Vec<&_> = cg.clips.iter().collect();
-            cc.sort_by(|a, b| b.num_poses.cmp(&a.num_poses));
-            println!("[chris] {} clips (hash | tt | poses | dur) sorted by poses:", cg.clips.len());
+            // LtSampleWave [ecx+0x58] = 8642 is the playing clip's data base offset in the animgroup.
+            // Sort by havok_offset and flag the clip whose packfile owns offset 8642.
+            cc.sort_by_key(|c| c.havok_offset);
+            println!("[chris] {} clips (hash | tt | poses | dur | havok_offset) — captured base=8642:", cg.clips.len());
             for c in &cc {
-                println!("   0x{:08X}  {:3}tt  {:3} poses  {:.2}s", c.name_hash, c.num_transform_tracks, c.num_poses, c.duration);
+                let mark = if c.havok_offset <= 8642 && 8642 < c.havok_offset + 4000 { " <== near 8642" } else { "" };
+                println!("   0x{:08X}  {:3}tt  {:3} poses  {:.2}s  @0x{:X} ({}){}", c.name_hash, c.num_transform_tracks, c.num_poses, c.duration, c.havok_offset, c.havok_offset, mark);
+            }
+            // Match the LIVE-captured quant data (distinctive stretch e00d/e01f/e011) to the block -> clip.
+            let needle: [u8; 16] = [0xe0,0x0d,0xe0,0x1d,0xe0,0x05,0xe0,0x1f,0xe0,0x1d,0xe0,0x05,0xe0,0x11,0xe0,0x1d];
+            if let Some(pos) = cb.windows(needle.len()).position(|w| w == needle) {
+                let mut by: Vec<&_> = cg.clips.iter().collect();
+                by.sort_by_key(|c| c.havok_offset);
+                let owner = by.iter().rev().find(|c| c.havok_offset <= pos);
+                println!("[chris] captured quant data @ block 0x{pos:X}");
+                if let Some(c) = owner {
+                    println!("[chris] ==> CHRIS IDLE = 0x{:08X}  ({}tt {} poses {:.2}s, packfile @0x{:X})", c.name_hash, c.num_transform_tracks, c.num_poses, c.duration, c.havok_offset);
+                }
+            } else {
+                println!("[chris] captured quant data NOT found in block 3278");
+            }
+            // Chris WALK/RUN via footstep annotations: bucket each footstep_* string offset to its clip.
+            let mut by: Vec<&_> = cg.clips.iter().collect();
+            by.sort_by_key(|c| c.havok_offset);
+            for (tag, needle) in [("WALK", b"footstep_walk".as_slice()), ("RUN", b"footstep_run".as_slice())] {
+                let mut clips: std::collections::BTreeSet<u32> = Default::default();
+                let mut start = 0usize;
+                while start + needle.len() <= cb.len() {
+                    match cb[start..].windows(needle.len()).position(|w| w == needle) {
+                        Some(p) => {
+                            let off = start + p;
+                            if let Some(c) = by.iter().rev().find(|c| c.havok_offset <= off) {
+                                clips.insert(c.name_hash);
+                            }
+                            start = off + needle.len();
+                        }
+                        None => break,
+                    }
+                }
+                let list: Vec<String> = clips.iter().map(|h| format!("0x{h:08X}")).collect();
+                println!("[chris] {tag} clips ({}): {:?}", clips.len(), list);
             }
         }
     }

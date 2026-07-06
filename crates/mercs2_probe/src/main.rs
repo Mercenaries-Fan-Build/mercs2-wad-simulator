@@ -31,7 +31,8 @@ fn usage() -> ! {
          \x20 animdiag/animcheck/skincheck [--model H] [--index I]        trackmap [... --clip H]\n\
          \x20 entity-find [0xKEY ...]       comp-probe                    comp-dump [Name]\n\
          \x20 block-grep <needle>           scan-hash <0xH ...>           find-ref <0xH ...>\n\
-         \x20 block-probe <index>           placement-names\n\
+         \x20 block-probe <index>           placement-names               hier --model H [names.txt]\n\
+         \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
          (vz.wad auto-discovers from the registry; override with --wad <path>)"
     );
     std::process::exit(2);
@@ -61,7 +62,7 @@ fn first_positional(args: &[String]) -> Option<String> {
             skip_next = false;
             continue;
         }
-        if a == "--wad" || a == "--model" || a == "--index" || a == "--clip" {
+        if a == "--wad" || a == "--model" || a == "--index" || a == "--clip" || a == "--csv" {
             skip_next = true;
             continue;
         }
@@ -71,6 +72,43 @@ fn first_positional(args: &[String]) -> Option<String> {
         return Some(a.clone());
     }
     None
+}
+
+/// Dump a save `.profile`: all parsed header fields (including the raw bytes around the
+/// character/costume region, 0x240..0x260) + the DECOMPRESSED SaveSingleton Lua payload — the
+/// grep-able ground truth for header-byte meanings. `needle` filters payload lines
+/// (case-insensitive); `None` prints the whole payload.
+fn save_dump(profile_path: &str, needle: Option<&str>) -> Result<(), String> {
+    let bytes = std::fs::read(profile_path).map_err(|e| format!("read {profile_path}: {e}"))?;
+    let p = mercs2_formats::save::parse(&bytes)?;
+    println!(
+        "[save-dump] '{}' | contract {} | playtime {}s | cash {} | fuel {}/{} | character(0x4D) {} | upgrade(0x4F) {} | unlocked_costumes(0x24A) {} | unk(0x24B) {} | flags4C {:#x} | ts {}",
+        p.save_name(),
+        p.active_contract(),
+        p.play_time_seconds,
+        p.cash,
+        p.fuel,
+        p.fuel_capacity,
+        p.character_index,
+        p.upgrade_index,
+        p.unlocked_costumes,
+        p.unknown_0x24b,
+        p.flags_0x4c,
+        p.timestamp
+    );
+    let hex: Vec<String> = bytes[0x240..0x260.min(bytes.len())].iter().map(|b| format!("{b:02x}")).collect();
+    println!("[save-dump] header[0x240..0x260]: {}", hex.join(" "));
+    let lua = p.decompress_lua()?;
+    let text = String::from_utf8_lossy(&lua);
+    match needle {
+        Some(n) => {
+            for line in text.lines().filter(|l| l.to_lowercase().contains(n)) {
+                println!("{line}");
+            }
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
 }
 
 /// Headless verification of vz_state overlay activation: parse a `.profile` → its active `SaveState`
@@ -130,6 +168,131 @@ fn overlays_report(wadpath: &str, profile_path: &str) -> Result<(), String> {
     if !unresolved.is_empty() {
         let sample: Vec<&str> = unresolved.iter().take(6).copied().collect();
         println!("[overlays] {} unresolved (sample): {sample:?}", unresolved.len());
+    }
+    Ok(())
+}
+
+/// `hier` — dump a model container's HIER bone tree with name resolution.
+/// Names come from the rainbow table plus an optional plain-text candidate
+/// file (one string per line, hashed with pandemic_hash_m2). With `--csv <path>`
+/// the tree is also written as CSV (DFS order, parent_index column).
+fn hier_report(
+    wadpath: &str,
+    model: u32,
+    names_file: Option<String>,
+    csv_out: Option<String>,
+) -> Result<(), String> {
+    use mercs2_formats::hash::pandemic_hash_m2;
+    use mercs2_formats::orchestrator;
+    use std::collections::{BTreeSet, HashMap};
+
+    let mut w = wad::open(wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
+    let c = wad::extract_container(&mut w, model).map_err(|e| format!("extract_container: {e}"))?;
+    let hier = orchestrator::parse_hier(&c);
+    let swit: BTreeSet<u32> = orchestrator::parse_swit(&c).into_iter().collect();
+    let dest = orchestrator::classify(&c);
+
+    let all_hashes: BTreeSet<u32> = hier.iter().map(|n| n.hash).collect();
+    let mut names = mercs2_engine::worldutil::rainbow_names(&all_hashes);
+    if let Some(p) = names_file {
+        let text = std::fs::read_to_string(&p).map_err(|e| format!("read {p}: {e}"))?;
+        for line in text.lines() {
+            let cand = line.trim();
+            if cand.len() < 2 {
+                continue;
+            }
+            let h = pandemic_hash_m2(cand);
+            if all_hashes.contains(&h) {
+                names.entry(h).or_insert_with(|| cand.to_string());
+            }
+        }
+    }
+
+    println!(
+        "model 0x{model:08X}: {} HIER nodes, {} in SWIT, {} resolved names",
+        hier.len(),
+        hier.iter().filter(|n| swit.contains(&n.hash)).count(),
+        hier.iter().filter(|n| names.contains_key(&n.hash)).count()
+    );
+
+    // Depth-first print. parent==None are roots.
+    let mut kids: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut roots = Vec::new();
+    for n in &hier {
+        match n.parent {
+            Some(p) => kids.entry(p).or_default().push(n.index),
+            None => roots.push(n.index),
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        i: usize,
+        depth: usize,
+        hier: &[orchestrator::HierNode],
+        kids: &HashMap<usize, Vec<usize>>,
+        names: &HashMap<u32, String>,
+        swit: &BTreeSet<u32>,
+        dest: &Option<orchestrator::Destruction>,
+        csv: &mut Option<String>,
+    ) {
+        let n = &hier[i];
+        let name = names.get(&n.hash).map(|s| s.as_str()).unwrap_or("?");
+        let state = dest
+            .as_ref()
+            .and_then(|d| d.state_of_node(i))
+            .map(|s| s.as_str())
+            .unwrap_or("-");
+        let t = [n.local[12], n.local[13], n.local[14]];
+        let dim = [
+            n.bbox_max[0] - n.bbox_min[0],
+            n.bbox_max[1] - n.bbox_min[1],
+            n.bbox_max[2] - n.bbox_min[2],
+        ];
+        println!(
+            "{:indent$}[{i:>3}] 0x{:08X} {name:<44} {}{state:<12} t=({:.2},{:.2},{:.2}) bbox {:.1}x{:.1}x{:.1}",
+            "",
+            n.hash,
+            if swit.contains(&n.hash) { "SWIT " } else { "" },
+            t[0],
+            t[1],
+            t[2],
+            dim[0],
+            dim[1],
+            dim[2],
+            indent = depth * 2
+        );
+        if let Some(out) = csv {
+            let parent = n.parent.map(|p| p.to_string()).unwrap_or_default();
+            out.push_str(&format!(
+                "{i},{parent},{depth},0x{:08X},{},{},{state},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3}\n",
+                n.hash,
+                if name == "?" { "" } else { name },
+                u8::from(swit.contains(&n.hash)),
+                t[0], t[1], t[2],
+                dim[0], dim[1], dim[2],
+            ));
+        }
+        for &k in kids.get(&i).map(|v| v.as_slice()).unwrap_or(&[]) {
+            walk(k, depth + 1, hier, kids, names, swit, dest, csv);
+        }
+    }
+    let mut csv = csv_out.as_ref().map(|_| {
+        String::from("index,parent_index,depth,hash,name,in_swit,state,tx,ty,tz,bbox_dx,bbox_dy,bbox_dz\n")
+    });
+    for &r in &roots {
+        walk(r, 0, &hier, &kids, &names, &swit, &dest, &mut csv);
+    }
+    if let (Some(path), Some(out)) = (&csv_out, &csv) {
+        std::fs::write(path, out).map_err(|e| format!("write {path}: {e}"))?;
+        println!("csv -> {path}");
+    }
+    if let Some(d) = &dest {
+        println!(
+            "destruction: {} switch groups, {} hulls, INDX {} mesh->node entries",
+            d.switch_group_count,
+            d.hull_count,
+            d.indx.len()
+        );
     }
     Ok(())
 }
@@ -214,12 +377,61 @@ fn main() {
             }
         },
         "placement-names" => diag::placement_names(&wadpath),
+        "gfx-extract" => {
+            let out = first_positional(&args).unwrap_or_else(|| {
+                "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/gfx_movies".into()
+            });
+            run(diag::gfx_extract(&wadpath, &out));
+        }
+        "extract" => {
+            let mh = model.as_deref().and_then(parse_hash).unwrap_or_else(|| {
+                eprintln!("extract: usage: mercs2_probe extract --model 0xHASH <out.bin>");
+                std::process::exit(2);
+            });
+            let out = first_positional(&args).unwrap_or_else(|| format!("{mh:08X}.bin"));
+            run((|| -> Result<(), String> {
+                let mut w = wad::open(&wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
+                let c = wad::extract_container(&mut w, mh).map_err(|e| format!("extract_container: {e}"))?;
+                std::fs::write(&out, &c).map_err(|e| format!("write {out}: {e}"))?;
+                println!("0x{mh:08X}: {} bytes -> {out}", c.len());
+                Ok(())
+            })());
+        }
+        "hier" => {
+            let mh = model.as_deref().and_then(parse_hash).unwrap_or_else(|| {
+                eprintln!("hier: usage: mercs2_probe hier --model 0xHASH [names.txt]");
+                std::process::exit(2);
+            });
+            run(hier_report(&wadpath, mh, first_positional(&args), flag_val(&args, "--csv")));
+        }
         "overlays" => {
             let prof = first_positional(&args).unwrap_or_else(|| {
                 eprintln!("overlays: usage: mercs2_probe overlays <profile-path>");
                 std::process::exit(2);
             });
             run(overlays_report(&wadpath, &prof));
+        }
+        "save-dump" => {
+            let prof = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("save-dump: usage: mercs2_probe save-dump <profile-path> [grep-needle]");
+                std::process::exit(2);
+            });
+            // Second positional = case-insensitive needle to filter the Lua payload lines.
+            let needle = {
+                let mut seen = false;
+                let mut n = None;
+                let mut skip = false;
+                for a in &args {
+                    if skip { skip = false; continue; }
+                    if a == "--wad" { skip = true; continue; }
+                    if a.starts_with("--") { continue; }
+                    if !seen { seen = true; continue; } // the profile path
+                    n = Some(a.to_lowercase());
+                    break;
+                }
+                n
+            };
+            run(save_dump(&prof, needle.as_deref()));
         }
         "-h" | "--help" | "help" => usage(),
         other => {
