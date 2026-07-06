@@ -39,10 +39,13 @@ const OFF_UNK_20: usize = 0x20; // u32  constant 0x0
 const OFF_TIMESTAMP: usize = 0x24; // u32  unix timestamp of the save
 const OFF_CONTRACT: usize = 0x2C; // [16] NUL-padded ASCII active contract id (FACT)
 const CONTRACT_LEN: usize = 16;
-const OFF_FLAGS_4C: usize = 0x4C; // u32  bitfield (INFERRED)
+const OFF_FLAGS_4C: usize = 0x4C; // u32  raw dword; byte +1 is the hero (see OFF_CHARACTER)
+const OFF_CHARACTER: usize = 0x4D; // u8  1-based hero: 1 mattias / 2 chris / 3 jen (INFERRED, strong)
 const OFF_SAVE_NAME: usize = 0x20A; // UTF-16LE NUL-terminated slot name (FACT)
 const OFF_FUEL_CAP: usize = 0x2F8; // u16  fuel capacity? tracks fuel (INFERRED)
-const OFF_COSTUME: usize = 0x24A; // u8   costume/character index (INFERRED)
+const OFF_UNLOCKED_COSTUMES: usize = 0x24A; // u8  unlocked-costume count (1 fresh, 5 = all base outfits)
+const OFF_UNK_24B: usize = 0x24B; // u8  unknown (1 in every observed save)
+const OFF_UPGRADE: usize = 0x4F; // u8  hero upgrade tier 0..3 (drives the upgrade TEMPLATE = the look)
 
 /// Decoded Mercenaries 2 `.profile` save.
 ///
@@ -74,10 +77,29 @@ pub struct Profile {
     /// `@0x2C` 16B — active/last mission **contract id**, NUL-padded ASCII
     /// (`PmcCon001`, `OilCon003`, `PmcJob001`, ...). FACT.
     pub active_contract: String,
-    /// `@0x4C` u32 — flag bitfield (changes with progress). INFERRED.
+    /// `@0x4C` u32 — raw dword, kept for reference. NOT one bitfield: byte `@0x4D` is the hero
+    /// (exposed as `character_index`); byte `@0x4F` is a progression flag (3 on completed saves).
     pub flags_0x4c: u32,
-    /// `@0x24A` u8 — costume / character index (`SetProfileCostume`). INFERRED.
-    pub costume_index: u8,
+    /// `@0x4D` u8 — HERO (`Get/SetProfileCharacter` = runtime profile object byte `+0x61`,
+    /// `FUN_005df790/7d0`). Values are engine-coded (`FUN_00634810` display-name switch):
+    /// 1 = `SHELL.SelectCharacter.MattiasNilsson`, 2 = `.ChrisJacobs`, 3 = `.JenniferMui`,
+    /// else "Player". File offset verified by save diff: the Jen save stores 3, all Mattias
+    /// saves store 1, and it is the only header byte separating two parallel fresh saves.
+    pub character_index: u8,
+    /// `@0x24A` u8 — UNLOCKED-costume count (feeds `Player.GetAvailableCostumes`, the wardrobe
+    /// menu gate in `_SelectOutfit`): 1 on fresh/mid saves, 5 (= all five base outfits) on the
+    /// completed saves. NOT the selected costume (disproved by user ground truth: saves with
+    /// different looks share it via upgrade tier, wardrobe untouched).
+    pub unlocked_costumes: u8,
+    /// `@0x24B` u8 — unknown, `1` in every observed save. NOT the costume/character.
+    pub unknown_0x24b: u8,
+    /// `@0x4F` u8 — hero UPGRADE tier 0..3 (`Get/SetProfileUpgrade` = runtime profile object
+    /// byte `+0x62`, `FUN_005df830/870`). Drives the spawn TEMPLATE via `_tCharacterMap.templates`
+    /// (`mrxplayer.lua:167-168`: `tTemplates[iUpgrade] or base`) — the hero's LOOK progresses with
+    /// tier, no wardrobe involvement. Observed: 0 on fresh/mid saves (default skin,
+    /// user-confirmed), 3 on both completed-save copies (Mattias endgame "MetalHead" look,
+    /// user-confirmed).
+    pub upgrade_index: u8,
     /// `@0x2F8` u16 — fuel capacity (max fuel); tracks/exceeds `fuel`. INFERRED.
     pub fuel_capacity: u16,
     /// `@0x20A` — save-slot name, UTF-16LE NUL-terminated (e.g. `auto_634304EA`).
@@ -144,7 +166,10 @@ pub fn parse(bytes: &[u8]) -> Result<Profile, String> {
         timestamp: rd_u32(bytes, OFF_TIMESTAMP),
         active_contract,
         flags_0x4c: rd_u32(bytes, OFF_FLAGS_4C),
-        costume_index: bytes[OFF_COSTUME],
+        unlocked_costumes: bytes[OFF_UNLOCKED_COSTUMES],
+        unknown_0x24b: bytes[OFF_UNK_24B],
+        upgrade_index: bytes[OFF_UPGRADE],
+        character_index: bytes[OFF_CHARACTER],
         fuel_capacity: rd_u16(bytes, OFF_FUEL_CAP),
         save_name,
         raw: bytes.to_vec(),

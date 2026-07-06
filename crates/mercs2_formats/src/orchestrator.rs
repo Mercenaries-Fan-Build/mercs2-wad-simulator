@@ -165,6 +165,300 @@ pub fn parse_hier(buf: &[u8]) -> Vec<HierNode> {
         .collect()
 }
 
+// ── The engine's destruction STATE MACHINE (FUN_004cf340 @0x004cf340 — the exe's only SWIT
+// consumer; recovered layout in docs/destruction_orchestrator_format.md). NOT a heuristic:
+// per switch node, NAMED states with explicit Enter/Exit u32 lists. ──
+
+/// `pandemic_hash_m2("Enter")` — CHDR list selector for a state's Enter list.
+pub const LIST_ENTER: u32 = 0x9DA9_7065;
+/// `pandemic_hash_m2("Exit")` — CHDR list selector for a state's Exit list.
+pub const LIST_EXIT: u32 = 0xDB41_017D;
+
+/// One named state of a switch node.
+#[derive(Debug, Clone, Default)]
+pub struct StateDef {
+    pub name_hash: u32,
+    pub enter: Vec<u32>,
+    pub exit: Vec<u32>,
+}
+
+/// One switch node: its name hash + named states, in authored order.
+#[derive(Debug, Clone, Default)]
+pub struct SwitchNodeDef {
+    pub name_hash: u32,
+    pub states: Vec<StateDef>,
+}
+
+/// The parsed state machine.
+#[derive(Debug, Clone, Default)]
+pub struct StateMachine {
+    /// The `SWIT` per-slot table (`INFO.switch_count` u32s).
+    pub switch_slots: Vec<u32>,
+    pub nodes: Vec<SwitchNodeDef>,
+}
+
+/// One UCFX descriptor row (20 bytes at `20 + i*20`): tag, data offset (`0xFFFFFFFF` =
+/// container), size, `u2` (valid/flags), `u3` (descendant row count — the engine's walker skips
+/// subtrees with `next = i + u3 + 1`).
+struct DescRow {
+    tag: [u8; 4],
+    u0: u32,
+    size: u32,
+    u3: u32,
+}
+
+fn desc_rows(buf: &[u8]) -> (usize, Vec<DescRow>) {
+    let mut rows = Vec::new();
+    if buf.len() < 20 {
+        return (0, rows);
+    }
+    let data_off = u32_le(buf, 4) as usize;
+    let ndesc = u32_le(buf, 16) as usize;
+    for d in 0..ndesc {
+        let ro = 20 + d * 20;
+        if ro + 20 > buf.len() {
+            break;
+        }
+        rows.push(DescRow {
+            tag: [buf[ro], buf[ro + 1], buf[ro + 2], buf[ro + 3]],
+            u0: u32_le(buf, ro + 4),
+            size: u32_le(buf, ro + 8),
+            u3: u32_le(buf, ro + 16),
+        });
+    }
+    (data_off, rows)
+}
+
+/// Parse the destruction state machine from a container, mirroring `FUN_004cf340`: find the
+/// container row whose IMMEDIATE children carry `NODE`/`STAT` chunks, then dispatch those
+/// children in authored order (the engine walks siblings with the `u3`-skip). Returns `None`
+/// when the container carries no such family (non-destructible models).
+pub fn parse_state_machine(buf: &[u8]) -> Option<StateMachine> {
+    let (data_off, rows) = desc_rows(buf);
+    if rows.is_empty() {
+        return None;
+    }
+    // Immediate children of row `p`: p+1, then advance past each child's subtree (u3 rows).
+    let children_of = |p: usize| -> Vec<usize> {
+        let end = (p + rows[p].u3 as usize + 1).min(rows.len());
+        let mut out = Vec::new();
+        let mut i = p + 1;
+        while i < end {
+            out.push(i);
+            i += rows[i].u3 as usize + 1;
+        }
+        out
+    };
+    // The family parent: the container whose immediate children include a NODE row.
+    let parent = (0..rows.len()).find(|&p| {
+        rows[p].u3 > 0 && children_of(p).iter().any(|&c| &rows[c].tag == b"NODE")
+    })?;
+
+    let mut sm = StateMachine::default();
+    let mut switch_count = 0usize;
+    // Parser context: the list the next CEXE fills (true = Enter) + its expected count.
+    let mut pending: Option<(bool, usize)> = None;
+    for c in children_of(parent) {
+        let r = &rows[c];
+        if r.u0 == 0xFFFF_FFFF {
+            continue; // nested container — the engine reads only leaf data here
+        }
+        let start = data_off + r.u0 as usize;
+        let end = (start + r.size as usize).min(buf.len());
+        if start > end {
+            continue;
+        }
+        let d = &buf[start..end];
+        match &r.tag {
+            b"INFO" if d.len() >= 12 => {
+                // [u32 skipped, u32 switch_count, u32 node_count]
+                switch_count = u32_le(d, 4) as usize;
+            }
+            b"NODE" if d.len() >= 8 => {
+                sm.nodes.push(SwitchNodeDef {
+                    name_hash: u32_le(d, 0),
+                    states: Vec::with_capacity(u32_le(d, 4) as usize),
+                });
+            }
+            b"STAT" if d.len() >= 4 => {
+                if let Some(n) = sm.nodes.last_mut() {
+                    n.states.push(StateDef { name_hash: u32_le(d, 0), ..Default::default() });
+                }
+            }
+            b"CHDR" if d.len() >= 8 => {
+                let which = u32_le(d, 0);
+                let count = u32_le(d, 4) as usize;
+                match which {
+                    LIST_ENTER => pending = Some((true, count)),
+                    LIST_EXIT => pending = Some((false, count)),
+                    _ => pending = None,
+                }
+            }
+            b"CEXE" => {
+                if let Some((enter, count)) = pending.take() {
+                    let n = (d.len() / 4).min(count);
+                    let list: Vec<u32> = (0..n).map(|i| u32_le(d, i * 4)).collect();
+                    if let Some(st) = sm.nodes.last_mut().and_then(|nd| nd.states.last_mut()) {
+                        if enter {
+                            st.enter = list;
+                        } else {
+                            st.exit = list;
+                        }
+                    }
+                }
+            }
+            b"SWIT" => {
+                let n = if switch_count > 0 { switch_count.min(d.len() / 4) } else { d.len() / 4 };
+                sm.switch_slots = (0..n).map(|i| u32_le(d, i * 4)).collect();
+            }
+            _ => {}
+        }
+    }
+    (!sm.nodes.is_empty()).then_some(sm)
+}
+
+/// Decode a state's Enter/Exit COMMAND SCRIPT into readable calls. Token grammar (observed on
+/// retail vehicles, e.g. `al_veh_truck_hmmwv_avenger`):
+/// `0x1 <arg>` pushes an argument, `0x2 <command>` invokes the command with the pushed args,
+/// `0x3` ends the script. Commands/args are m2 hashes (SHOW/Hide/SetState/StartEmitter/
+/// StopEmitter/PropTemplate/KILL, effect names, HIER node hashes, state hashes) — `resolve`
+/// maps hash → display name.
+pub fn decode_script(list: &[u32], resolve: impl Fn(u32) -> String) -> String {
+    let mut calls: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < list.len() {
+        match list[i] {
+            1 if i + 1 < list.len() => {
+                args.push(resolve(list[i + 1]));
+                i += 2;
+            }
+            2 if i + 1 < list.len() => {
+                calls.push(format!("{}({})", resolve(list[i + 1]), args.join(", ")));
+                args.clear();
+                i += 2;
+            }
+            3 => i += 1,
+            other => {
+                args.push(resolve(other));
+                i += 1;
+            }
+        }
+    }
+    if !args.is_empty() {
+        calls.push(format!("?({})", args.join(", ")));
+    }
+    calls.join("; ")
+}
+
+/// The default state of a switch node, resolved from the GAME DATA: every observed machine's
+/// first state is an init stub whose enter script is `SetState(<target>, self)` — follow it.
+/// Falls back to state 0 when the pattern is absent.
+pub fn default_state_index(node: &SwitchNodeDef) -> usize {
+    let setstate = crate::hash::pandemic_hash_m2("setstate");
+    let Some(first) = node.states.first() else { return 0 };
+    let mut args: Vec<u32> = Vec::new();
+    let l = &first.enter;
+    let mut i = 0;
+    while i < l.len() {
+        match l[i] {
+            1 if i + 1 < l.len() => {
+                args.push(l[i + 1]);
+                i += 2;
+            }
+            2 if i + 1 < l.len() => {
+                if l[i + 1] == setstate {
+                    if let Some(&target) = args.first() {
+                        if let Some(pos) = node.states.iter().position(|s| s.name_hash == target) {
+                            return pos;
+                        }
+                    }
+                }
+                args.clear();
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    0
+}
+
+/// GROUND-TRUTH per-mesh-group visibility from the engine state machine — no classification
+/// heuristics: every `SWIT` participant subtree starts hidden, then each switch node's CHOSEN
+/// state executes its enter-script `SHOW`/`Hide` commands over the HIER; mesh groups map through
+/// `INDX`. `chosen[i]` = state index for `sm.nodes[i]` (see [`default_state_index`]).
+pub fn machine_group_visibility(
+    sm: &StateMachine,
+    hier: &[HierNode],
+    indx: &[usize],
+    chosen: &[usize],
+) -> Vec<bool> {
+    let show = crate::hash::pandemic_hash_m2("show");
+    let hide = crate::hash::pandemic_hash_m2("hide");
+    let hash_to_idx: std::collections::HashMap<u32, usize> =
+        hier.iter().map(|h| (h.hash, h.index)).collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); hier.len()];
+    for h in hier {
+        if let Some(p) = h.parent {
+            if p < hier.len() {
+                children[p].push(h.index);
+            }
+        }
+    }
+    fn mark(children: &[Vec<usize>], hidden: &mut [bool], root: usize, v: bool) {
+        let mut stack = vec![root];
+        while let Some(x) = stack.pop() {
+            if x < hidden.len() {
+                hidden[x] = v;
+                stack.extend_from_slice(&children[x]);
+            }
+        }
+    }
+    let mut hidden = vec![false; hier.len()];
+    for &slot in &sm.switch_slots {
+        if let Some(&i) = hash_to_idx.get(&slot) {
+            mark(&children, &mut hidden, i, true);
+        }
+    }
+    for (ni, node) in sm.nodes.iter().enumerate() {
+        let si = chosen
+            .get(ni)
+            .copied()
+            .unwrap_or(0)
+            .min(node.states.len().saturating_sub(1));
+        let Some(st) = node.states.get(si) else { continue };
+        let mut args: Vec<u32> = Vec::new();
+        let l = &st.enter;
+        let mut i = 0;
+        while i < l.len() {
+            match l[i] {
+                1 if i + 1 < l.len() => {
+                    args.push(l[i + 1]);
+                    i += 2;
+                }
+                2 if i + 1 < l.len() => {
+                    let cmd = l[i + 1];
+                    if cmd == show || cmd == hide {
+                        for a in &args {
+                            if let Some(&idx) = hash_to_idx.get(a) {
+                                mark(&children, &mut hidden, idx, cmd == hide);
+                            }
+                        }
+                    }
+                    args.clear();
+                    i += 2;
+                }
+                3 => i += 1,
+                _ => {
+                    args.push(l[i]);
+                    i += 1;
+                }
+            }
+        }
+    }
+    indx.iter().map(|&n| hidden.get(n).map(|h| !h).unwrap_or(true)).collect()
+}
+
 /// Parse the first `SWIT` chunk as a flat u32 node-hash list.
 pub fn parse_swit(buf: &[u8]) -> Vec<u32> {
     let chunks = leaf_chunks(buf);
