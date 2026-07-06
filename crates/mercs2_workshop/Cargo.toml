@@ -1,0 +1,30 @@
+[package]
+name = "mercs2_workshop"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — native asset workshop (browse / inspect / remix) on the mercs2_engine renderer."
+
+[dependencies]
+winit = "0.29"
+wgpu = "0.20"
+pollster = "0.3"
+glam = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.17" # --tex-png headless dump (CPU BC1/BC3 decode -> PNG for visual inspection)
+# glTF import (drag-drop a .gltf/.glb onto the workshop window -> engine-rendered preview).
+# `import` decodes buffers + images (PNG/JPEG) so materials come across without extra plumbing.
+gltf = "1"
+# The inspector GUI (Unreal-style Details panel, mouse-driven): egui painted through the engine's
+# Scene overlay hook. egui 0.28 matches wgpu 0.20; the winit-0.29 event bridge is hand-rolled in
+# gui.rs (egui-winit 0.28 wants winit 0.30, which the engine is not on yet).
+egui = "0.28"
+egui-wgpu = "0.28"
+# OS clipboard for the context menus' copy actions — our hand-rolled bridge must handle egui's
+# PlatformOutput.copied_text itself (egui-winit would normally do this).
+arboard = "3"
+# NOTE (blueprint editor, planned): `full_moon` (Lua 5.1 AST, round-trip) + `egui-snarl`
+# (node graph) — see docs/modernization/workshop_charter.md §Mission designer.
+mercs2_engine = { path = "../mercs2_engine" }
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }
