@@ -56,6 +56,14 @@ impl GameplaySystems {
         self.physics.set_tris(tris);
     }
 
+    /// Give the fleet physics the terrain heightfield so ground raycasts (vehicle wheels, dropped
+    /// props) resolve over open terrain — not just where a c3 building cell happens to supply triangles.
+    /// Closes the §6.2 "terrain heightmap never handed to the fleet physics" gap (cars fell through
+    /// open ground). `None` clears it (e.g. the interior boot, which has no terrain).
+    pub fn set_heightmap(&mut self, heightmap: Option<mercs2_physics::Heightmap>) {
+        self.physics.set_heightmap(heightmap);
+    }
+
     /// Run one fixed simulation step of the fleet systems over `world`, in the recovered layer-4 order
     /// (vehicle → weapons — `FUN_004c9740`), drain the event bus, then advance audio. No-op over a
     /// World carrying none of the fleet components yet.

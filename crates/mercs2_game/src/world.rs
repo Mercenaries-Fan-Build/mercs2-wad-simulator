@@ -510,6 +510,26 @@ fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::rend
 /// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`] for the particle sim.
 /// Static light-shaft FX are handled separately (see [`is_light_shaft_fx`] / glow cards) and never
 /// reach here. Name-heuristic mapping until the `EffectTemplate → EmitterDesc` decode is pinned.
+/// Sample the render terrain's `HeightMap` onto a regular grid → a `mercs2_physics::Heightmap` the
+/// fleet physics can raycast (K2 S3). The terrain extent is the engine's ±4000 m world square; a
+/// 257×257 grid (~31 m cells) bilinearly interpolates smoothly enough for vehicle ground contact. The
+/// render HeightMap keeps the exact triangles for the player walk; this is the physics-side heightfield.
+fn heightmap_to_physics(hm: &mercs2_engine::worldutil::HeightMap) -> mercs2_physics::Heightmap {
+    const W: usize = 257;
+    const MIN: f32 = -4000.0;
+    const MAX: f32 = 4000.0;
+    let cell = (MAX - MIN) / (W as f32 - 1.0);
+    let mut heights = Vec::with_capacity(W * W);
+    for iz in 0..W {
+        let z = MIN + iz as f32 * cell;
+        for ix in 0..W {
+            let x = MIN + ix as f32 * cell;
+            heights.push(hm.height_at(x, z));
+        }
+    }
+    mercs2_physics::Heightmap::new(MIN, MIN, cell, W, W, heights)
+}
+
 fn classify_particle(name: &str) -> Option<mercs2_engine::particles::EmitterDesc> {
     use mercs2_engine::particles::EmitterDesc;
     let n = name.to_ascii_lowercase();
@@ -1354,6 +1374,14 @@ pub async fn run_scene_world_loading(
                                 // Hand the streamed collision soup to the fleet physics world so the
                                 // vehicle/weapon systems can raycast against it via PhysicsQuery.
                                 runtime.set_collision(collision_tris.clone());
+                                // K2 S3: hand the terrain heightfield to the fleet physics too, so ground
+                                // raycasts resolve over open terrain (not just where a building cell
+                                // supplies triangles) — vehicles no longer fall through open ground.
+                                if let Some(hm) = hmap.as_ref() {
+                                    let phm = heightmap_to_physics(hm);
+                                    println!("[world] terrain heightmap -> fleet physics ({}x{} grid)", phm.width, phm.depth);
+                                    runtime.set_heightmap(Some(phm));
+                                }
                                 // Feed the harvested dynamic point lights to the renderer (nearest set
                                 // uploaded per frame). Without this the villa/world has no local lighting.
                                 scene.set_lights(std::mem::take(&mut data.lights));

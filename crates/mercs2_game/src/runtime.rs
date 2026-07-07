@@ -96,6 +96,12 @@ impl GameRuntime {
         self.gameplay.set_collision(tris);
     }
 
+    /// Hand the fleet physics the terrain heightfield (open-ground raycasts). See
+    /// [`GameplaySystems::set_heightmap`].
+    pub fn set_heightmap(&mut self, heightmap: Option<mercs2_physics::Heightmap>) {
+        self.gameplay.set_heightmap(heightmap);
+    }
+
     /// Realize recorded spawn intents into ECS entities. Each request's template name is hashed
     /// (`pandemic_hash_m2`) and routed through the resolver → the right archetype: a drivable `Vehicle`
     /// bundle the fleet drive system moves, or a plain `Prop`. The final transform is the request's
