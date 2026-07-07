@@ -74,6 +74,14 @@ impl GameScriptHost {
         self.audio.clone()
     }
 
+    /// Drain the spawn intents recorded since the last call (the loop realizes these into ECS
+    /// entities each frame — runtime `Pg.Spawn`s become drivable vehicles / rendered props). Clears
+    /// the `by_guid` index too so realized requests aren't re-mutated by a later `Object.Set*`.
+    pub fn take_new_spawns(&mut self) -> Vec<SpawnRequest> {
+        self.by_guid.clear();
+        std::mem::take(&mut self.spawns)
+    }
+
     fn req_mut(&mut self, guid: u64) -> Option<&mut SpawnRequest> {
         let i = *self.by_guid.get(&guid)?;
         self.spawns.get_mut(i)

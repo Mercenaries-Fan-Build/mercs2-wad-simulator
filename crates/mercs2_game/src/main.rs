@@ -26,6 +26,7 @@ mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharac
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
 mod player; // GAME: third-person player locomotion controller (extracted from world.rs, unit-tested)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
+mod runtime; // GAME: per-frame game update bundle (fleet gameplay + spawn resolver; realize_spawns seam)
 mod spawn; // GAME: template -> ECS archetype resolver (Pg.Spawn -> fleet entity, e.g. drivable vehicle)
 mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
 mod world; // GAME render/boot: full TPS/free world render path (player avatar, 10-stage load)
