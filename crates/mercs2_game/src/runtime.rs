@@ -50,6 +50,27 @@ pub struct GameRuntime {
     /// Monotonic runtime GUID source for population-spawned actors (distinct high space so they don't
     /// collide with script-spawned handles).
     next_pop_handle: u32,
+    /// Combat impacts this step, stashed after their decals are spawned so the render layer can emit a
+    /// matching particle burst (muzzle/impact/explosion FX live on the `Scene`, outside this bundle).
+    /// Drained by [`take_render_impacts`](Self::take_render_impacts).
+    render_impacts: Vec<mercs2_combat::Impact>,
+}
+
+/// Map a combat [`ImpactKind`](mercs2_combat::ImpactKind) to the decal it leaves — the three
+/// combat-produced `decaltable` categories.
+fn impact_decal_type(kind: mercs2_combat::ImpactKind) -> mercs2_decal::DecalType {
+    match kind {
+        mercs2_combat::ImpactKind::Bullet => mercs2_decal::DecalType::BulletHole,
+        mercs2_combat::ImpactKind::Explosion => mercs2_decal::DecalType::Scorch,
+        mercs2_combat::ImpactKind::Blood => mercs2_decal::DecalType::Blood,
+    }
+}
+
+/// Any unit vector perpendicular to `n` — the decal's surface tangent (the projection basis; the exact
+/// roll is cosmetic).
+fn perp(n: Vec3) -> Vec3 {
+    let axis = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    n.cross(axis).normalize_or_zero()
 }
 
 impl GameRuntime {
@@ -65,6 +86,7 @@ impl GameRuntime {
             decal: mercs2_decal::DecalWorld::new(),
             population: mercs2_population::PopulationWorld::new(),
             next_pop_handle: 0x2000_0000,
+            render_impacts: Vec::new(),
         }
     }
 
@@ -100,9 +122,22 @@ impl GameRuntime {
     /// [`tick_population`](Self::tick_population).)
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         self.gameplay.tick(world, dt);
+        // Combat impacts → projected decals (bullet holes / scorch / blood) + stash for particle FX.
+        // The decal pool + the render impacts are now fed by a real producer (was dead bookkeeping).
+        let impacts = self.gameplay.take_impacts();
+        for imp in &impacts {
+            self.decal.spawn(impact_decal_type(imp.kind), imp.position, imp.normal, perp(imp.normal));
+        }
+        self.render_impacts.extend(impacts);
         self.ai.tick(world);
         self.water.tick(world);
         self.decal.update(dt);
+    }
+
+    /// Drain the combat impacts recorded this frame so the render layer can emit a particle burst at
+    /// each (the FX sink lives on the `Scene`). Drain-then-clear.
+    pub fn take_render_impacts(&mut self) -> Vec<mercs2_combat::Impact> {
+        std::mem::take(&mut self.render_impacts)
     }
 
     /// Advance the population system one fixed step and realize its output. `focus` is the camera/player
@@ -175,6 +210,20 @@ mod tests {
         }
         let z1 = world.get::<&Transform>(car).unwrap().translation.z;
         assert!((z1 - z0).abs() > 1.0, "realized+throttled vehicle should drive; dz = {}", z1 - z0);
+    }
+
+    /// Each combat `ImpactKind` maps to its `decaltable` decal (the producer→pool wire that fills the
+    /// previously-empty decal pool).
+    #[test]
+    fn impact_kinds_map_to_their_decals() {
+        use mercs2_combat::ImpactKind;
+        use mercs2_decal::DecalType;
+        assert_eq!(impact_decal_type(ImpactKind::Bullet), DecalType::BulletHole);
+        assert_eq!(impact_decal_type(ImpactKind::Explosion), DecalType::Scorch);
+        assert_eq!(impact_decal_type(ImpactKind::Blood), DecalType::Blood);
+        // perp is a unit vector orthogonal to the surface normal.
+        let t = perp(Vec3::Y);
+        assert!((t.length() - 1.0).abs() < 1e-3 && t.dot(Vec3::Y).abs() < 1e-3);
     }
 
     /// The AI perception update runs through `GameRuntime::tick`: a hostile observer in range makes the

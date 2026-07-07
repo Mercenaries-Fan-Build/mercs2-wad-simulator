@@ -27,6 +27,11 @@ pub struct GameplaySystems {
     physics: StaticSoupPhysics,
     /// The engine event bus (combat posts DamageMsg/DestroyMsg/homing events here).
     bus: EventBus,
+    /// The weapon system, held as an instance so its per-frame **impact channel** (bullet/explosion/
+    /// blood hit points) can be drained for the decal + particle producers. See [`take_impacts`].
+    ///
+    /// [`take_impacts`]: GameplaySystems::take_impacts
+    weapons: mercs2_combat::WeaponSystem,
     /// The vehicle steering donut sine-LUT (built once).
     lut: DonutLut,
     /// Shared audio engine — the loop ticks the SAME engine the Lua `Sound.*` cues into.
@@ -39,6 +44,7 @@ impl GameplaySystems {
         GameplaySystems {
             physics: StaticSoupPhysics::new(Vec::new()),
             bus: EventBus::new(),
+            weapons: mercs2_combat::WeaponSystem::default(),
             lut: DonutLut::new(),
             audio,
         }
@@ -56,9 +62,16 @@ impl GameplaySystems {
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         let phys: &dyn PhysicsQuery = &self.physics;
         mercs2_vehicle::drive_step_system(world, phys, &self.lut, dt);
-        mercs2_combat::WeaponSystem::update(world, dt, &mut self.bus, Some(phys));
+        // Instance tick (not the static `update`) so the impact channel accumulates for draining.
+        self.weapons.tick(world, dt, &mut self.bus, Some(phys));
         self.bus.dispatch_all();
         self.audio.borrow_mut().tick(dt);
+    }
+
+    /// Drain this fixed step's combat impacts (bullet/explosion/blood hit points + normals). The
+    /// runtime turns each into a projected decal and a particle burst. Drain-then-clear.
+    pub fn take_impacts(&mut self) -> Vec<mercs2_combat::Impact> {
+        self.weapons.take_impacts()
     }
 }
 

@@ -1538,6 +1538,24 @@ pub async fn run_scene_world_loading(
                             }
                         }
                     }
+                    // Combat impact FX: each resolved hit (decal already spawned in the runtime) also
+                    // emits a particle burst — explosion → fireball, bullet → dust puff. Blood is
+                    // decal-only (no particle desc). The FX sink lives on the Scene, so it's drained
+                    // here rather than in the GPU-free runtime bundle.
+                    for imp in runtime.take_render_impacts() {
+                        let desc = match imp.kind {
+                            mercs2_combat::ImpactKind::Explosion => {
+                                Some(mercs2_engine::particles::EmitterDesc::demo_fire())
+                            }
+                            mercs2_combat::ImpactKind::Bullet => {
+                                Some(mercs2_engine::particles::EmitterDesc::demo_smoke())
+                            }
+                            mercs2_combat::ImpactKind::Blood => None,
+                        };
+                        if let Some(d) = desc {
+                            scene.fx_start_desc(d, imp.position.to_array());
+                        }
+                    }
                     // Directional shadow key light, centred on the player. The travel direction is the
                     // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
                     // so the cast shadows line up with the sun shading. half_extent ~18 m covers the
