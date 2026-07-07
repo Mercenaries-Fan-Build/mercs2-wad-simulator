@@ -29,40 +29,76 @@ struct GpuLight {
     color_intensity: vec4<f32>,  // rgb = color, w = intensity
 };
 struct Lights {
-    count: vec4<u32>,            // x = active light count
+    count: vec4<u32>,            // x = active point-light count; y = ShaderLevel gate (0/1/2/3)
     items: array<GpuLight, 32>,
 };
 @group(3) @binding(0) var<uniform> lights: Lights;
 
-// Directional shadow map (folded into group 3 so the shader stays within wgpu's 4-group limit):
-// a depth-only render of the scene from the key light, PCF-sampled to cast real cast-shadows.
+// 4-cascade directional shadow ATLAS (1024×4096 = four stacked 1024² tiles), folded into group 3 so
+// the shader stays within wgpu's 4-GROUP limit. A depth-only render of the scene from the key light,
+// per cascade, PCF-sampled to cast real cast-shadows (faithful to FUN_00755d90 + the 4× RenderShadow
+// emit; shadow_code_map.md §1/§4).
 @group(3) @binding(1) var shadow_map: texture_depth_2d;
 @group(3) @binding(2) var shadow_cmp: sampler_comparison;
-struct ShadowVp { mat: mat4x4<f32> };  // light view-proj (LH look_at_lh * orthographic_lh, NO cam X-flip)
-@group(3) @binding(3) var<uniform> shadow_vp: ShadowVp;
+// 4 cascade light view-projs (LH look_at_lh * orthographic_lh, NO cam X-flip) + a params vec4
+// (x = shadow-strength floor, z = cascade count, w = configured 0/1).
+struct ShadowParams {
+    cascades: array<mat4x4<f32>, 4>,
+    params: vec4<f32>,
+};
+@group(3) @binding(3) var<uniform> shadowp: ShadowParams;
 
-// 3×3 PCF shadow factor for a WORLD-space fragment: 1 = fully lit, 0 = fully shadowed. Projects the
-// fragment with the light view-proj, converts to shadow-map UV (wgpu y-flip), and compares depth.
-// Uses textureSampleCompareLevel (no derivatives) so it is valid under the early-out control flow.
-fn shadow_factor(wpos: vec3<f32>) -> f32 {
-    let lc = shadow_vp.mat * vec4<f32>(wpos, 1.0);
-    if (lc.w <= 0.0) { return 1.0; }
-    let ndc = lc.xyz / lc.w;
-    // orthographic_lh already maps z to [0,1] (wgpu depth range), so ndc.z is the compare ref directly.
-    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
-        return 1.0; // outside the shadow frustum -> treat as lit
-    }
-    let bias = 0.0015;          // constant depth bias vs shadow acne (pairs with the pipeline slope bias)
-    let texel = 1.0 / 2048.0;   // shadow map is 2048² (see scene.rs SHADOW_SIZE)
+// Per-pixel SPOT light set (`_sl` / `_pl_sl` class). Evaluated only when the ShaderLevel gate admits
+// spots (level >= 2). pos_range: xyz pos, w range. dir_cos: xyz cone axis, w = cos(outer half-angle).
+// params: x = cos(inner half-angle).
+struct SpotLight {
+    pos_range: vec4<f32>,
+    color_intensity: vec4<f32>,
+    dir_cos: vec4<f32>,
+    params: vec4<f32>,
+};
+struct Spots {
+    count: vec4<u32>,           // x = active spot count
+    items: array<SpotLight, 16>,
+};
+@group(3) @binding(4) var<uniform> spots: Spots;
+
+// 3×3 PCF sample of ONE atlas tile (cascade `c`). `uv_tile` is the fragment's [0,1] UV within the
+// tile; the atlas stacks 4 tiles vertically, so tile `c` maps to atlas-v in [c*0.25, (c+1)*0.25].
+// PCF texel steps: 1/1024 in u, 1/4096 in v (a whole atlas is 1024×4096). No derivatives → valid under
+// early-out control flow.
+fn sample_cascade(uv_tile: vec2<f32>, c: i32, ref_depth: f32) -> f32 {
+    let base_v = f32(c) * 0.25;
+    let tx = 1.0 / 1024.0;
+    let ty = 1.0 / 4096.0;
     var sum = 0.0;
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
-            let off = vec2<f32>(f32(x), f32(y)) * texel;
-            sum += textureSampleCompareLevel(shadow_map, shadow_cmp, uv + off, ndc.z - bias);
+            let auv = vec2<f32>(uv_tile.x + f32(x) * tx, base_v + uv_tile.y * 0.25 + f32(y) * ty);
+            sum += textureSampleCompareLevel(shadow_map, shadow_cmp, auv, ref_depth);
         }
     }
     return sum / 9.0;
+}
+
+// 4-cascade PCF shadow factor for a WORLD-space fragment: 1 = fully lit, 0 = fully shadowed. Picks the
+// SMALLEST (tightest) cascade whose light-clip box contains the fragment (crisp near, wide far), then
+// PCF-samples that cascade's atlas tile. Fragments outside every cascade read as lit (a blob fallback
+// grounds those casters instead — see scene.rs record_blob).
+fn shadow_factor(wpos: vec3<f32>) -> f32 {
+    let bias = 0.0015; // constant depth bias vs acne (pairs with the pipeline slope bias)
+    for (var c = 0; c < 4; c = c + 1) {
+        let lc = shadowp.cascades[c] * vec4<f32>(wpos, 1.0);
+        if (lc.w <= 0.0) { continue; }
+        let ndc = lc.xyz / lc.w;
+        // orthographic_lh maps z to [0,1] (wgpu depth range), so ndc.z is the compare ref directly.
+        let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0) {
+            continue; // not in this cascade — try the next (wider) one
+        }
+        return sample_cascade(uv, c, ndc.z - bias);
+    }
+    return 1.0; // outside all cascades -> treat as lit
 }
 
 struct VSOut {
@@ -181,38 +217,87 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         direct += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
     }
 
-    // Dynamic point lights: the nearest N (uploaded per frame). Smooth radius falloff + Blinn-Phong.
-    // These add to the shadowable direct term (a caster occluding the key light darkens them too).
-    let count = min(lights.count.x, 32u);
-    for (var i = 0u; i < count; i = i + 1u) {
-        let lp = lights.items[i].pos_radius.xyz;
-        let lr = max(lights.items[i].pos_radius.w, 1e-3);
-        let lcol = lights.items[i].color_intensity.rgb;
-        let linten = lights.items[i].color_intensity.w;
-        let d = lp - in.wpos;
-        let dist = length(d);
-        if (dist >= lr) { continue; }
-        let Ld = d / max(dist, 1e-4);
-        // Windowed inverse-square-ish falloff: (1 - (dist/lr)^2)^2, cheap and edge-clean.
-        let x = dist / lr;
-        let atten = (1.0 - x * x);
-        let att = atten * atten;
-        let ndl = max(dot(N, Ld), 0.0);
-        direct += albedo * lcol * (linten * ndl * att);
-        if (ndl > 0.0) {
-            let H = normalize(Ld + V);
-            let ndh = max(dot(N, H), 0.0);
-            direct += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
+    // Per-pixel dynamic lights, gated by the ShaderLevel light-class permutation (the `DAT_00dfc345`
+    // gate → the `.sho` variant the exe registers per material): count.y = 0 base (none) / 1 `_pl`
+    // (point) / 2 `_sl` (spot) / 3 `_pl_sl` (both). We realize the four compiled permutations as a
+    // runtime branch on the level (same visible result; one pipeline).
+    // NOTE: the exact per-pixel falloff/cone math is VMX128 in the exe and does not decode from the PPC
+    // dump — the Blinn-Phong + windowed falloff + smoothstep cone below are a faithful reconstruction.
+    // CONFIRM-LIVE: break the `_pl`/`_sl` fragment shaders in x32dbg to recover the exact attenuation
+    // curve, cone falloff, and specular model.
+    let shader_level = lights.count.y;
+    let do_point = (shader_level == 1u) || (shader_level == 3u); // `_pl` / `_pl_sl`
+    let do_spot  = (shader_level == 2u) || (shader_level == 3u); // `_sl` / `_pl_sl`
+
+    // `_pl` — dynamic POINT lights: the nearest N (uploaded per frame). Smooth radius falloff +
+    // Blinn-Phong. These add to the shadowable direct term (a caster occluding the key light darkens
+    // them too).
+    if (do_point) {
+        let count = min(lights.count.x, 32u);
+        for (var i = 0u; i < count; i = i + 1u) {
+            let lp = lights.items[i].pos_radius.xyz;
+            let lr = max(lights.items[i].pos_radius.w, 1e-3);
+            let lcol = lights.items[i].color_intensity.rgb;
+            let linten = lights.items[i].color_intensity.w;
+            let d = lp - in.wpos;
+            let dist = length(d);
+            if (dist >= lr) { continue; }
+            let Ld = d / max(dist, 1e-4);
+            // Windowed inverse-square-ish falloff: (1 - (dist/lr)^2)^2, cheap and edge-clean.
+            let x = dist / lr;
+            let atten = (1.0 - x * x);
+            let att = atten * atten;
+            let ndl = max(dot(N, Ld), 0.0);
+            direct += albedo * lcol * (linten * ndl * att);
+            if (ndl > 0.0) {
+                let H = normalize(Ld + V);
+                let ndh = max(dot(N, H), 0.0);
+                direct += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
+            }
+        }
+    }
+
+    // `_sl` — dynamic SPOT lights: point falloff × a smooth cone gate between the inner/outer half-angle
+    // cosines. CONFIRM-LIVE: the exact cone attenuation curve is VMX128-only in the exe.
+    if (do_spot) {
+        let scount = min(spots.count.x, 16u);
+        for (var i = 0u; i < scount; i = i + 1u) {
+            let sp = spots.items[i].pos_range.xyz;
+            let sr = max(spots.items[i].pos_range.w, 1e-3);
+            let scol = spots.items[i].color_intensity.rgb;
+            let sinten = spots.items[i].color_intensity.w;
+            let axis = spots.items[i].dir_cos.xyz;    // cone axis (spot points along this)
+            let cos_outer = spots.items[i].dir_cos.w;
+            let cos_inner = spots.items[i].params.x;
+            let d = sp - in.wpos;
+            let dist = length(d);
+            if (dist >= sr) { continue; }
+            let Ld = d / max(dist, 1e-4);
+            // Cone gate: cos of the angle between the light->fragment dir and the spot axis. `-Ld` is
+            // the light-to-fragment direction; compare against the axis it points along.
+            let cang = dot(-Ld, normalize(axis));
+            let cone = smoothstep(cos_outer, cos_inner, cang);
+            if (cone <= 0.0) { continue; }
+            let x = dist / sr;
+            let atten = (1.0 - x * x);
+            let att = atten * atten * cone;
+            let ndl = max(dot(N, Ld), 0.0);
+            direct += albedo * scol * (sinten * ndl * att);
+            if (ndl > 0.0) {
+                let H = normalize(Ld + V);
+                let ndh = max(dot(N, H), 0.0);
+                direct += spec_mask * scol * (sinten * att * pow(ndh, spec_power));
+            }
         }
     }
 
     // Directional shadow — ONLY when there is a sun (sun_i > 0). Indoors the sun is off, so there is no
     // directional light and therefore NO directional shadow (a shadow with no sun reads as a phantom
-    // noon sun). Outdoors the shadow map (dynamic casters only) darkens the result, clamped to a floor
-    // so shadowed areas darken rather than blacken. (0.35 = shadow strength knob.)
+    // noon sun). Outdoors the 4-cascade atlas (dynamic casters only) darkens the result, clamped to a
+    // floor (shadowp.params.x, default 0.35) so shadowed areas darken rather than blacken.
     var shadow = 1.0;
     if (sun_i > 0.0) {
-        shadow = max(shadow_factor(in.wpos), 0.35);
+        shadow = max(shadow_factor(in.wpos), shadowp.params.x);
     }
     var lit = (ambient_floor + direct) * shadow;
 

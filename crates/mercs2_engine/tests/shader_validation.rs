@@ -45,6 +45,11 @@ fn ui_shader_valid() {
     validate("ui.wgsl", include_str!("../src/ui.wgsl"));
 }
 
+#[test]
+fn blob_shader_valid() {
+    validate("blob.wgsl", include_str!("../src/blob.wgsl"));
+}
+
 /// The post shader declares three fragment entry points sharing one uniform + one 2-texture group.
 /// Assert all four (vs + 3 fs) entry points are present so the pipelines can be built.
 #[test]

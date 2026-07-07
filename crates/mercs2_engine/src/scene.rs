@@ -20,9 +20,148 @@ use crate::render::{ClipAnim, GpuLight, TexMap, DEPTH_FORMAT, MAX_LIGHTS};
 use crate::mesh::{self, Vertex};
 use crate::pose;
 
-/// Directional shadow-map resolution (square). Kept in sync with the `texel = 1/2048` PCF step in
-/// `shader.wgsl`; change both together.
-const SHADOW_SIZE: u32 = 2048;
+/// Per-cascade shadow tile edge (px). The exe's `FUN_00755d90` builds a **1024×4096** shadow atlas =
+/// four vertically-stacked 1024² tiles (`shadow_code_map.md` §1). We mirror that exactly: a
+/// `SHADOW_TILE × (SHADOW_TILE*SHADOW_CASCADES)` depth atlas, one 1024² tile per cascade. Kept in sync
+/// with the `1/1024` (u) / `1/4096` (v) PCF texel steps in `shader.wgsl`; change together.
+const SHADOW_TILE: u32 = 1024;
+/// Number of directional shadow cascades = the exe's 4-tile atlas emit (`while(i<4)` around
+/// `FUN_00468ca0`, `shadow_code_map.md` §4). Four nested light-space boxes, near→far.
+const SHADOW_CASCADES: usize = 4;
+/// Padded per-cascade stride for the shadow-pass light-VP uniform (wgpu min dynamic-offset alignment
+/// is 256 B). Each cascade's 64 B `mat4` sits at `c * CASCADE_STRIDE` in `cascade_vp_buf`.
+const CASCADE_STRIDE: u64 = 256;
+/// Max concurrent spot lights uploaded per frame (the `_sl` / `_pl_sl` per-pixel spot set).
+const MAX_SPOT: usize = 16;
+
+/// Nested cascade half-extents (metres) as multiples of the caller's base `half_extent` in
+/// [`Scene::set_shadow`]. Cascade 0 = the tight box around the focus (crisp near shadows); each
+/// successive cascade covers a geometrically larger area at the same 1024² tile resolution, so the
+/// shadowed radius grows near→far — the engine realization of the exe's near/far cascade split. The
+/// per-fragment shader picks the SMALLEST cascade that contains the point (see `shader.wgsl`).
+const CASCADE_SPLIT_FACTORS: [f32; SHADOW_CASCADES] = [1.0, 2.5, 6.0, 15.0];
+
+/// Pure cascade-split helper: the four nested half-extents for a base extent. Exposed for unit tests
+/// (the split math is CPU-deterministic; the GPU projection is not testable headless).
+fn cascade_half_extents(base: f32) -> [f32; SHADOW_CASCADES] {
+    let mut out = [0.0; SHADOW_CASCADES];
+    for c in 0..SHADOW_CASCADES {
+        out[c] = base * CASCADE_SPLIT_FACTORS[c];
+    }
+    out
+}
+
+/// Pure cascade-selection helper mirroring the shader's per-fragment choice: the index of the
+/// SMALLEST (lowest) cascade whose light-clip box contains `wpos` (ndc.xy ∈ [-1,1], depth ∈ [0,1]),
+/// or `None` when the point is outside every cascade (→ eligible for a blob fallback). Kept in sync
+/// with `shadow_factor` in `shader.wgsl`.
+fn select_cascade(vps: &[glam::Mat4; SHADOW_CASCADES], wpos: glam::Vec3) -> Option<usize> {
+    for (c, vp) in vps.iter().enumerate() {
+        let lc = *vp * wpos.extend(1.0);
+        if lc.w <= 0.0 {
+            continue;
+        }
+        let ndc = lc.truncate() / lc.w;
+        if ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z >= 0.0 && ndc.z <= 1.0 {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// One dynamic SPOT light — the `_sl` / `_pl_sl` per-pixel light class (`LightObject` type field ≠
+/// point). Complements [`crate::render::GpuLight`] (the omni point set) without changing that shared
+/// 32 B point record: spot lights carry the extra cone axis + angles the `_sl` shader path needs, and
+/// live in their own group-3 uniform (`scene`-owned). 64 B, `std140`-friendly (4 × `vec4`).
+///
+/// Harvested from `LightObject` COMPs the same way point lights are (`FUN_006622e0`, stride 0x34 =
+/// int type + rgb + 9 floats — intensity/range/atten/**cone angles**). The exe selects the `_sl`
+/// shader permutation for these via the `DAT_00dfc345` ShaderLevel gate (see [`Scene::set_shader_level`]).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SpotLightGpu {
+    /// `xyz` = world position, `w` = range (metres; ≤0 disables).
+    pub pos_range: [f32; 4],
+    /// `rgb` = linear color, `w` = intensity scalar.
+    pub color_intensity: [f32; 4],
+    /// `xyz` = normalized cone axis (direction the spot points), `w` = `cos(outer half-angle)`.
+    pub dir_cos: [f32; 4],
+    /// `x` = `cos(inner half-angle)` (smooth cone edge), `y` = casts-shadow flag (reserved), `zw` reserved.
+    pub params: [f32; 4],
+}
+
+impl SpotLightGpu {
+    /// Build a spot light from position, direction, color/intensity, range and cone half-angles (rad).
+    pub fn new(
+        pos: [f32; 3],
+        dir: [f32; 3],
+        color: [f32; 3],
+        intensity: f32,
+        range: f32,
+        inner_half_angle: f32,
+        outer_half_angle: f32,
+    ) -> Self {
+        let d = glam::Vec3::from(dir).normalize_or_zero();
+        SpotLightGpu {
+            pos_range: [pos[0], pos[1], pos[2], range],
+            color_intensity: [color[0], color[1], color[2], intensity],
+            dir_cos: [d.x, d.y, d.z, outer_half_angle.cos()],
+            params: [inner_half_angle.cos(), 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// How a [`LightAnim`] tween drives its target light over time — the engine realization of the exe's
+/// `Rt{Light,Color,Alpha}Animation` descriptors, ticked by the master update `FUN_00675e50`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightAnimMode {
+    /// Smooth sinusoidal intensity pulse (`RtLightAnimation` / `RtAlphaAnimation`).
+    Pulse,
+    /// Noisy per-frame flicker (torch/fire), value-noise on the base intensity.
+    Flicker,
+}
+
+/// A runtime light tween applied each frame before the light set is uploaded — the engine analog of
+/// the exe's `Rt{Light,Color,Scale,Alpha}Animation` runtime-type descriptors (`FUN_00646b60` &
+/// siblings) driven by the master light-update pass `FUN_00675e50`. Data-driven: authored per light.
+///
+/// NOTE (confirm-live): the retail `LightObject`/`LightAnimation` COMP stream carries these tween
+/// descriptors, but our world harvest (`placement::light_inventory`) does not yet decode the animation
+/// sub-records, so on retail data this set is empty unless a caller supplies it. The tween MATH here
+/// (pulse/flicker) is an engine approximation until the descriptor keys are read live — see DEFERRED.md.
+#[derive(Clone, Copy, Debug)]
+pub struct LightAnim {
+    /// Index into the point-light set ([`Scene::set_lights`]); out-of-range indices are ignored.
+    pub light_index: usize,
+    /// Steady-state intensity the tween modulates around.
+    pub base_intensity: f32,
+    /// Tween rate (Hz).
+    pub freq_hz: f32,
+    /// Fractional amplitude (0..1): peak deviation from `base_intensity`.
+    pub amp: f32,
+    /// Tween shape.
+    pub mode: LightAnimMode,
+}
+
+/// A pending blob / contact shadow (`FUN_00853710` analog): a dark disc in the world XZ plane centred
+/// at `pos` (the caster's ground/feet point), `radius` metres wide, `darkness` 0..1 = the `ShadowK`
+/// darkness constant. Emitted for casters the cascade atlas doesn't cover.
+#[derive(Clone, Copy, Debug)]
+pub struct BlobInstance {
+    pub pos: [f32; 3],
+    pub radius: f32,
+    pub darkness: f32,
+}
+
+/// One vertex of a blob quad (world XZ plane): world position + centred UV (-1..1) for the radial
+/// falloff + the blob's darkness (`ShadowK`). Blob quads are CPU-generated into `blob_vbuf` each frame.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlobVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
+    darkness: f32,
+}
 
 /// CPU-side per-model data the animation system needs (read-only after load, shared via `Rc`).
 pub struct ModelAnim {
@@ -86,13 +225,45 @@ pub struct Scene {
     lights_buf: wgpu::Buffer,
     lights_bind: wgpu::BindGroup,
     lights: Vec<GpuLight>,
-    /// Directional shadow map (depth-only render from the key light) + its light view-proj uniform.
-    /// The depth view is sampled by the main shader (folded into group 3); `shadow_vp_bind` is the
-    /// shadow pass's group-1 (light view-proj). Built once; the matrix is refreshed by `set_shadow`.
+    /// Per-pixel SPOT light set (`_sl` / `_pl_sl` class). Uploaded into group-3 binding 4 each frame;
+    /// empty by default (point/omni lights only). See [`Scene::set_spot_lights`].
+    spot_lights: Vec<SpotLightGpu>,
+    spot_buf: wgpu::Buffer,
+    /// ShaderLevel gate (the `DAT_00dfc345` analog): 0 = base (no per-pixel dynamic lights), 1 = `_pl`
+    /// (point), 2 = `_sl` (spot), 3 = `_pl_sl` (both). Written into the light uniform's `count.y`; the
+    /// shader selects which per-pixel light class to evaluate. Default 3 (full).
+    shader_level: u32,
+    /// Per-frame light tweens (`Rt{Light,Color,Alpha}Animation` analog); applied in `render` before the
+    /// light set is uploaded (the `FUN_00675e50` master-update analog). Empty by default (static lights).
+    light_anims: Vec<LightAnim>,
+    /// **4-cascade** directional shadow atlas (`FUN_00755d90`: 1024×4096 = four stacked 1024² tiles),
+    /// depth-only renders from the key light, PCF-sampled by the main shader (folded into group 3).
+    /// `cascade_vp_buf` = the shadow pass's group-1 per-cascade light-VP (dynamic offset, one 1024²
+    /// tile per cascade); `shadow_params_buf` (group-3 binding 3) carries all 4 cascade VPs + params so
+    /// the color pass can select+sample per fragment. Refreshed by [`Scene::set_shadow`].
     shadow_view: wgpu::TextureView,
-    shadow_vp_buf: wgpu::Buffer,
+    cascade_vp_buf: wgpu::Buffer,
+    shadow_params_buf: wgpu::Buffer,
     shadow_vp_bind: wgpu::BindGroup,
     shadow_pipeline: wgpu::RenderPipeline,
+    /// The 4 cascade light view-projections this frame (CPU mirror of `shadow_params_buf`), used by the
+    /// shadow pass to gate each caster into the tightest cascade(s) that contain it (the distance-LOD
+    /// caster gate, `FUN_00858150` analog) and to decide blob-shadow fallbacks. Identity until
+    /// `set_shadow` runs (default paths read no cascade shadow).
+    cascade_vps: [glam::Mat4; SHADOW_CASCADES],
+    /// Whether `set_shadow` has configured the cascades this session (default `false` → no directional
+    /// shadow, same as the pre-cascade `--ecs`/`--animate` behaviour).
+    shadow_configured: bool,
+    /// Blob / contact-shadow fallback (`FUN_00853710`, `shadow_code_map.md` §5): dark projected discs
+    /// for dynamic casters that fall OUTSIDE every cascade (beyond shadow distance) — the cheap
+    /// fallback the exe emits when the depth atlas doesn't cover a caster. Rebuilt each frame; empty →
+    /// the `PassId::Blob` pass records nothing (default paths unchanged).
+    blob_pipeline: wgpu::RenderPipeline,
+    blob_vbuf: wgpu::Buffer,
+    blob_cap: usize,
+    blob_params_buf: wgpu::Buffer,
+    blob_bind: wgpu::BindGroup,
+    blobs: Vec<BlobInstance>,
     models: HashMap<u32, ModelGpu>,
     entities: HashMap<Entity, EntityGpu>,
     /// Per-model set of draw-call indices to SKIP at render (e.g. low-res terrain tiles hidden where
@@ -249,13 +420,17 @@ impl Scene {
         let flat_normal = make_flat_normal_view(&device, &queue);
         let black = make_black_view(&device, &queue);
 
-        // Directional shadow map: a depth-only render of the scene from the key light, PCF-sampled by
-        // the main shader for real cast-shadows. Built here so the group-3 lights bind group (below)
-        // can fold in its depth view + comparison sampler + light view-proj (staying within wgpu's
-        // 4-bind-group limit).
+        // 4-cascade directional shadow ATLAS (faithful to `FUN_00755d90`: 1024×4096 = four stacked
+        // 1024² tiles). Depth-only renders from the key light, PCF-sampled by the main shader. Built
+        // here so the group-3 lights bind group (below) can fold in its depth view + comparison sampler
+        // + cascade params (staying within wgpu's 4-bind-group limit — bindings, not groups, grow).
         let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow map"),
-            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+            label: Some("shadow atlas (4x1024 cascades)"),
+            size: wgpu::Extent3d {
+                width: SHADOW_TILE,
+                height: SHADOW_TILE * SHADOW_CASCADES as u32,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -265,7 +440,7 @@ impl Scene {
         });
         let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
         // PCF comparison sampler: linear filter + LessEqual so `textureSampleCompareLevel` returns a
-        // smoothed 0..1 occlusion across the 2×2 depth footprint.
+        // smoothed 0..1 occlusion across the depth footprint.
         let shadow_cmp = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow comparison sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -276,19 +451,46 @@ impl Scene {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
-        // Light view-proj (one mat4 = 64 B). Init to identity so a path that never calls `set_shadow`
-        // (e.g. `--ecs`) still has a valid (w=1) matrix and reads unshadowed instead of dividing by 0.
-        let shadow_vp_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("shadow light view-proj"),
-            size: 64,
+        // Per-cascade light-VP for the SHADOW PASS (dynamic-offset uniform: 4 cascades × 256 B padded).
+        // Init identity so a path that never calls `set_shadow` (e.g. `--ecs`) still has a valid matrix.
+        let cascade_vp_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow cascade view-projs"),
+            size: CASCADE_STRIDE * SHADOW_CASCADES as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(
-            &shadow_vp_buf,
-            0,
-            bytemuck::cast_slice(&glam::Mat4::IDENTITY.to_cols_array()),
-        );
+        // group-3 shadow params for the COLOR PASS: 4 cascade VPs (tight array<mat4,4>=256 B) + a params
+        // vec4 (shadow_strength, blob unused, cascade_count, configured). Init cascades to identity.
+        let shadow_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow params (cascade VPs + knobs)"),
+            size: (SHADOW_CASCADES * 64 + 16) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        {
+            let ident = glam::Mat4::IDENTITY.to_cols_array();
+            for c in 0..SHADOW_CASCADES {
+                queue.write_buffer(&cascade_vp_buf, c as u64 * CASCADE_STRIDE, bytemuck::cast_slice(&ident));
+            }
+            let mut params = vec![0f32; SHADOW_CASCADES * 16 + 4];
+            for c in 0..SHADOW_CASCADES {
+                params[c * 16..c * 16 + 16].copy_from_slice(&ident);
+            }
+            // params vec4: [shadow_strength, reserved, cascade_count, configured(0/1)]
+            let base = SHADOW_CASCADES * 16;
+            params[base] = 0.35; // shadow-strength floor (shadowed areas darken, not blacken)
+            params[base + 2] = SHADOW_CASCADES as f32;
+            params[base + 3] = 0.0; // not configured yet
+            queue.write_buffer(&shadow_params_buf, 0, bytemuck::cast_slice(&params));
+        }
+        // Per-pixel SPOT light uniform (group-3 binding 4): vec4 count + MAX_SPOT × 64 B.
+        let spot_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("spot lights uniform"),
+            size: (16 + MAX_SPOT * 64) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&spot_buf, 0, bytemuck::cast_slice(&[0u32, 0, 0, 0]));
 
         // group 3: the per-frame dynamic light array (uniform) + the folded-in shadow map.
         let lights_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -330,6 +532,17 @@ impl Scene {
                     },
                     count: None,
                 },
+                // binding 4: the per-pixel SPOT light set (`_sl` / `_pl_sl` class).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         // vec4 count (16) + MAX_LIGHTS * (vec4 pos_radius + vec4 color_intensity = 32 B) bytes.
@@ -352,7 +565,8 @@ impl Scene {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&shadow_cmp),
                 },
-                wgpu::BindGroupEntry { binding: 3, resource: shadow_vp_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: shadow_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: spot_buf.as_entire_binding() },
             ],
         });
 
@@ -417,6 +631,7 @@ impl Scene {
         // small group-1 bind group carries the light view-proj (group 0 = camera for `model`, group 2
         // = bones — reused from the color pass). Vertex-only (no fragment); a slope+constant depth
         // bias fights shadow acne.
+        // Dynamic-offset uniform: one bind, re-pointed at cascade `c`'s 64 B VP via offset `c*256`.
         let shadow_vp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow vp bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -424,8 +639,8 @@ impl Scene {
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(64),
                 },
                 count: None,
             }],
@@ -433,7 +648,14 @@ impl Scene {
         let shadow_vp_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow vp bind"),
             layout: &shadow_vp_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_vp_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &cascade_vp_buf,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(64),
+                }),
+            }],
         });
         let shadow_shader = device.create_shader_module(wgpu::include_wgsl!("shadow.wgsl"));
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -467,6 +689,94 @@ impl Scene {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Blob / contact-shadow fallback pass (`FUN_00853710`, shadow_code_map.md §5). A darken-blend
+        // pipeline drawing flat radial-falloff discs in the world XZ plane under casters the cascade
+        // atlas doesn't cover. Own group-0 uniform = the frame's (flipped) camera view-proj. The quads
+        // are CPU-generated into `blob_vbuf` each frame; blend `dst*(1-a)` darkens by the disc alpha.
+        let blob_shader = device.create_shader_module(wgpu::include_wgsl!("blob.wgsl"));
+        let blob_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blob bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let blob_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blob view-proj"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let blob_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("blob bind"),
+            layout: &blob_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: blob_params_buf.as_entire_binding() }],
+        });
+        let blob_cap = 64usize; // grown on demand in record_blob
+        let blob_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blob vbuf"),
+            size: (blob_cap * 6 * std::mem::size_of::<BlobVertex>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let blob_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blob pipeline layout"),
+            bind_group_layouts: &[&blob_bgl],
+            push_constant_ranges: &[],
+        });
+        let blob_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blob pipeline"),
+            layout: Some(&blob_layout),
+            vertex: wgpu::VertexState {
+                module: &blob_shader,
+                entry_point: "vs_blob",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BlobVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blob_shader,
+                entry_point: "fs_blob",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    // Darken blend: out = dst*(1 - a). Blob outputs a = darkness*radial-falloff.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::COLOR,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false, // a shadow decal, not occluding geometry
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -661,10 +971,23 @@ impl Scene {
             lights_buf,
             lights_bind,
             lights: Vec::new(),
+            spot_lights: Vec::new(),
+            spot_buf,
+            shader_level: 3, // full: `_pl_sl` (point + spot per-pixel). See set_shader_level.
+            light_anims: Vec::new(),
             shadow_view,
-            shadow_vp_buf,
+            cascade_vp_buf,
+            shadow_params_buf,
             shadow_vp_bind,
             shadow_pipeline,
+            cascade_vps: [glam::Mat4::IDENTITY; SHADOW_CASCADES],
+            shadow_configured: false,
+            blob_pipeline,
+            blob_vbuf,
+            blob_cap,
+            blob_params_buf,
+            blob_bind,
+            blobs: Vec::new(),
             models: HashMap::new(),
             hidden_draws: HashMap::new(),
             entities: HashMap::new(),
@@ -897,12 +1220,38 @@ impl Scene {
         self.lights = lights;
     }
 
-    /// Aim the directional shadow map for this frame. `center` = the world point the orthographic
-    /// shadow frustum is centred on (typically the player/focus); `dir` = the key light's travel
-    /// direction (points FROM the light TOWARD the scene — downward-ish); `half_extent` = half the
-    /// frustum width in metres (the shadowed radius around `center`). Builds a self-consistent LH
-    /// light view-proj (`look_at_lh` * `orthographic_lh`, NO camera X-flip — the main shader projects
-    /// true world space with this same matrix) and uploads it. Call each frame in the world path.
+    /// Set the per-pixel SPOT light set (`_sl` / `_pl_sl` class). Empty by default (point lights only).
+    /// Uploaded (capped to [`MAX_SPOT`]) into the group-3 spot uniform each frame; the shader evaluates
+    /// them when the ShaderLevel gate ([`Scene::set_shader_level`]) admits the spot class (level ≥ 2).
+    pub fn set_spot_lights(&mut self, spots: Vec<SpotLightGpu>) {
+        self.spot_lights = spots;
+    }
+
+    /// Set the ShaderLevel gate (the `DAT_00dfc345` analog) selecting the per-pixel light-class shader
+    /// permutation: **0** = base (sun/ambient/baked only — no per-pixel dynamic lights), **1** = `_pl`
+    /// (point), **2** = `_sl` (spot), **3** = `_pl_sl` (point + spot). Clamped to 0..=3. Default 3.
+    /// Faithful to the exe, which registers the matching `.sho` permutation at load under this gate
+    /// (`FUN_0085ac90`, rendering-shaders.md §Lighting); we realize it as a runtime branch.
+    pub fn set_shader_level(&mut self, level: u32) {
+        self.shader_level = level.min(3);
+    }
+
+    /// Set the runtime light tweens (`Rt{Light,Color,Alpha}Animation` analog). Applied each frame in
+    /// `render` before the light set is uploaded (the `FUN_00675e50` master-update analog). Empty =
+    /// static lights. See [`LightAnim`] (retail descriptor decode is confirm-live — DEFERRED.md).
+    pub fn set_light_animations(&mut self, anims: Vec<LightAnim>) {
+        self.light_anims = anims;
+    }
+
+    /// Aim the **4-cascade** directional shadow atlas for this frame. `center` = the world focus the
+    /// cascades are centred on (typically the player); `dir` = the key light's travel direction (FROM
+    /// the light TOWARD the scene, downward-ish); `half_extent` = half the width (m) of the TIGHTEST
+    /// cascade (cascade 0). The remaining cascades cover geometrically larger areas
+    /// ([`CASCADE_SPLIT_FACTORS`]) at the same 1024² tile resolution, so the shadowed radius grows
+    /// near→far — the engine realization of the exe's `while(i<4)` cascade emit (`FUN_00468ca0`,
+    /// shadow_code_map.md §4). Builds a self-consistent LH light view-proj per cascade (`look_at_lh` *
+    /// `orthographic_lh`, NO camera X-flip — the main shader projects true world space with these) and
+    /// uploads all four (packed for the color pass, padded for the shadow pass). Call each frame.
     pub fn set_shadow(&mut self, center: [f32; 3], dir: [f32; 3], half_extent: f32) {
         let c = glam::Vec3::from(center);
         let mut d = glam::Vec3::from(dir);
@@ -912,15 +1261,32 @@ impl Scene {
         d = d.normalize();
         // Guard against dir ∥ up: pick +Z as the up reference when the light is near-vertical.
         let up = if d.dot(glam::Vec3::Y).abs() > 0.99 { glam::Vec3::Z } else { glam::Vec3::Y };
-        let distance = 40.0f32;
-        let eye = c - d * distance;
-        let view = glam::Mat4::look_at_lh(eye, c, up);
-        let proj = glam::Mat4::orthographic_lh(
-            -half_extent, half_extent, -half_extent, half_extent, 0.1, 2.0 * distance,
-        );
-        let light_vp = proj * view;
-        self.queue
-            .write_buffer(&self.shadow_vp_buf, 0, bytemuck::cast_slice(&light_vp.to_cols_array()));
+
+        let extents = cascade_half_extents(half_extent.max(0.01));
+        // Color-pass uniform: 4 tight mat4 (256 B) + params vec4.
+        let mut params = vec![0f32; SHADOW_CASCADES * 16 + 4];
+        for (c_idx, &he) in extents.iter().enumerate() {
+            // Push the eye back proportionally to the cascade box so the near/far depth range always
+            // brackets the casters that fall inside this cascade.
+            let distance = (he * 3.0).max(40.0);
+            let eye = c - d * distance;
+            let view = glam::Mat4::look_at_lh(eye, c, up);
+            let proj = glam::Mat4::orthographic_lh(-he, he, -he, he, 0.1, 2.0 * distance);
+            let vp = proj * view;
+            self.cascade_vps[c_idx] = vp;
+            let cols = vp.to_cols_array();
+            // Shadow pass: padded (256 B stride) for dynamic-offset binding.
+            self.queue
+                .write_buffer(&self.cascade_vp_buf, c_idx as u64 * CASCADE_STRIDE, bytemuck::cast_slice(&cols));
+            // Color pass: tight array<mat4,4>.
+            params[c_idx * 16..c_idx * 16 + 16].copy_from_slice(&cols);
+        }
+        let base = SHADOW_CASCADES * 16;
+        params[base] = 0.35; // shadow-strength floor
+        params[base + 2] = SHADOW_CASCADES as f32;
+        params[base + 3] = 1.0; // configured
+        self.queue.write_buffer(&self.shadow_params_buf, 0, bytemuck::cast_slice(&params));
+        self.shadow_configured = true;
     }
 
     /// Upload a model's geometry + materials into the store, keyed by hash. Idempotent per hash.
@@ -1138,36 +1504,66 @@ impl Scene {
     // `&self` (all queue uploads happen in phase 1 before recording), take the frame's `encoder` +
     // swapchain view, and record the SAME commands the monolithic `render` did — a byte-identical carve.
 
-    /// [`render_graph::PassId::ShadowCascade`] node — directional shadow-depth pass (our single-cascade
-    /// realization of the exe's 4× `RenderShadow` emit). Depth-only render of the DYNAMIC scene from the
-    /// key light into the shadow map (cleared to 1.0); the color pass PCF-samples it. SKIPPED when the
-    /// sun is off (interiors) — the shader gates on the same condition. Only non-prelit geometry casts
-    /// (the building shell bakes its own shadow into vertex colour).
+    /// [`render_graph::PassId::ShadowCascade`] node — the **4-cascade** directional shadow-depth pass
+    /// (faithful to the exe's `while(i<4){…RenderShadow…}` emit into the 1024×4096 atlas, shadow §4).
+    /// One depth-only render of the DYNAMIC scene per cascade, into that cascade's 1024² tile of the
+    /// atlas (via a per-tile viewport + the cascade's light-VP dynamic offset); the color pass selects
+    /// + PCF-samples the tightest cascade per fragment. SKIPPED when the sun is off (interiors) — the
+    /// shader gates on the same condition. Only non-prelit geometry casts (the building shell bakes its
+    /// own shadow into vertex colour), and each caster is gated into ONLY the cascades whose box
+    /// contains it (the distance-LOD caster gate, `FUN_00858150` analog) — near casters land in the
+    /// tight cascades, far ones only in the wide ones, mirroring the per-cascade caster list.
     fn record_shadow_cascade(&self, encoder: &mut wgpu::CommandEncoder, items: &[DrawItem]) {
-        if self.sun_intensity > 0.0 {
-            let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
+        if self.sun_intensity <= 0.0 {
+            return;
+        }
+        // Single pass over the whole atlas (cleared once to 1.0); per cascade we set the viewport to
+        // its 1024² tile and bind the cascade's light-VP via the dynamic offset.
+        let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("shadow atlas pass (4 cascades)"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.shadow_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
                 }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            spass.set_pipeline(&self.shadow_pipeline);
-            spass.set_bind_group(1, &self.shadow_vp_bind, &[]);
-            for (e, _m, model_hash, _p) in items {
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        spass.set_pipeline(&self.shadow_pipeline);
+        let tile = SHADOW_TILE as f32;
+        for cascade in 0..SHADOW_CASCADES {
+            // Tile `cascade` occupies rows [cascade*1024 .. (cascade+1)*1024) of the atlas.
+            spass.set_viewport(0.0, cascade as f32 * tile, tile, tile, 0.0, 1.0);
+            let offset = (cascade as u64 * CASCADE_STRIDE) as wgpu::DynamicOffset;
+            spass.set_bind_group(1, &self.shadow_vp_bind, &[offset]);
+            for (e, entity_model, model_hash, _p) in items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
                 // Only DYNAMIC geometry casts: the prelit building shell already bakes its own light +
                 // shadow into vertex colour, so casting it into the map would double-darken the baked
                 // walls. Casting only characters/props gives clean contact shadows on the baked floor.
                 if mg.prelit {
                     continue;
+                }
+                // Distance-LOD caster gate: skip this caster in cascade `c` unless its ground point is
+                // inside cascade `c`'s box (near casters → tight cascades, far → wide only). `shadow_configured`
+                // guarantees `cascade_vps` are real (not identity) here.
+                if self.shadow_configured {
+                    let world = *entity_model * mg.fit;
+                    let wpos = world.w_axis.truncate();
+                    let lc = self.cascade_vps[cascade] * wpos.extend(1.0);
+                    if lc.w > 0.0 {
+                        let ndc = lc.truncate() / lc.w;
+                        // Pad the test by the caster's rough radius in NDC so a caster straddling the
+                        // border still renders into the cascade that will sample it.
+                        let pad = 1.3;
+                        if ndc.x.abs() > pad || ndc.y.abs() > pad || ndc.z < -0.2 || ndc.z > 1.2 {
+                            continue;
+                        }
+                    }
                 }
                 let Some(eg) = self.entities.get(e) else { continue };
                 spass.set_bind_group(0, &eg.mvp_bind, &[]);
@@ -1181,6 +1577,47 @@ impl Scene {
                 }
             }
         }
+    }
+
+    /// [`render_graph::PassId::Blob`] node — the BlobShadow cheap fallback (`FUN_00853710`, shadow §5).
+    /// Darkens flat radial discs under the casters the cascade atlas doesn't cover (collected each
+    /// frame into `self.blobs`). No-op when empty. Runs AFTER the color pass (blobs darken the composed
+    /// image), depth-tested read-only so a blob is hidden by nearer opaque geometry.
+    fn record_blob(&self, encoder: &mut wgpu::CommandEncoder, view_tex: &wgpu::TextureView) {
+        if self.blobs.is_empty() {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blob shadow pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: view_tex,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.blob_pipeline);
+        pass.set_bind_group(0, &self.blob_bind, &[]);
+        pass.set_vertex_buffer(0, self.blob_vbuf.slice(..));
+        pass.draw(0..(self.blobs.len() * 6) as u32, 0..1);
+    }
+
+    /// Apply the [`LightAnim`] tweens (the `Rt{Light,Color,Alpha}Animation` / `FUN_00675e50` analog) to
+    /// a scratch copy of the point-light set at time `t`, so animated lights pulse/flicker without
+    /// mutating the authored base set. Returns the base set unchanged when no tween targets it.
+    fn animated_lights(&self, t: f32) -> Vec<GpuLight> {
+        let mut out = self.lights.clone();
+        for a in &self.light_anims {
+            let Some(l) = out.get_mut(a.light_index) else { continue };
+            l.color_intensity[3] = (a.base_intensity * light_anim_factor(a, t)).max(0.0);
+        }
+        out
     }
 
     /// [`render_graph::PassId::Color`] node — the main color draw (`PgScene::RenderColor`). Combined
@@ -1444,14 +1881,19 @@ impl Scene {
             self.queue.write_buffer(&self.sky_buf, 0, bytemuck::cast_slice(&su));
         }
 
+        // Rt{Light,Color,Alpha}Animation tick (the `FUN_00675e50` master light-update analog): apply
+        // the per-frame light tweens to a scratch copy of the point set so animated lights pulse/flicker
+        // without mutating the authored base set. No-op when `light_anims` is empty (static lights).
+        let lit_lights = self.animated_lights(t);
+
         // Dynamic lights: upload the MAX_LIGHTS nearest to the camera this frame. The full set lives
-        // in `self.lights`; we partial-sort by squared distance to `cam_world` and pack the head.
+        // in `lit_lights`; we partial-sort by squared distance to `cam_world` and pack the head.
         {
-            let mut order: Vec<usize> = (0..self.lights.len()).collect();
+            let mut order: Vec<usize> = (0..lit_lights.len()).collect();
             if order.len() > MAX_LIGHTS {
                 order.sort_by(|&a, &b| {
-                    let da = light_dist2(&self.lights[a], cam_world);
-                    let db = light_dist2(&self.lights[b], cam_world);
+                    let da = light_dist2(&lit_lights[a], cam_world);
+                    let db = light_dist2(&lit_lights[b], cam_world);
                     da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
@@ -1459,13 +1901,99 @@ impl Scene {
             // vec4 count (4 f32) then MAX_LIGHTS * (pos_radius[4] + color_intensity[4]).
             let mut buf = vec![0f32; 4 + MAX_LIGHTS * 8];
             buf[0] = f32::from_bits(n as u32); // count.x, read as u32 in the shader
+            // count.y = ShaderLevel gate (DAT_00dfc345 analog: 0 base / 1 _pl / 2 _sl / 3 _pl_sl).
+            buf[1] = f32::from_bits(self.shader_level);
             for (slot, &li) in order.iter().take(n).enumerate() {
-                let l = &self.lights[li];
+                let l = &lit_lights[li];
                 let base = 4 + slot * 8;
                 buf[base..base + 4].copy_from_slice(&l.pos_radius);
                 buf[base + 4..base + 8].copy_from_slice(&l.color_intensity);
             }
             self.queue.write_buffer(&self.lights_buf, 0, bytemuck::cast_slice(&buf));
+        }
+
+        // Spot lights (`_sl` / `_pl_sl` class): upload the MAX_SPOT nearest to the camera. vec4 count +
+        // MAX_SPOT × 64 B. The shader evaluates them only when the ShaderLevel gate admits spots.
+        {
+            let mut order: Vec<usize> = (0..self.spot_lights.len()).collect();
+            if order.len() > MAX_SPOT {
+                order.sort_by(|&a, &b| {
+                    let da = spot_dist2(&self.spot_lights[a], cam_world);
+                    let db = spot_dist2(&self.spot_lights[b], cam_world);
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            let n = order.len().min(MAX_SPOT);
+            let mut sbuf = vec![0f32; 4 + MAX_SPOT * 16];
+            sbuf[0] = f32::from_bits(n as u32);
+            for (slot, &si) in order.iter().take(n).enumerate() {
+                let s = &self.spot_lights[si];
+                let base = 4 + slot * 16;
+                sbuf[base..base + 4].copy_from_slice(&s.pos_range);
+                sbuf[base + 4..base + 8].copy_from_slice(&s.color_intensity);
+                sbuf[base + 8..base + 12].copy_from_slice(&s.dir_cos);
+                sbuf[base + 12..base + 16].copy_from_slice(&s.params);
+            }
+            self.queue.write_buffer(&self.spot_buf, 0, bytemuck::cast_slice(&sbuf));
+        }
+
+        // Blob view-proj (the flipped world clip matrix, matching the geometry pass).
+        self.queue
+            .write_buffer(&self.blob_params_buf, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
+
+        // Blob / contact-shadow collection (the exe's cheap fallback for casters the depth atlas can't
+        // cover — `FUN_00853710`, shadow_code_map.md §5). A dynamic (non-prelit) caster whose ground
+        // point falls OUTSIDE every cascade box (beyond shadow distance) gets a projected dark disc
+        // instead of a real cascade shadow. Only active when the cascades are configured AND the sun is
+        // on (outdoors) — interiors/default paths keep their prior no-blob behaviour (graceful degrade).
+        self.blobs.clear();
+        if self.shadow_configured && self.sun_intensity > 0.0 {
+            for (_e, entity_model, model_hash, _pal) in &items {
+                let Some(mg) = self.models.get(model_hash) else { continue };
+                if mg.prelit {
+                    continue; // baked geometry is not a dynamic caster
+                }
+                let world = *entity_model * mg.fit;
+                let wpos = world.w_axis.truncate();
+                if select_cascade(&self.cascade_vps, wpos).is_none() {
+                    // Beyond all cascades: emit a grounding blob at the caster's origin. Radius/darkness
+                    // are fixed knobs (exact ShadowK + per-caster bounds are confirm-live).
+                    self.blobs.push(BlobInstance { pos: wpos.to_array(), radius: 1.3, darkness: 0.45 });
+                }
+            }
+        }
+        // Build + upload the blob quad geometry (world XZ plane, two triangles per blob), growing the
+        // vertex buffer if this frame has more blobs than the current capacity.
+        if !self.blobs.is_empty() {
+            if self.blobs.len() > self.blob_cap {
+                self.blob_cap = self.blobs.len().next_power_of_two();
+                self.blob_vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("blob vbuf"),
+                    size: (self.blob_cap * 6 * std::mem::size_of::<BlobVertex>()) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            let mut verts: Vec<BlobVertex> = Vec::with_capacity(self.blobs.len() * 6);
+            for b in &self.blobs {
+                let r = b.radius;
+                let [x, y, z] = b.pos;
+                let dk = b.darkness;
+                // Two triangles in the XZ plane (Y = ground); uv = centred corner (-1..1) for the radial
+                // falloff; darkness carried per-vertex so the shader needs no per-blob uniform.
+                let corners = [
+                    ([x - r, y, z - r], [-1.0, -1.0]),
+                    ([x + r, y, z - r], [1.0, -1.0]),
+                    ([x + r, y, z + r], [1.0, 1.0]),
+                    ([x - r, y, z - r], [-1.0, -1.0]),
+                    ([x + r, y, z + r], [1.0, 1.0]),
+                    ([x - r, y, z + r], [-1.0, 1.0]),
+                ];
+                for (p, uv) in corners {
+                    verts.push(BlobVertex { pos: p, uv, darkness: dk });
+                }
+            }
+            self.queue.write_buffer(&self.blob_vbuf, 0, bytemuck::cast_slice(&verts));
         }
 
         // Particle FX: upload the camera uniform + instance buffers before the pass. The billboard
@@ -1536,8 +2064,9 @@ impl Scene {
                 PassId::FadingTrees => {}
                 // SILO mirror/sub-scene (Band-A): planar-mirror render seam.
                 PassId::Mirror => {}
-                // SILO blob-shadow (Band-A): projected-blob fallback seam.
-                PassId::Blob => {}
+                // Blob-shadow fallback (`FUN_00853710`): darken projected discs under casters the
+                // cascade atlas doesn't cover. No-op when `self.blobs` is empty (default paths).
+                PassId::Blob => self.record_blob(&mut encoder, &view_tex),
                 // SILO particles-as-pass (Band-A): canonical PgFX pass; engine draws via TransparentFx.
                 PassId::Particles => {}
                 // Collect / scene-begin / shadow-collect are folded into phase-1 CPU setup and the
@@ -1580,6 +2109,26 @@ fn light_dist2(l: &GpuLight, p: glam::Vec3) -> f32 {
     dx * dx + dy * dy + dz * dz
 }
 
+/// Squared distance from a spot light's world position to `p` (spot-selection sort key).
+fn spot_dist2(s: &SpotLightGpu, p: glam::Vec3) -> f32 {
+    let dx = s.pos_range[0] - p.x;
+    let dy = s.pos_range[1] - p.y;
+    let dz = s.pos_range[2] - p.z;
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Pure [`LightAnim`] tween multiplier at time `t` (the `Rt{Light,Alpha}Animation` shape). The target
+/// light's intensity = `base_intensity * light_anim_factor(..)`. Exposed for unit tests.
+fn light_anim_factor(a: &LightAnim, t: f32) -> f32 {
+    let phase = std::f32::consts::TAU * a.freq_hz * t;
+    match a.mode {
+        // Smooth sinusoidal pulse in [1-amp, 1+amp].
+        LightAnimMode::Pulse => 1.0 + a.amp * phase.sin(),
+        // Cheap value-noise flicker: two incommensurate sines → jittered [1-amp, 1+amp].
+        LightAnimMode::Flicker => 1.0 + a.amp * (0.6 * phase.sin() + 0.4 * (phase * 2.37 + 1.3).sin()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1605,14 +2154,111 @@ mod tests {
         validate_wgsl("shadow.wgsl", include_str!("shadow.wgsl"));
         validate_wgsl("sky.wgsl", include_str!("sky.wgsl"));
         validate_wgsl("loading.wgsl", include_str!("loading.wgsl"));
+        validate_wgsl("blob.wgsl", include_str!("blob.wgsl"));
     }
 
-    /// The camera uniform we upload (44 f32 = 176 B) matches the shader `Camera` struct size, and the
-    /// lights uniform packing (16 B count + MAX_LIGHTS * 32 B) matches the buffer we allocate.
+    /// The camera uniform we upload (44 f32 = 176 B) matches the shader `Camera` struct size, the point
+    /// light packing (16 B count + MAX_LIGHTS * 32 B) matches the buffer we allocate, and the spot
+    /// record is the 64 B (4 × vec4) the shader `SpotLight` expects.
     #[test]
     fn uniform_sizes_match() {
         assert_eq!(44 * 4, 176); // mvp(64)+model(64)+cam_pos(16)+fog_color_density(16)+fog_misc(16)
         assert_eq!(std::mem::size_of::<GpuLight>(), 32);
         assert_eq!(16 + MAX_LIGHTS * 32, 16 + 32 * 32);
+        assert_eq!(std::mem::size_of::<SpotLightGpu>(), 64);
+        // The shadow-params uniform = 4 cascade mat4 (256 B) + a params vec4 (16 B).
+        assert_eq!(SHADOW_CASCADES * 64 + 16, 272);
+        // The shadow atlas is 1024 × (1024*4) = 1024×4096, faithful to FUN_00755d90.
+        assert_eq!(SHADOW_TILE, 1024);
+        assert_eq!(SHADOW_TILE * SHADOW_CASCADES as u32, 4096);
+    }
+
+    /// Cascade split math: the four half-extents are strictly increasing (near→far coverage grows),
+    /// cascade 0 equals the caller's base extent, and the factors are the documented nested set.
+    #[test]
+    fn cascade_split_is_monotonic_nested() {
+        let ext = cascade_half_extents(10.0);
+        assert_eq!(ext[0], 10.0); // cascade 0 = the tight box the caller asked for
+        for c in 1..SHADOW_CASCADES {
+            assert!(ext[c] > ext[c - 1], "cascade {c} must be wider than {}", c - 1);
+        }
+        // Widest cascade covers the far range.
+        assert_eq!(ext[SHADOW_CASCADES - 1], 10.0 * CASCADE_SPLIT_FACTORS[SHADOW_CASCADES - 1]);
+    }
+
+    /// Cascade SELECTION mirrors the shader: a point inside the tight cascade 0 selects 0; a point only
+    /// inside a wider cascade selects that cascade; a point outside every cascade selects `None` (→ a
+    /// blob fallback grounds it). Uses real ortho VPs like `set_shadow` builds.
+    #[test]
+    fn cascade_selection_picks_tightest() {
+        let center = glam::Vec3::ZERO;
+        let dir = glam::Vec3::new(0.0, -1.0, 0.0);
+        let up = glam::Vec3::Z; // dir ∥ Y → +Z up reference (matches set_shadow's guard)
+        let extents = cascade_half_extents(4.0);
+        let mut vps = [glam::Mat4::IDENTITY; SHADOW_CASCADES];
+        for (c, &he) in extents.iter().enumerate() {
+            let distance = (he * 3.0f32).max(40.0);
+            let eye = center - dir * distance;
+            let view = glam::Mat4::look_at_lh(eye, center, up);
+            let proj = glam::Mat4::orthographic_lh(-he, he, -he, he, 0.1, 2.0 * distance);
+            vps[c] = proj * view;
+        }
+        // Dead centre → tightest cascade 0.
+        assert_eq!(select_cascade(&vps, glam::Vec3::ZERO), Some(0));
+        // Just outside cascade 0 (he=4) but inside cascade 1 (he=10) → cascade 1.
+        assert_eq!(select_cascade(&vps, glam::Vec3::new(6.0, 0.0, 0.0)), Some(1));
+        // Far beyond the widest cascade (he = 4*15 = 60) → None (blob fallback).
+        assert_eq!(select_cascade(&vps, glam::Vec3::new(500.0, 0.0, 0.0)), None);
+    }
+
+    /// The `Rt*Animation` pulse tween swings around 1.0 by ±amp: at quarter-period the sine peaks
+    /// (k = 1+amp), at zero phase it's neutral (k = 1). Flicker stays bounded within [1-amp, 1+amp].
+    #[test]
+    fn light_animation_pulse_and_flicker_bounds() {
+        let pulse = LightAnim {
+            light_index: 0,
+            base_intensity: 2.0,
+            freq_hz: 1.0,
+            amp: 0.5,
+            mode: LightAnimMode::Pulse,
+        };
+        assert!((light_anim_factor(&pulse, 0.0) - 1.0).abs() < 1e-4); // neutral at t=0
+        // t=0.25 s, freq 1 Hz → phase = TAU/4 → sin=1 → k = 1.5 → intensity 2.0*1.5 = 3.0.
+        assert!((2.0 * light_anim_factor(&pulse, 0.25) - 3.0).abs() < 1e-4);
+        let flick = LightAnim { mode: LightAnimMode::Flicker, ..pulse };
+        for i in 0..200 {
+            let k = light_anim_factor(&flick, i as f32 * 0.013);
+            assert!(k >= 1.0 - flick.amp - 1e-3 && k <= 1.0 + flick.amp + 1e-3);
+        }
+    }
+
+    /// A tween only rewrites its target light's intensity (`animated_lights` semantics), leaving the
+    /// authored color + other lights intact. Exercised on the pure formula + index guard.
+    #[test]
+    fn light_animation_targets_by_index() {
+        let mut lights = [3.0f32, 7.0];
+        let a = LightAnim {
+            light_index: 0,
+            base_intensity: 4.0,
+            freq_hz: 2.0,
+            amp: 0.25,
+            mode: LightAnimMode::Pulse,
+        };
+        // Apply exactly as animated_lights does for the in-range index.
+        lights[a.light_index] = a.base_intensity * light_anim_factor(&a, 0.0);
+        assert_eq!(lights[0], 4.0); // pulled to base at neutral phase
+        assert_eq!(lights[1], 7.0); // untouched
+    }
+
+    /// The ShaderLevel gate maps to the light-class permutation the shader branches on: point on for
+    /// `_pl`(1)/`_pl_sl`(3), spot on for `_sl`(2)/`_pl_sl`(3), neither at base(0).
+    #[test]
+    fn shader_level_gate_selects_light_class() {
+        let point_on = |lvl: u32| lvl == 1 || lvl == 3;
+        let spot_on = |lvl: u32| lvl == 2 || lvl == 3;
+        assert!(!point_on(0) && !spot_on(0)); // base
+        assert!(point_on(1) && !spot_on(1)); // _pl
+        assert!(!point_on(2) && spot_on(2)); // _sl
+        assert!(point_on(3) && spot_on(3)); // _pl_sl
     }
 }
