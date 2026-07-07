@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Vehicle")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -111,6 +111,42 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("EnableTurret", lua.create_function(move |_, (veh, on): (i64, Option<bool>)| { h.borrow_mut().vehicle_enable_turret(veh as u64, on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
     b.real("ClearControls", lua.create_function(move |_, veh: i64| { h.borrow_mut().vehicle_clear_controls(veh as u64); Ok(()) })?)?;
+
+    // --- faithful-default GETTERS (game reads the return; seat/hijack state not modelled yet) ---
+    // seat-lookup queries → empty seat / on-foot → nil so `if not uRider` control flow is authentic.
+    b.real("GetFromSeat", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    b.real("GetRiderFromSeat", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    b.real("GetSeatParams", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    b.real("GetSeatToSeat", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    // seat predicate queries → not blocked / not a ladder.
+    b.real("IsSeatBlocked", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsSeatALadder", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    // hijack predicate queries → not a remote / not a bad hijack.
+    b.real("IsHijackRemote", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsHijackBad", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+
+    // --- faithful no-op SETTERS / actions the retail vehicle driver consumes but we don't model yet ---
+    // (the whole scripted hijack FSM, turret aim, heli/tank motion, seat transfer, restock actions.)
+    for name in [
+        "EnterBySeatGuid",
+        "TransferToSeat",
+        "HijackComplete",
+        "HijackAbort",
+        "HijackAbortDone",
+        "SetTurretPitch",
+        "SetTurretYaw",
+        "SpinHeli",
+        "StartTankHijackMotion",
+        "StopTankHijackMotion",
+        "HijackStart",
+        "SetHijackState",
+        "SetHijackSuccess",
+        "CancelHijack",
+        "RestoreHealth",
+        "RestoreAmmo",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
 
     b.install_global(GLOBAL)
 }

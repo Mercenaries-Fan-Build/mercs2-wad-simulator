@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Sound")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -169,6 +169,93 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("GetAudioDir", lua.create_function(move |_, ()| Ok(h.borrow().sound_audio_dir()))?)?;
     let h = host.clone();
     b.real("_GetLibVersion", lua.create_function(move |_, ()| Ok(h.borrow().sound_lib_version()))?)?;
+
+    // --- test cue variants (route through the same cue playback path) ---
+    let h = host.clone();
+    b.real("TestCueSound", lua.create_function(move |_, cue: String| Ok(voice_opt(h.borrow_mut().sound_cue(&cue))))?)?;
+    let h = host.clone();
+    b.real("TestStopSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_stop(v as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("TestPauseSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_pause(v as u64); Ok(()) })?)?;
+
+    // --- faithful-default GETTERS (game reads the return; no host state modelled yet) ---
+    // `is-locked` music queries → never locked in a fresh session.
+    b.real("IsFactionLockedMusic", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsActionLevelLockedMusic", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    // cue length lookup → 0 duration (no bank metadata loaded).
+    b.real("GetMaxDuration", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    // category volume/pitch reads → neutral (unity gain / unity pitch).
+    b.real("GetCategoryVolume", lua.create_function(|_, _: MultiValue| Ok(1.0f32))?)?;
+    b.real("GetCategoryPitch", lua.create_function(|_, _: MultiValue| Ok(1.0f32))?)?;
+    // stream file handle → nil (no async stream file opened).
+    b.real("OpenStreamFile", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+
+    // --- faithful no-op SETTERS / actions the retail audio driver consumes but we don't model yet ---
+    // (category pitch + listener + all faction/action/source dynamic-music tuning; bank load/unload;
+    //  reverb/low-pass DSP; misc mode toggles; stream close + user-music override; dev summon.)
+    for name in [
+        "SetCategoryPitch",
+        "LockListenerPosition",
+        "SetTimerUpdateMusic",
+        "AddFactionMusic",
+        "SetFactionMusic",
+        "LockFactionMusic",
+        "SetActionLevelsMusic",
+        "SetHostilityDecayRateMusic",
+        "SetSourceMusic",
+        "SetSourceEnterMusic",
+        "SetSourceExitMusic",
+        "SetSourceMusicTransition",
+        "ClearSourceMusicTransitions",
+        "AddSourceMusicEntryState",
+        "ClearSourceMusicEntryStates",
+        "SetActionThresholdsMusic",
+        "SetRootFactionRegionMusic",
+        "SetHijackMusic",
+        "ActivateFactionRegionMusic",
+        "AddMusicSourcePlaylist",
+        "ClearMusicSourcePlaylist",
+        "RemoveMusicSourcePlaylist",
+        "AddCueToMusicSourcePlaylist",
+        "LoadBank",
+        "UnloadBank",
+        "LoadSoundBank",
+        "LoadWaveBank",
+        "UnloadSoundBank",
+        "UnloadWaveBank",
+        "LoadTempBank",
+        "UnloadTempBank",
+        "LoadBankWithCallback",
+        "UnloadBankWithCallback",
+        "RequestAmbienceBank",
+        "SetStreamBlockDumping",
+        "SilenceAmbience",
+        "SetMessageFiltering",
+        "DefineReverbPreset",
+        "SetReverbPreset",
+        "SetReverb",
+        "SetLowPassFilterSettings",
+        "SetLowPassFilter",
+        "SetSurvivalMode",
+        "SetVehicleEngineBoost",
+        "SetCinematicMode",
+        "ForceActionTransition",
+        "ClearFadeCategories",
+        "AddFadeCategory",
+        "ClearPitchCategories",
+        "AddPitchCategory",
+        "PitchCategoryActivate",
+        "PitchCategoryDeactivate",
+        "SetSystemPause",
+        "SetPauseFilter",
+        "RegisterReadyCallback",
+        "CloseStreamFile",
+        "OverrideUserMusic",
+        "RestoreUserMusic",
+        "_SummonEd",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
 
     b.install_global(GLOBAL)
 }

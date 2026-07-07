@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -141,6 +141,135 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             },
         )?,
     )?;
+
+    // ===== Static-layer state queries (mrxlayermanager reads these as booleans). =====
+    // No static-layer streaming state on the host yet → faithful "nothing loading / not static" so the
+    // layer manager's add/remove guards run authentically instead of hitting a nil.
+    for name in [
+        "LoadingStaticLayers",
+        "GetLoadingStaticLayers",
+        "IsStaticLayer",
+        "UnloadingStaticLayers",
+        "GetUnloadingStaticLayers",
+        "AssetExists",
+        "IsPointInBoundary",
+        "LoadGame",
+        "LoadIsRetry",
+        "AchievementIsGranted",
+    ] {
+        b.real(name, lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    }
+
+    // ===== Collection / query getters (the game reads the returned list). =====
+    // No world-object index on the host yet → faithful empty list so the mission Lua's `for _,g in
+    // tObjs` / `#tObjs` loops run with zero results instead of nil-indexing.
+    for name in [
+        "GetAllGuidsByName",
+        "GetObjectsInArea",
+        "GetAwakeObjects",
+        "GetAllLandingZones",
+        "FastCollectHelicopters",
+        "FastCollectJets",
+        "FastCollectFlying",
+        "FastCollectTanks",
+        "FastCollectCars",
+        "FastCollectGroundVehicles",
+        "FastCollectGroundVehiclesExceptTanks",
+        "FastCollectHumans",
+        "FastCollectBoats",
+        "FastCollectUsables",
+        "FastCollectProps",
+        "FastCollectBuildings",
+        "GetPursuitState",
+    ] {
+        b.real(name, lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
+    }
+
+    // ===== Scalar radius/tether getters (read as numbers). =====
+    for name in [
+        "GetBoundaryRadius",
+        "GetWarningRadius",
+        "GetTetherDiameterStart",
+        "GetTetherDiameterEnd",
+    ] {
+        b.real(name, lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    }
+
+    // ===== Spawn-family cfuncs that return a guid (no camera/relative spawn seam yet → nil = "no
+    // object", the same faithful convention as `Pg.Spawn` failing). =====
+    for name in ["SpawnRelative", "SpawnFromCamera", "SpawnPlayer", "SpawnPlayerAdvanced"] {
+        b.real(
+            name,
+            lua.create_function(|_, _: MultiValue| Ok::<Option<i64>, mlua::Error>(None))?,
+        )?;
+    }
+
+    // Pg.FindPointFromCamera(dist, altitude, ...) -> x, y, z. No camera transform yet → origin.
+    b.real(
+        "FindPointFromCamera",
+        lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 0.0f32)))?,
+    )?;
+    // Pg.GetLineRegionPoints(region, invert) -> tX, tY (two coord lists) → two empty tables.
+    b.real(
+        "GetLineRegionPoints",
+        lua.create_function(|lua, _: MultiValue| {
+            Ok((lua.create_table()?, lua.create_table()?))
+        })?,
+    )?;
+    // Pg.GetDistantSpawnPointOnPath(...) -> res, x, y, z, yaw. res=false → callers take the backup point.
+    b.real(
+        "GetDistantSpawnPointOnPath",
+        lua.create_function(|_, _: MultiValue| Ok((false, 0.0f32, 0.0f32, 0.0f32, 0.0f32)))?,
+    )?;
+
+    // ===== Side-effect actions (return value the game ignores) → faithful no-ops. =====
+    // Layer/asset streaming, context actions, region radii, rumble, roads, save/contract signals,
+    // achievements, the whole pursuit-director surface, heli-wave + skirmish spawners. Wired to real
+    // behavior by later world/AI silos; the game's Lua control flow runs unchanged here.
+    for name in [
+        "ResetSingletonDone",
+        "LoadLayer",
+        "UnloadLayer",
+        "ReloadLayer",
+        "LoadAsset",
+        "UnloadAsset",
+        "ReloadAsset",
+        "AddContextAction",
+        "RemoveContextAction",
+        "SetBoundaryRadius",
+        "SetWarningRadius",
+        "Rumble",
+        "EnableRoad",
+        "EnableIntersection",
+        "SaveGame",
+        "ContractActivated",
+        "ContractCancelled",
+        "ContractCompleted",
+        "AchievementAddCount",
+        "LockPursuit",
+        "ClearPursuitLock",
+        "SetPursuit",
+        "SetPursuitSeconds",
+        "AdjustPursuitLevel",
+        "AdjustPursuitTimer",
+        "RestrictAllPursuit",
+        "RestrictPursuitFaction",
+        "RestrictPursuitType",
+        "SetMaxPursuitLevel",
+        "SetMaxPursuitTime",
+        "SetPursuitLevelTimes",
+        "ClearPursuitRestrictions",
+        "TweakPursuitParam",
+        "SetCustomPursuit",
+        "ClearCustomPursuit",
+        "StartHeliWaveSpawner",
+        "StopHeliWaveSpawner",
+        "SetSkirmishTable",
+        "AddSkirmishTemplate",
+        "SetGlobalSkirmishState",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
 
     b.install_global(GLOBAL)
 }

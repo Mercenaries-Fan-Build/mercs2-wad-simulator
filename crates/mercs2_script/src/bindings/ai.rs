@@ -130,6 +130,53 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(h.borrow_mut().ai_set_state(guid as u64, &state, on.unwrap_or(true)))
     })?)?;
 
+    // Ai.DefaultGoal(tParameters) — the table-form goal post (mrxai.lua:19). Faithfully routes to the
+    // same action ring as Ai.Goal (there is no separate compiled "default goal" body; AI code map §5/§8).
+    let h = host.clone();
+    b.real("DefaultGoal", lua.create_function(move |_, params: Value| {
+        let (guid, goal): (i64, String) = match params {
+            Value::Table(t) => (
+                t.get::<i64>("AIGuid").or_else(|_| t.get::<i64>("Guid")).unwrap_or(0),
+                t.get::<String>("Goal").unwrap_or_default(),
+            ),
+            _ => (0, String::new()),
+        };
+        Ok(h.borrow_mut().ai_goal(guid as u64, &goal))
+    })?)?;
+
+    // --- Getters the game reads → faithful defaults (no faction/perception system yet). ---
+    // Ai.GetRelation is above; these have no host method so they return the neutral default.
+    b.real("GetFeeling", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetPerceivability", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetState", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("TestDropZone", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    // GUID getter: 0 → nil so the game's `if not uFaction` control flow is authentic.
+    b.real("GetFactionGuid", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    b.real("GetAttrib", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    b.real("GetSubjectData", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    b.real("GetSpawnList", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    b.real("GetSpawnListChangeInfo", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    b.real("HeliDropZoneInfo", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+
+    // --- Order verbs / setters / spawner+plan orchestration → faithful no-ops. ---
+    // The AI code map (§5/§8) shows the planner/cover/squad brain is DATA dispatched over the action
+    // ring — there is NO compiled body for these directives. Posting/ignoring them is the faithful
+    // behavior. AddInfraction/SetInfractionMultiplier want a native faction-mood bridge (no host method
+    // yet) — see report.
+    for name in [
+        "Temp", "RemoveGoal", "Squad", "Role", "Anchor", "SetFacing", "LivingWorld", "Water", "Feed",
+        "Rest", "Talk", "Admire", "Deliver", "HeliLand", "HeliTakeoff", "GoIn", "EveryoneOut",
+        "Deploy", "SetHaste", "SetPerceivability", "PlanSetConditions", "PlanSetGoal", "Plan",
+        "PlanIterate", "PlanClear", "SetTrafficSpawning", "SetSidewalkSpawning", "SetRoadSpawning",
+        "SetLaneActive", "TweakAttachedSpawners", "TweakAttachedSpawnersInGroup", "ShowObjectSpawners",
+        "SetSpawnList", "ClearSpawnListChanges", "ResetAllSpawnLists", "SetExclusionZone",
+        "AddRoadException", "RemoveRoadException", "RemoveExclusionZone", "AddSubject", "RemoveSubject",
+        "RemoveAllSubjects", "ThreatPerception", "SetFeeling", "ChangeRelation", "AddInfraction",
+        "SetInfractionMultiplier", "SetAttitude", "SetDriveThroughMassRatio", "SetPriorityTarget",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
+
     b.stub("Enable", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.install_global(GLOBAL)
 }

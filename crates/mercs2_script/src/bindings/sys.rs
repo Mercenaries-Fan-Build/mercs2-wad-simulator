@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Sys")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -138,6 +138,101 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "GuidToString",
         lua.create_function(move |_, guid: i64| Ok(h.borrow().sys_guid_to_string(guid as u64)))?,
     )?;
+
+    // Sys.StringToGuid("0x000f9a64") — the faithful inverse of GuidToString: parse a hex (or decimal)
+    // guid literal to its number (wifpmcgarage.lua/wiftutorialgatehonk.lua read the result). No host
+    // method needed; the string→number marshal is self-contained. Unparseable → nil.
+    b.real(
+        "StringToGuid",
+        lua.create_function(|_, s: String| {
+            let t = s.trim();
+            let parsed = t
+                .strip_prefix("0x")
+                .or_else(|| t.strip_prefix("0X"))
+                .and_then(|hex| i64::from_str_radix(hex, 16).ok())
+                .or_else(|| t.parse::<i64>().ok());
+            Ok(match parsed {
+                Some(g) => Value::Integer(g),
+                None => Value::Nil,
+            })
+        })?,
+    )?;
+
+    // --- Time / timestamp surface (self-consistent monotonic clock; no host method needed). ---
+    // The game marks a stamp (Real/MainTimeStamp, TimeStampMark) and later reads the delta
+    // (TimeStampGetElapsed) — e.g. antiair.lua's lock-on blink. A single boot Instant makes every stamp
+    // and elapsed value coherent.
+    let boot = std::time::Instant::now();
+    b.real("MainTime", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    b.real("RealTime", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    b.real("MainTimeStamp", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    b.real("RealTimeStamp", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    b.real("TimeStampMark", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    b.real("Clock", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    b.real("TimeStampGetElapsed", lua.create_function(move |_, ts: f64| Ok(boot.elapsed().as_secs_f64() - ts))?)?;
+    b.real("DiffTime", lua.create_function(|_, (a, b): (f64, f64)| Ok(a - b))?)?;
+    b.real(
+        "Time",
+        lua.create_function(|_, ()| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            Ok(secs)
+        })?,
+    )?;
+    b.real(
+        "Date",
+        lua.create_function(|_, ()| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Ok(format!("{secs}"))
+        })?,
+    )?;
+
+    // --- Config / platform / profile getters the game branches on → faithful retail-PC defaults. ---
+    // (No host method for these yet; each returns the value the retail PC build reports.)
+    b.real("SubtitlesEnabled", lua.create_function(|_, ()| Ok(true))?)?;
+    b.real("RumbleEnabled", lua.create_function(|_, ()| Ok(true))?)?;
+    b.real("TutorialsEnabled", lua.create_function(|_, ()| Ok(true))?)?;
+    b.real("YAxisInverted", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("IsDemoMode", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("NoHud", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("IsFinalConfig", lua.create_function(|_, ()| Ok(true))?)?;
+    b.real("IsConfirmOnCircle", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("IsGermanSKU", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("GetForceNewGame", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("GetLanguage", lua.create_function(|_, ()| Ok("English".to_string()))?)?;
+    b.real("GetPlatform", lua.create_function(|_, ()| Ok(0i64))?)?;
+    b.real("MemUsage", lua.create_function(|_, ()| Ok(0i64))?)?;
+    b.real("HaveActiveProfile", lua.create_function(|_, ()| Ok(true))?)?;
+    b.real("IsAutosaveEnabled", lua.create_function(|_, ()| Ok(true))?)?;
+    b.real("LTIGetPrecacheBypass", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("GetAssetRequestMax", lua.create_function(|_, ()| Ok(0i64))?)?;
+    // Shell / flow getters — fresh boot: nothing finished, nothing to auto-load or skip.
+    b.real("FinishedShell", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("AutoLoad", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("GetINIBriefing", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("GetINILoadLastSave", lua.create_function(|_, ()| Ok(false))?)?;
+    b.real("GetSkipMission", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
+    b.real("GetCharacterTemplate", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    b.real("GetShellCode", lua.create_function(|_, ()| Ok(String::new()))?)?;
+    // Sys.GetVersion() → (sCode, sData) — two strings (mrxguishell.lua:527).
+    b.real("GetVersion", lua.create_function(|_, ()| Ok((String::new(), String::new())))?)?;
+    b.real("ToStringL", lua.create_function(|_, _: MultiValue| Ok(String::new()))?)?;
+
+    // --- Setters / actions / dev sinks the retail engine consumes but the game does not read back. ---
+    for name in [
+        "WriteToConsole", "SetNumberOfViewports", "SetTimeScale", "SetLevelName", "SetMasterScriptName",
+        "RequiredAsset", "SetAssetRequestMax", "Callback", "SetSkipMission", "SetINIBriefing",
+        "DisableAssetPreload", "FlushAssets", "PlayIntroMovies", "SetTutorialsEnabled",
+        "SetLuaSaveVersion", "AddStringDb", "ClearStringDb", "StartSingleplayer", "SetAutosaveEnabled",
+        "ForceNextAutosave",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
 
     b.install_global(GLOBAL)
 }

@@ -1050,11 +1050,12 @@ mod tests {
         // Event system + Player economy/getters + Object health/labels + Sys game-state handshake).
         const EXPECTED_NAMESPACES: usize = 35;
         const EXPECTED_REQUIRED: usize = 1086;
-        // Baseline after the Wave-3 binding pass (5 agents backed ~520 bindings across HUD/Net/
-        // presentation/math+string+util/object-family; +3 real cross-cutting fixes). Bump when a silo
-        // lands more bodies. real 86→190 (+104 real); stubs jumped with the faithful no-op surface.
-        const EXPECTED_REAL: usize = 290;
-        const EXPECTED_STUB: usize = 508;
+        // Baseline after the full binding-surface pass: ALL 1086 Required cfuncs are now installed &
+        // callable (tests/binding_smoke.rs enforces this). Bodies split into real (behavioral / faithful
+        // default) vs stub (deliberate faithful no-op). Session start was real 86 / stub 9; every other
+        // Required binding was previously auto-stubbed-at-runtime only, not present.
+        const EXPECTED_REAL: usize = 393;
+        const EXPECTED_STUB: usize = 693; // recomputed below
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1080,14 +1081,14 @@ mod tests {
         // Spot-check the boot-slice namespaces route correctly.
         let by = |name: &str| cov.iter().find(|c| c.namespace == name).unwrap();
         assert_eq!(by("Debug").real_count(), 1);
-        assert_eq!(by("Sys").real_count(), 7);
-        assert_eq!(by("Pg").real_count(), 2);
+        assert_eq!(by("Sys").real_count(), 44);
+        assert_eq!(by("Pg").real_count(), 40);
         assert_eq!(by("Object").real_count(), 62);
         assert_eq!(by("Object").stub_count(), 25);
         assert_eq!(by("Player").real_count(), 65);
         assert_eq!(by("Event").real_count(), 4);
-        assert_eq!(by("Vehicle").real_count(), 16);
-        assert_eq!(by("Sound").real_count(), 20);
+        assert_eq!(by("Vehicle").real_count(), 24);
+        assert_eq!(by("Sound").real_count(), 29);
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);
 
