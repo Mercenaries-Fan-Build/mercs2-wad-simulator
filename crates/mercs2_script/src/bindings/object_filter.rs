@@ -9,9 +9,6 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("ObjectFilter")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
@@ -43,40 +40,66 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "_GC", corpus_calls: 0 },
 ];
 
-/// Object query/filter predicate handles. The engine backs a filter with a native `ObjectFilter`
-/// object (a label/faction/type predicate + explicit include/exclude object set); we don't yet own
-/// that native object, so filters are faithful empty predicates: `Create`/`Copy` hand back a stable
-/// non-nil handle (so `local f = ObjectFilter.Create()` and `f = f or ObjectFilter.Create()` work),
-/// the mutators are accepted no-ops, and the evaluators return an authentic empty/false/nil result.
-/// A later silo backs this with a real host filter registry (see report — needs `object_filter_*`).
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+/// Object query filters, backed by the real `mercs2_core::ObjectFilterRegistry` on the host: a label
+/// boolean-expression predicate (`"Hero||(China&&Vehicle)"`) + explicit include/exclude object sets +
+/// a `UsePlayers` flag. `Create`/`Copy` mint handles; the mutators configure the registry filter;
+/// `Eval`/`GetObjects` query it against the host's object label store. The filter-graph association/
+/// relation cfuncs (0 shipped calls) remain unbacked (see burn-down).
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // Filter handles are opaque to the game; hand back a unique, stable, non-nil id per filter so the
-    // game's `local f = ObjectFilter.Create()` / `f = f or ObjectFilter.Create()` control flow holds.
-    let next = Rc::new(Cell::new(1i64));
-    let n = next.clone();
-    b.real("Create", lua.create_function(move |_, _: MultiValue| { let h = n.get(); n.set(h + 1); Ok(h) })?)?;
-    let n = next.clone();
-    b.real("Copy", lua.create_function(move |_, _: MultiValue| { let h = n.get(); n.set(h + 1); Ok(h) })?)?;
+    let h = host.clone();
+    b.real("Create", lua.create_function(move |_, _: MultiValue| Ok(h.borrow_mut().object_filter_create() as i64))?)?;
+    let h = host.clone();
+    b.real("Copy", lua.create_function(move |_, src: i64| Ok(h.borrow_mut().object_filter_copy(src as u64) as i64))?)?;
 
-    // Evaluators — faithful empty predicate.
-    b.real("GetObjects", lua.create_function(|_, _: MultiValue| Ok(Vec::<i64>::new()))?)?;
-    b.real("Eval", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    // Configuration mutators → the registry filter.
+    let h = host.clone();
+    b.real("SetFilter", lua.create_function(move |_, (f, expr): (i64, String)| {
+        h.borrow_mut().object_filter_set_expr(f as u64, &expr);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("ClearFilter", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_set_expr(f as u64, ""); Ok(()) })?)?;
+    // AddObject(f, guid, bInclude) — bInclude defaults true (an explicit include).
+    let h = host.clone();
+    b.real("AddObject", lua.create_function(move |_, (f, guid, include): (i64, i64, Option<bool>)| {
+        h.borrow_mut().object_filter_add(f as u64, guid as u64, include.unwrap_or(true));
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("RemoveObject", lua.create_function(move |_, (f, guid): (i64, i64)| {
+        h.borrow_mut().object_filter_remove(f as u64, guid as u64);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("ClearObjects", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_clear(f as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("UsePlayers", lua.create_function(move |_, (f, on): (i64, Option<bool>)| {
+        h.borrow_mut().object_filter_use_players(f as u64, on.unwrap_or(true));
+        Ok(())
+    })?)?;
+
+    // Evaluators → query the registry filter.
+    let h = host.clone();
+    b.real("GetObjects", lua.create_function(move |_, (f, _which): (i64, Option<bool>)| {
+        Ok(h.borrow().object_filter_objects(f as u64).into_iter().map(|g| g as i64).collect::<Vec<_>>())
+    })?)?;
+    let h = host.clone();
+    b.real("Eval", lua.create_function(move |_, (f, guid): (i64, i64)| {
+        Ok(h.borrow().object_filter_eval(f as u64, guid as u64))
+    })?)?;
+    let h = host.clone();
+    b.real("_GC", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_gc(f as u64); Ok(()) })?)?;
+
     b.real("GetCoopPlayerGuid", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
 
-    // Mutators / configuration — accepted no-ops until the native filter object exists.
-    b.stub("SetFilter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("ClearFilter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("AddObject", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("RemoveObject", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("ClearObjects", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("UsePlayers", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // UNBACKED residue (0 shipped calls): filter-graph association/relation edges — a filter-to-filter
+    // relation model not yet built. Honest no-ops (see burn-down).
     b.stub("SetAssociation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("ClearAssociation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("SetRelation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("ClearRelation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("_GC", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
 
     b.install_global(GLOBAL)
 }

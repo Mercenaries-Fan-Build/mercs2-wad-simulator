@@ -95,6 +95,11 @@ pub struct GameScriptHost {
     /// Engine settings the `Sys.Set*` config surface writes and the matching `Sys.*` getters read
     /// (the game holds these; the rest of the engine reads them). `Set*`→`Get*` are real roundtrips.
     settings: SysSettings,
+    /// Per-object label set (`Object.AddLabel`/`RemoveLabel`/`HasLabel`) — the tags mission Lua and the
+    /// `ObjectFilter` predicate query against.
+    object_labels: HashMap<u64, std::collections::HashSet<String>>,
+    /// The `ObjectFilter.*` handle registry (label boolean-expr + include/exclude sets).
+    object_filters: mercs2_core::ObjectFilterRegistry,
 }
 
 /// The `Sys.*` engine-config the script host owns (`Sys.SetTimeScale`/`SetTutorialsEnabled`/… write it;
@@ -166,6 +171,8 @@ impl GameScriptHost {
             hijacks: HashMap::new(),
             turrets: HashMap::new(),
             settings: SysSettings::default(),
+            object_labels: HashMap::new(),
+            object_filters: mercs2_core::ObjectFilterRegistry::new(),
         }
     }
 
@@ -490,6 +497,62 @@ impl EngineHost for GameScriptHost {
     }
     fn sys_start_singleplayer(&mut self) {
         self.settings.singleplayer = true;
+    }
+
+    // ===== Object labels + ObjectFilter query registry. =====
+    fn object_add_label(&mut self, guid: u64, label: &str) {
+        self.object_labels.entry(guid).or_default().insert(label.to_string());
+    }
+    fn object_remove_label(&mut self, guid: u64, label: &str) {
+        if let Some(set) = self.object_labels.get_mut(&guid) {
+            set.remove(label);
+        }
+    }
+    fn object_has_label(&self, guid: u64, label: &str) -> bool {
+        self.object_labels.get(&guid).is_some_and(|s| s.contains(label))
+    }
+    fn object_filter_create(&mut self) -> u64 {
+        self.object_filters.create()
+    }
+    fn object_filter_copy(&mut self, src: u64) -> u64 {
+        self.object_filters.copy(src)
+    }
+    fn object_filter_set_expr(&mut self, handle: u64, expr: &str) {
+        if let Some(f) = self.object_filters.get_mut(handle) {
+            f.expr = expr.to_string();
+        }
+    }
+    fn object_filter_add(&mut self, handle: u64, guid: u64, include: bool) {
+        if let Some(f) = self.object_filters.get_mut(handle) {
+            f.add(guid, include);
+        }
+    }
+    fn object_filter_remove(&mut self, handle: u64, guid: u64) {
+        if let Some(f) = self.object_filters.get_mut(handle) {
+            f.remove(guid);
+        }
+    }
+    fn object_filter_clear(&mut self, handle: u64) {
+        if let Some(f) = self.object_filters.get_mut(handle) {
+            f.clear_objects();
+        }
+    }
+    fn object_filter_use_players(&mut self, handle: u64, on: bool) {
+        if let Some(f) = self.object_filters.get_mut(handle) {
+            f.use_players = on;
+        }
+    }
+    fn object_filter_objects(&self, handle: u64) -> Vec<u64> {
+        self.object_filters.get(handle).map(|f| f.include.clone()).unwrap_or_default()
+    }
+    fn object_filter_eval(&self, handle: u64, guid: u64) -> bool {
+        match self.object_filters.get(handle) {
+            Some(f) => f.matches(guid, |label| self.object_has_label(guid, label)),
+            None => false,
+        }
+    }
+    fn object_filter_gc(&mut self, handle: u64) {
+        self.object_filters.remove(handle);
     }
 
     // ===== Player identity / session / binding (single local player controlling the hero). =====
@@ -874,6 +937,41 @@ mod tests {
         sh.exec("Sys.SetTimeScale(0.5); Sys.SetNumberOfViewports(2)", "@s").unwrap();
         assert_eq!(host.borrow().sys_time_scale(), 0.5);
         assert_eq!(host.borrow().settings.viewports, 2);
+    }
+
+    /// `ObjectFilter.*` is WIRED to the real `mercs2_core` filter registry + object label store: the
+    /// label boolean-expression predicate evaluates against real labels, and the include/exclude sets
+    /// work — all driven through Lua.
+    #[test]
+    fn game_lua_object_filter_evaluates_real_predicate() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Label two objects, then filter for "China&&Vehicle".
+        sh.exec(
+            r#"
+            Object.AddLabel(100, "China"); Object.AddLabel(100, "Vehicle")
+            Object.AddLabel(200, "China")
+            uFilter = ObjectFilter.Create()
+            ObjectFilter.SetFilter(uFilter, "China&&Vehicle")
+        "#,
+            "@of",
+        )
+        .unwrap();
+
+        // 100 (China+Vehicle) matches; 200 (China only) does not — real predicate evaluation.
+        let m100: bool = sh.eval("return ObjectFilter.Eval(uFilter, 100)").unwrap();
+        let m200: bool = sh.eval("return ObjectFilter.Eval(uFilter, 200)").unwrap();
+        assert!(m100, "China&&Vehicle matches the labelled vehicle");
+        assert!(!m200, "China-only object fails China&&Vehicle");
+
+        // Explicit include overrides a failing predicate; GetObjects returns the include set.
+        sh.exec("ObjectFilter.AddObject(uFilter, 200, true)", "@of").unwrap();
+        let m200b: bool = sh.eval("return ObjectFilter.Eval(uFilter, 200)").unwrap();
+        assert!(m200b, "explicit include forces a match");
+        let objs: Vec<i64> = sh.eval("return ObjectFilter.GetObjects(uFilter, false)").unwrap();
+        assert_eq!(objs, vec![200]);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

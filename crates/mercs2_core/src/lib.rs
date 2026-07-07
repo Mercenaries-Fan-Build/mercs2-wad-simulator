@@ -31,6 +31,11 @@ pub use physics_query::{PhysicsQuery, RayHit};
 pub mod registry;
 pub use registry::{ComponentDescriptor, ComponentRegistry};
 
+/// The `ObjectFilter.*` script-query mechanism (see `object_filter.rs`): a label boolean-expression +
+/// explicit include/exclude sets, minted/freed through a handle registry the script host owns.
+pub mod object_filter;
+pub use object_filter::{eval_label_expr, ObjectFilter, ObjectFilterRegistry};
+
 /// Keystone B — the serialized event / RPC bus (see `event.rs`): the one name-hash-keyed event bus
 /// the engine shares across GUI (`ToggleHud`), Networking (`NetEventCallback`), and AI
 /// (`DirectAction`). Typed args (≤7), an immediate dispatch path, and a bounded deferred queue

@@ -186,6 +186,51 @@ pub trait EngineHost {
         let _ = (guid, label);
         false
     }
+
+    // ===== ObjectFilter — the script-side object query (label expr + include/exclude sets). =====
+    /// `ObjectFilter.Create()` → a fresh filter handle.
+    fn object_filter_create(&mut self) -> u64 {
+        0
+    }
+    /// `ObjectFilter.Copy(src)` → a duplicate filter handle.
+    fn object_filter_copy(&mut self, src: u64) -> u64 {
+        let _ = src;
+        0
+    }
+    /// `ObjectFilter.SetFilter(f, expr)` — set the label boolean-expression predicate.
+    fn object_filter_set_expr(&mut self, handle: u64, expr: &str) {
+        let _ = (handle, expr);
+    }
+    /// `ObjectFilter.AddObject(f, guid, bInclude)` — add to the include (`true`) or exclude set.
+    fn object_filter_add(&mut self, handle: u64, guid: u64, include: bool) {
+        let _ = (handle, guid, include);
+    }
+    /// `ObjectFilter.RemoveObject(f, guid)`.
+    fn object_filter_remove(&mut self, handle: u64, guid: u64) {
+        let _ = (handle, guid);
+    }
+    /// `ObjectFilter.ClearObjects(f)` / `ClearFilter(f)`.
+    fn object_filter_clear(&mut self, handle: u64) {
+        let _ = handle;
+    }
+    /// `ObjectFilter.UsePlayers(f, on)`.
+    fn object_filter_use_players(&mut self, handle: u64, on: bool) {
+        let _ = (handle, on);
+    }
+    /// `ObjectFilter.GetObjects(f)` — the explicitly-included object GUIDs.
+    fn object_filter_objects(&self, handle: u64) -> Vec<u64> {
+        let _ = handle;
+        Vec::new()
+    }
+    /// `ObjectFilter.Eval(f, guid)` — whether `guid` passes the filter (label predicate + sets).
+    fn object_filter_eval(&self, handle: u64, guid: u64) -> bool {
+        let _ = (handle, guid);
+        false
+    }
+    /// `ObjectFilter._GC(f)` — free a filter handle.
+    fn object_filter_gc(&mut self, handle: u64) {
+        let _ = handle;
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1182,9 +1227,10 @@ mod tests {
         // order ring + faction mood + spawner tweaks (real +31); Vehicle vertical wired the hijack FSM
         // + turret aim + RestoreHealth (real +13); Sound vertical wired category pitch + the bank
         // load/unload/ambience residency family (real +12); Sys vertical wired the engine-config store
-        // (time scale / level+master-script / tutorials / autosave / save-version / viewports; real +10).
-        const EXPECTED_REAL: usize = 459;
-        const EXPECTED_STUB: usize = 627;
+        // (time scale / level+master-script / tutorials / autosave / save-version / viewports; real +10);
+        // ObjectFilter vertical wired the label-expr query registry + object label store (real +7).
+        const EXPECTED_REAL: usize = 466;
+        const EXPECTED_STUB: usize = 620;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
