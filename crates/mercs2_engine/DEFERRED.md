@@ -39,3 +39,29 @@ Plug-in seam: implement `render_graph::RenderNode` against the node's `PassId` s
   back through `PassCtx`. Re-driving `Color` from `ctx.items` is a mechanical follow-up left untouched
   here to keep the carve byte-identical (fidelity bar). A newly-registered Band-A node already reads
   the fully-populated `items`. `[faithful-blocker: no]`
+
+## Wave-1 seam A/B (schema loader + region cache) — confirm-live follow-ups
+
+The E1 `schm` deserializer is now wired into the world loader (`worldutil::load_schema_components`)
+and the S5 RegionCache is populated from authored `PopulationDensity` anchors
+(`worldutil::register_population_regions`, driven each tick in `game_world`). Grounded facts and the
+items left for a live/x32dbg read:
+
+- **Region extent is a POINT, not a real rect.** The placed region COMPs do not author an extent:
+  `PopulationDensity` = density params + 2 name refs + flags (no min/max), `LineRegion` = a single
+  ref (points live in a separate `PgLineRegion`), and `SphereRegion`/`CircleRegion` (the only region
+  types that author a radius float) have ZERO placed instances joined to a Transform in retail vz.wad
+  (registry-block prototypes + runtime `World.CreateRegion` only). The engine's real per-region rect
+  is built at load in `FUN_004d60e0`/`PgSysPopulation::Update` (+0x10..+0x1c). UNBLOCK = x32dbg-read
+  that rect (and the priority `+0x38`) for a placed region and replace the point-anchor +
+  `POPULATION_REGION_CACHE_IN/OUT` tunables with the authored rect. `[faithful-blocker: no]`
+- **Region cache radii are tunables.** `POPULATION_REGION_CACHE_IN=250` / `_OUT=400` (metres) are
+  streaming tunables analogous to `StreamingConfig::tier_stream_out`, pending the live rect above.
+  `[faithful-blocker: no]`
+- **PopulationDensity field semantics.** 7 fields decoded (`0x263c1369`/`0xc63c9abc` f32-encoded
+  small ints = density levels; `0x77e838e4`/`0xafb45fd9` = name/template refs; `0x87519019` f32-int;
+  `0xa603f273` flags; `0x431c37e3` ref). Region `priority` is set to 0 pending a live confirm of
+  which field drives the density-selection priority gate. `[faithful-blocker: no]`
+- **The population-lump executor.** `update_regions` decisions (CacheIn/CacheOut) are computed each
+  tick but not yet acted on (no spawn/despawn of an ambient-population lump). That executor is the
+  population silo's job; the decision layer is now live and correct. `[faithful-blocker: no]`
