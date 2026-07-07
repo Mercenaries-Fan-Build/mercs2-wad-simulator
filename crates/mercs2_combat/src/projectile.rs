@@ -13,27 +13,48 @@ use hecs::{Entity, World};
 use mercs2_core::event::EventBus;
 use mercs2_core::PhysicsQuery;
 
-use crate::components::{RuntimeExplosion, RuntimeProjectile};
+use crate::components::{Health, RuntimeExplosion, RuntimeProjectile};
+use crate::impact::Impact;
 
 /// One resolved projectile outcome, applied after the (immutable) integration query is dropped.
 enum Outcome {
-    /// Direct hit on `victim` (if any) at `point`; despawn the projectile.
+    /// Direct hit on `victim` (if any) at `point`; despawn the projectile. `normal` is the physics
+    /// contact normal (may be degenerate → the impact channel falls back to reverse-travel); `dir` is
+    /// the projectile's unit travel direction at impact (the reverse-travel fallback source).
     Hit {
         proj: Entity,
         victim: Option<Entity>,
         point: Vec3,
+        normal: Vec3,
+        dir: Vec3,
     },
     /// Lifetime expired at `point`; despawn (detonate in place if explosive).
     Expired { proj: Entity, point: Vec3 },
 }
 
 /// Advance every [`RuntimeProjectile`] one fixed step. Returns the number despawned this tick
-/// (impact + expiry) for tests/telemetry.
+/// (impact + expiry) for tests/telemetry. This is the legacy entry point that **discards** the impact
+/// FX channel; call [`projectile_system_impacts`] to capture it.
 pub fn projectile_system(
     world: &mut World,
     dt: f32,
     bus: &mut EventBus,
     physics: Option<&dyn PhysicsQuery>,
+) -> u32 {
+    let mut sink = Vec::new();
+    projectile_system_impacts(world, dt, bus, physics, &mut sink)
+}
+
+/// Advance every [`RuntimeProjectile`] one fixed step, appending a bullet/blood [`Impact`] for each
+/// **non-explosive** direct hit to `impacts` (explosive rounds emit their impact through the
+/// [`RuntimeExplosion`] they spawn, handled by [`explosion_system_impacts`]). Returns the number
+/// despawned this tick.
+pub fn projectile_system_impacts(
+    world: &mut World,
+    dt: f32,
+    bus: &mut EventBus,
+    physics: Option<&dyn PhysicsQuery>,
+    impacts: &mut Vec<Impact>,
 ) -> u32 {
     let mut outcomes: Vec<Outcome> = Vec::new();
 
@@ -55,6 +76,8 @@ pub fn projectile_system(
                         proj: pe,
                         victim: hit.entity,
                         point: hit.point,
+                        normal: hit.normal,
+                        dir,
                     });
                     impacted = true;
                 }
@@ -73,9 +96,9 @@ pub fn projectile_system(
 
     let mut despawned = 0u32;
     for outcome in outcomes {
-        let (proj, victim, point) = match outcome {
-            Outcome::Hit { proj, victim, point } => (proj, victim, point),
-            Outcome::Expired { proj, point } => (proj, None, point),
+        let (proj, victim, point, hit_facing) = match outcome {
+            Outcome::Hit { proj, victim, point, normal, dir } => (proj, victim, point, Some((normal, dir))),
+            Outcome::Expired { proj, point } => (proj, None, point, None),
         };
         // Read the projectile's payload before despawning it.
         let payload = world.get::<&RuntimeProjectile>(proj).ok().map(|p| {
@@ -93,7 +116,8 @@ pub fn projectile_system(
         if let Some(v) = victim {
             crate::damage::apply_hit(world, bus, v, Some(owner), damage, key);
         }
-        // Explosive round: spawn a blast at the impact/expiry point.
+        // Explosive round: spawn a blast at the impact/expiry point (its Explosion impact is emitted by
+        // the explosion pass). A non-explosive direct hit emits a bullet/blood impact here.
         if let Some(exp) = explosive {
             world.spawn((RuntimeExplosion {
                 owner: Some(owner),
@@ -103,6 +127,10 @@ pub fn projectile_system(
                 applied: false,
                 life: 0.25, // brief linger; the damage applies on its first tick
             },));
+        } else if let Some((normal, dir)) = hit_facing {
+            // A character hit sprays blood; a world/prop hit leaves a bullet hole.
+            let is_character = victim.map(|v| world.get::<&Health>(v).is_ok()).unwrap_or(false);
+            impacts.push(Impact::from_hit(point, normal, dir, is_character));
         }
         let _ = world.despawn(proj);
         despawned += 1;
@@ -112,11 +140,29 @@ pub fn projectile_system(
 
 /// Advance every [`RuntimeExplosion`]: apply its radial damage once (on its first tick) via the
 /// confirm-live applier, then age it out. Returns the number of blasts that applied damage this tick.
+/// Legacy entry point that **discards** the impact FX channel; call [`explosion_system_impacts`] to
+/// capture it.
 pub fn explosion_system(
     world: &mut World,
     dt: f32,
     bus: &mut EventBus,
     physics: Option<&dyn PhysicsQuery>,
+) -> u32 {
+    let mut sink = Vec::new();
+    explosion_system_impacts(world, dt, bus, physics, &mut sink)
+}
+
+/// Advance every [`RuntimeExplosion`], emitting one [`ImpactKind::Explosion`](crate::ImpactKind)
+/// [`Impact`] per detonation (at the blast centre, facing world-up) into `impacts`. This is the single
+/// choke point for explosion FX — grenade/mine blasts, explosive-projectile detonations, and homing
+/// warheads all spawn a [`RuntimeExplosion`] that lands here. Returns the number of blasts that applied
+/// damage this tick.
+pub fn explosion_system_impacts(
+    world: &mut World,
+    dt: f32,
+    bus: &mut EventBus,
+    physics: Option<&dyn PhysicsQuery>,
+    impacts: &mut Vec<Impact>,
 ) -> u32 {
     // Gather blasts to detonate this tick (those not yet applied), plus age/despawn bookkeeping.
     let mut to_detonate: Vec<(Entity, Option<Entity>, Vec3, crate::stats::ExplosiveStats, crate::damage::DamageKey)> =
@@ -134,6 +180,9 @@ pub fn explosion_system(
     }
     let mut applied_count = 0u32;
     for (_ee, owner, pos, stats, key) in to_detonate {
+        // Emit the explosion-mark/scorch FX at the blast centre (once, on the detonation tick),
+        // regardless of whether the blast happened to catch any bodies.
+        impacts.push(Impact::explosion(pos));
         let hits = crate::damage::detonate_explosion(world, bus, physics, owner, pos, &stats, key);
         if !hits.is_empty() {
             applied_count += 1;
@@ -217,5 +266,101 @@ mod tests {
         let applied = explosion_system(&mut world, 1.0 / 60.0, &mut bus, Some(&NoPhysics));
         assert_eq!(applied, 1);
         assert!(world.get::<&Health>(victim).unwrap().cur < 100.0);
+    }
+
+    /// A physics stub that reports a hit at a fixed distance ahead with an optional victim.
+    struct HitAhead {
+        victim: Option<Entity>,
+        dist: f32,
+    }
+    impl PhysicsQuery for HitAhead {
+        fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<RayHit> {
+            if self.dist <= max {
+                Some(RayHit {
+                    point: origin + dir * self.dist,
+                    normal: -dir,
+                    distance: self.dist,
+                    entity: self.victim,
+                })
+            } else {
+                None
+            }
+        }
+        fn closest_point(&self, _p: Vec3, _m: f32) -> Option<ClosestPoint> {
+            None
+        }
+        fn move_character(&self, pos: Vec3, delta: Vec3, _r: f32, _h: f32, _s: f32) -> Vec3 {
+            pos + delta
+        }
+    }
+
+    #[test]
+    fn non_explosive_projectile_hit_emits_bullet_or_blood() {
+        use crate::impact::ImpactKind;
+        // World hit (no victim) → Bullet.
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let owner = world.spawn(());
+        world.spawn((RuntimeProjectile {
+            owner,
+            pos: Vec3::ZERO,
+            vel: Vec3::new(0.0, 0.0, 30.0),
+            gravity: 0.0,
+            life: 5.0,
+            damage: 10.0,
+            damage_key: DamageKey::BulletLarge,
+            explosive: None,
+        },));
+        let mut impacts = Vec::new();
+        projectile_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&HitAhead { victim: None, dist: 0.1 }), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Bullet);
+
+        // Character hit (Health victim) → Blood.
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let owner = world.spawn(());
+        let victim = world.spawn((Health::new(100.0),));
+        world.spawn((RuntimeProjectile {
+            owner,
+            pos: Vec3::ZERO,
+            vel: Vec3::new(0.0, 0.0, 30.0),
+            gravity: 0.0,
+            life: 5.0,
+            damage: 10.0,
+            damage_key: DamageKey::BulletLarge,
+            explosive: None,
+        },));
+        let mut impacts = Vec::new();
+        projectile_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&HitAhead { victim: Some(victim), dist: 0.1 }), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Blood);
+    }
+
+    #[test]
+    fn explosive_projectile_emits_explosion_not_bullet() {
+        use crate::impact::ImpactKind;
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let owner = world.spawn(());
+        world.spawn((RuntimeProjectile {
+            owner,
+            pos: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            gravity: 0.0,
+            life: 0.01,
+            damage: 0.0,
+            damage_key: DamageKey::Explosion,
+            explosive: Some(ExplosiveStats { radius: 5.0, max_force: 10.0, damage: 60.0, min_force_falloff: 0.0 }),
+        },));
+        let mut impacts = Vec::new();
+        // Expiry spawns a RuntimeExplosion; the projectile pass itself emits NO impact for explosives.
+        projectile_system_impacts(&mut world, 0.02, &mut bus, Some(&NoPhysics), &mut impacts);
+        assert!(impacts.is_empty(), "explosive round defers its impact to the explosion pass");
+        // The explosion pass emits exactly one Explosion impact (facing world-up).
+        explosion_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&NoPhysics), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Explosion);
+        assert_eq!(impacts[0].normal, Vec3::Y);
     }
 }

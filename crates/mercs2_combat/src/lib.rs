@@ -34,6 +34,7 @@ pub mod damage;
 pub mod events;
 pub mod firing;
 pub mod homing;
+pub mod impact;
 pub mod lua_surface;
 pub mod projectile;
 pub mod stats;
@@ -43,6 +44,7 @@ pub use components::{
     RuntimeWeapon,
 };
 pub use damage::{DamageKey, ExplosionSize};
+pub use impact::{Impact, ImpactKind};
 pub use stats::{ExplosiveStats, FireType, HomingStats, WeaponDefBlob, WeaponStats, WeaponSubObject};
 
 /// The weapon-system per-frame driver — the reimpl of `FUN_0051cff0` (code map §2), an entry in the
@@ -51,25 +53,75 @@ pub use stats::{ExplosiveStats, FireType, HomingStats, WeaponDefBlob, WeaponStat
 /// explosions**. Runs at the fixed sim rate; gate it on world-present/not-paused at the call site (the
 /// exe's `PTR_DAT_01175cdc[0x62]` gate, §1) — a paused world simply doesn't call this.
 ///
-/// This is a zero-state sequencer (all state lives in the ECS components), so it's a unit struct; call
-/// [`WeaponSystem::update`] once per fixed tick.
-pub struct WeaponSystem;
+/// Almost all state lives in the ECS components; the one piece of frame-local system state is the
+/// **impact-output buffer** — the [`Impact`] records produced by resolved hits this frame, drained by
+/// the game layer to feed the decal/particle consumers. Construct with [`WeaponSystem::default`], call
+/// [`WeaponSystem::tick`] once per fixed step, then [`WeaponSystem::take_impacts`] to hand the frame's
+/// impacts to the consumers.
+#[derive(Default)]
+pub struct WeaponSystem {
+    /// Impacts accumulated since the last drain (drain-then-clear, like the event bus's post-then-drain
+    /// cadence). Filled by [`WeaponSystem::tick`]; emptied by [`WeaponSystem::take_impacts`].
+    impacts: Vec<impact::Impact>,
+}
 
 impl WeaponSystem {
-    /// Advance the whole weapon system one fixed step `dt`. `physics` is the [`PhysicsQuery`] seam for
-    /// hitscan/projectile/explosion line tests (pass `None` before the physics silo lands — hitscans
-    /// then simply miss, projectiles fly to lifetime, explosions still damage by ECS overlap).
+    /// Advance the whole weapon system one fixed step `dt`, **discarding impact FX records** — the
+    /// legacy stateless entry point (kept for callers that don't consume the impact channel). `physics`
+    /// is the [`PhysicsQuery`] seam for hitscan/projectile/explosion line tests (pass `None` before the
+    /// physics silo lands — hitscans then simply miss, projectiles fly to lifetime, explosions still
+    /// damage by ECS overlap).
+    ///
+    /// To capture the impact channel, construct a [`WeaponSystem`] and call [`WeaponSystem::tick`].
     pub fn update(world: &mut World, dt: f32, bus: &mut EventBus, physics: Option<&dyn PhysicsQuery>) {
+        let mut sink = Vec::new();
+        Self::run(world, dt, bus, physics, &mut sink);
+    }
+
+    /// Advance the whole weapon system one fixed step `dt`, **accumulating** the [`Impact`] records for
+    /// every resolved hit (hitscan strikes, projectile direct hits, explosion detonations) into
+    /// `self.impacts`. Drain them with [`WeaponSystem::take_impacts`] after the tick.
+    pub fn tick(
+        &mut self,
+        world: &mut World,
+        dt: f32,
+        bus: &mut EventBus,
+        physics: Option<&dyn PhysicsQuery>,
+    ) {
+        Self::run(world, dt, bus, physics, &mut self.impacts);
+    }
+
+    /// Drain and return this frame's accumulated impacts (drain-then-clear); the buffer is left empty
+    /// for the next tick.
+    pub fn take_impacts(&mut self) -> Vec<impact::Impact> {
+        std::mem::take(&mut self.impacts)
+    }
+
+    /// Borrow the currently-accumulated impacts without draining (telemetry/inspection).
+    pub fn impacts(&self) -> &[impact::Impact] {
+        &self.impacts
+    }
+
+    /// The shared sequencer body: runs the combat passes in the exe's order and appends every resolved
+    /// hit's [`Impact`] to `impacts`.
+    fn run(
+        world: &mut World,
+        dt: f32,
+        bus: &mut EventBus,
+        physics: Option<&dyn PhysicsQuery>,
+        impacts: &mut Vec<impact::Impact>,
+    ) {
         // §4 homing sub-update (lock FSM) runs first (exe: FUN_0052e730 before the pooled passes).
         homing::homing_lock_system(world, dt, bus);
         // Pooled RuntimeWeapon leaf: trigger → shot / reload / rate-of-fire (may launch homing missiles).
-        firing::weapon_firing_system(world, dt, bus, physics);
-        // Guided-missile flight integration (FUN_0052e1f0).
+        firing::weapon_firing_system_impacts(world, dt, bus, physics, impacts);
+        // Guided-missile flight integration (FUN_0052e1f0) — detonations spawn RuntimeExplosions whose
+        // impacts are emitted by the explosion pass below.
         homing::homing_flight_system(world, dt, bus, physics);
         // Generic projectile flight (velocity + gravity + swept raycast).
-        projectile::projectile_system(world, dt, bus, physics);
-        // Live blasts apply their radial damage and age out.
-        projectile::explosion_system(world, dt, bus, physics);
+        projectile::projectile_system_impacts(world, dt, bus, physics, impacts);
+        // Live blasts apply their radial damage, emit an explosion impact, and age out.
+        projectile::explosion_system_impacts(world, dt, bus, physics, impacts);
     }
 }
 
@@ -137,5 +189,41 @@ mod tests {
             hp < start_hp * 0.5,
             "rocket locked, launched, tracked, and dealt heavy blast damage (hp {hp} < 50)"
         );
+    }
+
+    /// The stateful `tick` path captures the impact channel: a homing missile detonation flows through
+    /// the explosion pass and lands one `Explosion` impact, drainable via `take_impacts`.
+    #[test]
+    fn tick_collects_and_drains_explosion_impact() {
+        use crate::impact::ImpactKind;
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let shooter = world.spawn(());
+        let _target = world.spawn((
+            Transform::from_translation(Vec3::new(5.0, 0.0, 40.0)),
+            Health::new(100.0),
+        ));
+        let mut stats = WeaponStats::rocket_launcher();
+        stats.homing.as_mut().unwrap().lock_on_time = 0.05;
+        stats.homing.as_mut().unwrap().detonation_distance = 3.0;
+        let mut w = RuntimeWeapon::new(shooter, stats);
+        w.aim_dir = Vec3::new(5.0, 0.0, 40.0).normalize();
+        w.trigger_down = true;
+        world.spawn((w,));
+
+        let phys = NoPhysics;
+        let mut sys = WeaponSystem::default();
+        let mut saw_explosion = false;
+        for _ in 0..600 {
+            sys.tick(&mut world, 1.0 / 60.0, &mut bus, Some(&phys));
+            let drained = sys.take_impacts();
+            // take_impacts drains: the buffer is empty right after.
+            assert!(sys.impacts().is_empty());
+            if drained.iter().any(|i| i.kind == ImpactKind::Explosion) {
+                saw_explosion = true;
+                break;
+            }
+        }
+        assert!(saw_explosion, "the missile detonation produced a drainable Explosion impact");
     }
 }

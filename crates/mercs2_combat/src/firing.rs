@@ -14,8 +14,9 @@ use hecs::{Entity, World};
 use mercs2_core::event::{Event, EventArg, EventBus};
 use mercs2_core::PhysicsQuery;
 
-use crate::components::{HomingState, RuntimeProjectile, RuntimeWeapon};
+use crate::components::{Health, HomingState, RuntimeProjectile, RuntimeWeapon};
 use crate::events::WEAPON_EVENT;
+use crate::impact::Impact;
 use crate::stats::FireType;
 
 /// Maximum hitscan range (m). `// CONFIRM-LIVE:` the exe derives this from the weapon/projectile range
@@ -36,11 +37,27 @@ struct SpawnProjectile(RuntimeProjectile);
 /// missile spawn is [`crate::homing::launch_missile`]).
 ///
 /// Emits `WeaponEvent` per shot. Returns the number of shots fired this tick (for tests/telemetry).
+/// Legacy entry point that **discards** the impact FX channel; call [`weapon_firing_system_impacts`]
+/// to capture it.
 pub fn weapon_firing_system(
     world: &mut World,
     dt: f32,
     bus: &mut EventBus,
     physics: Option<&dyn PhysicsQuery>,
+) -> u32 {
+    let mut sink = Vec::new();
+    weapon_firing_system_impacts(world, dt, bus, physics, &mut sink)
+}
+
+/// As [`weapon_firing_system`], but appends a bullet/blood [`Impact`] for each resolved **hitscan**
+/// strike (world surface or body) to `impacts`. Projectile and homing shots resolve their impacts in
+/// their own flight systems, so nothing is emitted here for them.
+pub fn weapon_firing_system_impacts(
+    world: &mut World,
+    dt: f32,
+    bus: &mut EventBus,
+    physics: Option<&dyn PhysicsQuery>,
+    impacts: &mut Vec<Impact>,
 ) -> u32 {
     let mut spawns: Vec<SpawnProjectile> = Vec::new();
     let mut hitscans: Vec<(Entity, Vec3, Vec3, f32, crate::damage::DamageKey)> = Vec::new();
@@ -142,6 +159,10 @@ pub fn weapon_firing_system(
                 if let Some(victim) = hit.entity {
                     crate::damage::apply_hit(world, bus, victim, Some(owner), damage, key);
                 }
+                // Impact FX at the strike point: blood on a character (Health-bearing), a bullet hole
+                // on world geometry / non-character bodies. Emitted for world hits too (entity == None).
+                let is_character = hit.entity.map(|v| world.get::<&Health>(v).is_ok()).unwrap_or(false);
+                impacts.push(Impact::from_hit(hit.point, hit.normal, dir, is_character));
             }
         }
     }
@@ -313,5 +334,60 @@ mod tests {
         let phys = HitStub { victim, dist: 10.0 };
         weapon_firing_system(&mut world, 1.0 / 60.0, &mut bus, Some(&phys));
         assert_eq!(world.get::<&Health>(victim).unwrap().cur, 75.0);
+    }
+
+    #[test]
+    fn hitscan_emits_blood_impact_on_character() {
+        use crate::impact::ImpactKind;
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let victim = world.spawn((Health::new(100.0),)); // Health-bearing ⇒ character ⇒ blood
+        let shooter = world.spawn(());
+        let mut w = RuntimeWeapon::new(shooter, WeaponStats::default());
+        w.trigger_down = true;
+        w.muzzle = Vec3::ZERO;
+        w.aim_dir = Vec3::Z;
+        world.spawn((w,));
+
+        let phys = HitStub { victim, dist: 10.0 };
+        let mut impacts = Vec::new();
+        weapon_firing_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&phys), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Blood);
+        // HitStub reports the strike at origin + dir*dist along +Z.
+        assert!((impacts[0].position - Vec3::new(0.0, 0.0, 10.0)).length() < 1e-4);
+        // Its normal is -dir (facing back at the shooter).
+        assert!((impacts[0].normal - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-4);
+    }
+
+    #[test]
+    fn hitscan_emits_bullet_impact_on_world() {
+        use crate::impact::ImpactKind;
+        use mercs2_core::physics_query::ClosestPoint;
+        // A physics stub that reports a world hit (entity == None).
+        struct WorldWall;
+        impl PhysicsQuery for WorldWall {
+            fn raycast(&self, origin: Vec3, dir: Vec3, _max: f32) -> Option<RayHit> {
+                Some(RayHit { point: origin + dir * 5.0, normal: -dir, distance: 5.0, entity: None })
+            }
+            fn closest_point(&self, _p: Vec3, _m: f32) -> Option<ClosestPoint> {
+                None
+            }
+            fn move_character(&self, pos: Vec3, delta: Vec3, _r: f32, _h: f32, _s: f32) -> Vec3 {
+                pos + delta
+            }
+        }
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let shooter = world.spawn(());
+        let mut w = RuntimeWeapon::new(shooter, WeaponStats::default());
+        w.trigger_down = true;
+        w.aim_dir = Vec3::Z;
+        world.spawn((w,));
+
+        let mut impacts = Vec::new();
+        weapon_firing_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&WorldWall), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Bullet);
     }
 }
