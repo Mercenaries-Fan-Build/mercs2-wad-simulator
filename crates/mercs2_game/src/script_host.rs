@@ -92,6 +92,46 @@ pub struct GameScriptHost {
     hijacks: HashMap<u64, mercs2_vehicle::HijackFsm>,
     /// Per-vehicle turret/rotor aim (`Vehicle.SetTurretPitch/Yaw`, `Vehicle.SpinHeli`).
     turrets: HashMap<u64, mercs2_vehicle::TurretAim>,
+    /// Engine settings the `Sys.Set*` config surface writes and the matching `Sys.*` getters read
+    /// (the game holds these; the rest of the engine reads them). `Set*`→`Get*` are real roundtrips.
+    settings: SysSettings,
+}
+
+/// The `Sys.*` engine-config the script host owns (`Sys.SetTimeScale`/`SetTutorialsEnabled`/… write it;
+/// `Sys.TutorialsEnabled`/`GetMasterScriptName`/… read it). Retail-PC defaults.
+#[derive(Clone, Debug)]
+pub struct SysSettings {
+    /// `Sys.SetTimeScale` — global sim time multiplier (1.0 = real time). The fixed-tick reads this.
+    pub time_scale: f32,
+    /// `Sys.SetMasterScriptName` — the master boot script (`GetMasterScriptName`).
+    pub master_script: String,
+    /// `Sys.SetTutorialsEnabled` ↔ `Sys.TutorialsEnabled`.
+    pub tutorials_enabled: bool,
+    /// `Sys.SetAutosaveEnabled` — gates `Sys.RequestAutosave`.
+    pub autosave_enabled: bool,
+    /// `Sys.SetLuaSaveVersion` — the save-format version the Lua stamps into profiles.
+    pub lua_save_version: i64,
+    /// `Sys.SetNumberOfViewports` — split-screen viewport count (1 on PC single-player).
+    pub viewports: i64,
+    /// `Sys.SetAssetRequestMax` — the streaming asset-request budget.
+    pub asset_request_max: i64,
+    /// `Sys.StartSingleplayer` — a single-player session has been started.
+    pub singleplayer: bool,
+}
+
+impl Default for SysSettings {
+    fn default() -> Self {
+        SysSettings {
+            time_scale: 1.0,
+            master_script: String::new(),
+            tutorials_enabled: true,
+            autosave_enabled: true,
+            lua_save_version: 0,
+            viewports: 1,
+            asset_request_max: 0,
+            singleplayer: false,
+        }
+    }
 }
 
 /// The GUID the local player object is registered under (distinct from [`HERO_GUID`], the character it
@@ -125,6 +165,7 @@ impl GameScriptHost {
             human_states: HashMap::new(),
             hijacks: HashMap::new(),
             turrets: HashMap::new(),
+            settings: SysSettings::default(),
         }
     }
 
@@ -407,6 +448,48 @@ impl EngineHost for GameScriptHost {
         if let Some(s) = spin {
             aim.rotor_spinning = s;
         }
+    }
+
+    // ===== Sys engine-config store (Set* ↔ Get* real roundtrips). =====
+    fn sys_set_time_scale(&mut self, scale: f32) {
+        self.settings.time_scale = scale.max(0.0);
+    }
+    fn sys_time_scale(&self) -> f32 {
+        self.settings.time_scale
+    }
+    fn sys_set_level_name(&mut self, name: &str) {
+        self.level = name.to_string();
+    }
+    fn sys_set_master_script_name(&mut self, name: &str) {
+        self.settings.master_script = name.to_string();
+    }
+    fn sys_master_script_name(&self) -> String {
+        if self.settings.master_script.is_empty() {
+            self.level.clone()
+        } else {
+            self.settings.master_script.clone()
+        }
+    }
+    fn sys_set_tutorials_enabled(&mut self, on: bool) {
+        self.settings.tutorials_enabled = on;
+    }
+    fn sys_tutorials_enabled(&self) -> bool {
+        self.settings.tutorials_enabled
+    }
+    fn sys_set_autosave_enabled(&mut self, on: bool) {
+        self.settings.autosave_enabled = on;
+    }
+    fn sys_set_lua_save_version(&mut self, version: i64) {
+        self.settings.lua_save_version = version;
+    }
+    fn sys_set_viewports(&mut self, n: i64) {
+        self.settings.viewports = n.max(1);
+    }
+    fn sys_set_asset_request_max(&mut self, n: i64) {
+        self.settings.asset_request_max = n.max(0);
+    }
+    fn sys_start_singleplayer(&mut self) {
+        self.settings.singleplayer = true;
     }
 
     // ===== Player identity / session / binding (single local player controlling the hero). =====
@@ -765,6 +848,32 @@ mod tests {
             .eval("Vehicle.HijackStart(0x3000); return Vehicle.CancelHijack(0x3000)")
             .unwrap();
         assert_eq!(cancelled, "idle");
+    }
+
+    /// The `Sys.Set*` config surface is WIRED to a real settings store: `Set*` ↔ `Get*` roundtrip
+    /// through the host (not no-ops that drop the write).
+    #[test]
+    fn game_lua_sys_settings_roundtrip() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Tutorials toggle roundtrips through Set→Get.
+        let before: bool = sh.eval("return Sys.TutorialsEnabled()").unwrap();
+        assert!(before, "default tutorials enabled");
+        let after: bool = sh.eval("Sys.SetTutorialsEnabled(false); return Sys.TutorialsEnabled()").unwrap();
+        assert!(!after, "SetTutorialsEnabled persisted");
+
+        // Master-script name roundtrips (was aliased to level name; now a real settable field).
+        let master: String = sh
+            .eval(r#"Sys.SetMasterScriptName("mrxbootstrap"); return Sys.GetMasterScriptName()"#)
+            .unwrap();
+        assert_eq!(master, "mrxbootstrap");
+
+        // Time scale + viewports land on the store.
+        sh.exec("Sys.SetTimeScale(0.5); Sys.SetNumberOfViewports(2)", "@s").unwrap();
+        assert_eq!(host.borrow().sys_time_scale(), 0.5);
+        assert_eq!(host.borrow().settings.viewports, 2);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

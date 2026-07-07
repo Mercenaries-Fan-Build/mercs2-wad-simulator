@@ -102,7 +102,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real(
         "GetMasterScriptName",
-        lua.create_function(move |_, ()| Ok(h.borrow().get_level_name()))?,
+        lua.create_function(move |_, ()| Ok(h.borrow().sys_master_script_name()))?,
     )?;
     let h = host.clone();
     b.real(
@@ -196,7 +196,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // (No host method for these yet; each returns the value the retail PC build reports.)
     b.real("SubtitlesEnabled", lua.create_function(|_, ()| Ok(true))?)?;
     b.real("RumbleEnabled", lua.create_function(|_, ()| Ok(true))?)?;
-    b.real("TutorialsEnabled", lua.create_function(|_, ()| Ok(true))?)?;
+    let h = host.clone();
+    b.real("TutorialsEnabled", lua.create_function(move |_, ()| Ok(h.borrow().sys_tutorials_enabled()))?)?;
     b.real("YAxisInverted", lua.create_function(|_, ()| Ok(false))?)?;
     b.real("IsDemoMode", lua.create_function(|_, ()| Ok(false))?)?;
     b.real("NoHud", lua.create_function(|_, ()| Ok(false))?)?;
@@ -224,12 +225,36 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("ToStringL", lua.create_function(|_, _: MultiValue| Ok(String::new()))?)?;
 
     // --- Setters / actions / dev sinks the retail engine consumes but the game does not read back. ---
+    // --- Config setters → the host settings store (Set* ↔ Get* real roundtrips). ---
+    let h = host.clone();
+    b.real("WriteToConsole", lua.create_function(move |_, msg: String| {
+        h.borrow_mut().sys_write_to_console(&msg);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("SetTimeScale", lua.create_function(move |_, s: f32| { h.borrow_mut().sys_set_time_scale(s); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetLevelName", lua.create_function(move |_, n: String| { h.borrow_mut().sys_set_level_name(&n); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetMasterScriptName", lua.create_function(move |_, n: String| { h.borrow_mut().sys_set_master_script_name(&n); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetTutorialsEnabled", lua.create_function(move |_, on: bool| { h.borrow_mut().sys_set_tutorials_enabled(on); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetAutosaveEnabled", lua.create_function(move |_, on: bool| { h.borrow_mut().sys_set_autosave_enabled(on); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetLuaSaveVersion", lua.create_function(move |_, v: i64| { h.borrow_mut().sys_set_lua_save_version(v); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetNumberOfViewports", lua.create_function(move |_, n: i64| { h.borrow_mut().sys_set_viewports(n); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetAssetRequestMax", lua.create_function(move |_, n: i64| { h.borrow_mut().sys_set_asset_request_max(n); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("StartSingleplayer", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().sys_start_singleplayer(); Ok(()) })?)?;
+
+    // --- UNBACKED residue (burn-down): asset-preload/streaming controls + string-DB + intro movies +
+    // mission-skip need the asset/streaming + localization subsystems. Honest no-ops. ---
     for name in [
-        "WriteToConsole", "SetNumberOfViewports", "SetTimeScale", "SetLevelName", "SetMasterScriptName",
-        "RequiredAsset", "SetAssetRequestMax", "Callback", "SetSkipMission", "SetINIBriefing",
-        "DisableAssetPreload", "FlushAssets", "PlayIntroMovies", "SetTutorialsEnabled",
-        "SetLuaSaveVersion", "AddStringDb", "ClearStringDb", "StartSingleplayer", "SetAutosaveEnabled",
-        "ForceNextAutosave",
+        "RequiredAsset", "Callback", "SetSkipMission", "SetINIBriefing", "DisableAssetPreload",
+        "FlushAssets", "PlayIntroMovies", "AddStringDb", "ClearStringDb", "ForceNextAutosave",
     ] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     }

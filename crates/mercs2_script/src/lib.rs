@@ -207,6 +207,56 @@ pub trait EngineHost {
     fn sys_guid_to_string(&self, guid: u64) -> String {
         format!("{guid:#x}")
     }
+    /// `Sys.WriteToConsole(msg)` — write a line to the engine console (routed to the log sink).
+    fn sys_write_to_console(&mut self, msg: &str) {
+        self.log("console", msg);
+    }
+    /// `Sys.SetTimeScale(scale)` ↔ the global sim time multiplier the fixed-tick reads.
+    fn sys_set_time_scale(&mut self, scale: f32) {
+        let _ = scale;
+    }
+    /// The current global sim time scale (`1.0` = real time).
+    fn sys_time_scale(&self) -> f32 {
+        1.0
+    }
+    /// `Sys.SetLevelName(name)` — set the active level (`GetLevelName` reads it back).
+    fn sys_set_level_name(&mut self, name: &str) {
+        let _ = name;
+    }
+    /// `Sys.SetMasterScriptName(name)` ↔ `Sys.GetMasterScriptName`.
+    fn sys_set_master_script_name(&mut self, name: &str) {
+        let _ = name;
+    }
+    /// `Sys.GetMasterScriptName` — the master boot script name (falls back to the level name if unset).
+    fn sys_master_script_name(&self) -> String {
+        self.get_level_name()
+    }
+    /// `Sys.SetTutorialsEnabled(on)` ↔ `Sys.TutorialsEnabled`.
+    fn sys_set_tutorials_enabled(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// `Sys.TutorialsEnabled` — whether in-game tutorials are enabled (default true).
+    fn sys_tutorials_enabled(&self) -> bool {
+        true
+    }
+    /// `Sys.SetAutosaveEnabled(on)` — gates `Sys.RequestAutosave`.
+    fn sys_set_autosave_enabled(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// `Sys.SetLuaSaveVersion(v)` — the save-format version the Lua stamps into profiles.
+    fn sys_set_lua_save_version(&mut self, version: i64) {
+        let _ = version;
+    }
+    /// `Sys.SetNumberOfViewports(n)` — split-screen viewport count.
+    fn sys_set_viewports(&mut self, n: i64) {
+        let _ = n;
+    }
+    /// `Sys.SetAssetRequestMax(n)` — the streaming asset-request budget.
+    fn sys_set_asset_request_max(&mut self, n: i64) {
+        let _ = n;
+    }
+    /// `Sys.StartSingleplayer` — mark a single-player session started.
+    fn sys_start_singleplayer(&mut self) {}
 
     // ===== Vehicle (the real host forwards to `mercs2_vehicle`; the harness backs it with seat state). =====
     /// `Vehicle.GetDriver` (0 = empty seat → nil).
@@ -1131,9 +1181,10 @@ mod tests {
         // De-stub work moves a name real←stub. Session start: real 86 / stub 9. Ai vertical wired its
         // order ring + faction mood + spawner tweaks (real +31); Vehicle vertical wired the hijack FSM
         // + turret aim + RestoreHealth (real +13); Sound vertical wired category pitch + the bank
-        // load/unload/ambience residency family (real +12).
-        const EXPECTED_REAL: usize = 449;
-        const EXPECTED_STUB: usize = 637;
+        // load/unload/ambience residency family (real +12); Sys vertical wired the engine-config store
+        // (time scale / level+master-script / tutorials / autosave / save-version / viewports; real +10).
+        const EXPECTED_REAL: usize = 459;
+        const EXPECTED_STUB: usize = 627;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1159,7 +1210,7 @@ mod tests {
         // Spot-check the boot-slice namespaces route correctly.
         let by = |name: &str| cov.iter().find(|c| c.namespace == name).unwrap();
         assert_eq!(by("Debug").real_count(), 1);
-        assert_eq!(by("Sys").real_count(), 44);
+        assert_eq!(by("Sys").real_count(), 54);
         assert_eq!(by("Pg").real_count(), 40);
         assert_eq!(by("Object").real_count(), 62);
         assert_eq!(by("Object").stub_count(), 25);
