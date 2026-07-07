@@ -31,10 +31,17 @@ pub use registry::{ComponentDescriptor, ComponentRegistry};
 pub mod event;
 pub use event::{Event, EventArg, EventBus, EventError, SubId};
 
+/// Keystone C — the master frame spine (see `frame.rs`): the 5-layer application-layer stack the
+/// engine's master tick (`FUN_004c14f0 → FUN_004c15e0`) climbs 0→4 each frame, plus the recovered
+/// RunFrame stage order. Pairs with [`Time`] below (the decoupled fixed-sim accumulator).
+pub mod frame;
+pub use frame::{LayerStack, LayerTransition, LAYER_COUNT, LAYER_GAME};
+
 /// Fixed-timestep simulation clock. Real frame deltas are accumulated and drained in `fixed_dt`
 /// chunks so the sim advances deterministically regardless of render framerate — the way the
-/// original engine ticks its update. `dt` equals `fixed_dt` during a step; `elapsed`/`tick` count
-/// simulated time and steps.
+/// original engine ticks its update (**decoupled fixed-sim + variable-render**, RunFrame stages 3–4,
+/// `docs/reverse_engineer/scheduler_tick_code_map.md` §6). `dt` equals `fixed_dt` during a step;
+/// `elapsed`/`tick` count simulated time and steps.
 #[derive(Clone, Copy, Debug)]
 pub struct Time {
     pub fixed_dt: f32,
@@ -43,6 +50,10 @@ pub struct Time {
     pub tick: u64,
     /// Cap on fixed steps run per frame, to avoid a spiral-of-death after a long stall.
     pub max_steps: u32,
+    /// Sim time scale applied to each real frame delta before it is accumulated — the engine's
+    /// `dt * timescale` (`FUN_004c14f0`, `_DAT_0198dc48 += dt*timescale`). `1.0` = real time; `<1.0`
+    /// slow-motion, `0.0` a hard pause. Render stays variable-rate regardless.
+    pub timescale: f32,
     accumulator: f32,
 }
 
@@ -56,8 +67,49 @@ impl Time {
             elapsed: 0.0,
             tick: 0,
             max_steps: 8,
+            timescale: 1.0,
             accumulator: 0.0,
         }
+    }
+
+    /// Fold a real (variable) frame delta into the fixed-sim accumulator, scaled by [`timescale`]
+    /// (the engine's `dt * timescale`). Call once per rendered frame before draining steps.
+    ///
+    /// [`timescale`]: Time::timescale
+    pub fn begin_frame(&mut self, real_dt: f32) {
+        self.accumulator += real_dt.max(0.0) * self.timescale;
+    }
+
+    /// Consume one fixed step if the accumulator holds one and the per-frame budget isn't spent.
+    /// Advances `tick`/`elapsed` and sets `dt = fixed_dt`. `steps_done` = steps already taken this
+    /// frame (for the `max_steps` clamp). Private — callers use [`advance_frame`](Time::advance_frame)
+    /// or [`Schedule::run_fixed`].
+    fn try_step(&mut self, steps_done: u32) -> bool {
+        if self.accumulator >= self.fixed_dt && steps_done < self.max_steps {
+            self.accumulator -= self.fixed_dt;
+            self.dt = self.fixed_dt;
+            self.tick += 1;
+            self.elapsed += self.fixed_dt;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Fold in a real frame delta and return how many fixed sim steps to run this frame, draining the
+    /// accumulator (clamped to `max_steps`; the backlog is dropped on clamp to avoid a spiral of
+    /// death). Use when the **host** runs its own fixed-step body (streaming/animation) instead of a
+    /// [`Schedule`] — the loop calls `advance_frame` once, then runs its systems `n` times.
+    pub fn advance_frame(&mut self, real_dt: f32) -> u32 {
+        self.begin_frame(real_dt);
+        let mut steps = 0;
+        while self.try_step(steps) {
+            steps += 1;
+        }
+        if steps == self.max_steps {
+            self.accumulator = 0.0;
+        }
+        steps
     }
 }
 
@@ -99,13 +151,9 @@ impl Schedule {
     /// leftover time across frames. Returns the number of fixed steps executed. Clamps to
     /// `time.max_steps` and drops the backlog if the clamp is hit.
     pub fn run_fixed(&mut self, world: &mut World, time: &mut Time, frame_dt: f32) -> u32 {
-        time.accumulator += frame_dt.max(0.0);
+        time.begin_frame(frame_dt);
         let mut steps = 0;
-        while time.accumulator >= time.fixed_dt && steps < time.max_steps {
-            time.accumulator -= time.fixed_dt;
-            time.dt = time.fixed_dt;
-            time.tick += 1;
-            time.elapsed += time.fixed_dt;
+        while time.try_step(steps) {
             self.run_once(world, time);
             steps += 1;
         }

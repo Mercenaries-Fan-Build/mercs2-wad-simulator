@@ -1,0 +1,15 @@
+[package]
+name = "mercs2_reassemble"
+version = "0.1.0"
+edition = "2021"
+description = "Reassemble the decompiled Mercs2 engine from the 27k-function Ghidra corpus by joining every attribution source (code maps, annotations, memory) onto the master function list, and flag the unmapped residue for manual review."
+
+[[bin]]
+name = "mercs2_reassemble"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"

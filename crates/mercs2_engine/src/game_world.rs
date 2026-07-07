@@ -849,8 +849,10 @@ pub async fn run_game_world(
         + 'static,
 ) {
     use crate::scene::Scene;
+    use mercs2_core::frame::{LayerStack, LayerTransition, LAYER_GAME};
     use mercs2_core::glam::{Mat4, Quat, Vec3};
     use mercs2_core::streaming::StreamingConfig;
+    use mercs2_core::Time;
     use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
     use std::collections::{HashMap, HashSet};
     use std::f32::consts::PI;
@@ -950,7 +952,6 @@ pub async fn run_game_world(
     // its clip into the entity `SkinPalette`, exactly as the player avatar is driven in mercs2_game.
     // Empty for every clip-less retail prop, so existing static behaviour is byte-for-byte unchanged.
     let mut anim_store: HashMap<u32, crate::scene::ModelAnim> = HashMap::new();
-    let anim_dt = 1.0f32 / 60.0; // fixed animation step (matches the game's Time(60))
 
     // Free-fly camera. Start over the PMC exterior spawn at a moderate height so nearby cells +
     // props stream in immediately; WASDQE + mouse-look fly around.
@@ -978,7 +979,15 @@ pub async fn run_game_world(
         None => (PI, -0.35),
     };
     let mut held: HashSet<KeyCode> = HashSet::new();
-    let mut loading = true;
+    // Keystone C — the master frame spine (docs/reverse_engineer/scheduler_tick_code_map.md). The
+    // shared fixed-sim `Time` clock drives the animation step (replacing the old private anim_dt); the
+    // application-layer stack replaces the `loading` bool — LAYER_LOADING renders the plate/spinner
+    // while the background loader runs, then loader-completion raises the target to LAYER_GAME and the
+    // one Ascending(GAME) transition realizes the world (the recovered 0→4 climb, `FUN_004c15e0`).
+    const LAYER_LOADING: usize = LAYER_GAME - 1;
+    let mut time = Time::new(60.0);
+    let mut layers = LayerStack::at(LAYER_LOADING);
+    let mut pending: Option<StreamingWorldData> = None;
     let load_start = std::time::Instant::now();
     let mut bar_shown = 0.0f32;
     let mut bar_last_t = 0.0f32;
@@ -1009,57 +1018,81 @@ pub async fn run_game_world(
                     let _ = scene.window.set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
                 }
                 WindowEvent::RedrawRequested => {
-                    if loading {
+                    // ===== RunFrame (FUN_00630ef0) — faithful 9-stage per-frame order =====
+                    // (docs/reverse_engineer/scheduler_tick_code_map.md §2). Stages that are pure
+                    // platform glue on our side fold into wgpu/winit: (2) device re-init = the
+                    // surface-lost/outdated recovery in render()'s Err arm; (8) vsync/cap + (9) present
+                    // = wgpu's present mode + winit's AboutToWait redraw request.
+
+                    // (1) frame-start timestamp — QPC on the exe; std Instant is our QPC source.
+                    let now = std::time::Instant::now();
+                    let real_dt = (now - last).as_secs_f32().min(0.1);
+                    last = now;
+
+                    // (5a) MASTER UPDATE — mode logic for the active application layer. While loading,
+                    //      poll the background loader; on completion raise the target to the GAME layer.
+                    if layers.active() == LAYER_LOADING {
                         match rx.try_recv() {
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                let t = load_start.elapsed().as_secs_f32();
-                                let dt = (t - bar_last_t).max(0.0);
-                                bar_last_t = t;
-                                bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
-                                match scene.render_loading(t, bar_shown) {
-                                    Ok(()) => {}
-                                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                                    Err(e) => eprintln!("surface error: {e:?}"),
-                                }
-                                return;
-                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                                 eprintln!("[stream] loader thread died"); elwt.exit(); return;
                             }
                             Ok(Err(e)) => { eprintln!("[stream] load failed: {e}"); elwt.exit(); return; }
-                            Ok(Ok(mut data)) => {
-                                // Base terrain: one static entity at identity (verts already world-space).
-                                let terrain = data.terrain;
-                                terrain_hash = terrain.hash;
-                                scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
-                                world.spawn((
-                                    Transform::IDENTITY,
-                                    ModelRef { model: terrain.hash },
-                                    AnimState::default(),
-                                    SkinPalette { mats: vec![IDENTITY] },
-                                ));
-                                // GAME world population: hand the game the live World/Scene/Wad so it
-                                // can spawn its own entities (player, PMC interior, …). The engine does
-                                // not know what a "PMC interior" is — that lives in `mercs2_game`.
-                                populate(&mut world, &mut scene, &mut data.wad);
-                                // Hand the harvested world lights to the scene (static placements;
-                                // the scene uploads the nearest set to the camera each frame).
-                                scene.set_lights(std::mem::take(&mut data.lights));
-                                wad_opt = Some(data.wad);
-                                manager = Some(data.manager);
-                                props = data.props;
-                                terrain_tiles = data.terrain_tiles;
-                                lowres_draw_by_cell = data.lowres_draw_by_cell;
-                                loading = false;
-                            }
+                            Ok(Ok(data)) => { pending = Some(data); layers.set_target(LAYER_GAME); }
+                        }
+                    }
+                    // (5b) climb the layer stack toward its target; realize the world exactly once on
+                    //      entering the GAME layer (the former loader-complete branch).
+                    while !layers.settled() {
+                        if let Some(LayerTransition::Ascending(LAYER_GAME)) = layers.advance() {
+                            let Some(mut data) = pending.take() else { continue };
+                            // Base terrain: one static entity at identity (verts already world-space).
+                            let terrain = data.terrain;
+                            terrain_hash = terrain.hash;
+                            scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
+                            world.spawn((
+                                Transform::IDENTITY,
+                                ModelRef { model: terrain.hash },
+                                AnimState::default(),
+                                SkinPalette { mats: vec![IDENTITY] },
+                            ));
+                            // GAME world population: hand the game the live World/Scene/Wad so it can
+                            // spawn its own entities (player, PMC interior, …). The engine does not know
+                            // what a "PMC interior" is — that lives in `mercs2_game`.
+                            populate(&mut world, &mut scene, &mut data.wad);
+                            // Hand the harvested world lights to the scene (static placements; the scene
+                            // uploads the nearest set to the camera each frame).
+                            scene.set_lights(std::mem::take(&mut data.lights));
+                            wad_opt = Some(data.wad);
+                            manager = Some(data.manager);
+                            props = data.props;
+                            terrain_tiles = data.terrain_tiles;
+                            lowres_draw_by_cell = data.lowres_draw_by_cell;
                         }
                     }
 
-                    let now = std::time::Instant::now();
-                    let dt = (now - last).as_secs_f32().min(0.1);
-                    last = now;
-                    let look = 1.6 * dt;
+                    // (6-loading) While still on the loading layer, render the plate/spinner and stop
+                    //      here — the GAME-layer master update + render below only run once realized.
+                    if layers.active() != LAYER_GAME {
+                        let t = load_start.elapsed().as_secs_f32();
+                        let dt = (t - bar_last_t).max(0.0);
+                        bar_last_t = t;
+                        bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
+                        match scene.render_loading(t, bar_shown) {
+                            Ok(()) => {}
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
+                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(e) => eprintln!("surface error: {e:?}"),
+                        }
+                        return;
+                    }
+
+                    // (5c) GAME-layer Update (layer 4). The camera is the free-fly DEBUG cam and stays
+                    //      variable-rate (the real PgSysCamera is a fixed-sim layer-4 system); the sim
+                    //      work (streaming decision + animation) drains the decoupled fixed-sim clock.
+                    // (3+4) timestep compute + fixed-sim accumulator drain.
+                    let steps = time.advance_frame(real_dt);
+                    let look = 1.6 * real_dt;
 
                     // --- mouse-look (dual-source; see run_scene_world_loading) ---
                     const MOUSE_SENS: f32 = 0.0008;
@@ -1087,7 +1120,7 @@ pub async fn run_game_world(
                     if held.contains(&KeyCode::KeyE) { mv += Vec3::Y; }
                     if held.contains(&KeyCode::KeyQ) { mv -= Vec3::Y; }
                     let sp = if held.contains(&KeyCode::ShiftLeft) { 900.0 } else { 260.0 };
-                    if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * dt; }
+                    if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * real_dt; }
                     let view = Mat4::look_to_lh(free_pos, fwd, Vec3::Y);
 
                     // --- streaming tick: decide, then execute the diff on the GPU/ECS ---
@@ -1220,10 +1253,14 @@ pub async fn run_game_world(
                         }
                     }
 
-                    // --- animation pass: sample each playing entity's clip into its SkinPalette ---
-                    // Same drive as the mercs2_game player system (pose::havok_palette_in_place); scoped
-                    // to entities whose model registered clips, so clip-less static content is untouched.
-                    if !anim_store.is_empty() {
+                    // --- animation pass (fixed-timestep): advance each playing clip on the shared
+                    //     mercs2_core `Time` clock, by the fixed steps drained this frame (§5c). Drives
+                    //     the pose via pose::havok_palette_in_place — same math as the mercs2_game
+                    //     player system — scoped to models that registered clips, so clip-less static
+                    //     content is untouched. `steps == 0` (render faster than the sim tick) simply
+                    //     holds the previous pose that frame — the decoupled fixed-sim/variable-render.
+                    if steps > 0 && !anim_store.is_empty() {
+                        let sim_dt = steps as f32 * time.fixed_dt;
                         for (_e, (state, palette, mref)) in world
                             .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
                             .iter()
@@ -1237,7 +1274,7 @@ pub async fn run_game_world(
                                 continue;
                             };
                             let clip_dur = ca.clip.duration.max(1e-3);
-                            state.time = (state.time + anim_dt * state.speed) % clip_dur;
+                            state.time = (state.time + sim_dt * state.speed) % clip_dur;
                             let sample = ca.clip.sample_local(state.time);
                             palette.mats = crate::pose::havok_palette_in_place(
                                 &ma.rig,

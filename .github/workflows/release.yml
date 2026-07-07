@@ -47,16 +47,14 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
+          # Binaries published on release: the modkit-consumed converters plus the
+          # mercs2_* engine/tooling entry points.
+          bins="wad_simulator ucfx_byteswap loadprobe dlc_port \
+                mercs2_game mercs2_probe mercs2_reassemble mercs2_workshop"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp wad_simulator.exe wad_simulator${{ matrix.suffix }}
-            cp ucfx_byteswap.exe ucfx_byteswap${{ matrix.suffix }}
-            cp loadprobe.exe loadprobe${{ matrix.suffix }}
-            cp dlc_port.exe dlc_port${{ matrix.suffix }}
+            for b in $bins; do cp "$b.exe" "$b${{ matrix.suffix }}"; done
           else
-            cp wad_simulator wad_simulator${{ matrix.suffix }}
-            cp ucfx_byteswap ucfx_byteswap${{ matrix.suffix }}
-            cp loadprobe loadprobe${{ matrix.suffix }}
-            cp dlc_port dlc_port${{ matrix.suffix }}
+            for b in $bins; do cp "$b" "$b${{ matrix.suffix }}"; done
           fi
 
       - name: Upload to release
