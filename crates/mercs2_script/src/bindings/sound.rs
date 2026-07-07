@@ -190,69 +190,53 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // stream file handle → nil (no async stream file opened).
     b.real("OpenStreamFile", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
 
-    // --- faithful no-op SETTERS / actions the retail audio driver consumes but we don't model yet ---
-    // (category pitch + listener + all faction/action/source dynamic-music tuning; bank load/unload;
-    //  reverb/low-pass DSP; misc mode toggles; stream close + user-music override; dev summon.)
+    // --- Category pitch → `AudioEngine::set_category_pitch`. ---
+    let h = host.clone();
+    b.real("SetCategoryPitch", lua.create_function(move |_, (cat, pitch, length): (String, f32, Option<f32>)| {
+        h.borrow_mut().sound_set_category_pitch(&cat, pitch, length.unwrap_or(0.0));
+        Ok(())
+    })?)?;
+
+    // --- Bank residency → the real `BankManager` (`AudioEngine::load_*/unload_bank`). Returns whether
+    // the request was accepted; the Lua completion callback is deferred (banks tick to complete). ---
+    for (verb, wave) in [
+        ("LoadBank", false), ("LoadSoundBank", false), ("LoadWaveBank", true),
+        ("LoadTempBank", false), ("LoadBankWithCallback", false),
+    ] {
+        let h = host.clone();
+        let is_wave = wave;
+        b.real(verb, lua.create_function(move |_, name: String| {
+            Ok(h.borrow_mut().sound_load_bank(&name, is_wave))
+        })?)?;
+    }
+    for verb in ["UnloadBank", "UnloadSoundBank", "UnloadWaveBank", "UnloadTempBank", "UnloadBankWithCallback"] {
+        let h = host.clone();
+        b.real(verb, lua.create_function(move |_, name: String| {
+            Ok(h.borrow_mut().sound_unload_bank(&name))
+        })?)?;
+    }
+    let h = host.clone();
+    b.real("RequestAmbienceBank", lua.create_function(move |_, name: String| {
+        Ok(h.borrow_mut().sound_request_ambience_bank(&name))
+    })?)?;
+
+    // --- UNBACKED residue (burn-down): the dynamic faction/action/source-music model, EAX reverb +
+    // low-pass DSP (no portable analog — backend.rs note), and misc mode toggles / stream close /
+    // user-music override. Honest no-ops until the music model + DSP land. ---
     for name in [
-        "SetCategoryPitch",
-        "LockListenerPosition",
-        "SetTimerUpdateMusic",
-        "AddFactionMusic",
-        "SetFactionMusic",
-        "LockFactionMusic",
-        "SetActionLevelsMusic",
-        "SetHostilityDecayRateMusic",
-        "SetSourceMusic",
-        "SetSourceEnterMusic",
-        "SetSourceExitMusic",
-        "SetSourceMusicTransition",
-        "ClearSourceMusicTransitions",
-        "AddSourceMusicEntryState",
-        "ClearSourceMusicEntryStates",
-        "SetActionThresholdsMusic",
-        "SetRootFactionRegionMusic",
-        "SetHijackMusic",
-        "ActivateFactionRegionMusic",
-        "AddMusicSourcePlaylist",
-        "ClearMusicSourcePlaylist",
-        "RemoveMusicSourcePlaylist",
-        "AddCueToMusicSourcePlaylist",
-        "LoadBank",
-        "UnloadBank",
-        "LoadSoundBank",
-        "LoadWaveBank",
-        "UnloadSoundBank",
-        "UnloadWaveBank",
-        "LoadTempBank",
-        "UnloadTempBank",
-        "LoadBankWithCallback",
-        "UnloadBankWithCallback",
-        "RequestAmbienceBank",
-        "SetStreamBlockDumping",
-        "SilenceAmbience",
-        "SetMessageFiltering",
-        "DefineReverbPreset",
-        "SetReverbPreset",
-        "SetReverb",
-        "SetLowPassFilterSettings",
-        "SetLowPassFilter",
-        "SetSurvivalMode",
-        "SetVehicleEngineBoost",
-        "SetCinematicMode",
-        "ForceActionTransition",
-        "ClearFadeCategories",
-        "AddFadeCategory",
-        "ClearPitchCategories",
-        "AddPitchCategory",
-        "PitchCategoryActivate",
-        "PitchCategoryDeactivate",
-        "SetSystemPause",
-        "SetPauseFilter",
-        "RegisterReadyCallback",
-        "CloseStreamFile",
-        "OverrideUserMusic",
-        "RestoreUserMusic",
-        "_SummonEd",
+        "LockListenerPosition", "SetTimerUpdateMusic", "AddFactionMusic", "SetFactionMusic",
+        "LockFactionMusic", "SetActionLevelsMusic", "SetHostilityDecayRateMusic", "SetSourceMusic",
+        "SetSourceEnterMusic", "SetSourceExitMusic", "SetSourceMusicTransition",
+        "ClearSourceMusicTransitions", "AddSourceMusicEntryState", "ClearSourceMusicEntryStates",
+        "SetActionThresholdsMusic", "SetRootFactionRegionMusic", "SetHijackMusic",
+        "ActivateFactionRegionMusic", "AddMusicSourcePlaylist", "ClearMusicSourcePlaylist",
+        "RemoveMusicSourcePlaylist", "AddCueToMusicSourcePlaylist", "SetStreamBlockDumping",
+        "SilenceAmbience", "SetMessageFiltering", "DefineReverbPreset", "SetReverbPreset", "SetReverb",
+        "SetLowPassFilterSettings", "SetLowPassFilter", "SetSurvivalMode", "SetVehicleEngineBoost",
+        "SetCinematicMode", "ForceActionTransition", "ClearFadeCategories", "AddFadeCategory",
+        "ClearPitchCategories", "AddPitchCategory", "PitchCategoryActivate", "PitchCategoryDeactivate",
+        "SetSystemPause", "SetPauseFilter", "RegisterReadyCallback", "CloseStreamFile",
+        "OverrideUserMusic", "RestoreUserMusic", "_SummonEd",
     ] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     }

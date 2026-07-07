@@ -288,6 +288,10 @@ impl AudioEngine {
     pub fn unload_bank(&mut self, name: &str, cb: Option<CallbackId>) -> bool {
         self.banks.unload(name, cb)
     }
+    /// Whether a bank is currently resident (`BankManager` slot).
+    pub fn bank_is_loaded(&self, name: &str) -> bool {
+        self.banks.is_loaded(name)
+    }
 
     // ---- Sound.* : stream files & misc -----------------------------------------------------------
 

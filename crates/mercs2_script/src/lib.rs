@@ -371,6 +371,31 @@ pub trait EngineHost {
     fn sound_lock_action_level_music(&mut self, level: i64) {
         let _ = level;
     }
+    /// `Sound.SetCategoryPitch(category, pitch [, length])` — set a mix category's pitch over `length`s.
+    fn sound_set_category_pitch(&mut self, category: &str, pitch: f32, length: f32) {
+        let _ = (category, pitch, length);
+    }
+    /// `Sound.LoadBank`/`LoadSoundBank`/`LoadWaveBank`/`LoadTempBank` — request a bank resident
+    /// (`wave=true` ⇒ wave bank). Returns whether the load was accepted.
+    fn sound_load_bank(&mut self, name: &str, wave: bool) -> bool {
+        let _ = (name, wave);
+        false
+    }
+    /// `Sound.UnloadBank`/`UnloadSoundBank`/`UnloadWaveBank`/`UnloadTempBank` — release a bank.
+    fn sound_unload_bank(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+    /// `Sound.RequestAmbienceBank(name)` — load a bank as an ambience bank.
+    fn sound_request_ambience_bank(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+    /// Whether a bank is currently resident (test/introspection seam).
+    fn sound_bank_loaded(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
     /// `VO.Cue` → voice id.
     fn vo_cue(&mut self, cue: &str) -> u64 {
         let _ = cue;
@@ -1105,9 +1130,10 @@ mod tests {
         //           system it needs. `stub` is NOT "done" — it's "not built yet".
         // De-stub work moves a name real←stub. Session start: real 86 / stub 9. Ai vertical wired its
         // order ring + faction mood + spawner tweaks (real +31); Vehicle vertical wired the hijack FSM
-        // + turret aim + RestoreHealth (real +13).
-        const EXPECTED_REAL: usize = 437;
-        const EXPECTED_STUB: usize = 649;
+        // + turret aim + RestoreHealth (real +13); Sound vertical wired category pitch + the bank
+        // load/unload/ambience residency family (real +12).
+        const EXPECTED_REAL: usize = 449;
+        const EXPECTED_STUB: usize = 637;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1140,7 +1166,7 @@ mod tests {
         assert_eq!(by("Player").real_count(), 65);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 37);
-        assert_eq!(by("Sound").real_count(), 29);
+        assert_eq!(by("Sound").real_count(), 41);
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);
 

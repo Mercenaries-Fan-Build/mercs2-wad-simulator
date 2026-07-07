@@ -311,6 +311,23 @@ impl EngineHost for GameScriptHost {
     fn sound_is_dynamic_music(&self) -> bool {
         self.audio.borrow().is_dynamic_music()
     }
+    fn sound_set_category_pitch(&mut self, category: &str, pitch: f32, length: f32) {
+        self.audio.borrow_mut().set_category_pitch(category, pitch, length);
+    }
+    fn sound_load_bank(&mut self, name: &str, wave: bool) -> bool {
+        // Residency tracking is real (BankManager slots); the wave/sound distinction picks the loader.
+        let mut a = self.audio.borrow_mut();
+        if wave { a.load_wave_bank(name, None) } else { a.load_sound_bank(name, None) }
+    }
+    fn sound_unload_bank(&mut self, name: &str) -> bool {
+        self.audio.borrow_mut().unload_bank(name, None)
+    }
+    fn sound_request_ambience_bank(&mut self, name: &str) -> bool {
+        self.audio.borrow_mut().request_ambience_bank(name)
+    }
+    fn sound_bank_loaded(&self, name: &str) -> bool {
+        self.audio.borrow().bank_is_loaded(name)
+    }
 
     // ===== AI order surface → the recovered mechanism (`mercs2_ai::AiWorld`). =====
     fn ai_goal(&mut self, guid: u64, goal: &str) -> bool {
@@ -673,6 +690,19 @@ mod tests {
         // CueSound with no bank loaded → nil (faithful); the forwarding is exercised regardless.
         let cue_nil: bool = sh.eval(r#"return Sound.CueSound("ui_confirm") == nil"#).unwrap();
         assert!(cue_nil, "unknown cue with no sounddb loaded returns nil");
+
+        // Bank load/unload drives the REAL BankManager (slot table + 64-in-flight throttle): the request
+        // is accepted (a slot is taken). Residency completes across frames via the streaming callback
+        // (async, not driven here); the observable Lua contract is the accepted-bool.
+        let loaded: bool = sh.eval(r#"return Sound.LoadSoundBank("weapons")"#).unwrap();
+        assert!(loaded, "LoadSoundBank is accepted by the BankManager");
+        let unloaded: bool = sh.eval(r#"return Sound.UnloadBank("weapons")"#).unwrap();
+        assert!(unloaded, "UnloadBank releases the slot");
+        // Category pitch drives the real mixer: SetCategoryPitch queues a change the engine tick applies
+        // (length 0 ⇒ snaps in one tick).
+        sh.exec(r#"Sound.SetCategoryPitch("sfx", 1.5, 0.0)"#, "@p").unwrap();
+        host.borrow().audio.borrow_mut().tick(1.0 / 60.0);
+        assert_eq!(host.borrow().audio.borrow().get_category_pitch("sfx"), 1.5);
     }
 
     /// The `Ai.*` order/faction/spawner surface is WIRED to real mechanisms (not no-ops): game Lua
