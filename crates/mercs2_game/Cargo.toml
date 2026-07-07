@@ -17,6 +17,11 @@ mercs2_engine = { path = "../mercs2_engine" }
 mercs2_core = { path = "../mercs2_core" }
 # Lua script host — the game's PMC interior boot (script_host.rs) drives the engine via EngineHost.
 mercs2_script = { path = "../mercs2_script" }
+# Fleet gameplay/AV systems the game wires into the running engine (ticked each frame + via EngineHost).
+mercs2_audio = { path = "../mercs2_audio" }
+mercs2_physics = { path = "../mercs2_physics" }
+mercs2_vehicle = { path = "../mercs2_vehicle" }
+mercs2_combat = { path = "../mercs2_combat" }
 pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread
 # The game's own render/boot path (world.rs, the TPS world loop) owns its window + event loop.
 winit = "0.29"

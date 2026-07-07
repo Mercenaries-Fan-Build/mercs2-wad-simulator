@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use mercs2_formats::save;
 
 mod collision; // GAME collision: world triangle soup + camera-boom raycast + player capsule push-out
+mod gameplay; // GAME: fleet gameplay systems (physics/vehicle/combat/audio) ticked each fixed step
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)

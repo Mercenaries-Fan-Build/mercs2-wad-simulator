@@ -848,6 +848,11 @@ pub async fn run_scene_world_loading(
     }
     let mut world = World::new();
 
+    // Fleet gameplay systems (physics/vehicle/combat/audio), ticked each fixed step over `world`.
+    // Idle until entities carry their components; the audio engine mixes/advances from frame 1.
+    let audio = Rc::new(RefCell::new(mercs2_audio::AudioEngine::default()));
+    let mut gameplay = crate::gameplay::GameplaySystems::new(audio.clone());
+
     // Background loader: all WAD/terrain/player parsing happens off the render thread; the
     // result lands on this channel and is wired into the scene/world on arrival. With the shell
     // menu up, the spawn is DEFERRED until the player picks a save (the retail flow); direct
@@ -1354,6 +1359,9 @@ pub async fn run_scene_world_loading(
                                 }
                                 hmap = Some(data.hmap);
                                 println!("[world] collision: {} world-space triangles (buildings + interior shells)", collision_tris.len());
+                                // Hand the streamed collision soup to the fleet physics world so the
+                                // vehicle/weapon systems can raycast against it via PhysicsQuery.
+                                gameplay.set_collision(collision_tris.clone());
                                 // Feed the harvested dynamic point lights to the renderer (nearest set
                                 // uploaded per frame). Without this the villa/world has no local lighting.
                                 scene.set_lights(std::mem::take(&mut data.lights));
@@ -1611,7 +1619,12 @@ pub async fn run_scene_world_loading(
                         view = Mat4::look_at_lh(eye, ANCHOR, Vec3::Y);
                     }
 
-                    schedule.run_fixed(&mut world, &mut time, dt);
+                    let steps = schedule.run_fixed(&mut world, &mut time, dt);
+                    // Tick the fleet gameplay systems (vehicle/combat/physics/audio) at the SAME fixed
+                    // cadence the animation schedule just ran — the layer-4 gameplay tick, now driven.
+                    for _ in 0..steps {
+                        gameplay.tick(&mut world, time.fixed_dt);
+                    }
                     // Directional shadow key light, centred on the player. The travel direction is the
                     // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
                     // so the cast shadows line up with the sun shading. half_extent ~18 m covers the

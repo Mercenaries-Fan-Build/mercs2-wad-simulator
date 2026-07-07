@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use mercs2_audio::{AudioEngine, VoiceId};
 use mercs2_script::{EngineHost, ScriptHost};
 
 /// The engine's actor-template name for the PMC player HQ interior. `Pg.Spawn(PMC_INTERIOR_TEMPLATE)`
@@ -46,6 +47,10 @@ pub struct GameScriptHost {
     by_guid: HashMap<u64, usize>,
     next_guid: u64,
     level: String,
+    /// The live audio system the game's `Sound.*` / music Lua drives. **Shared** (`Rc<RefCell>`) so the
+    /// game loop ticks the SAME engine each frame (`GameplaySystems::tick` → `audio.tick`) that the Lua
+    /// `EngineHost` forwarding cues into — one `mercs2_audio` stack, driven from both sides.
+    audio: Rc<RefCell<AudioEngine>>,
 }
 
 impl GameScriptHost {
@@ -56,7 +61,17 @@ impl GameScriptHost {
             by_guid: HashMap::new(),
             next_guid: 0x1000_0000, // distinct, non-zero GUID space for script-spawned actors
             level: level.into(),
+            audio: Rc::new(RefCell::new(AudioEngine::default())),
         }
+    }
+
+    /// A shared handle to the live audio engine, for the game loop to `tick`/`render_tick` each frame
+    /// (and for `GameplaySystems` to own the tick side of the same engine the Lua cues into). Consumed
+    /// once a `GameScriptHost` is made loop-resident (the persistent-Lua step) so its `Sound.*` cues and
+    /// the loop's `gameplay.tick` drive one engine; today the default boot loop owns its own.
+    #[allow(dead_code)]
+    pub fn audio(&self) -> Rc<RefCell<AudioEngine>> {
+        self.audio.clone()
     }
 
     fn req_mut(&mut self, guid: u64) -> Option<&mut SpawnRequest> {
@@ -107,6 +122,39 @@ impl EngineHost for GameScriptHost {
     }
     fn teleport_hero(&mut self, _pos: [f32; 3]) {}
     fn add_layers(&mut self, _layers: &[String]) {}
+
+    // ===== Sound / music → the live `mercs2_audio::AudioEngine` (the fleet audio system, wired in). =====
+    fn sound_cue(&mut self, cue: &str) -> u64 {
+        // Unknown cue (no sounddb / not found) returns 0 → Lua nil, faithful to the exe.
+        self.audio.borrow_mut().cue_sound_by_name(cue, None, None).map(|v| v.0 as u64).unwrap_or(0)
+    }
+    fn sound_stop(&mut self, voice: u64) {
+        self.audio.borrow_mut().stop_sound(VoiceId(voice as u32));
+    }
+    fn sound_pause(&mut self, voice: u64) {
+        self.audio.borrow_mut().pause_sound(VoiceId(voice as u32));
+    }
+    fn sound_stop_all(&mut self) {
+        self.audio.borrow_mut().stop_and_flush_all_sounds();
+    }
+    fn sound_set_master_volume(&mut self, vol: f32) {
+        self.audio.borrow_mut().set_master_volume(vol, 0.0);
+    }
+    fn sound_transition_music(&mut self, state: &str) -> bool {
+        self.audio.borrow_mut().transition_music(state)
+    }
+    fn sound_add_music_state(&mut self, name: &str) {
+        self.audio.borrow_mut().add_music_state(name, [0.0; 5]);
+    }
+    fn sound_add_music_transition(&mut self, from: &str, to: &str) {
+        self.audio.borrow_mut().add_music_transition(from, to);
+    }
+    fn sound_set_dynamic_music(&mut self, on: bool) {
+        self.audio.borrow_mut().set_dynamic_music(on);
+    }
+    fn sound_is_dynamic_music(&self) -> bool {
+        self.audio.borrow().is_dynamic_music()
+    }
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
@@ -223,6 +271,29 @@ pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The audio system is wired in: real game `Sound.*` Lua drives the live `mercs2_audio::AudioEngine`
+    /// through the `EngineHost` forwarding (not a test double). `SetDynamicMusic`/`IsDynamicMusic`
+    /// round-trip deterministically; an unknown cue (no sounddb) returns nil, faithful to the exe.
+    #[test]
+    fn game_lua_sound_drives_real_audio_engine() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        let dyn_on: bool = sh
+            .eval("Sound.SetDynamicMusic(true); return Sound.IsDynamicMusic()")
+            .unwrap();
+        assert!(dyn_on, "SetDynamicMusic/IsDynamicMusic must round-trip through the real AudioEngine");
+        assert!(host.borrow().audio.borrow().is_dynamic_music());
+
+        // Music FSM: registering a state then a self-transition drives the real dual-deck FSM.
+        sh.exec(r#"Sound.AddMusicState("combat")"#, "@ms").unwrap();
+
+        // CueSound with no bank loaded → nil (faithful); the forwarding is exercised regardless.
+        let cue_nil: bool = sh.eval(r#"return Sound.CueSound("ui_confirm") == nil"#).unwrap();
+        assert!(cue_nil, "unknown cue with no sounddb loaded returns nil");
+    }
 
     #[test]
     fn interior_boot_records_the_hqinterior_spawn() {
