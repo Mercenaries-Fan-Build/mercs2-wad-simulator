@@ -279,6 +279,21 @@ pub fn resident_script_host(host: Rc<RefCell<GameScriptHost>>) -> Option<ScriptH
     Some(sh)
 }
 
+/// Run the **real vanilla boot Lua flow** through the resident host (bisect against the pmc_bb
+/// `[lua]` trace). `MrxBootstrap.Start()` (mrxbootstrap.lua:14) imports the resident modules
+/// (MrxPlayer/MrxPmc/MrxState/MrxUtil/…), registers the GUI-loaded + local-player-joined callbacks, and
+/// calls `MrxPlayer.Start()`. Each `Debug.Printf` in that cascade surfaces as a `[lua]` line here, so
+/// this is exactly what to diff against vanilla to find the first divergence. The spawn itself
+/// (`MrxPlayer.OnPlayerJoined` → `SetSpawnLocations`/`CreatePlayerCharacter`) is event-driven — it fires
+/// once the engine signals GUI-loaded + player-joined (wired next). Errors are logged, not fatal.
+pub fn run_boot_flow(sh: &ScriptHost) {
+    println!("[world] ===== vanilla boot Lua flow: MrxBootstrap.Start() =====");
+    match sh.exec("import(\"MrxBootstrap\")\nMrxBootstrap.Start()", "@boot_flow") {
+        Ok(()) => println!("[world] ===== boot flow returned (Start complete) ====="),
+        Err(e) => eprintln!("[world] ===== boot flow error (first divergence): {e} ====="),
+    }
+}
+
 /// Advance the resident script host one fixed step: pump the Lua event/timer system (`Event.__pump(dt)`)
 /// so `TimerRelative` fires and posted events dispatch. A no-op if `Event`/`__pump` aren't present.
 /// Errors are logged, not fatal (a mission-script bug must not kill the render loop).

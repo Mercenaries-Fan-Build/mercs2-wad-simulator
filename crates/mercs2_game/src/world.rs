@@ -1227,6 +1227,14 @@ pub async fn run_scene_world_loading(
                                         );
                                     }
                                 }
+                                // Run the REAL vanilla boot Lua flow (MrxBootstrap.Start) through the
+                                // resident host — the [lua] trace to diff against the pmc_bb log. Runs
+                                // after the world load, matching the vanilla order (LoadLevel → master).
+                                // (The marker resolution above is the interim engine-side spawn until the
+                                // flow's event-driven CreatePlayerCharacter is wired to drive it.)
+                                if let Some(sh) = &script {
+                                    crate::script_host::run_boot_flow(sh);
+                                }
                                 // Terrain: one static entity at identity (its verts are already world-space).
                                 // Skipped in --interior mode: the interior is off-map at Y~450 sitting above
                                 // the SE-corner terrain peak (~Y400), which otherwise occludes the whole room.
