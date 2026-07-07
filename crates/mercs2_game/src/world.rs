@@ -25,7 +25,7 @@ use winit::event_loop::EventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, WindowBuilder};
 
-use crate::pmc::{load_pmc_interior, PMC_INTERIOR_SPAWN};
+use crate::pmc::load_pmc_interior;
 
 // ---------------------------------------------------------------------------
 //   Restored render/boot code (verbatim from the deleted engine bin, path-adapted via the `use`
@@ -133,6 +133,11 @@ struct WorldData {
     cells: Vec<(LoadedModel, [f32; 3])>,
     /// Merged placement-marker mesh (one model + one static entity), when `--placements` is set.
     placements: Option<LoadedModel>,
+    /// Named world markers → world position (lowercased name → pos), harvested from the placement
+    /// records. This is the engine's `Pg.GetGuidByName`→position lookup: the base game spawns the hero
+    /// at a NAMED marker (`SetSpawnLocations`/`CreatePlayerCharacter(location=…)`, e.g. `PmcCon001_Start1`
+    /// / `Pmc_Entry1`) resolved here — NOT a hardcoded coordinate (see `vanilla_boot_load_order.md`).
+    named_locations: std::collections::HashMap<String, [f32; 3]>,
     /// PMC-subset real-geometry models resolved by name→mesh (currently none — see report).
     pmc_models: Vec<(LoadedModel, [f32; 3], f32)>,
     /// PMC interior instances (`--interior`): resolved interior geometry + authored world Transform
@@ -339,10 +344,17 @@ fn load_world_data(
 
     // World placements (layers_static block 29): a merged marker mesh + the interior-hunt report,
     // plus an attempt to resolve the PMC-subset to real geometry (opt-in via `--placements`).
-    let (placements, pmc_models) = if load_placements {
+    let (placements, pmc_models, named_locations) = if load_placements {
         match mercs2_formats::placement::load_placements(&ls) {
             Ok(pl) => {
                 report_interior_hunt(&pl);
+                // Named markers → world position: the engine's Pg.GetGuidByName→pos lookup the base
+                // game resolves the hero spawn against (SetSpawnLocations/CreatePlayerCharacter).
+                let named: std::collections::HashMap<String, [f32; 3]> = pl
+                    .iter()
+                    .filter_map(|p| p.name.as_ref().map(|n| (n.to_ascii_lowercase(), p.pos)))
+                    .collect();
+                println!("[placements] {} named markers indexed for spawn resolution", named.len());
                 let (verts, indices, draws) = build_placement_markers(&pl);
                 println!(
                     "[placements] marker mesh: {} placements -> {} verts / {} tris",
@@ -360,15 +372,15 @@ fn load_world_data(
                     clips: Vec::new(),
                 };
                 let pmc = resolve_pmc_geometry(&mut w, &pl);
-                (Some(markers), pmc)
+                (Some(markers), pmc, named)
             }
             Err(e) => {
                 eprintln!("[placements] load failed: {e}");
-                (None, Vec::new())
+                (None, Vec::new(), std::collections::HashMap::new())
             }
         }
     } else {
-        (None, Vec::new())
+        (None, Vec::new(), std::collections::HashMap::new())
     };
     progress.step(if load_placements { "placements" } else { "placements (skipped)" });
 
@@ -453,7 +465,7 @@ fn load_world_data(
         lights.len(), particle_fx.len(), glow_cards.len()
     );
 
-    Ok(WorldData { terrain, player, cells, placements, pmc_models, interior, props, interior_props, hmap, lights, particle_fx, glow_cards })
+    Ok(WorldData { terrain, player, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, lights, particle_fx, glow_cards })
 }
 
 /// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
@@ -906,28 +918,14 @@ pub async fn run_scene_world_loading(
     // World-dependent state, wired in when the loader finishes (defaults until then).
     let mut hmap: Option<HeightMap> = None;
     let store = Rc::new(RefCell::new(AssetStore::default()));
-    // Spawn at the PMC HQ compound (game coords, docs/coordinate_systems.md Example 1); Y is
-    // terrain-snapped at spawn. The base GEOMETRY itself arrives with the placements brick — for
-    // now this at least drops the player where the PMC is, not the empty map centre.
-    // Spawn coords are the game's own boot-log values (MrxUtil._TeleportHero, mrxutil.lua:490),
-    // used with the authored Y VERBATIM — no ground-snap at spawn in either mode:
-    //   * `--interior`: the authored PMC INTERIOR teleport coord `PMC_INTERIOR_SPAWN`
-    //     (3794.0427, 450.7505, -3911.0322) — the off-map, high-Y (above the ~393 terrain cap)
-    //     SE-corner interior cell. Height-follow stays OFF (its floor is at ~450, not the terrain).
-    //     The interior geometry is now placed at its OWN authored Transforms (no synthetic offset),
-    //     so the spawn sits inside the assembled recruit-interior meshes.
-    //   * default: the EXTERIOR back-door/pool coord (2560.26, -13.18, -926.25) near the PMC HQ.
-    //     Per-frame terrain height-follow kicks in only while walking outdoors (below).
-    let spawn_pos = if spawn_interior {
-        println!("[world] --interior: spawning at PMC interior teleport coord (3794.043, 450.751, -3911.032) [interior placed at authored transforms; height-follow OFF]");
-        Vec3::new(PMC_INTERIOR_SPAWN[0], PMC_INTERIOR_SPAWN[1], PMC_INTERIOR_SPAWN[2])
-    } else {
-        Vec3::new(2560.2646, -13.1779, -926.2511)
-    };
-    // Third-person player locomotion — the extracted, unit-tested `crate::player::PlayerController`.
-    // Its foot offset / clip durations / ground speeds (baked-root-stride derived) / idle / entity are
-    // filled when the avatar loads (below); WALK_SPEED/RUN_SPEED are the fallbacks.
-    let mut player = crate::player::PlayerController::new(spawn_pos);
+    // Hero spawn is resolved DATA-DRIVEN from a NAMED world marker once the world loads (in the
+    // realize branch below), NOT from a hardcoded coordinate. The base game does exactly this:
+    // `SetSpawnLocations(<name>)` → `CreatePlayerCharacter(location=<name>)`, the name coming from the
+    // active contract / HQ portal and resolved to a position via `Pg.GetGuidByName` (our
+    // `data.named_locations`). The old `PMC_INTERIOR_SPAWN`/exterior consts were `_TeleportHero`
+    // *destinations*, not spawns — see `docs/modernization/vanilla_boot_load_order.md`. Placeholder
+    // until the marker resolves.
+    let mut player = crate::player::PlayerController::new(Vec3::ZERO);
 
     // World-space collision triangle soup, filled from the structural geometry (interior shells +
     // c3 building cells) when the loader delivers. Consumed by the camera boom (raycast, so it
@@ -1189,6 +1187,25 @@ pub async fn run_scene_world_loading(
                                 return;
                             }
                             Ok(Ok(mut data)) => {
+                                // Hero spawn (data-driven, base-game path): resolve a NAMED world marker
+                                // to a position — the `SetSpawnLocations`/`CreatePlayerCharacter(location=…)`
+                                // mechanism. The marker name is the HQ portal entry `Pmc_Entry1` (from
+                                // `mrxhq.tPortal.sStart1`; the active-contract `<Contract>_Start1` is the
+                                // pre-HQ case — threaded next). Resolved via `data.named_locations`
+                                // (Pg.GetGuidByName→pos), not a hardcoded coordinate.
+                                const SPAWN_MARKER: &str = "Pmc_Entry1";
+                                match data.named_locations.get(&SPAWN_MARKER.to_ascii_lowercase()) {
+                                    Some(&p) => {
+                                        player.pos = Vec3::new(p[0], p[1], p[2]);
+                                        println!("[world] hero spawn: marker '{SPAWN_MARKER}' -> ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
+                                    }
+                                    None => {
+                                        eprintln!(
+                                            "[world] SPAWN MARKER '{SPAWN_MARKER}' not in world data ({} named markers indexed) — hero stays at origin until the marker/flow is wired (see vanilla_boot_load_order.md)",
+                                            data.named_locations.len()
+                                        );
+                                    }
+                                }
                                 // Terrain: one static entity at identity (its verts are already world-space).
                                 // Skipped in --interior mode: the interior is off-map at Y~450 sitting above
                                 // the SE-corner terrain peak (~Y400), which otherwise occludes the whole room.
