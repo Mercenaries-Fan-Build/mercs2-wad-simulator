@@ -125,26 +125,58 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("IsHijackRemote", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
     b.real("IsHijackBad", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
 
-    // --- faithful no-op SETTERS / actions the retail vehicle driver consumes but we don't model yet ---
-    // (the whole scripted hijack FSM, turret aim, heli/tank motion, seat transfer, restock actions.)
-    for name in [
-        "EnterBySeatGuid",
-        "TransferToSeat",
-        "HijackComplete",
-        "HijackAbort",
-        "HijackAbortDone",
-        "SetTurretPitch",
-        "SetTurretYaw",
-        "SpinHeli",
-        "StartTankHijackMotion",
-        "StopTankHijackMotion",
-        "HijackStart",
-        "SetHijackState",
-        "SetHijackSuccess",
-        "CancelHijack",
-        "RestoreHealth",
-        "RestoreAmmo",
+    // --- Hijack FSM → `mercs2_vehicle::HijackFsm` on the host (returns the resulting state name). ---
+    // Each verb takes the vehicle guid as its first arg; the lifecycle is driven by the mission Lua.
+    for (verb, event) in [
+        ("HijackStart", "start"),
+        ("StartTankHijackMotion", "tank_motion_on"),
+        ("StopTankHijackMotion", "tank_motion_off"),
+        ("SetHijackSuccess", "success"),
+        ("HijackComplete", "complete"),
+        ("HijackAbort", "abort"),
+        ("HijackAbortDone", "abort_done"),
+        ("CancelHijack", "cancel"),
     ] {
+        let h = host.clone();
+        let ev = event;
+        b.real(verb, lua.create_function(move |_, veh: i64| {
+            Ok(h.borrow_mut().vehicle_hijack_event(veh as u64, ev))
+        })?)?;
+    }
+    // Vehicle.SetHijackState(veh, name) — explicit override.
+    let h = host.clone();
+    b.real("SetHijackState", lua.create_function(move |_, (veh, name): (i64, String)| {
+        Ok(h.borrow_mut().vehicle_hijack_event(veh as u64, &format!("set:{name}")))
+    })?)?;
+
+    // --- Turret / rotor articulation → `mercs2_vehicle::TurretAim` on the host. ---
+    let h = host.clone();
+    b.real("SetTurretPitch", lua.create_function(move |_, (veh, pitch): (i64, f32)| {
+        h.borrow_mut().vehicle_set_turret(veh as u64, Some(pitch), None, None);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("SetTurretYaw", lua.create_function(move |_, (veh, yaw): (i64, f32)| {
+        h.borrow_mut().vehicle_set_turret(veh as u64, None, Some(yaw), None);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("SpinHeli", lua.create_function(move |_, (veh, on): (i64, Option<bool>)| {
+        h.borrow_mut().vehicle_set_turret(veh as u64, None, None, Some(on.unwrap_or(true)));
+        Ok(())
+    })?)?;
+
+    // Vehicle.RestoreHealth(veh) — restore the vehicle object to full health (Object health seam).
+    let h = host.clone();
+    b.real("RestoreHealth", lua.create_function(move |_, veh: i64| {
+        let max = h.borrow().object_max_health(veh as u64);
+        h.borrow_mut().object_set_health(veh as u64, max);
+        Ok(())
+    })?)?;
+
+    // --- UNBACKED residue (burn-down): seat-transfer needs the seat-guid resolution seam; RestoreAmmo
+    // needs a per-object ammo store. Honest no-ops until those land. ---
+    for name in ["EnterBySeatGuid", "TransferToSeat", "RestoreAmmo"] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     }
 

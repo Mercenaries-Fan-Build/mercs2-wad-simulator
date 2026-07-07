@@ -87,6 +87,11 @@ pub struct GameScriptHost {
     /// `Human.SetState`/`DoAction` driven state per humanoid GUID: `(stance, action)`. The boot teleport
     /// (`mrxutil.lua:314`) records `("upright","idle")`; civ/hijack scripts record their stance+anim.
     human_states: HashMap<u64, (String, String)>,
+    /// Per-vehicle hijack FSM (`Vehicle.Hijack*`), keyed by vehicle GUID — the engine-owned state the
+    /// mission Lua drives through its lifecycle (`mercs2_vehicle::HijackFsm`).
+    hijacks: HashMap<u64, mercs2_vehicle::HijackFsm>,
+    /// Per-vehicle turret/rotor aim (`Vehicle.SetTurretPitch/Yaw`, `Vehicle.SpinHeli`).
+    turrets: HashMap<u64, mercs2_vehicle::TurretAim>,
 }
 
 /// The GUID the local player object is registered under (distinct from [`HERO_GUID`], the character it
@@ -118,6 +123,8 @@ impl GameScriptHost {
             hero_character: String::new(),
             player_character: HashMap::new(),
             human_states: HashMap::new(),
+            hijacks: HashMap::new(),
+            turrets: HashMap::new(),
         }
     }
 
@@ -351,6 +358,38 @@ impl EngineHost for GameScriptHost {
         // the attitude event + drives price/pursuit), mirrored into the AI matrix the perception tick reads.
         self.faction.set_relation(faction as u32, toward as u32, relation as i32);
         self.ai.set_relation(faction as u32, toward as u32, relation as i32);
+    }
+
+    // ===== Vehicle hijack FSM + turret aim → `mercs2_vehicle` (held per-vehicle on the host). =====
+    fn vehicle_hijack_event(&mut self, veh: u64, event: &str) -> String {
+        let fsm = self.hijacks.entry(veh).or_insert_with(mercs2_vehicle::HijackFsm::new);
+        let state = match event {
+            "start" => fsm.start(),
+            "tank_motion_on" => fsm.tank_motion(true),
+            "tank_motion_off" => fsm.tank_motion(false),
+            "success" => fsm.set_success(),
+            "complete" => fsm.complete(),
+            "abort" => fsm.abort(),
+            "abort_done" => fsm.abort_done(),
+            "cancel" => fsm.cancel(),
+            other => fsm.set_state(other.strip_prefix("set:").unwrap_or(other)),
+        };
+        state.name().to_string()
+    }
+    fn vehicle_hijack_state(&self, veh: u64) -> String {
+        self.hijacks.get(&veh).map(|f| f.state.name()).unwrap_or("idle").to_string()
+    }
+    fn vehicle_set_turret(&mut self, veh: u64, pitch: Option<f32>, yaw: Option<f32>, spin: Option<bool>) {
+        let aim = self.turrets.entry(veh).or_insert_with(mercs2_vehicle::TurretAim::new);
+        if let Some(p) = pitch {
+            aim.pitch = p;
+        }
+        if let Some(y) = yaw {
+            aim.yaw = y;
+        }
+        if let Some(s) = spin {
+            aim.rotor_spinning = s;
+        }
     }
 
     // ===== Player identity / session / binding (single local player controlling the hero). =====
@@ -665,6 +704,37 @@ mod tests {
         sh.exec("Ai.SetAttitude(777, 42, -100)", "@ai").unwrap();
         assert_eq!(host.borrow().faction.get_relation(777, 42), -100);
         assert_eq!(host.borrow().ai.get_relation(777, 42), -100);
+    }
+
+    /// The `Vehicle.Hijack*`/`SetTurret*` surface is WIRED to the real `mercs2_vehicle` hijack FSM +
+    /// turret aim (not no-ops): game Lua drives the lifecycle and the host state advances accordingly.
+    #[test]
+    fn game_lua_vehicle_hijack_and_turret() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        let veh: i64 = 0x2000;
+        // Full happy-path lifecycle through Lua; each verb returns the resulting state name.
+        let started: String = sh.eval(&format!("return Vehicle.HijackStart({veh})")).unwrap();
+        assert_eq!(started, "started");
+        let done: String = sh
+            .eval(&format!("Vehicle.SetHijackSuccess({veh}); return Vehicle.HijackComplete({veh})"))
+            .unwrap();
+        assert_eq!(done, "complete");
+        assert_eq!(host.borrow().vehicle_hijack_state(veh as u64), "complete");
+
+        // Turret + rotor articulation lands on the host TurretAim.
+        sh.exec(&format!("Vehicle.SetTurretYaw({veh}, 1.5); Vehicle.SpinHeli({veh}, true)"), "@v").unwrap();
+        let aim = host.borrow().turrets.get(&(veh as u64)).copied().unwrap();
+        assert_eq!(aim.yaw, 1.5);
+        assert!(aim.rotor_spinning);
+
+        // Cancel from a fresh vehicle returns to idle.
+        let cancelled: String = sh
+            .eval("Vehicle.HijackStart(0x3000); return Vehicle.CancelHijack(0x3000)")
+            .unwrap();
+        assert_eq!(cancelled, "idle");
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

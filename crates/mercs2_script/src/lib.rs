@@ -279,6 +279,23 @@ pub trait EngineHost {
     fn vehicle_clear_controls(&mut self, veh: u64) {
         let _ = veh;
     }
+    /// The `Vehicle.Hijack*` lifecycle (`HijackStart`/`StartTankHijackMotion`/`SetHijackSuccess`/
+    /// `HijackComplete`/`HijackAbort`/`HijackAbortDone`/`CancelHijack`/`SetHijackState(name)`): drive
+    /// the vehicle's hijack FSM by event name and return the resulting state name.
+    fn vehicle_hijack_event(&mut self, veh: u64, event: &str) -> String {
+        let _ = (veh, event);
+        "idle".into()
+    }
+    /// The current hijack state name for a vehicle (`idle` when not being hijacked).
+    fn vehicle_hijack_state(&self, veh: u64) -> String {
+        let _ = veh;
+        "idle".into()
+    }
+    /// `Vehicle.SetTurretPitch`/`SetTurretYaw`/`SpinHeli` — set the turret/rotor articulation targets
+    /// (radians; `spin` gates helicopter rotor). `None` leaves that field unchanged.
+    fn vehicle_set_turret(&mut self, veh: u64, pitch: Option<f32>, yaw: Option<f32>, spin: Option<bool>) {
+        let _ = (veh, pitch, yaw, spin);
+    }
 
     // ===== Sound / music / VO (the real host forwards to `mercs2_audio::AudioEngine`). =====
     /// `Sound.CueSound` → voice id (0 = failed → nil).
@@ -1087,9 +1104,10 @@ mod tests {
         //           These are the burn-down: docs/modernization/binding_burndown.md tracks each by the
         //           system it needs. `stub` is NOT "done" — it's "not built yet".
         // De-stub work moves a name real←stub. Session start: real 86 / stub 9. Ai vertical wired its
-        // order ring + faction mood + spawner tweaks (real +31).
-        const EXPECTED_REAL: usize = 424;
-        const EXPECTED_STUB: usize = 662;
+        // order ring + faction mood + spawner tweaks (real +31); Vehicle vertical wired the hijack FSM
+        // + turret aim + RestoreHealth (real +13).
+        const EXPECTED_REAL: usize = 437;
+        const EXPECTED_STUB: usize = 649;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1121,7 +1139,7 @@ mod tests {
         assert_eq!(by("Object").stub_count(), 25);
         assert_eq!(by("Player").real_count(), 65);
         assert_eq!(by("Event").real_count(), 4);
-        assert_eq!(by("Vehicle").real_count(), 24);
+        assert_eq!(by("Vehicle").real_count(), 37);
         assert_eq!(by("Sound").real_count(), 29);
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);

@@ -25,6 +25,7 @@ pub mod camera;
 pub mod command;
 pub mod components;
 pub mod drive;
+pub mod hijack;
 pub mod lua_surface;
 pub mod lut;
 pub mod system;
@@ -37,6 +38,7 @@ pub use components::{
     VehicleTuning, Wheel, WheelSet,
 };
 pub use drive::{CarActor, DriveSim, TankActor, VehicleActor};
+pub use hijack::{HijackFsm, HijackState, TurretAim};
 pub use lut::DonutLut;
 pub use system::{drive_step_system, pump_boat_heli_ring, pump_car_ring};
 pub use tuning::AxleTuning;
