@@ -66,6 +66,67 @@ impl GameplaySystems {
 mod tests {
     use super::*;
 
+    /// The wired vehicle system **acts**: a throttled car spawned into the World moves forward when
+    /// driven purely through `GameplaySystems::tick` (which runs `drive_step_system` over the shared
+    /// `StaticSoupPhysics`). This is the end-to-end proof that the engine→system→entity edge is live —
+    /// spawn a fleet entity, tick the bundle, the entity moves. (Spawns are Lua/population-driven at
+    /// runtime; here we spawn directly to exercise the wire.)
+    #[test]
+    fn vehicle_system_acts_through_gameplay_tick() {
+        use mercs2_core::Transform;
+        use mercs2_vehicle::components::{
+            ChassisBody, Vehicle, VehicleClass, VehicleControls, VehicleRuntime, VehicleTuning, Wheel,
+            WheelSet,
+        };
+        use mercs2_vehicle::lua_surface::{default_car_seating, spawn_vehicle};
+
+        let audio = Rc::new(RefCell::new(AudioEngine::default()));
+        let mut gp = GameplaySystems::new(audio);
+        // Tiled flat ground (1 m tiles) — real world geometry streams as small triangles, and the
+        // physics proximity cull is tuned for that (giant quads get culled; W1-C DEFERRED note).
+        let mut tris = Vec::new();
+        for xi in -15..15 {
+            for zi in -15..15 {
+                let (x0, x1) = (xi as f32, xi as f32 + 1.0);
+                let (z0, z1) = (zi as f32, zi as f32 + 1.0);
+                tris.push([Vec3::new(x0, 0.0, z0), Vec3::new(x1, 0.0, z0), Vec3::new(x1, 0.0, z1)]);
+                tris.push([Vec3::new(x0, 0.0, z0), Vec3::new(x1, 0.0, z1), Vec3::new(x0, 0.0, z1)]);
+            }
+        }
+        gp.set_collision(tris);
+
+        let mut world = World::new();
+        let mut ctrl = VehicleControls::default();
+        ctrl.accel = 1.0; // full throttle
+        let car = spawn_vehicle(
+            &mut world,
+            Transform::from_translation(Vec3::new(0.0, 0.85, 0.0)),
+            Vehicle::new(VehicleClass::Car, 0x1000),
+            ChassisBody::new(1200.0),
+            ctrl,
+            WheelSet(vec![
+                Wheel::new(Vec3::new(-0.8, 0.0, 1.3), true, true, false),
+                Wheel::new(Vec3::new(0.8, 0.0, 1.3), true, true, false),
+                Wheel::new(Vec3::new(-0.8, 0.0, -1.3), false, false, true),
+                Wheel::new(Vec3::new(0.8, 0.0, -1.3), false, false, true),
+            ]),
+            VehicleTuning::default(),
+            VehicleRuntime::new(),
+            default_car_seating(),
+        );
+
+        let z0 = world.get::<&Transform>(car).unwrap().translation.z;
+        for _ in 0..240 {
+            gp.tick(&mut world, 1.0 / 60.0);
+        }
+        let z1 = world.get::<&Transform>(car).unwrap().translation.z;
+        assert!(
+            (z1 - z0).abs() > 1.0,
+            "throttled car should move via the wired drive system; dz = {}",
+            z1 - z0
+        );
+    }
+
     /// Ticking the fleet over an empty World is a safe no-op (the systems find no components) — the
     /// invariant that lets the loop drive them from frame 1, before entities stream in.
     #[test]
