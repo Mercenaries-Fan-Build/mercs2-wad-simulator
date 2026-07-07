@@ -58,6 +58,13 @@ pub struct GameScriptHost {
     ai: mercs2_ai::AiWorld,
     /// Per-actor `AiBehavior` restriction flags set by `Ai.SetState` (keyed by actor GUID).
     ai_states: std::collections::HashMap<u64, mercs2_ai::AiBehavior>,
+    /// The faction/reputation manager the game's `Ai.AddInfraction`/`SetInfractionMultiplier`/attitude
+    /// Lua drives — the recovered combat→faction mood bridge + `[-100,100]` relation model
+    /// (`mercs2_faction::FactionWorld`, faction code map). Seeded with the recovered initial relations.
+    faction: mercs2_faction::FactionWorld,
+    /// The living-world population/spawner manager the game's `Ai.TweakAttachedSpawners*`/spawn-list Lua
+    /// drives (`mercs2_population::PopulationWorld`, world-streaming/AI code maps §7).
+    population: mercs2_population::PopulationWorld,
     /// The hero spawn position the game's Lua set via `Object.SetPosition(Player.GetLocalCharacter(),
     /// …)` — the base game's `MrxUtil._TeleportHero` bottoms out to exactly that (mrxutil.lua:328). The
     /// boot reads this to place the player: the spawn is **Lua-authored, no engine-constant fallback**.
@@ -102,6 +109,8 @@ impl GameScriptHost {
             audio: Rc::new(RefCell::new(AudioEngine::default())),
             ai: mercs2_ai::AiWorld::new(),
             ai_states: std::collections::HashMap::new(),
+            faction: mercs2_faction::FactionWorld::with_default_relations(),
+            population: mercs2_population::PopulationWorld::new(),
             hero_teleport: None,
             named_locations: std::collections::HashMap::new(),
             marker_guids: std::collections::HashMap::new(),
@@ -311,6 +320,37 @@ impl EngineHost for GameScriptHost {
     }
     fn ai_set_state(&mut self, guid: u64, state: &str, on: bool) -> bool {
         self.ai_states.entry(guid).or_default().set_state(state, on)
+    }
+    fn ai_order(&mut self, guid: u64, verb: &str) -> bool {
+        self.ai.order(guid as u32, verb)
+    }
+    fn ai_add_infraction(&mut self, _offender: u64, faction: u64, amount: i64) {
+        self.faction.add_scripted_infraction(faction as u32, amount as i32);
+    }
+    fn ai_set_infraction_multiplier(&mut self, faction: u64, multiplier: i64) {
+        self.faction.set_infraction_multiplier(faction as u32, multiplier as i32);
+    }
+    fn ai_tweak_spawners(&mut self, _target: u64, group_mask: u8, state: Option<&str>, force_respawn: bool) -> u32 {
+        // Map the Lua `{SpawnerState=…}` verb to the recovered spawner state byte: "on" resumes,
+        // "off"/"despawn" force-despawns (terminal state 5). Unknown/absent ⇒ no state overwrite.
+        let spawner_state = state.and_then(|s| match s.to_ascii_lowercase().as_str() {
+            "on" => Some(0u8),
+            "off" | "despawn" | "disable" => Some(5u8),
+            _ => None,
+        });
+        let adjust = mercs2_population::SpawnerAdjust {
+            group_mask,
+            spawner_state,
+            spawn_list: None,
+            force_respawn,
+        };
+        self.population.tweak_attached_spawners(&adjust)
+    }
+    fn ai_set_attitude(&mut self, faction: u64, toward: u64, relation: i64) {
+        // `Ai.SetAttitude`/`ChangeRelation` write the faction manager's directed relation (which emits
+        // the attitude event + drives price/pursuit), mirrored into the AI matrix the perception tick reads.
+        self.faction.set_relation(faction as u32, toward as u32, relation as i32);
+        self.ai.set_relation(faction as u32, toward as u32, relation as i32);
     }
 
     // ===== Player identity / session / binding (single local player controlling the hero). =====
@@ -594,6 +634,37 @@ mod tests {
         // CueSound with no bank loaded → nil (faithful); the forwarding is exercised regardless.
         let cue_nil: bool = sh.eval(r#"return Sound.CueSound("ui_confirm") == nil"#).unwrap();
         assert!(cue_nil, "unknown cue with no sounddb loaded returns nil");
+    }
+
+    /// The `Ai.*` order/faction/spawner surface is WIRED to real mechanisms (not no-ops): game Lua
+    /// drives `mercs2_ai::AiWorld` (the ring), `mercs2_faction::FactionWorld` (the mood bridge), and the
+    /// infraction-multiplier gate — asserted on the live host state the bindings forwarded into.
+    #[test]
+    fn game_lua_ai_drives_ring_and_faction() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Order verb (table form) posts to the recovered 1024-slot action ring.
+        sh.exec(r#"Ai.Anchor({AIGuid = 0x1000, AnchorRadius = 0})"#, "@ai").unwrap();
+        sh.exec(r#"Ai.Goal(0x1000, "Attack")"#, "@ai").unwrap();
+        assert_eq!(host.borrow().ai.bus.len(), 2, "Ai order + goal both post to the ring");
+
+        // Faction: a scripted infraction accrues into the mood accumulator...
+        let faction: i64 = 777;
+        sh.exec(&format!("Ai.AddInfraction(1, {faction}, 100)"), "@ai").unwrap();
+        assert!(!host.borrow().faction.accumulator(faction as u32).is_empty(), "AddInfraction accrues mood");
+
+        // ...and SetInfractionMultiplier(0) DISABLES further infractions for that faction (shipped
+        // gurcon002 pattern): a second faction at multiplier 0 stays empty.
+        let quiet: i64 = 888;
+        sh.exec(&format!("Ai.SetInfractionMultiplier({quiet}, 0); Ai.AddInfraction(1, {quiet}, 100)"), "@ai").unwrap();
+        assert!(host.borrow().faction.accumulator(quiet as u32).is_empty(), "multiplier 0 ignores infractions");
+
+        // SetAttitude writes the directed relation the faction manager (and AI matrix) hold.
+        sh.exec("Ai.SetAttitude(777, 42, -100)", "@ai").unwrap();
+        assert_eq!(host.borrow().faction.get_relation(777, 42), -100);
+        assert_eq!(host.borrow().ai.get_relation(777, 42), -100);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

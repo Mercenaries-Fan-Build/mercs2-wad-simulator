@@ -65,6 +65,14 @@ impl AiWorld {
         self.bus.direct_action(guid, action_hash)
     }
 
+    /// The `Ai.*` **order surface** (`Role`/`Anchor`/`Squad`/`Deploy`/`SetHaste`/`RemoveGoal`/…): post
+    /// the order verb, hash-addressed, to the same 1024-ring the (data/Lua) brain consumes. This is the
+    /// mechanism the engine owns for every order directive — there is no compiled per-verb body (AI code
+    /// map §5/§8); the verb *is* the identity and the parameters are brain-consumed content.
+    pub fn order(&mut self, guid: u32, verb: &str) -> bool {
+        self.bus.direct_action(guid, goal_action_hash(verb))
+    }
+
     /// `Ai.SetRelation(from, to, value)` — set the directed attitude, clamped `[-100,100]`.
     pub fn set_relation(&mut self, from: u32, to: u32, value: i32) {
         self.relations.set(from, to, value);

@@ -79,6 +79,10 @@ pub struct FactionWorld {
     relations: HashMap<(u32, u32), i32>,
     /// Per-faction pursuit ("heat") state.
     pursuit: HashMap<u32, PursuitState>,
+    /// Per-faction infraction multiplier (`Ai.SetInfractionMultiplier`) applied to every scripted
+    /// `Ai.AddInfraction`. Unset ⇒ `1`; `0` disables the faction's infractions (the shipped
+    /// `gurcon002.lua` toggles this `0 ↔ 1` around scripted damage windows).
+    infraction_multiplier: HashMap<u32, i32>,
     /// Drainable `Ai.SetRelation` intents.
     relation_changes: Vec<RelationChange>,
     /// Drainable `Attitude` events.
@@ -95,6 +99,7 @@ impl FactionWorld {
             pursuit: HashMap::new(),
             relation_changes: Vec::new(),
             attitude_events: Vec::new(),
+            infraction_multiplier: HashMap::new(),
         }
     }
 
@@ -144,6 +149,29 @@ impl FactionWorld {
     /// A `SpecialEvent` infraction: its mood term is `multiplier × amount` (`SpecialEvent[1]×[2]`).
     pub fn add_special_infraction(&mut self, faction: u32, multiplier: i32, amount: i32) {
         self.accumulators.entry(faction).or_default().add_special(multiplier, amount);
+    }
+
+    /// `Ai.AddInfraction(offender, faction, amount)` — accrue a scripted infraction against `faction`,
+    /// weighted by its current [`infraction_multiplier`](Self::infraction_multiplier) (a `SpecialEvent`
+    /// slot: mood term = `multiplier × amount`). A faction whose multiplier is `0` ignores the
+    /// infraction, matching the shipped disable/enable pattern.
+    pub fn add_scripted_infraction(&mut self, faction: u32, amount: i32) {
+        let mult = self.infraction_multiplier(faction);
+        if mult == 0 {
+            return;
+        }
+        self.add_special_infraction(faction, mult, amount);
+    }
+
+    /// `Ai.SetInfractionMultiplier(faction, mult)` — set the standing multiplier applied to future
+    /// scripted infractions against `faction`. `0` disables them.
+    pub fn set_infraction_multiplier(&mut self, faction: u32, multiplier: i32) {
+        self.infraction_multiplier.insert(faction, multiplier);
+    }
+
+    /// The faction's current infraction multiplier (`1` if never set).
+    pub fn infraction_multiplier(&self, faction: u32) -> i32 {
+        self.infraction_multiplier.get(&faction).copied().unwrap_or(1)
     }
 
     /// Read a faction's current accumulator (before it is reported).

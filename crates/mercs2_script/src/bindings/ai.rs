@@ -14,6 +14,30 @@ use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
 
+/// Extract an AI actor guid from an order argument: a bare integer, or a `{AIGuid=…}`/`{Guid=…}` table
+/// (code map §5 order-table form). `0` when absent.
+fn guid_of(v: &Value) -> i64 {
+    match v {
+        Value::Integer(i) => *i,
+        Value::Number(n) => *n as i64,
+        Value::Table(t) => t.get::<i64>("AIGuid").or_else(|_| t.get::<i64>("Guid")).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Pull the spawner-adjust fields the host cares about out of a `TweakAttachedSpawners` options table:
+/// `(SpawnerState, forceRespawn)`. `ForceRespawn`/`Respawn` truthy ⇒ force an immediate respawn.
+fn spawner_opts(opts: &Option<mlua::Table>) -> (Option<String>, bool) {
+    match opts {
+        Some(t) => {
+            let state = t.get::<String>("SpawnerState").ok();
+            let respawn = t.get::<bool>("ForceRespawn").or_else(|_| t.get::<bool>("Respawn")).unwrap_or(false);
+            (state, respawn)
+        }
+        None => (None, false),
+    }
+}
+
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Ai";
 /// The Lua global table this namespace installs as.
@@ -90,14 +114,16 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetPriorityTarget", corpus_calls: 2 },
 ];
 
-/// Boot slice: only `Ai.Enable` is wired, as a no-op — it's the one `Ai.*` cfunc the animate-actor
-/// branch of `_SpawnActorComplete` touches. The other 65 (goals, squads, plans, spawner tweaks,
-/// faction relation/mood) are for later silos.
-/// The `Ai.*` order surface: goals/relations/state, forwarded to the AI mechanism through
-/// [`crate::EngineHost`] (the real host backs it with `mercs2_ai::AiWorld` — the recovered action ring
-/// + relation matrix + `AiBehavior` flags; AI code map §8). The *goal vocabulary* is authored data, so
-/// these post/set the mechanism rather than running a compiled planner. The planner/cover/squad
-/// orchestration cfuncs (Plan*, Deploy, HeliLand…) stay a later pass.
+/// The `Ai.*` surface, wired to the recovered mechanisms through [`crate::EngineHost`]:
+/// - goals/orders (`Goal`/`Role`/`Anchor`/`Squad`/`Deploy`/`Plan*`/…) → the `mercs2_ai::AiWorld`
+///   1024-slot action ring (`DirectAction`), hash-addressed by verb — the engine owns the ring, the
+///   goal vocabulary is authored data (AI code map §5/§8), so posting the verb IS the faithful body;
+/// - relations/mood (`SetRelation`/`GetRelation`/`AddInfraction`/`SetInfractionMultiplier`/
+///   `SetAttitude`/`ChangeRelation`) → `mercs2_faction::FactionWorld` (the mood bridge + `[-100,100]`
+///   relation model that drives price/pursuit/attitude);
+/// - living-world spawners (`TweakAttachedSpawners`/`…InGroup`) → `mercs2_population::PopulationWorld`.
+/// The UNBACKED residue (perception subjects, spawn-list channels, exclusion zones, road/lane spawning)
+/// no-ops honestly and is tracked in `docs/modernization/binding_burndown.md`.
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
@@ -144,8 +170,65 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(h.borrow_mut().ai_goal(guid as u64, &goal))
     })?)?;
 
-    // --- Getters the game reads → faithful defaults (no faction/perception system yet). ---
-    // Ai.GetRelation is above; these have no host method so they return the neutral default.
+    // --- Order verbs → the recovered 1024-slot action ring (`ai_order` → `AiWorld::order`). ---
+    // Every `Ai.*` order directive (goal-adjacent: role/anchor/squad/deploy/haste/heli/…) posts its
+    // hash-addressed verb to the ring the (data/Lua) brain consumes — the engine-owned mechanism, NOT a
+    // no-op (AI code map §5/§8). Each accepts a bare guid OR a `{AIGuid=…}` table (code map §5 form).
+    for verb in [
+        "Temp", "RemoveGoal", "Squad", "Role", "Anchor", "SetFacing", "Water", "Feed", "Rest", "Talk",
+        "Admire", "Enable", "Deliver", "HeliLand", "HeliTakeoff", "GoIn", "EveryoneOut", "Deploy",
+        "SetHaste", "SetPriorityTarget", "PlanSetConditions", "PlanSetGoal", "Plan", "PlanIterate",
+        "PlanClear",
+    ] {
+        let h = host.clone();
+        let verb_name = verb;
+        b.real(verb, lua.create_function(move |_, first: Value| {
+            let guid = guid_of(&first);
+            Ok(h.borrow_mut().ai_order(guid as u64, verb_name))
+        })?)?;
+    }
+
+    // --- Faction/reputation → the recovered mood bridge (`mercs2_faction::FactionWorld`). ---
+    // Ai.AddInfraction(offender, faction, amount).
+    let h = host.clone();
+    b.real("AddInfraction", lua.create_function(move |_, (offender, faction, amount): (i64, i64, Option<i64>)| {
+        h.borrow_mut().ai_add_infraction(offender as u64, faction as u64, amount.unwrap_or(0));
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("SetInfractionMultiplier", lua.create_function(move |_, (faction, mult): (i64, i64)| {
+        h.borrow_mut().ai_set_infraction_multiplier(faction as u64, mult);
+        Ok(())
+    })?)?;
+    // Ai.SetAttitude/ChangeRelation(faction, toward, value) — directed relation write (drives price/pursuit).
+    let h = host.clone();
+    b.real("SetAttitude", lua.create_function(move |_, (faction, toward, value): (i64, i64, i64)| {
+        h.borrow_mut().ai_set_attitude(faction as u64, toward as u64, value);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("ChangeRelation", lua.create_function(move |_, (faction, toward, value): (i64, i64, i64)| {
+        h.borrow_mut().ai_set_attitude(faction as u64, toward as u64, value);
+        Ok(())
+    })?)?;
+
+    // --- Living-world spawners → the population manager (`PopulationWorld::tweak_attached_spawners`). ---
+    // Ai.TweakAttachedSpawners(target, {SpawnerState="on"/"off", SecondsPerCycle=…, …}) — apply an adjust
+    // to all groups; the InGroup form scopes to a single group via `Group`/`GroupIndex`.
+    let h = host.clone();
+    b.real("TweakAttachedSpawners", lua.create_function(move |_, (target, opts): (i64, Option<mlua::Table>)| {
+        let (state, respawn) = spawner_opts(&opts);
+        Ok(h.borrow_mut().ai_tweak_spawners(target as u64, 0xFF, state.as_deref(), respawn))
+    })?)?;
+    let h = host.clone();
+    b.real("TweakAttachedSpawnersInGroup", lua.create_function(move |_, (target, group, opts): (i64, i64, Option<mlua::Table>)| {
+        let (state, respawn) = spawner_opts(&opts);
+        let mask = 1u8.checked_shl(group as u32).unwrap_or(0);
+        Ok(h.borrow_mut().ai_tweak_spawners(target as u64, mask, state.as_deref(), respawn))
+    })?)?;
+
+    // --- Getters the game reads → real-state defaults (see burn-down: perception/subject/spawn-list
+    // models are not built yet, so these read the neutral value the game reads when unset). ---
     b.real("GetFeeling", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
     b.real("GetPerceivability", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
     b.real("GetState", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
@@ -158,25 +241,18 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("GetSpawnListChangeInfo", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
     b.real("HeliDropZoneInfo", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
 
-    // --- Order verbs / setters / spawner+plan orchestration → faithful no-ops. ---
-    // The AI code map (§5/§8) shows the planner/cover/squad brain is DATA dispatched over the action
-    // ring — there is NO compiled body for these directives. Posting/ignoring them is the faithful
-    // behavior. AddInfraction/SetInfractionMultiplier want a native faction-mood bridge (no host method
-    // yet) — see report.
+    // --- UNBACKED residue → honest no-ops (NOT "faithful"): these want a perception-subject list, a
+    // spawn-list channel model, exclusion zones, or road/lane spawning toggles the engine does not have
+    // yet. Tracked in docs/modernization/binding_burndown.md — de-stub as those systems land. ---
     for name in [
-        "Temp", "RemoveGoal", "Squad", "Role", "Anchor", "SetFacing", "LivingWorld", "Water", "Feed",
-        "Rest", "Talk", "Admire", "Deliver", "HeliLand", "HeliTakeoff", "GoIn", "EveryoneOut",
-        "Deploy", "SetHaste", "SetPerceivability", "PlanSetConditions", "PlanSetGoal", "Plan",
-        "PlanIterate", "PlanClear", "SetTrafficSpawning", "SetSidewalkSpawning", "SetRoadSpawning",
-        "SetLaneActive", "TweakAttachedSpawners", "TweakAttachedSpawnersInGroup", "ShowObjectSpawners",
-        "SetSpawnList", "ClearSpawnListChanges", "ResetAllSpawnLists", "SetExclusionZone",
-        "AddRoadException", "RemoveRoadException", "RemoveExclusionZone", "AddSubject", "RemoveSubject",
-        "RemoveAllSubjects", "ThreatPerception", "SetFeeling", "ChangeRelation", "AddInfraction",
-        "SetInfractionMultiplier", "SetAttitude", "SetDriveThroughMassRatio", "SetPriorityTarget",
+        "LivingWorld", "SetPerceivability", "SetTrafficSpawning", "SetSidewalkSpawning",
+        "SetRoadSpawning", "SetLaneActive", "ShowObjectSpawners", "SetSpawnList",
+        "ClearSpawnListChanges", "ResetAllSpawnLists", "SetExclusionZone", "AddRoadException",
+        "RemoveRoadException", "RemoveExclusionZone", "AddSubject", "RemoveSubject", "RemoveAllSubjects",
+        "ThreatPerception", "SetFeeling", "SetDriveThroughMassRatio",
     ] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     }
 
-    b.stub("Enable", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.install_global(GLOBAL)
 }

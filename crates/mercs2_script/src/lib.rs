@@ -395,6 +395,34 @@ pub trait EngineHost {
         let _ = (guid, state, on);
         false
     }
+    /// The `Ai.*` **order surface** (`Role`/`Anchor`/`Squad`/`Deploy`/`SetHaste`/`RemoveGoal`/…): post
+    /// the order verb, hash-addressed, to the same action ring `ai_goal` uses (AI code map §5/§8 — the
+    /// order brain is data/Lua over the ring, so posting the verb *is* the engine-owned mechanism).
+    fn ai_order(&mut self, guid: u64, verb: &str) -> bool {
+        let _ = (guid, verb);
+        false
+    }
+    /// `Ai.AddInfraction(offender, faction, amount)` — accrue a scripted infraction against `faction`
+    /// (weighted by its infraction multiplier) into the faction mood accumulator.
+    fn ai_add_infraction(&mut self, offender: u64, faction: u64, amount: i64) {
+        let _ = (offender, faction, amount);
+    }
+    /// `Ai.SetInfractionMultiplier(faction, mult)` — set the standing multiplier on `faction`'s future
+    /// scripted infractions (`0` disables them).
+    fn ai_set_infraction_multiplier(&mut self, faction: u64, multiplier: i64) {
+        let _ = (faction, multiplier);
+    }
+    /// `Ai.TweakAttachedSpawners(target, {SpawnerState=…, …})` — apply a spawner adjust to the attached
+    /// living-world spawners in `group_mask`; returns how many spawners were affected.
+    fn ai_tweak_spawners(&mut self, target: u64, group_mask: u8, state: Option<&str>, force_respawn: bool) -> u32 {
+        let _ = (target, group_mask, state, force_respawn);
+        0
+    }
+    /// `Ai.SetAttitude`/`ChangeRelation(faction, toward, value)` — write the faction manager's directed
+    /// relation (drives price/pursuit/attitude events), mirrored into the AI matrix.
+    fn ai_set_attitude(&mut self, faction: u64, toward: u64, relation: i64) {
+        let _ = (faction, toward, relation);
+    }
 
     // ===== Player: identity / session / binding / profile (the depth surface `Player.*` reads). =====
     // The host tracks the player↔character binding + the profile hero fields; getters the game reads
@@ -1050,12 +1078,18 @@ mod tests {
         // Event system + Player economy/getters + Object health/labels + Sys game-state handshake).
         const EXPECTED_NAMESPACES: usize = 35;
         const EXPECTED_REQUIRED: usize = 1086;
-        // Baseline after the full binding-surface pass: ALL 1086 Required cfuncs are now installed &
-        // callable (tests/binding_smoke.rs enforces this). Bodies split into real (behavioral / faithful
-        // default) vs stub (deliberate faithful no-op). Session start was real 86 / stub 9; every other
-        // Required binding was previously auto-stubbed-at-runtime only, not present.
-        const EXPECTED_REAL: usize = 393;
-        const EXPECTED_STUB: usize = 693; // recomputed below
+        // Binding-surface burn-down. ALL 1086 Required cfuncs are installed & callable
+        // (tests/binding_smoke.rs enforces that). The split is the HONEST progress metric:
+        //   real  = BACKED — wired to a real engine mechanism (`mercs2_ai`/`faction`/`population`/
+        //           `audio`/…) or reads real host state. A wrong body here is a bug.
+        //   stub  = UNBACKED — a deliberate no-op because the engine system behind it isn't built yet
+        //           (HUD renderer, DSP, exclusion zones, …) OR the retail cfunc is genuinely stripped.
+        //           These are the burn-down: docs/modernization/binding_burndown.md tracks each by the
+        //           system it needs. `stub` is NOT "done" — it's "not built yet".
+        // De-stub work moves a name real←stub. Session start: real 86 / stub 9. Ai vertical wired its
+        // order ring + faction mood + spawner tweaks (real +31).
+        const EXPECTED_REAL: usize = 424;
+        const EXPECTED_STUB: usize = 662;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
