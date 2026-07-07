@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_physics"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — silo 7 (row 22): Havok character controller, rigid bodies, collision queries, MOPP/heightfield. WAVE-1 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }

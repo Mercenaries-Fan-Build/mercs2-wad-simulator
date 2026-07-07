@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_vehicle"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — silo 9 (rows 25/19): vehicle actors + custom drive model + camera modes. WAVE-1 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }
