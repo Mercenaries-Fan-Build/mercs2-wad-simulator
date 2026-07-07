@@ -21,9 +21,13 @@ Plug-in seam: implement `render_graph::RenderNode` against the node's `PassId` s
 
 ## Improvements observed but NOT implemented in E2
 
-- **4× shadow cascades.** The exe emits four cascades into a 1024×4096 atlas (`while(i<4)` around
-  `FUN_00468ca0`, shadow_code_map.md §4); the engine realizes a single directional cascade
-  (`PassId::ShadowCascade`). Multi-cascade is a shadow-silo task. `[faithful-blocker: no]`
+- **4× shadow cascades.** ~~The exe emits four cascades into a 1024×4096 atlas (`while(i<4)` around
+  `FUN_00468ca0`, shadow_code_map.md §4); the engine realizes a single directional cascade.~~ **DONE
+  (Wave-1 silo 2 — lighting/shadows).** `PassId::ShadowCascade` now renders the DYNAMIC scene into a
+  **1024×4096 depth atlas** (four stacked 1024² tiles, faithful to `FUN_00755d90` §1), one viewport +
+  light-VP per cascade via a dynamic-offset uniform; casters are distance-LOD gated into only the
+  cascade boxes that contain them (`FUN_00858150` analog). The color pass (`shader.wgsl` `shadow_factor`)
+  selects the tightest containing cascade per fragment and PCF-samples its tile. `[faithful-blocker: no]`
 - **Sky-as-a-pass.** The engine draws the sky as the first fullscreen triangle inside the color pass
   rather than as the canonical standalone sky/atmosphere pass. Splitting it out belongs with the
   sky/HDR silo. `[faithful-blocker: no]`
@@ -65,3 +69,43 @@ items left for a live/x32dbg read:
 - **The population-lump executor.** `update_regions` decisions (CacheIn/CacheOut) are computed each
   tick but not yet acted on (no spawn/despawn of an ambient-population lump). That executor is the
   population silo's job; the decision layer is now live and correct. `[faithful-blocker: no]`
+
+## Wave-1 silo 2 (lighting + shadows) — confirm-live follow-ups
+
+The 4-cascade directional atlas, the `_pl`/`_sl`/`_pl_sl` per-pixel light-class permutation (ShaderLevel
+gate), the BlobShadow fallback, and the `Rt*Animation` light-tween update are now wired into `scene.rs`
++ `shader.wgsl` + `blob.wgsl`. Grounded facts and the items left for a live/x32dbg read:
+
+- **Per-pixel light-class shader math is a faithful reconstruction, not the exe's exact curve.** The
+  `_pl`/`_sl`/`_pl_sl` fragment math (point windowed falloff, spot cone smoothstep, Blinn-Phong spec) is
+  **VMX128 in the exe and does not decode from the PPC dump** (rendering-shaders.md §Corrections). We
+  realize the four compiled permutations as a runtime branch on `lights.count.y` (the `DAT_00dfc345`
+  ShaderLevel analog, default 3 = `_pl_sl`) — same visible result, one pipeline. **CONFIRM-LIVE:** break
+  the `_pl`/`_sl` fragment shaders (or `RenderLights` `0x0026b28`) in x32dbg to recover the exact
+  attenuation curve, cone falloff, and specular model, then match the WGSL. `[faithful-blocker: no]`
+- **Spot lights are not yet harvested from retail data.** `set_spot_lights` + the `SpotLightGpu` record
+  (pos/range/color/intensity/**cone axis + inner/outer cos**) + the `_sl` shader path are all wired, but
+  `placement::light_inventory` only emits omni `render::GpuLight` point records today — the `LightObject`
+  stride-0x34 `int` type field (point vs spot) and the cone-angle floats are not decoded into spot
+  records. On retail data the spot set is empty (point lights only). **CONFIRM-LIVE / cross-silo:** decode
+  the `LightObject` type + cone floats in the harvest (`FUN_006622e0`, presentation-ECS §LightObject) and
+  route spots to `set_spot_lights`. `[faithful-blocker: no]`
+- **`Rt{Light,Color,Scale,Alpha}Animation` descriptors are not decoded from the COMP stream.** The tween
+  runtime (`set_light_animations` + `animated_lights`, the `FUN_00675e50` master-update analog) is wired
+  and unit-tested (pulse/flicker), but the retail `LightAnimation` sub-records (`FUN_00646b60` descriptor,
+  the `0x9e3779b9`-seeded keys) are not parsed by the world harvest, so on retail data the anim set is
+  empty unless a caller supplies it. The pulse/flicker MATH is an engine approximation. **CONFIRM-LIVE:**
+  read the `RtLightAnimation::Update` (`0x0017758`) tween keys live and decode them into `LightAnim`.
+  `[faithful-blocker: no]`
+- **Blob geometry/darkness/projection are approximations.** `record_blob` grounds a dark radial disc in
+  the world XZ plane at the caster's origin for casters outside every cascade (sun-on/outdoor only, so
+  interiors/default paths are unchanged). Radius (1.3 m) + `darkness` (0.45 = the `ShadowK` analog) are
+  fixed knobs, and the disc sits at the entity origin rather than a real ground-raycast contact point.
+  The exe's blob render is vtable-reached (`FUN_00853710`, `BlobShadowFrontVB`, `ShadowK` — no static
+  token, shadow_code_map.md §5). **CONFIRM-LIVE:** break the `PgBlobShadowVP/FP` set to recover the real
+  `ShadowK`, per-caster bounds, and ground projection. The sun-off (interior overhead) blob path is left
+  disabled to avoid net-new dark discs under every indoor prop. `[faithful-blocker: no]`
+- **`SetShadowBaseDistance` threshold not bound.** The distance-LOD caster gate uses the cascade-box
+  containment test as its near/far split ([`CASCADE_SPLIT_FACTORS`] = the nested extents), not the exe's
+  authored `SetShadowBaseDistance` float (near `DAT_01176288`, unbound — shadow_code_map.md §4). **CONFIRM-LIVE:**
+  read that float and drive the cascade extents from it. `[faithful-blocker: no]`
