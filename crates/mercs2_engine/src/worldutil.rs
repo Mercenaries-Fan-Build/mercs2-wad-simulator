@@ -320,6 +320,30 @@ pub fn build_streaming_catalog(
     // `TerrainObject`->Transform tiles (below). The building `Model`'s authored transform is a
     // separate unsolved RCA (its position source is not the c3 cell-id); until it's recovered, we do
     // NOT stream it rather than render floating geometry. Re-enable once that placement is known.
+    //
+    // CONFIRM-LIVE (Wave-0 S5 investigation, 2026-07-06) — WHY it stays disabled + what unblocks it:
+    //   Grounded in three independent facts, the c3 building `Model` placement is genuinely
+    //   unrecovered from the shipped data, NOT merely un-wired:
+    //   (1) `--comp-probe` (d) proved "exterior buildings ARE baked into c3 cell geometry (not placed
+    //       via ModelName)" — so, unlike every other prop, these buildings have NO `layers_static`
+    //       Transform/ModelName record we could register as a per-entity placement (the loops below).
+    //   (2) `WorldIndex`'s extent for a bare c3 cell is `Aabb::from_center_half(cx, cz, C3_CELL_SIZE/2)`
+    //       (world_index.rs) — the cell-CENTRE box. It carries an XZ proxy but NO authored Y and NO
+    //       per-object footprint offset (a cell holds up to ~39 distinct objects at distinct spots —
+    //       world_streaming_spec §10.2b), so it cannot place the Model, only bound it.
+    //   (3) The baked geometry is ORIGIN-LOCAL (a model LIBRARY — [[world-placements-no-model-hash]]);
+    //       `load_one_c3_cell` already returns identity for the rare cells whose verts test world-space,
+    //       and cell-local `[cx,0,cz]` (Y=0) for the rest — the float.
+    //   The authored per-cell origin the engine actually uses is built at runtime by
+    //   `TerrainObject::Activate FUN_0066cac0` (world_streaming_code_map §3): it stamps ≤16 patch
+    //   children under a PARENT record carrying the cell's world AABB. The building-cell analog of that
+    //   parent AABB origin is the missing datum. UNBLOCK = recover that authored origin, by either:
+    //     (a) x32dbg break on `FUN_0066cac0` / the c3-cell activate path and read the parent-record
+    //         AABB origin the engine assigns (read-only while PAUSED — [[x32dbg-mcp-no-resume]]); or
+    //     (b) locating a per-cell `Transform`/POFF record analogous to the terrain-tile
+    //         `TerrainObject->Transform` composition used for the 0x7C569307 tiles below.
+    //   Deriving Y from a terrain-height sample would be a FABRICATION (a building may sit on a roof /
+    //   in a pit) and is explicitly declined. Until (a) or (b) lands, do NOT stream it.
 
     // Per-entity placements: ModelName props in layers_static, keyed by entity key with their own
     // hibernation directive (or the class defaults).
@@ -362,6 +386,15 @@ pub fn build_streaming_catalog(
         mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
         props.insert(p.key, PropSpawn { model_hash: h, pos: p.pos, quat: p.quat });
     }
+
+    // Region cache (PgSysPopulation CacheIn/CacheOut — row 9): the streaming manager now carries the
+    // decision layer (`mgr.add_region` / `update_regions`), but the region CATALOG is not populated
+    // here yet. Population regions come from the `SphereRegion`/`CircleRegion`/`LineRegion` +
+    // `PopulationDensity` COMPs (descriptors `FUN_00641e10`/`FUN_004d60e0` — world_streaming_code_map
+    // §4), whose field-schema parsers live in `mercs2_formats` (out of this silo's edit scope).
+    // Registering real regions is deferred to the population/formats silo — see
+    // `crates/mercs2_core/DEFERRED.md` ("region catalog wiring"). The decision core + its tests stand
+    // on their own until then; fabricating region rects here would violate the fidelity bar.
 
     (mgr, props, terrain_tiles)
 }
