@@ -140,6 +140,12 @@ pub struct Scene {
     particles: crate::particles::ParticleSystem,
     /// Last-frame timestamp for the particle sim's per-frame dt.
     last_frame: std::time::Instant,
+    /// Registered Band-A render nodes (reflection / water / decals / sky-as-pass silos), each plugged
+    /// into a canonical [`crate::render_graph::PassId`] slot. EMPTY by default → the `SCENE_ORDER`
+    /// walk records nothing extra, so the E2 carve stays behaviour-preserving until a silo plugs in.
+    /// A silo registers via [`Scene::add_render_node`]; the frame builds a [`crate::render_graph::PassCtx`]
+    /// and calls each matching node in its slot (see `dispatch_nodes`).
+    render_nodes: Vec<Box<dyn crate::render_graph::RenderNode>>,
 }
 
 impl Scene {
@@ -683,7 +689,16 @@ impl Scene {
             ui,
             particles,
             last_frame: std::time::Instant::now(),
+            render_nodes: Vec::new(),
         }
+    }
+
+    /// Register a Band-A [`crate::render_graph::RenderNode`] (reflection / water / decal / sky silo).
+    /// It runs in its declared [`crate::render_graph::PassId`] slot during the `SCENE_ORDER` walk,
+    /// handed a fully-populated [`crate::render_graph::PassCtx`] (camera + lights + surface format +
+    /// the collected renderable list). Multiple nodes may share a slot (registration order preserved).
+    pub fn add_render_node(&mut self, node: Box<dyn crate::render_graph::RenderNode>) {
+        self.render_nodes.push(node);
     }
 
     /// The wgpu device (external overlay layers create their GPU resources against it).
@@ -1288,6 +1303,44 @@ impl Scene {
         self.ui.draw(&mut upass, ui_count);
     }
 
+    /// Run any registered Band-A [`crate::render_graph::RenderNode`] whose slot is `slot`, building a
+    /// fully-populated [`crate::render_graph::PassCtx`] for each (camera + lights + surface format +
+    /// the collected renderable list). No-op when `render_nodes` is empty (the default) → the frame is
+    /// byte-identical to the E2 carve. `color` is this frame's swapchain view; `depth`/lights/format
+    /// come from `self`; the camera + `items` are this frame's locals.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_nodes(
+        &self,
+        slot: crate::render_graph::PassId,
+        encoder: &mut wgpu::CommandEncoder,
+        color: &wgpu::TextureView,
+        items: &[DrawItem],
+        view_proj: glam::Mat4,
+        view: glam::Mat4,
+        cam_pos: glam::Vec3,
+    ) {
+        for node in &self.render_nodes {
+            if node.id() != slot {
+                continue;
+            }
+            let mut ctx = crate::render_graph::PassCtx {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut *encoder, // reborrow per node so ctx can be rebuilt each iteration
+                color,
+                depth: &self.depth_view,
+                size: [self.config.width, self.config.height],
+                view_proj,
+                view,
+                cam_pos,
+                lights_bind: &self.lights_bind,
+                surface_format: self.config.format,
+                items,
+            };
+            node.record(&mut ctx);
+        }
+    }
+
     /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
         self.render_with(world, None)
@@ -1491,6 +1544,10 @@ impl Scene {
                 // color/shadow passes' own RT bind + clear — no standalone GPU pass to record.
                 PassId::SceneBegin | PassId::Collect | PassId::ShadowCollect => {}
             }
+            // After the built-in pass for this slot, run any Band-A silo node plugged into it, handed
+            // the fully-populated PassCtx (camera + lights + surface format + the collected `items`
+            // list). No registered nodes yet → this is a no-op and the frame stays byte-identical.
+            self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -1501,8 +1558,9 @@ impl Scene {
 
 /// A snapshot of one drawable entity for a frame: `(entity, model-space transform, model hash,
 /// bone palette)`. Copied out of the ECS `World` each frame so the world borrow is released before
-/// `Scene` records the passes.
-type DrawItem = (Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>);
+/// `Scene` records the passes. This IS the [`crate::render_graph::PassId::Collect`] list the Band-A
+/// silos read via [`crate::render_graph::PassCtx::items`] (aliased so the exposure is zero-copy).
+type DrawItem = crate::render_graph::RenderItem;
 
 /// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,
 /// swapchain view, surface size in pixels.
