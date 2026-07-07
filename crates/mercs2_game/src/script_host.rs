@@ -74,7 +74,17 @@ pub struct GameScriptHost {
     hero_spawn: Option<[f32; 3]>,
     /// The hero template name the boot spawns (`chris`/`mattias`/`jen`), for the fired boot flow.
     hero_character: String,
+    /// `Player.AttachToCharacter` bindings: player GUID → the character it controls. The local player
+    /// defaults to [`HERO_GUID`] (`player_character_of`) even before an explicit attach.
+    player_character: HashMap<u64, u64>,
+    /// `Human.SetState`/`DoAction` driven state per humanoid GUID: `(stance, action)`. The boot teleport
+    /// (`mrxutil.lua:314`) records `("upright","idle")`; civ/hijack scripts record their stance+anim.
+    human_states: HashMap<u64, (String, String)>,
 }
+
+/// The GUID the local player object is registered under (distinct from [`HERO_GUID`], the character it
+/// controls). `Player.GetLocalPlayer`/`GetPrimaryPlayer` return this; `Player.GetCharacter(it)` → hero.
+pub const LOCAL_PLAYER_GUID: u64 = 0x0000_0002;
 
 /// The GUID the player hero is registered under so the game's Lua can address it (`Player.Get*Character`
 /// return this; `Object.SetPosition`/`SetYaw` on it drive the real player). Distinct from the
@@ -97,7 +107,25 @@ impl GameScriptHost {
             marker_guids: std::collections::HashMap::new(),
             hero_spawn: None,
             hero_character: String::new(),
+            player_character: HashMap::new(),
+            human_states: HashMap::new(),
         }
+    }
+
+    /// The `(stance, action)` a `Human.SetState`/`DoAction` last drove onto `guid`, if any — the loop's
+    /// humanoid animation system reads this to pick the clip (record-then-realize, like spawns).
+    #[allow(dead_code)] // consumed by the loop's humanoid-anim realize step (wired next), like `audio()`.
+    pub fn human_state(&self, guid: u64) -> Option<&(String, String)> {
+        self.human_states.get(&guid)
+    }
+
+    /// Look up a spawned actor's template (its model), for `Object.GetModelName` / name resolution.
+    fn template_of(&self, guid: u64) -> Option<&str> {
+        self.by_guid.get(&guid).and_then(|&i| self.spawns.get(i)).map(|r| r.template.as_str())
+    }
+
+    fn name_of(&self, guid: u64) -> Option<&str> {
+        self.by_guid.get(&guid).and_then(|&i| self.spawns.get(i)).map(|r| r.name.as_str())
     }
 
     /// A shared handle to the live audio engine, for the game loop to `tick`/`render_tick` each frame
@@ -283,6 +311,74 @@ impl EngineHost for GameScriptHost {
     }
     fn ai_set_state(&mut self, guid: u64, state: &str, on: bool) -> bool {
         self.ai_states.entry(guid).or_default().set_state(state, on)
+    }
+
+    // ===== Player identity / session / binding (single local player controlling the hero). =====
+    fn player_local_player(&self) -> u64 {
+        LOCAL_PLAYER_GUID
+    }
+    fn player_get_player(&self, id: i64) -> u64 {
+        if id <= 1 { LOCAL_PLAYER_GUID } else { 0 }
+    }
+    fn player_primary_player(&self) -> u64 {
+        LOCAL_PLAYER_GUID
+    }
+    fn player_character_of(&self, player: u64) -> u64 {
+        if let Some(&c) = self.player_character.get(&player) {
+            return c;
+        }
+        if player == LOCAL_PLAYER_GUID {
+            HERO_GUID
+        } else {
+            0
+        }
+    }
+    fn player_is_local(&self, guid: u64) -> bool {
+        // The local player and the hero it controls are local; a hypothetical second player is remote.
+        guid == LOCAL_PLAYER_GUID || guid == HERO_GUID
+    }
+    fn player_selected_character(&self) -> String {
+        self.hero_character.clone()
+    }
+    fn player_attach_to_character(&mut self, player: u64, character: u64) {
+        self.player_character.insert(player, character);
+    }
+    fn player_detach_from_character(&mut self, player: u64) {
+        self.player_character.remove(&player);
+    }
+    fn player_unbind(&mut self, player: u64) {
+        self.player_character.remove(&player);
+    }
+
+    // ===== Object identity (derived from the recorded spawn requests + the hero). =====
+    fn object_name(&self, guid: u64) -> String {
+        self.name_of(guid).unwrap_or("").to_string()
+    }
+    fn object_model_name(&self, guid: u64) -> String {
+        self.template_of(guid).unwrap_or("").to_string()
+    }
+    fn object_is_player_controlled(&self, guid: u64) -> bool {
+        guid == HERO_GUID
+    }
+    fn object_is_valid(&self, guid: u64) -> bool {
+        guid == HERO_GUID
+            || self.by_guid.contains_key(&guid)
+            || self.marker_guids.contains_key(&guid)
+    }
+
+    // ===== Human driven state (record-then-realize, keyed by GUID). =====
+    fn human_set_state(&mut self, guid: u64, stance: &str, action: &str) {
+        self.human_states
+            .insert(guid, (stance.to_string(), action.to_string()));
+    }
+    fn human_do_action(&mut self, guid: u64, action: &str) {
+        // Keep the current stance; DoAction only changes the one-shot action.
+        let stance = self
+            .human_states
+            .get(&guid)
+            .map(|(s, _)| s.clone())
+            .unwrap_or_default();
+        self.human_states.insert(guid, (stance, action.to_string()));
     }
 }
 

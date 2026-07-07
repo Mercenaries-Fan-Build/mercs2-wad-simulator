@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Human")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Human";
@@ -45,7 +45,63 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetJostleEnabled", corpus_calls: 2 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Humanoid state surface. `SetState`/`DoAction` (the boot-relevant teleport + civ/hijack drivers) and
+/// the carry/swim/grapple queries are **real** — they record onto / read the host's per-human state.
+/// The remaining animation/weapon/ragdoll *actions* (Knockdown, PlayRawAnimation, DisableWeapons, …)
+/// are faithful no-ops: this build has no ragdoll/weapon-lock runtime, so the game's Lua control flow
+/// runs unchanged and simply produces no ragdoll/anim side effect.
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // --- driven state (real: recorded on the host, keyed by GUID) ---
+    // Human.SetState(guid, stance, action) — mrxutil.lua:314 teleport calls ("upright","idle"); the
+    // civ/hijack tables drive ("InVehicle", <animation>). `action` is optional (SetState(g,"Cower")).
+    let h = host.clone();
+    b.real(
+        "SetState",
+        lua.create_function(move |_, (guid, stance, action): (i64, String, Option<String>)| {
+            h.borrow_mut().human_set_state(guid as u64, &stance, action.as_deref().unwrap_or(""));
+            Ok(())
+        })?,
+    )?;
+    let h = host.clone();
+    b.real(
+        "DoAction",
+        lua.create_function(move |_, (guid, action): (i64, String)| {
+            h.borrow_mut().human_do_action(guid as u64, &action);
+            Ok(())
+        })?,
+    )?;
+
+    // --- queries (real: read host state) ---
+    let h = host.clone();
+    b.real("IsSwimming", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_swimming(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("IsCarrying", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_carrying(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("IsGrappling", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_grappling(guid as u64)))?)?;
+
+    // --- animation / weapon / ragdoll actions: faithful no-ops (no ragdoll/weapon-lock runtime yet) ---
+    for name in [
+        "Knockdown",
+        "SetPreemptiveRagdoll",
+        "ForceExitSeatNoSnap",
+        "Emote",
+        "PlayRawAnimation",
+        "PersistTransform",
+        "Drop",
+        "StopGrappling",
+        "EnableWeapons",
+        "DisableWeapons",
+        "SetFireLock",
+        "EquipWeapon",
+        "StowWeapon",
+        "SetAllowCorpseCleanup",
+        "Scrub",
+        "SetJostleEnabled",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
+
+    b.install_global(GLOBAL)
 }

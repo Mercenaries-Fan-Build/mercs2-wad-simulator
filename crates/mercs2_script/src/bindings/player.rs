@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Player")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -180,6 +180,164 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("GetSecondaryCharacter", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_secondary_character())))?)?;
     let h = host.clone();
     b.real("IsLocal", lua.create_function(move |_, guid: i64| Ok(h.borrow().player_is_local(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("IsRemote", lua.create_function(move |_, guid: i64| Ok(!h.borrow().player_is_local(guid as u64)))?)?;
+
+    // --- identity / session (real getters backed by host player↔character state) ---
+    let h = host.clone();
+    b.real("GetPlayer", lua.create_function(move |_, id: Option<i64>| Ok(guid_opt(h.borrow().player_get_player(id.unwrap_or(0)))))?)?;
+    let h = host.clone();
+    b.real("GetPrimaryPlayer", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_primary_player())))?)?;
+    let h = host.clone();
+    b.real("GetSecondaryPlayer", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_secondary_player())))?)?;
+    let h = host.clone();
+    b.real("GetCharacter", lua.create_function(move |_, player: i64| Ok(guid_opt(h.borrow().player_character_of(player as u64))))?)?;
+    let h = host.clone();
+    b.real("GetControlledObject", lua.create_function(move |_, player: i64| Ok(guid_opt(h.borrow().player_controlled_object(player as u64))))?)?;
+    let h = host.clone();
+    b.real("GetPlayerId", lua.create_function(move |_, player: i64| Ok(h.borrow().player_id_of(player as u64)))?)?;
+    let h = host.clone();
+    b.real("GetLocalPlayerId", lua.create_function(move |_, ()| Ok(h.borrow().player_id_of(h.borrow().player_local_player())))?)?;
+    let h = host.clone();
+    b.real("GetLocalId", lua.create_function(move |_, ()| Ok(h.borrow().player_id_of(h.borrow().player_local_player())))?)?;
+    let h = host.clone();
+    b.real("GetName", lua.create_function(move |_, player: i64| Ok(h.borrow().player_name(player as u64)))?)?;
+    let h = host.clone();
+    b.real("GetMaximumPlayers", lua.create_function(move |_, ()| Ok(h.borrow().player_max_players()))?)?;
+    let h = host.clone();
+    b.real("GetMaximumLocalPlayers", lua.create_function(move |_, ()| Ok(h.borrow().player_max_players()))?)?;
+    let h = host.clone();
+    b.real("GetCurrentPlayers", lua.create_function(move |_, ()| Ok(h.borrow().player_current_players()))?)?;
+    let h = host.clone();
+    b.real("GetCurrentLocalPlayers", lua.create_function(move |_, ()| Ok(h.borrow().player_current_players()))?)?;
+    let h = host.clone();
+    b.real("IsCoopMultiplayer", lua.create_function(move |_, ()| Ok(h.borrow().player_is_coop()))?)?;
+    let h = host.clone();
+    b.real("IsJoined", lua.create_function(move |_, player: i64| Ok(h.borrow().player_is_joined(player as u64)))?)?;
+    // GUID list getters -> Lua array table (1-based).
+    fn guid_table(lua: &Lua, guids: Vec<u64>) -> LuaResult<mlua::Table> {
+        let t = lua.create_table()?;
+        for (i, g) in guids.into_iter().enumerate() {
+            t.set(i + 1, g as i64)?;
+        }
+        Ok(t)
+    }
+    let h = host.clone();
+    b.real("GetAllPlayers", lua.create_function(move |lua, ()| guid_table(lua, h.borrow().player_all_players()))?)?;
+    let h = host.clone();
+    b.real("GetAllCharacters", lua.create_function(move |lua, ()| guid_table(lua, h.borrow().player_all_characters()))?)?;
+
+    // --- profile (real: the host's hero fields; the game reads these for the LOOK/economy) ---
+    let h = host.clone();
+    b.real("GetSelectedCharacter", lua.create_function(move |_, ()| Ok(h.borrow().player_selected_character()))?)?;
+    let h = host.clone();
+    b.real("GetProfileCharacter", lua.create_function(move |_, ()| Ok(h.borrow().player_profile_character()))?)?;
+    let h = host.clone();
+    b.real("GetProfileUpgrade", lua.create_function(move |_, ()| Ok(h.borrow().player_profile_upgrade()))?)?;
+    let h = host.clone();
+    b.real("GetProfileCostume", lua.create_function(move |_, ()| Ok(h.borrow().player_profile_costume()))?)?;
+    let h = host.clone();
+    b.real("GetAvailableCostumes", lua.create_function(move |lua, ()| {
+        let t = lua.create_table()?;
+        for (i, c) in h.borrow().player_available_costumes().into_iter().enumerate() {
+            t.set(i + 1, c)?;
+        }
+        Ok(t)
+    })?)?;
+    let h = host.clone();
+    b.real("SetProfileCostume", lua.create_function(move |_, costume: i64| { h.borrow_mut().player_set_profile_costume(costume); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetOutfit", lua.create_function(move |_, (character, outfit): (i64, i64)| { h.borrow_mut().player_set_outfit(character as u64, outfit); Ok(()) })?)?;
+
+    // --- binding actions (real: track the player↔character binding on the host) ---
+    let h = host.clone();
+    b.real("AttachToCharacter", lua.create_function(move |_, (player, character): (i64, i64)| { h.borrow_mut().player_attach_to_character(player as u64, character as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("DetachFromCharacter", lua.create_function(move |_, player: i64| { h.borrow_mut().player_detach_from_character(player as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("BindToLocal", lua.create_function(move |_, player: i64| { h.borrow_mut().player_bind_local(player as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("BindToRemote", lua.create_function(move |_, player: i64| { h.borrow_mut().player_bind_remote(player as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Unbind", lua.create_function(move |_, player: i64| { h.borrow_mut().player_unbind(player as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("CreatePlayer", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow_mut().player_create())))?)?;
+    let h = host.clone();
+    b.real("DestroyPlayer", lua.create_function(move |_, player: i64| { h.borrow_mut().player_destroy(player as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("ClearPlayerDB", lua.create_function(move |_, ()| { h.borrow_mut().player_clear_db(); Ok(()) })?)?;
+
+    // --- const-default getters (faithful: nothing modelled → neutral values, so Lua never hits nil) ---
+    b.real("InCinematicMode", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsInWarningZone", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsBoundaryDeath", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsPositionOutBoundary", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("GetControlBindingType", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetCameraXZHeading", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    b.real("GetVehicleDisguiseState", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetViewportId", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("CheckSpawnPos", lua.create_function(|_, _: MultiValue| Ok(true))?)?;
+    // Viewport / boundary / spawn-start handles: nothing modelled → nil (authentic `if not uX` flow).
+    b.real("GetViewport", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    b.real("GetOutBoundary", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    b.real("GetPlayerStart", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    b.real("GetRetryPosition", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    // Handle/target getters with nothing to return → nil (the game's `if not uX` control flow is authentic).
+    b.real("GetCamera", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    b.real("GetTargetUnderReticle", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    b.real("GetVehicleDisguise", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    b.real("GetSeat", lua.create_function(|_, _: MultiValue| Ok(mlua::Value::Nil))?)?;
+    // Empty-list getters (iterating them is a faithful no-op).
+    b.real("GetAllTargetMarkerPos", lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
+    b.real("GetAllBoundaryGuid", lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
+
+    // --- session / camera / boundary / PDA / scan actions: faithful no-ops (unmodelled subsystems) ---
+    for name in [
+        "SetCinematicMode",
+        "SetInputEnabled",
+        "SetSurvivalMode",
+        "SetSurvivalModeCallback",
+        "SetHealthClamp",
+        "SetWaitForInGame",
+        "SetAimMode",
+        "SetInPmc",
+        "SetGrappleEnabled",
+        "SetScopeEnabled",
+        "ClearGPS",
+        "SetSeatMovementLocks",
+        "SetVehicleControlsLock",
+        "SetProfileCharacter",
+        "SetProfileUpgrade",
+        "SetAvailableCostumes",
+        "SetVehicleDisguise",
+        "VehicleDisguise",
+        "SetSwimmingSearchRadius",
+        "TeleportCamera",
+        "SetPDAMapMode",
+        "SetPDAMapModeCallback",
+        "SetPDAMapModeCancelCallback",
+        "RequestPDAMapModeExit",
+        "RequestPDAMapModeCancel",
+        "SetSatelliteScanMode",
+        "SetupSatelliteScan",
+        "SetSatelliteScanCallbacks",
+        "AddSatelliteScanTarget",
+        "SetSatelliteScanPaused",
+        "SetOutBoundary",
+        "AddBoundary",
+        "RemoveBoundary",
+        "RemoveAllBoundary",
+        "SetBoundaryCallback",
+        "SetPlayerJoinedCallback",
+        "SetPlayerLeftCallback",
+        "RemovePlayerJoinedCallback",
+        "RemovePlayerLeftCallback",
+        "SetPlayerStart",
+        "ClaimSeat",
+        "UnClaimSeat",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
 
     b.install_global(GLOBAL)
 }

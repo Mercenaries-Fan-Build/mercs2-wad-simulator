@@ -395,6 +395,281 @@ pub trait EngineHost {
         let _ = (guid, state, on);
         false
     }
+
+    // ===== Player: identity / session / binding / profile (the depth surface `Player.*` reads). =====
+    // The host tracks the player↔character binding + the profile hero fields; getters the game reads
+    // return real host state, pure session actions the single-player host ignores are faithful no-ops.
+    /// `Player.GetPlayer(id)` — the player object for a slot id (0 = local).
+    fn player_get_player(&self, id: i64) -> u64 {
+        let _ = id;
+        self.player_local_player()
+    }
+    /// `Player.GetCharacter(player)` — the character a player currently controls.
+    fn player_character_of(&self, player: u64) -> u64 {
+        let _ = player;
+        0
+    }
+    /// `Player.GetControlledObject(player)` — the object (character or vehicle) a player drives.
+    fn player_controlled_object(&self, player: u64) -> u64 {
+        self.player_character_of(player)
+    }
+    /// `Player.GetPrimaryPlayer`.
+    fn player_primary_player(&self) -> u64 {
+        self.player_local_player()
+    }
+    /// `Player.GetSecondaryPlayer` (0 = no second player → nil).
+    fn player_secondary_player(&self) -> u64 {
+        0
+    }
+    /// `Player.GetPlayerId(player)` / `GetLocalPlayerId` / `GetLocalId`.
+    fn player_id_of(&self, player: u64) -> i64 {
+        let _ = player;
+        0
+    }
+    /// `Player.GetName(player)`.
+    fn player_name(&self, player: u64) -> String {
+        let _ = player;
+        String::new()
+    }
+    /// `Player.GetAllPlayers`.
+    fn player_all_players(&self) -> Vec<u64> {
+        let p = self.player_local_player();
+        if p == 0 { Vec::new() } else { vec![p] }
+    }
+    /// `Player.GetAllCharacters`.
+    fn player_all_characters(&self) -> Vec<u64> {
+        let c = self.player_any_character();
+        if c == 0 { Vec::new() } else { vec![c] }
+    }
+    /// `Player.GetMaximumPlayers` / `GetMaximumLocalPlayers` (2-player co-op).
+    fn player_max_players(&self) -> i64 {
+        2
+    }
+    /// `Player.GetCurrentPlayers` / `GetCurrentLocalPlayers`.
+    fn player_current_players(&self) -> i64 {
+        1
+    }
+    /// `Player.IsCoopMultiplayer`.
+    fn player_is_coop(&self) -> bool {
+        false
+    }
+    /// `Player.IsJoined(player)`.
+    fn player_is_joined(&self, player: u64) -> bool {
+        player != 0
+    }
+    /// `Player.GetSelectedCharacter` — the selected hero template name (`chris`/`mattias`/`jen`).
+    fn player_selected_character(&self) -> String {
+        String::new()
+    }
+    /// `Player.GetProfileCharacter` — the save's hero character (header @0x4D).
+    fn player_profile_character(&self) -> String {
+        self.player_selected_character()
+    }
+    /// `Player.GetProfileUpgrade` — the save's upgrade tier (header @0x4F).
+    fn player_profile_upgrade(&self) -> i64 {
+        0
+    }
+    /// `Player.GetProfileCostume` — the save's wardrobe costume (0 in all shipped saves).
+    fn player_profile_costume(&self) -> i64 {
+        0
+    }
+    /// `Player.GetAvailableCostumes`.
+    fn player_available_costumes(&self) -> Vec<i64> {
+        Vec::new()
+    }
+    /// `Player.AttachToCharacter(player, character)` — bind a player to a character.
+    fn player_attach_to_character(&mut self, player: u64, character: u64) {
+        let _ = (player, character);
+    }
+    /// `Player.DetachFromCharacter(player)`.
+    fn player_detach_from_character(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Player.BindToLocal(player)`.
+    fn player_bind_local(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Player.BindToRemote(player)`.
+    fn player_bind_remote(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Player.Unbind(player)`.
+    fn player_unbind(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Player.CreatePlayer` — mint a new player object (0 = failed → nil).
+    fn player_create(&mut self) -> u64 {
+        0
+    }
+    /// `Player.DestroyPlayer(player)`.
+    fn player_destroy(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Player.ClearPlayerDB`.
+    fn player_clear_db(&mut self) {}
+    /// `Player.SetOutfit(character, outfit)` — the `_tOutfits`→wardrobe override.
+    fn player_set_outfit(&mut self, character: u64, outfit: i64) {
+        let _ = (character, outfit);
+    }
+    /// `Player.SetProfileCostume(costume)`.
+    fn player_set_profile_costume(&mut self, costume: i64) {
+        let _ = costume;
+    }
+
+    // ===== Object: the depth surface (identity / transform / physics / hibernation state). =====
+    /// `Object.GetParent(guid)` (0 = no parent → nil).
+    fn object_parent(&self, guid: u64) -> u64 {
+        let _ = guid;
+        0
+    }
+    /// `Object.GetModelName(guid)`.
+    fn object_model_name(&self, guid: u64) -> String {
+        let _ = guid;
+        String::new()
+    }
+    /// `Object.SetModelName(guid, name)`.
+    fn object_set_model_name(&mut self, guid: u64, name: &str) {
+        let _ = (guid, name);
+    }
+    /// `Object.GetLocalizedName(guid)` — the display name (defaults to the object name).
+    fn object_localized_name(&self, guid: u64) -> String {
+        self.object_name(guid)
+    }
+    /// `Object.IsValid(guid)`.
+    fn object_is_valid(&self, guid: u64) -> bool {
+        guid != 0
+    }
+    /// `Object.IsPlayerControlled(guid)`.
+    fn object_is_player_controlled(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Object.GetInvincible(guid)`.
+    fn object_get_invincible(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Object.GetMass(guid)`.
+    fn object_mass(&self, guid: u64) -> f32 {
+        let _ = guid;
+        0.0
+    }
+    /// `Object.SetMass(guid, mass)`.
+    fn object_set_mass(&mut self, guid: u64, mass: f32) {
+        let _ = (guid, mass);
+    }
+    /// `Object.IsVisible(guid)`.
+    fn object_is_visible(&self, guid: u64) -> bool {
+        let _ = guid;
+        true
+    }
+    /// `Object.SetVisible(guid, on)`.
+    fn object_set_visible(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Object.IsAwake(guid)`.
+    fn object_is_awake(&self, guid: u64) -> bool {
+        let _ = guid;
+        true
+    }
+    /// `Object.IsHibernated(guid)`.
+    fn object_is_hibernated(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Object.GetHibernationDistance(guid)`.
+    fn object_hibernation_distance(&self, guid: u64) -> f32 {
+        let _ = guid;
+        0.0
+    }
+    /// `Object.SetHibernationDistance(guid, dist)`.
+    fn object_set_hibernation_distance(&mut self, guid: u64, dist: f32) {
+        let _ = (guid, dist);
+    }
+    /// `Object.GetPhysicsType(guid)`.
+    fn object_physics_type(&self, guid: u64) -> i64 {
+        let _ = guid;
+        0
+    }
+    /// `Object.EnablePhysics` (`on=true`) / `Object.DisablePhysics`.
+    fn object_set_physics_enabled(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Object.GetVelocityVector(guid)`.
+    fn object_velocity_vector(&self, guid: u64) -> [f32; 3] {
+        let _ = guid;
+        [0.0; 3]
+    }
+    /// `Object.GetDistanceFrom(a, b)` — real Euclidean distance from the two objects' positions.
+    fn object_distance(&mut self, a: u64, b: u64) -> f32 {
+        let pa = self.object_get_position(a);
+        let pb = self.object_get_position(b);
+        let d = [pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+    /// `Object.IsAttached(guid)`.
+    fn object_is_attached(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Object.GetAttachedObjects(guid)`.
+    fn object_attached_objects(&self, guid: u64) -> Vec<u64> {
+        let _ = guid;
+        Vec::new()
+    }
+    /// `Object.IsTemplate(guid)`.
+    fn object_is_template(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Object.GetCashValue(guid)`.
+    fn object_cash_value(&self, guid: u64) -> i64 {
+        let _ = guid;
+        0
+    }
+    /// `Object.SetUnkillable(guid, on)`.
+    fn object_set_unkillable(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Object.SetInfiniteAmmo(guid, on)`.
+    fn object_set_infinite_ammo(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Object.FadeOut(guid)` — despawn with a fade (record as a removal).
+    fn object_fade_out(&mut self, guid: u64) {
+        self.object_remove(guid);
+    }
+    /// `Object.IsDisguised(guid)`.
+    fn object_is_disguised(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+
+    // ===== Human: humanoid stance / action / carry state (mrxutil teleport + civ/hijack scripts). =====
+    /// `Human.SetState(guid, stance, action)` — the boot-relevant stance+action setter
+    /// (`mrxutil.lua:314` teleport uses `("upright","idle")`). Records the humanoid's driven state.
+    fn human_set_state(&mut self, guid: u64, stance: &str, action: &str) {
+        let _ = (guid, stance, action);
+    }
+    /// `Human.DoAction(guid, action)` — trigger a one-shot humanoid action (Cower/Stand/…).
+    fn human_do_action(&mut self, guid: u64, action: &str) {
+        let _ = (guid, action);
+    }
+    /// `Human.IsSwimming(guid)`.
+    fn human_is_swimming(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Human.IsCarrying(guid)`.
+    fn human_is_carrying(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Human.IsGrappling(guid)`.
+    fn human_is_grappling(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -778,8 +1053,8 @@ mod tests {
         // Baseline after the Wave-3 binding pass (5 agents backed ~520 bindings across HUD/Net/
         // presentation/math+string+util/object-family; +3 real cross-cutting fixes). Bump when a silo
         // lands more bodies. real 86→190 (+104 real); stubs jumped with the faithful no-op surface.
-        const EXPECTED_REAL: usize = 190;
-        const EXPECTED_STUB: usize = 428; // 9→428: the faithful no-op surface (HUD/Net/presentation/…)
+        const EXPECTED_REAL: usize = 290;
+        const EXPECTED_STUB: usize = 508;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -807,9 +1082,9 @@ mod tests {
         assert_eq!(by("Debug").real_count(), 1);
         assert_eq!(by("Sys").real_count(), 7);
         assert_eq!(by("Pg").real_count(), 2);
-        assert_eq!(by("Object").real_count(), 18);
-        assert_eq!(by("Object").stub_count(), 3);
-        assert_eq!(by("Player").real_count(), 14);
+        assert_eq!(by("Object").real_count(), 62);
+        assert_eq!(by("Object").stub_count(), 25);
+        assert_eq!(by("Player").real_count(), 65);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 16);
         assert_eq!(by("Sound").real_count(), 20);
