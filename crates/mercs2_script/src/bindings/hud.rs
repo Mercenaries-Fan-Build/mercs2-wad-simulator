@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Hud")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Hud";
@@ -138,7 +138,159 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "AddPdaMapBlips", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Names backed by a deliberate **faithful no-op** stub: every widget/image/text/minimap/flash/
+/// sprite/movie/pda *mutator* (create/set/show/hide/update/animate/play/…). The retail bodies drive
+/// the Scaleform GFx HUD overlay; this build renders no GFx HUD yet, so a silent no-op is the
+/// faithful behavior — the game's Lua HUD managers (`mrxguiinterface`, `mrxguimanager`) run their
+/// control flow unchanged, they simply produce no on-screen overlay. Getters are handled separately
+/// in [`install`] (real bodies returning sane defaults so no Lua arithmetic hits `nil`).
+const STUB_NAMES: &[&str] = &[
+    // --- widget lifecycle / transform / state (mutators) ---
+    "CreateWidget",
+    "DeleteWidget",
+    "SetWidgetLocation",
+    "SetWidgetHighlightable",
+    "SetWidgetCorrectedLocation",
+    "SetWidgetColor",
+    "SetWidgetVisible",
+    "SetWidgetIgnoresPause",
+    "ActivateWidget",
+    "SetWidgetSleep",
+    "PushWidgetToFront",
+    "PushWidgetToBack",
+    "SetWidgetAnchoring",
+    "InterpolateWidget",
+    "SetWidgetUpdateCallback",
+    "SetWidgetViewport",
+    "AddWidgetChild",
+    "SetWidgetChild",
+    "RemoveWidgetChild",
+    "RemoveAllWidgetChildren",
+    "SetWidgetFullscreen",
+    "CorrectWidgetForResolution",
+    "SetWidgetUseResolutionCorrection",
+    "SetWidgetUseNewRescale",
+    // --- image widget (mutators) ---
+    "CreateImageWidget",
+    "SetImageTexture",
+    "SetImageRotation",
+    "SetImageTextureCoordinates",
+    "SetImageTiling",
+    "SetImageTextureTransience",
+    "SetImageClockAnimation",
+    "SetImageClockCallback",
+    "SetImagePieSliceRender",
+    "DisableImagePieSliceRender",
+    // --- text widget (mutators) ---
+    "CreateTextWidget",
+    "SetTextText",
+    "SetTextFont",
+    "SetTextWrapping",
+    "SetTextJustification",
+    "SetTextScale",
+    "SplitText",
+    "AnimateText",
+    "HaltTextAnimation",
+    // --- minimap (mutators) ---
+    "MinimapCreate",
+    "MinimapUpdate",
+    "MinimapSetPlayerLocation",
+    "MinimapSetFocusLocation",
+    "MinimapSetRotation",
+    "MinimapSetRange",
+    "SetMinimapOwner",
+    "SetMinimapBorder",
+    "SetMinimapRadius",
+    "MinimapAddObjective",
+    "MinimapAnimateObjectiveSize",
+    "MinimapAnimateObjectiveAlpha",
+    "MinimapAnimateObjectiveSonar",
+    "MinimapUnanimateObjective",
+    "MinimapRemoveObjective",
+    "MinimapDelete",
+    "SetPlayerPDAWidget",
+    // --- flash widget (mutators) ---
+    "CreateFlashWidget",
+    "SetFlashSwfFile",
+    "SetFlashPlaySpeed",
+    "PauseFlash",
+    "PlayFlash",
+    "RestartFlash",
+    "SendFlashInput",
+    "SendFlashLeftAnalogInput",
+    "SendFlashRightAnalogInput",
+    "SetFlashCallback",
+    "CallFlashScriptFunction",
+    "SetFlashPauseMenu",
+    "SetFlashTesselationAllowed",
+    "RemoveFlashPauseMenu",
+    // --- sprite widget (mutators) ---
+    "CreateSpriteWidget",
+    "SetSpriteTexture",
+    "SetSpriteTextureSize",
+    "SetSpriteFrameSize",
+    "AnimateSprite",
+    "HaltSpriteAnimation",
+    "SetSpriteFrame",
+    // --- movie widget (mutators) ---
+    "CreateMovieWidget",
+    "SetMovieFile",
+    "PlayMovie",
+    "PauseMovie",
+    "StopMovie",
+    "SetMovieEndCallback",
+    // --- PDA blips (mutators) ---
+    "RegisterForPdaUpdate",
+    "RemovePdaBlip",
+    "UpdatePdaBlip",
+    "AddPdaMapBlips",
+];
+
+/// Faithful HUD binding surface. We render no Scaleform GFx HUD yet, so every mutator is a silent
+/// no-op and every query returns the sane engine default (a widget with default transform/state).
+/// This keeps the game's Lua HUD managers running their exact control flow — the only observable
+/// difference from retail is the absent overlay. No [`crate::EngineHost`] method is needed.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // --- mutators: faithful no-ops (ignore all args, return nil) ---
+    for &name in STUB_NAMES {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    }
+
+    // --- queries: real bodies returning sane defaults so Lua never does arithmetic on nil ---
+    // Boolean state getters — nothing is shown/awake in a HUD-less build.
+    b.real("GetWidgetVisible", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("GetWidgetHighlightable", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("GetWidgetIgnoresPause", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("GetWidgetSleep", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("GetTextWrapping", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+
+    // Location / viewport / color / texcoords — return neutral numeric tuples.
+    b.real("GetWidgetLocation", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32)))?)?;
+    b.real("GetWidgetCorrectedLocation", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32)))?)?;
+    b.real("GetWidgetViewport", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 0.0f32, 0.0f32)))?)?;
+    b.real("GetWidgetColor", lua.create_function(|_, _: MultiValue| Ok((255.0f32, 255.0f32, 255.0f32, 255.0f32)))?)?;
+    b.real("GetImageTextureCoordinates", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 1.0f32, 1.0f32)))?)?;
+
+    // Scalar numeric getters — 0 where a measurement/id, 1 where a multiplier/speed.
+    b.real("GetWidgetAnchoring", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetWidgetHighlightId", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetWidgetDownId", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetImageRotation", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    b.real("GetImageClockElapsed", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    b.real("GetTextWidth", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    b.real("GetTextHeight", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
+    b.real("GetTextJustification", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetTextScale", lua.create_function(|_, _: MultiValue| Ok(1.0f32))?)?;
+    b.real("GetFlashPlaySpeed", lua.create_function(|_, _: MultiValue| Ok(1.0f32))?)?;
+    b.real("GetMovieCurrentFrameNumber", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+
+    // String getter — empty text.
+    b.real("GetTextText", lua.create_function(|_, _: MultiValue| Ok(String::new()))?)?;
+
+    // Child list getter — empty table (iterating it is a no-op).
+    b.real("GetWidgetChildren", lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
+
+    b.install_global(GLOBAL)
 }

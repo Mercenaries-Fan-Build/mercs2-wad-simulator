@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Face")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Face";
@@ -30,7 +30,18 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetUseBriefingLOD", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Facial animation driver. The engine doesn't drive face anim in the reimpl, so every cfunc is a
+/// faithful no-op (`GetTranslationForStanceAndAction` returns nil — no translation). None of these are
+/// called by the game Lua corpus.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    b.stub("BindFaceAnimSet", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("UnbindFaceAnimSet", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("PlayFaceAnim", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("PlayFacialExpression", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("GetTranslationForStanceAndAction", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    b.stub("SetUseBriefingLOD", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+
+    b.install_global(GLOBAL)
 }

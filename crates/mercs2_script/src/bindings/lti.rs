@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Lti";
@@ -76,7 +76,87 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "FirstRun", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// LTI = the shell/front-end "library" the menu Flash calls back into: video/input/profile options,
+/// precache handshakes, shell-state changes. These are UI-driver callbacks; the fixed-function shell
+/// does not yet apply the option changes, and every observed call site discards the return, so the
+/// whole surface is a faithful no-op.
+///
+/// The one exception is `FirstRun`, whose return the shell reads: `if FirstRun() == 1 then` (the
+/// first-boot options prompt). Faithful default is a non-first-run session → `0`, so normal boot
+/// proceeds.
+///
+/// The game reaches this surface exclusively through the `LTILibName` alias (`LTILibName.FirstRun()`,
+/// `LTILibName.ChangeShellState(..)`, …) — never a bare `Lti.*`. The table installs as the `Lti`
+/// global and is also bound to the `LTILibName` global below so those shell lookups resolve.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "LTIMovieStart",
+        "LTIMovieStop",
+        "LTIMoviePause",
+        "LTIMovieResume",
+        "LTIVideoEnter",
+        "LTIVideoSwitchMode",
+        "LTIVideoNextRes",
+        "LTIVideoPrevRes",
+        "LTIVideoNextRefresh",
+        "LTIVideoPrevRefresh",
+        "LTIVideoSetGamma",
+        "LTIVideoGetViewDistance",
+        "LTIVideoApplyChanges",
+        "LTIVideoDefault",
+        "LTIVideoCancel",
+        "LTIVideoAdvanceEnter",
+        "LTIVideoSwitchOpt1",
+        "LTIVideoAdvanceDefault",
+        "LTIInputGeneralEnter",
+        "LTIInputGeneralOptions",
+        "LTIInputGeneralInvertMouse",
+        "LTIInputGeneralMouseSense",
+        "LTIInputGeneralJoySense",
+        "LTIInputGeneralRumble",
+        "LTIInputKMEnter",
+        "LTIInputKMChangeInput",
+        "LTIInputKMApplyChanges",
+        "LTIInputKMDefault",
+        "LTIOverBoundResponse",
+        "LTIInputKMCancelInput",
+        "LTIInputKMExit",
+        "LTIInputJoystickEnter",
+        "LTIInputJoystickChangePrimary",
+        "LTIInputJoystickChangeInput",
+        "LTIInputJoystickCancel",
+        "LTIInputJoystickApplyChanges",
+        "LTIInputJoystickDefault",
+        "LTIInputJoystickExit",
+        "LTIInputJoystickReEnter",
+        "LTIJoystickOverBoundResponse",
+        "LTIGetStartButton",
+        "ChangeShellState",
+        "LTIProfileEnter",
+        "LTIProfileExit",
+        "LTIPauseItemChanged",
+        "LTIPrecacheDone",
+        "LTIPrecacheSmokeDone",
+        "LTIChoseOnline",
+        "LTIGetDateFormat",
+        "LTICamera",
+        "LTIupdateSupportQuickSlot",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    // Shell first-boot gate: `if FirstRun() == 1` — report a normal (non-first) session.
+    b.real(
+        "FirstRun",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(0i64))?,
+    )?;
+
+    let installed = b.install_global(GLOBAL)?;
+
+    // The shell Flash callbacks address this surface as `LTILibName.*`; bind that alias to the table.
+    if let Ok(lti) = lua.globals().get::<mlua::Table>(GLOBAL) {
+        let _ = lua.globals().set("LTILibName", lti);
+    }
+
+    Ok(installed)
 }

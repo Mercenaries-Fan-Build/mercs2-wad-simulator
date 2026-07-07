@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "CameraFx";
@@ -38,7 +38,48 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetShot", corpus_calls: 2 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Cinematic-camera FX (shake, blend, hold, shot framing) plus a few pose getters. This table is
+/// installed on the `Camera` global, shared with `camera.rs`, and `camera_fx` installs *after* it in
+/// `install_all` — so we first wire our own bindings, then re-attach the sibling `camera.rs` entries
+/// (SetNearFar/…) that would otherwise be clobbered by the global replace.
+///
+/// The reimpl camera is fixed-function, so the FX setters are faithful no-ops. `GetYaw` is the one
+/// getter the gameplay Lua reads (e.g. `self.nHeading = Camera.GetYaw(cam)`); with no live camera
+/// heading to report it returns a neutral 0° — a value the callers' arithmetic accepts. `GetPitch`/
+/// `GetFOV` are not called by the corpus and stay no-ops.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "SetYaw",
+        "GetPitch",
+        "SetPitch",
+        "StopBlending",
+        "Shake",
+        "SetFOV",
+        "GetFOV",
+        "SetPosition",
+        "SetLookAt",
+        "Hold",
+        "Follow",
+        "Blend",
+        "SetShot",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    // Read as a heading by gameplay Lua — neutral 0° default.
+    b.real(
+        "GetYaw",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(0.0f64))?,
+    )?;
+
+    // Preserve the sibling `Camera` surface installed earlier by `camera.rs`; `install_global` below
+    // replaces the global table, so copy those functions into ours first (no name overlap).
+    if let Ok(existing) = lua.globals().get::<mlua::Table>(GLOBAL) {
+        for pair in existing.pairs::<String, mlua::Function>() {
+            let (k, f) = pair?;
+            b.extra(&k, f)?;
+        }
+    }
+
+    b.install_global(GLOBAL)
 }

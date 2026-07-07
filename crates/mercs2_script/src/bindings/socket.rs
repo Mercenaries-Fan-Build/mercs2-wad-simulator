@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Socket";
@@ -27,7 +27,15 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "freeaddrinfo", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Low-level DNS/socket resolver helpers. Faithful for a single-player boot: all no-op stubs — an
+/// offline SP session never resolves or opens sockets. (LuaSocket-style resolver surface.)
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for r in REQUIRED {
+        b.stub(
+            r.name,
+            lua.create_function(|_, _: mlua::MultiValue| Ok(()))?,
+        )?;
+    }
+    b.install_global(GLOBAL)
 }

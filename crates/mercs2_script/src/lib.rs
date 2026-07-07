@@ -775,10 +775,11 @@ mod tests {
         // Event system + Player economy/getters + Object health/labels + Sys game-state handshake).
         const EXPECTED_NAMESPACES: usize = 35;
         const EXPECTED_REQUIRED: usize = 1086;
-        // Debug(1) + Sys(7) + Pg(2) + Object(18) + Player(14) + Event(4) + Vehicle(16) + Sound(20)
-        // + Ai(4: Goal/SetRelation/GetRelation/SetState)
-        const EXPECTED_REAL: usize = 86;
-        const EXPECTED_STUB: usize = 9; // Debug(5) + Object(3) + Ai.Enable  (Vehicle.EnableTurret now real)
+        // Baseline after the Wave-3 binding pass (5 agents backed ~520 bindings across HUD/Net/
+        // presentation/math+string+util/object-family; +3 real cross-cutting fixes). Bump when a silo
+        // lands more bodies. real 86→190 (+104 real); stubs jumped with the faithful no-op surface.
+        const EXPECTED_REAL: usize = 190;
+        const EXPECTED_STUB: usize = 428; // 9→428: the faithful no-op surface (HUD/Net/presentation/…)
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

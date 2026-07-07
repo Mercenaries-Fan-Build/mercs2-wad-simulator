@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Graphics";
@@ -35,7 +35,35 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetBoundaryEffect", corpus_calls: 3 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Graphics settings/quality cfuncs — presentation only. Screenshot, frame-sync, gamma, shader
+/// reload, tiny-geometry and boundary-effect toggles are faithful no-ops on the fixed-function
+/// renderer, and none of those return values the game reads.
+///
+/// `GetShadowBaseDistance` is the one getter the game reads: briefings do
+/// `_nBaseShadowDistance = Graphics.GetShadowBaseDistance()`, temporarily lower it, then restore the
+/// saved value. It doesn't gate control flow, but the return is consumed, so it's real and reports a
+/// stable neutral base distance the save/restore round-trips cleanly. `GetScreenRatio` is never
+/// called by the corpus and stays a no-op.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "ScreenShot",
+        "SetNumFrameSync",
+        "SetScreenRatio",
+        "GetScreenRatio",
+        "ReloadShaders",
+        "SetGamma",
+        "SetShadowBaseDistance",
+        "InitTinyGeometry",
+        "ShowTinyGeometryObject",
+        "SetBoundaryEffect",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    // Saved-and-restored by briefing scripts; report a stable neutral base distance.
+    b.real(
+        "GetShadowBaseDistance",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(100.0f64))?,
+    )?;
+    b.install_global(GLOBAL)
 }

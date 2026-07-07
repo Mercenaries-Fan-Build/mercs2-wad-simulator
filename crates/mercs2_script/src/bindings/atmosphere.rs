@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Atmosphere";
@@ -61,7 +61,80 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetSky", corpus_calls: 5 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Sky / atmosphere / tone / bloom-value setters — presentation only. The fixed-function renderer
+/// carries a single fixed light + fog and does not honor these runtime sky/tone tweaks, so the whole
+/// setter/enable/change surface is a faithful no-op, and the uncalled getters (region settings, color/
+/// int values) return nil.
+///
+/// Two getters ARE read by the game and are backed with faithful neutral defaults:
+/// - `IsInterpolating` gates `bSafeToBegin = not Atmosphere.IsInterpolating()` → `false` (no transition
+///   in flight, so the game proceeds).
+/// - `GetValue(key)` feeds bloom-parameter arithmetic → `0.0` (a neutral numeric the callers accept).
+///
+/// The game addresses this whole surface as `Graphics.Atmosphere.*` (every observed call site); this
+/// table installs as the `Atmosphere` global and is *also* mirrored onto the `Graphics` global below so
+/// those lookups resolve. `Graphics` installs earlier in `install_all`, so its table already exists.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "Begin",
+        "End",
+        "SetTime",
+        "SetTimeSpeed",
+        "SetLightIntensity",
+        "SetLightModifier",
+        "SetLightAngle",
+        "SetAmbientColor",
+        "SetAmbientCube",
+        "SetRimColor",
+        "SetTurbinity",
+        "SetInscatteringMultiplier",
+        "SetExtinctionMultiplier",
+        "SetBetaRayMultiplier",
+        "SetBetaMieMultiplier",
+        "SetHenyeyGreensteinConst",
+        "SetAtmosphere",
+        "SetHaze",
+        "SetWindDirection",
+        "SetParticlesPerSecond",
+        "Change",
+        "ChangeLineRegionSetting",
+        "GetLineRegionSetting",
+        "GetLineRegion",
+        "Restore",
+        "GetCurrentSetting",
+        "EnableImmediatelyChangeMode",
+        "SetRainSpeed",
+        "SetRainDensity",
+        "SetValue",
+        "GetColorValue",
+        "SetColorValue",
+        "GetIntValue",
+        "SetIntValue",
+        "SetSky",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    // No sky transition is ever in flight — the game proceeds (`not IsInterpolating()`).
+    b.real(
+        "IsInterpolating",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+    )?;
+    // Reads a tone/bloom parameter into gameplay arithmetic — neutral numeric.
+    b.real(
+        "GetValue",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(0.0f64))?,
+    )?;
+
+    let installed = b.install_global(GLOBAL)?;
+
+    // Mirror onto `Graphics.Atmosphere`, the name every call site actually uses.
+    if let (Ok(gfx), Ok(atmo)) = (
+        lua.globals().get::<mlua::Table>("Graphics"),
+        lua.globals().get::<mlua::Table>(GLOBAL),
+    ) {
+        let _ = gfx.set("Atmosphere", atmo);
+    }
+
+    Ok(installed)
 }

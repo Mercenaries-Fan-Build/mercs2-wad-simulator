@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Gui";
@@ -62,7 +62,84 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "OutputToPIX", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// GUI/HUD frontend cfuncs. Marker placement, objective/texture/font loading, faction/vehicle/pickup
+/// marker toggles, sign-in checks, loading hints and PIX output are presentation/side-effect calls the
+/// fixed-function HUD does not yet render — faithful no-ops whose returns the game never reads.
+///
+/// Six getters ARE read by the game and are backed with faithful neutral defaults:
+/// - `IsXboxController` / `ControllerInUse` / `IsPdaOnSelect` gate KB/M-vs-controller branches → `false`
+///   (PC keyboard/mouse is the faithful default).
+/// - `GetReticlePosition` (→ two coords) and `FindGuiLocation` (→ four coords) feed widget arithmetic
+///   → neutral zeros (nil would fault the `local x,y = ...` math).
+/// - `GetLanguageName` supplies the localized-VO asset suffix → `"english"` (the base locale).
+///
+/// `GetLanguageNum` is not called by the corpus and stays a no-op.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "AddObjective",
+        "LoadTexture",
+        "LoadFont",
+        "_MarkerAdd",
+        "_MarkerAddTripwire",
+        "_MarkerAddDisc",
+        "_MarkerAdd3D",
+        "_MarkerSetBlipLimit",
+        "_MarkerAddOld",
+        "_MarkerRemove",
+        "_MarkerSetLocation",
+        "_MarkerSetColor",
+        "_MarkerSetFollowGuid",
+        "_MarkerSetScale",
+        "_MarkerPulse",
+        "_MarkerHaltPulse",
+        "SetFactionMarkerVisibleDistance",
+        "EnableFactionMarkers",
+        "SetFactionMarkerSize",
+        "SetVehicleEntranceMarkerVisibleDistance",
+        "EnableVehicleEntranceMarkers",
+        "SetVehicleEntranceMarkerSize",
+        "EnablePickupMarkers",
+        "SetPickupMarkerSize",
+        "SetPickupMarkerVisibleDistance",
+        "EnablePlayerMarkers",
+        "GetLanguageNum",
+        "DoSigninCheck",
+        "OnShellLoaded",
+        "OnGlobalExit",
+        "ShowLoadingHints",
+        "OutputToPIX",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+
+    // Input-mode queries gate KB/M-vs-controller branches — PC default = keyboard/mouse.
+    b.real(
+        "IsXboxController",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+    )?;
+    b.real(
+        "ControllerInUse",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+    )?;
+    b.real(
+        "IsPdaOnSelect",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+    )?;
+    // Screen-space queries feeding widget arithmetic — neutral coordinates.
+    b.real(
+        "GetReticlePosition",
+        lua.create_function(|_, _: mlua::MultiValue| Ok((0.0f64, 0.0f64)))?,
+    )?;
+    b.real(
+        "FindGuiLocation",
+        lua.create_function(|_, _: mlua::MultiValue| Ok((0.0f64, 0.0f64, 0.0f64, 0.0f64)))?,
+    )?;
+    // Localized-VO asset suffix — faithful base locale.
+    b.real(
+        "GetLanguageName",
+        lua.create_function(|_, _: mlua::MultiValue| Ok(String::from("english")))?,
+    )?;
+
+    b.install_global(GLOBAL)
 }

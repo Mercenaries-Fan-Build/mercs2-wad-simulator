@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Camera";
@@ -31,7 +31,22 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetLodParams", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Camera near/far/FOV/focus/LOD *override* setters (and their Restore pairs) — presentation tuning
+/// on the active camera. The reimpl camera is fixed-function, so honoring these runtime overrides is a
+/// faithful no-op; none return a value the game's Lua reads. (This table shares the `Camera` global
+/// with `camera_fx.rs`, which installs later and preserves these entries — see that file.)
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "SetNearFar",
+        "RestoreNearFar",
+        "SetFovParams",
+        "RestoreFovParams",
+        "SetFocusParams",
+        "RestoreFocusParams",
+        "SetLodParams",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    b.install_global(GLOBAL)
 }

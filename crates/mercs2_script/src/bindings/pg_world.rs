@@ -5,14 +5,19 @@
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
-//! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
-//! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
+//! This is the *second* `Pg` luaL_Reg table (world/spawn/asset-tooling; the spawn-by-name half lives
+//! in `pg.rs`). Only one entry here is pure: `FormatTime(seconds)` — a seconds→`"M:SS"` formatter —
+//! which gets a real body. Every other cfunc needs world, asset-DB, or install-manager state that has
+//! no `EngineHost` seam yet, so they are faithful `b.stub`s: the dev/diagnostic dumps (`DumpAssets`,
+//! `DumpTextures`, `DumpMemory`, `DumpStats`, …) mirror retail's return-0 dev stubs, and the
+//! spawn/region/alarm/install cfuncs no-op with sensible defaults (spawns → guid 0, `IsInstallable`
+//! → false, `Search` → empty table) so callers don't fault on a nil. A later world/asset silo backs
+//! these once the host exposes the streaming + asset DB.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
+use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
-use super::{Installed, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "PgWorld";
@@ -48,7 +53,90 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "DumpStats", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// `FormatTime` is pure and gets a real body; the world/asset/install cfuncs are faithful stubs.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // FormatTime(seconds [, useTenths]) -> "M:SS" (or "M:SS.t" with tenths). Pure clock formatting.
+    b.real(
+        "FormatTime",
+        lua.create_function(|_, (seconds, use_tenths): (f64, Option<bool>)| {
+            let secs = seconds.max(0.0);
+            let mins = (secs / 60.0).floor() as i64;
+            let rem = secs - (mins * 60) as f64;
+            Ok(if use_tenths.unwrap_or(false) {
+                let whole = rem.floor() as i64;
+                let tenths = ((rem - whole as f64) * 10.0).floor() as i64;
+                format!("{mins}:{whole:02}.{tenths}")
+            } else {
+                format!("{mins}:{:02}", rem.floor() as i64)
+            })
+        })?,
+    )?;
+
+    // Value-returning stubs: sensible defaults so callers never fault on a nil where they read a
+    // result. Not engine-backed yet, so counted as stubs.
+    b.stub(
+        "IsInstallable",
+        lua.create_function(|_, _: MultiValue| Ok(false))?,
+    )?;
+    b.stub(
+        "GetModelBBoxExtents",
+        lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 0.0f32)))?,
+    )?;
+    b.stub(
+        "DescribeGuid",
+        lua.create_function(|_, _: MultiValue| Ok(String::new()))?,
+    )?;
+    b.stub(
+        "Search",
+        lua.create_function(|lua, _: MultiValue| lua.create_table())?,
+    )?;
+    // Spawns return a guid; 0 = "no object" until the world seam exists.
+    b.stub(
+        "SpawnHomingProjectile",
+        lua.create_function(|_, _: MultiValue| Ok(0i64))?,
+    )?;
+    b.stub(
+        "SpawnWithModel",
+        lua.create_function(|_, _: MultiValue| Ok(0i64))?,
+    )?;
+    b.stub(
+        "CreateRegion",
+        lua.create_function(|_, _: MultiValue| Ok(0i64))?,
+    )?;
+
+    // Pure no-op stubs (side-effect cfuncs + retail-style dev dumps: return nothing).
+    for name in [
+        "Subdue",
+        "DrawPath",
+        "InstallToHDD",
+        "UseExistingInstall",
+        "DumpAssets",
+        "DumpAssetsDiff",
+        "DumpTextures",
+        "DumpAssetMemory",
+        "DumpMemory",
+        "LoadScript",
+        "LoadFunctions",
+        "LoadData",
+        "SetQGrey",
+        "ActivateAlarm",
+        "ToggleAlarm",
+        "DumpStats",
+    ] {
+        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    }
+
+    // `Pg` is a SHARED global: `pg.rs` installs the core surface (Spawn / GetGuidByName / …) earlier,
+    // and `install_global` below replaces the global table. Copy the existing `Pg` entries into ours
+    // first so both coexist (no name overlap) — otherwise this clobbers Pg.GetGuidByName/Spawn.
+    if let Ok(existing) = lua.globals().get::<mlua::Table>(GLOBAL) {
+        for pair in existing.pairs::<String, mlua::Function>() {
+            let (k, f) = pair?;
+            b.extra(&k, f)?;
+        }
+    }
+
+    b.install_global(GLOBAL)
 }

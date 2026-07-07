@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Fade";
@@ -28,7 +28,13 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "CameraFade", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Screen/terrain fade cfuncs — presentation only. The reimpl's fixed-function renderer has no fade
+/// compositor, so each is a faithful no-op (the fade is treated as instantly complete). None of these
+/// return a value the game's Lua reads, so all are stubs.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in ["AmbientTop", "AmbientSides", "Terrain", "CameraFade"] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    b.install_global(GLOBAL)
 }

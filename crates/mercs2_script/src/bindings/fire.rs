@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Fire")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Fire";
@@ -27,7 +27,14 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "Put", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Fire FX driver. We don't own the fire/particle system in the reimpl, so ignite/extinguish are
+/// faithful no-ops. None of these are called by the game Lua corpus.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    b.stub("Ignite", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("Extinguish", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("Put", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+
+    b.install_global(GLOBAL)
 }

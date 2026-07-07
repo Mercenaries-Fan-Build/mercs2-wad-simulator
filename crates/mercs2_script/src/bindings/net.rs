@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Net";
@@ -116,7 +116,67 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "UpdatePresence", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Session/host query getters that gate control flow in the game Lua and therefore need real bodies
+/// returning the single-player-faithful default. All of these are `false` in an SP boot; `IsServer`
+/// (below) is the lone `true` because the retail engine runs the local SP game as its own authoritative
+/// server (scripts guard authoritative logic with `if Net.IsServer() then ...`).
+///
+/// Notes on the corpus-confirmed values:
+/// - `IsActive` → `false`: `pircon002.lua:475` splits the mission cash reward in half and sets a
+///   Player2 bonus when `Net.IsActive()`; the `else` branch (full reward, no P2) is the SP path. A
+///   `true` here would silently halve SP rewards.
+/// - `IsMultiplayer`/`IsClient` → `false`: SP is a single local player, never a joined client.
+/// - `AutoClient`/`AutoServer`/`AutoLobby` → `false`: `gamebootstrap.Start()` only auto-connects /
+///   auto-hosts when these are set; `false` routes a normal boot to the shell / `LoadLevel` path.
+/// - `IsPlatformConnected`/`IsConnectedToInternet`/`IsMatchmakingInternet`/`IsOnlineConnected` →
+///   `false`: no online/matchmaking session in an offline SP boot.
+/// - `IsReadyToTether` → `false`: co-op tether has no meaning without a second player.
+/// - `HasPlayerUnlockedCode` → `false`: retail default until the player enters a promo/unlock code
+///   (gates the extra wardrobe outfit in `wifpmcinterior.lua`).
+const REAL_FALSE_GETTERS: &[&str] = &[
+    "IsMultiplayer",
+    "IsConnectedToInternet",
+    "IsActive",
+    "IsClient",
+    "IsPlatformConnected",
+    "AutoLobby",
+    "AutoClient",
+    "AutoServer",
+    "IsMatchmakingInternet",
+    "IsOnlineConnected",
+    "IsReadyToTether",
+    "HasPlayerUnlockedCode",
+];
+
+/// SP-faithful boot slice. The control-flow session/host getters get real bodies returning the SP
+/// default (`IsServer` → `true`; everything in [`REAL_FALSE_GETTERS`] → `false`). Every other cfunc —
+/// replication (`SendCustomEvent`, all `SendEvent_*`), lobby/session control (`StartServer`,
+/// `ConnectToServer`, `EnterLobby`, …), the net-routed briefing/HUD setters, telemetry
+/// (`GrantAchievement`, `UpdatePresence`) and the uncalled online-dialog helpers — is a faithful
+/// no-op stub for a single-player boot. The `mercs2_net` session/host model is wired at a separate
+/// seam, deliberately not here.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // Local SP game is its own authoritative server.
+    b.real("IsServer", lua.create_function(|_, ()| Ok(true))?)?;
+
+    // Session/host queries that are all false in an offline single-player boot.
+    for &name in REAL_FALSE_GETTERS {
+        b.real(name, lua.create_function(|_, ()| Ok(false))?)?;
+    }
+
+    // Everything else in the surface: a faithful no-op for SP (replication, lobby/session control,
+    // net-routed events/setters, telemetry, online dialogs).
+    for r in REQUIRED {
+        if r.name == "IsServer" || REAL_FALSE_GETTERS.contains(&r.name) {
+            continue;
+        }
+        b.stub(
+            r.name,
+            lua.create_function(|_, _: mlua::MultiValue| Ok(()))?,
+        )?;
+    }
+
+    b.install_global(GLOBAL)
 }

@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Bloom";
@@ -31,7 +31,20 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetAdaptiveLuminanceScale", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// HDR-bloom post tuning setters — presentation only. The fixed-function renderer has no bloom pass,
+/// so each is a faithful no-op. All are setters; none return a value the game's Lua reads.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for name in [
+        "SetBlurRadius",
+        "SetThreshold",
+        "SetMultiplier",
+        "SetAmount",
+        "SetTargetLuminance",
+        "SetAdaptiveLuminancePercent",
+        "SetAdaptiveLuminanceScale",
+    ] {
+        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+    }
+    b.install_global(GLOBAL)
 }

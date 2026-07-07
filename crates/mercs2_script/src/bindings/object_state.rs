@@ -9,10 +9,29 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("ObjectState")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
+
+const FNV1A_OFFSET_BASIS: u32 = 0x811C_9DC5;
+const FNV1A_PRIME: u32 = 0x0100_0193;
+
+/// Pandemic Mercs-2 string hash (FNV-1a, case-suppressed, `^0x2A` + `*prime` finalize). Same algorithm
+/// as `mercs2_formats::hash::pandemic_hash_m2`, inlined because this crate stays dependency-light.
+/// Verified vectors: `m2("texture") == 0xF011157A`, `m2("model") == 0x5B724250`.
+fn pandemic_hash_m2(text: &str) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut h = FNV1A_OFFSET_BASIS;
+    for &byte in text.as_bytes() {
+        h ^= (byte | 0x20) as u32;
+        h = h.wrapping_mul(FNV1A_PRIME);
+    }
+    h ^= 0x2A;
+    h.wrapping_mul(FNV1A_PRIME)
+}
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "ObjectState";
@@ -33,7 +52,26 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "DebugStateMachine", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Object state-machine + node FX driver. `GetStringHash` is a pure engine string hash (real). The
+/// message/damage/state/emitter cfuncs drive the native FX + state machine we don't own yet, so they
+/// are faithful no-ops; `GetLinkGuid` returns nil (no link) until the native state object exists.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // Pure hash — fully faithful.
+    b.real("GetStringHash", lua.create_function(|_, s: String| Ok(pandemic_hash_m2(&s) as i64))?)?;
+
+    // Query — no linked object until the native state machine is backed.
+    b.real("GetLinkGuid", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+
+    // State machine + node-emitter FX actions — faithful no-ops.
+    b.stub("SendMessage", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("SendDamage", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("SetState", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("StartEmitter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("StopEmitter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("PrintStateMachine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("DebugStateMachine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+
+    b.install_global(GLOBAL)
 }

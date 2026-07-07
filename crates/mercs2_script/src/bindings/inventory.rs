@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Inventory")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Inventory";
@@ -33,7 +33,27 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "DestroyAllWeapons", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// A human's weapon loadout. The native inventory component isn't owned yet, so the weapon getters
+/// report an empty loadout (`nil` for a single slot, empty table for `GetAllWeapons`, so the game's
+/// `for w in tWeapons` iteration is a faithful no-op) and the mutators are accepted no-ops. A later
+/// silo backs these with the real inventory component (see report — needs `inventory_*` host methods).
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // Single-slot getters — empty loadout → nil.
+    b.real("GetPrimaryWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    b.real("GetSecondaryWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    b.real("GetVehicleWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+
+    // Full-loadout getter — empty list (faithful: `for w in GetAllWeapons(c)` iterates nothing).
+    b.real("GetAllWeapons", lua.create_function(|_, _: MultiValue| Ok(Vec::<i64>::new()))?)?;
+
+    // Loadout mutators — accepted no-ops.
+    b.stub("SetAllWeapons", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("DropWeapon", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("EquipWeapon", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("ReloadAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("DestroyAllWeapons", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+
+    b.install_global(GLOBAL)
 }

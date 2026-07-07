@@ -12,7 +12,7 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Report";
@@ -29,7 +29,17 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetDelay", corpus_calls: 3 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Faction-infraction telemetry/reporting surface. Faithful for a single-player boot: all no-op
+/// stubs. The sole getter, `GetInfractions`, is consumed under an `if tInfractions then` guard in
+/// `mrxfactionmanager.lua`, so a no-op (nil) return simply skips the optional mood-adjustment path —
+/// a faithful degrade for a build with reporting disabled.
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+    for r in REQUIRED {
+        b.stub(
+            r.name,
+            lua.create_function(|_, _: mlua::MultiValue| Ok(()))?,
+        )?;
+    }
+    b.install_global(GLOBAL)
 }

@@ -9,10 +9,14 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("VO")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
+
+fn voice_opt(v: u64) -> Option<i64> {
+    if v == 0 { None } else { Some(v as i64) }
+}
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "VO";
@@ -35,7 +39,33 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "RemoveSequence", corpus_calls: 1 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Voice-over playback. `Cue`/`CueWithoutSubtitles` play a VO line through the audio host
+/// ([`crate::EngineHost::vo_cue`]) and return the voice id (`0` → nil). Call shape is
+/// `VO.Cue(speakerGuid, cueHandle, [onComplete, args, ...])`; we forward the cue handle and ignore
+/// the trailing completion-callback args (a depth-pass VO-callback host seam — see report). The
+/// pause/cancel/sequence controls drive VO state we don't own yet, so they are faithful no-ops.
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    let h = host.clone();
+    b.real("Cue", lua.create_function(move |_, (_speaker, cue, _rest): (i64, String, MultiValue)| {
+        Ok(voice_opt(h.borrow_mut().vo_cue(&cue)))
+    })?)?;
+    let h = host.clone();
+    b.real("CueWithoutSubtitles", lua.create_function(move |_, (_speaker, cue, _rest): (i64, String, MultiValue)| {
+        Ok(voice_opt(h.borrow_mut().vo_cue(&cue)))
+    })?)?;
+
+    // Cancel / pause / cinematic-mode / sequence controls — faithful no-ops.
+    b.stub("Cancel", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("CancelAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("Pause", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("PauseAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("Unpause", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("UnpauseAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("SetCinematicMode", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("AddSequence", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("RemoveSequence", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+
+    b.install_global(GLOBAL)
 }

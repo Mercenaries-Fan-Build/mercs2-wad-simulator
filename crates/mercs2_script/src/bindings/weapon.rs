@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Weapon")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use crate::SharedHost;
-use super::{Installed, Required};
+use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Weapon";
@@ -33,7 +33,27 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "IsPrimary", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Per-weapon ammo/loadout accessors. The native `RuntimeWeapon` component isn't owned yet, so ammo
+/// getters return a faithful `0` (empty) and the predicate getters return `false`; the setters/reload
+/// are accepted no-ops. A later silo backs these with the real weapon component (see report — needs
+/// `weapon_*` host methods).
+pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // Ammo getters — faithful empty (0).
+    b.real("GetClipAmmo", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetMaxClipAmmo", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetReserveAmmo", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+    b.real("GetMaxReserveAmmo", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
+
+    // Classification predicates — faithful false.
+    b.real("IsDesignator", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    b.real("IsPrimary", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+
+    // Ammo/reload setters — accepted no-ops.
+    b.stub("SetClipAmmo", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("SetReserveAmmo", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    b.stub("Reload", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+
+    b.install_global(GLOBAL)
 }
