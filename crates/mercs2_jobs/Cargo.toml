@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_jobs"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — Pimp job system (row 15): worker pool + CS-guarded job ring, the engine's parallel-work spine. WAVE-2 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }

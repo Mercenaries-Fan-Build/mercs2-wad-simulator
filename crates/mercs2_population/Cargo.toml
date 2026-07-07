@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_population"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — Population / spawners (row 24): SkirmishSpawnList, living-world crowd/traffic density, dynamic-road flow. Feeds AI actors through the spawn resolver. WAVE-2 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }

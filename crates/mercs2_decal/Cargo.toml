@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_decal"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — Decals (row 6): decaltable loader + decal instance pool/lifetime management. Render integration is a seam against mercs2_engine. WAVE-2 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }

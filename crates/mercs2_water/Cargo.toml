@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_water"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — Water (row 7): watermap query, water zones/height, TPS swim-state FSM + buoyancy tunables. Render integration is a seam against mercs2_engine. WAVE-2 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }
