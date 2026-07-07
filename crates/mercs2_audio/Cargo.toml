@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_audio"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — silo 14 (row 21): audio backend, mixer, dual-deck music FSM, banks, 3D. WAVE-1 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }

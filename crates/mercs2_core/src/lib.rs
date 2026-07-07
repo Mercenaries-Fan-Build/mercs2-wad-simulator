@@ -18,6 +18,13 @@ pub use components::{AnimState, ModelRef, SkinPalette, Transform};
 
 pub mod streaming;
 
+/// The `PhysicsQuery` seam (see `physics_query.rs`): the collision-query interface the sim silos
+/// (`mercs2_vehicle`/`mercs2_combat`/`mercs2_anim`) depend on so they compile against the contract,
+/// not the `mercs2_physics` impl. Grounded in `physics_code_map.md` §3/§4 (raycast / getClosestPoints
+/// / hkpCharacterProxy move).
+pub mod physics_query;
+pub use physics_query::{PhysicsQuery, RayHit};
+
 /// Keystone A — the reflection / component-descriptor registry (see `registry.rs`): the engine's
 /// component/serialization spine that keys every component class by its name-hash and carries its
 /// pool budget (`cdbsizes.ini`). Keystone C is the ordered [`Schedule`] below.

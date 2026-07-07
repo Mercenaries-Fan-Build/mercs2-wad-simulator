@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_combat"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — silo 10 (row 26): weapons/combat (projectiles, homing FSM, damage/explosion). WAVE-1 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }

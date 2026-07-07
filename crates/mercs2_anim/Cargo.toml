@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_anim"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — silo 8 (row 20): animation runtime (controllers, IK, ragdoll, FaceFX). WAVE-1 scaffold."
+
+[dependencies]
+mercs2_core = { path = "../mercs2_core" }
+mercs2_formats = { path = "../mercs2_formats" }
