@@ -926,6 +926,9 @@ pub async fn run_scene_world_loading(
     // *destinations*, not spawns — see `docs/modernization/vanilla_boot_load_order.md`. Placeholder
     // until the marker resolves.
     let mut player = crate::player::PlayerController::new(Vec3::ZERO);
+    // The selected save's active contract (menu boot) — drives the named spawn marker
+    // (`<Contract>_Start1`), the base-game SetSpawnLocations name. Empty for the dev direct boot.
+    let mut active_contract = String::new();
 
     // World-space collision triangle soup, filled from the structural geometry (interior shells +
     // c3 building cells) when the loader delivers. Consumed by the camera boom (raycast, so it
@@ -1123,7 +1126,8 @@ pub async fn run_scene_world_loading(
                         // cursor, resets the loading clock, and drops the menu). Otherwise draw the
                         // menu and stay on the frontend layer for this frame.
                         if let Some(sel) = pending_boot.take() {
-                            let (r, sp, models, label) = boot_config_from(sel.as_deref());
+                            let (r, sp, models, label, contract) = boot_config_from(sel.as_deref());
+                            active_contract = contract;
                             println!("[shell] boot: {label}");
                             spawn_loader(r, sp, models);
                             layers.set_target(LAYER_LOADING);
@@ -1193,10 +1197,14 @@ pub async fn run_scene_world_loading(
                                 // hardcoded coordinate. Candidate names, in vanilla priority: the HQ portal
                                 // entry `Pmc_Entry1` (mrxhq.tPortal.sStart1), then common contract starts.
                                 // The active-contract `<Contract>_Start1` is threaded next (pre-HQ saves).
-                                let candidates = ["pmc_entry1", "pmccon001_start1", "pmc_start1"];
+                                // Vanilla priority: the active contract's start (`<Contract>_Start1`,
+                                // the SetSpawnLocations name for a pre-HQ save), then the HQ portal entry.
+                                let contract_marker = format!("{}_start1", active_contract.to_ascii_lowercase());
+                                let candidates = [contract_marker.as_str(), "pmc_entry1", "pmc_start1"];
                                 let resolved = candidates
                                     .iter()
-                                    .find_map(|n| data.named_locations.get(*n).map(|&p| (*n, p)));
+                                    .filter(|&&n| !n.is_empty() && n != "_start1")
+                                    .find_map(|&n| data.named_locations.get(n).map(|&p| (n, p)));
                                 match resolved {
                                     Some((name, p)) => {
                                         player.pos = Vec3::new(p[0], p[1], p[2]);
@@ -1671,12 +1679,13 @@ pub async fn run_scene_world_loading(
 /// direct boots. `None`, or an unreadable save, = new-game defaults (Mattias, Original outfit).
 fn boot_config_from(
     sel: Option<&std::path::Path>,
-) -> (crate::pmc::RecruitUnlocks, crate::pmc::Stockpile, Vec<String>, String) {
+) -> (crate::pmc::RecruitUnlocks, crate::pmc::Stockpile, Vec<String>, String, String) {
     // Retail new game = Mattias, upgrade tier 0, wardrobe untouched → his base/default skin
-    // (matches the user's observed fresh retail saves).
+    // (matches the user's observed fresh retail saves). New game = the opening contract PmcCon001,
+    // so the hero spawns at `PmcCon001_Start1` (the base-game first-contract start).
     let new_game_models = || crate::hero::player_model_candidates(1, 0, 0);
     let Some(path) = sel else {
-        return (Default::default(), Default::default(), new_game_models(), "new game".into());
+        return (Default::default(), Default::default(), new_game_models(), "new game".into(), "PmcCon001".into());
     };
     let parsed = std::fs::read(path)
         .map_err(|e| e.to_string())
@@ -1702,11 +1711,11 @@ fn boot_config_from(
                 crate::hero::hero(hero_idx).display,
                 crate::hero::look_label(hero_idx, prof.upgrade_index, 0),
             );
-            (recruits, stockpile, models, label)
+            (recruits, stockpile, models, label, prof.active_contract().to_string())
         }
         Err(e) => {
             eprintln!("[shell] save {} unreadable ({e}) — booting new game", path.display());
-            (Default::default(), Default::default(), new_game_models(), "new game (save unreadable)".into())
+            (Default::default(), Default::default(), new_game_models(), "new game (save unreadable)".into(), "PmcCon001".into())
         }
     }
 }
