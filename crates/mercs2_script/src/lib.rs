@@ -33,7 +33,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Table};
+use mlua::{Lua, Result as LuaResult, Table};
+
+pub mod bindings;
+pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
 
 /// The engine services the script bindings call. The engine (`mercs2_engine`) implements this; the
 /// script host only ever talks to the engine through it. Every method here corresponds to an original
@@ -236,179 +239,21 @@ impl ScriptHost {
 
     /// Install the engine binding tables backed by `host`. Idempotent-ish: call once after `new`.
     ///
-    /// Phase 1 installs the confirmed C-binding tables the boot + PMC-interior slice touches. The
-    /// `Mrx*` modules are *game* Lua and come from the corpus via `import`, not from here.
+    /// The surface is modular: one file per engine namespace under [`bindings`], each declaring its
+    /// required cfunc surface and installing this build's real/stub bodies. Phase 1's real bodies (the
+    /// boot + PMC-interior slice: `Debug`, `Sys`, `Pg`, `Object`, `Ai`, `Vehicle`, `Event`) live in
+    /// those files; every other namespace's cfuncs are still "stubs remaining" (see
+    /// [`Self::register_engine_reported`] / [`bindings::coverage_json`]). The `Mrx*` modules are
+    /// *game* Lua and come from the corpus via `import`, not from here.
     pub fn register_engine(&self, host: SharedHost) -> LuaResult<()> {
-        let g = self.lua.globals();
+        self.register_engine_reported(host).map(|_| ())
+    }
 
-        // ---- Debug.* (the [lua] log stream) ----
-        let debug = self.lua.create_table()?;
-        let h = host.clone();
-        let printf = self.lua.create_function(move |lua, args: MultiValue| {
-            let s = args
-                .iter()
-                .next()
-                .and_then(|v| lua.coerce_string(v.clone()).ok().flatten())
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            h.borrow_mut().log("lua", &s);
-            Ok(())
-        })?;
-        debug.set("Printf", printf.clone())?;
-        debug.set("Print", printf)?;
-        g.set("Debug", debug)?;
-
-        // ---- Sys.* (engine/level queries) ----
-        let sys = self.lua.create_table()?;
-        let h = host.clone();
-        sys.set(
-            "GetLevelName",
-            self.lua
-                .create_function(move |_, ()| Ok(h.borrow().get_level_name()))?,
-        )?;
-        let h = host.clone();
-        sys.set(
-            "GetMasterScriptName",
-            self.lua
-                .create_function(move |_, ()| Ok(h.borrow().get_level_name()))?,
-        )?;
-        let h = host.clone();
-        sys.set(
-            "StartWithResources",
-            self.lua
-                .create_function(move |_, ()| Ok(h.borrow().start_with_resources()))?,
-        )?;
-        g.set("Sys", sys)?;
-
-        // ---- Pg.* (name → GUID; template Spawn) ----
-        let pg = self.lua.create_table()?;
-        let h = host.clone();
-        pg.set(
-            "GetGuidByName",
-            self.lua.create_function(move |_, name: String| {
-                let guid = h.borrow_mut().guid_by_name(&name);
-                Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
-            })?,
-        )?;
-        let h = host.clone();
-        // Pg.Spawn(template, x, y, z, yaw, [bLink], [bHighDetail]) -> guid | nil
-        pg.set(
-            "Spawn",
-            self.lua.create_function(
-                move |_,
-                      (template, x, y, z, yaw, _link, high): (
-                    String,
-                    f32,
-                    f32,
-                    f32,
-                    f32,
-                    Option<bool>,
-                    Option<bool>,
-                )| {
-                    let guid =
-                        h.borrow_mut().pg_spawn(&template, [x, y, z], yaw, high.unwrap_or(false));
-                    Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
-                },
-            )?,
-        )?;
-        g.set("Pg", pg)?;
-
-        // ---- Object.* (the transform/name mutators the SpawnActor recipe uses) ----
-        let object = self.lua.create_table()?;
-        let h = host.clone();
-        object.set(
-            "SetName",
-            self.lua.create_function(move |_, (guid, name): (i64, String)| {
-                h.borrow_mut().object_set_name(guid as u64, &name);
-                Ok(())
-            })?,
-        )?;
-        let h = host.clone();
-        object.set(
-            "SetPosition",
-            self.lua
-                .create_function(move |_, (guid, x, y, z): (i64, f32, f32, f32)| {
-                    h.borrow_mut().object_set_position(guid as u64, [x, y, z]);
-                    Ok(())
-                })?,
-        )?;
-        let h = host.clone();
-        object.set(
-            "SetYaw",
-            self.lua.create_function(move |_, (guid, yaw): (i64, f32)| {
-                h.borrow_mut().object_set_yaw(guid as u64, yaw);
-                Ok(())
-            })?,
-        )?;
-        let h = host.clone();
-        object.set(
-            "GetPosition",
-            self.lua.create_function(move |_, guid: i64| {
-                let p = h.borrow_mut().object_get_position(guid as u64);
-                Ok((p[0], p[1], p[2]))
-            })?,
-        )?;
-        let h = host.clone();
-        object.set(
-            "GetYaw",
-            self.lua
-                .create_function(move |_, guid: i64| Ok(h.borrow_mut().object_get_yaw(guid as u64)))?,
-        )?;
-        // Anchor/attachment + physics toggles: accepted as no-ops so the FULL SpawnActor body and its
-        // `_SpawnActorComplete` run without erroring. Wired to real behavior in a later phase.
-        object.set(
-            "SetTransformToObject",
-            self.lua.create_function(|_, _: MultiValue| Ok(()))?,
-        )?;
-        object.set("Attach", self.lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-        object.set(
-            "DisablePhysics",
-            self.lua.create_function(|_, _: MultiValue| Ok(()))?,
-        )?;
-        g.set("Object", object)?;
-
-        // ---- Ai.* / Vehicle.* (only the stubs `_SpawnActorComplete` hits for animate actors) ----
-        let ai = self.lua.create_table()?;
-        ai.set("Enable", self.lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-        g.set("Ai", ai)?;
-        let vehicle = self.lua.create_table()?;
-        vehicle.set(
-            "EnableTurret",
-            self.lua.create_function(|_, _: MultiValue| Ok(()))?,
-        )?;
-        g.set("Vehicle", vehicle)?;
-
-        // ---- Event.* (constants + a Create stub so boot scripts register without erroring) ----
-        let event = self.lua.create_table()?;
-        for (i, k) in [
-            "ObjectHibernation",
-            "TimerRelative",
-            "TimerAbsolute",
-            "ObjectDeath",
-            "ObjectProximity",
-            "Boundary",
-            "ObjectPhysicsEvent",
-        ]
-        .iter()
-        .enumerate()
-        {
-            event.set(*k, (i + 1) as i64)?;
-        }
-        // Create(kind, params, fn, args) -> opaque handle. Phase 1 does not run the event loop yet;
-        // it returns a distinct integer so scripts can store/compare handles.
-        let counter = Rc::new(RefCell::new(0i64));
-        let c = counter.clone();
-        event.set(
-            "Create",
-            self.lua.create_function(move |_, _: MultiValue| {
-                let mut n = c.borrow_mut();
-                *n += 1;
-                Ok(*n)
-            })?,
-        )?;
-        g.set("Event", event)?;
-
-        Ok(())
+    /// Like [`Self::register_engine`], but returns the per-namespace [`bindings::NsCoverage`] so the
+    /// coverage gate can measure "N stubs remaining" across the whole binding surface. Installing is a
+    /// side effect (globals are set); the returned records are pure data.
+    pub fn register_engine_reported(&self, host: SharedHost) -> LuaResult<Vec<NsCoverage>> {
+        bindings::install_all(&self.lua, &host)
     }
 
     /// Install the lenient bring-up auto-stub layer ([`AUTOSTUB_LUA`]): reads of unimplemented
@@ -601,5 +446,59 @@ mod tests {
         assert_eq!(hb.names, vec![(1u64, "HqInterior".to_string())]);
         assert_eq!(hb.positions, vec![(1u64, [3750.0, 450.0, -3840.0])]);
         assert_eq!(hb.yaws, vec![(1u64, 0.0)]);
+    }
+
+    /// The Wave-0 E3 **coverage gate**. Installs the whole binding surface, writes the machine-readable
+    /// `binding_coverage.json` next to the crate, and asserts the current baseline so any later silo's
+    /// progress (or a regression) is visible as a diff. `remaining` = required cfuncs still lacking a
+    /// real body — the "N stubs remaining" metric, which must only ever go **down**.
+    ///
+    /// Later silos: when you fill a namespace, re-run this test to regenerate the JSON, then bump the
+    /// asserted `EXPECTED_REAL` / `EXPECTED_REMAINING` below (they should move in opposite directions).
+    #[test]
+    fn coverage_report() {
+        // Baseline of the current build (boot + PMC-interior slice). Update as silos land bodies.
+        const EXPECTED_NAMESPACES: usize = 35;
+        const EXPECTED_REQUIRED: usize = 1086;
+        const EXPECTED_REAL: usize = 11; // Debug.Printf + Sys(3) + Pg(2) + Object(5)
+        const EXPECTED_STUB: usize = 11; // Debug(5) + Object(3) + Ai + Vehicle + Event.Create
+
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        let h = ScriptHost::bare().unwrap();
+        let cov = h.register_engine_reported(host).unwrap();
+
+        let t = totals(&cov);
+        assert_eq!(t.namespaces, EXPECTED_NAMESPACES, "namespace count changed");
+        assert_eq!(
+            t.required, EXPECTED_REQUIRED,
+            "required cfunc surface changed — did the seed move?"
+        );
+        assert_eq!(
+            t.real, EXPECTED_REAL,
+            "real-body count regressed/changed — bump EXPECTED_REAL when a silo lands bodies"
+        );
+        assert_eq!(t.stub, EXPECTED_STUB, "stub count changed");
+        assert_eq!(
+            t.remaining,
+            EXPECTED_REQUIRED - EXPECTED_REAL,
+            "'stubs remaining' must equal required-real"
+        );
+
+        // Spot-check the boot-slice namespaces route correctly.
+        let by = |name: &str| cov.iter().find(|c| c.namespace == name).unwrap();
+        assert_eq!(by("Debug").real_count(), 1);
+        assert_eq!(by("Sys").real_count(), 3);
+        assert_eq!(by("Pg").real_count(), 2);
+        assert_eq!(by("Object").real_count(), 5);
+        assert_eq!(by("Object").stub_count(), 3);
+        // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
+        assert_eq!(by("Pg").table_va, 0x00B99328);
+
+        // Emit the machine-readable report for CI / later silos to watch trend to zero.
+        let json = coverage_json(&cov);
+        let out =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binding_coverage.json");
+        std::fs::write(&out, &json).expect("write binding_coverage.json");
+        assert!(json.contains("\"remaining\""));
     }
 }
