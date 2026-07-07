@@ -2,8 +2,10 @@
 name = "mercs2_combat"
 version = "0.1.0"
 edition = "2021"
-description = "Mercenaries 2 reimpl — silo 10 (row 26): weapons/combat (projectiles, homing FSM, damage/explosion). WAVE-1 scaffold."
+description = "Mercenaries 2 reimpl — silo 10 (row 26): weapons/combat (wpn_* stats, projectile lifecycle, homing FSM, damage/explosion applier)."
 
 [dependencies]
 mercs2_core = { path = "../mercs2_core" }
 mercs2_formats = { path = "../mercs2_formats" }
+glam = "0.27"        # same version mercs2_core pins; canonical game space (LH, +Y up)
+hecs = "0.10"        # same ECS substrate mercs2_core re-exports
