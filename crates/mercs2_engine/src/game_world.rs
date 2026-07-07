@@ -577,7 +577,12 @@ pub fn load_clips_for_model(w: &mut wad::Wad, rig: &[mesh::BoneRig]) -> Vec<Clip
 /// the WAD handle (moved to the render thread for on-demand wake extraction), the base terrain, its
 /// heightmap, the pure streaming decision manager (blocks + per-entity props with hibernation), and
 /// the key->spawn recipe map the executor uses on WAKE.
-struct StreamingWorldData {
+///
+/// **Opaque cross-crate handle** (K2 unification, `docs/modernization/k2_streaming_unification_plan.md`):
+/// the type is `pub` so `mercs2_game`'s TPS boot can hold the loader output and hand it to the
+/// streaming executor, but the fields stay crate-private — the executor (this crate) is the only thing
+/// that reads them.
+pub struct StreamingWorldData {
     wad: wad::Wad,
     terrain: LoadedModel,
     manager: mercs2_core::streaming::StreamingManager,
@@ -744,7 +749,10 @@ fn colr_peak_bc(body: &[u8]) -> Option<([f32; 3], f32)> {
 /// Load the streaming world off-thread: open the WAD, merge the base terrain, build the world block
 /// index + Layer-2 streaming catalog (c3-cell LOAD units + per-entity `ModelName` props with their
 /// `HibernationControl` distances). Returns the data (incl. the WAD handle) for the render thread.
-fn load_streaming_world_data(
+/// Load the streaming world (block index + `StreamingManager` + wake recipes + WAD handle) on the
+/// background thread. `pub` for the K2 unification: `mercs2_game`'s playable boot calls this to get the
+/// same streaming runtime the free-fly path uses (see `k2_streaming_unification_plan.md`).
+pub fn load_streaming_world_data(
     wadpath: &str,
     cfg: mercs2_core::streaming::StreamingConfig,
     overlays: &[String],
