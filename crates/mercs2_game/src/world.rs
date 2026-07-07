@@ -765,6 +765,7 @@ pub async fn run_scene_world_loading(
     menu: Option<crate::menu::Menu>,
 ) {
     use mercs2_engine::scene::{AssetStore, ModelAnim, Scene};
+    use mercs2_core::frame::{LayerStack, LayerTransition, LAYER_GAME};
     use mercs2_core::glam::{Mat4, Quat, Vec3};
     use mercs2_core::{AnimState, Entity, ModelRef, Schedule, SkinPalette, Time, Transform, World};
     use std::cell::RefCell;
@@ -983,7 +984,18 @@ pub async fn run_scene_world_loading(
         .unwrap_or_default();
     let mut gamepad = mercs2_engine::input::Gamepad::new();
     use mercs2_engine::input::Action;
-    let mut loading = true;
+    // Keystone C — the master frame spine (docs/reverse_engineer/scheduler_tick_code_map.md). The
+    // shell-menu / loading / in-game phases are the engine's lower→upper application layers; the
+    // LayerStack climbs frontend → loading → GAME (`FUN_004c15e0`, 0→4), replacing the old
+    // `menu.is_some()` + `loading` bool phase gates. A direct boot (no shell menu) starts already on
+    // the loading layer; the shell-menu boot starts on the frontend layer and climbs on selection.
+    const LAYER_MENU: usize = LAYER_GAME - 2;
+    const LAYER_LOADING: usize = LAYER_GAME - 1;
+    let mut layers = if menu.is_some() {
+        LayerStack::at(LAYER_MENU)
+    } else {
+        LayerStack::at(LAYER_LOADING)
+    };
     let mut load_start = std::time::Instant::now();
     // Shell-menu bookkeeping: a selection made in a keyboard/gamepad handler is parked here and
     // executed at the top of the next redraw (ONE boot site). Gamepad nav is edge-detected
@@ -1083,17 +1095,23 @@ pub async fn run_scene_world_loading(
                         .set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
                 }
                 WindowEvent::RedrawRequested => {
-                    // ── Shell-menu phase (retail boot flow): draw the menu until a selection ──
-                    if menu.is_some() {
-                        // Execute a parked selection: resolve the save → boot config, start the
-                        // world load, hand the window over to the loading screen.
+                    // ===== RunFrame (FUN_00630ef0) — faithful 9-stage per-frame order =====
+                    // (docs/reverse_engineer/scheduler_tick_code_map.md §2). Platform-glue stages fold
+                    // into wgpu/winit: (2) device re-init = render()'s surface-lost recovery; (8)/(9)
+                    // vsync/present = wgpu's present mode + winit's AboutToWait redraw request.
+
+                    // (5a) MASTER UPDATE — mode logic for the active application layer. Shell menu
+                    //      (frontend) → loading → GAME are the engine's climbing application layers.
+                    if layers.active() == LAYER_MENU {
+                        // Execute a parked selection: resolve the save → boot config, start the world
+                        // load, and raise the target to the loading layer (the climb below grabs the
+                        // cursor, resets the loading clock, and drops the menu). Otherwise draw the
+                        // menu and stay on the frontend layer for this frame.
                         if let Some(sel) = pending_boot.take() {
                             let (r, sp, models, label) = boot_config_from(sel.as_deref());
                             println!("[shell] boot: {label}");
                             spawn_loader(r, sp, models);
-                            grab_cursor(&scene.window);
-                            load_start = std::time::Instant::now();
-                            menu = None;
+                            layers.set_target(LAYER_LOADING);
                         } else {
                             let m = menu.as_mut().unwrap();
                             // Gamepad nav, edge-detected: dpad/stick up/down, A/Start = select,
@@ -1134,27 +1152,15 @@ pub async fn run_scene_world_loading(
                                 Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
                                 Err(e) => eprintln!("surface error: {e:?}"),
                             }
+                            return;
                         }
-                        return;
                     }
-                    // Loading phase: animate the spinner until the background loader delivers,
-                    // then wire the world in (GPU uploads + entity spawns) and start playing.
-                    if loading {
+                    // (5a cont.) Loading layer: poll the background loader; when it delivers, wire the
+                    // world in (GPU uploads + entity spawns) and raise the target to the GAME layer.
+                    // The Empty case falls through to the shared frontend render below.
+                    if layers.active() == LAYER_LOADING {
                         match rx.try_recv() {
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                let t = load_start.elapsed().as_secs_f32();
-                                let dt = (t - bar_last_t).max(0.0);
-                                bar_last_t = t;
-                                // Exponential ease toward the staged target (~6/s rate).
-                                bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
-                                match scene.render_loading(t, bar_shown) {
-                                    Ok(()) => {}
-                                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                                    Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                                    Err(e) => eprintln!("surface error: {e:?}"),
-                                }
-                                return;
-                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                                 eprintln!("[world] loader thread died without a result");
                                 elwt.exit();
@@ -1374,10 +1380,42 @@ pub async fn run_scene_world_loading(
                                 if start_tps && player_entity.is_some() {
                                     mode = CamMode::ThirdPerson;
                                 }
-                                loading = false;
+                                layers.set_target(LAYER_GAME);
                             }
                         }
                     }
+
+                    // (5b) climb the layer stack toward its target, firing enter transitions. The one
+                    //      transition with side effects is entering the loading layer FROM the shell
+                    //      menu (grab the cursor, reset the loading clock, drop the frontend menu).
+                    while !layers.settled() {
+                        if let Some(LayerTransition::Ascending(LAYER_LOADING)) = layers.advance() {
+                            grab_cursor(&scene.window);
+                            load_start = std::time::Instant::now();
+                            menu = None;
+                        }
+                    }
+
+                    // (6-frontend) Not in-game yet — the menu already returned above, so this is the
+                    //      loading layer: ease + render the loading plate/spinner, then stop this frame.
+                    if layers.active() != LAYER_GAME {
+                        let t = load_start.elapsed().as_secs_f32();
+                        let dt = (t - bar_last_t).max(0.0);
+                        bar_last_t = t;
+                        // Exponential ease toward the staged target (~6/s rate).
+                        bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
+                        match scene.render_loading(t, bar_shown) {
+                            Ok(()) => {}
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
+                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(e) => eprintln!("surface error: {e:?}"),
+                        }
+                        return;
+                    }
+
+                    // ===== (5c) GAME layer (4) — camera + player sim + fixed-tick Schedule + render.
+                    // Camera + player controller are variable-rate; the `animation` system runs at the
+                    // fixed sim tick inside `schedule.run_fixed` (the shared mercs2_core `Time` clock).
                     let now = std::time::Instant::now();
                     let dt = (now - last).as_secs_f32().min(0.1);
                     last = now;
