@@ -1,7 +1,8 @@
 # mercs2_formats — deferred improvements
 
-Non-blocking follow-ups. Anything that would change on-disk fidelity is flagged
-`[faithful-blocker: yes]`; convenience/cleanup is `[faithful-blocker: no]`.
+Non-blocking follow-ups spotted while implementing but intentionally NOT done, so the crate stays a
+faithful reimplementation and nothing is gold-plated. Anything that would change on-disk fidelity is
+flagged `[faithful-blocker: yes]`; convenience/cleanup/perf is `[faithful-blocker: no]`.
 
 ## Save (`save.rs` / `save_write.rs`)
 
@@ -33,3 +34,12 @@ Non-blocking follow-ups. Anything that would change on-disk fidelity is flagged
 - **Undecoded Lua sub-tables.** Economy/faction/support catalogs,
   `_tRequirementsObtained`, `tLockedGates`, per-vehicle unlock tables are present in
   the inflated Lua but not decoded into `SaveState`. `[faithful-blocker: no]`
+
+## Schema (`schema.rs`)
+
+- **`parse_comp_groups` allocates a `Vec<u8>` per child body.** It copies each
+  `info`/`schm`/`data` body out of the container into an owned `Vec<u8>` (via
+  `CompGroup { info, schm, data }`). A borrowing variant returning `&[u8]` slices into
+  the container would avoid per-group allocations on the hot world-load path. Left as-is
+  because the copies keep the API simple and self-contained for the current callers
+  (tests + future loader), and correctness is unaffected. `[faithful-blocker: no]`
