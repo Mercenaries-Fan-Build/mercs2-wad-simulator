@@ -15,6 +15,10 @@
 //! and is a per-file integrity **checksum/hash** (`ProfileHash`). The stable
 //! structural sentinels are `version == 4` (`@0x04`), `data_size == len-4`
 //! (`@0x08`), and the zlib header byte `0x78` at `0x468`. See `SAVE_FORMAT.md`.
+//!
+//! The `ProfileHash` algorithm is now **derived**: CRC-32/BZIP2 over `[4:]`
+//! (see [`crate::save_write`]). The reader can verify it via
+//! [`Profile::hash_ok`]; the writer stamps a real one.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -27,25 +31,26 @@ pub const VERSION: u32 = 4;
 pub const ZLIB_OFFSET: usize = 0x468;
 
 // --- header field offsets (FACT: located by cross-file diff) ---
-const OFF_CHECKSUM: usize = 0x00; // u32  per-file hash (ProfileHash), opaque
-const OFF_VERSION: usize = 0x04; // u32  == VERSION
-const OFF_DATA_SIZE: usize = 0x08; // u32  == file_len - 4 (bytes the checksum covers)
-const OFF_UNK_0C: usize = 0x0C; // u32  constant 0x3 across all saves
-const OFF_UNK_10: usize = 0x10; // u32  constant 0x0
-const OFF_PLAY_TIME: usize = 0x14; // u32  play-time seconds (INFERRED)
-const OFF_CASH: usize = 0x18; // u32  PMC cash (INFERRED)
-const OFF_FUEL: usize = 0x1C; // u32  PMC fuel (INFERRED)
-const OFF_UNK_20: usize = 0x20; // u32  constant 0x0
-const OFF_TIMESTAMP: usize = 0x24; // u32  unix timestamp of the save
-const OFF_CONTRACT: usize = 0x2C; // [16] NUL-padded ASCII active contract id (FACT)
-const CONTRACT_LEN: usize = 16;
-const OFF_FLAGS_4C: usize = 0x4C; // u32  raw dword; byte +1 is the hero (see OFF_CHARACTER)
-const OFF_CHARACTER: usize = 0x4D; // u8  1-based hero: 1 mattias / 2 chris / 3 jen (INFERRED, strong)
-const OFF_SAVE_NAME: usize = 0x20A; // UTF-16LE NUL-terminated slot name (FACT)
-const OFF_FUEL_CAP: usize = 0x2F8; // u16  fuel capacity? tracks fuel (INFERRED)
-const OFF_UNLOCKED_COSTUMES: usize = 0x24A; // u8  unlocked-costume count (1 fresh, 5 = all base outfits)
-const OFF_UNK_24B: usize = 0x24B; // u8  unknown (1 in every observed save)
-const OFF_UPGRADE: usize = 0x4F; // u8  hero upgrade tier 0..3 (drives the upgrade TEMPLATE = the look)
+// `pub(crate)` so the writer in `save_write.rs` re-stamps the exact same offsets.
+pub(crate) const OFF_CHECKSUM: usize = 0x00; // u32  per-file hash (ProfileHash), CRC-32/BZIP2 over [4:]
+pub(crate) const OFF_VERSION: usize = 0x04; // u32  == VERSION
+pub(crate) const OFF_DATA_SIZE: usize = 0x08; // u32  == file_len - 4 (bytes the checksum covers)
+pub(crate) const OFF_UNK_0C: usize = 0x0C; // u32  constant 0x3 across all saves
+pub(crate) const OFF_UNK_10: usize = 0x10; // u32  constant 0x0
+pub(crate) const OFF_PLAY_TIME: usize = 0x14; // u32  play-time seconds (INFERRED)
+pub(crate) const OFF_CASH: usize = 0x18; // u32  PMC cash (INFERRED)
+pub(crate) const OFF_FUEL: usize = 0x1C; // u32  PMC fuel (INFERRED)
+pub(crate) const OFF_UNK_20: usize = 0x20; // u32  constant 0x0
+pub(crate) const OFF_TIMESTAMP: usize = 0x24; // u32  unix timestamp of the save
+pub(crate) const OFF_CONTRACT: usize = 0x2C; // [16] NUL-padded ASCII active contract id (FACT)
+pub(crate) const CONTRACT_LEN: usize = 16;
+pub(crate) const OFF_FLAGS_4C: usize = 0x4C; // u32  raw dword; byte +1 is the hero (see OFF_CHARACTER)
+pub(crate) const OFF_CHARACTER: usize = 0x4D; // u8  1-based hero: 1 mattias / 2 chris / 3 jen (INFERRED, strong)
+pub(crate) const OFF_SAVE_NAME: usize = 0x20A; // UTF-16LE NUL-terminated slot name (FACT)
+pub(crate) const OFF_FUEL_CAP: usize = 0x2F8; // u16  fuel capacity? tracks fuel (INFERRED)
+pub(crate) const OFF_UNLOCKED_COSTUMES: usize = 0x24A; // u8  unlocked-costume count (1 fresh, 5 = all base outfits)
+pub(crate) const OFF_UNK_24B: usize = 0x24B; // u8  unknown (1 in every observed save)
+pub(crate) const OFF_UPGRADE: usize = 0x4F; // u8  hero upgrade tier 0..3 (drives the upgrade TEMPLATE = the look)
 
 /// Decoded Mercenaries 2 `.profile` save.
 ///
@@ -53,8 +58,10 @@ const OFF_UPGRADE: usize = 0x4F; // u8  hero upgrade tier 0..3 (drives the upgra
 /// in the module docs and `SAVE_FORMAT.md` (FACT vs INFERRED).
 #[derive(Debug, Clone)]
 pub struct Profile {
-    /// `@0x00` u32 — per-file integrity checksum (`ProfileHash`). Algorithm not
-    /// yet reversed; stored verbatim, **not** validated. Varies every save.
+    /// `@0x00` u32 — per-file integrity checksum (`ProfileHash`): **CRC-32/BZIP2
+    /// over bytes `[4:]`** (poly `0x04C11DB7`, init/xorout `0xFFFFFFFF`,
+    /// non-reflected). Stored verbatim on read; validate with [`Profile::hash_ok`].
+    /// Varies every save. See [`crate::save_write`].
     pub checksum: u32,
     /// `@0x04` u32 — save-format version. Always `4` in retail. Validated.
     pub version: u32,
@@ -191,6 +198,32 @@ impl Profile {
     /// padding that the deflate stream ignores).
     pub fn compressed_payload(&self) -> &[u8] {
         &self.raw[ZLIB_OFFSET..]
+    }
+
+    /// The whole on-disk file, retained verbatim from [`parse`].
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// Mutable access to the retained on-disk buffer (crate-internal — the writer
+    /// re-stamps header fields and the payload region in place).
+    pub(crate) fn raw_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.raw
+    }
+
+    /// Recompute the `ProfileHash` (`@0x00`) over the on-disk bytes `[4:]`.
+    ///
+    /// The algorithm is **CRC-32/BZIP2** (poly `0x04C11DB7`, init/xorout
+    /// `0xFFFFFFFF`, non-reflected) — see [`crate::save_write::profile_hash`],
+    /// derived and verified byte-exact against every retail `.profile`.
+    pub fn computed_hash(&self) -> u32 {
+        crate::save_write::profile_hash(&self.raw[4..])
+    }
+
+    /// Whether the stored `checksum` (`@0x00`) matches [`Profile::computed_hash`].
+    /// True for every uncorrupted retail save (this is the engine's integrity check).
+    pub fn hash_ok(&self) -> bool {
+        self.checksum == self.computed_hash()
     }
 
     /// Decompress the Lua `SaveSingleton` payload. This is the authoritative
