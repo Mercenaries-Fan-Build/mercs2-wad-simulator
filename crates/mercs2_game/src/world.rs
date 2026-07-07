@@ -781,20 +781,9 @@ pub async fn run_scene_world_loading(
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
-    const CLIP_IDLE: u32 = 0x24F8_C8E6;
-    const CLIP_WALK: u32 = 0x5368_2784;
-    const CLIP_RUN: u32 = 0x867B_166D;
-    // Locomotion feel tunables.
+    // Locomotion clip hashes + feel tunables now live on `crate::player::PlayerController`
+    // (extracted for unit testing). Only the schedule's animation crossfade duration is used here.
     const ANIM_BLEND_SEC: f32 = 0.25; // crossfade duration on clip switches
-    const TURN_RATE: f32 = 12.0; // rad/s exponential yaw damp toward the move direction
-    // Human-scale locomotion (world units = metres): the 1.0 s walk cycle strides ~2 m, so
-    // ~2 m/s walk keeps feet planted under FOOT_SYNC; sprint ~6.5 m/s. (The earlier 14/60
-    // were vehicle speeds — user-confirmed mismatch against the geometry.)
-    const WALK_SPEED: f32 = 2.2; // m/s
-    const RUN_SPEED: f32 = 6.5; // m/s (Shift)
-    const ACCEL: f32 = 12.0; // m/s^2 easing toward a higher target speed
-    const DECEL: f32 = 16.0; // m/s^2 easing toward a lower target speed
-    const FOOT_SYNC: bool = true; // scale locomotion playback by current/target speed (0.8..1.2)
 
     let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
@@ -896,26 +885,16 @@ pub async fn run_scene_world_loading(
     //     so the spawn sits inside the assembled recruit-interior meshes.
     //   * default: the EXTERIOR back-door/pool coord (2560.26, -13.18, -926.25) near the PMC HQ.
     //     Per-frame terrain height-follow kicks in only while walking outdoors (below).
-    let mut player_pos = if spawn_interior {
+    let spawn_pos = if spawn_interior {
         println!("[world] --interior: spawning at PMC interior teleport coord (3794.043, 450.751, -3911.032) [interior placed at authored transforms; height-follow OFF]");
         Vec3::new(PMC_INTERIOR_SPAWN[0], PMC_INTERIOR_SPAWN[1], PMC_INTERIOR_SPAWN[2])
     } else {
         Vec3::new(2560.2646, -13.1779, -926.2511)
     };
-    let mut player_foot = 0.0f32;
-    let mut player_entity: Option<Entity> = None;
-    let mut player_yaw = 0.0; // matches the spawn rotation below (faces +Z, into the open hall)
-    let mut player_speed = 0.0f32; // eased ground speed (m/s)
-    let mut player_move_dir = Vec3::new(0.0, 0.0, 1.0); // last input direction (kept while decelerating)
-    let mut has_run = false;
-    // The per-merc idle clip hash (data-driven in load_world_data), captured when the player
-    // spawns; drives the locomotion state machine's idle state. CLIP_IDLE is only the fallback.
-    let mut player_idle = CLIP_IDLE;
-    let (mut dur_walk, mut dur_run) = (1.0f32, 1.0f32);
-    // Ground speeds are DERIVED from each clip's baked root stride at load (see below) so the model
-    // advances exactly as fast as its feet — WALK_SPEED/RUN_SPEED are only the fallback if a clip has
-    // no root locomotion.
-    let (mut walk_speed, mut run_speed) = (WALK_SPEED, RUN_SPEED);
+    // Third-person player locomotion — the extracted, unit-tested `crate::player::PlayerController`.
+    // Its foot offset / clip durations / ground speeds (baked-root-stride derived) / idle / entity are
+    // filled when the avatar loads (below); WALK_SPEED/RUN_SPEED are the fallbacks.
+    let mut player = crate::player::PlayerController::new(spawn_pos);
 
     // World-space collision triangle soup, filled from the structural geometry (interior shells +
     // c3 building cells) when the loader delivers. Consumed by the camera boom (raycast, so it
@@ -1294,12 +1273,12 @@ pub async fn run_scene_world_loading(
 
                                 // Player avatar (optional): near map centre, feet snapped to the terrain heightmap.
                                 if let Some(p) = data.player {
-                                    has_run = p.clips.iter().any(|c| c.name_hash == CLIP_RUN);
+                                    player.has_run = p.clips.iter().any(|c| c.name_hash == crate::player::CLIP_RUN);
                                     // The idle clip = the loaded player clip that isn't walk/run
                                     // (idle was resolved per-merc in load_world_data).
-                                    player_idle = p.clips.iter().map(|c| c.name_hash)
-                                        .find(|h| *h != CLIP_WALK && *h != CLIP_RUN)
-                                        .unwrap_or(CLIP_IDLE);
+                                    player.idle = p.clips.iter().map(|c| c.name_hash)
+                                        .find(|h| *h != crate::player::CLIP_WALK && *h != crate::player::CLIP_RUN)
+                                        .unwrap_or(crate::player::CLIP_IDLE);
                                     for c in &p.clips {
                                         let d = c.clip.duration.max(1e-3);
                                         // Authentic ground speed = the clip's baked root stride / duration.
@@ -1311,14 +1290,14 @@ pub async fn run_scene_world_loading(
                                             c.num_transform_tracks,
                                             d * 0.999,
                                         );
-                                        if c.name_hash == CLIP_WALK {
-                                            dur_walk = d;
-                                            if sp > 0.1 { walk_speed = sp; }
-                                            println!("[world] walk clip stride -> {sp:.2} m/s (fallback {WALK_SPEED})");
-                                        } else if c.name_hash == CLIP_RUN {
-                                            dur_run = d;
-                                            if sp > 0.1 { run_speed = sp; }
-                                            println!("[world] run clip stride -> {sp:.2} m/s (fallback {RUN_SPEED})");
+                                        if c.name_hash == crate::player::CLIP_WALK {
+                                            player.dur_walk = d;
+                                            if sp > 0.1 { player.walk_speed = sp; }
+                                            println!("[world] walk clip stride -> {sp:.2} m/s (fallback {})", crate::player::WALK_SPEED);
+                                        } else if c.name_hash == crate::player::CLIP_RUN {
+                                            player.dur_run = d;
+                                            if sp > 0.1 { player.run_speed = sp; }
+                                            println!("[world] run clip stride -> {sp:.2} m/s (fallback {})", crate::player::RUN_SPEED);
                                         }
                                     }
                                     scene.load_model(p.hash, &p.verts, &p.indices, &p.draws, &p.textures, &p.skin);
@@ -1331,8 +1310,8 @@ pub async fn run_scene_world_loading(
                                     };
                                     // Feet offset: origin-to-lowest-vertex, so the avatar stands ON the ground sample.
                                     let min_y = p.verts.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min);
-                                    player_foot = if min_y.is_finite() { -min_y } else { 0.0 };
-                                    println!("[world] player foot offset = {player_foot:.3} (model min Y {min_y:.3})");
+                                    player.foot = if min_y.is_finite() { -min_y } else { 0.0 };
+                                    println!("[world] player foot offset = {:.3} (model min Y {min_y:.3})", player.foot);
                                     // Spawn uses the boot-log authored Y verbatim (no snap) for BOTH
                                     // modes; per-frame height-follow (exterior only) takes over on move.
                                     let playing = !p.clips.is_empty();
@@ -1341,16 +1320,16 @@ pub async fn run_scene_world_loading(
                                         clips: p.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
                                     });
                                     let anim = if playing {
-                                        AnimState::playing(player_idle)
+                                        AnimState::playing(player.idle)
                                     } else {
                                         AnimState::default()
                                     };
                                     // Spawn facing +Z (into the open hall / toward the exit archway, matching the
                                     // retail spawn), with the third-person camera behind on the -Z side (tp_yaw = 0)
                                     // so the over-the-shoulder view opens behind the player's back.
-                                    let mut t = Transform::from_translation(player_pos);
+                                    let mut t = Transform::from_translation(player.pos);
                                     t.rotation = Quat::from_rotation_y(0.0);
-                                    player_entity = Some(world.spawn((
+                                    player.entity = Some(world.spawn((
                                         t,
                                         ModelRef { model: p.hash },
                                         anim,
@@ -1385,7 +1364,7 @@ pub async fn run_scene_world_loading(
                                         println!("[world] particle FX: {started} emitters + {glows} light-shaft glows started, {skipped} unsupported skipped");
                                     }
                                 }
-                                if start_tps && player_entity.is_some() {
+                                if start_tps && player.entity.is_some() {
                                     mode = CamMode::ThirdPerson;
                                 }
                                 layers.set_target(LAYER_GAME);
@@ -1494,96 +1473,23 @@ pub async fn run_scene_world_loading(
                             // Analog planar move (KB WASD + left stick).
                             let (mx, my) = inp.move_vec();
                             let mv = fwd_flat * my + right_flat * mx;
-                            // Speed ramp: ease the ground speed toward the walk/run target (or 0)
-                            // so starts, stops and gait changes aren't instant. Sprint = ini Sprint (LSHIFT).
-                            let target_sp = if mv != Vec3::ZERO {
-                                if inp.held(Action::Sprint) { run_speed } else { walk_speed }
-                            } else {
-                                0.0
-                            };
-                            let rate = if target_sp > player_speed { ACCEL } else { DECEL };
-                            player_speed += (target_sp - player_speed).clamp(-rate * dt, rate * dt);
-                            if mv != Vec3::ZERO {
-                                player_move_dir = mv.normalize();
-                            }
-                            let moving = player_speed > 1e-3;
-                            if moving {
-                                let horiz = player_move_dir * player_speed * dt;
-                                if !collision_tris.is_empty() {
-                                    // Capsule character controller: collide-and-slide against walls +
-                                    // (interior) a downward ground probe so stairs/steps/ramps work and
-                                    // the capsule rests AGAINST walls instead of penetrating then bouncing.
-                                    // Mirrors the engine's Havok capsule (MatchCapsuleToPose). The exterior
-                                    // still gets Y from the terrain heightmap below (follow_ground = false).
-                                    const PLAYER_RADIUS: f32 = 0.35;
-                                    const PLAYER_HEIGHT: f32 = 1.8;
-                                    const STEP: f32 = 0.5;
-                                    player_pos = crate::collision::move_character(
-                                        &collision_tris, player_pos, horiz,
-                                        PLAYER_RADIUS, PLAYER_HEIGHT, STEP, spawn_interior,
-                                    );
-                                } else {
-                                    player_pos += horiz;
-                                }
-                            }
-                            // Ground snap: feet follow the terrain heightmap. Hinted by the
-                            // current ground Y so overhangs don't teleport the player up. Skipped
-                            // for `--interior` (its floor is at Y≈450, off the terrain).
-                            if !spawn_interior {
-                                if let Some(hm) = &hmap {
-                                    player_pos.y = hm
-                                        .height_at_near(player_pos.x, player_pos.z, player_pos.y - player_foot)
-                                        + player_foot;
-                                }
-                            }
-                            if let Some(e) = player_entity {
-                                if let Ok(mut t) = world.get::<&mut Transform>(e) {
-                                    t.translation = player_pos;
-                                    if moving {
-                                        // Smooth turning: exponential yaw damp toward the move
-                                        // direction, shortest arc.
-                                        let target = player_move_dir.x.atan2(player_move_dir.z);
-                                        let d = (target - player_yaw + PI).rem_euclid(2.0 * PI) - PI;
-                                        player_yaw += d * (1.0 - (-TURN_RATE * dt).exp());
-                                        t.rotation = Quat::from_rotation_y(player_yaw);
-                                    }
-                                }
-                                // Run under Shift, walk while moving, idle otherwise. A switch
-                                // crossfades from the old clip; walk<->run carries the normalized
-                                // cycle phase so the feet stay in step (idle restarts at 0).
-                                if let Ok(mut a) = world.get::<&mut AnimState>(e) {
-                                    let want = if mv != Vec3::ZERO {
-                                        if inp.held(Action::Sprint) && has_run { CLIP_RUN } else { CLIP_WALK }
-                                    } else {
-                                        player_idle
-                                    };
-                                    if a.clip != want {
-                                        a.prev_clip = a.clip;
-                                        a.prev_time = a.time;
-                                        a.blend = 0.0;
-                                        a.time = if a.clip == CLIP_WALK && want == CLIP_RUN {
-                                            a.time / dur_walk * dur_run
-                                        } else if a.clip == CLIP_RUN && want == CLIP_WALK {
-                                            a.time / dur_run * dur_walk
-                                        } else {
-                                            0.0
-                                        };
-                                        a.clip = want;
-                                    }
-                                    // Foot-slide reduction: playback rate tracks the eased speed.
-                                    a.speed = if FOOT_SYNC && want != player_idle && target_sp > 0.0 {
-                                        (player_speed / target_sp).clamp(0.8, 1.2)
-                                    } else {
-                                        1.0
-                                    };
-                                }
-                            }
+                            // Player locomotion (eased speed + collide-and-slide + terrain ground-snap +
+                            // walk/run/idle clip FSM) is the extracted, unit-tested PlayerController.
+                            player.update(
+                                &mut world,
+                                mv,
+                                inp.held(Action::Sprint),
+                                &collision_tris,
+                                hmap.as_ref(),
+                                spawn_interior,
+                                dt,
+                            );
                             let dir = Vec3::new(tp_pitch.cos() * tp_yaw.sin(), tp_pitch.sin(), tp_pitch.cos() * tp_yaw.cos()).normalize();
                             // Over-the-shoulder rig tuned to the retail framing (tight, low): focus at the
                             // character's upper back/shoulder (~1.6 m), a short boom, and a small lateral
                             // shoulder offset. The retail exact values live in the binary's .rdata
                             // (CameraOffset / CameraOffsetZ / HumanCameraModifier) — recoverable via x32dbg.
-                            let focus = player_pos + Vec3::Y * 1.6;
+                            let focus = player.pos + Vec3::Y * 1.6;
                             let right = Vec3::Y.cross(dir).normalize();
                             const BOOM: f32 = 2.2; // eye distance behind the focus (6 m/3 m both read too far back)
                             let want_eye = focus - dir * BOOM + right * 0.55;
@@ -1633,7 +1539,7 @@ pub async fn run_scene_world_loading(
                     // reads as a grounding contact shadow under the character, not an outdoor sun shadow;
                     // outdoors it aligns to the sun. (Direction/extent are tuning knobs.)
                     let shadow_dir = if spawn_interior { [-0.15, -1.0, 0.1] } else { [-0.4, -0.7, 0.5] };
-                    scene.set_shadow(player_pos.to_array(), shadow_dir, 18.0);
+                    scene.set_shadow(player.pos.to_array(), shadow_dir, 18.0);
                     scene.set_view(view, if interior_orbit { 1.0 } else { 0.5 }, 30000.0);
                     match scene.render(&world) {
                         Ok(()) => {}

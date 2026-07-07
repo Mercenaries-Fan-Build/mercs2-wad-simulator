@@ -23,6 +23,7 @@ mod collision; // GAME collision: world triangle soup + camera-boom raycast + pl
 mod gameplay; // GAME: fleet gameplay systems (physics/vehicle/combat/audio) ticked each fixed step
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
+mod player; // GAME: third-person player locomotion controller (extracted from world.rs, unit-tested)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
 mod spawn; // GAME: template -> ECS archetype resolver (Pg.Spawn -> fleet entity, e.g. drivable vehicle)
 mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
