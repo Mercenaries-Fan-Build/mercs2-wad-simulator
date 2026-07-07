@@ -116,7 +116,10 @@ impl GameRuntime {
         for req in self.population.take_requests() {
             let handle = self.next_pop_handle;
             self.next_pop_handle = self.next_pop_handle.wrapping_add(1);
-            self.resolver.spawn(world, req.template, handle, req.transform);
+            let e = self.resolver.spawn(world, req.template, handle, req.transform);
+            // Map the spawn's faction channel onto the actor's AiFaction (K3: no longer dropped). 0 is
+            // the neutral/unset id, so offset by +1 to keep channel Vz(0) distinct from neutral.
+            crate::spawn::set_faction(world, e, req.faction as u32 + 1);
         }
         for e in self.population.take_retired() {
             let _ = world.despawn(e);

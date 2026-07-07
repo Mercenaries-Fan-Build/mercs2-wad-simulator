@@ -20,14 +20,19 @@ use mercs2_vehicle::components::{
 };
 use mercs2_vehicle::lua_surface::{default_car_seating, spawn_vehicle};
 
-/// The ECS entity shape a template resolves to. Extends as more fleet archetypes land (Weapon,
-/// Character, …); today: a rendered prop or a drivable vehicle.
+/// The ECS entity shape a template resolves to. Extends as more fleet archetypes land (Weapon, …);
+/// today: a rendered prop, a drivable vehicle, or a full AI character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Archetype {
     /// A static/rendered prop — the render loop attaches Transform + ModelRef.
     Prop,
     /// A drivable vehicle of the given class — a full fleet bundle the drive system moves.
     Vehicle(VehicleClass),
+    /// A living AI actor (person) — a full cross-system bundle: AI perception/behavior + faction +
+    /// health + animation, so the actor is visible to the AI, killable by combat, and animated. This
+    /// closes keystone K3 (`engine_support_inventory.md` §6.1): before it, every spawned NPC was an
+    /// inert factionless prop, gating AI/faction/combat-death/animation for all population actors.
+    Character,
 }
 
 /// Template name-hash → [`Archetype`]. Populated from the reflection registry / spawn-list data;
@@ -64,6 +69,7 @@ impl SpawnResolver {
     ) -> Entity {
         match self.archetype(template_hash) {
             Archetype::Vehicle(class) => spawn_default_vehicle(world, class, handle, transform),
+            Archetype::Character => spawn_character(world, template_hash, transform),
             Archetype::Prop => world.spawn((transform,)),
         }
     }
@@ -92,6 +98,48 @@ pub fn spawn_default_vehicle(
     )
 }
 
+/// Spawn a living AI actor — the full cross-system component bundle a person needs so it participates
+/// in every actor subsystem at once (keystone K3):
+/// - **AI** (`mercs2_ai`): `Perception`/`Stimulus`/`Target`/`PerceptionRecord` (seen by + sees others),
+///   `AiBehavior` (unrestricted), `AiSkill`, `Squad`, and a **neutral `AiFaction(0)`** the caller
+///   overrides with the real faction (`set_faction`);
+/// - **combat** (`mercs2_combat`): `Health` (100) so damage/death applies;
+/// - **animation** (`mercs2_anim`): `HumanAnimationSet` (keyed by the template hash as the character id)
+///   + `AnimController`, so the data-driven clip picker can drive it.
+///
+/// The render layer adds `ModelRef`/`SkinPalette` (model resolution is the render seam). `template_hash`
+/// doubles as the animation character id until a template→character map lands.
+pub fn spawn_character(world: &mut World, template_hash: u32, transform: Transform) -> Entity {
+    use mercs2_ai::{AiBehavior, AiFaction, AiSkill, Perception, PerceptionRecord, Squad, Stimulus, Target};
+    use mercs2_anim::{AnimController, HumanAnimationSet};
+    use mercs2_combat::components::Health;
+
+    world.spawn((
+        transform,
+        // AI
+        Perception::default(),
+        Stimulus::default(),
+        Target::default(),
+        PerceptionRecord::default(),
+        AiBehavior::default(),
+        AiSkill::default(),
+        Squad::default(),
+        AiFaction(0), // neutral until the caller maps the spawn's faction (see set_faction)
+        // combat
+        Health::new(100.0),
+        // animation
+        HumanAnimationSet::new(template_hash),
+        AnimController::default(),
+    ))
+}
+
+/// Set (override) a spawned actor's AI faction — the caller maps the population/script spawn's faction
+/// channel to a faction id after [`spawn`](SpawnResolver::spawn). No-op if the entity has no
+/// `AiFaction` (e.g. it resolved to a prop/vehicle).
+pub fn set_faction(world: &mut World, entity: Entity, faction_id: u32) {
+    let _ = world.insert_one(entity, mercs2_ai::AiFaction(faction_id));
+}
+
 /// A standard 4-wheel car layout (front steered/unpowered, rear powered) — the hardpoints
 /// `drive_step_system`'s per-axle raycasts use.
 fn car_wheels() -> WheelSet {
@@ -106,6 +154,37 @@ fn car_wheels() -> WheelSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Character` template resolves to a full AI actor carrying every cross-system component (K3):
+    /// AI perception/behavior, faction, health, animation — so it is seen by AI, killable, and animated.
+    /// `set_faction` then overrides the neutral default with the real faction.
+    #[test]
+    fn character_template_spawns_the_full_actor_bundle() {
+        use mercs2_ai::{AiBehavior, AiFaction, Perception, PerceptionRecord, Stimulus, Target};
+        use mercs2_anim::{AnimController, HumanAnimationSet};
+        use mercs2_combat::components::Health;
+
+        let npc_tpl = mercs2_formats::hash::pandemic_hash_m2("vz_soldier");
+        let mut r = SpawnResolver::new();
+        r.register(npc_tpl, Archetype::Character);
+
+        let mut world = World::new();
+        let npc = r.spawn(&mut world, npc_tpl, 0x2000, Transform::from_translation(Vec3::new(3.0, 0.0, 4.0)));
+
+        // AI: sees + is seen.
+        assert!(world.get::<&Perception>(npc).is_ok(), "actor must perceive");
+        assert!(world.get::<&Stimulus>(npc).is_ok() && world.get::<&Target>(npc).is_ok(), "actor is a target");
+        assert!(world.get::<&PerceptionRecord>(npc).is_ok() && world.get::<&AiBehavior>(npc).is_ok());
+        // combat: killable.
+        assert_eq!(world.get::<&Health>(npc).unwrap().max, 100.0);
+        // animation: drivable by the picker.
+        assert_eq!(world.get::<&HumanAnimationSet>(npc).unwrap().character, npc_tpl);
+        assert!(world.get::<&AnimController>(npc).is_ok());
+        // faction: neutral by default, then overridden.
+        assert_eq!(world.get::<&AiFaction>(npc).unwrap().0, 0);
+        set_faction(&mut world, npc, 7);
+        assert_eq!(world.get::<&AiFaction>(npc).unwrap().0, 7, "caller maps the spawn faction");
+    }
 
     /// The resolver routes a registered vehicle template to a `Vehicle` entity and everything else to
     /// a plain prop — the `Pg.Spawn`→entity mapping the mission/population path will drive.
