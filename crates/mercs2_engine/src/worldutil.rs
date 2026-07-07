@@ -387,14 +387,16 @@ pub fn build_streaming_catalog(
         props.insert(p.key, PropSpawn { model_hash: h, pos: p.pos, quat: p.quat });
     }
 
-    // Region cache (PgSysPopulation CacheIn/CacheOut — row 9): the streaming manager now carries the
-    // decision layer (`mgr.add_region` / `update_regions`), but the region CATALOG is not populated
-    // here yet. Population regions come from the `SphereRegion`/`CircleRegion`/`LineRegion` +
-    // `PopulationDensity` COMPs (descriptors `FUN_00641e10`/`FUN_004d60e0` — world_streaming_code_map
-    // §4), whose field-schema parsers live in `mercs2_formats` (out of this silo's edit scope).
-    // Registering real regions is deferred to the population/formats silo — see
-    // `crates/mercs2_core/DEFERRED.md` ("region catalog wiring"). The decision core + its tests stand
-    // on their own until then; fabricating region rects here would violate the fidelity bar.
+    // Region cache (PgSysPopulation CacheIn/CacheOut — row 9), SEAM B: the streaming manager carries
+    // the decision layer (`mgr.add_region` / `update_regions`); this now POPULATES it from the world's
+    // authored `PopulationDensity` COMPs (E1 schema path — `register_population_regions`). See that
+    // function for the grounding + the confirm-live note on why the extent is the authored Transform
+    // anchor (a point) rather than an on-disk rect (region geometry is NOT authored in the placed
+    // COMP; the runtime rect `FUN_004d60e0` +0x10..+0x1c is computed at load).
+    let n_regions = register_population_regions(layers_static, &mut mgr);
+    if n_regions > 0 {
+        println!("[stream] region cache (seam B): {n_regions} PopulationDensity anchors registered");
+    }
 
     (mgr, props, terrain_tiles)
 }
@@ -441,7 +443,224 @@ pub fn add_overlay_to_catalog(
         n_named += 1;
     }
 
+    // Fold the overlay's population regions into the same region cache (seam B), on top of the base.
+    let _ = register_population_regions(block, mgr);
+
     (n_mn, n_named)
+}
+
+// ===========================================================================================
+//  E1 schema → world-loader wiring (Wave-1 seam A) + region cache activation (seam B).
+//
+//  The bespoke `placement::*` loaders remain the correctness ORACLE for the props/terrain/regions
+//  the executor instantiates (they still drive `build_streaming_catalog` unchanged). This section
+//  adds the schema-DRIVEN path ALONGSIDE them: it walks each streamed block's `COMP` groups through
+//  `mercs2_formats::schema` (`parse_comp_groups` → `ComponentSchema` → `deserialize_records`), builds
+//  the kernel `ComponentRegistry` (`register_with_fields`), and reads typed field values by
+//  name-hash — validating agreement with the oracle where they overlap (HibernationControl dist0,
+//  ModelName hash) so drift is caught, and sourcing the population regions the RegionCache needs.
+// ===========================================================================================
+
+/// Population-region cache radii (streaming tunables, native game metres) — the proximity band at
+/// which a `PopulationDensity` region caches its ambient-population lump IN / OUT around its authored
+/// anchor. These are TUNABLES (like `StreamingConfig::tier_stream_out`), not on-disk geometry: the
+/// placed region COMP authors only the anchor position (its `Transform`), never an extent. CONFIRM-
+/// LIVE: the engine's actual cache radius comes from the runtime region rect built in
+/// `FUN_004d60e0`/`PgSysPopulation::Update` (+0x10..+0x1c), read live; these normalized defaults give
+/// the decision core real anchors to run against until that rect is captured. `OUT > IN` = hysteresis.
+pub const POPULATION_REGION_CACHE_IN: f32 = 250.0;
+pub const POPULATION_REGION_CACHE_OUT: f32 = 400.0;
+
+/// Walk every `COMP` group across a decompressed world block's UCFX containers (the same entry-table
+/// framing `ucfx::walk_decompressed_block` uses), grouped into `{info, schm, data}` triples by the E1
+/// `parse_comp_groups` (the `FUN_00654940` COMP arm). This is the single entry point both the schema
+/// registry build and the region registration consume.
+fn walk_comp_groups(block: &[u8]) -> Vec<mercs2_formats::schema::CompGroup> {
+    let parsed = mercs2_formats::ucfx::walk_decompressed_block(block, "stream-world").0;
+    let mut out = Vec::new();
+    for c in &parsed.containers {
+        out.extend(mercs2_formats::schema::parse_comp_groups(c));
+    }
+    out
+}
+
+/// Map an E1 asset-boundary `SchemaFieldType` to the kernel-side `FieldKind` (identical schm type
+/// codes; the mirror is architecturally required — seam F).
+fn field_kind_of(t: mercs2_formats::schema::SchemaFieldType) -> mercs2_core::registry::FieldKind {
+    use mercs2_core::registry::FieldKind as K;
+    use mercs2_formats::schema::SchemaFieldType as T;
+    match t {
+        T::Bit => K::Bit,
+        T::U8 => K::U8,
+        T::U16 => K::U16,
+        T::F32 => K::F32,
+        T::U32 => K::U32,
+        T::Ref => K::Ref,
+        T::StringRef => K::StringRef,
+        T::Flags => K::Flags,
+        T::Vec3 => K::Vec3,
+        T::Blob32 => K::Blob32,
+    }
+}
+
+/// Result of the schema-driven load pass over one world block.
+#[derive(Debug, Default, Clone)]
+pub struct SchemaLoadStats {
+    /// Distinct component classes registered into the `ComponentRegistry` (each `schm` → descriptor).
+    pub classes: usize,
+    /// Generic `COMP` groups whose fixed-stride `data` deserialized (excludes `Transform`, which is
+    /// CHDR-stride-gated per E1, and variable-length/`Name` records).
+    pub generic_groups: usize,
+    /// Total per-entity records deserialized across those generic groups.
+    pub generic_records: usize,
+    /// HibernationControl dist0 values cross-checked against the `placement` oracle, and how many
+    /// agreed (the schema path must match the oracle exactly where they overlap).
+    pub hib_checked: usize,
+    pub hib_agree: usize,
+    /// ModelName hashes cross-checked against the oracle, and how many agreed.
+    pub model_checked: usize,
+    pub model_agree: usize,
+}
+
+/// Build the kernel `ComponentRegistry` from a world block's `schm` field schemas and deserialize its
+/// generic `COMP` records through the E1 schema path, cross-checking agreement with the bespoke
+/// `placement` oracle. ADDITIVE + read-only: this informs/validates instantiation; it does not change
+/// what streams (the oracle-driven catalog is unchanged). Returns the registry + a stats summary.
+pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, SchemaLoadStats) {
+    use mercs2_core::registry::FieldLayout;
+    use mercs2_formats::schema::FieldValue;
+
+    let mut reg = mercs2_core::ComponentRegistry::new();
+    let mut stats = SchemaLoadStats::default();
+
+    // Oracle references for the agreement cross-check.
+    let oracle_hib = mercs2_formats::placement::load_hibernation(block);
+    let oracle_models: std::collections::HashMap<u32, u32> =
+        mercs2_formats::placement::load_model_placements(block)
+            .iter()
+            .map(|m| (m.key, m.model_hash))
+            .collect();
+    let mut schema_hib: std::collections::HashMap<u32, u16> = std::collections::HashMap::new();
+    let mut schema_model: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+    for g in walk_comp_groups(block) {
+        let Some(name) = g.name.clone() else { continue };
+        let Some(schema) = g.schema() else { continue };
+
+        // Register the class (schm → descriptor). register_with_fields is idempotent per type-hash.
+        let type_hash = g
+            .type_hash
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+        let fields: Vec<FieldLayout> = schema
+            .fields
+            .iter()
+            .map(|f| FieldLayout {
+                name_hash: f.name_hash,
+                byte_offset: f.byte_offset,
+                bit_index: f.bit_index,
+                kind: field_kind_of(f.field_type),
+            })
+            .collect();
+        reg.register_with_fields(name.clone(), type_hash, Some(schema.payload_stride), fields);
+
+        // Transform's on-disk `data` is written by the CHDR-stride-gated builder (0x0063D7C0), NOT the
+        // generic [key][payload] path — keep using the placement parser for it (E1 confirm-live note).
+        if name == "Transform" {
+            continue;
+        }
+        let Some(data) = g.data.as_ref() else { continue };
+        if data.is_empty() {
+            continue;
+        }
+        let Some(recs) = schema.deserialize_records(data) else { continue };
+        stats.generic_groups += 1;
+        stats.generic_records += recs.len();
+
+        // Read typed field values by name-hash for the two classes the oracle also decodes.
+        match name.as_str() {
+            "HibernationControl" => {
+                let nh = schema.fields[0].name_hash;
+                for r in &recs {
+                    if let Some(FieldValue::U16(d0)) = r.get(nh) {
+                        schema_hib.entry(r.entity_key).or_insert(d0);
+                    }
+                }
+            }
+            "ModelName" => {
+                let nh = schema.fields[0].name_hash;
+                for r in &recs {
+                    if let Some(FieldValue::U32(h)) = r.get(nh) {
+                        schema_model.entry(r.entity_key).or_insert(h);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (k, h) in &oracle_hib {
+        stats.hib_checked += 1;
+        if schema_hib.get(k) == Some(&h.dist[0]) {
+            stats.hib_agree += 1;
+        }
+    }
+    for (k, h) in &oracle_models {
+        stats.model_checked += 1;
+        if schema_model.get(k) == Some(h) {
+            stats.model_agree += 1;
+        }
+    }
+    stats.classes = reg.len();
+    (reg, stats)
+}
+
+/// Register the world block's authored `PopulationDensity` regions into the streaming manager's
+/// RegionCache (seam B). Each placed `PopulationDensity` entity is joined by key to its `Transform`
+/// (the oracle center) and registered as a region anchored at that authored world point.
+///
+/// GROUNDING / FIDELITY (see the retail-vz.wad survey, 2026-07-07): the placed region COMPs do NOT
+/// carry a rect/radius extent on disk — `PopulationDensity`'s `schm` is density params + two name
+/// refs + a flags word (no min/max); `LineRegion` is a single ref (its points live in a separate
+/// `PgLineRegion` structure); and `SphereRegion`/`CircleRegion` (the only region types that author a
+/// radius float, `FUN_0065fe40`/`FUN_0065fee0`) have ZERO placed instances joined to a Transform (they
+/// exist only as prototypes in the registry block + are created at runtime by `World.CreateRegion`).
+/// So the only grounded region datum is the authored ANCHOR (the Transform center); the extent is a
+/// point and the cache in/out band is the streaming tunable [`POPULATION_REGION_CACHE_IN`]/`_OUT`.
+/// Fabricating a rect from terrain/heuristics is explicitly declined; the real runtime rect
+/// (`FUN_004d60e0` +0x10..+0x1c) is a confirm-live capture.
+fn register_population_regions(
+    block: &[u8],
+    mgr: &mut mercs2_core::streaming::StreamingManager,
+) -> usize {
+    use mercs2_core::streaming::{Extent2, RegionUnit};
+
+    // Authored centers from the block's Transforms (the placement oracle).
+    let mut centers: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
+    for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
+        centers.entry(p.key).or_insert(p.pos);
+    }
+
+    let mut n = 0usize;
+    for g in walk_comp_groups(block) {
+        if g.name.as_deref() != Some("PopulationDensity") {
+            continue;
+        }
+        let Some(schema) = g.schema() else { continue };
+        let Some(data) = g.data.as_ref() else { continue };
+        let Some(recs) = schema.deserialize_records(data) else { continue };
+        for r in &recs {
+            let Some(c) = centers.get(&r.entity_key) else { continue };
+            mgr.add_region(RegionUnit {
+                key: r.entity_key,
+                extent: Extent2::from_center_half(c[0], c[2], 0.0), // authored anchor (a point)
+                priority: 0,
+                cache_in: POPULATION_REGION_CACHE_IN,
+                cache_out: POPULATION_REGION_CACHE_OUT,
+            });
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Resolve a vz_state overlay LAYER name to its WAD block, matching the PTHS filename
@@ -744,3 +963,94 @@ pub const PMC_INTERIOR_ENTITIES: &[(u32, &str)] = &[
     (0x000c740d, "_pmcoutpost_interior_recruitjet"),
     (0x000c73ee, "_pmcoutpost_interior_recruitmechanic"),
 ];
+
+#[cfg(test)]
+mod schema_wire_tests {
+    use super::*;
+
+    /// Live end-to-end proof that the E1 schema deserializer is wired into the world-load path and
+    /// that the S5 RegionCache is populated (seams A + B). SKIPS (passes) when vz.wad is absent so CI
+    /// stays green — matching the other live tests in this workspace.
+    ///
+    /// Asserts, against the real retail `layers_static` block:
+    ///   1. the schema path deserializes many generic COMP records (≥ 2000) across many classes,
+    ///   2. every value it reads for HibernationControl dist0 + ModelName hash AGREES with the bespoke
+    ///      `placement` oracle (no drift on the overlap),
+    ///   3. ≥ 1 population region registers into the streaming manager's RegionCache, and driving
+    ///      `update_regions` at a region's anchor caches that region IN.
+    #[test]
+    fn live_schema_and_region_wire_if_wad_present() {
+        let path = std::env::var("VZ_WAD").unwrap_or_else(|_| {
+            "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
+        });
+        if std::fs::metadata(&path).is_err() {
+            eprintln!("skip: vz.wad not present at {path}");
+            return;
+        }
+        let mut w = crate::wad::open(&path).expect("open vz.wad");
+        let (_low, ls) = find_terrain_blocks(&mut w).expect("terrain blocks");
+
+        // Seam A — schema-driven generic COMP deserialize + oracle agreement.
+        let (reg, stats) = load_schema_components(&ls);
+        println!(
+            "[schema-test] classes={} generic_groups={} generic_records={} | HibernationControl {}/{} agree, ModelName {}/{} agree | pool_budget_total={}",
+            stats.classes, stats.generic_groups, stats.generic_records,
+            stats.hib_agree, stats.hib_checked, stats.model_agree, stats.model_checked, reg.total_budget()
+        );
+        assert!(stats.classes >= 10, "expected many registered classes, got {}", stats.classes);
+        assert!(
+            stats.generic_records >= 2000,
+            "expected ≥2000 generic COMP records deserialized, got {}",
+            stats.generic_records
+        );
+        // The schema path must agree with the oracle exactly where they overlap.
+        assert!(stats.hib_checked > 0 && stats.hib_agree == stats.hib_checked,
+            "HibernationControl dist0 disagreed with oracle: {}/{}", stats.hib_agree, stats.hib_checked);
+        assert!(stats.model_checked > 0 && stats.model_agree == stats.model_checked,
+            "ModelName hash disagreed with oracle: {}/{}", stats.model_agree, stats.model_checked);
+
+        // Descriptor lookups resolve real classes registered from schm.
+        assert!(reg.get_by_name("HibernationControl").is_some(), "HibernationControl not registered");
+        assert!(reg.get_by_name("PopulationDensity").is_some(), "PopulationDensity not registered");
+
+        // Seam B — region cache populated from PopulationDensity anchors, and actually driven.
+        let mut mgr = mercs2_core::streaming::StreamingManager::new(
+            mercs2_core::streaming::StreamingConfig::default(),
+        );
+        let n_regions = register_population_regions(&ls, &mut mgr);
+        println!("[schema-test] region cache: {n_regions} PopulationDensity anchors registered");
+        assert!(n_regions >= 1, "expected ≥1 population region registered");
+        assert_eq!(mgr.region_count(), n_regions);
+
+        // Drive the decision layer at an anchor: it must cache that region IN.
+        let anchor = first_population_anchor(&ls).expect("a population anchor");
+        let diff = mgr.update_regions(anchor);
+        assert!(
+            !diff.cache_in.is_empty() || mgr.cached_region_count() >= 1,
+            "driving update_regions at an anchor should cache ≥1 region in"
+        );
+        println!("[schema-test] update_regions@anchor -> cached {}/{}", mgr.cached_region_count(), mgr.region_count());
+    }
+
+    /// The world position of the first `PopulationDensity` region's authored Transform anchor.
+    fn first_population_anchor(block: &[u8]) -> Option<[f32; 3]> {
+        let mut centers: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
+        for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
+            centers.entry(p.key).or_insert(p.pos);
+        }
+        for g in walk_comp_groups(block) {
+            if g.name.as_deref() != Some("PopulationDensity") {
+                continue;
+            }
+            let schema = g.schema()?;
+            let data = g.data.as_ref()?;
+            let recs = schema.deserialize_records(data)?;
+            for r in &recs {
+                if let Some(c) = centers.get(&r.entity_key) {
+                    return Some(*c);
+                }
+            }
+        }
+        None
+    }
+}

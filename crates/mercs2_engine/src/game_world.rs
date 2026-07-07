@@ -816,9 +816,26 @@ fn load_streaming_world_data(
     }
 
     println!(
-        "[stream] catalog: {} c3-cell blocks, {} per-entity props ({base_props} base + {} overlay), {} hi-res terrain tiles",
-        manager.block_count(), props.len(), props.len() - base_props, terrain_tiles.len()
+        "[stream] catalog: {} c3-cell blocks, {} per-entity props ({base_props} base + {} overlay), {} hi-res terrain tiles, {} population regions",
+        manager.block_count(), props.len(), props.len() - base_props, terrain_tiles.len(), manager.region_count()
     );
+
+    // Seam A — E1 schema-driven component pass (ADDITIVE, alongside the oracle-driven catalog above):
+    // build the kernel ComponentRegistry from the block's `schm` field schemas and deserialize its
+    // generic COMP records, cross-checking agreement with the bespoke placement oracle. This wires the
+    // field-schema deserializer into the live loader; it does not change what streams.
+    let (comp_reg, sstats) = load_schema_components(&ls);
+    println!(
+        "[stream] schema (seam A): {} classes registered (pool budget {}), {} generic COMP groups / {} records deserialized; oracle agreement: HibernationControl {}/{}, ModelName {}/{}",
+        sstats.classes, comp_reg.total_budget(), sstats.generic_groups, sstats.generic_records,
+        sstats.hib_agree, sstats.hib_checked, sstats.model_agree, sstats.model_checked
+    );
+    if sstats.hib_agree != sstats.hib_checked || sstats.model_agree != sstats.model_checked {
+        eprintln!(
+            "[stream] WARNING: schema path disagreed with the placement oracle (HibernationControl {}/{}, ModelName {}/{}) — investigate before trusting schema-driven instantiation",
+            sstats.hib_agree, sstats.hib_checked, sstats.model_agree, sstats.model_checked
+        );
+    }
     progress.step("streaming catalog");
 
     println!("[stream] dynamic lights: {} LightObject placements harvested", lights.len());
@@ -1126,6 +1143,11 @@ pub async fn run_game_world(
                     // --- streaming tick: decide, then execute the diff on the GPU/ECS ---
                     if let (Some(mgr), Some(w)) = (manager.as_mut(), wad_opt.as_mut()) {
                         let diff = mgr.update([free_pos.x, free_pos.y, free_pos.z]);
+                        // Seam B — drive the RegionCache decision layer each tick (PgSysPopulation
+                        // CacheIn/CacheOut). Decisions are computed against the authored PopulationDensity
+                        // anchors registered at load; the population-lump executor is a later silo, so the
+                        // ops are informational here (surfaced in the periodic stat line below).
+                        let _region_diff = mgr.update_regions([free_pos.x, free_pos.y, free_pos.z]);
 
                         // UNLOAD first (free GPU): blocks that left the working radius.
                         for b in &diff.unload_blocks {
@@ -1245,9 +1267,10 @@ pub async fn run_game_world(
                         if stat_last.elapsed().as_secs_f32() >= 1.0 {
                             stat_last = std::time::Instant::now();
                             println!(
-                                "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} | live_blk_ents={} props={} models={}",
+                                "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={}",
                                 free_pos.x, free_pos.y, free_pos.z,
                                 mgr.resident_count(), mgr.awake_count(),
+                                mgr.cached_region_count(), mgr.region_count(),
                                 block_ents.len(), prop_ents.len(), model_refs.len()
                             );
                         }
