@@ -27,3 +27,37 @@ pub mod scene;
 pub mod ui;
 pub mod wad;
 pub mod worldutil;
+
+/// Wave-0 Tier-2 seam guard (seam F, `docs/modernization/wave0_seam_review.md`).
+///
+/// The `schm` type-code table exists as two **parallel enums** by architectural necessity —
+/// `mercs2_formats::schema::SchemaFieldType` (the on-disk/asset side) and
+/// `mercs2_core::registry::FieldKind` (the asset-agnostic kernel side, which cannot depend on
+/// `mercs2_formats`). They are a hand-kept mirror; this test — living in the one crate that depends on
+/// **both** — fails the moment a code or width diverges, so the mirror can never silently drift.
+#[cfg(test)]
+mod schema_type_code_mirror {
+    use mercs2_core::registry::FieldKind;
+    use mercs2_formats::schema::SchemaFieldType;
+
+    #[test]
+    fn field_kind_mirrors_schema_field_type_for_every_code() {
+        // The full schm code space (0..=12 covers every valid code + the gaps 0/3/12).
+        for code in 0u32..=12 {
+            let asset = SchemaFieldType::from_code(code);
+            let kernel = FieldKind::from_type_code(code);
+            assert_eq!(
+                asset.is_some(),
+                kernel.is_some(),
+                "code {code}: formats and core disagree on whether it is a valid schm type"
+            );
+            if let (Some(a), Some(k)) = (asset, kernel) {
+                assert_eq!(
+                    a.byte_width(),
+                    k.byte_width(),
+                    "code {code} ({a:?} vs {k:?}): byte-width mismatch between the two mirrors"
+                );
+            }
+        }
+    }
+}
