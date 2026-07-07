@@ -850,6 +850,272 @@ pub fn load_streaming_world_data(
     Ok(StreamingWorldData { wad: w, terrain, manager, props, terrain_tiles, lowres_draw_by_cell, lights })
 }
 
+/// A per-frame stats snapshot for the streaming console/HUD line.
+pub struct StreamStats {
+    pub resident: usize,
+    pub awake: usize,
+    pub cached_regions: usize,
+    pub regions: usize,
+    pub block_ents: usize,
+    pub props: usize,
+    pub models: usize,
+}
+
+/// Map a world XZ to the 20×20 low-res terrain grid cell (`row*20+col`); tiles are 400 m from -3800.
+/// Used by the executor to hide/show the low-res tile beneath a woken/hibernated hi-res terrainmesh.
+fn pos_to_cell(p: [f32; 3]) -> Option<usize> {
+    let col = ((p[0] + 3800.0) / 400.0).round() as i32;
+    let row = ((p[2] + 3800.0) / 400.0).round() as i32;
+    (0..20).contains(&col).then_some(())?;
+    (0..20).contains(&row).then_some(())?;
+    Some(row as usize * 20 + col as usize)
+}
+
+/// The reusable streaming-runtime **executor** (K2 unification,
+/// `docs/modernization/k2_streaming_unification_plan.md`). Owns the decision [`StreamingManager`], the
+/// WAD handle (for on-demand wake extraction), the wake recipes, and all live-executor bookkeeping, and
+/// performs the per-frame GPU/ECS LOAD/WAKE/UNLOAD/HIBERNATE work in [`step`](Self::step). Extracted
+/// **verbatim** from `run_game_world`'s closure so BOTH the free-fly boot and the playable TPS boot can
+/// drive one streaming path — each layering its own camera/player on top. The one-time boot glue (base
+/// terrain upload, the game populate hook, world lights) stays in the caller; [`new`](Self::new) takes
+/// ownership of the streaming state after that.
+pub struct StreamingWorld {
+    wad: wad::Wad,
+    manager: mercs2_core::streaming::StreamingManager,
+    props: std::collections::HashMap<u32, PropSpawn>,
+    terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])>,
+    lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
+    terrain_hash: u32,
+    prop_ents: std::collections::HashMap<u32, mercs2_core::Entity>,
+    block_ents: std::collections::HashMap<u16, mercs2_core::Entity>,
+    model_refs: std::collections::HashMap<u32, u32>,
+    wake_failed: std::collections::HashSet<u32>,
+    anim_store: std::collections::HashMap<u32, crate::scene::ModelAnim>,
+}
+
+impl StreamingWorld {
+    /// Take ownership of the loaded streaming state. The caller has already uploaded the base terrain,
+    /// run its populate hook, and set the world lights (one-time boot glue, not per-frame). `terrain_hash`
+    /// is the low-res terrain model hash (for the tile LOD swap).
+    pub fn new(
+        wad: wad::Wad,
+        manager: mercs2_core::streaming::StreamingManager,
+        props: std::collections::HashMap<u32, PropSpawn>,
+        terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])>,
+        lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
+        terrain_hash: u32,
+    ) -> Self {
+        StreamingWorld {
+            wad,
+            manager,
+            props,
+            terrain_tiles,
+            lowres_draw_by_cell,
+            terrain_hash,
+            prop_ents: std::collections::HashMap::new(),
+            block_ents: std::collections::HashMap::new(),
+            model_refs: std::collections::HashMap::new(),
+            wake_failed: std::collections::HashSet::new(),
+            anim_store: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Live executor counts for the periodic stat line.
+    pub fn stats(&self) -> StreamStats {
+        StreamStats {
+            resident: self.manager.resident_count(),
+            awake: self.manager.awake_count(),
+            cached_regions: self.manager.cached_region_count(),
+            regions: self.manager.region_count(),
+            block_ents: self.block_ents.len(),
+            props: self.prop_ents.len(),
+            models: self.model_refs.len(),
+        }
+    }
+
+    /// One streaming step at camera position `cam`: run the manager decision (block/prop diff + the
+    /// RegionCache CacheIn/CacheOut layer), then execute the diff on the GPU/ECS — UNLOAD blocks that
+    /// left the working radius, HIBERNATE far props, LOAD c3-cell geometry, and WAKE props/terrain tiles
+    /// at their authored transforms. Verbatim from the original free-fly executor.
+    pub fn step(&mut self, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World, cam: [f32; 3]) {
+        use mercs2_core::glam::{Quat, Vec3};
+        use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
+        const IDENTITY: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let Self {
+            wad,
+            manager,
+            props,
+            terrain_tiles,
+            lowres_draw_by_cell,
+            terrain_hash,
+            prop_ents,
+            block_ents,
+            model_refs,
+            wake_failed,
+            anim_store,
+        } = self;
+        let terrain_hash = *terrain_hash;
+
+        let diff = manager.update(cam);
+        // Seam B — drive the RegionCache decision layer each tick (PgSysPopulation CacheIn/CacheOut).
+        let _region_diff = manager.update_regions(cam);
+
+        // UNLOAD first (free GPU): blocks that left the working radius.
+        for b in &diff.unload_blocks {
+            if let Some(e) = block_ents.remove(b) {
+                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
+                    dec_model_ref(model_refs, mr, scene);
+                }
+                let _ = world.despawn(e);
+                scene.forget_entity(e);
+            }
+        }
+        // HIBERNATE (free GPU): props beyond their stream-out distance.
+        for k in &diff.hibernate {
+            // If a hi-res terrain tile hibernates, un-hide its low-res tile again.
+            if let Some(&(_, pos)) = terrain_tiles.get(k) {
+                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
+                    scene.set_draw_hidden(terrain_hash, *di, false);
+                }
+            }
+            if let Some(e) = prop_ents.remove(k) {
+                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
+                    dec_model_ref(model_refs, mr, scene);
+                }
+                let _ = world.despawn(e);
+                scene.forget_entity(e);
+            }
+        }
+        // LOAD c3-cell blocks (throttled by the manager's block budget).
+        for b in &diff.load_blocks {
+            if block_ents.contains_key(b) {
+                continue;
+            }
+            if let Some((m, off)) = load_one_c3_cell(wad, *b) {
+                if !scene.has_model(m.hash) {
+                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                }
+                let e = world.spawn((
+                    Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
+                    ModelRef { model: m.hash },
+                    AnimState::default(),
+                    SkinPalette { mats: vec![IDENTITY] },
+                ));
+                *model_refs.entry(m.hash).or_insert(0) += 1;
+                block_ents.insert(*b, e);
+            }
+        }
+        // WAKE props (throttled by the manager's entity budget): instantiate the ModelName mesh at the
+        // authored Transform (identity fit + bone-count palette).
+        for k in &diff.wake {
+            if prop_ents.contains_key(k) {
+                continue;
+            }
+            // Hi-res terrain tile? Load the terrainmesh (POFF-composed, world-placed via
+            // TerrainObject->Transform) and spawn at identity (verts already world-space).
+            if let Some(&(tm_hash, pos)) = terrain_tiles.get(k) {
+                if !scene.has_model(tm_hash) {
+                    match load_terrainmesh_tile(wad, tm_hash, pos) {
+                        Some(m) => scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin),
+                        None => {
+                            wake_failed.insert(*k);
+                            continue;
+                        }
+                    }
+                }
+                let e = world.spawn((
+                    Transform::IDENTITY,
+                    ModelRef { model: tm_hash },
+                    AnimState::default(),
+                    SkinPalette { mats: vec![IDENTITY] },
+                ));
+                *model_refs.entry(tm_hash).or_insert(0) += 1;
+                prop_ents.insert(*k, e);
+                // Hide the low-res tile beneath this hi-res tile (the LOD swap).
+                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
+                    scene.set_draw_hidden(terrain_hash, *di, true);
+                }
+                continue;
+            }
+            let Some(spawn) = props.get(k).copied() else { continue };
+            if !scene.has_model(spawn.model_hash) {
+                match load_model_by_hash(wad, spawn.model_hash) {
+                    Some((m, _, _)) => {
+                        scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                        // A rigged model that ships clips registers its rig + clips so the per-frame
+                        // animation pass can pose it (no-op for clip-less props).
+                        if !m.clips.is_empty() {
+                            anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
+                                rig: m.skin.rig.clone(),
+                                clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
+                            });
+                        }
+                    }
+                    None => {
+                        wake_failed.insert(*k);
+                        continue;
+                    }
+                }
+            }
+            let nbones = scene.model_bone_count(spawn.model_hash).max(1);
+            let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
+            t.rotation = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
+            // Play the first discovered clip if this model has any; else stay static.
+            let anim = match anim_store.get(&spawn.model_hash).and_then(|ma| ma.clips.keys().next()) {
+                Some(&clip) => AnimState::playing(clip),
+                None => AnimState::default(),
+            };
+            let e = world.spawn((
+                t,
+                ModelRef { model: spawn.model_hash },
+                anim,
+                SkinPalette { mats: vec![IDENTITY; nbones] },
+            ));
+            *model_refs.entry(spawn.model_hash).or_insert(0) += 1;
+            prop_ents.insert(*k, e);
+        }
+        // diff.tier_changes carries the per-PROP hibernation LOD tier — informational only; props don't
+        // ship alternate-LOD meshes (verified --lod-probe: 2/446).
+    }
+
+    /// The fixed-timestep animation pass for woken rigged props: advance each playing clip by `sim_dt`
+    /// and pose it into the entity `SkinPalette` (same `havok_palette_in_place` math as the player
+    /// system). Scoped to models that registered clips, so clip-less static content is untouched — a
+    /// no-op when nothing woke with clips.
+    pub fn animate(&self, world: &mut mercs2_core::World, sim_dt: f32) {
+        use mercs2_core::{AnimState, ModelRef, SkinPalette};
+        if self.anim_store.is_empty() {
+            return;
+        }
+        for (_e, (state, palette, mref)) in world
+            .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
+            .iter()
+        {
+            if !state.playing {
+                continue;
+            }
+            let Some(ma) = self.anim_store.get(&mref.model) else { continue };
+            let Some(ca) = ma.clips.get(&state.clip).or_else(|| ma.clips.values().next()) else {
+                continue;
+            };
+            let clip_dur = ca.clip.duration.max(1e-3);
+            state.time = (state.time + sim_dt * state.speed) % clip_dur;
+            let sample = ca.clip.sample_local(state.time);
+            palette.mats = crate::pose::havok_palette_in_place(
+                &ma.rig,
+                &sample,
+                &ca.track_to_hier,
+                ca.num_transform_tracks,
+            );
+        }
+    }
+}
+
 /// The control-driven streaming world with a free-fly camera (the no-arg default boot; also
 /// `--stream`). Mirrors the original engine's ONE streaming system (spec §10): a background loader
 /// builds the block index + Layer-2 decision catalog, then each frame the pure `StreamingManager`
@@ -875,11 +1141,11 @@ pub async fn run_game_world(
 ) {
     use crate::scene::Scene;
     use mercs2_core::frame::{LayerStack, LayerTransition, LAYER_GAME};
-    use mercs2_core::glam::{Mat4, Quat, Vec3};
+    use mercs2_core::glam::{Mat4, Vec3};
     use mercs2_core::streaming::StreamingConfig;
     use mercs2_core::Time;
-    use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
-    use std::collections::{HashMap, HashSet};
+    use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform, World};
+    use std::collections::HashSet;
     use std::f32::consts::PI;
     use winit::event::{DeviceEvent, ElementState};
     use winit::window::CursorGrabMode;
@@ -952,31 +1218,9 @@ pub async fn run_game_world(
     });
 
     let mut world = World::new();
-    // Streaming state, wired in on loader completion.
-    let mut wad_opt: Option<wad::Wad> = None;
-    let mut manager: Option<mercs2_core::streaming::StreamingManager> = None;
-    let mut props: HashMap<u32, PropSpawn> = HashMap::new();
-    let mut terrain_tiles: HashMap<u32, (u32, [f32; 3])> = HashMap::new(); // key -> (terrainmesh hash, pos)
-    let mut lowres_draw_by_cell: HashMap<usize, usize> = HashMap::new(); // grid cell -> low-res draw idx
-    let mut terrain_hash: u32 = 0; // the low-res terrain model hash (for the tile LOD swap)
-    // Map a world XZ to the 20x20 low-res grid cell (row*20+col); tiles are 400 m from -3800.
-    let pos_to_cell = |p: [f32; 3]| -> Option<usize> {
-        let col = ((p[0] + 3800.0) / 400.0).round() as i32;
-        let row = ((p[2] + 3800.0) / 400.0).round() as i32;
-        (0..20).contains(&col).then(|| ())?;
-        (0..20).contains(&row).then(|| ())?;
-        Some(row as usize * 20 + col as usize)
-    };
-    // Live executor bookkeeping.
-    let mut prop_ents: HashMap<u32, Entity> = HashMap::new(); // entity key -> ECS entity
-    let mut block_ents: HashMap<u16, Entity> = HashMap::new(); // c3 block -> ECS entity
-    let mut model_refs: HashMap<u32, u32> = HashMap::new(); // model hash -> live entity count
-    let mut wake_failed: HashSet<u32> = HashSet::new(); // keys whose mesh wouldn't resolve (logged once)
-    // CPU animation store: model hash -> (rig + its decoded clips). A woken model that ships clips
-    // (rigged prop / NPC / DLC content) registers here so the per-frame animation pass below samples
-    // its clip into the entity `SkinPalette`, exactly as the player avatar is driven in mercs2_game.
-    // Empty for every clip-less retail prop, so existing static behaviour is byte-for-byte unchanged.
-    let mut anim_store: HashMap<u32, crate::scene::ModelAnim> = HashMap::new();
+    // The streaming runtime executor (K2: the reusable StreamingWorld owns the manager + WAD handle +
+    // all live bookkeeping). Wired in on loader completion; drives the world each frame via `step`.
+    let mut stream: Option<StreamingWorld> = None;
 
     // Free-fly camera. Start over the PMC exterior spawn at a moderate height so nearby cells +
     // props stream in immediately; WASDQE + mouse-look fly around.
@@ -1073,7 +1317,7 @@ pub async fn run_game_world(
                             let Some(mut data) = pending.take() else { continue };
                             // Base terrain: one static entity at identity (verts already world-space).
                             let terrain = data.terrain;
-                            terrain_hash = terrain.hash;
+                            let terrain_hash = terrain.hash;
                             scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
                             world.spawn((
                                 Transform::IDENTITY,
@@ -1088,11 +1332,15 @@ pub async fn run_game_world(
                             // Hand the harvested world lights to the scene (static placements; the scene
                             // uploads the nearest set to the camera each frame).
                             scene.set_lights(std::mem::take(&mut data.lights));
-                            wad_opt = Some(data.wad);
-                            manager = Some(data.manager);
-                            props = data.props;
-                            terrain_tiles = data.terrain_tiles;
-                            lowres_draw_by_cell = data.lowres_draw_by_cell;
+                            // Take ownership of the streaming state into the reusable executor.
+                            stream = Some(StreamingWorld::new(
+                                data.wad,
+                                data.manager,
+                                data.props,
+                                data.terrain_tiles,
+                                data.lowres_draw_by_cell,
+                                terrain_hash,
+                            ));
                         }
                     }
 
@@ -1148,171 +1396,28 @@ pub async fn run_game_world(
                     if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * real_dt; }
                     let view = Mat4::look_to_lh(free_pos, fwd, Vec3::Y);
 
-                    // --- streaming tick: decide, then execute the diff on the GPU/ECS ---
-                    if let (Some(mgr), Some(w)) = (manager.as_mut(), wad_opt.as_mut()) {
-                        let diff = mgr.update([free_pos.x, free_pos.y, free_pos.z]);
-                        // Seam B — drive the RegionCache decision layer each tick (PgSysPopulation
-                        // CacheIn/CacheOut). Decisions are computed against the authored PopulationDensity
-                        // anchors registered at load; the population-lump executor is a later silo, so the
-                        // ops are informational here (surfaced in the periodic stat line below).
-                        let _region_diff = mgr.update_regions([free_pos.x, free_pos.y, free_pos.z]);
-
-                        // UNLOAD first (free GPU): blocks that left the working radius.
-                        for b in &diff.unload_blocks {
-                            if let Some(e) = block_ents.remove(b) {
-                                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
-                                    dec_model_ref(&mut model_refs, mr, &mut scene);
-                                }
-                                let _ = world.despawn(e);
-                                scene.forget_entity(e);
-                            }
-                        }
-                        // HIBERNATE (free GPU): props beyond their stream-out distance.
-                        for k in &diff.hibernate {
-                            // If a hi-res terrain tile hibernates, un-hide its low-res tile again.
-                            if let Some(&(_, pos)) = terrain_tiles.get(k) {
-                                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
-                                    scene.set_draw_hidden(terrain_hash, *di, false);
-                                }
-                            }
-                            if let Some(e) = prop_ents.remove(k) {
-                                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
-                                    dec_model_ref(&mut model_refs, mr, &mut scene);
-                                }
-                                let _ = world.despawn(e);
-                                scene.forget_entity(e);
-                            }
-                        }
-                        // LOAD c3-cell blocks (throttled by the manager's block budget).
-                        for b in &diff.load_blocks {
-                            if block_ents.contains_key(b) { continue; }
-                            if let Some((m, off)) = load_one_c3_cell(w, *b) {
-                                if !scene.has_model(m.hash) {
-                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                }
-                                let e = world.spawn((
-                                    Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
-                                    ModelRef { model: m.hash },
-                                    AnimState::default(),
-                                    SkinPalette { mats: vec![IDENTITY] },
-                                ));
-                                *model_refs.entry(m.hash).or_insert(0) += 1;
-                                block_ents.insert(*b, e);
-                            }
-                        }
-                        // WAKE props (throttled by the manager's entity budget): instantiate the
-                        // ModelName mesh at the authored Transform (identity fit + bone-count palette).
-                        for k in &diff.wake {
-                            if prop_ents.contains_key(k) { continue; }
-                            // Hi-res terrain tile? Load the terrainmesh (POFF-composed, world-placed via
-                            // TerrainObject->Transform) and spawn at identity (verts already world-space).
-                            if let Some(&(tm_hash, pos)) = terrain_tiles.get(k) {
-                                if !scene.has_model(tm_hash) {
-                                    match load_terrainmesh_tile(w, tm_hash, pos) {
-                                        Some(m) => scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin),
-                                        None => { wake_failed.insert(*k); continue; }
-                                    }
-                                }
-                                let e = world.spawn((
-                                    Transform::IDENTITY,
-                                    ModelRef { model: tm_hash },
-                                    AnimState::default(),
-                                    SkinPalette { mats: vec![IDENTITY] },
-                                ));
-                                *model_refs.entry(tm_hash).or_insert(0) += 1;
-                                prop_ents.insert(*k, e);
-                                // Hide the low-res tile beneath this hi-res tile (the LOD swap).
-                                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
-                                    scene.set_draw_hidden(terrain_hash, *di, true);
-                                }
-                                continue;
-                            }
-                            let Some(spawn) = props.get(k).copied() else { continue };
-                            if !scene.has_model(spawn.model_hash) {
-                                match load_model_by_hash(w, spawn.model_hash) {
-                                    Some((m, _, _)) => {
-                                        scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                        // A rigged model that ships clips registers its rig + clips so the
-                                        // per-frame animation pass can pose it (no-op for clip-less props).
-                                        if !m.clips.is_empty() {
-                                            anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
-                                                rig: m.skin.rig.clone(),
-                                                clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
-                                            });
-                                        }
-                                    }
-                                    None => {
-                                        if wake_failed.insert(*k) {
-                                            // Mesh hash has no primary model ASET (the documented ~10/465 gap).
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            let nbones = scene.model_bone_count(spawn.model_hash).max(1);
-                            let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
-                            t.rotation = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
-                            // Play the first discovered clip if this model has any; else stay static.
-                            let anim = match anim_store.get(&spawn.model_hash).and_then(|ma| ma.clips.keys().next()) {
-                                Some(&clip) => AnimState::playing(clip),
-                                None => AnimState::default(),
-                            };
-                            let e = world.spawn((
-                                t,
-                                ModelRef { model: spawn.model_hash },
-                                anim,
-                                SkinPalette { mats: vec![IDENTITY; nbones] },
-                            ));
-                            *model_refs.entry(spawn.model_hash).or_insert(0) += 1;
-                            prop_ents.insert(*k, e);
-                        }
-                        // Each geometry block streams independently by its own tier-scaled distance
-                        // (per-object; the c3 chain is a size-keyed spatial index, not LOD levels).
-                        // diff.tier_changes carries the per-PROP hibernation LOD tier — informational
-                        // only; props don't ship alternate-LOD meshes (verified --lod-probe: 2/446).
-
+                    // --- streaming tick: decide + execute the diff (the reusable StreamingWorld) ---
+                    if let Some(sw) = stream.as_mut() {
+                        sw.step(&mut scene, &mut world, [free_pos.x, free_pos.y, free_pos.z]);
                         // Periodic streaming stats to the console (proof the runtime is live).
                         if stat_last.elapsed().as_secs_f32() >= 1.0 {
                             stat_last = std::time::Instant::now();
+                            let s = sw.stats();
                             println!(
                                 "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={}",
                                 free_pos.x, free_pos.y, free_pos.z,
-                                mgr.resident_count(), mgr.awake_count(),
-                                mgr.cached_region_count(), mgr.region_count(),
-                                block_ents.len(), prop_ents.len(), model_refs.len()
+                                s.resident, s.awake, s.cached_regions, s.regions,
+                                s.block_ents, s.props, s.models
                             );
                         }
                     }
 
-                    // --- animation pass (fixed-timestep): advance each playing clip on the shared
-                    //     mercs2_core `Time` clock, by the fixed steps drained this frame (§5c). Drives
-                    //     the pose via pose::havok_palette_in_place — same math as the mercs2_game
-                    //     player system — scoped to models that registered clips, so clip-less static
-                    //     content is untouched. `steps == 0` (render faster than the sim tick) simply
-                    //     holds the previous pose that frame — the decoupled fixed-sim/variable-render.
-                    if steps > 0 && !anim_store.is_empty() {
-                        let sim_dt = steps as f32 * time.fixed_dt;
-                        for (_e, (state, palette, mref)) in world
-                            .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
-                            .iter()
-                        {
-                            if !state.playing {
-                                continue;
-                            }
-                            let Some(ma) = anim_store.get(&mref.model) else { continue };
-                            let Some(ca) = ma.clips.get(&state.clip).or_else(|| ma.clips.values().next())
-                            else {
-                                continue;
-                            };
-                            let clip_dur = ca.clip.duration.max(1e-3);
-                            state.time = (state.time + sim_dt * state.speed) % clip_dur;
-                            let sample = ca.clip.sample_local(state.time);
-                            palette.mats = crate::pose::havok_palette_in_place(
-                                &ma.rig,
-                                &sample,
-                                &ca.track_to_hier,
-                                ca.num_transform_tracks,
-                            );
+                    // --- animation pass (fixed-timestep): woken rigged props, via StreamingWorld::animate
+                    //     on the shared mercs2_core `Time` clock (same pose math as the mercs2_game player
+                    //     system). `steps == 0` (render faster than the sim tick) holds the previous pose.
+                    if steps > 0 {
+                        if let Some(sw) = stream.as_ref() {
+                            sw.animate(&mut world, steps as f32 * time.fixed_dt);
                         }
                     }
 
