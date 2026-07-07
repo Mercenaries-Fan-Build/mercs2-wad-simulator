@@ -33,7 +33,7 @@ Diff result: `const=4363  vary=9041` bytes. Varying regions (start–end inclusi
 
 | Offset | Size | Field | Status | Notes |
 |--------|------|-------|--------|-------|
-| `0x00` | u32 | `checksum` | FACT (opaque) | **Not a magic** — varies every save. Per-file `ProfileHash`. Algorithm not reversed (not crc32/fnv1a/sum/xor/adler over `[4:]`,`[8:]`,`[4:0x468]`,`[0x468:]`). Stored, **not validated**. |
+| `0x00` | u32 | `checksum` | **FACT (algorithm DERIVED)** | **Not a magic** — varies every save. Per-file `ProfileHash` = **CRC-32/BZIP2** over `[4:]` (poly `0x04C11DB7`, init/xorout `0xFFFFFFFF`, **non-reflected**). Verified byte-exact against all 8 retail saves. Validate via `Profile::hash_ok()`; the writer (`save_write.rs`) stamps a real one. The earlier "not crc32" ruling tested only the *reflected* ISO-HDLC model; the non-reflected (MSB-first, BE) variant matches — consistent with the engine's `ntohl` BE SaveData blob. |
 | `0x04` | u32 | `version` | FACT | Always `4` (`SetLuaSaveVersion`). Validated. |
 | `0x08` | u32 | `data_size` | FACT | `= file_len - 4` = `0x3458` (13400) — the range the checksum covers. Validated. |
 | `0x0C` | u32 | `unknown_0x0c` | FACT (const) | Constant `3` across all saves. Meaning unknown. |
@@ -128,9 +128,24 @@ Per-file decode (all six saves):
 The `tLayerData` sets are genuinely per-save (differ in both membership and
 count) — every entry, in every file, begins with `vz_state_`.
 
+## Writing `.profile` files
+
+Writer: [`src/save_write.rs`](src/save_write.rs) — the inverse of `save::parse`.
+
+- `save_write::profile_hash(&data[4:]) -> u32` — the derived CRC-32/BZIP2 `ProfileHash`.
+- `save_write::write_profile(&Profile) -> Vec<u8>` — re-stamps every grounded header
+  field over the profile's retained raw buffer, recomputes `data_size` + hash, and
+  emits the 13,404-byte file. **Round-trips byte-exact**: `write_profile(&parse(x)) == x`.
+  Mutate a public field then re-write to get a loadable save with a valid integrity hash.
+- `save_write::set_lua_payload(&mut Profile, lua_source)` — re-deflates a
+  `return { … }` Lua blob into the fixed payload region (`0x468`, capacity 12,276 B).
+
+The `saveProfile` disk-write *body* is still absent from the Ghidra dump, but every
+behaviour it must reproduce is now grounded (LE header, zlib@0x468, CRC-32/BZIP2 hash),
+so `write_profile` is a faithful reimplementation, not a stand-in.
+
 ## Not yet reversed
 
-- `checksum` algorithm (integrity hash at `0x00`).
 - `0x462`–`0x467`: two u16 immediately before the zlib stream; not the
   compressed/uncompressed lengths (verified) — purpose unknown.
 - Byte `0xAC`, and the `0x4C`/`0x4F–0x51` flag bit meanings.
