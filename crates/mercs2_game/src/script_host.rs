@@ -58,7 +58,16 @@ pub struct GameScriptHost {
     ai: mercs2_ai::AiWorld,
     /// Per-actor `AiBehavior` restriction flags set by `Ai.SetState` (keyed by actor GUID).
     ai_states: std::collections::HashMap<u64, mercs2_ai::AiBehavior>,
+    /// The hero spawn position the game's Lua set via `Object.SetPosition(Player.GetLocalCharacter(),
+    /// …)` — the base game's `MrxUtil._TeleportHero` bottoms out to exactly that (mrxutil.lua:328). The
+    /// boot reads this to place the player: the spawn is **Lua-authored, no engine-constant fallback**.
+    hero_teleport: Option<[f32; 3]>,
 }
+
+/// The GUID the player hero is registered under so the game's Lua can address it (`Player.Get*Character`
+/// return this; `Object.SetPosition`/`SetYaw` on it drive the real player). Distinct from the
+/// script-spawn GUID space (`0x1000_0000+`).
+pub const HERO_GUID: u64 = 0x0000_0001;
 
 impl GameScriptHost {
     pub fn new(level: impl Into<String>) -> Self {
@@ -71,6 +80,7 @@ impl GameScriptHost {
             audio: Rc::new(RefCell::new(AudioEngine::default())),
             ai: mercs2_ai::AiWorld::new(),
             ai_states: std::collections::HashMap::new(),
+            hero_teleport: None,
         }
     }
 
@@ -89,6 +99,12 @@ impl GameScriptHost {
     pub fn take_new_spawns(&mut self) -> Vec<SpawnRequest> {
         self.by_guid.clear();
         std::mem::take(&mut self.spawns)
+    }
+
+    /// The hero spawn position the game's Lua requested via `MrxUtil._TeleportHero`, if any. The boot
+    /// places the player here — the spawn is Lua-authored (no engine-constant fallback).
+    pub fn take_hero_teleport(&mut self) -> Option<[f32; 3]> {
+        self.hero_teleport.take()
     }
 
     fn req_mut(&mut self, guid: u64) -> Option<&mut SpawnRequest> {
@@ -128,16 +144,30 @@ impl EngineHost for GameScriptHost {
         self.by_name.insert(name.to_string(), guid);
     }
     fn object_set_position(&mut self, guid: u64, pos: [f32; 3]) {
+        // The hero is a Lua-addressable object: teleporting it (the base game's _TeleportHero →
+        // Object.SetPosition path) records the spawn the boot consumes. Other GUIDs are spawn requests.
+        if guid == HERO_GUID {
+            self.hero_teleport = Some(pos);
+            return;
+        }
         if let Some(r) = self.req_mut(guid) {
             r.pos = pos;
         }
+    }
+    fn player_any_character(&self) -> u64 {
+        HERO_GUID
+    }
+    fn player_local_character(&self) -> u64 {
+        HERO_GUID
     }
     fn object_set_yaw(&mut self, guid: u64, yaw: f32) {
         if let Some(r) = self.req_mut(guid) {
             r.yaw = yaw;
         }
     }
-    fn teleport_hero(&mut self, _pos: [f32; 3]) {}
+    fn teleport_hero(&mut self, pos: [f32; 3]) {
+        self.hero_teleport = Some(pos);
+    }
     fn add_layers(&mut self, _layers: &[String]) {}
 
     // ===== Sound / music → the live `mercs2_audio::AudioEngine` (the fleet audio system, wired in). =====
@@ -395,6 +425,25 @@ mod tests {
 
         // The per-frame pump runs the Lua event/timer system without error.
         pump_resident(&sh, 1.0 / 60.0);
+    }
+
+    /// The base-game hero teleport is `Object.SetPosition(Player.GetLocalCharacter(), x, y, z)`
+    /// (mrxutil.lua:328). Running that through the live host registers the hero spawn the boot consumes
+    /// — Lua-authored, no engine constant. This is the "wire the Lua parts together" mechanism.
+    #[test]
+    fn lua_teleport_via_object_setposition_drives_hero_spawn() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = resident_script_host(host.clone()).expect("resident host");
+        // Exactly what MrxUtil._TeleportHero does: move the local character to a world position.
+        sh.exec(
+            "Object.SetPosition(Player.GetLocalCharacter(), 3794.0, 451.0, -3911.0, false)",
+            "@teleport",
+        )
+        .unwrap();
+        let pos = host.borrow_mut().take_hero_teleport().expect("hero teleport recorded");
+        assert_eq!(pos, [3794.0, 451.0, -3911.0]);
+        // Drained — a second read is None (the boot consumes it once).
+        assert!(host.borrow_mut().take_hero_teleport().is_none());
     }
 
     #[test]
