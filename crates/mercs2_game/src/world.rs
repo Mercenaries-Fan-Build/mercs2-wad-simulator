@@ -163,7 +163,7 @@ struct WorldData {
 }
 
 /// Number of `progress.step` calls in `load_world_data` (keep in sync when adding stages).
-const LOAD_STAGES: u32 = 10;
+const LOAD_STAGES: u32 = 11;
 
 /// Exterior prop bounding: load only props within this radius (m) of the pool spawn, capped at
 /// `EXTERIOR_PROP_CAP` distinct meshes, so `--props` stays light next to the full map.
@@ -464,6 +464,9 @@ fn load_world_data(
         "[world] dynamic lights harvested: {}; particle placements: {}; light-shaft glows: {}",
         lights.len(), particle_fx.len(), glow_cards.len()
     );
+    // The lights/FX harvest above (incl. the interior state-block decompress) is real load work that
+    // used to run AFTER the bar hit 100% — count it as the final stage so the progress reflects reality.
+    progress.step("lights + fx");
 
     Ok(WorldData { terrain, player, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, lights, particle_fx, glow_cards })
 }
