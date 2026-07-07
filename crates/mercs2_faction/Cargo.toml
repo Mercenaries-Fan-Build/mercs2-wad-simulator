@@ -2,7 +2,7 @@
 name = "mercs2_faction"
 version = "0.1.0"
 edition = "2021"
-description = "Mercenaries 2 reimpl — silo 13 (rows 30/31 + faction): entity state machines, destruction, faction/reputation. WAVE-1 scaffold."
+description = "Mercenaries 2 reimpl — silo 13 (faction/reputation/pursuit): the combat->infraction->attitude->pursuit loop from faction_reputation_code_map.md."
 
 [dependencies]
 mercs2_core = { path = "../mercs2_core" }
