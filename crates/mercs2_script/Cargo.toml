@@ -12,3 +12,8 @@ path = "src/lib.rs"
 # Lua 5.4 per charter D5 (5.1 = conservative fallback). Vendored builds Lua from source via the
 # MSVC `cc` toolchain (same one wgpu uses), so no system Lua is required.
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
+
+[dev-dependencies]
+# The game-hook harness backs its EngineHost with the real AI mechanism so the Ai.* hooks exercise
+# the recovered action ring + relation matrix (not a stand-in). Test-only — the lib stays standalone.
+mercs2_ai = { path = "../mercs2_ai" }

@@ -51,6 +51,13 @@ pub struct GameScriptHost {
     /// game loop ticks the SAME engine each frame (`GameplaySystems::tick` → `audio.tick`) that the Lua
     /// `EngineHost` forwarding cues into — one `mercs2_audio` stack, driven from both sides.
     audio: Rc<RefCell<AudioEngine>>,
+    /// The AI mechanism the game's `Ai.*` Lua drives: the recovered 1024-slot action ring + the
+    /// `[-100,100]` relation matrix (`mercs2_ai::AiWorld`, AI code map §8). `Ai.Goal` posts to the ring;
+    /// `Ai.SetRelation`/`GetRelation` read/write the matrix. Per-entity perception records are ticked
+    /// over the ECS world by the runtime, not here.
+    ai: mercs2_ai::AiWorld,
+    /// Per-actor `AiBehavior` restriction flags set by `Ai.SetState` (keyed by actor GUID).
+    ai_states: std::collections::HashMap<u64, mercs2_ai::AiBehavior>,
 }
 
 impl GameScriptHost {
@@ -62,6 +69,8 @@ impl GameScriptHost {
             next_guid: 0x1000_0000, // distinct, non-zero GUID space for script-spawned actors
             level: level.into(),
             audio: Rc::new(RefCell::new(AudioEngine::default())),
+            ai: mercs2_ai::AiWorld::new(),
+            ai_states: std::collections::HashMap::new(),
         }
     }
 
@@ -162,6 +171,23 @@ impl EngineHost for GameScriptHost {
     }
     fn sound_is_dynamic_music(&self) -> bool {
         self.audio.borrow().is_dynamic_music()
+    }
+
+    // ===== AI order surface → the recovered mechanism (`mercs2_ai::AiWorld`). =====
+    fn ai_goal(&mut self, guid: u64, goal: &str) -> bool {
+        self.ai.goal(guid as u32, goal)
+    }
+    fn ai_direct_action(&mut self, guid: u64, action_hash: u32) -> bool {
+        self.ai.direct_action(guid as u32, action_hash)
+    }
+    fn ai_set_relation(&mut self, from: u64, to: u64, value: i64) {
+        self.ai.set_relation(from as u32, to as u32, value as i32);
+    }
+    fn ai_get_relation(&self, from: u64, to: u64) -> i64 {
+        self.ai.get_relation(from as u32, to as u32) as i64
+    }
+    fn ai_set_state(&mut self, guid: u64, state: &str, on: bool) -> bool {
+        self.ai_states.entry(guid).or_default().set_state(state, on)
     }
 }
 

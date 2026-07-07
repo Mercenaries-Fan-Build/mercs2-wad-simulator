@@ -32,6 +32,11 @@ pub struct GameRuntime {
     /// Template-name-hash → ECS archetype (populated from the reflection registry / spawn-list data;
     /// `register` until that's threaded).
     pub resolver: SpawnResolver,
+    /// The AI mechanism (recovered action ring + relation matrix). Its per-entity perception update
+    /// runs each fixed step over the world (idle until AI entities carry perception components, the
+    /// same data-driven way the vehicle/combat systems idle). The `Ai.*` Lua surface drives the same
+    /// relation matrix once the persistent mission-Lua host shares this in.
+    pub ai: mercs2_ai::AiWorld,
 }
 
 impl GameRuntime {
@@ -42,6 +47,7 @@ impl GameRuntime {
         GameRuntime {
             gameplay: GameplaySystems::new(audio),
             resolver: SpawnResolver::new(),
+            ai: mercs2_ai::AiWorld::new(),
         }
     }
 
@@ -70,9 +76,12 @@ impl GameRuntime {
             .collect()
     }
 
-    /// Advance the fleet gameplay systems one fixed step over `world`. See [`GameplaySystems::tick`].
+    /// Advance the per-frame game update one fixed step over `world`: the fleet gameplay systems
+    /// (physics / vehicle / combat / audio) plus the AI per-entity perception update (§2.4). Both idle
+    /// until entities carry their components.
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         self.gameplay.tick(world, dt);
+        self.ai.tick(world);
     }
 }
 
@@ -124,6 +133,34 @@ mod tests {
         }
         let z1 = world.get::<&Transform>(car).unwrap().translation.z;
         assert!((z1 - z0).abs() > 1.0, "realized+throttled vehicle should drive; dz = {}", z1 - z0);
+    }
+
+    /// The AI perception update runs through `GameRuntime::tick`: a hostile observer in range makes the
+    /// target's perception record show a hostile-aware observer — proving the recovered AI mechanism is
+    /// wired into the per-frame game update alongside the fleet, idle until AI entities exist.
+    #[test]
+    fn tick_runs_ai_perception_over_the_world() {
+        use mercs2_ai::{AiFaction, Perception, PerceptionRecord, Stimulus, Target};
+
+        let audio = Rc::new(RefCell::new(AudioEngine::default()));
+        let mut rt = GameRuntime::new(audio);
+        rt.ai.set_relation(1, 2, -100); // faction 1 hostile to 2
+
+        let mut world = World::new();
+        world.spawn((Perception::default(), Transform::from_translation(Vec3::ZERO), AiFaction(1)));
+        let watched = world.spawn((
+            PerceptionRecord::default(),
+            Target::default(),
+            Stimulus::default(),
+            Transform::from_translation(Vec3::new(30.0, 0.0, 0.0)),
+            AiFaction(2),
+        ));
+
+        rt.tick(&mut world, 1.0 / 60.0);
+        assert_eq!(
+            world.get::<&PerceptionRecord>(watched).unwrap().hostile_aware, 1,
+            "AI perception must run through the runtime tick"
+        );
     }
 
     /// An unregistered template realizes a plain prop (bare Transform, no Vehicle) — the render loop

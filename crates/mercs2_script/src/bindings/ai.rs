@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Ai")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -93,9 +93,43 @@ pub const REQUIRED: &[Required] = &[
 /// Boot slice: only `Ai.Enable` is wired, as a no-op — it's the one `Ai.*` cfunc the animate-actor
 /// branch of `_SpawnActorComplete` touches. The other 65 (goals, squads, plans, spawner tweaks,
 /// faction relation/mood) are for later silos.
+/// The `Ai.*` order surface: goals/relations/state, forwarded to the AI mechanism through
+/// [`crate::EngineHost`] (the real host backs it with `mercs2_ai::AiWorld` — the recovered action ring
+/// + relation matrix + `AiBehavior` flags; AI code map §8). The *goal vocabulary* is authored data, so
+/// these post/set the mechanism rather than running a compiled planner. The planner/cover/squad
+/// orchestration cfuncs (Plan*, Deploy, HeliLand…) stay a later pass.
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
-    let _ = host;
     let mut b = NsBuilder::new(lua)?;
+
+    // Ai.Goal(guid, "verb")  OR  Ai.Goal{AIGuid=guid, Goal='verb', ...}  (code map §5 table form).
+    let h = host.clone();
+    b.real("Goal", lua.create_function(move |_, (first, maybe_goal): (Value, Option<String>)| {
+        let (guid, goal): (i64, String) = match first {
+            Value::Table(t) => (
+                t.get::<i64>("AIGuid").or_else(|_| t.get::<i64>("Guid")).unwrap_or(0),
+                t.get::<String>("Goal").unwrap_or_default(),
+            ),
+            Value::Integer(i) => (i, maybe_goal.unwrap_or_default()),
+            Value::Number(n) => (n as i64, maybe_goal.unwrap_or_default()),
+            _ => (0, maybe_goal.unwrap_or_default()),
+        };
+        Ok(h.borrow_mut().ai_goal(guid as u64, &goal))
+    })?)?;
+
+    let h = host.clone();
+    b.real("SetRelation", lua.create_function(move |_, (from, to, value): (i64, i64, i64)| {
+        h.borrow_mut().ai_set_relation(from as u64, to as u64, value);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("GetRelation", lua.create_function(move |_, (from, to): (i64, i64)| {
+        Ok(h.borrow().ai_get_relation(from as u64, to as u64))
+    })?)?;
+    let h = host.clone();
+    b.real("SetState", lua.create_function(move |_, (guid, state, on): (i64, String, Option<bool>)| {
+        Ok(h.borrow_mut().ai_set_state(guid as u64, &state, on.unwrap_or(true)))
+    })?)?;
+
     b.stub("Enable", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.install_global(GLOBAL)
 }

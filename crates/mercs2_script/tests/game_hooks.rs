@@ -54,6 +54,9 @@ struct HarnessHost {
     current_music: String,
     // movement
     velocities: HashMap<u64, f32>,
+    // AI mechanism (the recovered action ring + relation matrix + AiBehavior flags)
+    ai: mercs2_ai::AiWorld,
+    ai_states: HashMap<u64, mercs2_ai::AiBehavior>,
 }
 
 impl HarnessHost {
@@ -280,6 +283,22 @@ impl EngineHost for HarnessHost {
     // movement
     fn object_velocity(&self, guid: u64) -> f32 {
         self.velocities.get(&guid).copied().unwrap_or(0.0)
+    }
+
+    fn ai_goal(&mut self, guid: u64, goal: &str) -> bool {
+        self.ai.goal(guid as u32, goal)
+    }
+    fn ai_direct_action(&mut self, guid: u64, action_hash: u32) -> bool {
+        self.ai.direct_action(guid as u32, action_hash)
+    }
+    fn ai_set_relation(&mut self, from: u64, to: u64, value: i64) {
+        self.ai.set_relation(from as u32, to as u32, value as i32);
+    }
+    fn ai_get_relation(&self, from: u64, to: u64) -> i64 {
+        self.ai.get_relation(from as u32, to as u32) as i64
+    }
+    fn ai_set_state(&mut self, guid: u64, state: &str, on: bool) -> bool {
+        self.ai_states.entry(guid).or_default().set_state(state, on)
     }
 }
 
@@ -530,16 +549,23 @@ fn h_object_death_fires_event() {
     assert!(dead, "ObjectDeath handler did not fire on Object.Kill");
 }
 
-// --- RED (expected fail — the genuine work queue: AI has no body; proximity needs engine feeding) ---
-fn h_red_ai_setrelation() {
+// oilcon002.lua: Ai.SetRelation(GetGuidByName("VZ"), uHostage, -100) — now backed by the recovered
+// relation matrix (mercs2_ai::RelationMatrix, [-100,100] directed) via the host seam.
+fn h_ai_setrelation_roundtrips() {
     let (sh, _h) = setup();
-    // oilcon002.lua: Ai.SetRelation(GetGuidByName("VZ"), uHostage, -100) — AI not built yet
-    let _: bool = sh.eval("Ai.SetRelation(1, 2, -100); return true").unwrap();
+    let v: i64 = sh
+        .eval("Ai.SetRelation(1, 2, -100); return Ai.GetRelation(1, 2)")
+        .unwrap();
+    assert_eq!(v, -100, "SetRelation must persist through the host relation matrix");
 }
-fn h_red_ai_goal() {
+// Ai.Goal posts the hashed goal verb to the recovered 1024-slot action ring (mercs2_ai::AiActionBus).
+fn h_ai_goal_posts_to_ring() {
     let (sh, _h) = setup();
-    let _: bool = sh.eval(r#"Ai.Goal(Player.GetAnyCharacter(), "Attack"); return true"#).unwrap();
+    let ok: bool = sh.eval(r#"return Ai.Goal(Player.GetAnyCharacter(), "Attack")"#).unwrap();
+    assert!(ok, "Ai.Goal must be accepted onto the action ring");
 }
+
+// --- RED (expected fail — the genuine work queue: proximity needs engine condition feeding) ---
 fn h_red_event_proximity_fires() {
     let (sh, _h) = setup();
     // oilcon020.lua: Event.Create(Event.ObjectProximity, {char, guid, "<", 7, ...}, cb) — condition
@@ -582,15 +608,15 @@ const HOOKS: &[(&str, HookFn)] = &[
     ("Sound.AddMusicState/TransitionMusic", h_sound_music_transition),
     ("Object.GetVelocity", h_object_getvelocity),
     ("Event.ObjectDeath fires on Kill", h_object_death_fires_event),
-    // --- expected RED (the genuine queue: AI unbuilt; proximity needs engine condition feeding) ---
-    ("RED Ai.SetRelation (no AI yet)", h_red_ai_setrelation),
-    ("RED Ai.Goal (no AI yet)", h_red_ai_goal),
+    ("Ai.SetRelation/GetRelation roundtrip", h_ai_setrelation_roundtrips),
+    ("Ai.Goal posts to the action ring", h_ai_goal_posts_to_ring),
+    // --- expected RED (the genuine queue: proximity needs engine condition feeding) ---
     ("RED Event.ObjectProximity fires", h_red_event_proximity_fires),
 ];
 
 /// Minimum green hooks — the TDD floor. Bump this UP as more bindings land; it catches regressions
 /// without demanding the RED queue pass. (23 green designed above; floor set just under.)
-const EXPECTED_PASS_MIN: usize = 23;
+const EXPECTED_PASS_MIN: usize = 25;
 
 #[test]
 fn game_hook_catalog() {

@@ -365,6 +365,36 @@ pub trait EngineHost {
         let _ = guid;
         0.0
     }
+
+    // ===== AI order surface (`Ai.*` → the real host forwards to `mercs2_ai::AiWorld`). =====
+    // The engine supplies the mechanism (the hash-addressed action ring + the relation matrix); the
+    // goal/state vocabulary is authored data (AI code map §5/§8). These post to that mechanism.
+    /// `Ai.Goal(guid, goal)` — hash the goal verb and post it to the AI action ring (`DirectAction`).
+    /// Returns whether the ring accepted it (false = the 1024-slot budget was full).
+    fn ai_goal(&mut self, guid: u64, goal: &str) -> bool {
+        let _ = (guid, goal);
+        false
+    }
+    /// `Ai.DirectAction(guid, actionHash)` — post a pre-hashed action to the AI ring.
+    fn ai_direct_action(&mut self, guid: u64, action_hash: u32) -> bool {
+        let _ = (guid, action_hash);
+        false
+    }
+    /// `Ai.SetRelation(from, to, value)` — set the directed attitude, clamped `[-100,100]`.
+    fn ai_set_relation(&mut self, from: u64, to: u64, value: i64) {
+        let _ = (from, to, value);
+    }
+    /// `Ai.GetRelation(from, to)` — the directed attitude (`0` if unset).
+    fn ai_get_relation(&self, from: u64, to: u64) -> i64 {
+        let _ = (from, to);
+        0
+    }
+    /// `Ai.SetState(guid, state, on)` — flip a named `AiBehavior` restriction flag; returns whether the
+    /// state name was recognised.
+    fn ai_set_state(&mut self, guid: u64, state: &str, on: bool) -> bool {
+        let _ = (guid, state, on);
+        false
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -746,8 +776,9 @@ mod tests {
         const EXPECTED_NAMESPACES: usize = 35;
         const EXPECTED_REQUIRED: usize = 1086;
         // Debug(1) + Sys(7) + Pg(2) + Object(18) + Player(14) + Event(4) + Vehicle(16) + Sound(20)
-        const EXPECTED_REAL: usize = 82;
-        const EXPECTED_STUB: usize = 9; // Debug(5) + Object(3) + Ai  (Vehicle.EnableTurret now real)
+        // + Ai(4: Goal/SetRelation/GetRelation/SetState)
+        const EXPECTED_REAL: usize = 86;
+        const EXPECTED_STUB: usize = 9; // Debug(5) + Object(3) + Ai.Enable  (Vehicle.EnableTurret now real)
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
