@@ -156,6 +156,39 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         lua.create_function(move |_, guid: i64| Ok(h.borrow_mut().object_get_yaw(guid as u64)))?,
     )?;
 
+    // --- health / life / labels (the highest-traffic Object cfuncs) ---
+    let h = host.clone();
+    b.real("GetHealth", lua.create_function(move |_, guid: i64| Ok(h.borrow().object_health(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("SetHealth", lua.create_function(move |_, (guid, hp): (i64, f32)| { h.borrow_mut().object_set_health(guid as u64, hp); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetMaxHealth", lua.create_function(move |_, guid: i64| Ok(h.borrow().object_max_health(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("GetVelocity", lua.create_function(move |_, guid: i64| Ok(h.borrow().object_velocity(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("IsAlive", lua.create_function(move |_, guid: i64| Ok(h.borrow().object_is_alive(guid as u64)))?)?;
+    let h = host.clone();
+    // Kill also fires the object's ObjectDeath handlers (the condition-feed via the shared event mgr).
+    b.real("Kill", lua.create_function(move |lua, guid: i64| {
+        h.borrow_mut().object_kill(guid as u64);
+        super::event::fire_object_death(lua, guid as u64)?;
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("Revive", lua.create_function(move |_, guid: i64| { h.borrow_mut().object_revive(guid as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Remove", lua.create_function(move |_, guid: i64| { h.borrow_mut().object_remove(guid as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetName", lua.create_function(move |_, guid: i64| Ok(h.borrow().object_name(guid as u64)))?)?;
+    let h = host.clone();
+    b.real("AddLabel", lua.create_function(move |_, (guid, label): (i64, String)| { h.borrow_mut().object_add_label(guid as u64, &label); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("RemoveLabel", lua.create_function(move |_, (guid, label): (i64, String)| { h.borrow_mut().object_remove_label(guid as u64, &label); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("HasLabel", lua.create_function(move |_, (guid, label): (i64, String)| Ok(h.borrow().object_has_label(guid as u64, &label)))?)?;
+    let h = host.clone();
+    b.real("SetInvincible", lua.create_function(move |_, (guid, on): (i64, bool)| { h.borrow_mut().object_set_invincible(guid as u64, on); Ok(()) })?)?;
+
     // Anchor/attachment + physics toggles: no-ops so the full SpawnActor body runs.
     b.stub(
         "SetTransformToObject",

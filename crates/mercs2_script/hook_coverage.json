@@ -1,0 +1,8 @@
+{
+  "schema": "mercs2_script.hook_coverage/1",
+  "note": "Behavioral TDD across the Lua<->engine seam: real corpus hook patterns run against the bindings + a HarnessHost. pass = green; red = the work queue. Regenerate: cargo test -p mercs2_script --test game_hooks.",
+  "total": 26,
+  "pass": 23,
+  "red": 3,
+  "red_hooks": ["RED Ai.SetRelation (no AI yet)", "RED Ai.Goal (no AI yet)", "RED Event.ObjectProximity fires"]
+}

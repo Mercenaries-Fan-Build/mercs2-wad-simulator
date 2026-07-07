@@ -81,6 +81,290 @@ pub trait EngineHost {
     /// The bottom-out of `MrxLayerManager.Add({..})`: request `vz_state_*` world-state layers. (Lua
     /// binding wired in a later phase; the seam is final.)
     fn add_layers(&mut self, layers: &[String]);
+
+    // ===== Player: economy (money/fuel — signed i32 on the profile/economy singleton `[0x1176054]`,
+    // see the money-fuel-datatype notes; `i64` here so the Lua number round-trips exactly). =====
+    /// `Player.GetCash`.
+    fn player_cash(&self) -> i64 {
+        0
+    }
+    /// `Player.SetCash`.
+    fn player_set_cash(&mut self, cash: i64) {
+        let _ = cash;
+    }
+    /// `Player.GetFuel`.
+    fn player_fuel(&self) -> i64 {
+        0
+    }
+    /// `Player.SetFuel`.
+    fn player_set_fuel(&mut self, fuel: i64) {
+        let _ = fuel;
+    }
+    /// `Player.GetFuelCapacity`.
+    fn player_fuel_capacity(&self) -> i64 {
+        0
+    }
+    /// `Player.SetFuelCapacity`.
+    fn player_set_fuel_capacity(&mut self, cap: i64) {
+        let _ = cap;
+    }
+
+    // ===== Player / character GUID getters (0 = none → the binding maps it to Lua `nil`). =====
+    /// `Player.GetLocalPlayer` — the local player object's GUID.
+    fn player_local_player(&self) -> u64 {
+        0
+    }
+    /// `Player.GetAnyCharacter` — any player-controlled character (the most-called `Player` cfunc).
+    fn player_any_character(&self) -> u64 {
+        0
+    }
+    /// `Player.GetLocalCharacter`.
+    fn player_local_character(&self) -> u64 {
+        0
+    }
+    /// `Player.GetPrimaryCharacter`.
+    fn player_primary_character(&self) -> u64 {
+        0
+    }
+    /// `Player.GetSecondaryCharacter` (0 = no second player).
+    fn player_secondary_character(&self) -> u64 {
+        0
+    }
+    /// `Player.IsLocal`.
+    fn player_is_local(&self, guid: u64) -> bool {
+        let _ = guid;
+        true
+    }
+
+    // ===== Object: health / life / labels (the highest-traffic `Object` cfuncs). =====
+    /// `Object.GetHealth`.
+    fn object_health(&self, guid: u64) -> f32 {
+        let _ = guid;
+        0.0
+    }
+    /// `Object.SetHealth`.
+    fn object_set_health(&mut self, guid: u64, hp: f32) {
+        let _ = (guid, hp);
+    }
+    /// `Object.GetMaxHealth`.
+    fn object_max_health(&self, guid: u64) -> f32 {
+        let _ = guid;
+        0.0
+    }
+    /// `Object.IsAlive`.
+    fn object_is_alive(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Object.Kill`.
+    fn object_kill(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Object.Revive`.
+    fn object_revive(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Object.Remove`.
+    fn object_remove(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Object.GetName`.
+    fn object_name(&self, guid: u64) -> String {
+        let _ = guid;
+        String::new()
+    }
+    /// `Object.AddLabel`.
+    fn object_add_label(&mut self, guid: u64, label: &str) {
+        let _ = (guid, label);
+    }
+    /// `Object.RemoveLabel`.
+    fn object_remove_label(&mut self, guid: u64, label: &str) {
+        let _ = (guid, label);
+    }
+    /// `Object.HasLabel`.
+    fn object_has_label(&self, guid: u64, label: &str) -> bool {
+        let _ = (guid, label);
+        false
+    }
+    /// `Object.SetInvincible`.
+    fn object_set_invincible(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+
+    // ===== Sys: game-state request + autosave (the world-load handshake `loadprobe` scores). =====
+    /// `Sys.RequestGameState` — request a game-state transition (`"WaitForStreaming"`,
+    /// `"WaitForTether"`, `"InGame"`, …); the engine drives the FSM + fires `Event.GameStateChange`.
+    fn sys_request_game_state(&mut self, state: &str) {
+        let _ = state;
+    }
+    /// `Sys.RequestAutosave`.
+    fn sys_request_autosave(&mut self) {}
+    /// `Sys.IsLoadingOrStreaming` — the busy-flag gate (`mgr+0x4c35c`).
+    fn sys_is_loading_or_streaming(&self) -> bool {
+        false
+    }
+    /// `Sys.GuidToString`.
+    fn sys_guid_to_string(&self, guid: u64) -> String {
+        format!("{guid:#x}")
+    }
+
+    // ===== Vehicle (the real host forwards to `mercs2_vehicle`; the harness backs it with seat state). =====
+    /// `Vehicle.GetDriver` (0 = empty seat → nil).
+    fn vehicle_driver(&self, veh: u64) -> u64 {
+        let _ = veh;
+        0
+    }
+    /// `Vehicle.GetRiders`.
+    fn vehicle_riders(&self, veh: u64) -> Vec<u64> {
+        let _ = veh;
+        Vec::new()
+    }
+    /// `Vehicle.GetFromRider` — the vehicle a rider occupies (0 = on foot).
+    fn vehicle_from_rider(&self, rider: u64) -> u64 {
+        let _ = rider;
+        0
+    }
+    /// `Vehicle.GetSeatFromRider`.
+    fn vehicle_seat_from_rider(&self, rider: u64) -> String {
+        let _ = rider;
+        String::new()
+    }
+    /// `Vehicle.GetSeatByType`.
+    fn vehicle_seat_by_type(&self, veh: u64, ty: &str) -> String {
+        let _ = (veh, ty);
+        String::new()
+    }
+    /// `Vehicle.Enter(veh, rider, seat)` → success.
+    fn vehicle_enter(&mut self, veh: u64, rider: u64, seat: &str) -> bool {
+        let _ = (veh, rider, seat);
+        false
+    }
+    /// `Vehicle.Exit(rider)` → success.
+    fn vehicle_exit(&mut self, rider: u64) -> bool {
+        let _ = rider;
+        false
+    }
+    /// `Vehicle.Usable`.
+    fn vehicle_usable(&self, veh: u64) -> bool {
+        let _ = veh;
+        false
+    }
+    /// `Vehicle.IsFlying`.
+    fn vehicle_is_flying(&self, veh: u64) -> bool {
+        let _ = veh;
+        false
+    }
+    /// `Vehicle.IsFlipped`.
+    fn vehicle_is_flipped(&self, veh: u64) -> bool {
+        let _ = veh;
+        false
+    }
+    /// `Vehicle.SetParts`.
+    fn vehicle_set_parts(&mut self, veh: u64) {
+        let _ = veh;
+    }
+    /// `Vehicle.OpenDoor` / `Vehicle.CloseDoor`.
+    fn vehicle_set_door(&mut self, veh: u64, open: bool) {
+        let _ = (veh, open);
+    }
+    /// `Vehicle.SetCanPlayerUse`.
+    fn vehicle_set_can_player_use(&mut self, veh: u64, can: bool) {
+        let _ = (veh, can);
+    }
+    /// `Vehicle.EnableTurret`.
+    fn vehicle_enable_turret(&mut self, veh: u64, on: bool) {
+        let _ = (veh, on);
+    }
+    /// `Vehicle.ClearControls`.
+    fn vehicle_clear_controls(&mut self, veh: u64) {
+        let _ = veh;
+    }
+
+    // ===== Sound / music / VO (the real host forwards to `mercs2_audio::AudioEngine`). =====
+    /// `Sound.CueSound` → voice id (0 = failed → nil).
+    fn sound_cue(&mut self, cue: &str) -> u64 {
+        let _ = cue;
+        0
+    }
+    /// `Sound.StopSound`.
+    fn sound_stop(&mut self, voice: u64) {
+        let _ = voice;
+    }
+    /// `Sound.PauseSound`.
+    fn sound_pause(&mut self, voice: u64) {
+        let _ = voice;
+    }
+    /// `Sound.SetCategoryVolume`.
+    fn sound_set_category_volume(&mut self, cat: &str, vol: f32) {
+        let _ = (cat, vol);
+    }
+    /// `Sound.SetMasterVolume`.
+    fn sound_set_master_volume(&mut self, vol: f32) {
+        let _ = vol;
+    }
+    /// `Sound.FadeCategoryDown` (`down=true`) / `FadeCategoryUp`.
+    fn sound_fade_category(&mut self, cat: &str, down: bool) {
+        let _ = (cat, down);
+    }
+    /// `Sound.StopAndFlushAllSounds`.
+    fn sound_stop_all(&mut self) {}
+    /// `Sound.TransitionMusic` → accepted.
+    fn sound_transition_music(&mut self, state: &str) -> bool {
+        let _ = state;
+        false
+    }
+    /// `Sound.AddMusicState`.
+    fn sound_add_music_state(&mut self, name: &str) {
+        let _ = name;
+    }
+    /// `Sound.AddMusicTransition`.
+    fn sound_add_music_transition(&mut self, from: &str, to: &str) {
+        let _ = (from, to);
+    }
+    /// `Sound.SetDynamicMusic`.
+    fn sound_set_dynamic_music(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// `Sound.IsDynamicMusic`.
+    fn sound_is_dynamic_music(&self) -> bool {
+        false
+    }
+    /// `Sound.BindMusicCue`.
+    fn sound_bind_music_cue(&mut self, state: &str, cue: &str) {
+        let _ = (state, cue);
+    }
+    /// `Sound.ClearMusicCues`.
+    fn sound_clear_music_cues(&mut self) {}
+    /// `Sound.CueAmbience` → voice id.
+    fn sound_cue_ambience(&mut self, cue: &str) -> u64 {
+        let _ = cue;
+        0
+    }
+    /// `Sound.StopAmbience`.
+    fn sound_stop_ambience(&mut self) {}
+    /// `Sound.GetAudioDir`.
+    fn sound_audio_dir(&self) -> String {
+        String::new()
+    }
+    /// `Sound._GetLibVersion`.
+    fn sound_lib_version(&self) -> String {
+        "PgAudio".into()
+    }
+    /// `Sound.LockActionLevelMusic`.
+    fn sound_lock_action_level_music(&mut self, level: i64) {
+        let _ = level;
+    }
+    /// `VO.Cue` → voice id.
+    fn vo_cue(&mut self, cue: &str) -> u64 {
+        let _ = cue;
+        0
+    }
+
+    /// `Object.GetVelocity` — speed magnitude (m/s).
+    fn object_velocity(&self, guid: u64) -> f32 {
+        let _ = guid;
+        0.0
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -457,11 +741,13 @@ mod tests {
     /// asserted `EXPECTED_REAL` / `EXPECTED_REMAINING` below (they should move in opposite directions).
     #[test]
     fn coverage_report() {
-        // Baseline of the current build (boot + PMC-interior slice). Update as silos land bodies.
+        // Baseline of the current build. Update as silos land bodies (the Lua-hook TDD pass added the
+        // Event system + Player economy/getters + Object health/labels + Sys game-state handshake).
         const EXPECTED_NAMESPACES: usize = 35;
         const EXPECTED_REQUIRED: usize = 1086;
-        const EXPECTED_REAL: usize = 11; // Debug.Printf + Sys(3) + Pg(2) + Object(5)
-        const EXPECTED_STUB: usize = 11; // Debug(5) + Object(3) + Ai + Vehicle + Event.Create
+        // Debug(1) + Sys(7) + Pg(2) + Object(18) + Player(14) + Event(4) + Vehicle(16) + Sound(20)
+        const EXPECTED_REAL: usize = 82;
+        const EXPECTED_STUB: usize = 9; // Debug(5) + Object(3) + Ai  (Vehicle.EnableTurret now real)
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -487,10 +773,14 @@ mod tests {
         // Spot-check the boot-slice namespaces route correctly.
         let by = |name: &str| cov.iter().find(|c| c.namespace == name).unwrap();
         assert_eq!(by("Debug").real_count(), 1);
-        assert_eq!(by("Sys").real_count(), 3);
+        assert_eq!(by("Sys").real_count(), 7);
         assert_eq!(by("Pg").real_count(), 2);
-        assert_eq!(by("Object").real_count(), 5);
+        assert_eq!(by("Object").real_count(), 18);
         assert_eq!(by("Object").stub_count(), 3);
+        assert_eq!(by("Player").real_count(), 14);
+        assert_eq!(by("Event").real_count(), 4);
+        assert_eq!(by("Vehicle").real_count(), 16);
+        assert_eq!(by("Sound").real_count(), 20);
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);
 

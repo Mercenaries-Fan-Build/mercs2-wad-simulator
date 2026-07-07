@@ -11,8 +11,12 @@
 
 use mlua::{Lua, Result as LuaResult};
 
+use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
-use super::{Installed, Required};
+
+fn voice_opt(v: u64) -> Option<i64> {
+    if v == 0 { None } else { Some(v as i64) }
+}
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Sound";
@@ -112,7 +116,59 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "_GetLibVersion", corpus_calls: 6 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Cue playback + the dual-deck music FSM + category volumes, forwarded to the audio system through
+/// [`crate::EngineHost`] (the real host backs it with `mercs2_audio::AudioEngine`). A `0` voice id
+/// maps to Lua `nil`. The ~50 remaining faction/action/source-music + bank cfuncs are a later pass.
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // --- cue playback ---
+    let h = host.clone();
+    b.real("CueSound", lua.create_function(move |_, cue: String| Ok(voice_opt(h.borrow_mut().sound_cue(&cue))))?)?;
+    let h = host.clone();
+    b.real("StopSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_stop(v as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("PauseSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_pause(v as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("StopAndFlushAllSounds", lua.create_function(move |_, ()| { h.borrow_mut().sound_stop_all(); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("CueAmbience", lua.create_function(move |_, cue: String| Ok(voice_opt(h.borrow_mut().sound_cue_ambience(&cue))))?)?;
+    let h = host.clone();
+    b.real("StopAmbience", lua.create_function(move |_, ()| { h.borrow_mut().sound_stop_ambience(); Ok(()) })?)?;
+
+    // --- category volumes / fades ---
+    let h = host.clone();
+    b.real("SetCategoryVolume", lua.create_function(move |_, (cat, vol): (String, f32)| { h.borrow_mut().sound_set_category_volume(&cat, vol); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetMasterVolume", lua.create_function(move |_, vol: f32| { h.borrow_mut().sound_set_master_volume(vol); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("FadeCategoryDown", lua.create_function(move |_, cat: String| { h.borrow_mut().sound_fade_category(&cat, true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("FadeCategoryUp", lua.create_function(move |_, cat: String| { h.borrow_mut().sound_fade_category(&cat, false); Ok(()) })?)?;
+
+    // --- dual-deck music FSM ---
+    let h = host.clone();
+    b.real("TransitionMusic", lua.create_function(move |_, state: String| Ok(h.borrow_mut().sound_transition_music(&state)))?)?;
+    let h = host.clone();
+    b.real("AddMusicState", lua.create_function(move |_, name: String| { h.borrow_mut().sound_add_music_state(&name); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("AddMusicTransition", lua.create_function(move |_, (from, to): (String, String)| { h.borrow_mut().sound_add_music_transition(&from, &to); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetDynamicMusic", lua.create_function(move |_, on: bool| { h.borrow_mut().sound_set_dynamic_music(on); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("IsDynamicMusic", lua.create_function(move |_, ()| Ok(h.borrow().sound_is_dynamic_music()))?)?;
+    let h = host.clone();
+    b.real("BindMusicCue", lua.create_function(move |_, (state, cue): (String, String)| { h.borrow_mut().sound_bind_music_cue(&state, &cue); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("ClearMusicCues", lua.create_function(move |_, ()| { h.borrow_mut().sound_clear_music_cues(); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("LockActionLevelMusic", lua.create_function(move |_, level: i64| { h.borrow_mut().sound_lock_action_level_music(level); Ok(()) })?)?;
+
+    // --- info ---
+    let h = host.clone();
+    b.real("GetAudioDir", lua.create_function(move |_, ()| Ok(h.borrow().sound_audio_dir()))?)?;
+    let h = host.clone();
+    b.real("_GetLibVersion", lua.create_function(move |_, ()| Ok(h.borrow().sound_lib_version()))?)?;
+
+    b.install_global(GLOBAL)
 }

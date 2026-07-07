@@ -110,5 +110,34 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         lua.create_function(move |_, ()| Ok(h.borrow().start_with_resources()))?,
     )?;
 
+    // --- world-load handshake (the markers loadprobe scores) ---
+    let h = host.clone();
+    b.real(
+        "RequestGameState",
+        lua.create_function(move |_, state: String| {
+            h.borrow_mut().sys_request_game_state(&state);
+            Ok(())
+        })?,
+    )?;
+    let h = host.clone();
+    b.real(
+        "RequestAutosave",
+        // RequestAutosave(inMission, lastMission, missionTime, pct) — args recorded, ignored here.
+        lua.create_function(move |_, _: mlua::MultiValue| {
+            h.borrow_mut().sys_request_autosave();
+            Ok(())
+        })?,
+    )?;
+    let h = host.clone();
+    b.real(
+        "IsLoadingOrStreaming",
+        lua.create_function(move |_, ()| Ok(h.borrow().sys_is_loading_or_streaming()))?,
+    )?;
+    let h = host.clone();
+    b.real(
+        "GuidToString",
+        lua.create_function(move |_, guid: i64| Ok(h.borrow().sys_guid_to_string(guid as u64)))?,
+    )?;
+
     b.install_global(GLOBAL)
 }

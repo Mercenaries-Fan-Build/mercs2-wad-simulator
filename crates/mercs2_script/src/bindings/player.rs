@@ -11,8 +11,8 @@
 
 use mlua::{Lua, Result as LuaResult};
 
+use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
-use super::{Installed, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Player";
@@ -131,7 +131,55 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SetSwimmingSearchRadius", corpus_calls: 0 },
 ];
 
-/// Not yet implemented — installs no global; every [`REQUIRED`] entry counts as a remaining stub.
-pub fn install(_lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
-    Ok(Installed::none())
+/// Economy (cash/fuel) + the player/character GUID getters — the most-called `Player` cfuncs
+/// (`GetAnyCharacter` 223, `GetLocalCharacter` 165, `GetCash`/`SetCash`, `GetFuel`/`SetFuel`). Backed
+/// by [`crate::EngineHost`]; a `0` GUID maps to Lua `nil` so the game's `if not uChar` control flow is
+/// authentic. The remaining ~90 `Player.*` cfuncs (viewports, PDA, boundaries, MP session) are later.
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
+    let mut b = NsBuilder::new(lua)?;
+
+    // --- economy ---
+    let h = host.clone();
+    b.real("GetCash", lua.create_function(move |_, ()| Ok(h.borrow().player_cash()))?)?;
+    let h = host.clone();
+    b.real("SetCash", lua.create_function(move |_, n: i64| { h.borrow_mut().player_set_cash(n); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("AddCash", lua.create_function(move |_, n: i64| {
+        let total = h.borrow().player_cash() + n;
+        h.borrow_mut().player_set_cash(total);
+        Ok(total)
+    })?)?;
+    let h = host.clone();
+    b.real("GetFuel", lua.create_function(move |_, ()| Ok(h.borrow().player_fuel()))?)?;
+    let h = host.clone();
+    b.real("SetFuel", lua.create_function(move |_, n: i64| { h.borrow_mut().player_set_fuel(n); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("AddFuel", lua.create_function(move |_, n: i64| {
+        let total = h.borrow().player_fuel() + n;
+        h.borrow_mut().player_set_fuel(total);
+        Ok(total)
+    })?)?;
+    let h = host.clone();
+    b.real("GetFuelCapacity", lua.create_function(move |_, ()| Ok(h.borrow().player_fuel_capacity()))?)?;
+    let h = host.clone();
+    b.real("SetFuelCapacity", lua.create_function(move |_, n: i64| { h.borrow_mut().player_set_fuel_capacity(n); Ok(()) })?)?;
+
+    // --- player / character GUID getters (0 -> nil) ---
+    fn guid_opt(g: u64) -> Option<i64> {
+        if g == 0 { None } else { Some(g as i64) }
+    }
+    let h = host.clone();
+    b.real("GetLocalPlayer", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_local_player())))?)?;
+    let h = host.clone();
+    b.real("GetAnyCharacter", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_any_character())))?)?;
+    let h = host.clone();
+    b.real("GetLocalCharacter", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_local_character())))?)?;
+    let h = host.clone();
+    b.real("GetPrimaryCharacter", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_primary_character())))?)?;
+    let h = host.clone();
+    b.real("GetSecondaryCharacter", lua.create_function(move |_, ()| Ok(guid_opt(h.borrow().player_secondary_character())))?)?;
+    let h = host.clone();
+    b.real("IsLocal", lua.create_function(move |_, guid: i64| Ok(h.borrow().player_is_local(guid as u64)))?)?;
+
+    b.install_global(GLOBAL)
 }
