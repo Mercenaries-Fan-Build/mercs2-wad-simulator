@@ -22,6 +22,9 @@ mercs2_audio = { path = "../mercs2_audio" }
 mercs2_physics = { path = "../mercs2_physics" }
 mercs2_vehicle = { path = "../mercs2_vehicle" }
 mercs2_ai = { path = "../mercs2_ai" }
+mercs2_water = { path = "../mercs2_water" }
+mercs2_decal = { path = "../mercs2_decal" }
+mercs2_population = { path = "../mercs2_population" }
 mercs2_combat = { path = "../mercs2_combat" }
 pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread
 # The game's own render/boot path (world.rs, the TPS world loop) owns its window + event loop.

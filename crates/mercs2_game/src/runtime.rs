@@ -37,6 +37,19 @@ pub struct GameRuntime {
     /// same data-driven way the vehicle/combat systems idle). The `Ai.*` Lua surface drives the same
     /// relation matrix once the persistent mission-Lua host shares this in.
     pub ai: mercs2_ai::AiWorld,
+    /// The water mechanism (static watermap + swim FSM). `tick` advances every `Swimmer` against the
+    /// watermap; idle until a watermap is loaded. Buoyancy is applied by the physics side.
+    pub water: mercs2_water::WaterWorld,
+    /// The decal mechanism (decaltable + bounded instance pool). `tick` ages the pool and GCs expired
+    /// decals; idle until decals are spawned. The render seam draws `decal.iter_live()`.
+    pub decal: mercs2_decal::DecalWorld,
+    /// The population mechanism (PgSysPopulation spawners + density + death). Ticked via
+    /// [`tick_population`](Self::tick_population) (it needs the camera anchor for the death gate); its
+    /// emitted `SpawnRequest`s are realized through the same [`SpawnResolver`] as script spawns.
+    pub population: mercs2_population::PopulationWorld,
+    /// Monotonic runtime GUID source for population-spawned actors (distinct high space so they don't
+    /// collide with script-spawned handles).
+    next_pop_handle: u32,
 }
 
 impl GameRuntime {
@@ -48,6 +61,10 @@ impl GameRuntime {
             gameplay: GameplaySystems::new(audio),
             resolver: SpawnResolver::new(),
             ai: mercs2_ai::AiWorld::new(),
+            water: mercs2_water::WaterWorld::new(),
+            decal: mercs2_decal::DecalWorld::new(),
+            population: mercs2_population::PopulationWorld::new(),
+            next_pop_handle: 0x2000_0000,
         }
     }
 
@@ -77,11 +94,33 @@ impl GameRuntime {
     }
 
     /// Advance the per-frame game update one fixed step over `world`: the fleet gameplay systems
-    /// (physics / vehicle / combat / audio) plus the AI per-entity perception update (§2.4). Both idle
-    /// until entities carry their components.
+    /// (physics / vehicle / combat / audio), the AI per-entity perception update (§2.4), the water swim
+    /// FSM, and the decal pool aging. Every one idles until entities/content carry their components —
+    /// the same data-driven way the engine's systems idle. (Population needs the camera anchor, so it's
+    /// [`tick_population`](Self::tick_population).)
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         self.gameplay.tick(world, dt);
         self.ai.tick(world);
+        self.water.tick(world);
+        self.decal.update(dt);
+    }
+
+    /// Advance the population system one fixed step and realize its output. `focus` is the camera/player
+    /// anchor the death-distance gate measures against. Emitted `SpawnRequest`s are materialized through
+    /// the shared [`SpawnResolver`] (a template hash → the right ECS archetype, exactly as script
+    /// `Pg.Spawn`s are), and retired entities are despawned. Idle until spawners are registered.
+    pub fn tick_population(&mut self, world: &mut World, dt: f32, focus: Vec3) {
+        let mut time = mercs2_core::Time::new(60.0);
+        time.dt = dt;
+        self.population.tick(world, &time, &[focus]);
+        for req in self.population.take_requests() {
+            let handle = self.next_pop_handle;
+            self.next_pop_handle = self.next_pop_handle.wrapping_add(1);
+            self.resolver.spawn(world, req.template, handle, req.transform);
+        }
+        for e in self.population.take_retired() {
+            let _ = world.despawn(e);
+        }
     }
 }
 
@@ -161,6 +200,48 @@ mod tests {
             world.get::<&PerceptionRecord>(watched).unwrap().hostile_aware, 1,
             "AI perception must run through the runtime tick"
         );
+    }
+
+    /// The decal pool ages through `GameRuntime::tick` (proving `decal.update` is wired into the
+    /// per-frame update): a spawned decal survives a short step and stays live.
+    #[test]
+    fn tick_ages_the_decal_pool() {
+        let audio = Rc::new(RefCell::new(AudioEngine::default()));
+        let mut rt = GameRuntime::new(audio);
+        rt.decal.spawn(mercs2_decal::DecalType::BulletHole, Vec3::new(1.0, 0.0, 0.0), Vec3::Y, Vec3::X);
+        assert_eq!(rt.decal.pool.live_count(), 1);
+
+        let mut world = World::new();
+        rt.tick(&mut world, 1.0 / 60.0); // decal.update runs inside tick
+        assert_eq!(rt.decal.pool.live_count(), 1, "a fresh decal survives a short tick");
+    }
+
+    /// A registered population spawner fires through `tick_population` and its request is realized into
+    /// an ECS entity via the shared resolver — proving the population→resolver bridge (the same path
+    /// script `Pg.Spawn`s take).
+    #[test]
+    fn tick_population_realizes_spawns_through_the_resolver() {
+        use mercs2_population::{SimpleSpawner, SpawnFaction, SpawnerFamily};
+
+        let audio = Rc::new(RefCell::new(AudioEngine::default()));
+        let mut rt = GameRuntime::new(audio);
+        rt.population
+            .spawners
+            .register(SimpleSpawner {
+                interval: 1.0,
+                countdown: 1.0,
+                reload: 1.0,
+                faction: SpawnFaction::Vz,
+                family: SpawnerFamily::Window,
+                transform: Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+                ..SimpleSpawner::default()
+            })
+            .unwrap();
+
+        let mut world = World::new();
+        rt.tick_population(&mut world, 1.0, Vec3::ZERO); // dt 1.0 crosses the 1.0s interval → fires
+        let realized = world.query::<&Transform>().iter().count();
+        assert!(realized >= 1, "a fired population spawner must realize an entity through the resolver");
     }
 
     /// An unregistered template realizes a plain prop (bare Transform, no Vehicle) — the render loop

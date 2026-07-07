@@ -1510,6 +1510,10 @@ pub async fn run_scene_world_loading(
                     // cadence the animation schedule just ran — the layer-4 gameplay tick, now driven.
                     for _ in 0..steps {
                         runtime.tick(&mut world, time.fixed_dt);
+                        // Population update uses the player as the camera/death-distance anchor; its
+                        // spawn requests are realized through the shared resolver. Idle until spawners
+                        // are registered (the living-world data path is a later wire).
+                        runtime.tick_population(&mut world, time.fixed_dt, player.pos);
                     }
                     // Directional shadow key light, centred on the player. The travel direction is the
                     // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
