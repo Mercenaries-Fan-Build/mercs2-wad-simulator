@@ -871,6 +871,43 @@ fn pos_to_cell(p: [f32; 3]) -> Option<usize> {
     Some(row as usize * 20 + col as usize)
 }
 
+// --- K2 S2 collision-delta helpers ---
+/// Distinct tagged keys so block (u16) and prop (u32) collision entries never collide in one map.
+fn block_key(b: u16) -> u64 {
+    (1u64 << 32) | b as u64
+}
+fn prop_key(k: u32) -> u64 {
+    k as u64
+}
+
+/// A mesh's **local-space** collision triangles (raw vertex positions, per index triple). Degenerate
+/// indices that fall outside the vertex range are skipped rather than panicking.
+fn extract_local_tris(m: &LoadedModel) -> Vec<[mercs2_core::glam::Vec3; 3]> {
+    use mercs2_core::glam::Vec3;
+    m.indices
+        .chunks_exact(3)
+        .filter_map(|idx| {
+            let a = m.verts.get(idx[0] as usize)?;
+            let b = m.verts.get(idx[1] as usize)?;
+            let c = m.verts.get(idx[2] as usize)?;
+            Some([Vec3::from(a.pos), Vec3::from(b.pos), Vec3::from(c.pos)])
+        })
+        .collect()
+}
+
+/// Place local triangles into world space by an instance's rotation + translation (`rotate·v +
+/// translate`) — the same transform the render entity uses, so collision matches what's drawn.
+fn placed_tris(
+    local: &[[mercs2_core::glam::Vec3; 3]],
+    translate: mercs2_core::glam::Vec3,
+    rotate: mercs2_core::glam::Quat,
+) -> Vec<[mercs2_core::glam::Vec3; 3]> {
+    local
+        .iter()
+        .map(|t| [rotate * t[0] + translate, rotate * t[1] + translate, rotate * t[2] + translate])
+        .collect()
+}
+
 /// The reusable streaming-runtime **executor** (K2 unification,
 /// `docs/modernization/k2_streaming_unification_plan.md`). Owns the decision [`StreamingManager`], the
 /// WAD handle (for on-demand wake extraction), the wake recipes, and all live-executor bookkeeping, and
@@ -891,6 +928,18 @@ pub struct StreamingWorld {
     model_refs: std::collections::HashMap<u32, u32>,
     wake_failed: std::collections::HashSet<u32>,
     anim_store: std::collections::HashMap<u32, crate::scene::ModelAnim>,
+    // --- collision delta (K2 S2) ---
+    /// Per-model **local-space** collision triangles, cached on first load so a prop whose mesh is
+    /// already resident (loaded by an earlier instance) still contributes collision without re-reading
+    /// the WAD. Keyed by model hash.
+    local_tris: std::collections::HashMap<u32, Vec<[mercs2_core::glam::Vec3; 3]>>,
+    /// Live **world-space** collision soup, keyed per streamed unit (block or prop — see `block_key`/
+    /// `prop_key`) so a UNLOAD/HIBERNATE removes exactly that unit's triangles. The consumer rebuilds
+    /// its physics soup from [`collision_tris`](Self::collision_tris) whenever [`take_collision_dirty`]
+    /// (Self::take_collision_dirty) reports a change.
+    collision: std::collections::HashMap<u64, Vec<[mercs2_core::glam::Vec3; 3]>>,
+    /// Set whenever `collision` changed this step (a unit woke/loaded or hibernated/unloaded).
+    collision_dirty: bool,
 }
 
 impl StreamingWorld {
@@ -917,7 +966,27 @@ impl StreamingWorld {
             model_refs: std::collections::HashMap::new(),
             wake_failed: std::collections::HashSet::new(),
             anim_store: std::collections::HashMap::new(),
+            local_tris: std::collections::HashMap::new(),
+            collision: std::collections::HashMap::new(),
+            collision_dirty: false,
         }
+    }
+
+    /// Whether the collision soup changed since the last [`take_collision_dirty`](Self::take_collision_dirty).
+    pub fn collision_dirty(&self) -> bool {
+        self.collision_dirty
+    }
+
+    /// Read-and-clear the collision-dirty flag — the consumer calls this each step and, if `true`,
+    /// rebuilds its physics soup from [`collision_tris`](Self::collision_tris).
+    pub fn take_collision_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.collision_dirty)
+    }
+
+    /// The current world-space collision soup (all resident blocks + woken props), flattened. Cheap to
+    /// rebuild since it only runs when [`take_collision_dirty`](Self::take_collision_dirty) is `true`.
+    pub fn collision_tris(&self) -> Vec<[mercs2_core::glam::Vec3; 3]> {
+        self.collision.values().flatten().copied().collect()
     }
 
     /// Live executor counts for the periodic stat line.
@@ -958,6 +1027,9 @@ impl StreamingWorld {
             model_refs,
             wake_failed,
             anim_store,
+            local_tris,
+            collision,
+            collision_dirty,
         } = self;
         let terrain_hash = *terrain_hash;
 
@@ -973,6 +1045,9 @@ impl StreamingWorld {
                 }
                 let _ = world.despawn(e);
                 scene.forget_entity(e);
+            }
+            if collision.remove(&block_key(*b)).is_some() {
+                *collision_dirty = true;
             }
         }
         // HIBERNATE (free GPU): props beyond their stream-out distance.
@@ -990,6 +1065,9 @@ impl StreamingWorld {
                 let _ = world.despawn(e);
                 scene.forget_entity(e);
             }
+            if collision.remove(&prop_key(*k)).is_some() {
+                *collision_dirty = true;
+            }
         }
         // LOAD c3-cell blocks (throttled by the manager's block budget).
         for b in &diff.load_blocks {
@@ -1000,6 +1078,10 @@ impl StreamingWorld {
                 if !scene.has_model(m.hash) {
                     scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                 }
+                // Collision (S2): c3 cell geometry placed at `off` (identity rotation).
+                let lt = local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
+                collision.insert(block_key(*b), placed_tris(lt, Vec3::new(off[0], off[1], off[2]), Quat::IDENTITY));
+                *collision_dirty = true;
                 let e = world.spawn((
                     Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
                     ModelRef { model: m.hash },
@@ -1021,12 +1103,20 @@ impl StreamingWorld {
             if let Some(&(tm_hash, pos)) = terrain_tiles.get(k) {
                 if !scene.has_model(tm_hash) {
                     match load_terrainmesh_tile(wad, tm_hash, pos) {
-                        Some(m) => scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin),
+                        Some(m) => {
+                            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                            local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
+                        }
                         None => {
                             wake_failed.insert(*k);
                             continue;
                         }
                     }
+                }
+                // Collision (S2): terrain verts are already world-space; the tile spawns at identity.
+                if let Some(lt) = local_tris.get(&tm_hash) {
+                    collision.insert(prop_key(*k), lt.clone());
+                    *collision_dirty = true;
                 }
                 let e = world.spawn((
                     Transform::IDENTITY,
@@ -1047,6 +1137,7 @@ impl StreamingWorld {
                 match load_model_by_hash(wad, spawn.model_hash) {
                     Some((m, _, _)) => {
                         scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                        local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
                         // A rigged model that ships clips registers its rig + clips so the per-frame
                         // animation pass can pose it (no-op for clip-less props).
                         if !m.clips.is_empty() {
@@ -1061,6 +1152,13 @@ impl StreamingWorld {
                         continue;
                     }
                 }
+            }
+            // Collision (S2): the prop mesh placed at its authored pos+quat.
+            if let Some(lt) = local_tris.get(&spawn.model_hash) {
+                let q = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
+                let p = Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]);
+                collision.insert(prop_key(*k), placed_tris(lt, p, q));
+                *collision_dirty = true;
             }
             let nbones = scene.model_bone_count(spawn.model_hash).max(1);
             let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
@@ -1596,5 +1694,35 @@ mod prop_anim_tests {
         for c in &m.clips {
             assert!(c.clip.num_tracks > 0, "clip 0x{:08X} decoded 0 tracks", c.name_hash);
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_collision_tests {
+    use super::*;
+    use mercs2_core::glam::{Quat, Vec3};
+
+    /// A block and a prop with the same numeric key must never collide in the one collision map.
+    #[test]
+    fn block_and_prop_keys_are_disjoint() {
+        assert_ne!(block_key(5), prop_key(5));
+        assert_ne!(block_key(0), prop_key(0));
+        assert_eq!(prop_key(0xDEAD_BEEF), 0xDEAD_BEEF_u64);
+        assert_eq!(block_key(1), (1u64 << 32) | 1);
+    }
+
+    /// `placed_tris` applies an instance's rotation + translation so the collision matches what's drawn.
+    #[test]
+    fn placed_tris_translates_and_rotates() {
+        let local = [[Vec3::X, Vec3::Y, Vec3::Z]];
+        // Identity rotation → pure translation.
+        let t = placed_tris(&local, Vec3::new(10.0, 2.0, 0.0), Quat::IDENTITY);
+        assert_eq!(t[0][0], Vec3::new(11.0, 2.0, 0.0));
+        assert_eq!(t[0][1], Vec3::new(10.0, 3.0, 0.0));
+        // A 90° yaw actually rotates the vertex while preserving length.
+        let q = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let r = placed_tris(&local, Vec3::ZERO, q);
+        assert!((r[0][0].length() - 1.0).abs() < 1e-4, "rotation preserves length");
+        assert!((r[0][0] - Vec3::X).length() > 0.5, "X was actually rotated, not left in place");
     }
 }
