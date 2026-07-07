@@ -1084,7 +1084,7 @@ impl Scene {
     fn draw_geometry<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
-        items: &[(Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)],
+        items: &[DrawItem],
         pipeline: &'a wgpu::RenderPipeline,
     ) {
         pass.set_pipeline(pipeline);
@@ -1117,6 +1117,177 @@ impl Scene {
         }
     }
 
+    // --- Render-graph nodes (see `render_graph::SCENE_ORDER`) --------------------------------------
+    // Each canonical/engine pass carved out of the old monolithic `render` into its own recorder so
+    // the frame walks `render_graph::SCENE_ORDER` in the recovered `FUN_00466d40` sequence. These are
+    // `&self` (all queue uploads happen in phase 1 before recording), take the frame's `encoder` +
+    // swapchain view, and record the SAME commands the monolithic `render` did — a byte-identical carve.
+
+    /// [`render_graph::PassId::ShadowCascade`] node — directional shadow-depth pass (our single-cascade
+    /// realization of the exe's 4× `RenderShadow` emit). Depth-only render of the DYNAMIC scene from the
+    /// key light into the shadow map (cleared to 1.0); the color pass PCF-samples it. SKIPPED when the
+    /// sun is off (interiors) — the shader gates on the same condition. Only non-prelit geometry casts
+    /// (the building shell bakes its own shadow into vertex colour).
+    fn record_shadow_cascade(&self, encoder: &mut wgpu::CommandEncoder, items: &[DrawItem]) {
+        if self.sun_intensity > 0.0 {
+            let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            spass.set_pipeline(&self.shadow_pipeline);
+            spass.set_bind_group(1, &self.shadow_vp_bind, &[]);
+            for (e, _m, model_hash, _p) in items {
+                let Some(mg) = self.models.get(model_hash) else { continue };
+                // Only DYNAMIC geometry casts: the prelit building shell already bakes its own light +
+                // shadow into vertex colour, so casting it into the map would double-darken the baked
+                // walls. Casting only characters/props gives clean contact shadows on the baked floor.
+                if mg.prelit {
+                    continue;
+                }
+                let Some(eg) = self.entities.get(e) else { continue };
+                spass.set_bind_group(0, &eg.mvp_bind, &[]);
+                spass.set_bind_group(2, &eg.bone_bind, &[]);
+                spass.set_vertex_buffer(0, mg.vbuf.slice(..));
+                if let Some(ib) = &mg.ibuf {
+                    spass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    spass.draw_indexed(0..mg.nindices, 0, 0..1);
+                } else {
+                    spass.draw(0..mg.nverts, 0..1);
+                }
+            }
+        }
+    }
+
+    /// [`render_graph::PassId::Color`] node — the main color draw (`PgScene::RenderColor`). Combined
+    /// forward pass: a fullscreen sky draw (engine approximation of the canonical sky-as-pass) then the
+    /// opaque geometry. Prefers the HDR world path (scene → `Rgba16Float` → tone-map + bloom →
+    /// swapchain); falls back to a direct forward present when the post chain is absent (default
+    /// `--ecs`/`--animate`, or if HDR setup failed — nothing regresses). `draw_geometry` binds the
+    /// group-3 lights itself.
+    fn record_color(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view_tex: &wgpu::TextureView,
+        items: &[DrawItem],
+        hdr_world: bool,
+    ) {
+        if hdr_world {
+            let post = self.post.as_ref().unwrap();
+            post.update(&self.queue, &self.atmo);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("scene hdr pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: post.hdr_view(),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(self.sky_pipeline_hdr.as_ref().unwrap());
+                pass.set_bind_group(0, &self.sky_bind, &[]);
+                pass.draw(0..3, 0..1);
+                self.draw_geometry(&mut pass, items, self.world_pipeline.as_ref().unwrap());
+            }
+            post.run(encoder, view_tex); // bright-pass → blur → composite + tone-map → swapchain
+        } else {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: view_tex,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if self.sky_enabled {
+                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_bind_group(0, &self.sky_bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.draw_geometry(&mut pass, items, &self.pipeline);
+        }
+    }
+
+    /// [`render_graph::PassId::TransparentFx`] node — transparent FX (billboard particles + light
+    /// shafts): a separate pass on the SWAPCHAIN, after the world/post, blending over the final image.
+    /// Depth = the scene depth (read-only test), so both are occluded by nearer opaque geometry. No-op
+    /// when nothing is live.
+    fn record_transparent_fx(&self, encoder: &mut wgpu::CommandEncoder, view_tex: &wgpu::TextureView) {
+        let has_fx = self.particles.active_emitter_count() > 0
+            || self.particles.live_particle_count() > 0
+            || self.particles.glow_card_count() > 0;
+        if has_fx {
+            let mut ppass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("transparent fx pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: view_tex,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            self.particles.draw(&mut ppass);
+        }
+    }
+
+    /// [`render_graph::PassId::Ui`] node — the 2D UI overlay (tool panels / debug HUD): draw any quads
+    /// staged via `ui_rect`/`ui_text` over the final image (the same overlay pass the shell menu uses).
+    /// The caller passes the staged-quad count from `ui.prepare`; only invoked when `ui_count > 0`, so
+    /// the game render path is unchanged unless a caller stages UI this frame.
+    fn record_ui(&self, encoder: &mut wgpu::CommandEncoder, view_tex: &wgpu::TextureView, ui_count: u32) {
+        let mut upass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ui overlay pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: view_tex,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        self.ui.draw(&mut upass, ui_count);
+    }
+
     /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
     pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
         self.render_with(world, None)
@@ -1129,7 +1300,7 @@ impl Scene {
     pub fn render_with(
         &mut self,
         world: &World,
-        overlay: Option<Overlay<'_>>,
+        mut overlay: Option<Overlay<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
         // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
@@ -1165,7 +1336,7 @@ impl Scene {
         let view_proj = glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0)) * raw_vp;
 
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
-        let mut items: Vec<(Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)> = Vec::new();
+        let mut items: Vec<DrawItem> = Vec::new();
         for (e, (xform, mref, pal)) in world.query::<(&Transform, &ModelRef, &SkinPalette)>().iter() {
             items.push((e, xform.matrix(), mref.model, pal.mats.clone()));
         }
@@ -1254,172 +1425,84 @@ impl Scene {
         self.particles
             .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, eye);
 
-        // Phase 2: record the pass.
+        // Phase 2: record the frame's passes by walking the canonical per-viewport scene order
+        // (`render_graph::SCENE_ORDER`, the recovered `FUN_00466d40` body sequence — render_core §5).
+        // The not-yet-implemented canonical passes (wake/occlusion/reflection/water/z-prepass/
+        // fading-trees/mirror/blob) are no-op SEAMS the Band-A silos fill next wave: they record
+        // NOTHING today, so this loop reduces to the engine's prior command sequence (shadow-depth →
+        // color → transparent-fx → ui → overlay) — a behaviour-preserving carve. Each node's Xbox↔PC
+        // anchor lives on `render_graph::PassId::anchor`.
         let output = self.surface.get_current_texture()?;
         let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene frame") });
 
-        // Shadow pass (FIRST): depth-only render of the scene from the key light into the shadow map
-        // (cleared to 1.0 = far). The color pass' main shader PCF-samples this for real cast-shadows.
-        // Same entities as the color pass, whole index range per model (depth only — materials/
-        // draw-group split are irrelevant here). Uses the per-entity mvp_bind (for `model`) + bone_bind
-        // uploaded in phase 1. SKIPPED when the sun is off (interiors) — no sun means no directional
-        // shadow, and the shader gates on the same condition.
-        if self.sun_intensity > 0.0 {
-            let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            spass.set_pipeline(&self.shadow_pipeline);
-            spass.set_bind_group(1, &self.shadow_vp_bind, &[]);
-            for (e, _m, model_hash, _p) in &items {
-                let Some(mg) = self.models.get(model_hash) else { continue };
-                // Only DYNAMIC geometry casts: the prelit building shell already bakes its own light +
-                // shadow into vertex colour, so casting it into the map would double-darken the baked
-                // walls. Casting only characters/props gives clean contact shadows on the baked floor.
-                if mg.prelit {
-                    continue;
-                }
-                let Some(eg) = self.entities.get(e) else { continue };
-                spass.set_bind_group(0, &eg.mvp_bind, &[]);
-                spass.set_bind_group(2, &eg.bone_bind, &[]);
-                spass.set_vertex_buffer(0, mg.vbuf.slice(..));
-                if let Some(ib) = &mg.ibuf {
-                    spass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    spass.draw_indexed(0..mg.nindices, 0, 0..1);
-                } else {
-                    spass.draw(0..mg.nverts, 0..1);
-                }
-            }
-        }
-
         // Prefer the HDR world path (scene → Rgba16Float → tone-map + bloom → swapchain); fall back to
         // a direct forward present when the post chain is absent (default `--ecs`/`--animate`, or if
-        // HDR-target setup failed — nothing regresses). draw_geometry binds the group-3 lights itself.
+        // HDR-target setup failed — nothing regresses). `record_color` binds the group-3 lights itself.
         let hdr_world = self.sky_enabled
             && self.post.is_some()
             && self.world_pipeline.is_some()
             && self.sky_pipeline_hdr.is_some();
-        if hdr_world {
-            let post = self.post.as_ref().unwrap();
-            post.update(&self.queue, &self.atmo);
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("scene hdr pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: post.hdr_view(),
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.depth_view,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-                pass.set_pipeline(self.sky_pipeline_hdr.as_ref().unwrap());
-                pass.set_bind_group(0, &self.sky_bind, &[]);
-                pass.draw(0..3, 0..1);
-                self.draw_geometry(&mut pass, &items, self.world_pipeline.as_ref().unwrap());
-            }
-            post.run(&mut encoder, &view_tex); // bright-pass → blur → composite + tone-map → swapchain
-        } else {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            if self.sky_enabled {
-                pass.set_pipeline(&self.sky_pipeline);
-                pass.set_bind_group(0, &self.sky_bind, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            self.draw_geometry(&mut pass, &items, &self.pipeline);
-        }
-        // Transparent FX (particles + light shafts): a separate pass on the SWAPCHAIN (both are
-        // swapchain-format), after the world/post, blending over the final image. Depth = the scene
-        // depth (read-only test), so both are occluded by nearer opaque geometry.
-        let has_fx = self.particles.active_emitter_count() > 0
-            || self.particles.live_particle_count() > 0
-            || self.particles.glow_card_count() > 0;
-        if has_fx {
-            let mut ppass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("transparent fx pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            self.particles.draw(&mut ppass);
-        }
-        // 2D UI overlay (tool panels / debug HUD): draw any quads staged via `ui_rect`/`ui_text`
-        // over the final image — the same overlay pass the shell menu uses. No-op when nothing is
-        // staged, so the game render path is unchanged unless a caller stages UI this frame.
+
+        // Stage this frame's 2D UI overlay before recording (a queue buffer write; ordering among the
+        // frame's queue writes is immaterial). Non-zero only when a caller staged `ui_rect`/`ui_text`.
         let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
-        if ui_count > 0 {
-            let mut upass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ui overlay pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            self.ui.draw(&mut upass, ui_count);
+
+        use crate::render_graph::PassId;
+        for &node in crate::render_graph::SCENE_ORDER {
+            match node {
+                // --- realized world passes ---
+                PassId::ShadowCascade => self.record_shadow_cascade(&mut encoder, &items),
+                PassId::Color => self.record_color(&mut encoder, &view_tex, &items, hdr_world),
+                // --- engine composite tail ---
+                PassId::TransparentFx => self.record_transparent_fx(&mut encoder, &view_tex),
+                PassId::Ui => {
+                    if ui_count > 0 {
+                        self.record_ui(&mut encoder, &view_tex, ui_count);
+                    }
+                }
+                PassId::Overlay => {
+                    if let Some(f) = overlay.take() {
+                        f(
+                            &self.device,
+                            &self.queue,
+                            &mut encoder,
+                            &view_tex,
+                            [self.config.width, self.config.height],
+                        );
+                    }
+                }
+                // --- canonical FUN_00466d40 seams: Band-A silos fill these; they render NOTHING yet ---
+                // SILO water (Band-A): wake-map / occlusion / reflection / water-surface seams.
+                PassId::WakeMap | PassId::Occlusion | PassId::Reflection | PassId::WaterSurface => {}
+                // SILO z-prepass (Band-A): depth-only main-list pass seam.
+                PassId::ZOpaque => {}
+                // SILO vegetation-fade (Band-A): RenderFadingTrees seam.
+                PassId::FadingTrees => {}
+                // SILO mirror/sub-scene (Band-A): planar-mirror render seam.
+                PassId::Mirror => {}
+                // SILO blob-shadow (Band-A): projected-blob fallback seam.
+                PassId::Blob => {}
+                // SILO particles-as-pass (Band-A): canonical PgFX pass; engine draws via TransparentFx.
+                PassId::Particles => {}
+                // Collect / scene-begin / shadow-collect are folded into phase-1 CPU setup and the
+                // color/shadow passes' own RT bind + clear — no standalone GPU pass to record.
+                PassId::SceneBegin | PassId::Collect | PassId::ShadowCollect => {}
+            }
         }
-        if let Some(f) = overlay {
-            f(&self.device, &self.queue, &mut encoder, &view_tex, [self.config.width, self.config.height]);
-        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
         Ok(())
     }
 }
+
+/// A snapshot of one drawable entity for a frame: `(entity, model-space transform, model hash,
+/// bone palette)`. Copied out of the ECS `World` each frame so the world borrow is released before
+/// `Scene` records the passes.
+type DrawItem = (Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>);
 
 /// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,
 /// swapchain view, surface size in pixels.

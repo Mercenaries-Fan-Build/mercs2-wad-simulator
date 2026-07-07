@@ -22,6 +22,7 @@ pub mod particles;
 pub mod pose;
 pub mod post;
 pub mod render;
+pub mod render_graph;
 pub mod scene;
 pub mod ui;
 pub mod wad;
