@@ -1189,19 +1189,32 @@ pub async fn run_scene_world_loading(
                             Ok(Ok(mut data)) => {
                                 // Hero spawn (data-driven, base-game path): resolve a NAMED world marker
                                 // to a position — the `SetSpawnLocations`/`CreatePlayerCharacter(location=…)`
-                                // mechanism. The marker name is the HQ portal entry `Pmc_Entry1` (from
-                                // `mrxhq.tPortal.sStart1`; the active-contract `<Contract>_Start1` is the
-                                // pre-HQ case — threaded next). Resolved via `data.named_locations`
-                                // (Pg.GetGuidByName→pos), not a hardcoded coordinate.
-                                const SPAWN_MARKER: &str = "Pmc_Entry1";
-                                match data.named_locations.get(&SPAWN_MARKER.to_ascii_lowercase()) {
-                                    Some(&p) => {
+                                // mechanism (Pg.GetGuidByName→pos via `data.named_locations`), not a
+                                // hardcoded coordinate. Candidate names, in vanilla priority: the HQ portal
+                                // entry `Pmc_Entry1` (mrxhq.tPortal.sStart1), then common contract starts.
+                                // The active-contract `<Contract>_Start1` is threaded next (pre-HQ saves).
+                                let candidates = ["pmc_entry1", "pmccon001_start1", "pmc_start1"];
+                                let resolved = candidates
+                                    .iter()
+                                    .find_map(|n| data.named_locations.get(*n).map(|&p| (*n, p)));
+                                match resolved {
+                                    Some((name, p)) => {
                                         player.pos = Vec3::new(p[0], p[1], p[2]);
-                                        println!("[world] hero spawn: marker '{SPAWN_MARKER}' -> ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
+                                        println!("[world] hero spawn: marker '{name}' -> ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
                                     }
                                     None => {
+                                        // Surface what IS in the data so we can find where the spawn markers live.
+                                        let spawnish: Vec<&String> = data
+                                            .named_locations
+                                            .keys()
+                                            .filter(|k| {
+                                                k.contains("start") || k.contains("entry") || k.contains("spawn") || k.starts_with("pmc")
+                                            })
+                                            .take(30)
+                                            .collect();
                                         eprintln!(
-                                            "[world] SPAWN MARKER '{SPAWN_MARKER}' not in world data ({} named markers indexed) — hero stays at origin until the marker/flow is wired (see vanilla_boot_load_order.md)",
+                                            "[world] SPAWN MARKER unresolved ({} named markers total; none of {candidates:?}). \
+                                             spawn-ish markers present: {spawnish:?} — hero at origin (see vanilla_boot_load_order.md)",
                                             data.named_locations.len()
                                         );
                                     }
@@ -1220,9 +1233,14 @@ pub async fn run_scene_world_loading(
                                     ));
                                 }
 
-                                // Placement markers (`--placements`): one merged static entity (its
-                                // marker verts are already world-space).
-                                if let Some(pm) = data.placements {
+                                // Placement-marker DEBUG glyphs (the pyramids): one merged static entity
+                                // of a pyramid per placement. This is a diagnostic overlay — only render
+                                // it behind `--markers`, never in normal play (the named-marker spawn
+                                // resolution uses `data.named_locations`, built separately, so gating this
+                                // does not affect the hero spawn).
+                                if let (Some(pm), true) =
+                                    (data.placements, std::env::args().any(|a| a == "--markers"))
+                                {
                                     scene.load_model(pm.hash, &pm.verts, &pm.indices, &pm.draws, &pm.textures, &pm.skin);
                                     world.spawn((
                                         Transform::IDENTITY,
