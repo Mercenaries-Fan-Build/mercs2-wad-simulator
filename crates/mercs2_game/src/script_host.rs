@@ -62,6 +62,18 @@ pub struct GameScriptHost {
     /// …)` — the base game's `MrxUtil._TeleportHero` bottoms out to exactly that (mrxutil.lua:328). The
     /// boot reads this to place the player: the spawn is **Lua-authored, no engine-constant fallback**.
     hero_teleport: Option<[f32; 3]>,
+    /// The world's named markers (lowercased name → world pos) — the engine's `Pg.GetGuidByName`→pos
+    /// table. Set from the loaded world so the real boot flow's `CreatePlayerCharacter` resolves the
+    /// spawn location marker (e.g. `PmcCon001_Start1`) to coords.
+    named_locations: std::collections::HashMap<String, [f32; 3]>,
+    /// Minted GUID → the marker name it stands for, so `Object.GetPosition(guid)` on a
+    /// `Pg.GetGuidByName` result resolves back through `named_locations`.
+    marker_guids: std::collections::HashMap<u64, String>,
+    /// Where the boot flow's `Pg.Spawn(hero, x, y, z, …)` placed the hero — the spawn the loop reads
+    /// (the REAL flow result, superseding the engine-side marker shortcut).
+    hero_spawn: Option<[f32; 3]>,
+    /// The hero template name the boot spawns (`chris`/`mattias`/`jen`), for the fired boot flow.
+    hero_character: String,
 }
 
 /// The GUID the player hero is registered under so the game's Lua can address it (`Player.Get*Character`
@@ -81,6 +93,10 @@ impl GameScriptHost {
             ai: mercs2_ai::AiWorld::new(),
             ai_states: std::collections::HashMap::new(),
             hero_teleport: None,
+            named_locations: std::collections::HashMap::new(),
+            marker_guids: std::collections::HashMap::new(),
+            hero_spawn: None,
+            hero_character: String::new(),
         }
     }
 
@@ -99,6 +115,25 @@ impl GameScriptHost {
     pub fn take_new_spawns(&mut self) -> Vec<SpawnRequest> {
         self.by_guid.clear();
         std::mem::take(&mut self.spawns)
+    }
+
+    /// Give the host the world's named markers + the hero template, so the real boot flow's
+    /// `CreatePlayerCharacter(location=<name>)` resolves against them (`Pg.GetGuidByName`→`GetPosition`)
+    /// and `Pg.Spawn(hero, …)` places the hero at the marker.
+    pub fn set_boot_context(&mut self, named_locations: std::collections::HashMap<String, [f32; 3]>, hero_character: impl Into<String>) {
+        self.named_locations = named_locations;
+        self.hero_character = hero_character.into();
+    }
+
+    /// The hero template the boot spawns (for the fired boot flow's `CreatePlayerCharacter`).
+    pub fn hero_character(&self) -> &str {
+        &self.hero_character
+    }
+
+    /// Where the boot flow's `Pg.Spawn(hero, …)` placed the hero — the REAL flow's spawn result the loop
+    /// reads to position the player (supersedes the engine-side marker shortcut). `None` until it fires.
+    pub fn take_hero_spawn(&mut self) -> Option<[f32; 3]> {
+        self.hero_spawn.take()
     }
 
     /// The hero spawn position the game's Lua requested via `MrxUtil._TeleportHero`, if any. The boot
@@ -121,11 +156,29 @@ impl EngineHost for GameScriptHost {
         self.level.clone()
     }
     fn guid_by_name(&mut self, name: &str) -> u64 {
-        self.by_name.get(name).copied().unwrap_or(0)
+        // A spawned object with that name wins; otherwise a NAMED WORLD MARKER (the base game's
+        // Pg.GetGuidByName over placed markers, e.g. spawn-location points) mints a stable GUID whose
+        // position resolves through `named_locations` in `object_get_position`.
+        if let Some(g) = self.by_name.get(name).copied() {
+            return g;
+        }
+        if self.named_locations.contains_key(&name.to_ascii_lowercase()) {
+            self.next_guid += 1;
+            let guid = self.next_guid;
+            self.by_name.insert(name.to_string(), guid);
+            self.marker_guids.insert(guid, name.to_ascii_lowercase());
+            return guid;
+        }
+        0
     }
     fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, _high_detail: bool) -> u64 {
         self.next_guid += 1;
         let guid = self.next_guid;
+        // The hero character spawn (boot flow's CreatePlayerCharacter → Pg.Spawn(hero, x,y,z)) records
+        // the spawn position the loop reads to place the player — the REAL flow's result.
+        if !self.hero_character.is_empty() && template.eq_ignore_ascii_case(&self.hero_character) {
+            self.hero_spawn = Some(pos);
+        }
         let idx = self.spawns.len();
         self.spawns.push(SpawnRequest {
             guid,
@@ -153,6 +206,18 @@ impl EngineHost for GameScriptHost {
         if let Some(r) = self.req_mut(guid) {
             r.pos = pos;
         }
+    }
+    fn object_get_position(&mut self, guid: u64) -> [f32; 3] {
+        // A named world marker (from Pg.GetGuidByName) resolves through named_locations — this is how
+        // CreatePlayerCharacter turns a spawn-location NAME into coords. Else a spawn request's pos.
+        if let Some(name) = self.marker_guids.get(&guid) {
+            return self.named_locations.get(name).copied().unwrap_or([0.0; 3]);
+        }
+        self.by_guid
+            .get(&guid)
+            .and_then(|&i| self.spawns.get(i))
+            .map(|r| r.pos)
+            .unwrap_or([0.0; 3])
     }
     fn player_any_character(&self) -> u64 {
         HERO_GUID
@@ -286,10 +351,23 @@ pub fn resident_script_host(host: Rc<RefCell<GameScriptHost>>) -> Option<ScriptH
 /// this is exactly what to diff against vanilla to find the first divergence. The spawn itself
 /// (`MrxPlayer.OnPlayerJoined` → `SetSpawnLocations`/`CreatePlayerCharacter`) is event-driven — it fires
 /// once the engine signals GUI-loaded + player-joined (wired next). Errors are logged, not fatal.
-pub fn run_boot_flow(sh: &ScriptHost) {
+pub fn run_boot_flow(sh: &ScriptHost, contract: &str, character: &str) {
     println!("[world] ===== vanilla boot Lua flow: MrxBootstrap.Start() =====");
-    match sh.exec("import(\"MrxBootstrap\")\nMrxBootstrap.Start()", "@boot_flow") {
-        Ok(()) => println!("[world] ===== boot flow returned (Start complete) ====="),
+    // Drive the flow the way the engine does: MrxBootstrap.Start() registers the callbacks, then the
+    // mission flow sets the spawn location (SetSpawnLocations(<Contract>_Start1)) and the player-joined
+    // path spawns the hero (CreatePlayerCharacter → Pg.GetGuidByName → Object.GetPosition → Pg.Spawn).
+    // Wrapped in pcall so a later unbacked call (AttachToCharacter/OnPlayerInit) doesn't abort — the
+    // Pg.Spawn (the hero placement) runs first, so the spawn is captured regardless.
+    let src = format!(
+        "import(\"MrxBootstrap\")\n\
+         import(\"MrxPlayer\")\n\
+         MrxBootstrap.Start()\n\
+         MrxPlayer.SetSpawnLocations({{ \"{contract}_Start1\" }})\n\
+         local ok, err = pcall(MrxPlayer.CreatePlayerCharacter, true, 0, \"{character}\", \"{contract}_Start1\")\n\
+         if not ok then Debug.Printf(\"CreatePlayerCharacter aborted: \" .. tostring(err)) end\n"
+    );
+    match sh.exec(&src, "@boot_flow") {
+        Ok(()) => println!("[world] ===== boot flow returned (Start + spawn) ====="),
         Err(e) => eprintln!("[world] ===== boot flow error (first divergence): {e} ====="),
     }
 }
@@ -459,6 +537,33 @@ mod tests {
         assert_eq!(pos, [3794.0, 451.0, -3911.0]);
         // Drained — a second read is None (the boot consumes it once).
         assert!(host.borrow_mut().take_hero_teleport().is_none());
+    }
+
+    /// The full base-game spawn chain, host-side: `Pg.GetGuidByName(marker)` → `Object.GetPosition(guid)`
+    /// → `Pg.Spawn(hero, x,y,z)` — exactly what `MrxPlayer.CreatePlayerCharacter` runs. The marker
+    /// resolves through the world's `named_locations`, and the hero's Pg.Spawn position is captured for
+    /// the loop. No hardcoded coordinate anywhere.
+    #[test]
+    fn boot_spawn_chain_resolves_marker_to_hero_spawn() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let mut nl = std::collections::HashMap::new();
+        nl.insert("pmccon001_start1".to_string(), [10.0, 20.0, 30.0]);
+        host.borrow_mut().set_boot_context(nl, "chris");
+        let sh = resident_script_host(host.clone()).expect("resident host");
+
+        // The CreatePlayerCharacter chain (name → guid → position → Pg.Spawn(hero)).
+        sh.exec(
+            "local g = Pg.GetGuidByName('PmcCon001_Start1')\n\
+             local x, y, z = Object.GetPosition(g)\n\
+             Pg.Spawn('chris', x, y, z, 0, false, false, false)",
+            "@spawn_chain",
+        )
+        .unwrap();
+        assert_eq!(
+            host.borrow_mut().take_hero_spawn(),
+            Some([10.0, 20.0, 30.0]),
+            "the hero must spawn at the marker the name resolved to — Lua-driven, no const"
+        );
     }
 
     #[test]
