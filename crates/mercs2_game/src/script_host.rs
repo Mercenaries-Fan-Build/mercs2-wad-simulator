@@ -213,6 +213,54 @@ pub fn run_interior_boot() -> Vec<SpawnRequest> {
     run_interior_boot_inline()
 }
 
+/// Build a **loop-resident** `ScriptHost` bound to `host` — the persistent mission-Lua VM the game loop
+/// pumps every frame (`Event.__pump`, runtime `Pg.Spawn`, `Sound.*`), as opposed to the one-shot
+/// [`run_interior_boot`] host that is dropped after harvesting the boot spawns. Registers the engine
+/// bindings against `host` and enables auto-stubbing so the game modules' load-time binding-table
+/// touches (VO/Hud/Net/…) don't error. Returns `None` (with a logged reason) if the VM can't start, so
+/// the boot degrades to a script-less world rather than failing.
+///
+/// Keystone K1 (`engine_support_inventory.md` §6.1): the host is the socket the whole
+/// record-then-realize spawn path + the Lua event/timer system + audible `Sound.*` cues plug into.
+pub fn resident_script_host(host: Rc<RefCell<GameScriptHost>>) -> Option<ScriptHost> {
+    use std::collections::BTreeSet;
+    let sh = match discover_lua_root() {
+        Some(root) => ScriptHost::new(vec![root]),
+        None => ScriptHost::bare(),
+    };
+    let sh = match sh {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[script] resident host init failed ({e}); world runs script-less");
+            return None;
+        }
+    };
+    if let Err(e) = sh.register_engine(host) {
+        eprintln!("[script] resident register_engine failed ({e}); world runs script-less");
+        return None;
+    }
+    // Auto-stub the binding tables that game modules touch at load time (logged no-ops); the real
+    // gameplay bindings (Pg.Spawn/Object.*/Event/Sound/Ai) stay live.
+    let trace: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
+    if let Err(e) = sh.enable_autostub(trace) {
+        eprintln!("[script] resident autostub failed ({e}); world runs script-less");
+        return None;
+    }
+    Some(sh)
+}
+
+/// Advance the resident script host one fixed step: pump the Lua event/timer system (`Event.__pump(dt)`)
+/// so `TimerRelative` fires and posted events dispatch. A no-op if `Event`/`__pump` aren't present.
+/// Errors are logged, not fatal (a mission-script bug must not kill the render loop).
+pub fn pump_resident(sh: &ScriptHost, dt: f32) {
+    if let Err(e) = sh.exec(
+        &format!("if Event and Event.__pump then Event.__pump({dt}) end"),
+        "@resident_pump",
+    ) {
+        eprintln!("[script] resident pump error: {e}");
+    }
+}
+
 /// Locate the decompiled Lua corpus root (`docs/mercs2-luacd/src`): `MERCS2_LUA_ROOT` if set, else the
 /// dev path baked from this crate's location. Returns `None` at a shipped install (corpus not present).
 fn discover_lua_root() -> Option<PathBuf> {
@@ -327,6 +375,26 @@ mod tests {
         // CueSound with no bank loaded → nil (faithful); the forwarding is exercised regardless.
         let cue_nil: bool = sh.eval(r#"return Sound.CueSound("ui_confirm") == nil"#).unwrap();
         assert!(cue_nil, "unknown cue with no sounddb loaded returns nil");
+    }
+
+    /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
+    /// via `take_new_spawns` (the loop then realizes it), and `pump_resident` advances the Lua event
+    /// system without error. This is the socket the persistent mission-Lua plugs into.
+    #[test]
+    fn resident_host_pumps_and_drains_runtime_spawns() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = resident_script_host(host.clone()).expect("resident host starts");
+
+        // A runtime spawn (as a mission/population script would issue) is recorded on the live host.
+        sh.exec(r#"Pg.Spawn("civilian_sedan", 10, 0, 20, 0, false, true)"#, "@t").unwrap();
+        let drained = host.borrow_mut().take_new_spawns();
+        assert_eq!(drained.len(), 1, "resident host records a runtime Pg.Spawn for the loop to realize");
+        assert_eq!(drained[0].template, "civilian_sedan");
+        // Draining clears it — the next frame starts empty.
+        assert!(host.borrow_mut().take_new_spawns().is_empty());
+
+        // The per-frame pump runs the Lua event/timer system without error.
+        pump_resident(&sh, 1.0 / 60.0);
     }
 
     #[test]

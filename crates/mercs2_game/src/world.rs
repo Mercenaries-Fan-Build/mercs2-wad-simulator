@@ -837,11 +837,22 @@ pub async fn run_scene_world_loading(
     }
     let mut world = World::new();
 
+    // Persistent mission-Lua host (keystone K1): resident across the whole loop — NOT the one-shot
+    // interior-boot host that is dropped after harvesting spawns. Each fixed step the loop pumps its
+    // Lua event/timer system (`Event.__pump`) and drains the runtime `Pg.Spawn`s it records into the
+    // ECS via the resolver. Its `AudioEngine` is SHARED with the fleet below, so the Lua `Sound.*` cues
+    // and `GameplaySystems::tick`→`audio.tick` drive one engine (fixes the split-brain audio seam).
+    let script_host = Rc::new(RefCell::new(crate::script_host::GameScriptHost::new("vz")));
+    let script = crate::script_host::resident_script_host(script_host.clone());
+    if script.is_some() {
+        println!("[world] persistent mission-Lua host resident (Event.__pump + runtime Pg.Spawn live)");
+    }
+
     // Per-frame game update: the fleet gameplay systems (physics/vehicle/combat/audio) + the
     // template→entity spawn resolver, bundled in crate::runtime::GameRuntime. Idle until entities
-    // carry their components; the audio engine mixes/advances from frame 1. (The persistent mission-Lua
-    // host will feed runtime.realize_spawns its recorded Pg.Spawns; the resolver is empty until then.)
-    let audio = Rc::new(RefCell::new(mercs2_audio::AudioEngine::default()));
+    // carry their components; the audio engine mixes/advances from frame 1. Audio is the host's engine
+    // so scripted cues are audible.
+    let audio = script_host.borrow().audio();
     let mut runtime = crate::runtime::GameRuntime::new(audio.clone());
 
     // Background loader: all WAD/terrain/player parsing happens off the render thread; the
@@ -1514,6 +1525,18 @@ pub async fn run_scene_world_loading(
                         // spawn requests are realized through the shared resolver. Idle until spawners
                         // are registered (the living-world data path is a later wire).
                         runtime.tick_population(&mut world, time.fixed_dt, player.pos);
+                        // Persistent mission-Lua (K1): advance the Lua event/timer system, then realize
+                        // any runtime Pg.Spawns the script recorded this step through the same resolver.
+                        // The render layer attaches visuals to the returned entities (model resolution is
+                        // the render seam; bare-transform actors until a template→model map lands).
+                        if let Some(sh) = &script {
+                            crate::script_host::pump_resident(sh, time.fixed_dt);
+                            let new_spawns = script_host.borrow_mut().take_new_spawns();
+                            if !new_spawns.is_empty() {
+                                let realized = runtime.realize_spawns(&mut world, &new_spawns);
+                                println!("[world] realized {} runtime spawn(s) from mission Lua", realized.len());
+                            }
+                        }
                     }
                     // Directional shadow key light, centred on the player. The travel direction is the
                     // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
