@@ -1484,31 +1484,9 @@ pub async fn run_scene_world_loading(
                                 spawn_interior,
                                 dt,
                             );
-                            let dir = Vec3::new(tp_pitch.cos() * tp_yaw.sin(), tp_pitch.sin(), tp_pitch.cos() * tp_yaw.cos()).normalize();
-                            // Over-the-shoulder rig tuned to the retail framing (tight, low): focus at the
-                            // character's upper back/shoulder (~1.6 m), a short boom, and a small lateral
-                            // shoulder offset. The retail exact values live in the binary's .rdata
-                            // (CameraOffset / CameraOffsetZ / HumanCameraModifier) — recoverable via x32dbg.
-                            let focus = player.pos + Vec3::Y * 1.6;
-                            let right = Vec3::Y.cross(dir).normalize();
-                            const BOOM: f32 = 2.2; // eye distance behind the focus (6 m/3 m both read too far back)
-                            let want_eye = focus - dir * BOOM + right * 0.55;
-                            // Boom collision: cast from the focus toward the desired eye and pull the eye in
-                            // to just short of the nearest wall (CAM_RADIUS margin = the engine's camera
-                            // collision radius²). Without this the boom clips straight through geometry.
-                            let eye = if collision_tris.is_empty() {
-                                want_eye
-                            } else {
-                                const CAM_RADIUS: f32 = 0.35;
-                                let boom_vec = want_eye - focus;
-                                let boom_len = boom_vec.length();
-                                let boom_dir = boom_vec / boom_len;
-                                match crate::collision::raycast(&collision_tris, focus, boom_dir, boom_len) {
-                                    Some(hit) => focus + boom_dir * (hit - CAM_RADIUS).max(0.6),
-                                    None => want_eye,
-                                }
-                            };
-                            Mat4::look_to_lh(eye, (focus - eye).normalize(), Vec3::Y)
+                            // Over-the-shoulder framing + boom-collision — the extracted, unit-tested
+                            // crate::camera::third_person_view (pure geometry of player pos + look angles).
+                            crate::camera::third_person_view(player.pos, tp_yaw, tp_pitch, &collision_tris)
                         }
                     };
 

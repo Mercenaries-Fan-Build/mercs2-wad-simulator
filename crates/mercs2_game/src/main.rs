@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::save;
 
+mod camera; // GAME: third-person over-the-shoulder camera rig (boom-collision framing, extracted, unit-tested)
 mod collision; // GAME collision: world triangle soup + camera-boom raycast + player capsule push-out
 mod gameplay; // GAME: fleet gameplay systems (physics/vehicle/combat/audio) ticked each fixed step
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
