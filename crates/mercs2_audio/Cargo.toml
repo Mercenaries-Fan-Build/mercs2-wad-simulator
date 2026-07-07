@@ -2,8 +2,16 @@
 name = "mercs2_audio"
 version = "0.1.0"
 edition = "2021"
-description = "Mercenaries 2 reimpl — silo 14 (row 21): audio backend, mixer, dual-deck music FSM, banks, 3D. WAVE-1 scaffold."
+description = "Mercenaries 2 reimpl — silo 14 (row 21): audio backend, mixer, dual-deck music FSM, banks, 3D. WAVE-1 impl."
 
 [dependencies]
 mercs2_core = { path = "../mercs2_core" }
 mercs2_formats = { path = "../mercs2_formats" }
+
+# Portable device-output backend. This is a *faithful modern substitute* for the exe's DirectSound8
+# secondary-buffer sink (`FUN_00831b10` CreateDevice / `FUN_0083c880` mixer Init): we do the exact
+# software-mix the exe's own software mixer does (`FUN_00836610` MixSources → int32 accumulator →
+# packssdw-saturate → int16, code map §3.4) and hand the finished int16 PCM to cpal's output stream
+# instead of `IDirectSoundBuffer8`. cpal is optional at *runtime* (no device → the mixer runs fully
+# headless), never behind a build flag.
+cpal = "0.15"
