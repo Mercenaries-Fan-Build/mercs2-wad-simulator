@@ -442,9 +442,12 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wget!("GetFlashPlaySpeed", |w| w.flash.as_ref().map(|f| f.play_speed).unwrap_or(1.0), 1.0f32);
     wget!("GetMovieCurrentFrameNumber", |w| w.movie.as_ref().map(|m| m.frame as i64).unwrap_or(0), 0i64);
     let hh = host.clone();
+    // Returns (idList, size) — the game destructures `local tIds, nSize = GetWidgetChildren(uId)`.
     b.real("GetWidgetChildren", lua.create_function(move |lua, wid: i64| {
         let kids = hh.borrow().hud_ref().map(|t| t.children(wid as u64)).unwrap_or_default();
-        lua.create_sequence_from(kids.into_iter().map(|k| k as i64))
+        let n = kids.len() as i64;
+        let list = lua.create_sequence_from(kids.into_iter().map(|k| k as i64))?;
+        Ok((list, n))
     })?)?;
     // Input-picking / viewport-rect getters — no picker/rect model yet → neutral.
     b.real("GetWidgetViewport", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 0.0f32, 0.0f32)))?)?;
@@ -475,8 +478,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     let installed = b.install_global(GLOBAL)?;
     // `_GuiInternal` is the internal alias for this same widget table (`MrxGuiBase` drives the HUD
-    // through it — identical method set). Bind the alias to the installed table.
+    // through it — identical method set). Bind the alias to the installed table. `nVersion` marks the
+    // newer engine that handles widget-tree recursion (child visibility etc.) natively, so `MrxGuiBase`
+    // skips its Lua child-walk fallbacks (the final PC build sets it).
     if let Ok(hud) = lua.globals().get::<mlua::Table>(GLOBAL) {
+        let _ = hud.set("nVersion", 1i64);
         let _ = lua.globals().set("_GuiInternal", hud);
     }
     Ok(installed)

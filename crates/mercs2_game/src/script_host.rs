@@ -150,6 +150,9 @@ pub struct GameScriptHost {
     /// Count of `[lua]` `Debug.Printf` lines the game's Lua has emitted — the ground-truth that the
     /// game code is executing against the engine (used by the boot-flow regression test).
     pub lua_log_lines: usize,
+    /// Set once the game's Lua prints `GlobalExit - Complete` — loadprobe phase 20, the world-load
+    /// state machine ran to completion ("world fully loaded").
+    pub world_load_complete: bool,
     /// Dynamic-music / DSP / audio-mode command log (`Sound.*` director config).
     sound_cmds: Vec<(String, Vec<String>)>,
     /// Replicated mission-event log (`Net.SendEvent_*` etc.) the runtime realizes locally in SP.
@@ -392,6 +395,7 @@ impl GameScriptHost {
             player_scalars: HashMap::new(),
             human_seats: HashMap::new(),
             lua_log_lines: 0,
+            world_load_complete: false,
             sound_cmds: Vec::new(),
             net_events: Vec::new(),
             script_cmds: Vec::new(),
@@ -473,6 +477,10 @@ impl EngineHost for GameScriptHost {
     fn log(&mut self, source: &str, msg: &str) {
         if source == "lua" {
             self.lua_log_lines += 1;
+            // loadprobe phase 20 — the world-load state machine reached GlobalExit ("world fully loaded").
+            if msg.contains("GlobalExit - Complete") {
+                self.world_load_complete = true;
+            }
         }
         println!("[{source}] {msg}");
     }
@@ -1350,7 +1358,22 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, contra
          LevelBootstrap.LoadLevel(\"vz\", \"vz\")\n\
          MrxPlayer.SetSpawnLocations({{ \"{contract}_Start1\" }})\n\
          local ok, err = pcall(MrxPlayer.CreatePlayerCharacter, true, 0, \"{character}\", \"{contract}_Start1\")\n\
-         if not ok then Debug.Printf(\"CreatePlayerCharacter aborted: \" .. tostring(err)) end\n"
+         if not ok then Debug.Printf(\"CreatePlayerCharacter aborted: \" .. tostring(err)) end\n\
+         -- Shell-bootstrap fade setup (MrxGuiShellBootstrap.LoadMovieLayouts → _InitFadeFlash) that we\n\
+         -- skip by not running the shell: create the fade-flash widget the GlobalEnter fade uses.\n\
+         local fe, fi = pcall(MrxGui._InitFadeFlash)\n\
+         if not fe then Debug.Printf(\"_InitFadeFlash aborted: \" .. tostring(fi)) end\n\
+         -- The GlobalEnter/Exit screen fade blocks on the Flash SWF load-complete callback, which a\n\
+         -- non-rendering load never fires; take MrxState's fade-disabled path (a plain completion timer\n\
+         -- our pump services) so the load sequence completes. The fade is a cosmetic transition.\n\
+         import(\"MrxState\")\n\
+         MrxState._bEnableFade = false\n\
+         -- Drive the two async gates the engine signals (GUI-load complete + local-player-joined).\n\
+         -- _GuiLoaded → MrxState.Enter(WAITFORGAME) → GlobalEnter; _LocalPlayerJoined → _End → GlobalExit.\n\
+         local ge, ie = pcall(MrxBootstrap._GuiLoaded)\n\
+         if not ge then Debug.Printf(\"_GuiLoaded aborted: \" .. tostring(ie)) end\n\
+         local pe, pi = pcall(MrxBootstrap._LocalPlayerJoined)\n\
+         if not pe then Debug.Printf(\"_LocalPlayerJoined aborted: \" .. tostring(pi)) end\n"
     );
     match sh.exec(&src, "@boot_flow") {
         Ok(()) => println!("[world] ===== boot flow started (Start + spawn); servicing state machine ====="),
@@ -1362,20 +1385,24 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, contra
     // streaming/tether wait, so each requested state completes immediately — enter then exit). This
     // advances MrxState: Loading → WaitForGame → GlobalEnter → WaitForStreaming → … → GlobalExit.
     let mut idle_rounds = 0;
-    for _ in 0..600 {
+    for _ in 0..1200 {
+        let before = host.borrow().lua_log_lines;
         pump_resident(sh, 0.1);
         let states = host.borrow_mut().take_pending_game_states();
-        if states.is_empty() {
-            idle_rounds += 1;
-            if idle_rounds >= 3 {
-                break; // settled: no more state requests + timers drained
-            }
-            continue;
-        }
-        idle_rounds = 0;
+        let serviced = !states.is_empty();
         for st in states {
             let _ = sh.fire_state_change(&st, "enter");
             let _ = sh.fire_state_change(&st, "exit");
+        }
+        // Progress = a state was serviced OR the Lua produced new output (a timer/callback fired).
+        let progressed = serviced || host.borrow().lua_log_lines != before;
+        if progressed {
+            idle_rounds = 0;
+        } else {
+            idle_rounds += 1;
+            if idle_rounds >= 20 {
+                break; // truly settled: no state requests, no timers, no callbacks pending
+            }
         }
     }
     println!("[world] ===== boot flow settled =====");
@@ -2001,11 +2028,16 @@ mod tests {
         };
         host.borrow_mut().set_boot_context(std::collections::HashMap::new(), "chris");
         run_boot_flow(&sh, &host, "PmcCon001", "chris");
-        let lines = host.borrow().lua_log_lines;
+        let (lines, complete) = { let h = host.borrow(); (h.lua_log_lines, h.world_load_complete) };
         assert!(
             lines > 100,
-            "expected the game's Lua to run deep (>100 [lua] Debug.Printf lines); got {lines} — a boot \
-             regression (module Init / getfenv / debug lib / _GuiInternal / _GetLibVersion)"
+            "expected the game's Lua to run deep (>100 [lua] lines); got {lines} — a boot regression"
+        );
+        assert!(
+            complete,
+            "expected the world-load state machine to reach GlobalExit - Complete (loadprobe phase 20, \
+             'world fully loaded'); it did not — a regression in the GameStateChange bridge / GlobalEnter \
+             gates (_GuiLoaded/_LocalPlayerJoined) / fade path / pump loop"
         );
     }
 
