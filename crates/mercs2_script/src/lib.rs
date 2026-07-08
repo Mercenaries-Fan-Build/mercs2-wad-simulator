@@ -1117,6 +1117,39 @@ pub trait EngineHost {
     fn human_set_weapon_drawn(&mut self, guid: u64, drawn: bool) {
         let _ = (guid, drawn);
     }
+
+    // ===== Net session mode (`Net.*`). =====
+    /// `Net.StartServer`/`ConnectToServer`/`EnterLobby`/`AutoServer`/`AutoClient`/`AutoLobby` — enter a
+    /// session of `mode` (`"server"`/`"client"`/`"lobby"`), optionally targeting `host`.
+    fn net_session_start(&mut self, mode: &str, host: Option<&str>) {
+        let _ = (mode, host);
+    }
+    /// `Net.Stop` — leave any session (back to the offline single-player server).
+    fn net_stop(&mut self) {}
+    /// `Net.IsServer` — this endpoint hosts the session (default true: the SP game is its own server).
+    fn net_is_server(&self) -> bool {
+        true
+    }
+    /// `Net.IsClient` — this endpoint is a connected client.
+    fn net_is_client(&self) -> bool {
+        false
+    }
+    /// `Net.IsActive` — a network session is active (default false: offline SP).
+    fn net_is_active(&self) -> bool {
+        false
+    }
+    /// `Net.IsMultiplayer` — a real multiplayer session is running.
+    fn net_is_multiplayer(&self) -> bool {
+        false
+    }
+    /// `Net.IsLobby` — the session is in the lobby.
+    fn net_is_lobby(&self) -> bool {
+        false
+    }
+    /// `Net.GetHostName` — the connected host's name (empty offline).
+    fn net_host_name(&self) -> String {
+        String::new()
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1521,9 +1554,11 @@ mod tests {
         // weapon loadout (set/get/equip/drop/destroy) (real +4); Weapon ammo + Fire burning state +
         // object health/SendDamage wired to real host state (real +7); Pg regions/alarms + Airstrike
         // designator lifecycle + recorded ordnance spawns wired to real host state (real +13); Human
-        // weapon/ragdoll/grapple/carry/jostle flag verbs wired to a per-human flag store (real +13).
-        const EXPECTED_REAL: usize = 636;
-        const EXPECTED_STUB: usize = 450;
+        // weapon/ragdoll/grapple/carry/jostle flag verbs wired to a per-human flag store (real +13);
+        // Net session mode (IsServer/IsClient/IsActive/IsLobby/GetHostName + Start/Connect/Lobby/Stop)
+        // wired to a real NetState (real +6).
+        const EXPECTED_REAL: usize = 642;
+        const EXPECTED_STUB: usize = 444;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

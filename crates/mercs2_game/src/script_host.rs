@@ -131,6 +131,8 @@ pub struct GameScriptHost {
     airstrikes: Vec<(String, [f32; 3])>,
     /// Per-human runtime flags (`Human.*` action verbs).
     human_flags: HashMap<u64, HumanFlags>,
+    /// Network session state (`Net.*`).
+    net: NetState,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -173,6 +175,31 @@ const DEFAULT_MAX_HEALTH: f32 = 100.0;
 
 /// Designator charges granted by `Airstrike.EquipDesignator`/`RefillDesignator`.
 const DESIGNATOR_CHARGES: i32 = 3;
+
+/// Network session mode (`Net.*`). The offline single-player game defaults to `Server` (it is its own
+/// authoritative host) with no active session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetMode {
+    Offline,
+    Lobby,
+    Client,
+    Server,
+}
+
+/// Network session state the `Net.*` surface drives.
+#[derive(Clone, Debug)]
+pub struct NetState {
+    pub mode: NetMode,
+    pub active: bool,
+    pub multiplayer: bool,
+    pub host_name: String,
+}
+
+impl Default for NetState {
+    fn default() -> Self {
+        NetState { mode: NetMode::Server, active: false, multiplayer: false, host_name: String::new() }
+    }
+}
 
 /// Per-human runtime flags the `Human.*` action verbs toggle.
 #[derive(Clone, Copy, Debug)]
@@ -321,6 +348,7 @@ impl GameScriptHost {
             designators: HashMap::new(),
             airstrikes: Vec::new(),
             human_flags: HashMap::new(),
+            net: NetState::default(),
         }
     }
 
@@ -1040,6 +1068,41 @@ impl EngineHost for GameScriptHost {
     fn human_set_weapon_drawn(&mut self, guid: u64, drawn: bool) {
         self.human_flags.entry(guid).or_default().weapon_drawn = drawn;
     }
+
+    // ===== Net session mode. =====
+    fn net_session_start(&mut self, mode: &str, host: Option<&str>) {
+        self.net.mode = match mode {
+            "client" => NetMode::Client,
+            "lobby" => NetMode::Lobby,
+            _ => NetMode::Server,
+        };
+        self.net.active = true;
+        self.net.multiplayer = true;
+        if let Some(h) = host {
+            self.net.host_name = h.to_string();
+        }
+    }
+    fn net_stop(&mut self) {
+        self.net = NetState::default();
+    }
+    fn net_is_server(&self) -> bool {
+        self.net.mode == NetMode::Server
+    }
+    fn net_is_client(&self) -> bool {
+        self.net.mode == NetMode::Client
+    }
+    fn net_is_active(&self) -> bool {
+        self.net.active
+    }
+    fn net_is_multiplayer(&self) -> bool {
+        self.net.multiplayer
+    }
+    fn net_is_lobby(&self) -> bool {
+        self.net.mode == NetMode::Lobby
+    }
+    fn net_host_name(&self) -> String {
+        self.net.host_name.clone()
+    }
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
@@ -1634,6 +1697,32 @@ mod tests {
         assert!(grap);
         sh.exec(&format!("Human.StopGrappling({g})"), "@hu").unwrap();
         assert!(!host.borrow().human_is_grappling(g as u64));
+    }
+
+    /// `Net.*` session mode drives real NetState: SP defaults to offline server; ConnectToServer/
+    /// StartServer/Stop transition it, and the getters read it.
+    #[test]
+    fn game_lua_net_session_mode() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // SP default: server, not active, not multiplayer.
+        assert!(sh.eval::<bool>("return Net.IsServer()").unwrap());
+        assert!(!sh.eval::<bool>("return Net.IsActive()").unwrap());
+        assert!(!sh.eval::<bool>("return Net.IsClient()").unwrap());
+
+        // ConnectToServer → client + active + host name.
+        sh.exec(r#"Net.ConnectToServer("dedicated-01")"#, "@net").unwrap();
+        assert!(sh.eval::<bool>("return Net.IsClient()").unwrap());
+        assert!(!sh.eval::<bool>("return Net.IsServer()").unwrap());
+        assert!(sh.eval::<bool>("return Net.IsActive()").unwrap());
+        assert_eq!(sh.eval::<String>("return Net.GetHostName()").unwrap(), "dedicated-01");
+
+        // Stop → back to the offline SP server.
+        sh.exec("Net.Stop()", "@net").unwrap();
+        assert!(sh.eval::<bool>("return Net.IsServer()").unwrap());
+        assert!(!sh.eval::<bool>("return Net.IsActive()").unwrap());
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

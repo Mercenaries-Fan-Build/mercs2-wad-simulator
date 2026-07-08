@@ -133,20 +133,6 @@ pub const REQUIRED: &[Required] = &[
 /// - `IsReadyToTether` → `false`: co-op tether has no meaning without a second player.
 /// - `HasPlayerUnlockedCode` → `false`: retail default until the player enters a promo/unlock code
 ///   (gates the extra wardrobe outfit in `wifpmcinterior.lua`).
-const REAL_FALSE_GETTERS: &[&str] = &[
-    "IsMultiplayer",
-    "IsConnectedToInternet",
-    "IsActive",
-    "IsClient",
-    "IsPlatformConnected",
-    "AutoLobby",
-    "AutoClient",
-    "AutoServer",
-    "IsMatchmakingInternet",
-    "IsOnlineConnected",
-    "IsReadyToTether",
-    "HasPlayerUnlockedCode",
-];
 
 /// SP-faithful boot slice. The control-flow session/host getters get real bodies returning the SP
 /// default (`IsServer` → `true`; everything in [`REAL_FALSE_GETTERS`] → `false`). Every other cfunc —
@@ -155,21 +141,56 @@ const REAL_FALSE_GETTERS: &[&str] = &[
 /// (`GrantAchievement`, `UpdatePresence`) and the uncalled online-dialog helpers — is a faithful
 /// no-op stub for a single-player boot. The `mercs2_net` session/host model is wired at a separate
 /// seam, deliberately not here.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // Local SP game is its own authoritative server.
-    b.real("IsServer", lua.create_function(|_, ()| Ok(true))?)?;
+    // Session-mode getters → the real NetState (default: SP is its own offline server).
+    let h = host.clone();
+    b.real("IsServer", lua.create_function(move |_, ()| Ok(h.borrow().net_is_server()))?)?;
+    let h = host.clone();
+    b.real("IsClient", lua.create_function(move |_, ()| Ok(h.borrow().net_is_client()))?)?;
+    let h = host.clone();
+    b.real("IsActive", lua.create_function(move |_, ()| Ok(h.borrow().net_is_active()))?)?;
+    let h = host.clone();
+    b.real("IsMultiplayer", lua.create_function(move |_, ()| Ok(h.borrow().net_is_multiplayer()))?)?;
+    let h = host.clone();
+    b.real("IsLobby", lua.create_function(move |_, ()| Ok(h.borrow().net_is_lobby()))?)?;
+    let h = host.clone();
+    b.real("GetHostName", lua.create_function(move |_, ()| Ok(h.borrow().net_host_name()))?)?;
 
-    // Session/host queries that are all false in an offline single-player boot.
-    for &name in REAL_FALSE_GETTERS {
+    // Session control → the real NetState.
+    let h = host.clone();
+    b.real("StartServer", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("ConnectToServer", lua.create_function(move |_, hn: Option<String>| { h.borrow_mut().net_session_start("client", hn.as_deref()); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("EnterLobby", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("AutoServer", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(true) })?)?;
+    let h = host.clone();
+    b.real("AutoClient", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("client", None); Ok(true) })?)?;
+    let h = host.clone();
+    b.real("AutoLobby", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(true) })?)?;
+    let h = host.clone();
+    b.real("Stop", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_stop(); Ok(()) })?)?;
+
+    // Offline platform/matchmaking getters — all false in an offline single-player boot.
+    const OFFLINE_FALSE: &[&str] = &[
+        "IsConnectedToInternet", "IsPlatformConnected", "IsMatchmakingInternet", "IsOnlineConnected",
+        "IsReadyToTether", "HasPlayerUnlockedCode",
+    ];
+    for &name in OFFLINE_FALSE {
         b.real(name, lua.create_function(|_, ()| Ok(false))?)?;
     }
 
-    // Everything else in the surface: a faithful no-op for SP (replication, lobby/session control,
-    // net-routed events/setters, telemetry, online dialogs).
+    // Everything else: a faithful no-op for SP (replication, net-routed events/setters, telemetry,
+    // online dialogs) — the co-op restore silo backs these against mercs2_net.
+    const BACKED: &[&str] = &[
+        "IsServer", "IsClient", "IsActive", "IsMultiplayer", "IsLobby", "GetHostName", "StartServer",
+        "ConnectToServer", "EnterLobby", "AutoServer", "AutoClient", "AutoLobby", "Stop",
+    ];
     for r in REQUIRED {
-        if r.name == "IsServer" || REAL_FALSE_GETTERS.contains(&r.name) {
+        if BACKED.contains(&r.name) || OFFLINE_FALSE.contains(&r.name) {
             continue;
         }
         b.stub(
