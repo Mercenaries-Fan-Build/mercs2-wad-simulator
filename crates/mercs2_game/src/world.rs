@@ -1790,7 +1790,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         self.runtime.push_impact(mercs2_engine::combat::Impact::from_hit(point, Vec3::ZERO, aim, false));
                     }
                 }
-                mercs2_engine::camera::third_person_view(self.player.pos, self.tp_yaw, self.tp_pitch, &self.collision_tris)
+                // Mode-based camera: pick the reflected preset from whatever the player is riding (on
+                // foot → OnFoot). `ridden` stays `None` until vehicle-riding is wired; the selection +
+                // preset are already the real engine shape.
+                let preset = mercs2_engine::camera::CameraMode::for_ridden(None).preset();
+                mercs2_engine::camera::view_with_preset(&preset, self.player.pos, self.tp_yaw, self.tp_pitch, &self.collision_tris)
             }
         };
 
@@ -1805,7 +1809,15 @@ impl mercs2_engine::app::Game for Mercs2Game {
         }
 
         let pos = if self.mode == CamMode::Free { self.free_pos } else { self.player.pos };
-        mercs2_engine::app::Camera { view, pos, near: if self.interior_orbit { 1.0 } else { 0.5 }, far: 30000.0 }
+        // Near/far: on foot use the reflected preset (PMC `SetNearFar(0, 0.3, 500, 0)` from the game's
+        // Lua); free-fly/orbit keep the wide far so the whole world stays visible.
+        let (near, far) = if self.interior_orbit || self.mode == CamMode::Free {
+            (if self.interior_orbit { 1.0 } else { 0.5 }, 30000.0)
+        } else {
+            let p = mercs2_engine::camera::CameraMode::for_ridden(None).preset();
+            (p.near, p.far)
+        };
+        mercs2_engine::app::Camera { view, pos, near, far }
     }
 
     fn fixed_update(&mut self, ctx: &mut mercs2_engine::app::Ctx) {
