@@ -1283,6 +1283,24 @@ math.mod = math.mod or math.fmod
 string.gfind = string.gfind or string.gmatch
 _MODULES = _MODULES or {}
 
+-- Pandemic engine math extension used across the resident scripts (MrxFactionManager, gunships,
+-- airstrikes, island fortress, …): `math.randi(n)` = random integer in [1,n]; `math.randi(a,b)` =
+-- [a,b]. Guarded against an empty interval (n<1 / a>b) so a degenerate call returns the low bound
+-- instead of erroring (`math.random` rejects an empty range). NOT a 5.1 compat alias — an engine cfunc.
+if not math.randi then
+  function math.randi(a, b)
+    local lo, hi
+    if b then lo, hi = a, b else lo, hi = 1, a end
+    if hi < lo then return lo end
+    return math.random(lo, hi)
+  end
+end
+-- `Math` is the engine's capitalized math namespace (a superset of Lua `math`); the scripts use both
+-- `math.randi` and `Math.randi`. Alias it to the standard library (+ our extension) when it isn't a
+-- real table, so `Math.floor`/`Math.random`/`Math.randi`/… all resolve.
+if type(Math) ~= "table" or type(Math.floor) ~= "function" then Math = math end
+if not Math.randi then Math.randi = math.randi end
+
 -- 5.1 getfenv/setfenv shims over 5.4's _ENV-as-upvalue model (used by prototype-inheritance modules
 -- like AntiAir: `local m = getfenv(); for _,p in pairs(protos) do setmetatable(p,{__index=m}) end`).
 -- The module loader runs each module with its module table as the `_ENV` upvalue, so returning/replacing

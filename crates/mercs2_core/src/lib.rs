@@ -16,6 +16,12 @@ pub use hecs::{Entity, World};
 mod components;
 pub use components::{AnimState, ModelRef, SkinPalette, Transform};
 
+/// The `GuidMap` (see `guidmap.rs`): the name-hash → `Entity` + guid ↔ `Entity` registry modelling the
+/// engine's resident guidmap singleton (`0x385EA82C`). `Pg.GetGuidByName` / `Object.*` resolve against
+/// it to reach live entities instead of a side table parsed up front.
+pub mod guidmap;
+pub use guidmap::{GuidMap, FIRST_DYNAMIC_GUID, HERO_GUID, LOCAL_PLAYER_GUID};
+
 pub mod streaming;
 
 /// The `PhysicsQuery` seam (see `physics_query.rs`): the collision-query interface the sim silos
