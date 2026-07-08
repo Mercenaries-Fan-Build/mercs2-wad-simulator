@@ -29,12 +29,17 @@ pub const REQUIRED: &[Required] = &[
 
 /// Fire FX driver. We don't own the fire/particle system in the reimpl, so ignite/extinguish are
 /// faithful no-ops. None of these are called by the game Lua corpus.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    b.stub("Ignite", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("Extinguish", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("Put", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Ignite/extinguish drive the real per-object burning state (the fire FX/particle rendering is a
+    // render-pass concern; the burning flag is engine state gameplay + the renderer read).
+    let h = host.clone();
+    b.real("Ignite", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_ignite(o as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Extinguish", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_extinguish(o as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Put", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_extinguish(o as u64); Ok(()) })?)?;
 
     b.install_global(GLOBAL)
 }

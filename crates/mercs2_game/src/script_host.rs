@@ -113,6 +113,12 @@ pub struct GameScriptHost {
     camera_fx: CameraFxState,
     /// Per-character weapon loadout (`Inventory.*`): character GUID → its weapon GUIDs.
     loadouts: HashMap<u64, Vec<u64>>,
+    /// Per-weapon ammo state (`Weapon.*`).
+    weapons: HashMap<u64, WeaponState>,
+    /// Objects currently on fire (`Fire.Ignite`/`Extinguish`).
+    burning: std::collections::HashSet<u64>,
+    /// Per-object health `(current, max)` (`Object.*Health`, `SendDamage`, `Kill`/`Revive`).
+    health: HashMap<u64, (f32, f32)>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -147,6 +153,26 @@ impl Default for CameraFxState {
             follow_guid: 0,
             shot: String::new(),
         }
+    }
+}
+
+/// Default object health when an object is first touched by a health op (no per-object stats DB yet).
+const DEFAULT_MAX_HEALTH: f32 = 100.0;
+
+/// Per-weapon ammo state (`Weapon.*`).
+#[derive(Clone, Copy, Debug)]
+pub struct WeaponState {
+    pub clip: i32,
+    pub reserve: i32,
+    pub max_clip: i32,
+    pub max_reserve: i32,
+    pub primary: bool,
+    pub designator: bool,
+}
+
+impl Default for WeaponState {
+    fn default() -> Self {
+        WeaponState { clip: 0, reserve: 0, max_clip: 30, max_reserve: 300, primary: true, designator: false }
     }
 }
 
@@ -238,6 +264,9 @@ impl GameScriptHost {
             render: mercs2_core::RenderState::new(),
             camera_fx: CameraFxState::default(),
             loadouts: HashMap::new(),
+            weapons: HashMap::new(),
+            burning: std::collections::HashSet::new(),
+            health: HashMap::new(),
         }
     }
 
@@ -681,6 +710,83 @@ impl EngineHost for GameScriptHost {
     }
     fn inventory_destroy_all(&mut self, character: u64) {
         self.loadouts.remove(&character);
+    }
+
+    // ===== Weapon ammo. =====
+    fn weapon_set_ammo(&mut self, weapon: u64, clip: Option<i32>, reserve: Option<i32>) {
+        let w = self.weapons.entry(weapon).or_default();
+        if let Some(c) = clip {
+            w.clip = c.max(0);
+            w.max_clip = w.max_clip.max(w.clip);
+        }
+        if let Some(r) = reserve {
+            w.reserve = r.max(0);
+            w.max_reserve = w.max_reserve.max(w.reserve);
+        }
+    }
+    fn weapon_clip(&self, weapon: u64) -> i32 {
+        self.weapons.get(&weapon).map(|w| w.clip).unwrap_or(0)
+    }
+    fn weapon_reserve(&self, weapon: u64) -> i32 {
+        self.weapons.get(&weapon).map(|w| w.reserve).unwrap_or(0)
+    }
+    fn weapon_max_clip(&self, weapon: u64) -> i32 {
+        self.weapons.get(&weapon).map(|w| w.max_clip).unwrap_or(WeaponState::default().max_clip)
+    }
+    fn weapon_max_reserve(&self, weapon: u64) -> i32 {
+        self.weapons.get(&weapon).map(|w| w.max_reserve).unwrap_or(WeaponState::default().max_reserve)
+    }
+    fn weapon_reload(&mut self, weapon: u64) {
+        let w = self.weapons.entry(weapon).or_default();
+        let need = (w.max_clip - w.clip).max(0);
+        let take = need.min(w.reserve);
+        w.clip += take;
+        w.reserve -= take;
+    }
+    fn weapon_is_primary(&self, weapon: u64) -> bool {
+        self.weapons.get(&weapon).map(|w| w.primary).unwrap_or(true)
+    }
+    fn weapon_is_designator(&self, weapon: u64) -> bool {
+        self.weapons.get(&weapon).map(|w| w.designator).unwrap_or(false)
+    }
+
+    // ===== Fire. =====
+    fn fire_ignite(&mut self, object: u64) {
+        self.burning.insert(object);
+    }
+    fn fire_extinguish(&mut self, object: u64) {
+        self.burning.remove(&object);
+    }
+    fn object_is_burning(&self, object: u64) -> bool {
+        self.burning.contains(&object)
+    }
+
+    // ===== Health / damage (backs Object.*Health + Kill/Revive + SendDamage). =====
+    fn object_health(&self, guid: u64) -> f32 {
+        self.health.get(&guid).map(|&(c, _)| c).unwrap_or(DEFAULT_MAX_HEALTH)
+    }
+    fn object_set_health(&mut self, guid: u64, hp: f32) {
+        let e = self.health.entry(guid).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
+        e.0 = hp.clamp(0.0, e.1);
+    }
+    fn object_max_health(&self, guid: u64) -> f32 {
+        self.health.get(&guid).map(|&(_, m)| m).unwrap_or(DEFAULT_MAX_HEALTH)
+    }
+    fn object_is_alive(&self, guid: u64) -> bool {
+        self.health.get(&guid).map(|&(c, _)| c > 0.0).unwrap_or(true)
+    }
+    fn object_kill(&mut self, guid: u64) {
+        let e = self.health.entry(guid).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
+        e.0 = 0.0;
+    }
+    fn object_revive(&mut self, guid: u64) {
+        let e = self.health.entry(guid).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
+        e.0 = e.1;
+    }
+    fn object_send_damage(&mut self, target: u64, amount: f32) -> bool {
+        let e = self.health.entry(target).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
+        e.0 = (e.0 - amount).max(0.0);
+        e.0 <= 0.0
     }
 
     // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
@@ -1297,6 +1403,38 @@ mod tests {
         // A character with no loadout reads nil primary.
         let none: Option<i64> = sh.eval("return Inventory.GetPrimaryWeapon(0x9999)").unwrap();
         assert_eq!(none, None);
+    }
+
+    /// Weapon ammo, Fire burning state, and Object health/SendDamage are REAL host state driven through
+    /// Lua (were no-op stubs / empty getters).
+    #[test]
+    fn game_lua_weapon_fire_damage() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Weapon ammo: set clip + reserve, then Reload pulls from reserve into the clip.
+        let w: i64 = 0x555;
+        sh.exec(&format!("Weapon.SetClipAmmo({w}, 5); Weapon.SetReserveAmmo({w}, 90)"), "@wp").unwrap();
+        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetClipAmmo({w})")).unwrap(), 5);
+        sh.exec(&format!("Weapon.Reload({w})"), "@wp").unwrap();
+        // clip refills to max_clip (30), reserve drops by the 25 taken.
+        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetClipAmmo({w})")).unwrap(), 30);
+        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetReserveAmmo({w})")).unwrap(), 65);
+
+        // Fire: Ignite sets burning, Extinguish clears it.
+        sh.exec("Fire.Ignite(0x700)", "@fr").unwrap();
+        assert!(host.borrow().object_is_burning(0x700));
+        sh.exec("Fire.Extinguish(0x700)", "@fr").unwrap();
+        assert!(!host.borrow().object_is_burning(0x700));
+
+        // SendDamage reduces health; enough damage kills (returns true).
+        let died_partial: bool = sh.eval("return ObjectState.SendDamage(0x800, 40)").unwrap();
+        assert!(!died_partial);
+        assert_eq!(host.borrow().object_health(0x800), 60.0);
+        let died: bool = sh.eval("return ObjectState.SendDamage(0x800, 100)").unwrap();
+        assert!(died, "lethal damage returns died=true");
+        assert!(!host.borrow().object_is_alive(0x800));
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

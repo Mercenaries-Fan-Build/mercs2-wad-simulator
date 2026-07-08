@@ -343,6 +343,64 @@ pub trait EngineHost {
     fn inventory_destroy_all(&mut self, character: u64) {
         let _ = character;
     }
+
+    // ===== Weapon ammo (`Weapon.*`) — per-weapon clip/reserve state. =====
+    /// `SetClipAmmo`/`SetReserveAmmo` — set the loaded/reserve round count (clamped ≥ 0).
+    fn weapon_set_ammo(&mut self, weapon: u64, clip: Option<i32>, reserve: Option<i32>) {
+        let _ = (weapon, clip, reserve);
+    }
+    /// `GetClipAmmo`/`GetReserveAmmo` — loaded / reserve rounds.
+    fn weapon_clip(&self, weapon: u64) -> i32 {
+        let _ = weapon;
+        0
+    }
+    fn weapon_reserve(&self, weapon: u64) -> i32 {
+        let _ = weapon;
+        0
+    }
+    /// `GetMaxClipAmmo`/`GetMaxReserveAmmo` — capacities.
+    fn weapon_max_clip(&self, weapon: u64) -> i32 {
+        let _ = weapon;
+        0
+    }
+    fn weapon_max_reserve(&self, weapon: u64) -> i32 {
+        let _ = weapon;
+        0
+    }
+    /// `Weapon.Reload` — move reserve into the clip up to its capacity.
+    fn weapon_reload(&mut self, weapon: u64) {
+        let _ = weapon;
+    }
+    /// `IsPrimary` / `IsDesignator` — weapon class flags.
+    fn weapon_is_primary(&self, weapon: u64) -> bool {
+        let _ = weapon;
+        false
+    }
+    fn weapon_is_designator(&self, weapon: u64) -> bool {
+        let _ = weapon;
+        false
+    }
+
+    // ===== Fire (`Fire.*`) — per-object burning state. =====
+    /// `Fire.Ignite(object)` — set the object alight.
+    fn fire_ignite(&mut self, object: u64) {
+        let _ = object;
+    }
+    /// `Fire.Extinguish`/`Put(object)` — put the object's fire out.
+    fn fire_extinguish(&mut self, object: u64) {
+        let _ = object;
+    }
+    /// Whether an object is currently on fire.
+    fn object_is_burning(&self, object: u64) -> bool {
+        let _ = object;
+        false
+    }
+    /// `Object.SendDamage(target, amount)` — apply `amount` damage to the target's health, killing it
+    /// if health reaches zero. Returns whether the target died.
+    fn object_send_damage(&mut self, target: u64, amount: f32) -> bool {
+        let _ = (target, amount);
+        false
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1370,9 +1428,10 @@ mod tests {
         // (real +16); render-state vertical wired Atmosphere (generic value/color/int store + time) +
         // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40); CameraFx wired the cinematic
         // camera controller pose/shake/blend/follow (real +13); Inventory wired the per-character
-        // weapon loadout (set/get/equip/drop/destroy) (real +4).
-        const EXPECTED_REAL: usize = 603;
-        const EXPECTED_STUB: usize = 483;
+        // weapon loadout (set/get/equip/drop/destroy) (real +4); Weapon ammo + Fire burning state +
+        // object health/SendDamage wired to real host state (real +7).
+        const EXPECTED_REAL: usize = 610;
+        const EXPECTED_STUB: usize = 476;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

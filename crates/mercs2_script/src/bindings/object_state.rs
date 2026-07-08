@@ -55,7 +55,7 @@ pub const REQUIRED: &[Required] = &[
 /// Object state-machine + node FX driver. `GetStringHash` is a pure engine string hash (real). The
 /// message/damage/state/emitter cfuncs drive the native FX + state machine we don't own yet, so they
 /// are faithful no-ops; `GetLinkGuid` returns nil (no link) until the native state object exists.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
     // Pure hash — fully faithful.
@@ -64,9 +64,14 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
     // Query — no linked object until the native state machine is backed.
     b.real("GetLinkGuid", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
 
-    // State machine + node-emitter FX actions — faithful no-ops.
+    // SendDamage(target, amount) → apply damage to the target's health (returns whether it died).
+    let h = host.clone();
+    b.real("SendDamage", lua.create_function(move |_, (target, amount, _rest): (i64, f32, MultiValue)| {
+        Ok(h.borrow_mut().object_send_damage(target as u64, amount))
+    })?)?;
+
+    // State machine + node-emitter FX actions — faithful no-ops (state machine + particle system).
     b.stub("SendMessage", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SendDamage", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("SetState", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("StartEmitter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("StopEmitter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
