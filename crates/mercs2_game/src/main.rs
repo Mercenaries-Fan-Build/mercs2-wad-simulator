@@ -19,17 +19,12 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::save;
 
-mod camera; // GAME: third-person over-the-shoulder camera rig (boom-collision framing, extracted, unit-tested)
-mod collision; // GAME collision: world triangle soup + camera-boom raycast + player capsule push-out
-mod gameplay; // GAME: fleet gameplay systems (physics/vehicle/combat/audio) ticked each fixed step
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
-mod player; // GAME: third-person player locomotion controller (extracted from world.rs, unit-tested)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
-mod runtime; // GAME: per-frame game update bundle (fleet gameplay + spawn resolver; realize_spawns seam)
-mod spawn; // GAME: template -> ECS archetype resolver (Pg.Spawn -> fleet entity, e.g. drivable vehicle)
-mod script_host; // GAME-specific Lua interior boot (EngineHost impl + run_interior_boot)
 mod world; // GAME render/boot: full TPS/free world render path (player avatar, 10-stage load)
+// The Lua host + fleet-sim cluster (script_host/runtime/gameplay/spawn) moved INTO the engine — Lua is a
+// core engine pillar, married to the live engine systems. The game reaches it via `mercs2_engine::…`.
 
 use pmc::PMC_INTERIOR_SPAWN;
 
@@ -96,6 +91,24 @@ fn newest_profile(dir: &Path) -> Option<PathBuf> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // GAME dev tool: headless FULL interior-boot load (no window) that times each stage — a repeatable
+    // benchmark for the load path (`load_world_data` prints `stage k/n: name (+Xs)`), so the loader can
+    // be profiled + optimized without opening the GUI. `--time-load`.
+    if args.iter().any(|a| a == "--time-load") {
+        let wadpath = require_vz_wad();
+        let models = hero::player_model_candidates(1, 0, 0);
+        let progress = mercs2_engine::render::LoadProgress::new(world::LOAD_STAGES);
+        let t0 = std::time::Instant::now();
+        match world::load_world_data(
+            &wadpath, true, true, true, true,
+            pmc::RecruitUnlocks::default(), &pmc::Stockpile::default(), &models, &progress,
+        ) {
+            Ok(_) => println!("[time-load] full interior load_world_data: {:.1}s", t0.elapsed().as_secs_f64()),
+            Err(e) => println!("[time-load] failed: {e}"),
+        }
+        return;
+    }
 
     // GAME dev tool: headless PMC interior assembly + floor/furniture Y check (no window). It is fine
     // for the GAME to parse its own args for dev modes — the ENGINE never does. `MERCS2_FURNDBG=1`
@@ -389,7 +402,7 @@ fn main() {
             let mut pos = spawn;
             let mut travelled = 0.0f32;
             for _ in 0..160 {
-                let resolved = crate::collision::move_character(&tris, pos, dir * 0.2, radius, height, step_h, true);
+                let resolved = mercs2_engine::physics::soup::move_character(&tris, pos, dir * 0.2, radius, height, step_h, true);
                 let adv = (resolved - pos).length();
                 travelled += adv;
                 pos = resolved;
@@ -449,7 +462,7 @@ fn main() {
         println!("[shell] main menu: {} save(s) available", slots.len());
         let wadpath = require_vz_wad();
         let orbit = args.iter().any(|a| a == "--interior-orbit");
-        pollster::block_on(world::run_scene_world_loading(
+        pollster::block_on(mercs2_engine::app::run(world::Mercs2Game::new(
             wadpath,
             true,
             true,
@@ -461,7 +474,7 @@ fn main() {
             pmc::Stockpile::default(),
             hero::player_model_candidates(1, 0, 0), // retail new game: Mattias, tier 0, default skin
             Some(menu::Menu::new(slots)),
-        ));
+        )));
         return;
     }
 
@@ -589,9 +602,9 @@ fn main() {
             hero::hero(hero_idx).display,
             hero::look_label(hero_idx, profile.upgrade_index, 0)
         );
-        pollster::block_on(world::run_scene_world_loading(
+        pollster::block_on(mercs2_engine::app::run(world::Mercs2Game::new(
             wadpath, true, true, true, true, true, orbit, recruits, stockpile, models, None,
-        ));
+        )));
     }
 }
 
@@ -633,7 +646,7 @@ fn populate_pmc_interior(
         [0.0, 0.0, 0.0, 1.0],
     ];
 
-    let intents = script_host::run_interior_boot();
+    let intents = mercs2_engine::script_host::run_interior_boot();
     for r in &intents {
         println!(
             "[lua] Pg.Spawn '{}' (name={}) at ({:.1},{:.1},{:.1}) -> guid 0x{:x}",
@@ -642,7 +655,7 @@ fn populate_pmc_interior(
     }
     let want = intents
         .iter()
-        .any(|r| r.template.eq_ignore_ascii_case(script_host::PMC_INTERIOR_TEMPLATE));
+        .any(|r| r.template.eq_ignore_ascii_case(mercs2_engine::script_host::PMC_INTERIOR_TEMPLATE));
     if !want {
         return;
     }

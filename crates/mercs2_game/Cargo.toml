@@ -15,21 +15,13 @@ mercs2_formats = { path = "../mercs2_formats" }
 mercs2_engine = { path = "../mercs2_engine" }
 # ECS components (Transform/ModelRef/AnimState/SkinPalette) the game spawns into the engine's World.
 mercs2_core = { path = "../mercs2_core" }
-# Lua script host — the game's PMC interior boot (script_host.rs) drives the engine via EngineHost.
-mercs2_script = { path = "../mercs2_script" }
-# Fleet gameplay/AV systems the game wires into the running engine (ticked each frame + via EngineHost).
-mercs2_audio = { path = "../mercs2_audio" }
-mercs2_physics = { path = "../mercs2_physics" }
-mercs2_vehicle = { path = "../mercs2_vehicle" }
-mercs2_ai = { path = "../mercs2_ai" }
-mercs2_anim = { path = "../mercs2_anim" }
-mercs2_water = { path = "../mercs2_water" }
-mercs2_decal = { path = "../mercs2_decal" }
-mercs2_population = { path = "../mercs2_population" }
-mercs2_combat = { path = "../mercs2_combat" }
-mercs2_faction = { path = "../mercs2_faction" }
-mercs2_ui = { path = "../mercs2_ui" }
-pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread
-# The game's own render/boot path (world.rs, the TPS world loop) owns its window + event loop.
+# The game depends ONLY on the engine for all mercs2 mechanisms: the engine owns + re-exports every
+# subsystem crate (physics/combat/ai/anim/audio/vehicle/decal/population/faction/water/ui + the Lua
+# script host), so the game reaches them through `mercs2_engine::<name>::…`. The game's systems
+# (runtime/gameplay/spawn/script_host) are the Mrx *rules* layer implementing the engine's seams
+# (`EngineHost`, `Game`) — content driving mechanism, not the mechanism itself.
+pollster = "0.3" # block_on the engine's async app::run entry point on the main thread
+# Shared external deps (windowing / GPU) — used by the game's shell error handling + key enums, same as
+# the engine; not part of the mercs2_* graph the refactor inverted.
 winit = "0.29"
 wgpu = "0.20"

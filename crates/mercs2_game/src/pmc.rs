@@ -21,6 +21,60 @@ use mercs2_formats::placement::{load_model_placements, load_placements};
 /// position with NO synthetic offset.
 pub const PMC_INTERIOR_SPAWN: [f32; 3] = [3794.0427, 450.7505, -3911.0322];
 
+/// The `HqInterior` actor position — `mrxhq.lua:657` `SpawnActor(vPosition = {3750, 450, -3840})`. The
+/// interior geometry loads at this origin (see `load_pmc_interior`).
+pub const PMC_INTERIOR_ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
+
+/// Derive the HQ-interior hero spawn **the way the base game does** — not a baked constant. The game
+/// spawns the `HqInterior` actor at `vPosition {3750,450,-3840}` (`mrxhq.lua`) then teleports the hero to
+/// the `hp_playerA_enter` hardpoint on the interior hall mesh (`MrxUtil.TeleportHeroesToHardpoints`,
+/// mrxbriefing.lua). So the spawn = actor position (Lua data) + that hardpoint (mesh HIER). Since the
+/// interior geometry is placed at the actor origin, this lands the hero on the interior floor. Falls back
+/// to the actor origin (hall centre, over the floor) if the hardpoint node isn't present.
+pub fn derive_interior_spawn(w: &mut wad::Wad) -> [f32; 3] {
+    let hp = pandemic_hash_m2("hp_playerA_enter");
+    let hall = pandemic_hash_m2("pmcoutpost_interior_hq");
+    if let Ok(container) = wad::extract_container(w, hall) {
+        let hier = mercs2_formats::orchestrator::parse_hier(&container);
+        if let Some(idx) = hier.iter().position(|n| n.hash == hp) {
+            let m = hier_node_root_matrix(&hier, idx);
+            return [
+                PMC_INTERIOR_ACTOR_ORIGIN[0] + m[12],
+                PMC_INTERIOR_ACTOR_ORIGIN[1] + m[13],
+                PMC_INTERIOR_ACTOR_ORIGIN[2] + m[14],
+            ];
+        }
+    }
+    PMC_INTERIOR_ACTOR_ORIGIN
+}
+
+/// Root-relative transform of HIER node `idx` = local · parent.local · … (row-major; translation at
+/// `[12],[13],[14]`).
+fn hier_node_root_matrix(hier: &[mercs2_formats::orchestrator::HierNode], idx: usize) -> [f32; 16] {
+    let mut m = hier[idx].local;
+    let mut p = hier[idx].parent;
+    while let Some(pi) = p {
+        m = mat4_mul_rowmajor(&m, &hier[pi].local);
+        p = hier[pi].parent;
+    }
+    m
+}
+
+/// Row-major 4×4 multiply: `(a·b)[r][c] = Σ a[r][k]·b[k][c]`.
+fn mat4_mul_rowmajor(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut o = [0.0f32; 16];
+    for r in 0..4 {
+        for c in 0..4 {
+            let mut s = 0.0;
+            for k in 0..4 {
+                s += a[r * 4 + k] * b[k * 4 + c];
+            }
+            o[r * 4 + c] = s;
+        }
+    }
+    o
+}
+
 /// Which Villa recruits are unlocked (from the save's `tStarterData`). Drives which PMC-interior state
 /// layers + recruit bays load — the game shows only the unlocked recruits (wifpmcinterior.lua
 /// `_GetStarterLayers`), NOT all of them. Derive with [`RecruitUnlocks::from_starters`].
