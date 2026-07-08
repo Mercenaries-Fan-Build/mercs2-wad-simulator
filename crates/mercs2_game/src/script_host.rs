@@ -153,6 +153,9 @@ pub struct GameScriptHost {
     /// Set once the game's Lua prints `GlobalExit - Complete` — loadprobe phase 20, the world-load
     /// state machine ran to completion ("world fully loaded").
     pub world_load_complete: bool,
+    /// Set once every streaming layer request the master-script boot issued has been fulfilled
+    /// (`MrxLayerManager` drained its op queue) — the real world-streaming milestone.
+    pub world_layers_loaded: bool,
     /// Dynamic-music / DSP / audio-mode command log (`Sound.*` director config).
     sound_cmds: Vec<(String, Vec<String>)>,
     /// Replicated mission-event log (`Net.SendEvent_*` etc.) the runtime realizes locally in SP.
@@ -396,6 +399,7 @@ impl GameScriptHost {
             human_seats: HashMap::new(),
             lua_log_lines: 0,
             world_load_complete: false,
+            world_layers_loaded: false,
             sound_cmds: Vec::new(),
             net_events: Vec::new(),
             script_cmds: Vec::new(),
@@ -480,6 +484,11 @@ impl EngineHost for GameScriptHost {
             // loadprobe phase 20 — the world-load state machine reached GlobalExit ("world fully loaded").
             if msg.contains("GlobalExit - Complete") {
                 self.world_load_complete = true;
+            }
+            // The world's streaming layers all loaded (MrxLayerManager fulfilled every request) — the
+            // real streaming milestone the master-script boot drives (loadprobe 16/18-19 territory).
+            if msg.contains("All layer operations processed and fulfilled") {
+                self.world_layers_loaded = true;
             }
         }
         println!("[{source}] {msg}");
@@ -1354,28 +1363,27 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, contra
     let src = format!(
         "import(\"MrxBootstrap\")\n\
          import(\"MrxPlayer\")\n\
+         import(\"MrxGui\")\n\
          import(\"LevelBootstrap\")\n\
-         MrxBootstrap.Start()\n\
          LevelBootstrap.LoadLevel(\"vz\", \"vz\")\n\
-         MrxPlayer.SetSpawnLocations({{ \"{contract}_Start1\" }})\n\
-         local ok, err = pcall(MrxPlayer.CreatePlayerCharacter, true, 0, \"{character}\", \"{contract}_Start1\")\n\
-         if not ok then Debug.Printf(\"CreatePlayerCharacter aborted: \" .. tostring(err)) end\n\
-         -- Shell-bootstrap fade setup (MrxGuiShellBootstrap.LoadMovieLayouts → _InitFadeFlash) that we\n\
+         -- Shell-bootstrap fade setup (MrxGuiShellBootstrap.LoadMovieLayouts -> _InitFadeFlash) that we\n\
          -- skip by not running the shell: create the fade-flash widget the GlobalEnter fade uses.\n\
          local fe, fi = pcall(MrxGui._InitFadeFlash)\n\
          if not fe then Debug.Printf(\"_InitFadeFlash aborted: \" .. tostring(fi)) end\n\
-         -- The GlobalEnter/Exit screen fade blocks on the Flash SWF load-complete callback, which a\n\
-         -- non-rendering load never fires; take MrxState's fade-disabled path (a plain completion timer\n\
-         -- our pump services) so the load sequence completes. The fade is a cosmetic transition.\n\
-         import(\"MrxState\")\n\
-         MrxState._bEnableFade = false\n\
-         -- Drive the two async gates the engine signals (GUI-load complete + local-player-joined).\n\
-         -- _GuiLoaded → MrxState.Enter(WAITFORGAME) → GlobalEnter; _LocalPlayerJoined → _End → GlobalExit.\n\
+         -- Run the vz master script as the SOLE boot entry. Its Init is the real boot: \n\
+         --   SetHandleStateTransitions(false) + MrxBootstrap.Start(_AttemptGameplaySetup) +\n\
+         --   MrxState.EnableFade(false) + MrxPlayer.Reset + LoadSingleton(nil) -> _LoadLayers ->\n\
+         --   MrxLayerManager.Add -> the layer streaming the pump completes (Pg.LoadLayer callback) ->\n\
+         --   _AttemptGameplaySetup static/dynamic -> MrxPlayer.Start (spawn) + _CompleteGameplaySetup\n\
+         --   (act staging). We only supply the two async gates the non-rendering load can't signal.\n\
+         local me, mi = pcall(import, \"xQ!L\")\n\
+         if not me then Debug.Printf(\"master script (vz) aborted: \" .. tostring(mi)) end\n\
+         MrxPlayer.SetSpawnLocations({{ \"{contract}_Start1\" }})\n\
+         -- GUI-load-complete gate (the shell's GUI-file loads finish).\n\
          local ge, ie = pcall(MrxBootstrap._GuiLoaded)\n\
-         if not ge then Debug.Printf(\"_GuiLoaded aborted: \" .. tostring(ie)) end\n\
-         local pe, pi = pcall(MrxBootstrap._LocalPlayerJoined)\n\
-         if not pe then Debug.Printf(\"_LocalPlayerJoined aborted: \" .. tostring(pi)) end\n"
+         if not ge then Debug.Printf(\"_GuiLoaded aborted: \" .. tostring(ie)) end\n"
     );
+    let _ = character;
     match sh.exec(&src, "@boot_flow") {
         Ok(()) => println!("[world] ===== boot flow started (Start + spawn); servicing state machine ====="),
         Err(e) => println!("[world] ===== boot flow error (first divergence): {e} ====="),
@@ -1392,8 +1400,15 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, contra
         let states = host.borrow_mut().take_pending_game_states();
         let serviced = !states.is_empty();
         for st in states {
-            let _ = sh.fire_state_change(&st, "enter");
-            let _ = sh.fire_state_change(&st, "exit");
+            // Firing the "exit" phase runs the state's ReadyToExit callbacks — for WaitForStreaming that
+            // is `_SecondaryStreamComplete → _StartPlayerVisibleGameplay → WifMissionFlow.Refresh(Exit,
+            // WAITFORGAME)`, the chain that reaches GlobalExit. Surface any error (don't swallow it).
+            if let Err(e) = sh.fire_state_change(&st, "enter") {
+                println!("[script] GameStateChange({st}, enter) error: {e}");
+            }
+            if let Err(e) = sh.fire_state_change(&st, "exit") {
+                println!("[script] GameStateChange({st}, exit) error: {e}");
+            }
         }
         // Progress = a state was serviced OR the Lua produced new output (a timer/callback fired).
         let progressed = serviced || host.borrow().lua_log_lines != before;
@@ -2034,16 +2049,32 @@ mod tests {
         };
         host.borrow_mut().set_boot_context(std::collections::HashMap::new(), "chris");
         run_boot_flow(&sh, &host, "PmcCon001", "chris");
-        let (lines, complete) = { let h = host.borrow(); (h.lua_log_lines, h.world_load_complete) };
+        let (lines, complete, layers) = {
+            let h = host.borrow();
+            (h.lua_log_lines, h.world_load_complete, h.world_layers_loaded)
+        };
         assert!(
             lines > 100,
             "expected the game's Lua to run deep (>100 [lua] lines); got {lines} — a boot regression"
         );
+        // The real streaming milestone: every world-layer request the master boot issued was fulfilled
+        // (MrxLayerManager drained its op queue). If this fails the load never streamed the world in
+        // (e.g. Pg.AssetExists culling layers), so GlobalExit below would be meaningless.
+        assert!(
+            layers,
+            "expected every streaming layer request to be fulfilled ('All layer operations processed and \
+             fulfilled'); it was not — a regression in the layer-streaming completion (Pg.AssetExists / \
+             Pg.LoadLayer / __flush_layer_loads / MrxLayerManager op queue)"
+        );
+        // loadprobe phase 20: the world-load state machine ran the full master path — GlobalEnter, act
+        // staging, mission-flow init, WaitForStreaming, and the WifMissionFlow.Refresh → Exit(WAITFORGAME)
+        // that reaches GlobalExit ("world fully loaded").
         assert!(
             complete,
             "expected the world-load state machine to reach GlobalExit - Complete (loadprobe phase 20, \
              'world fully loaded'); it did not — a regression in the GameStateChange bridge / GlobalEnter \
-             gates (_GuiLoaded/_LocalPlayerJoined) / fade path / pump loop"
+             gates / act staging (StagingAct1) / mission flow (_StartPlayerVisibleGameplay → Refresh) / \
+             event-kind constants (Event.WeaponEvent et al.) / fade path / pump loop"
         );
     }
 

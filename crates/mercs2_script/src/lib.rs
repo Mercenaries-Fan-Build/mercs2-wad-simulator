@@ -677,9 +677,9 @@ pub trait EngineHost {
     fn sound_lib_version(&self) -> i64 {
         12
     }
-    /// `Sound.LockActionLevelMusic`.
-    fn sound_lock_action_level_music(&mut self, level: i64) {
-        let _ = level;
+    /// `Sound.LockActionLevelMusic(lock)` — lock/unlock the action-level dynamic music.
+    fn sound_lock_action_level_music(&mut self, lock: bool) {
+        let _ = lock;
     }
     /// `Sound.SetCategoryPitch(category, pitch [, length])` — set a mix category's pitch over `length`s.
     fn sound_set_category_pitch(&mut self, category: &str, pitch: f32, length: f32) {

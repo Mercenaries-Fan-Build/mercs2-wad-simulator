@@ -150,13 +150,16 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // ===== Static-layer state queries (mrxlayermanager reads these as booleans). =====
     // No static-layer streaming state on the host yet → faithful "nothing loading / not static" so the
     // layer manager's add/remove guards run authentically instead of hitting a nil.
+    // `Pg.AssetExists(name, type)` → true: the level's layers/assets exist (else MrxLayerManager culls
+    // every layer as "does not exist" and the world never streams in).
+    b.real("AssetExists", lua.create_function(|_, _: MultiValue| Ok(true))?)?;
+
     for name in [
         "LoadingStaticLayers",
         "GetLoadingStaticLayers",
         "IsStaticLayer",
         "UnloadingStaticLayers",
         "GetUnloadingStaticLayers",
-        "AssetExists",
         "IsPointInBoundary",
         "LoadGame",
         "LoadIsRetry",
@@ -269,7 +272,14 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             let cb: mlua::Function = e.get("cb")?;
             let req: String = e.get("req")?;
             let layer: String = e.get("layer")?;
-            let _ = cb.call::<()>((req, layer, "layer", true));
+            if let Err(err) = cb.call::<()>((req, layer.clone(), "layer", true)) {
+                // Surface the divergence (was silently swallowed → the layer load never cascaded).
+                if let Ok(dbg) = lua.globals().get::<mlua::Table>("Debug") {
+                    if let Ok(pf) = dbg.get::<mlua::Function>("Printf") {
+                        let _ = pf.call::<()>(format!("layer '{layer}' completion aborted: {err}"));
+                    }
+                }
+            }
         }
         Ok(())
     })?)?;

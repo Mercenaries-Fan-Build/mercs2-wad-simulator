@@ -24,9 +24,14 @@ pub struct AtmosphereState {
     pub colors: HashMap<String, [f32; 4]>,
     /// Named integer parameters (`SetIntValue`/`GetIntValue`).
     pub ints: HashMap<String, i64>,
+    /// Active sky preset name (`SetSky("afternoon")` / `SetSky("Maracaibo")`).
+    pub sky: String,
 }
 
 impl AtmosphereState {
+    pub fn set_sky(&mut self, name: &str) {
+        self.sky = name.to_string();
+    }
     pub fn set_value(&mut self, key: &str, v: f32) {
         self.values.insert(key.to_string(), v);
     }

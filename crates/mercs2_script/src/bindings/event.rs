@@ -74,6 +74,38 @@ const KINDS: &[(&str, i64)] = &[
     ("ObjectPhysicsEvent", KIND_OBJECT_PHYSICS_EVENT),
     ("Button", KIND_BUTTON),
     ("ContextAction", KIND_CONTEXT_ACTION),
+    // Remaining engine condition/event kinds the game registers handlers for. The engine feeds these
+    // conditions as the corresponding runtime state comes online; until then the handler is registered
+    // (a valid non-nil `Event.X` constant) and simply stays dormant. Distinct stable ids (13+); only our
+    // own Create/pump compares them. Sourced from every `Event.<Kind>` the Lua corpus references.
+    ("Timer", 13),
+    ("WeaponEvent", 14),
+    ("ButtonPress", 15),
+    ("ButtonReleased", 16),
+    ("HumanStateTransition", 17),
+    ("HumanActionComplete", 18),
+    ("HumanAnimationNearlyCompleted", 19),
+    ("AnimationEvent", 20),
+    ("ObjectHealth", 21),
+    ("ObjectHealthLessThan", 22),
+    ("ObjectDelete", 23),
+    ("ObjectIsReady", 24),
+    ("ObjectIsGrounded", 25),
+    ("ObjectIsVisible", 26),
+    ("ObjectWinched", 27),
+    ("PrimaryClipSize", 28),
+    ("PrimaryCurrentAmmo", 29),
+    ("PrimaryStoredAmmo", 30),
+    ("ExplosivesCurrentAmmo", 31),
+    ("ExplosivesStoredAmmo", 32),
+    ("FactionTexture", 33),
+    ("Minigame", 34),
+    ("GuiGameTimer", 35),
+    ("GuiUpdate", 36),
+    ("Cash", 37),
+    ("Player", 38),
+    ("PosX", 39),
+    ("PosZ", 40),
 ];
 
 /// One registered event handler.

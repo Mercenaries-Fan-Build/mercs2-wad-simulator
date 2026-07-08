@@ -141,7 +141,12 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     aset!("SetHaze", "haze");
     aset!("SetRainSpeed", "rain_speed");
     aset!("SetRainDensity", "rain_density");
-    aset!("SetSky", "sky");
+    // SetSky takes a sky-preset NAME (e.g. "afternoon", "Maracaibo"), not a scalar — store the string.
+    let h = host.clone();
+    b.real("SetSky", lua.create_function(move |_, name: String| {
+        if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_sky(&name); }
+        Ok(())
+    })?)?;
     // typed color setters → color store
     let h = host.clone();
     b.real("SetAmbientColor", lua.create_function(move |_, (r, g, bl, a): (f32, f32, f32, Option<f32>)| {

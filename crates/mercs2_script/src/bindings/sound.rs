@@ -162,7 +162,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("ClearMusicCues", lua.create_function(move |_, ()| { h.borrow_mut().sound_clear_music_cues(); Ok(()) })?)?;
     let h = host.clone();
-    b.real("LockActionLevelMusic", lua.create_function(move |_, level: i64| { h.borrow_mut().sound_lock_action_level_music(level); Ok(()) })?)?;
+    b.real("LockActionLevelMusic", lua.create_function(move |_, lock: Option<bool>| { h.borrow_mut().sound_lock_action_level_music(lock.unwrap_or(true)); Ok(()) })?)?;
 
     // --- info ---
     let h = host.clone();

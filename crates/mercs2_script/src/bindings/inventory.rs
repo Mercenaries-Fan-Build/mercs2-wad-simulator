@@ -81,5 +81,15 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
 
-    b.install_global(GLOBAL)
+    let installed = b.install_global(GLOBAL)?;
+    // The engine registers the inventory cfunc table as a child of `Human` — the game's Lua reaches it
+    // exclusively as `Human.Inventory.*` (e.g. the masterscript's `Human.Inventory.ReloadAll`). Mirror
+    // the top-level `Inventory` global onto `Human.Inventory` (Human installs first, at ns! order).
+    if let (Ok(human), Ok(inv)) = (
+        lua.globals().get::<mlua::Table>("Human"),
+        lua.globals().get::<mlua::Table>(GLOBAL),
+    ) {
+        human.set("Inventory", inv)?;
+    }
+    Ok(installed)
 }
