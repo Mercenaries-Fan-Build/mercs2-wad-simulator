@@ -496,6 +496,20 @@ pub trait EngineHost {
         let _ = cue;
         0
     }
+    /// `VO.Cancel(cue)` — stop the given VO line if it is playing.
+    fn vo_cancel(&mut self, cue: &str) {
+        let _ = cue;
+    }
+    /// `VO.CancelAll` — stop the active VO line.
+    fn vo_cancel_all(&mut self) {}
+    /// `VO.Pause`/`Unpause`/`PauseAll`/`UnpauseAll` — pause/resume VO playback.
+    fn vo_set_paused(&mut self, paused: bool) {
+        let _ = paused;
+    }
+    /// `VO.SetCinematicMode(enable)` — cinematic VO priority mode.
+    fn vo_set_cinematic_mode(&mut self, enable: bool) {
+        let _ = enable;
+    }
 
     /// `Object.GetVelocity` — speed magnitude (m/s).
     fn object_velocity(&self, guid: u64) -> f32 {
@@ -1237,9 +1251,10 @@ mod tests {
         // load/unload/ambience residency family (real +12); Sys vertical wired the engine-config store
         // (time scale / level+master-script / tutorials / autosave / save-version / viewports; real +10);
         // ObjectFilter vertical wired the label-expr query registry + object label store (real +7);
-        // Object Attach/Detach wired the real attachment graph (real +2).
-        const EXPECTED_REAL: usize = 468;
-        const EXPECTED_STUB: usize = 618;
+        // Object Attach/Detach wired the real attachment graph (real +2); VO wired cancel/pause/
+        // cinematic-mode to the real VoManager (real +7).
+        const EXPECTED_REAL: usize = 475;
+        const EXPECTED_STUB: usize = 611;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

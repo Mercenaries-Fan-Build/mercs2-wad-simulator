@@ -56,14 +56,26 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(voice_opt(h.borrow_mut().vo_cue(&cue)))
     })?)?;
 
-    // Cancel / pause / cinematic-mode / sequence controls — faithful no-ops.
-    b.stub("Cancel", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("CancelAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("Pause", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("PauseAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("Unpause", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("UnpauseAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SetCinematicMode", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Cancel / pause / cinematic-mode → the real VoManager (via the host AudioEngine).
+    let h = host.clone();
+    b.real("Cancel", lua.create_function(move |_, (_speaker, cue): (Option<i64>, String)| {
+        h.borrow_mut().vo_cancel(&cue);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("CancelAll", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().vo_cancel_all(); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Pause", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().vo_set_paused(true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("PauseAll", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().vo_set_paused(true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Unpause", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().vo_set_paused(false); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("UnpauseAll", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().vo_set_paused(false); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetCinematicMode", lua.create_function(move |_, on: Option<bool>| { h.borrow_mut().vo_set_cinematic_mode(on.unwrap_or(true)); Ok(()) })?)?;
+
+    // UNBACKED residue (burn-down): VO sequence playlists need a sequence model (not in vo.rs yet).
     b.stub("AddSequence", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("RemoveSequence", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
 

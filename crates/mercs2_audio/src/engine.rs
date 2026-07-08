@@ -394,6 +394,14 @@ impl AudioEngine {
     pub fn vo_set_cinematic_mode(&mut self, enable: bool) {
         self.vo.set_cinematic_mode(enable);
     }
+    /// Whether a VO line is currently active (test/introspection seam).
+    pub fn vo_is_active(&self) -> bool {
+        self.vo.is_active()
+    }
+    /// The current VO cinematic-mode flag.
+    pub fn vo_cinematic_mode(&self) -> bool {
+        self.vo.cinematic_mode()
+    }
 
     // ---- frame + mix -----------------------------------------------------------------------------
 

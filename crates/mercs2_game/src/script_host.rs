@@ -105,6 +105,17 @@ pub struct GameScriptHost {
     attachments: HashMap<u64, u64>,
 }
 
+/// Stable hash of a VO cue name → its cue guid, so `VO.Cue(name)` and a later `VO.Cancel(name)` address
+/// the same line (FNV-1a; internal consistency, not the game's exact m2 cue hash).
+fn vo_cue_hash(cue: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in cue.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
 /// The `Sys.*` engine-config the script host owns (`Sys.SetTimeScale`/`SetTutorialsEnabled`/… write it;
 /// `Sys.TutorialsEnabled`/`GetMasterScriptName`/… read it). Retail-PC defaults.
 #[derive(Clone, Debug)]
@@ -576,6 +587,27 @@ impl EngineHost for GameScriptHost {
         self.attachments.iter().filter(|(_, &p)| p == guid).map(|(&c, _)| c).collect()
     }
 
+    // ===== VO / dialogue → the real `mercs2_audio::VoManager` (via the shared AudioEngine). =====
+    fn vo_cue(&mut self, cue: &str) -> u64 {
+        // Cue names hash to a stable u32 guid so Cue↔Cancel(cue) address the same VO line. Contract
+        // priority is the default mission-dialogue tier; the VO routes through the real voice pool.
+        let guid = vo_cue_hash(cue);
+        let ok = self.audio.borrow_mut().vo_cue(0, guid, mercs2_audio::VoPriority::Contract, true, None);
+        if ok { guid as u64 } else { 0 }
+    }
+    fn vo_cancel(&mut self, cue: &str) {
+        self.audio.borrow_mut().vo_cancel(vo_cue_hash(cue));
+    }
+    fn vo_cancel_all(&mut self) {
+        self.audio.borrow_mut().vo_cancel_all();
+    }
+    fn vo_set_paused(&mut self, paused: bool) {
+        self.audio.borrow_mut().vo_set_paused(paused);
+    }
+    fn vo_set_cinematic_mode(&mut self, enable: bool) {
+        self.audio.borrow_mut().vo_set_cinematic_mode(enable);
+    }
+
     // ===== Player identity / session / binding (single local player controlling the hero). =====
     fn player_local_player(&self) -> u64 {
         LOCAL_PLAYER_GUID
@@ -1015,6 +1047,28 @@ mod tests {
         sh.exec("Object.Detach(500)", "@a").unwrap();
         assert_eq!(host.borrow().object_parent(500), 0, "Detach clears the parent");
         assert!(!host.borrow().object_is_attached(500));
+    }
+
+    /// `VO.*` drives the real `mercs2_audio::VoManager`: a cue plays a line (active), Cancel stops it,
+    /// SetCinematicMode toggles the real flag — all through Lua (were no-op stubs).
+    #[test]
+    fn game_lua_vo_drives_real_vo_manager() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Cue a line → the VoManager has an active line.
+        let handle: Option<i64> = sh.eval(r#"return VO.Cue(1, "vo_intro_001")"#).unwrap();
+        assert!(handle.is_some(), "VO.Cue returns a non-nil handle when the line starts");
+        assert!(host.borrow().audio.borrow().vo_is_active(), "VoManager has an active line");
+
+        // Cancel by the same cue name stops it.
+        sh.exec(r#"VO.Cancel(1, "vo_intro_001")"#, "@vo").unwrap();
+        assert!(!host.borrow().audio.borrow().vo_is_active(), "Cancel stopped the active VO line");
+
+        // Cinematic mode toggles the real flag.
+        sh.exec("VO.SetCinematicMode(true)", "@vo").unwrap();
+        assert!(host.borrow().audio.borrow().vo_cinematic_mode());
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
