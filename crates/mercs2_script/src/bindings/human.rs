@@ -81,25 +81,38 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("IsGrappling", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_grappling(guid as u64)))?)?;
 
-    // --- animation / weapon / ragdoll actions: faithful no-ops (no ragdoll/weapon-lock runtime yet) ---
-    for name in [
-        "Knockdown",
-        "SetPreemptiveRagdoll",
-        "ForceExitSeatNoSnap",
-        "Emote",
-        "PlayRawAnimation",
-        "PersistTransform",
-        "Drop",
-        "StopGrappling",
-        "EnableWeapons",
-        "DisableWeapons",
-        "SetFireLock",
-        "EquipWeapon",
-        "StowWeapon",
-        "SetAllowCorpseCleanup",
-        "Scrub",
-        "SetJostleEnabled",
-    ] {
+    // --- weapon / ragdoll / grapple / carry / jostle flags → the real per-human flag store ---
+    let h = host.clone();
+    b.real("EnableWeapons", lua.create_function(move |_, g: i64| { h.borrow_mut().human_enable_weapons(g as u64, true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("DisableWeapons", lua.create_function(move |_, g: i64| { h.borrow_mut().human_enable_weapons(g as u64, false); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetFireLock", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_fire_lock(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Knockdown", lua.create_function(move |_, g: i64| { h.borrow_mut().human_knockdown(g as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetPreemptiveRagdoll", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_ragdoll(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("StopGrappling", lua.create_function(move |_, g: i64| { h.borrow_mut().human_stop_grappling(g as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Drop", lua.create_function(move |_, g: i64| { h.borrow_mut().human_drop_carried(g as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetJostleEnabled", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_jostle(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetAllowCorpseCleanup", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_corpse_cleanup(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("EquipWeapon", lua.create_function(move |_, g: i64| { h.borrow_mut().human_set_weapon_drawn(g as u64, true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("StowWeapon", lua.create_function(move |_, g: i64| { h.borrow_mut().human_set_weapon_drawn(g as u64, false); Ok(()) })?)?;
+    // Emote / raw animation → recorded as the human's current action (drives the anim selector).
+    let h = host.clone();
+    b.real("Emote", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().human_do_action(g as u64, &name); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("PlayRawAnimation", lua.create_function(move |_, (g, anim): (i64, String)| { h.borrow_mut().human_do_action(g as u64, &anim); Ok(()) })?)?;
+
+    // --- UNBACKED residue (burn-down): one-shot side effects needing the vehicle/transform/cleanup
+    // runtime (seat exit, transform persistence, scrub). Honest no-ops. ---
+    for name in ["ForceExitSeatNoSnap", "PersistTransform", "Scrub"] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     }
 

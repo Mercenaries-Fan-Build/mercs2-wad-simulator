@@ -1071,6 +1071,52 @@ pub trait EngineHost {
         let _ = guid;
         false
     }
+    /// `Human.EnableWeapons`/`DisableWeapons(guid)` — whether the human may use its weapons.
+    fn human_enable_weapons(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// Whether the human's weapons are enabled (default true).
+    fn human_weapons_enabled(&self, guid: u64) -> bool {
+        let _ = guid;
+        true
+    }
+    /// `Human.SetFireLock(guid, on)` — lock the human out of firing.
+    fn human_set_fire_lock(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Human.Knockdown(guid)` — knock the human down (ragdoll).
+    fn human_knockdown(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Human.SetPreemptiveRagdoll(guid, on)`.
+    fn human_set_ragdoll(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// Whether the human is currently knocked down / ragdolled.
+    fn human_is_knocked_down(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// `Human.StopGrappling(guid)` — end a grapple.
+    fn human_stop_grappling(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Human.Drop(guid)` — drop whatever the human is carrying.
+    fn human_drop_carried(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Human.SetJostleEnabled(guid, on)`.
+    fn human_set_jostle(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Human.SetAllowCorpseCleanup(guid, on)`.
+    fn human_set_corpse_cleanup(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Human.EquipWeapon`/`StowWeapon(guid)` — whether a weapon is drawn.
+    fn human_set_weapon_drawn(&mut self, guid: u64, drawn: bool) {
+        let _ = (guid, drawn);
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1474,9 +1520,10 @@ mod tests {
         // camera controller pose/shake/blend/follow (real +13); Inventory wired the per-character
         // weapon loadout (set/get/equip/drop/destroy) (real +4); Weapon ammo + Fire burning state +
         // object health/SendDamage wired to real host state (real +7); Pg regions/alarms + Airstrike
-        // designator lifecycle + recorded ordnance spawns wired to real host state (real +13).
-        const EXPECTED_REAL: usize = 623;
-        const EXPECTED_STUB: usize = 463;
+        // designator lifecycle + recorded ordnance spawns wired to real host state (real +13); Human
+        // weapon/ragdoll/grapple/carry/jostle flag verbs wired to a per-human flag store (real +13).
+        const EXPECTED_REAL: usize = 636;
+        const EXPECTED_STUB: usize = 450;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

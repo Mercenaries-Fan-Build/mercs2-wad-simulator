@@ -129,6 +129,8 @@ pub struct GameScriptHost {
     designators: HashMap<u64, i32>,
     /// Recorded ordnance/plane spawns (`Airstrike.Spawn*`/`Flyby`/`ConeSpawn`) for the runtime to realize.
     airstrikes: Vec<(String, [f32; 3])>,
+    /// Per-human runtime flags (`Human.*` action verbs).
+    human_flags: HashMap<u64, HumanFlags>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -171,6 +173,38 @@ const DEFAULT_MAX_HEALTH: f32 = 100.0;
 
 /// Designator charges granted by `Airstrike.EquipDesignator`/`RefillDesignator`.
 const DESIGNATOR_CHARGES: i32 = 3;
+
+/// Per-human runtime flags the `Human.*` action verbs toggle.
+#[derive(Clone, Copy, Debug)]
+pub struct HumanFlags {
+    pub weapons_enabled: bool,
+    pub fire_lock: bool,
+    pub knocked_down: bool,
+    pub ragdoll: bool,
+    pub jostle_enabled: bool,
+    pub corpse_cleanup: bool,
+    pub weapon_drawn: bool,
+    pub carrying: bool,
+    pub grappling: bool,
+    pub swimming: bool,
+}
+
+impl Default for HumanFlags {
+    fn default() -> Self {
+        HumanFlags {
+            weapons_enabled: true,
+            fire_lock: false,
+            knocked_down: false,
+            ragdoll: false,
+            jostle_enabled: true,
+            corpse_cleanup: true,
+            weapon_drawn: false,
+            carrying: false,
+            grappling: false,
+            swimming: false,
+        }
+    }
+}
 
 /// Per-weapon ammo state (`Weapon.*`).
 #[derive(Clone, Copy, Debug)]
@@ -286,6 +320,7 @@ impl GameScriptHost {
             alarms: std::collections::HashSet::new(),
             designators: HashMap::new(),
             airstrikes: Vec::new(),
+            human_flags: HashMap::new(),
         }
     }
 
@@ -961,6 +996,50 @@ impl EngineHost for GameScriptHost {
             .unwrap_or_default();
         self.human_states.insert(guid, (stance, action.to_string()));
     }
+    fn human_is_swimming(&self, guid: u64) -> bool {
+        self.human_flags.get(&guid).map(|f| f.swimming).unwrap_or(false)
+    }
+    fn human_is_carrying(&self, guid: u64) -> bool {
+        self.human_flags.get(&guid).map(|f| f.carrying).unwrap_or(false)
+    }
+    fn human_is_grappling(&self, guid: u64) -> bool {
+        self.human_flags.get(&guid).map(|f| f.grappling).unwrap_or(false)
+    }
+    fn human_enable_weapons(&mut self, guid: u64, on: bool) {
+        self.human_flags.entry(guid).or_default().weapons_enabled = on;
+    }
+    fn human_weapons_enabled(&self, guid: u64) -> bool {
+        self.human_flags.get(&guid).map(|f| f.weapons_enabled).unwrap_or(true)
+    }
+    fn human_set_fire_lock(&mut self, guid: u64, on: bool) {
+        self.human_flags.entry(guid).or_default().fire_lock = on;
+    }
+    fn human_knockdown(&mut self, guid: u64) {
+        let f = self.human_flags.entry(guid).or_default();
+        f.knocked_down = true;
+        f.ragdoll = true;
+    }
+    fn human_set_ragdoll(&mut self, guid: u64, on: bool) {
+        self.human_flags.entry(guid).or_default().ragdoll = on;
+    }
+    fn human_is_knocked_down(&self, guid: u64) -> bool {
+        self.human_flags.get(&guid).map(|f| f.knocked_down).unwrap_or(false)
+    }
+    fn human_stop_grappling(&mut self, guid: u64) {
+        self.human_flags.entry(guid).or_default().grappling = false;
+    }
+    fn human_drop_carried(&mut self, guid: u64) {
+        self.human_flags.entry(guid).or_default().carrying = false;
+    }
+    fn human_set_jostle(&mut self, guid: u64, on: bool) {
+        self.human_flags.entry(guid).or_default().jostle_enabled = on;
+    }
+    fn human_set_corpse_cleanup(&mut self, guid: u64, on: bool) {
+        self.human_flags.entry(guid).or_default().corpse_cleanup = on;
+    }
+    fn human_set_weapon_drawn(&mut self, guid: u64, drawn: bool) {
+        self.human_flags.entry(guid).or_default().weapon_drawn = drawn;
+    }
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
@@ -1530,6 +1609,31 @@ mod tests {
         // Ordnance spawn is recorded (kind + position).
         sh.exec("Airstrike.SpawnOrdnance(100, 5, 200)", "@as").unwrap();
         assert_eq!(host.borrow().airstrikes.last().unwrap(), &("ordnance".to_string(), [100.0, 5.0, 200.0]));
+    }
+
+    /// `Human.*` weapon/ragdoll/grapple flag verbs drive the real per-human flag store through Lua.
+    #[test]
+    fn game_lua_human_flags() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        let g: i64 = 0x1000;
+        assert!(host.borrow().human_weapons_enabled(g as u64), "weapons enabled by default");
+        sh.exec(&format!("Human.DisableWeapons({g})"), "@hu").unwrap();
+        assert!(!host.borrow().human_weapons_enabled(g as u64), "DisableWeapons persisted");
+        sh.exec(&format!("Human.EnableWeapons({g})"), "@hu").unwrap();
+        assert!(host.borrow().human_weapons_enabled(g as u64));
+
+        sh.exec(&format!("Human.Knockdown({g})"), "@hu").unwrap();
+        assert!(host.borrow().human_is_knocked_down(g as u64), "Knockdown ragdolls the human");
+
+        // StopGrappling clears the grapple flag; IsGrappling reads the real store.
+        host.borrow_mut().human_flags.entry(g as u64).or_default().grappling = true;
+        let grap: bool = sh.eval(&format!("return Human.IsGrappling({g})")).unwrap();
+        assert!(grap);
+        sh.exec(&format!("Human.StopGrappling({g})"), "@hu").unwrap();
+        assert!(!host.borrow().human_is_grappling(g as u64));
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
