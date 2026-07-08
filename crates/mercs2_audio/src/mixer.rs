@@ -33,49 +33,92 @@ pub trait SampleSource: Send {
 }
 
 /// A resident PCM wave (decoded from a wave bank). Interleaved int16, `channels`-wide.
+///
+/// The clip's native sample rate rarely matches the mixer's, so [`fill`](SampleSource::fill) **resamples
+/// on the fly** — a fractional source cursor advances by `src_rate / dst_rate` per output frame with
+/// linear interpolation. This is the engine's per-voice pitch step (`PalSoundWaveDX8`, `FUN_00839ae0`):
+/// a 22 050 Hz clip played into a 44 100 Hz mix advances the cursor at 0.5 frames/output-frame, so it
+/// plays at the correct pitch and duration rather than an octave high.
 #[derive(Clone, Debug)]
 pub struct PcmSource {
     data: Vec<i16>,
     channels: usize,
-    cursor: usize, // in frames
+    /// Fractional source-frame cursor (resampling position).
+    pos: f64,
+    /// Source frames advanced per output frame (`src_rate / dst_rate`).
+    step: f64,
 }
 
 impl PcmSource {
-    /// Build from interleaved int16 samples.
+    /// Build from interleaved int16 samples that are **already at the mixer rate** (no resampling).
     pub fn new(data: Vec<i16>, channels: usize) -> PcmSource {
         PcmSource {
             data,
             channels: channels.max(1),
-            cursor: 0,
+            pos: 0.0,
+            step: 1.0,
+        }
+    }
+
+    /// Build a clip that plays at its native `src_rate` into a `dst_rate` mixer, resampling per frame.
+    pub fn with_rate(data: Vec<i16>, channels: usize, src_rate: u32, dst_rate: u32) -> PcmSource {
+        let step = if dst_rate == 0 {
+            1.0
+        } else {
+            (src_rate.max(1) as f64) / (dst_rate as f64)
+        };
+        PcmSource {
+            data,
+            channels: channels.max(1),
+            pos: 0.0,
+            step,
         }
     }
 
     fn frames(&self) -> usize {
         self.data.len() / self.channels
     }
+
+    /// Linear-interpolate source channel `ch` at fractional frame position `pos`.
+    #[inline]
+    fn sample_at(&self, pos: f64, ch: usize) -> i16 {
+        let frames = self.frames();
+        if frames == 0 {
+            return 0;
+        }
+        let base = pos.floor() as usize;
+        let frac = pos - base as f64;
+        let c = ch.min(self.channels - 1);
+        let s0 = self.data[base * self.channels + c] as f64;
+        let s1 = if base + 1 < frames {
+            self.data[(base + 1) * self.channels + c] as f64
+        } else {
+            s0
+        };
+        (s0 + (s1 - s0) * frac).round() as i16
+    }
 }
 
 impl SampleSource for PcmSource {
     fn fill(&mut self, out: &mut [i16], channels: usize) -> usize {
         let want = out.len() / channels;
+        let frames = self.frames();
         let mut written = 0;
-        while written < want && self.cursor < self.frames() {
-            let src = self.cursor * self.channels;
+        while written < want && (self.pos as usize) < frames {
             for ch in 0..channels {
-                // mono→stereo duplicates; stereo→stereo passes through.
-                let s = self.data[src + ch.min(self.channels - 1)];
-                out[written * channels + ch] = s;
+                // mono→stereo duplicates; stereo→stereo passes through — with linear resampling.
+                out[written * channels + ch] = self.sample_at(self.pos, ch);
             }
-            self.cursor += 1;
+            self.pos += self.step;
             written += 1;
         }
         written
     }
     fn is_finished(&self) -> bool {
-        self.cursor >= self.frames()
+        (self.pos as usize) >= self.frames()
     }
     fn reset(&mut self) {
-        self.cursor = 0;
+        self.pos = 0.0;
     }
 }
 
