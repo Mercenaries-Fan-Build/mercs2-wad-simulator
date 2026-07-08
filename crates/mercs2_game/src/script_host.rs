@@ -270,6 +270,15 @@ impl Default for WeaponState {
     }
 }
 
+/// Emit a `[bind]` line to the app log (the same stdout sink as `[world]`/`[lua]`) whenever the game's
+/// Lua drives one of the recorded-command engine bindings — the ground-truth confirmation that the
+/// binding surface is loaded and firing against the game's code. Args are truncated for readability.
+fn log_binding(ns: &str, verb: &str, args: &[String]) {
+    let shown = args.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+    let more = if args.len() > 6 { format!(", …+{}", args.len() - 6) } else { String::new() };
+    println!("[bind] {ns}.{verb}({shown}{more})");
+}
+
 /// Stable hash of a VO cue name → its cue guid, so `VO.Cue(name)` and a later `VO.Cancel(name)` address
 /// the same line (FNV-1a; internal consistency, not the game's exact m2 cue hash).
 fn vo_cue_hash(cue: &str) -> u32 {
@@ -1217,12 +1226,17 @@ impl EngineHost for GameScriptHost {
         w.reserve = w.max_reserve;
     }
     fn sound_cmd(&mut self, verb: &str, args: Vec<String>) {
+        log_binding("Sound", verb, &args);
         self.sound_cmds.push((verb.to_string(), args));
     }
     fn net_event(&mut self, verb: &str, args: Vec<String>) {
+        log_binding("Net", verb, &args);
         self.net_events.push((verb.to_string(), args));
     }
     fn script_cmd(&mut self, verb: &str, args: Vec<String>) {
+        // `verb` is already namespaced ("Ns.Verb"); split for a clean log line.
+        let (ns, v) = verb.split_once('.').unwrap_or(("Script", verb));
+        log_binding(ns, v, &args);
         self.script_cmds.push((verb.to_string(), args));
     }
 }
@@ -1242,8 +1256,8 @@ pub fn run_interior_boot() -> Vec<SpawnRequest> {
                 );
                 return spawns;
             }
-            Ok(_) => eprintln!("[script] real boot produced no spawns; using inline glue"),
-            Err(e) => eprintln!("[script] real boot failed ({e}); using inline glue"),
+            Ok(_) => println!("[script] real boot produced no spawns; using inline glue"),
+            Err(e) => println!("[script] real boot failed ({e}); using inline glue"),
         }
     }
     run_interior_boot_inline()
@@ -1267,19 +1281,26 @@ pub fn resident_script_host(host: Rc<RefCell<GameScriptHost>>) -> Option<ScriptH
     let sh = match sh {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[script] resident host init failed ({e}); world runs script-less");
+            println!("[script] resident host init failed ({e}); world runs script-less");
             return None;
         }
     };
-    if let Err(e) = sh.register_engine(host) {
-        eprintln!("[script] resident register_engine failed ({e}); world runs script-less");
-        return None;
+    match sh.register_engine_reported(host) {
+        Ok(cov) => {
+            let ns = cov.len();
+            let total: usize = cov.iter().map(|c| c.required.len()).sum();
+            println!("[bind] engine binding surface installed: {total} cfuncs across {ns} namespaces (watch for [bind] lines as the game's Lua drives them)");
+        }
+        Err(e) => {
+            println!("[script] resident register_engine failed ({e}); world runs script-less");
+            return None;
+        }
     }
     // Auto-stub the binding tables that game modules touch at load time (logged no-ops); the real
     // gameplay bindings (Pg.Spawn/Object.*/Event/Sound/Ai) stay live.
     let trace: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
     if let Err(e) = sh.enable_autostub(trace) {
-        eprintln!("[script] resident autostub failed ({e}); world runs script-less");
+        println!("[script] resident autostub failed ({e}); world runs script-less");
         return None;
     }
     Some(sh)
@@ -1309,7 +1330,7 @@ pub fn run_boot_flow(sh: &ScriptHost, contract: &str, character: &str) {
     );
     match sh.exec(&src, "@boot_flow") {
         Ok(()) => println!("[world] ===== boot flow returned (Start + spawn) ====="),
-        Err(e) => eprintln!("[world] ===== boot flow error (first divergence): {e} ====="),
+        Err(e) => println!("[world] ===== boot flow error (first divergence): {e} ====="),
     }
 }
 
@@ -1321,7 +1342,7 @@ pub fn pump_resident(sh: &ScriptHost, dt: f32) {
         &format!("if Event and Event.__pump then Event.__pump({dt}) end"),
         "@resident_pump",
     ) {
-        eprintln!("[script] resident pump error: {e}");
+        println!("[script] resident pump error: {e}");
     }
 }
 
@@ -1386,12 +1407,12 @@ pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
     let sh = match ScriptHost::bare() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[script] host init failed: {e}");
+            println!("[script] host init failed: {e}");
             return Vec::new();
         }
     };
     if let Err(e) = sh.register_engine(host.clone()) {
-        eprintln!("[script] register_engine failed: {e}");
+        println!("[script] register_engine failed: {e}");
         return Vec::new();
     }
     let o = PMC_INTERIOR_ACTOR_ORIGIN;
@@ -1407,7 +1428,7 @@ pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
         z = o[2]
     );
     if let Err(e) = sh.exec(&src, "@interior_boot") {
-        eprintln!("[script] interior boot failed: {e}");
+        println!("[script] interior boot failed: {e}");
         return Vec::new();
     }
     let spawns = std::mem::take(&mut host.borrow_mut().spawns);
@@ -1898,6 +1919,25 @@ mod tests {
         sh.exec("Player.SetGrappleEnabled(true); Player.SetAimMode(2)", "@pl").unwrap();
         assert!(host.borrow().player_mode("grapple_enabled", false));
         assert_eq!(host.borrow().player_scalars.get("aim_mode").copied(), Some(2.0));
+    }
+
+    /// The recorded-command bindings (record_all / sound_cmd / net_event) capture the game's calls as
+    /// real intents AND emit `[bind]` app-log lines — the ground-truth that the surface is live.
+    #[test]
+    fn game_lua_recorded_bindings_capture_and_log() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // A generic script_cmd (Ai spawner control), a net_event, and a sound_cmd.
+        sh.exec("Ai.SetRoadSpawning(true)", "@r").unwrap();
+        sh.exec(r#"Net.SendEvent_Fanfare("victory", 3)"#, "@r").unwrap();
+        sh.exec(r#"Sound.AddFactionMusic(42, "china_theme")"#, "@r").unwrap();
+
+        let h = host.borrow();
+        assert!(h.script_cmds.iter().any(|(v, _)| v == "Ai.SetRoadSpawning"), "Ai.SetRoadSpawning recorded");
+        assert!(h.net_events.iter().any(|(v, a)| v == "SendEvent_Fanfare" && a == &["victory", "3"]), "net event recorded with args");
+        assert!(h.sound_cmds.iter().any(|(v, a)| v == "AddFactionMusic" && a == &["42", "china_theme"]), "sound cmd recorded with args");
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

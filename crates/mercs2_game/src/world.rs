@@ -1,4 +1,4 @@
-//! GAME render/boot: the full third-person + free-fly world render path — player avatar, TPS/free
+﻿//! GAME render/boot: the full third-person + free-fly world render path — player avatar, TPS/free
 //! camera toggle, and the 10-stage full load (terrain / heightmap / player / clips / c3 cells /
 //! placements / interior / props). This is GAME code: it spawns the player + the PMC interior + world
 //! content, driving the asset-agnostic engine through its public API (`mercs2_engine::{wad, mesh, pose,
@@ -297,7 +297,7 @@ fn load_world_data(
                 player_loaded = Some(ok);
                 break;
             }
-            Err(e) => eprintln!("[world] player model {name} (0x{hash:08X}) failed ({e}); trying next"),
+            Err(e) => println!("[world] player model {name} (0x{hash:08X}) failed ({e}); trying next"),
         }
     }
     let player = match player_loaded.ok_or_else(|| "no player-model candidate built".to_string()) {
@@ -321,13 +321,13 @@ fn load_world_data(
                         );
                         clips.push(ca);
                     }
-                    None => eprintln!("[world] {name} clip 0x{h:08X} not found"),
+                    None => println!("[world] {name} clip 0x{h:08X} not found"),
                 }
             }
             Some(LoadedModel { hash: h, verts: v, indices: i, draws: d, textures: t, skin: s, clips })
         }
         Err(e) => {
-            eprintln!("[world] player avatar load failed: {e}");
+            println!("[world] player avatar load failed: {e}");
             progress.step("player");
             None
         }
@@ -375,7 +375,7 @@ fn load_world_data(
                 (Some(markers), pmc, named)
             }
             Err(e) => {
-                eprintln!("[placements] load failed: {e}");
+                println!("[placements] load failed: {e}");
                 (None, Vec::new(), std::collections::HashMap::new())
             }
         }
@@ -390,7 +390,7 @@ fn load_world_data(
         match load_pmc_interior(&mut w, recruits, stockpile) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[interior] load failed: {e}");
+                println!("[interior] load failed: {e}");
                 Vec::new()
             }
         }
@@ -414,7 +414,7 @@ fn load_world_data(
         match wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK) {
             Ok(dec) => load_model_props(&mut w, &dec, None, 0.0, usize::MAX),
             Err(e) => {
-                eprintln!("[interior props] state block {PMC_INTERIOR_STATE_BLOCK} decompress failed: {e}");
+                println!("[interior props] state block {PMC_INTERIOR_STATE_BLOCK} decompress failed: {e}");
                 Vec::new()
             }
         }
@@ -670,7 +670,7 @@ fn load_c3_cells(w: &mut wad::Wad, radius: f32, cap: usize) -> Vec<(LoadedModel,
     if near.is_empty() && !all.is_empty() {
         // No mesh cell inside the strict radius (spawn sits in a mesh-less region of the grid):
         // fall back to the nearest cluster within 2× radius, logged so the miss is visible.
-        eprintln!(
+        println!(
             "[cells] no mesh cell within {radius:.0} m of spawn (nearest = cell {} at {:.0} m); falling back to ≤{:.0} m",
             all[0].2, all[0].0, radius * 2.0
         );
@@ -684,7 +684,7 @@ fn load_c3_cells(w: &mut wad::Wad, radius: f32, cap: usize) -> Vec<(LoadedModel,
         let dec = match wad::decompress_block_index(w, blk) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("[cells] cell {cid} block {blk}: decompress failed: {e}");
+                println!("[cells] cell {cid} block {blk}: decompress failed: {e}");
                 continue;
             }
         };
@@ -701,13 +701,13 @@ fn load_c3_cells(w: &mut wad::Wad, radius: f32, cap: usize) -> Vec<(LoadedModel,
             pos = end;
         }
         let Some((hash, s0, s1)) = model else {
-            eprintln!("[cells] cell {cid} block {blk}: model entry vanished on full decompress");
+            println!("[cells] cell {cid} block {blk}: model entry vanished on full decompress");
             continue;
         };
         let (verts, indices, draws, stats) = match mesh::build_indexed_from_container(&dec[s0..s1]) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("[cells] cell {cid} block {blk} model 0x{hash:08X}: container parse FAILED: {e}");
+                println!("[cells] cell {cid} block {blk} model 0x{hash:08X}: container parse FAILED: {e}");
                 continue;
             }
         };
@@ -836,7 +836,7 @@ pub async fn run_scene_world_loading(
             .set_cursor_grab(CursorGrabMode::Confined)
             .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
         {
-            eprintln!("[world] cursor grab unavailable ({e}); arrow keys still steer");
+            println!("[world] cursor grab unavailable ({e}); arrow keys still steer");
         }
         window.set_cursor_visible(false);
     };
@@ -868,7 +868,7 @@ pub async fn run_scene_world_loading(
             );
             scene.set_loading_art(&td);
         }
-        Err(e) => eprintln!("[load] shell.wad loading art unavailable ({e}); spinner only"),
+        Err(e) => println!("[load] shell.wad loading art unavailable ({e}); spinner only"),
     }
     let mut world = World::new();
 
@@ -1174,7 +1174,7 @@ pub async fn run_scene_world_loading(
                                 Ok(()) => {}
                                 Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
                                 Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                                Err(e) => eprintln!("surface error: {e:?}"),
+                                Err(e) => println!("surface error: {e:?}"),
                             }
                             return;
                         }
@@ -1186,12 +1186,12 @@ pub async fn run_scene_world_loading(
                         match rx.try_recv() {
                             Err(std::sync::mpsc::TryRecvError::Empty) => {}
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                eprintln!("[world] loader thread died without a result");
+                                println!("[world] loader thread died without a result");
                                 elwt.exit();
                                 return;
                             }
                             Ok(Err(e)) => {
-                                eprintln!("[world] load failed: {e}");
+                                println!("[world] load failed: {e}");
                                 elwt.exit();
                                 return;
                             }
@@ -1225,7 +1225,7 @@ pub async fn run_scene_world_loading(
                                             })
                                             .take(30)
                                             .collect();
-                                        eprintln!(
+                                        println!(
                                             "[world] SPAWN MARKER unresolved ({} named markers total; none of {candidates:?}). \
                                              spawn-ish markers present: {spawnish:?} — hero at origin (see vanilla_boot_load_order.md)",
                                             data.named_locations.len()
@@ -1499,7 +1499,7 @@ pub async fn run_scene_world_loading(
                             Ok(()) => {}
                             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
                             Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                            Err(e) => eprintln!("surface error: {e:?}"),
+                            Err(e) => println!("surface error: {e:?}"),
                         }
                         return;
                     }
@@ -1521,7 +1521,7 @@ pub async fn run_scene_world_loading(
                     let mdx = src.0.clamp(-80.0, 80.0) * sens;
                     let mdy = src.1.clamp(-80.0, 80.0) * sens * inv_y;
                     if src != (0.0, 0.0) && mouse_dbg_frames < 20 {
-                        eprintln!("[mouse] src={} in=({:+.1},{:+.1}) applied=({:+.4},{:+.4})", mouse_src, src.0, src.1, mdx, mdy);
+                        println!("[mouse] src={} in=({:+.1},{:+.1}) applied=({:+.4},{:+.4})", mouse_src, src.0, src.1, mdx, mdy);
                         mouse_dbg_frames += 1;
                     }
                     mouse_acc = (0.0, 0.0);
@@ -1661,7 +1661,7 @@ pub async fn run_scene_world_loading(
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
                         Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                        Err(e) => eprintln!("surface error: {e:?}"),
+                        Err(e) => println!("surface error: {e:?}"),
                     }
                 }
                 _ => {}
@@ -1674,7 +1674,7 @@ pub async fn run_scene_world_loading(
                 if mouse_src != 2 {
                     if dx.abs() > 2000.0 || dy.abs() > 2000.0 {
                         mouse_src = 2; // absolute-coordinate stream detected -> cursor path
-                        eprintln!("[mouse] absolute-coordinate raw input detected -> cursor-recentre mode");
+                        println!("[mouse] absolute-coordinate raw input detected -> cursor-recentre mode");
                     } else {
                         mouse_raw_acc.0 += dx;
                         mouse_raw_acc.1 += dy;
@@ -1744,7 +1744,7 @@ fn boot_config_from(
             (recruits, stockpile, models, label, prof.active_contract().to_string(), hero_character_name(hero_idx).to_string())
         }
         Err(e) => {
-            eprintln!("[shell] save {} unreadable ({e}) — booting new game", path.display());
+            println!("[shell] save {} unreadable ({e}) — booting new game", path.display());
             (Default::default(), Default::default(), new_game_models(), "new game (save unreadable)".into(), "PmcCon001".into(), "mattias".into())
         }
     }
@@ -1796,7 +1796,7 @@ fn load_from_wad(
                     Ok(t) => {
                         textures.insert(h, t);
                     }
-                    Err(e) => eprintln!("  texture 0x{h:08X} unavailable: {e}"),
+                    Err(e) => println!("  texture 0x{h:08X} unavailable: {e}"),
                 }
             }
         }
@@ -1821,7 +1821,7 @@ fn load_from_wad(
                 Some(ca)
             }
             None => {
-                eprintln!("animation: no decodable clip bound to this model — using synthetic driver");
+                println!("animation: no decodable clip bound to this model — using synthetic driver");
                 None
             }
         }

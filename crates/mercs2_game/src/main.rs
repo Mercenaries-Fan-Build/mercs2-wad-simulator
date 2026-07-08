@@ -1,4 +1,4 @@
-//! `mercs2_game` — the Mercenaries 2 game exe.
+﻿//! `mercs2_game` — the Mercenaries 2 game exe.
 //!
 //! This is the *game* layer: it configures and boots the asset-agnostic engine from the player's real
 //! save. No Mercenaries-specific data lives in the engine; it lives here. The boot:
@@ -50,26 +50,26 @@ fn save_games_dir() -> Option<PathBuf> {
 fn newest_save_interior() -> (pmc::RecruitUnlocks, pmc::Stockpile) {
     let dir = save_games_dir();
     let path = dir.as_ref().and_then(|d| newest_profile(d));
-    eprintln!("[save] SaveGames dir = {dir:?}");
-    eprintln!("[save] newest .profile = {path:?}");
+    println!("[save] SaveGames dir = {dir:?}");
+    println!("[save] newest .profile = {path:?}");
     let prof = path
         .as_ref()
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| match save::parse(&b) {
             Ok(p) => Some(p),
             Err(e) => {
-                eprintln!("[save] parse FAILED: {e}");
+                println!("[save] parse FAILED: {e}");
                 None
             }
         });
     let ss = prof.as_ref().and_then(|p| match p.save_state() {
         Ok(s) => Some(s),
         Err(e) => {
-            eprintln!("[save] save_state FAILED: {e}");
+            println!("[save] save_state FAILED: {e}");
             None
         }
     });
-    eprintln!("[save] unlocked_starters = {:?}", ss.as_ref().map(|s| &s.unlocked_starters));
+    println!("[save] unlocked_starters = {:?}", ss.as_ref().map(|s| &s.unlocked_starters));
     let recruits = ss
         .map(|s| pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
         .unwrap_or_default();
@@ -106,7 +106,7 @@ fn main() {
             Some(mut w) => {
                 let _ = pmc::load_pmc_interior(&mut w, recruits, &stockpile);
             }
-            None => eprintln!("--interior-assemble: no vz.wad found"),
+            None => println!("--interior-assemble: no vz.wad found"),
         }
         return;
     }
@@ -267,7 +267,7 @@ fn main() {
             .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
         if let Some(mut w) = mercs2_engine::wad::registry_vz_wad().and_then(|p| mercs2_engine::wad::open(&p).ok()) {
             let Some((m, _, _)) = mercs2_engine::game_world::load_model_by_hash(&mut w, mhash) else {
-                eprintln!("--tex-audit: model 0x{mhash:08X} did not build");
+                println!("--tex-audit: model 0x{mhash:08X} did not build");
                 return;
             };
             let mut texs: Vec<u32> = m.draws.iter().filter_map(|d| d.diffuse).collect();
@@ -370,7 +370,7 @@ fn main() {
         // Same as pmc.rs: hall at actor origin (3750,450,-3840), identity quat.
         let origin = Vec3::new(3750.0, 450.0, -3840.0);
         let Some((m, _, _)) = mercs2_engine::game_world::load_model_by_hash_state(&mut w, 0x39AF17DC, 0x01) else {
-            eprintln!("--coll-probe: hall mesh did not build"); return;
+            println!("--coll-probe: hall mesh did not build"); return;
         };
         let mut tris: Vec<[Vec3; 3]> = Vec::new();
         for idx in m.indices.chunks_exact(3) {
@@ -425,7 +425,7 @@ fn main() {
     if args.iter().any(|a| a == "--c3-flat") {
         if let Some(p) = mercs2_engine::wad::registry_vz_wad() {
             if let Err(e) = mercs2_engine::diag::c3_flat_report(&p) {
-                eprintln!("--c3-flat: {e}");
+                println!("--c3-flat: {e}");
             }
         }
         return;
@@ -468,7 +468,7 @@ fn main() {
     let profile_path = match explicit.or_else(|| save_games_dir().and_then(|d| newest_profile(&d))) {
         Some(p) => p,
         None => {
-            eprintln!("mercs2_game: no .profile save found in %USERPROFILE%\\Documents\\My Games\\Mercenaries 2\\SaveGames. Pass a .profile path.");
+            println!("mercs2_game: no .profile save found in %USERPROFILE%\\Documents\\My Games\\Mercenaries 2\\SaveGames. Pass a .profile path.");
             std::process::exit(1);
         }
     };
@@ -476,14 +476,14 @@ fn main() {
     let bytes = match std::fs::read(&profile_path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("mercs2_game: read {}: {e}", profile_path.display());
+            println!("mercs2_game: read {}: {e}", profile_path.display());
             std::process::exit(1);
         }
     };
     let profile = match save::parse(&bytes) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mercs2_game: parse {}: {e}", profile_path.display());
+            println!("mercs2_game: parse {}: {e}", profile_path.display());
             std::process::exit(1);
         }
     };
@@ -600,7 +600,7 @@ fn require_vz_wad() -> String {
     match mercs2_engine::wad::registry_vz_wad() {
         Some(p) => p,
         None => {
-            eprintln!(
+            println!(
                 "mercs2_game: no vz.wad found — install Mercenaries 2 so that the EA Games registry \
                  key resolves to a folder containing data\\vz.wad."
             );
@@ -667,6 +667,6 @@ fn populate_pmc_interior(
             }
             println!("[game] PMC interior: {n} pieces placed");
         }
-        Err(e) => eprintln!("[game] PMC interior load failed: {e}"),
+        Err(e) => println!("[game] PMC interior load failed: {e}"),
     }
 }
