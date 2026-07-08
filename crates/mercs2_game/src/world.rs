@@ -284,11 +284,11 @@ fn update_held_weapon(
     player_model: u32,
     hand_bone: usize,
 ) {
-    use mercs2_core::glam::{Mat4, Quat, Vec3};
-    // Grip transform in the hand-bone frame (tunable): a small offset into the palm + an orientation
-    // to align the AK's local axes with the fist. Needs a visual calibration pass to finalize.
+    use mercs2_core::glam::{Mat4, Vec3};
+    // Grip transform in the hand-bone frame (tunable, first-pass). NOTE: the AK itself is a HARDCODED
+    // stand-in (see load_world_data) — the real held weapon should come from the hero's inventory, and in
+    // the PMC safe zone the hero is unarmed. Calibrating this grip is deferred until that's wired.
     let grip = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2) * Mat4::from_translation(Vec3::new(0.05, 0.0, 0.0));
-
     let (ppos, prot, clip, time) = {
         let Ok(t) = world.get::<&Transform>(player_e) else { return };
         let Ok(a) = world.get::<&AnimState>(player_e) else { return };
@@ -428,24 +428,13 @@ pub(crate) fn load_world_data(
             let names = ["idle", "walk", "run", "swim"];
             player_swim_clip = (swim_clip != 0).then_some(swim_clip);
 
-            // Held weapon: locate the hero's right-hand bone (`bone_rhand` = m2("bone_rhand") =
-            // 0xD34F7713, in every merc rig) and load the gun MODEL. Weapon models are named
-            // `global_weapon_<name>` (per the corpus: `wpn_*` blocks are STATS and the registry "Assault
-            // Rifle" hashes are ENTITY TEMPLATES, not meshes) — AK-47 is the default sidearm.
-            const BONE_RHAND: u32 = 0xD34F_7713;
-            if let Some(hb) = s.rig.iter().position(|b| b.name_hash == BONE_RHAND) {
-                let wpn_hash = mercs2_formats::hash::pandemic_hash_m2("global_weapon_ak47");
-                match mercs2_engine::game_world::load_model_by_hash(assets.base_mut(), wpn_hash) {
-                    Some((wm, _, _)) => {
-                        println!("[world] held weapon global_weapon_ak47 (0x{wpn_hash:08X}): {} verts, bone_rhand rig idx {hb}", wm.verts.len());
-                        weapon = Some(wm);
-                        weapon_hand_bone = Some(hb);
-                    }
-                    None => println!("[world] held weapon model 0x{wpn_hash:08X} did not load"),
-                }
-            } else {
-                println!("[world] no bone_rhand in hero rig — held weapon skipped");
-            }
+            // Held weapon: NOT loaded here. There is no weapon-to-hand mapping in the exe that hands the
+            // hero a fixed gun — the equipped weapon is the hero's INVENTORY (`Human.Inventory`
+            // GetPrimaryWeapon/SetAllWeapons), populated by the loadout Lua / the save's inventory, and in
+            // the PMC safe zone the hero is UNARMED. So `weapon` stays `None` until that inventory is
+            // wired; the attachment mechanism (`update_held_weapon`) activates only when a real weapon is
+            // equipped. (Was a hardcoded `global_weapon_ak47` stand-in — removed: nothing in the
+            // disassembly asks for it.)
             let mut clips: Vec<ClipAnim> = Vec::new();
             for (found, (&h, name)) in load_clips_for_rig(assets.base_mut(), &hier, &wanted)
                 .into_iter()
@@ -1787,9 +1776,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     self.spawn_interior,
                     dt,
                 );
-                // Player weapon fire: raycast from the eye along the aim → an impact (decal + burst).
+                // Player weapon fire — STAND-IN (raycast + invented range/interval; the real path is the
+                // equipped weapon's `Weapon.*` fire through its `wpn_*` stats). Gated on actually holding a
+                // weapon, so with no equipped gun (e.g. the unarmed PMC) there is no fire.
                 self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
-                let can_fire = !self.player.swim.is_swimming();
+                let can_fire = self.weapon_entity.is_some() && !self.player.swim.is_swimming();
                 if can_fire && inp.held(Action::PrimaryAttack) && self.fire_cooldown <= 0.0 {
                     self.fire_cooldown = PLAYER_FIRE_INTERVAL;
                     let aim = Vec3::new(self.tp_pitch.cos() * self.tp_yaw.sin(), self.tp_pitch.sin(), self.tp_pitch.cos() * self.tp_yaw.cos()).normalize();
