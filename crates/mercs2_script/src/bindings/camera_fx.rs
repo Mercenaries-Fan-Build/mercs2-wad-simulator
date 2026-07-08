@@ -47,30 +47,38 @@ pub const REQUIRED: &[Required] = &[
 /// getter the gameplay Lua reads (e.g. `self.nHeading = Camera.GetYaw(cam)`); with no live camera
 /// heading to report it returns a neutral 0° — a value the callers' arithmetic accepts. `GetPitch`/
 /// `GetFOV` are not called by the corpus and stay no-ops.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for name in [
-        "SetYaw",
-        "GetPitch",
-        "SetPitch",
-        "StopBlending",
-        "Shake",
-        "SetFOV",
-        "GetFOV",
-        "SetPosition",
-        "SetLookAt",
-        "Hold",
-        "Follow",
-        "Blend",
-        "SetShot",
-    ] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-    }
-    // Read as a heading by gameplay Lua — neutral 0° default.
-    b.real(
-        "GetYaw",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(0.0f64))?,
-    )?;
+
+    // Pose/shake/blend → the real cinematic camera controller state on the host.
+    let h = host.clone();
+    b.real("SetYaw", lua.create_function(move |_, y: f32| { h.borrow_mut().camera_set_yaw(y); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetYaw", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().camera_yaw()))?)?;
+    let h = host.clone();
+    b.real("SetPitch", lua.create_function(move |_, p: f32| { h.borrow_mut().camera_set_pitch(p); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetPitch", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().camera_pitch()))?)?;
+    let h = host.clone();
+    b.real("SetFOV", lua.create_function(move |_, f: f32| { h.borrow_mut().camera_set_fov(f); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetFOV", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().camera_fov()))?)?;
+    let h = host.clone();
+    b.real("SetPosition", lua.create_function(move |_, (x, y, z): (f32, f32, f32)| { h.borrow_mut().camera_set_position([x, y, z]); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetLookAt", lua.create_function(move |_, (x, y, z): (f32, f32, f32)| { h.borrow_mut().camera_set_lookat([x, y, z]); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Shake", lua.create_function(move |_, intensity: Option<f32>| { h.borrow_mut().camera_shake(intensity.unwrap_or(1.0)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Blend", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().camera_set_blending(true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("StopBlending", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().camera_set_blending(false); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Follow", lua.create_function(move |_, guid: Option<i64>| { h.borrow_mut().camera_follow(guid.unwrap_or(0) as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Hold", lua.create_function(move |_, on: Option<bool>| { h.borrow_mut().camera_hold(on.unwrap_or(true)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetShot", lua.create_function(move |_, shot: String| { h.borrow_mut().camera_set_shot(&shot); Ok(()) })?)?;
 
     // Preserve the sibling `Camera` surface installed earlier by `camera.rs`; `install_global` below
     // replaces the global table, so copy those functions into ours first (no name overlap).

@@ -260,6 +260,56 @@ pub trait EngineHost {
     fn render_state_ref(&self) -> Option<&mercs2_core::RenderState> {
         None
     }
+
+    // ===== Cinematic camera controller (`CameraFx.*` — script-driven camera pose/shake/blend). =====
+    /// `SetYaw`/`GetYaw` (heading, radians).
+    fn camera_set_yaw(&mut self, yaw: f32) {
+        let _ = yaw;
+    }
+    fn camera_yaw(&self) -> f32 {
+        0.0
+    }
+    /// `SetPitch`/`GetPitch` (elevation, radians).
+    fn camera_set_pitch(&mut self, pitch: f32) {
+        let _ = pitch;
+    }
+    fn camera_pitch(&self) -> f32 {
+        0.0
+    }
+    /// `SetFOV`/`GetFOV` (field of view, degrees).
+    fn camera_set_fov(&mut self, fov: f32) {
+        let _ = fov;
+    }
+    fn camera_fov(&self) -> f32 {
+        60.0
+    }
+    /// `SetPosition` / `SetLookAt` — the camera eye + target in world space.
+    fn camera_set_position(&mut self, pos: [f32; 3]) {
+        let _ = pos;
+    }
+    fn camera_set_lookat(&mut self, target: [f32; 3]) {
+        let _ = target;
+    }
+    /// `Shake(intensity)` — set the camera-shake intensity.
+    fn camera_shake(&mut self, intensity: f32) {
+        let _ = intensity;
+    }
+    /// `Blend`/`StopBlending` — whether a camera blend is in progress.
+    fn camera_set_blending(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// `Follow(guid)` — the object the cinematic camera follows (0 = none).
+    fn camera_follow(&mut self, guid: u64) {
+        let _ = guid;
+    }
+    /// `Hold(on)` — freeze the camera at its current pose.
+    fn camera_hold(&mut self, on: bool) {
+        let _ = on;
+    }
+    /// `SetShot(name)` — select a named cinematic shot.
+    fn camera_set_shot(&mut self, shot: &str) {
+        let _ = shot;
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1285,9 +1335,10 @@ mod tests {
         // (mercs2_ui::WidgetTree) — widget/image/text/sprite/movie/flash/minimap create+mutate+query
         // (real +55); Gui wired the world-marker set (mercs2_ui::MarkerSet) + texture/font handles
         // (real +16); render-state vertical wired Atmosphere (generic value/color/int store + time) +
-        // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40).
-        const EXPECTED_REAL: usize = 586;
-        const EXPECTED_STUB: usize = 500;
+        // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40); CameraFx wired the cinematic
+        // camera controller pose/shake/blend/follow (real +13).
+        const EXPECTED_REAL: usize = 599;
+        const EXPECTED_STUB: usize = 487;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

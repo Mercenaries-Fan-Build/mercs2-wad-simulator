@@ -109,6 +109,43 @@ pub struct GameScriptHost {
     markers: mercs2_ui::MarkerSet,
     /// Global render/post-FX parameter state the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua drives.
     render: mercs2_core::RenderState,
+    /// Cinematic camera controller state the `CameraFx.*` Lua drives.
+    camera_fx: CameraFxState,
+}
+
+/// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
+/// system applies. The engine owns it; the camera update reads it.
+#[derive(Clone, Debug)]
+pub struct CameraFxState {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov: f32,
+    pub position: [f32; 3],
+    pub lookat: [f32; 3],
+    pub shake: f32,
+    pub blending: bool,
+    pub held: bool,
+    /// The object the camera follows (`Follow`), 0 = none.
+    pub follow_guid: u64,
+    /// The selected named cinematic shot (`SetShot`).
+    pub shot: String,
+}
+
+impl Default for CameraFxState {
+    fn default() -> Self {
+        CameraFxState {
+            yaw: 0.0,
+            pitch: 0.0,
+            fov: 60.0,
+            position: [0.0; 3],
+            lookat: [0.0; 3],
+            shake: 0.0,
+            blending: false,
+            held: false,
+            follow_guid: 0,
+            shot: String::new(),
+        }
+    }
 }
 
 /// Stable hash of a VO cue name → its cue guid, so `VO.Cue(name)` and a later `VO.Cancel(name)` address
@@ -197,6 +234,7 @@ impl GameScriptHost {
             hud: mercs2_ui::WidgetTree::new(),
             markers: mercs2_ui::MarkerSet::new(),
             render: mercs2_core::RenderState::new(),
+            camera_fx: CameraFxState::default(),
         }
     }
 
@@ -598,6 +636,21 @@ impl EngineHost for GameScriptHost {
     fn render_state_ref(&self) -> Option<&mercs2_core::RenderState> {
         Some(&self.render)
     }
+
+    // ===== Cinematic camera controller. =====
+    fn camera_set_yaw(&mut self, yaw: f32) { self.camera_fx.yaw = yaw; }
+    fn camera_yaw(&self) -> f32 { self.camera_fx.yaw }
+    fn camera_set_pitch(&mut self, pitch: f32) { self.camera_fx.pitch = pitch; }
+    fn camera_pitch(&self) -> f32 { self.camera_fx.pitch }
+    fn camera_set_fov(&mut self, fov: f32) { self.camera_fx.fov = fov; }
+    fn camera_fov(&self) -> f32 { self.camera_fx.fov }
+    fn camera_set_position(&mut self, pos: [f32; 3]) { self.camera_fx.position = pos; }
+    fn camera_set_lookat(&mut self, target: [f32; 3]) { self.camera_fx.lookat = target; }
+    fn camera_shake(&mut self, intensity: f32) { self.camera_fx.shake = intensity; }
+    fn camera_set_blending(&mut self, on: bool) { self.camera_fx.blending = on; }
+    fn camera_follow(&mut self, guid: u64) { self.camera_fx.follow_guid = guid; }
+    fn camera_hold(&mut self, on: bool) { self.camera_fx.held = on; }
+    fn camera_set_shot(&mut self, shot: &str) { self.camera_fx.shot = shot.to_string(); }
 
     // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
     fn object_attach(&mut self, child: u64, parent: u64) {
@@ -1180,6 +1233,14 @@ mod tests {
         // Graphics shadow distance Set↔Get round-trips.
         let sd: f32 = sh.eval("Graphics.SetShadowBaseDistance(250); return Graphics.GetShadowBaseDistance()").unwrap();
         assert_eq!(sd, 250.0);
+
+        // CameraFx cinematic controller: pose Set↔Get + follow/shake land on the host.
+        let yaw: f32 = sh.eval("Camera.SetYaw(1.25); return Camera.GetYaw()").unwrap();
+        assert_eq!(yaw, 1.25);
+        sh.exec("Camera.SetPosition(1,2,3); Camera.Follow(0x77); Camera.Shake(0.5)", "@cam").unwrap();
+        assert_eq!(host.borrow().camera_fx.position, [1.0, 2.0, 3.0]);
+        assert_eq!(host.borrow().camera_fx.follow_guid, 0x77);
+        assert_eq!(host.borrow().camera_fx.shake, 0.5);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
