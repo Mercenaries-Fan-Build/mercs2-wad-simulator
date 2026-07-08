@@ -233,11 +233,49 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // behavior by later world/AI silos; the game's Lua control flow runs unchanged here.
     // Layer/asset load, context actions, boundary + pursuit control, contract lifecycle, heli-wave/
     // skirmish spawners → recorded Pg commands the world/pursuit/streaming runtime drains.
+    // Layer load/unload/reload → the real async completion: register the status-change callback (arg 3)
+    // into a pending queue that the resident pump fires next tick with success — the engine's
+    // layer-streaming callback that lets MrxLayerManager fulfil the request + fire the gameplay-setup
+    // signal (_AttemptGameplaySetup{"static"/"dynamic"}). Deferred (not synchronous) so the fire doesn't
+    // reenter MrxLayerManager mid-`_ProcessOpQueue`. Returns true (accepted).
+    for (name, req) in [("LoadLayer", "Load"), ("ReloadLayer", "Reload"), ("UnloadLayer", "Unload")] {
+        let req = req;
+        b.real(name, lua.create_function(move |lua, args: mlua::MultiValue| {
+            // args: (layerName, [dynamic], callback, [cbdata], [screen]); the callback is the first
+            // Function; the layer name is the first string.
+            let layer = args.iter().find_map(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+            let cb = args.iter().find_map(|v| if let mlua::Value::Function(f) = v { Some(f.clone()) } else { None });
+            if let Some(cb) = cb {
+                let pend: mlua::Table = match lua.globals().get("__pending_layer_loads") {
+                    Ok(t) => t,
+                    Err(_) => { let t = lua.create_table()?; lua.globals().set("__pending_layer_loads", t.clone())?; t }
+                };
+                let entry = lua.create_table()?;
+                entry.set("cb", cb)?;
+                entry.set("req", req)?;
+                entry.set("layer", layer)?;
+                pend.push(entry)?;
+            }
+            Ok(true)
+        })?)?;
+    }
+    // Flush hook the resident pump calls each tick: fire each pending layer-load callback with success
+    // (`_LayerStatusChange(sRequestType, sLayerName, sLayerType, bSuccess=true)`).
+    b.extra("__flush_layer_loads", lua.create_function(|lua, ()| {
+        let Ok(pend) = lua.globals().get::<mlua::Table>("__pending_layer_loads") else { return Ok(()) };
+        let entries: Vec<mlua::Table> = pend.clone().sequence_values::<mlua::Table>().flatten().collect();
+        lua.globals().set("__pending_layer_loads", lua.create_table()?)?;
+        for e in entries {
+            let cb: mlua::Function = e.get("cb")?;
+            let req: String = e.get("req")?;
+            let layer: String = e.get("layer")?;
+            let _ = cb.call::<()>((req, layer, "layer", true));
+        }
+        Ok(())
+    })?)?;
+
     super::record_all(&mut b, lua, host, "Pg", &[
         "ResetSingletonDone",
-        "LoadLayer",
-        "UnloadLayer",
-        "ReloadLayer",
         "LoadAsset",
         "UnloadAsset",
         "ReloadAsset",

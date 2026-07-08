@@ -1413,8 +1413,13 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, contra
 /// so `TimerRelative` fires and posted events dispatch. A no-op if `Event`/`__pump` aren't present.
 /// Errors are logged, not fatal (a mission-script bug must not kill the render loop).
 pub fn pump_resident(sh: &ScriptHost, dt: f32) {
+    // Fire completed layer loads (the engine's async streaming callback) THEN pump timers/events, so the
+    // MrxLayerManager fulfilment + the gameplay-setup signal it triggers advance each tick.
     if let Err(e) = sh.exec(
-        &format!("if Event and Event.__pump then Event.__pump({dt}) end"),
+        &format!(
+            "if Pg and Pg.__flush_layer_loads then Pg.__flush_layer_loads() end\n\
+             if Event and Event.__pump then Event.__pump({dt}) end"
+        ),
         "@resident_pump",
     ) {
         println!("[script] resident pump error: {e}");
@@ -2040,6 +2045,34 @@ mod tests {
              'world fully loaded'); it did not — a regression in the GameStateChange bridge / GlobalEnter \
              gates (_GuiLoaded/_LocalPlayerJoined) / fade path / pump loop"
         );
+    }
+
+    /// `Pg.LoadLayer` registers its status-change callback and the pump's `Pg.__flush_layer_loads`
+    /// fires it with success — the engine's async layer-streaming completion that lets MrxLayerManager
+    /// fulfil the request and signal gameplay setup (`_AttemptGameplaySetup{"static"}`).
+    #[test]
+    fn pg_loadlayer_fires_completion_callback() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // LoadLayer returns true (accepted) and defers the callback; nothing fires until the flush.
+        let accepted: bool = sh.eval(r#"
+            _fired = nil
+            local ok = Pg.LoadLayer("testlayer", true, function(req, name, typ, success)
+                _fired = { req, name, success }
+            end, {})
+            return ok
+        "#).unwrap();
+        assert!(accepted, "LoadLayer accepted");
+        assert!(sh.eval::<bool>("return _fired == nil").unwrap(), "callback deferred, not synchronous");
+
+        // The pump flush fires it with (Load, layer, ..., success=true).
+        pump_resident(&sh, 0.1);
+        let (req, name, ok): (String, String, bool) = sh
+            .eval("return _fired[1], _fired[2], _fired[3]")
+            .unwrap();
+        assert_eq!((req.as_str(), name.as_str(), ok), ("Load", "testlayer", true));
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
