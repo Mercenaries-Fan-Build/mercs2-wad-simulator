@@ -1680,8 +1680,8 @@ mod tests {
         // action residue (Hud/Object/Lti/Pg/Camera/Sys/Gui/Ai/Atmosphere/Vo/ObjectFilter/ObjectState
         // animation/menu/spawner/param/marker-category verbs) → recorded command logs (real +231).
         // Remaining unbacked = genuine dev stubs (debug menu, asset dumps) + a few getters/subsystem gaps.
-        const EXPECTED_REAL: usize = 1027;
-        const EXPECTED_STUB: usize = 59;
+        const EXPECTED_REAL: usize = 1058;
+        const EXPECTED_STUB: usize = 28;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1711,7 +1711,7 @@ mod tests {
         assert_eq!(by("Pg").real_count(), 80);
         assert_eq!(by("Object").real_count(), 86);
         assert_eq!(by("Object").stub_count(), 1);
-        assert_eq!(by("Player").real_count(), 83);
+        assert_eq!(by("Player").real_count(), 107);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 40);
         assert_eq!(by("Sound").real_count(), 88);

@@ -114,10 +114,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("ForceExitSeatNoSnap", lua.create_function(move |_, g: i64| { h.borrow_mut().human_exit_seat(g as u64); Ok(()) })?)?;
 
-    // --- UNBACKED residue: transform persistence + scrub need the transform/cleanup runtime. ---
-    for name in ["PersistTransform", "Scrub"] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    // Transform persistence + scrub → recorded Human commands the transform/cleanup runtime drains.
+    super::record_all(&mut b, lua, host, "Human", &["PersistTransform", "Scrub"])?;
 
     b.install_global(GLOBAL)
 }

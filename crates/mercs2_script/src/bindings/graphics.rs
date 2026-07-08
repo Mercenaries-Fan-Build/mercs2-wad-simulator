@@ -65,11 +65,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("SetBoundaryEffect", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.boundary_effect = v; } Ok(()) })?)?;
 
-    // UNBACKED residue: screenshot capture, frame-sync, shader reload, tiny-geometry debug viz — all
-    // need the live render device. Honest no-ops.
-    for name in ["ScreenShot", "SetNumFrameSync", "ReloadShaders", "InitTinyGeometry", "ShowTinyGeometryObject"] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-    }
+    // Screenshot capture, frame-sync, shader reload, tiny-geometry debug viz → recorded Graphics
+    // commands the render device drains.
+    super::record_all(&mut b, lua, host, "Graphics", &[
+        "ScreenShot", "SetNumFrameSync", "ReloadShaders", "InitTinyGeometry", "ShowTinyGeometryObject",
+    ])?;
 
     b.install_global(GLOBAL)
 }

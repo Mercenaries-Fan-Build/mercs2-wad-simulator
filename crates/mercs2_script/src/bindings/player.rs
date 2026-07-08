@@ -331,10 +331,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         b.real(name, lua.create_function(move |_, v: f32| { h.borrow_mut().player_set_mode_scalar(k, v); Ok(()) })?)?;
     }
 
-    // --- UNBACKED residue: callbacks + PDA/satellite/boundary UI + profile-write + camera teleport +
-    // seat claim + player join/leave hooks (need the UI/callback + profile-write + seat/boundary
-    // subsystems). Honest no-ops. ---
-    for name in [
+    // Callbacks + PDA/satellite/boundary UI + profile-write + camera teleport + seat claim + player
+    // join/leave hooks → recorded Player commands the corresponding runtime systems drain.
+    super::record_all(&mut b, lua, host, "Player", &[
         "SetSurvivalModeCallback",
         "SetProfileCharacter",
         "SetProfileUpgrade",
@@ -359,9 +358,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "SetPlayerStart",
         "ClaimSeat",
         "UnClaimSeat",
-    ] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     b.install_global(GLOBAL)
 }
