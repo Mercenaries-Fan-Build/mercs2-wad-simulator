@@ -246,51 +246,233 @@ const STUB_NAMES: &[&str] = &[
     "AddPdaMapBlips",
 ];
 
-/// Faithful HUD binding surface. We render no Scaleform GFx HUD yet, so every mutator is a silent
-/// no-op and every query returns the sane engine default (a widget with default transform/state).
-/// This keeps the game's Lua HUD managers running their exact control flow — the only observable
-/// difference from retail is the absent overlay. No [`crate::EngineHost`] method is needed.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+/// HUD binding surface, wired to the retained-mode `mercs2_ui::WidgetTree` on the host (via the
+/// `EngineHost::hud`/`hud_ref` seam). Every widget/image/text/sprite/movie/flash/minimap node is real
+/// scene-graph state: create mints a handle, the mutators write the node's fields, and the getters read
+/// them back (`Set*`→`Get*` round-trip). The GFx rasterization of the tree is a separate render pass;
+/// the render/callback/animation-only cfuncs (callbacks, interpolation, pie-slice, PDA blips) stay
+/// faithful no-ops until that pass + the input/anim seams exist (see burn-down).
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
+    use mercs2_ui::WidgetKind;
 
-    // --- mutators: faithful no-ops (ignore all args, return nil) ---
-    for &name in STUB_NAMES {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // create(kind) → handle; single-value setter on a widget field; getter reading a widget field.
+    macro_rules! create {
+        ($name:literal, $kind:expr) => {{
+            let hh = host.clone();
+            b.real($name, lua.create_function(move |_, _: MultiValue| {
+                Ok(hh.borrow_mut().hud().map(|t| t.create($kind) as i64).unwrap_or(0))
+            })?)?;
+        }};
+    }
+    macro_rules! wset {
+        ($name:literal, $t:ty, |$wd:ident, $v:ident| $body:block) => {{
+            let hh = host.clone();
+            b.real($name, lua.create_function(move |_, (wid, $v): (i64, $t)| {
+                if let Some(tree) = hh.borrow_mut().hud() {
+                    if let Some($wd) = tree.get_mut(wid as u64) { $body }
+                }
+                Ok(())
+            })?)?;
+        }};
+    }
+    macro_rules! wget {
+        ($name:literal, |$wd:ident| $body:expr, $default:expr) => {{
+            let hh = host.clone();
+            b.real($name, lua.create_function(move |_, wid: i64| {
+                Ok(hh.borrow().hud_ref().and_then(|t| t.get(wid as u64)).map(|$wd| $body).unwrap_or($default))
+            })?)?;
+        }};
     }
 
-    // --- queries: real bodies returning sane defaults so Lua never does arithmetic on nil ---
-    // Boolean state getters — nothing is shown/awake in a HUD-less build.
-    b.real("GetWidgetVisible", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
-    b.real("GetWidgetHighlightable", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
-    b.real("GetWidgetIgnoresPause", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
-    b.real("GetWidgetSleep", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
-    b.real("GetTextWrapping", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
+    // --- widget lifecycle ---
+    create!("CreateWidget", WidgetKind::Container);
+    create!("CreateImageWidget", WidgetKind::Image);
+    create!("CreateTextWidget", WidgetKind::Text);
+    create!("CreateSpriteWidget", WidgetKind::Sprite);
+    create!("CreateMovieWidget", WidgetKind::Movie);
+    create!("CreateFlashWidget", WidgetKind::Flash);
+    create!("MinimapCreate", WidgetKind::Minimap);
+    for name in ["DeleteWidget", "MinimapDelete"] {
+        let hh = host.clone();
+        b.real(name, lua.create_function(move |_, wid: i64| {
+            if let Some(t) = hh.borrow_mut().hud() { t.delete(wid as u64); }
+            Ok(())
+        })?)?;
+    }
 
-    // Location / viewport / color / texcoords — return neutral numeric tuples.
-    b.real("GetWidgetLocation", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32)))?)?;
-    b.real("GetWidgetCorrectedLocation", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32)))?)?;
+    // --- widget transform / state ---
+    let hh = host.clone();
+    b.real("SetWidgetLocation", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.location = [x, y]; } }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("SetWidgetCorrectedLocation", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.corrected_location = [x, y]; } }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("SetWidgetColor", lua.create_function(move |_, (wid, r, g, bl, a): (i64, f32, f32, f32, Option<f32>)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.color = [r, g, bl, a.unwrap_or(255.0)]; } }
+        Ok(())
+    })?)?;
+    wset!("SetWidgetVisible", bool, |w, v| { w.visible = v; });
+    wset!("SetWidgetIgnoresPause", bool, |w, v| { w.ignores_pause = v; });
+    wset!("SetWidgetSleep", bool, |w, v| { w.sleep = v; });
+    wset!("SetWidgetHighlightable", bool, |w, v| { w.highlightable = v; });
+    wset!("SetWidgetAnchoring", i64, |w, v| { w.anchoring = v as u32; });
+    wset!("SetWidgetViewport", i64, |w, v| { w.viewport = v as i32; });
+    wset!("SetWidgetFullscreen", bool, |w, v| { w.fullscreen = v; });
+
+    // --- tree / z-order ---
+    for (name, front) in [("PushWidgetToFront", true), ("PushWidgetToBack", false)] {
+        let hh = host.clone();
+        b.real(name, lua.create_function(move |_, wid: i64| {
+            if let Some(t) = hh.borrow_mut().hud() { if front { t.push_to_front(wid as u64) } else { t.push_to_back(wid as u64) } }
+            Ok(())
+        })?)?;
+    }
+    for name in ["AddWidgetChild", "SetWidgetChild"] {
+        let hh = host.clone();
+        b.real(name, lua.create_function(move |_, (parent, child): (i64, i64)| {
+            if let Some(t) = hh.borrow_mut().hud() { t.add_child(parent as u64, child as u64); }
+            Ok(())
+        })?)?;
+    }
+    let hh = host.clone();
+    b.real("RemoveWidgetChild", lua.create_function(move |_, (parent, child): (i64, i64)| {
+        if let Some(t) = hh.borrow_mut().hud() { t.remove_child(parent as u64, child as u64); }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("RemoveAllWidgetChildren", lua.create_function(move |_, parent: i64| {
+        if let Some(t) = hh.borrow_mut().hud() { t.remove_all_children(parent as u64); }
+        Ok(())
+    })?)?;
+
+    // --- image widget ---
+    wset!("SetImageTexture", String, |w, v| { if let Some(i) = w.image.as_mut() { i.texture = v; } });
+    wset!("SetImageRotation", f32, |w, v| { if let Some(i) = w.image.as_mut() { i.rotation = v; } });
+    wset!("SetImageTiling", bool, |w, v| { if let Some(i) = w.image.as_mut() { i.tiling = v; } });
+    let hh = host.clone();
+    b.real("SetImageTextureCoordinates", lua.create_function(move |_, (wid, u0, v0, u1, v1): (i64, f32, f32, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(i) = w.image.as_mut() { i.tex_coords = [u0, v0, u1, v1]; } } }
+        Ok(())
+    })?)?;
+
+    // --- text widget ---
+    wset!("SetTextText", String, |w, v| { if let Some(x) = w.text.as_mut() { x.text = v; } });
+    wset!("SetTextFont", String, |w, v| { if let Some(x) = w.text.as_mut() { x.font = v; } });
+    wset!("SetTextWrapping", bool, |w, v| { if let Some(x) = w.text.as_mut() { x.wrapping = v; } });
+    wset!("SetTextJustification", i64, |w, v| { if let Some(x) = w.text.as_mut() { x.justification = v as u8; } });
+    wset!("SetTextScale", f32, |w, v| { if let Some(x) = w.text.as_mut() { x.scale = v; } });
+
+    // --- sprite widget ---
+    wset!("SetSpriteTexture", String, |w, v| { if let Some(s) = w.sprite.as_mut() { s.texture = v; } });
+    wset!("SetSpriteFrame", i64, |w, v| { if let Some(s) = w.sprite.as_mut() { s.frame = v as u32; } });
+    let hh = host.clone();
+    b.real("SetSpriteTextureSize", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(s) = w.sprite.as_mut() { s.texture_size = [x, y]; } } }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("SetSpriteFrameSize", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(s) = w.sprite.as_mut() { s.frame_size = [x, y]; } } }
+        Ok(())
+    })?)?;
+
+    // --- movie widget ---
+    wset!("SetMovieFile", String, |w, v| { if let Some(m) = w.movie.as_mut() { m.file = v; } });
+    wset!("PlayMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = true; } });
+    wset!("PauseMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = false; } });
+    wset!("StopMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = false; m.frame = 0; } });
+
+    // --- flash widget ---
+    wset!("SetFlashSwfFile", String, |w, v| { if let Some(f) = w.flash.as_mut() { f.swf = v; } });
+    wset!("SetFlashPlaySpeed", f32, |w, v| { if let Some(f) = w.flash.as_mut() { f.play_speed = v; } });
+    wset!("PlayFlash", Option<bool>, |w, _v| { if let Some(f) = w.flash.as_mut() { f.playing = true; } });
+    wset!("PauseFlash", Option<bool>, |w, _v| { if let Some(f) = w.flash.as_mut() { f.playing = false; } });
+    wset!("RestartFlash", Option<bool>, |w, _v| { if let Some(f) = w.flash.as_mut() { f.playing = true; } });
+
+    // --- minimap ---
+    wset!("MinimapSetRotation", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.rotation = v; } });
+    wset!("MinimapSetRange", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.range = v; } });
+    wset!("SetMinimapRadius", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.radius = v; } });
+    wset!("SetMinimapOwner", i64, |w, v| { if let Some(m) = w.minimap.as_mut() { m.owner = v as u64; } });
+    let hh = host.clone();
+    b.real("MinimapSetPlayerLocation", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.player_location = [x, y]; } } }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("MinimapSetFocusLocation", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.focus_location = [x, y]; } } }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("MinimapAddObjective", lua.create_function(move |_, (wid, oid, x, y, z): (i64, i64, f32, f32, Option<f32>)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.objectives.insert(oid as u64, [x, y, z.unwrap_or(0.0)]); } } }
+        Ok(())
+    })?)?;
+    let hh = host.clone();
+    b.real("MinimapRemoveObjective", lua.create_function(move |_, (wid, oid): (i64, i64)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.objectives.remove(&(oid as u64)); } } }
+        Ok(())
+    })?)?;
+
+    // --- getters: read the real widget state (was fixed defaults) ---
+    wget!("GetWidgetVisible", |w| w.visible, true);
+    wget!("GetWidgetHighlightable", |w| w.highlightable, false);
+    wget!("GetWidgetIgnoresPause", |w| w.ignores_pause, false);
+    wget!("GetWidgetSleep", |w| w.sleep, false);
+    wget!("GetWidgetAnchoring", |w| w.anchoring as i64, 0i64);
+    wget!("GetWidgetLocation", |w| (w.location[0], w.location[1]), (0.0f32, 0.0f32));
+    wget!("GetWidgetCorrectedLocation", |w| (w.corrected_location[0], w.corrected_location[1]), (0.0f32, 0.0f32));
+    wget!("GetWidgetColor", |w| (w.color[0], w.color[1], w.color[2], w.color[3]), (255.0f32, 255.0f32, 255.0f32, 255.0f32));
+    wget!("GetImageRotation", |w| w.image.as_ref().map(|i| i.rotation).unwrap_or(0.0), 0.0f32);
+    wget!("GetImageTextureCoordinates", |w| { let c = w.image.as_ref().map(|i| i.tex_coords).unwrap_or([0.0, 0.0, 1.0, 1.0]); (c[0], c[1], c[2], c[3]) }, (0.0f32, 0.0f32, 1.0f32, 1.0f32));
+    wget!("GetTextText", |w| w.text.as_ref().map(|x| x.text.clone()).unwrap_or_default(), String::new());
+    wget!("GetTextWrapping", |w| w.text.as_ref().map(|x| x.wrapping).unwrap_or(false), false);
+    wget!("GetTextJustification", |w| w.text.as_ref().map(|x| x.justification as i64).unwrap_or(0), 0i64);
+    wget!("GetTextScale", |w| w.text.as_ref().map(|x| x.scale).unwrap_or(1.0), 1.0f32);
+    // Text metrics: a rough monospace estimate off the real string + scale (renderer refines later).
+    wget!("GetTextWidth", |w| w.text.as_ref().map(|x| x.text.chars().count() as f32 * 8.0 * x.scale).unwrap_or(0.0), 0.0f32);
+    wget!("GetTextHeight", |w| w.text.as_ref().map(|x| 16.0 * x.scale).unwrap_or(0.0), 0.0f32);
+    wget!("GetFlashPlaySpeed", |w| w.flash.as_ref().map(|f| f.play_speed).unwrap_or(1.0), 1.0f32);
+    wget!("GetMovieCurrentFrameNumber", |w| w.movie.as_ref().map(|m| m.frame as i64).unwrap_or(0), 0i64);
+    let hh = host.clone();
+    b.real("GetWidgetChildren", lua.create_function(move |lua, wid: i64| {
+        let kids = hh.borrow().hud_ref().map(|t| t.children(wid as u64)).unwrap_or_default();
+        lua.create_sequence_from(kids.into_iter().map(|k| k as i64))
+    })?)?;
+    // Input-picking / viewport-rect getters — no picker/rect model yet → neutral.
     b.real("GetWidgetViewport", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 0.0f32, 0.0f32)))?)?;
-    b.real("GetWidgetColor", lua.create_function(|_, _: MultiValue| Ok((255.0f32, 255.0f32, 255.0f32, 255.0f32)))?)?;
-    b.real("GetImageTextureCoordinates", lua.create_function(|_, _: MultiValue| Ok((0.0f32, 0.0f32, 1.0f32, 1.0f32)))?)?;
-
-    // Scalar numeric getters — 0 where a measurement/id, 1 where a multiplier/speed.
-    b.real("GetWidgetAnchoring", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
     b.real("GetWidgetHighlightId", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
     b.real("GetWidgetDownId", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
-    b.real("GetImageRotation", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
     b.real("GetImageClockElapsed", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
-    b.real("GetTextWidth", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
-    b.real("GetTextHeight", lua.create_function(|_, _: MultiValue| Ok(0.0f32))?)?;
-    b.real("GetTextJustification", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
-    b.real("GetTextScale", lua.create_function(|_, _: MultiValue| Ok(1.0f32))?)?;
-    b.real("GetFlashPlaySpeed", lua.create_function(|_, _: MultiValue| Ok(1.0f32))?)?;
-    b.real("GetMovieCurrentFrameNumber", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
 
-    // String getter — empty text.
-    b.real("GetTextText", lua.create_function(|_, _: MultiValue| Ok(String::new()))?)?;
-
-    // Child list getter — empty table (iterating it is a no-op).
-    b.real("GetWidgetChildren", lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
+    // Names newly backed above; everything else in STUB_NAMES stays a faithful no-op (render/callback/
+    // animation-only cfuncs with no state to hold — see the module burn-down note).
+    const BACKED: &[&str] = &[
+        "CreateWidget", "CreateImageWidget", "CreateTextWidget", "CreateSpriteWidget", "CreateMovieWidget",
+        "CreateFlashWidget", "MinimapCreate", "DeleteWidget", "MinimapDelete", "SetWidgetLocation",
+        "SetWidgetCorrectedLocation", "SetWidgetColor", "SetWidgetVisible", "SetWidgetIgnoresPause",
+        "SetWidgetSleep", "SetWidgetHighlightable", "SetWidgetAnchoring", "SetWidgetViewport",
+        "SetWidgetFullscreen", "PushWidgetToFront", "PushWidgetToBack", "AddWidgetChild", "SetWidgetChild",
+        "RemoveWidgetChild", "RemoveAllWidgetChildren", "SetImageTexture", "SetImageRotation",
+        "SetImageTiling", "SetImageTextureCoordinates", "SetTextText", "SetTextFont", "SetTextWrapping",
+        "SetTextJustification", "SetTextScale", "SetSpriteTexture", "SetSpriteFrame", "SetSpriteTextureSize",
+        "SetSpriteFrameSize", "SetMovieFile", "PlayMovie", "PauseMovie", "StopMovie", "SetFlashSwfFile",
+        "SetFlashPlaySpeed", "PlayFlash", "PauseFlash", "RestartFlash", "MinimapSetRotation",
+        "MinimapSetRange", "SetMinimapRadius", "SetMinimapOwner", "MinimapSetPlayerLocation",
+        "MinimapSetFocusLocation", "MinimapAddObjective", "MinimapRemoveObjective",
+    ];
+    for &name in STUB_NAMES {
+        if !BACKED.contains(&name) {
+            b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+        }
+    }
 
     b.install_global(GLOBAL)
 }

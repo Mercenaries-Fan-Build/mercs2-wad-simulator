@@ -28,6 +28,7 @@ mercs2_decal = { path = "../mercs2_decal" }
 mercs2_population = { path = "../mercs2_population" }
 mercs2_combat = { path = "../mercs2_combat" }
 mercs2_faction = { path = "../mercs2_faction" }
+mercs2_ui = { path = "../mercs2_ui" }
 pollster = "0.3" # block_on the async render entry point (run_game_world) on the main thread
 # The game's own render/boot path (world.rs, the TPS world loop) owns its window + event loop.
 winit = "0.29"

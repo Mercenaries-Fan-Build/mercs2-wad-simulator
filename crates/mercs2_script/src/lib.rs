@@ -231,6 +231,25 @@ pub trait EngineHost {
     fn object_filter_gc(&mut self, handle: u64) {
         let _ = handle;
     }
+
+    // ===== HUD widget tree + markers (`Hud.*` / `Gui._Marker*`) → `mercs2_ui`. =====
+    /// The retained-mode HUD widget tree, if this host owns one (the real game host does; the smoke/
+    /// test hosts return `None` and the `Hud.*` mutators become no-ops).
+    fn hud(&mut self) -> Option<&mut mercs2_ui::WidgetTree> {
+        None
+    }
+    /// Read-only view of the HUD widget tree (for `Get*` queries).
+    fn hud_ref(&self) -> Option<&mercs2_ui::WidgetTree> {
+        None
+    }
+    /// The HUD world-marker set, if this host owns one.
+    fn markers(&mut self) -> Option<&mut mercs2_ui::MarkerSet> {
+        None
+    }
+    /// Read-only view of the HUD marker set.
+    fn markers_ref(&self) -> Option<&mercs2_ui::MarkerSet> {
+        None
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1252,9 +1271,12 @@ mod tests {
         // (time scale / level+master-script / tutorials / autosave / save-version / viewports; real +10);
         // ObjectFilter vertical wired the label-expr query registry + object label store (real +7);
         // Object Attach/Detach wired the real attachment graph (real +2); VO wired cancel/pause/
-        // cinematic-mode to the real VoManager (real +7).
-        const EXPECTED_REAL: usize = 475;
-        const EXPECTED_STUB: usize = 611;
+        // cinematic-mode to the real VoManager (real +7); HUD wired the retained-mode widget tree
+        // (mercs2_ui::WidgetTree) — widget/image/text/sprite/movie/flash/minimap create+mutate+query
+        // (real +55); Gui wired the world-marker set (mercs2_ui::MarkerSet) + texture/font handles
+        // (real +16).
+        const EXPECTED_REAL: usize = 546;
+        const EXPECTED_STUB: usize = 540;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

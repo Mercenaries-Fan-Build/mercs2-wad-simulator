@@ -103,6 +103,10 @@ pub struct GameScriptHost {
     /// The object attachment graph: child GUID → parent GUID (`Object.Attach`/`Detach`). `GetParent`/
     /// `IsAttached`/`GetAttachedObjects` read it.
     attachments: HashMap<u64, u64>,
+    /// The retained-mode HUD widget tree the `Hud.*` Lua drives (`mercs2_ui::WidgetTree`).
+    hud: mercs2_ui::WidgetTree,
+    /// The HUD world-marker set the `Gui._Marker*` Lua drives.
+    markers: mercs2_ui::MarkerSet,
 }
 
 /// Stable hash of a VO cue name → its cue guid, so `VO.Cue(name)` and a later `VO.Cancel(name)` address
@@ -188,6 +192,8 @@ impl GameScriptHost {
             object_labels: HashMap::new(),
             object_filters: mercs2_core::ObjectFilterRegistry::new(),
             attachments: HashMap::new(),
+            hud: mercs2_ui::WidgetTree::new(),
+            markers: mercs2_ui::MarkerSet::new(),
         }
     }
 
@@ -568,6 +574,20 @@ impl EngineHost for GameScriptHost {
     }
     fn object_filter_gc(&mut self, handle: u64) {
         self.object_filters.remove(handle);
+    }
+
+    // ===== HUD widget tree + markers → mercs2_ui. =====
+    fn hud(&mut self) -> Option<&mut mercs2_ui::WidgetTree> {
+        Some(&mut self.hud)
+    }
+    fn hud_ref(&self) -> Option<&mercs2_ui::WidgetTree> {
+        Some(&self.hud)
+    }
+    fn markers(&mut self) -> Option<&mut mercs2_ui::MarkerSet> {
+        Some(&mut self.markers)
+    }
+    fn markers_ref(&self) -> Option<&mercs2_ui::MarkerSet> {
+        Some(&self.markers)
     }
 
     // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
@@ -1069,6 +1089,63 @@ mod tests {
         // Cinematic mode toggles the real flag.
         sh.exec("VO.SetCinematicMode(true)", "@vo").unwrap();
         assert!(host.borrow().audio.borrow().vo_cinematic_mode());
+    }
+
+    /// `Hud.*` drives the REAL `mercs2_ui::WidgetTree`: create widgets, set/get their state, parent
+    /// them, and text/image data round-trips — all through Lua (was a no-op HUD).
+    #[test]
+    fn game_lua_hud_drives_real_widget_tree() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Create a text widget, set its text + visibility → read them back.
+        sh.exec(
+            r#"
+            wRoot = Hud.CreateWidget()
+            wText = Hud.CreateTextWidget()
+            Hud.SetTextText(wText, "OBJECTIVE COMPLETE")
+            Hud.SetTextScale(wText, 2.0)
+            Hud.SetWidgetVisible(wText, false)
+            Hud.SetWidgetLocation(wText, 100, 200)
+            Hud.AddWidgetChild(wRoot, wText)
+        "#,
+            "@hud",
+        )
+        .unwrap();
+
+        let text: String = sh.eval("return Hud.GetTextText(wText)").unwrap();
+        assert_eq!(text, "OBJECTIVE COMPLETE");
+        let scale: f32 = sh.eval("return Hud.GetTextScale(wText)").unwrap();
+        assert_eq!(scale, 2.0);
+        let vis: bool = sh.eval("return Hud.GetWidgetVisible(wText)").unwrap();
+        assert!(!vis, "SetWidgetVisible(false) persisted");
+        let loc: (f32, f32) = sh.eval("return Hud.GetWidgetLocation(wText)").unwrap();
+        assert_eq!(loc, (100.0, 200.0));
+
+        // The tree really parented the text under the root.
+        let wtext: i64 = sh.eval("return wText").unwrap();
+        let kids: Vec<i64> = sh.eval("return Hud.GetWidgetChildren(wRoot)").unwrap();
+        assert_eq!(kids, vec![wtext]);
+        assert_eq!(host.borrow().hud.len(), 2, "two widgets live in the tree");
+
+        // Gui markers drive the real MarkerSet.
+        sh.exec(
+            r#"
+            mObj = Gui.AddObjective()
+            Gui._MarkerSetLocation(mObj, 300, 5, 400)
+            Gui._MarkerSetFollowGuid(mObj, 0x1234)
+            Gui._MarkerPulse(mObj)
+        "#,
+            "@mk",
+        )
+        .unwrap();
+        let mid: u64 = sh.eval::<i64>("return mObj").unwrap() as u64;
+        let mk = host.borrow();
+        let marker = mk.markers.get(mid).unwrap();
+        assert_eq!(marker.location, [300.0, 5.0, 400.0]);
+        assert_eq!(marker.follow_guid, 0x1234);
+        assert!(marker.pulsing);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

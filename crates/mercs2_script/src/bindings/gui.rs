@@ -74,41 +74,78 @@ pub const REQUIRED: &[Required] = &[
 /// - `GetLanguageName` supplies the localized-VO asset suffix → `"english"` (the base locale).
 ///
 /// `GetLanguageNum` is not called by the corpus and stays a no-op.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
+    use mercs2_ui::MarkerKind;
+
+    // --- world-space HUD markers → the real `mercs2_ui::MarkerSet` on the host. ---
+    for (name, kind) in [
+        ("_MarkerAdd", MarkerKind::Blip),
+        ("_MarkerAddOld", MarkerKind::Blip),
+        ("_MarkerAddTripwire", MarkerKind::Tripwire),
+        ("_MarkerAddDisc", MarkerKind::Disc),
+        ("_MarkerAdd3D", MarkerKind::ThreeD),
+        ("AddObjective", MarkerKind::Objective),
+    ] {
+        let h = host.clone();
+        b.real(name, lua.create_function(move |_, _: mlua::MultiValue| {
+            Ok(h.borrow_mut().markers().map(|m| m.add(kind) as i64).unwrap_or(0))
+        })?)?;
+    }
+    let h = host.clone();
+    b.real("_MarkerRemove", lua.create_function(move |_, id: i64| {
+        if let Some(m) = h.borrow_mut().markers() { m.remove(id as u64); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerSetLocation", lua.create_function(move |_, (id, x, y, z): (i64, f32, f32, Option<f32>)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_location(id as u64, [x, y, z.unwrap_or(0.0)]); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerSetColor", lua.create_function(move |_, (id, r, g, bl, a): (i64, f32, f32, f32, Option<f32>)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_color(id as u64, [r, g, bl, a.unwrap_or(255.0)]); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerSetFollowGuid", lua.create_function(move |_, (id, guid): (i64, i64)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_follow(id as u64, guid as u64); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerSetScale", lua.create_function(move |_, (id, s): (i64, f32)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_scale(id as u64, s); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerPulse", lua.create_function(move |_, id: i64| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_pulsing(id as u64, true); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerHaltPulse", lua.create_function(move |_, id: i64| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_pulsing(id as u64, false); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("_MarkerSetBlipLimit", lua.create_function(move |_, n: i64| {
+        if let Some(m) = h.borrow_mut().markers() { m.blip_limit = n.max(0) as u32; }
+        Ok(())
+    })?)?;
+
+    // --- texture/font handles: addressed by name (identity handle) so `Hud.SetImageTexture(w, tex)` gets
+    // a usable value. The actual GPU upload is a render-pass concern. ---
+    b.real("LoadTexture", lua.create_function(|_, name: String| Ok(name))?)?;
+    b.real("LoadFont", lua.create_function(|_, name: String| Ok(name))?)?;
+
+    // --- UNBACKED residue (burn-down): faction/vehicle/pickup/player marker CATEGORY toggles (need a
+    // marker-category config + the render pass), sign-in/shell lifecycle, loading hints, PIX. No-ops. ---
     for name in [
-        "AddObjective",
-        "LoadTexture",
-        "LoadFont",
-        "_MarkerAdd",
-        "_MarkerAddTripwire",
-        "_MarkerAddDisc",
-        "_MarkerAdd3D",
-        "_MarkerSetBlipLimit",
-        "_MarkerAddOld",
-        "_MarkerRemove",
-        "_MarkerSetLocation",
-        "_MarkerSetColor",
-        "_MarkerSetFollowGuid",
-        "_MarkerSetScale",
-        "_MarkerPulse",
-        "_MarkerHaltPulse",
-        "SetFactionMarkerVisibleDistance",
-        "EnableFactionMarkers",
-        "SetFactionMarkerSize",
-        "SetVehicleEntranceMarkerVisibleDistance",
-        "EnableVehicleEntranceMarkers",
-        "SetVehicleEntranceMarkerSize",
-        "EnablePickupMarkers",
-        "SetPickupMarkerSize",
-        "SetPickupMarkerVisibleDistance",
-        "EnablePlayerMarkers",
-        "GetLanguageNum",
-        "DoSigninCheck",
-        "OnShellLoaded",
-        "OnGlobalExit",
-        "ShowLoadingHints",
-        "OutputToPIX",
+        "SetFactionMarkerVisibleDistance", "EnableFactionMarkers", "SetFactionMarkerSize",
+        "SetVehicleEntranceMarkerVisibleDistance", "EnableVehicleEntranceMarkers",
+        "SetVehicleEntranceMarkerSize", "EnablePickupMarkers", "SetPickupMarkerSize",
+        "SetPickupMarkerVisibleDistance", "EnablePlayerMarkers", "GetLanguageNum", "DoSigninCheck",
+        "OnShellLoaded", "OnGlobalExit", "ShowLoadingHints", "OutputToPIX",
     ] {
         b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
     }
