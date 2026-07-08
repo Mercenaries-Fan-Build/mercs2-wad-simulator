@@ -185,7 +185,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("RemoveLabel", lua.create_function(move |_, (guid, label): (i64, String)| { h.borrow_mut().object_remove_label(guid as u64, &label); Ok(()) })?)?;
     let h = host.clone();
-    b.real("HasLabel", lua.create_function(move |_, (guid, label): (i64, String)| Ok(h.borrow().object_has_label(guid as u64, &label)))?)?;
+    // Tolerant of a nil guid (data-setup code like MrxUtil.GetFaction probes objects that only spawn at
+    // runtime) → false, matching the lenient engine rather than erroring on the arg.
+    b.real("HasLabel", lua.create_function(move |_, (guid, label): (Option<i64>, String)| {
+        Ok(match guid { Some(g) => h.borrow().object_has_label(g as u64, &label), None => false })
+    })?)?;
     let h = host.clone();
     b.real("SetInvincible", lua.create_function(move |_, (guid, on): (i64, bool)| { h.borrow_mut().object_set_invincible(guid as u64, on); Ok(()) })?)?;
 
