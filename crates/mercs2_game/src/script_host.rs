@@ -119,6 +119,16 @@ pub struct GameScriptHost {
     burning: std::collections::HashSet<u64>,
     /// Per-object health `(current, max)` (`Object.*Health`, `SendDamage`, `Kill`/`Revive`).
     health: HashMap<u64, (f32, f32)>,
+    /// `Pg.CreateRegion` trigger regions: handle → `(center, radius)`; `region_names` maps name→handle.
+    regions: HashMap<u64, ([f32; 3], f32)>,
+    region_names: HashMap<String, u64>,
+    next_region: u64,
+    /// Active alarms (`Pg.ActivateAlarm`/`ToggleAlarm`).
+    alarms: std::collections::HashSet<u64>,
+    /// Per-player designator charges (`Airstrike.*Designator`); presence = equipped.
+    designators: HashMap<u64, i32>,
+    /// Recorded ordnance/plane spawns (`Airstrike.Spawn*`/`Flyby`/`ConeSpawn`) for the runtime to realize.
+    airstrikes: Vec<(String, [f32; 3])>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -158,6 +168,9 @@ impl Default for CameraFxState {
 
 /// Default object health when an object is first touched by a health op (no per-object stats DB yet).
 const DEFAULT_MAX_HEALTH: f32 = 100.0;
+
+/// Designator charges granted by `Airstrike.EquipDesignator`/`RefillDesignator`.
+const DESIGNATOR_CHARGES: i32 = 3;
 
 /// Per-weapon ammo state (`Weapon.*`).
 #[derive(Clone, Copy, Debug)]
@@ -267,6 +280,12 @@ impl GameScriptHost {
             weapons: HashMap::new(),
             burning: std::collections::HashSet::new(),
             health: HashMap::new(),
+            regions: HashMap::new(),
+            region_names: HashMap::new(),
+            next_region: 0x5000_0000,
+            alarms: std::collections::HashSet::new(),
+            designators: HashMap::new(),
+            airstrikes: Vec::new(),
         }
     }
 
@@ -787,6 +806,54 @@ impl EngineHost for GameScriptHost {
         let e = self.health.entry(target).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
         e.0 = (e.0 - amount).max(0.0);
         e.0 <= 0.0
+    }
+
+    // ===== Pg regions + alarms. =====
+    fn pg_create_region(&mut self, name: &str, center: [f32; 3], radius: f32) -> u64 {
+        // Re-creating a named region reuses its handle (idempotent for mission re-entry).
+        let handle = *self.region_names.entry(name.to_string()).or_insert_with(|| {
+            let h = self.next_region;
+            self.next_region += 1;
+            h
+        });
+        self.regions.insert(handle, (center, radius));
+        handle
+    }
+    fn pg_alarm_set(&mut self, guid: u64, on: bool) {
+        if on {
+            self.alarms.insert(guid);
+        } else {
+            self.alarms.remove(&guid);
+        }
+    }
+    fn pg_alarm_toggle(&mut self, guid: u64) -> bool {
+        if self.alarms.contains(&guid) {
+            self.alarms.remove(&guid);
+            false
+        } else {
+            self.alarms.insert(guid);
+            true
+        }
+    }
+    fn pg_alarm_active(&self, guid: u64) -> bool {
+        self.alarms.contains(&guid)
+    }
+
+    // ===== Airstrike designators + ordnance. =====
+    fn airstrike_equip_designator(&mut self, player: u64) {
+        self.designators.insert(player, DESIGNATOR_CHARGES);
+    }
+    fn airstrike_remove_designator(&mut self, player: u64) {
+        self.designators.remove(&player);
+    }
+    fn airstrike_refill_designator(&mut self, player: u64) {
+        self.designators.insert(player, DESIGNATOR_CHARGES);
+    }
+    fn airstrike_designator_owner(&self) -> u64 {
+        self.designators.keys().copied().min().unwrap_or(0)
+    }
+    fn airstrike_spawn(&mut self, kind: &str, pos: [f32; 3]) {
+        self.airstrikes.push((kind.to_string(), pos));
     }
 
     // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
@@ -1435,6 +1502,34 @@ mod tests {
         let died: bool = sh.eval("return ObjectState.SendDamage(0x800, 100)").unwrap();
         assert!(died, "lethal damage returns died=true");
         assert!(!host.borrow().object_is_alive(0x800));
+    }
+
+    /// `Pg` regions/alarms + `Airstrike` designators/ordnance drive real host state through Lua.
+    #[test]
+    fn game_lua_pg_regions_and_airstrike() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Region registry: CreateRegion mints a stable handle; re-creating the name reuses it.
+        let r1: i64 = sh.eval(r#"return Pg.CreateRegion("bank_lobby", 10, 0, 20, 5)"#).unwrap();
+        let r2: i64 = sh.eval(r#"return Pg.CreateRegion("bank_lobby", 11, 0, 21, 6)"#).unwrap();
+        assert_eq!(r1, r2, "same-named region reuses its handle");
+        assert_eq!(host.borrow().regions.get(&(r1 as u64)).copied(), Some(([11.0, 0.0, 21.0], 6.0)));
+
+        // Alarm state: Activate then Toggle.
+        sh.exec("Pg.ActivateAlarm(0x42, true)", "@al").unwrap();
+        assert!(host.borrow().pg_alarm_active(0x42));
+        let now: bool = sh.eval("return Pg.ToggleAlarm(0x42)").unwrap();
+        assert!(!now, "toggle turns the active alarm off");
+
+        // Airstrike designator lifecycle + FindDesignatorOwner.
+        sh.exec("Airstrike.EquipDesignator(0x2)", "@as").unwrap();
+        let owner: Option<i64> = sh.eval("return Airstrike.FindDesignatorOwner()").unwrap();
+        assert_eq!(owner, Some(2));
+        // Ordnance spawn is recorded (kind + position).
+        sh.exec("Airstrike.SpawnOrdnance(100, 5, 200)", "@as").unwrap();
+        assert_eq!(host.borrow().airstrikes.last().unwrap(), &("ordnance".to_string(), [100.0, 5.0, 200.0]));
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

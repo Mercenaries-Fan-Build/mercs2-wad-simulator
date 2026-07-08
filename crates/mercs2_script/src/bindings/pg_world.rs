@@ -54,7 +54,7 @@ pub const REQUIRED: &[Required] = &[
 ];
 
 /// `FormatTime` is pure and gets a real body; the world/asset/install cfuncs are faithful stubs.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
     // FormatTime(seconds [, useTenths]) -> "M:SS" (or "M:SS.t" with tenths). Pure clock formatting.
@@ -101,12 +101,22 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
         "SpawnWithModel",
         lua.create_function(|_, _: MultiValue| Ok(0i64))?,
     )?;
-    b.stub(
-        "CreateRegion",
-        lua.create_function(|_, _: MultiValue| Ok(0i64))?,
-    )?;
+    // CreateRegion(name, x, y, z, radius) → the real trigger-region registry; returns the handle.
+    let h = host.clone();
+    b.real("CreateRegion", lua.create_function(move |_, (name, x, y, z, radius): (String, f32, f32, f32, Option<f32>)| {
+        Ok(h.borrow_mut().pg_create_region(&name, [x, y, z], radius.unwrap_or(0.0)) as i64)
+    })?)?;
 
-    // Pure no-op stubs (side-effect cfuncs + retail-style dev dumps: return nothing).
+    // Alarms → the real alarm state.
+    let h = host.clone();
+    b.real("ActivateAlarm", lua.create_function(move |_, (guid, on): (i64, Option<bool>)| {
+        h.borrow_mut().pg_alarm_set(guid as u64, on.unwrap_or(true));
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("ToggleAlarm", lua.create_function(move |_, guid: i64| Ok(h.borrow_mut().pg_alarm_toggle(guid as u64)))?)?;
+
+    // Pure no-op stubs (asset/install/debug side-effect cfuncs + retail-style dev dumps).
     for name in [
         "Subdue",
         "DrawPath",
@@ -121,8 +131,6 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
         "LoadFunctions",
         "LoadData",
         "SetQGrey",
-        "ActivateAlarm",
-        "ToggleAlarm",
         "DumpStats",
     ] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;

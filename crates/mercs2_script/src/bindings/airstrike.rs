@@ -40,24 +40,54 @@ pub const REQUIRED: &[Required] = &[
 /// lifecycle drive systems we don't own yet, so those are faithful no-ops; the two queries
 /// (`FindExitPoint`, `FindDesignatorOwner`) return a faithful nil (no result). A later silo backs the
 /// spawns with the real support system (see report — needs `airstrike_*` / spawn host methods).
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // Queries — faithful nil (no exit point / no owner found).
+    // FindDesignatorOwner → the real per-player designator registry (0 → nil).
+    let h = host.clone();
+    b.real("FindDesignatorOwner", lua.create_function(move |_, _: MultiValue| {
+        let o = h.borrow().airstrike_designator_owner();
+        Ok(if o == 0 { None } else { Some(o as i64) })
+    })?)?;
+    // No exit-point pathing yet.
     b.real("FindExitPoint", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
-    b.real("FindDesignatorOwner", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
 
-    // Spawns + designator lifecycle — accepted no-ops.
-    b.stub("SpawnCarpetBombLine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SpawnPlaneNew", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SpawnOrdnance", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SpawnTargettedOrdnance", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("ConeSpawn", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("EquipDesignator", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("RemoveDesignator", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("RefillDesignator", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("Flyby", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SpawnDirectedObject", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Designator lifecycle → the real per-player designator state.
+    let h = host.clone();
+    b.real("EquipDesignator", lua.create_function(move |_, p: i64| { h.borrow_mut().airstrike_equip_designator(p as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("RemoveDesignator", lua.create_function(move |_, p: i64| { h.borrow_mut().airstrike_remove_designator(p as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("RefillDesignator", lua.create_function(move |_, p: i64| { h.borrow_mut().airstrike_refill_designator(p as u64); Ok(()) })?)?;
+
+    // Ordnance/plane spawns → recorded airstrike requests (kind + position) the runtime realizes.
+    for (name, kind) in [
+        ("SpawnOrdnance", "ordnance"),
+        ("SpawnTargettedOrdnance", "targetted_ordnance"),
+        ("SpawnCarpetBombLine", "carpet_bomb"),
+        ("SpawnPlaneNew", "plane"),
+        ("ConeSpawn", "cone"),
+        ("Flyby", "flyby"),
+        ("SpawnDirectedObject", "directed_object"),
+    ] {
+        let h = host.clone();
+        let k = kind;
+        b.real(name, lua.create_function(move |_, args: MultiValue| {
+            // Pull the first three numeric args as the spawn position (common leading-arg shape).
+            // Lua integers and floats both count (as_f32 only matches floats).
+            let nums: Vec<f32> = args
+                .iter()
+                .filter_map(|v| v.as_f32().or_else(|| v.as_i64().map(|i| i as f32)))
+                .collect();
+            let pos = [
+                nums.first().copied().unwrap_or(0.0),
+                nums.get(1).copied().unwrap_or(0.0),
+                nums.get(2).copied().unwrap_or(0.0),
+            ];
+            h.borrow_mut().airstrike_spawn(k, pos);
+            Ok(())
+        })?)?;
+    }
 
     b.install_global(GLOBAL)
 }

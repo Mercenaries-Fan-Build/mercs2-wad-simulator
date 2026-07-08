@@ -401,6 +401,50 @@ pub trait EngineHost {
         let _ = (target, amount);
         false
     }
+
+    // ===== Pg world regions + alarms. =====
+    /// `Pg.CreateRegion(name, center, radius)` — register a trigger region; returns its handle.
+    fn pg_create_region(&mut self, name: &str, center: [f32; 3], radius: f32) -> u64 {
+        let _ = (name, center, radius);
+        0
+    }
+    /// `Pg.ActivateAlarm(guid, on)` — set an alarm's active state.
+    fn pg_alarm_set(&mut self, guid: u64, on: bool) {
+        let _ = (guid, on);
+    }
+    /// `Pg.ToggleAlarm(guid)` — flip an alarm; returns the new state.
+    fn pg_alarm_toggle(&mut self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+    /// Whether an alarm is currently active.
+    fn pg_alarm_active(&self, guid: u64) -> bool {
+        let _ = guid;
+        false
+    }
+
+    // ===== Airstrike designators + ordnance. =====
+    /// `Airstrike.EquipDesignator(player)` — give the player a full designator.
+    fn airstrike_equip_designator(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Airstrike.RemoveDesignator(player)`.
+    fn airstrike_remove_designator(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Airstrike.RefillDesignator(player)` — restore designator charges.
+    fn airstrike_refill_designator(&mut self, player: u64) {
+        let _ = player;
+    }
+    /// `Airstrike.FindDesignatorOwner()` — the player currently holding a designator (0 = none).
+    fn airstrike_designator_owner(&self) -> u64 {
+        0
+    }
+    /// The `Airstrike.Spawn*`/`Flyby`/`ConeSpawn` family — record an ordnance/plane spawn of `kind` at
+    /// `pos` for the projectile/airstrike system to realize.
+    fn airstrike_spawn(&mut self, kind: &str, pos: [f32; 3]) {
+        let _ = (kind, pos);
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1429,9 +1473,10 @@ mod tests {
         // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40); CameraFx wired the cinematic
         // camera controller pose/shake/blend/follow (real +13); Inventory wired the per-character
         // weapon loadout (set/get/equip/drop/destroy) (real +4); Weapon ammo + Fire burning state +
-        // object health/SendDamage wired to real host state (real +7).
-        const EXPECTED_REAL: usize = 610;
-        const EXPECTED_STUB: usize = 476;
+        // object health/SendDamage wired to real host state (real +7); Pg regions/alarms + Airstrike
+        // designator lifecycle + recorded ordnance spawns wired to real host state (real +13).
+        const EXPECTED_REAL: usize = 623;
+        const EXPECTED_STUB: usize = 463;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
