@@ -291,38 +291,62 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("GetAllTargetMarkerPos", lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
     b.real("GetAllBoundaryGuid", lua.create_function(|lua, _: MultiValue| lua.create_table())?)?;
 
-    // --- session / camera / boundary / PDA / scan actions: faithful no-ops (unmodelled subsystems) ---
+    // --- player-mode boolean gates → the real player-mode store (engine reads these). ---
+    // (name, mode-key) pairs; the trailing bool arg (default true) sets the gate.
+    for (name, key) in [
+        ("SetCinematicMode", "cinematic_mode"),
+        ("SetInputEnabled", "input_enabled"),
+        ("SetSurvivalMode", "survival_mode"),
+        ("SetWaitForInGame", "wait_for_ingame"),
+        ("SetInPmc", "in_pmc"),
+        ("SetGrappleEnabled", "grapple_enabled"),
+        ("SetScopeEnabled", "scope_enabled"),
+        ("SetSeatMovementLocks", "seat_movement_lock"),
+        ("SetVehicleControlsLock", "vehicle_controls_lock"),
+        ("SetVehicleDisguise", "vehicle_disguise"),
+        ("VehicleDisguise", "vehicle_disguise"),
+        ("SetPDAMapMode", "pda_map_mode"),
+        ("SetSatelliteScanMode", "satellite_scan_mode"),
+        ("SetSatelliteScanPaused", "satellite_scan_paused"),
+    ] {
+        let h = host.clone();
+        let k = key;
+        b.real(name, lua.create_function(move |_, on: Option<bool>| {
+            h.borrow_mut().player_set_mode(k, on.unwrap_or(true));
+            Ok(())
+        })?)?;
+    }
+    // ClearGPS — a one-shot that clears the GPS route flag.
+    let h = host.clone();
+    b.real("ClearGPS", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().player_set_mode("gps_active", false); Ok(()) })?)?;
+
+    // Player-mode scalars → the real scalar store.
+    for (name, key) in [
+        ("SetHealthClamp", "health_clamp"),
+        ("SetSwimmingSearchRadius", "swim_search_radius"),
+        ("SetAimMode", "aim_mode"),
+    ] {
+        let h = host.clone();
+        let k = key;
+        b.real(name, lua.create_function(move |_, v: f32| { h.borrow_mut().player_set_mode_scalar(k, v); Ok(()) })?)?;
+    }
+
+    // --- UNBACKED residue: callbacks + PDA/satellite/boundary UI + profile-write + camera teleport +
+    // seat claim + player join/leave hooks (need the UI/callback + profile-write + seat/boundary
+    // subsystems). Honest no-ops. ---
     for name in [
-        "SetCinematicMode",
-        "SetInputEnabled",
-        "SetSurvivalMode",
         "SetSurvivalModeCallback",
-        "SetHealthClamp",
-        "SetWaitForInGame",
-        "SetAimMode",
-        "SetInPmc",
-        "SetGrappleEnabled",
-        "SetScopeEnabled",
-        "ClearGPS",
-        "SetSeatMovementLocks",
-        "SetVehicleControlsLock",
         "SetProfileCharacter",
         "SetProfileUpgrade",
         "SetAvailableCostumes",
-        "SetVehicleDisguise",
-        "VehicleDisguise",
-        "SetSwimmingSearchRadius",
         "TeleportCamera",
-        "SetPDAMapMode",
         "SetPDAMapModeCallback",
         "SetPDAMapModeCancelCallback",
         "RequestPDAMapModeExit",
         "RequestPDAMapModeCancel",
-        "SetSatelliteScanMode",
         "SetupSatelliteScan",
         "SetSatelliteScanCallbacks",
         "AddSatelliteScanTarget",
-        "SetSatelliteScanPaused",
         "SetOutBoundary",
         "AddBoundary",
         "RemoveBoundary",

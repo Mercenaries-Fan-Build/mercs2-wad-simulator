@@ -1207,6 +1207,22 @@ pub trait EngineHost {
     fn report_infractions(&self) -> i64 {
         0
     }
+
+    // ===== Player mode flags (`Player.Set*` — engine-read gameplay gates). =====
+    /// Set a named player-mode boolean flag (`Player.SetInputEnabled`/`SetCinematicMode`/… → the engine
+    /// reads these to gate control, HUD, grapple, scope, vehicle locks, disguise, PDA/satellite modes).
+    fn player_set_mode(&mut self, key: &str, on: bool) {
+        let _ = (key, on);
+    }
+    /// Read a named player-mode flag (with the caller's default if unset).
+    fn player_mode(&self, key: &str, default: bool) -> bool {
+        let _ = key;
+        default
+    }
+    /// Set a named player-mode scalar (`SetHealthClamp`/`SetSwimmingSearchRadius`/`SetAimMode`).
+    fn player_set_mode_scalar(&mut self, key: &str, value: f32) {
+        let _ = (key, value);
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1614,9 +1630,11 @@ mod tests {
         // weapon/ragdoll/grapple/carry/jostle flag verbs wired to a per-human flag store (real +13);
         // Net session mode (IsServer/IsClient/IsActive/IsLobby/GetHostName + Start/Connect/Lobby/Stop)
         // wired to a real NetState (real +6); ObjectState SetState/emitters + Face bind/play + Report
-        // faction-report lifecycle wired to real host state (real +12).
-        const EXPECTED_REAL: usize = 654;
-        const EXPECTED_STUB: usize = 432;
+        // faction-report lifecycle wired to real host state (real +12); Player mode gates
+        // (input/cinematic/survival/grapple/scope/vehicle-lock/disguise/PDA/satellite + scalars) wired
+        // to a real player-mode store (real +18).
+        const EXPECTED_REAL: usize = 672;
+        const EXPECTED_STUB: usize = 414;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1646,7 +1664,7 @@ mod tests {
         assert_eq!(by("Pg").real_count(), 40);
         assert_eq!(by("Object").real_count(), 64);
         assert_eq!(by("Object").stub_count(), 23);
-        assert_eq!(by("Player").real_count(), 65);
+        assert_eq!(by("Player").real_count(), 83);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 37);
         assert_eq!(by("Sound").real_count(), 41);

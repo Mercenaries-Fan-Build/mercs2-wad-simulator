@@ -141,6 +141,10 @@ pub struct GameScriptHost {
     faces: HashMap<u64, (String, String)>,
     /// The active mission report `(faction, delay)` (`Report.*`).
     report: Option<(u64, f32)>,
+    /// Named player-mode boolean flags (`Player.Set*` gameplay gates the engine reads).
+    player_modes: HashMap<String, bool>,
+    /// Named player-mode scalars (`SetHealthClamp`/`SetSwimmingSearchRadius`/`SetAimMode`).
+    player_scalars: HashMap<String, f32>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -361,6 +365,8 @@ impl GameScriptHost {
             emitters: HashMap::new(),
             faces: HashMap::new(),
             report: None,
+            player_modes: HashMap::new(),
+            player_scalars: HashMap::new(),
         }
     }
 
@@ -1171,6 +1177,17 @@ impl EngineHost for GameScriptHost {
             None => 0,
         }
     }
+
+    // ===== Player mode flags. =====
+    fn player_set_mode(&mut self, key: &str, on: bool) {
+        self.player_modes.insert(key.to_string(), on);
+    }
+    fn player_mode(&self, key: &str, default: bool) -> bool {
+        self.player_modes.get(key).copied().unwrap_or(default)
+    }
+    fn player_set_mode_scalar(&mut self, key: &str, value: f32) {
+        self.player_scalars.insert(key.to_string(), value);
+    }
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
@@ -1816,6 +1833,26 @@ mod tests {
         let inf: i64 = sh.eval("return Report.GetInfractions()").unwrap();
         assert_eq!(inf, 0);
         sh.exec("Report.Completed()", "@rp").unwrap();
+    }
+
+    /// `Player.Set*` mode gates drive the real player-mode store the engine reads.
+    #[test]
+    fn game_lua_player_modes() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        sh.exec("Player.SetInputEnabled(false); Player.SetCinematicMode(true); Player.SetHealthClamp(0.25)", "@pl").unwrap();
+        // engine reads via player_mode(key, default)
+        assert!(!host.borrow().player_mode("input_enabled", true), "input disabled");
+        assert!(host.borrow().player_mode("cinematic_mode", false), "cinematic on");
+        // unset gate returns the caller's default
+        assert!(host.borrow().player_mode("scope_enabled", false) == false);
+        assert_eq!(host.borrow().player_scalars.get("health_clamp").copied(), Some(0.25));
+
+        sh.exec("Player.SetGrappleEnabled(true); Player.SetAimMode(2)", "@pl").unwrap();
+        assert!(host.borrow().player_mode("grapple_enabled", false));
+        assert_eq!(host.borrow().player_scalars.get("aim_mode").copied(), Some(2.0));
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
