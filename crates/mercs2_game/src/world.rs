@@ -133,6 +133,9 @@ struct WorldData {
     /// The shared swim locomotion clip hash resolved for the hero (loaded into `player.clips`), so the
     /// controller can switch to it in water. `None` if unresolved.
     player_swim_clip: Option<u32>,
+    /// The held-weapon model (global_weapon_ak47) + the hero rig's `bone_rhand` index it attaches to.
+    weapon: Option<LoadedModel>,
+    weapon_hand_bone: Option<usize>,
     cells: Vec<(LoadedModel, [f32; 3])>,
     /// Merged placement-marker mesh (one model + one static entity), when `--placements` is set.
     placements: Option<LoadedModel>,
@@ -246,6 +249,45 @@ fn resolve_player_swim(w: &mut wad::Wad) -> Option<u32> {
     fallback
 }
 
+/// Place the held-weapon entity at the hero's right hand for this frame: sample the hero's current
+/// clip pose, take the `hand_bone`'s model-space matrix, and compose `player_world · hand · grip` into
+/// the weapon's `Transform`. The hero's fit is identity (set at load) and the weapon's fit is too, so
+/// the model→world chains line up. `GRIP` seats the gun in the palm (barrel forward) — a first-pass
+/// offset tunable against the running game.
+fn update_held_weapon(
+    world: &mut World,
+    store: &AssetStore,
+    player_e: Entity,
+    weapon_e: Entity,
+    player_model: u32,
+    hand_bone: usize,
+) {
+    use mercs2_core::glam::{Mat4, Quat, Vec3};
+    // Grip transform in the hand-bone frame (tunable): a small offset into the palm + an orientation
+    // to align the AK's local axes with the fist. Needs a visual calibration pass to finalize.
+    let grip = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2) * Mat4::from_translation(Vec3::new(0.05, 0.0, 0.0));
+
+    let (ppos, prot, clip, time) = {
+        let Ok(t) = world.get::<&Transform>(player_e) else { return };
+        let Ok(a) = world.get::<&AnimState>(player_e) else { return };
+        (t.translation, t.rotation, a.clip, a.time)
+    };
+    let Some(ma) = store.models.get(&player_model) else { return };
+    let Some(ca) = ma.clips.get(&clip).or_else(|| ma.clips.values().next()) else { return };
+    let sample = ca.clip.sample_local(time);
+    // Hand bone model-space matrix (row-vector, row-major). `from_cols_array_2d` reads its rows as
+    // glam columns == the transpose == the correct column-major matrix for the render pipeline.
+    let hand_rm = pose::bone_model_matrix(&ma.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks, hand_bone);
+    let hand = Mat4::from_cols_array_2d(&hand_rm);
+    let player_world = Mat4::from_translation(ppos) * Mat4::from_quat(prot);
+    let (scale, rot, trans) = (player_world * hand * grip).to_scale_rotation_translation();
+    if let Ok(mut wt) = world.get::<&mut Transform>(weapon_e) {
+        wt.translation = trans;
+        wt.rotation = rot;
+        wt.scale = if scale.is_finite() { scale } else { Vec3::ONE };
+    }
+}
+
 fn load_world_data(
     wadpath: &str,
     load_cells: bool,
@@ -328,6 +370,8 @@ fn load_world_data(
     println!("[world] player merc '{merc}' (CharacterName 0x{character:08X}) → idle clip 0x{idle_clip:08X}");
 
     let mut player_swim_clip: Option<u32> = None;
+    let mut weapon: Option<LoadedModel> = None;
+    let mut weapon_hand_bone: Option<usize> = None;
     let mut player_loaded = None;
     for name in player_models {
         let hash = name
@@ -358,6 +402,25 @@ fn load_world_data(
             let wanted = [idle_clip, 0x5368_2784, 0x867B_166D, swim_clip]; // idle (per-merc), walk, run, swim
             let names = ["idle", "walk", "run", "swim"];
             player_swim_clip = (swim_clip != 0).then_some(swim_clip);
+
+            // Held weapon: locate the hero's right-hand bone (`bone_rhand` = m2("bone_rhand") =
+            // 0xD34F7713, in every merc rig) and load the gun MODEL. Weapon models are named
+            // `global_weapon_<name>` (per the corpus: `wpn_*` blocks are STATS and the registry "Assault
+            // Rifle" hashes are ENTITY TEMPLATES, not meshes) — AK-47 is the default sidearm.
+            const BONE_RHAND: u32 = 0xD34F_7713;
+            if let Some(hb) = s.rig.iter().position(|b| b.name_hash == BONE_RHAND) {
+                let wpn_hash = mercs2_formats::hash::pandemic_hash_m2("global_weapon_ak47");
+                match mercs2_engine::game_world::load_model_by_hash(&mut w, wpn_hash) {
+                    Some((wm, _, _)) => {
+                        println!("[world] held weapon global_weapon_ak47 (0x{wpn_hash:08X}): {} verts, bone_rhand rig idx {hb}", wm.verts.len());
+                        weapon = Some(wm);
+                        weapon_hand_bone = Some(hb);
+                    }
+                    None => println!("[world] held weapon model 0x{wpn_hash:08X} did not load"),
+                }
+            } else {
+                println!("[world] no bone_rhand in hero rig — held weapon skipped");
+            }
             let mut clips: Vec<ClipAnim> = Vec::new();
             for (found, (&h, name)) in load_clips_for_rig(&mut w, &hier, &wanted)
                 .into_iter()
@@ -526,7 +589,7 @@ fn load_world_data(
         None => println!("[world] no watermap in WAD (swim disabled)"),
     }
 
-    Ok(WorldData { terrain, player, player_swim_clip, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, lights, particle_fx, glow_cards })
+    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, lights, particle_fx, glow_cards })
 }
 
 /// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
@@ -998,6 +1061,11 @@ pub async fn run_scene_world_loading(
     let mut watermap: Option<mercs2_water::Watermap> = None;
     // Player weapon fire cadence: seconds until the next round can fire (full-auto while held).
     let mut fire_cooldown: f32 = 0.0;
+    // Held weapon: the entity rendering the gun in the hero's hand, the hero rig's right-hand bone
+    // index (`bone_rhand` 0xD34F7713), and the player's model hash (to sample its pose for the follow).
+    let mut weapon_entity: Option<Entity> = None;
+    let mut weapon_hand_bone: usize = 0;
+    let mut weapon_player_model: u32 = 0;
     let store = Rc::new(RefCell::new(AssetStore::default()));
     // Hero spawn is resolved DATA-DRIVEN from a NAMED world marker once the world loads (in the
     // realize branch below), NOT from a hardcoded coordinate. The base game does exactly this:
@@ -1513,6 +1581,25 @@ pub async fn run_scene_world_loading(
                                         anim,
                                         SkinPalette { mats: bind },
                                     )));
+
+                                    // Held weapon: attach the gun (loaded at world-load) to the hero's
+                                    // right-hand bone. It follows the hand each frame (update_held_weapon).
+                                    if let (Some(mut wm), Some(hb)) = (data.weapon, data.weapon_hand_bone) {
+                                        // Native scale/placement (identity fit) so the mesh sits in the hand
+                                        // at true size, like the hero (whose fit is also identity).
+                                        wm.skin.center = [0.0, 0.0, 0.0];
+                                        wm.skin.scale = 1.0;
+                                        let ident = vec![IDENTITY; wm.skin.rig.len().max(1)];
+                                        scene.load_model(wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
+                                        weapon_entity = Some(world.spawn((
+                                            Transform::from_translation(player.pos),
+                                            ModelRef { model: wm.hash },
+                                            SkinPalette { mats: ident },
+                                        )));
+                                        weapon_hand_bone = hb;
+                                        weapon_player_model = p.hash;
+                                        println!("[world] held weapon 0x{:08X} on bone_rhand (rig idx {hb})", wm.hash);
+                                    }
                                 }
                                 hmap = Some(data.hmap);
                                 watermap = data.watermap;
@@ -1736,6 +1823,11 @@ pub async fn run_scene_world_loading(
                     }
 
                     let steps = schedule.run_fixed(&mut world, &mut time, dt);
+                    // Held weapon follows the hero's right-hand bone (after the anim schedule posed the
+                    // hero this frame). Skipped until the weapon + hand bone resolved at load.
+                    if let (Some(we), Some(pe)) = (weapon_entity, player.entity) {
+                        update_held_weapon(&mut world, &store.borrow(), pe, we, weapon_player_model, weapon_hand_bone);
+                    }
                     // Tick the fleet gameplay systems (vehicle/combat/physics/audio) at the SAME fixed
                     // cadence the animation schedule just ran — the layer-4 gameplay tick, now driven.
                     for _ in 0..steps {

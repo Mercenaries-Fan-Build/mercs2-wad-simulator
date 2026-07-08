@@ -167,6 +167,34 @@ pub fn havok_palette_in_place(
     skin_palette(rig, &model_poses(rig, &local))
 }
 
+/// The model-space matrix of a single `bone` for one clip sample — the same sampleAndCombine →
+/// root-in-place → compose chain as [`havok_palette_in_place`], but returning ONE bone's model
+/// transform (not the whole skin palette). Used to attach a held object (a weapon in the hand) to a
+/// bone each frame: the object's world matrix is `entity_world · bone_model · grip`. Returns the
+/// identity for an out-of-range bone.
+pub fn bone_model_matrix(
+    rig: &[BoneRig],
+    sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+    bone: usize,
+) -> [[f32; 4]; 4] {
+    let mut local = havok_locals(rig, sample, track_to_hier, num_transform_tracks);
+    for b in 0..rig.len() {
+        if rig[b].parent < 0 {
+            let lb = rig[b].local_bind;
+            local[b].translation = [lb[3][0], lb[3][1], lb[3][2]];
+        }
+    }
+    let model = model_poses(rig, &local);
+    model.get(bone).map(qs_to_local).unwrap_or([
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
 /// The horizontal distance the ROOT bone travels between two clip samples (its BAKED locomotion),
 /// divided by the elapsed time = the clip's authentic ground SPEED (m/s). The world movement code
 /// uses this to advance the entity Transform exactly as fast as the feet stride — so nothing slides
@@ -398,4 +426,39 @@ fn rot_x(a: f32) -> [[f32; 4]; 4] {
         [0.0, -s, c, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
+}
+
+#[cfg(test)]
+mod weapon_attach_tests {
+    use super::*;
+
+    fn ident() -> [[f32; 4]; 4] {
+        [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [0., 0., 0., 1.]]
+    }
+    fn translate(x: f32, y: f32, z: f32) -> [[f32; 4]; 4] {
+        [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [x, y, z, 1.]]
+    }
+    fn bone(parent: i32, local: [[f32; 4]; 4]) -> BoneRig {
+        BoneRig { parent, name_hash: 0, world_bind: ident(), inv_bind: ident(), local_bind: local }
+    }
+
+    /// `bone_model_matrix` composes a child bone's model-space position from the parent chain: at bind
+    /// pose (no clip tracks), a root→child rig with the child offset (1,2,3) puts the child's model
+    /// matrix translation at (1,2,3) — the anchor a held weapon rides. This is the weapon-attach core.
+    #[test]
+    fn hand_bone_model_matrix_is_the_chain_position() {
+        let rig = vec![bone(-1, ident()), bone(0, translate(1.0, 2.0, 3.0))];
+        let m = bone_model_matrix(&rig, &[], &[], 0, 1);
+        // Row-vector convention: translation is row 3.
+        assert!((m[3][0] - 1.0).abs() < 1e-4, "x = {}", m[3][0]);
+        assert!((m[3][1] - 2.0).abs() < 1e-4, "y = {}", m[3][1]);
+        assert!((m[3][2] - 3.0).abs() < 1e-4, "z = {}", m[3][2]);
+        // A grandchild stacks onto the parent: (1,2,3) + (0,1,0) = (1,3,3).
+        let rig2 = vec![bone(-1, ident()), bone(0, translate(1.0, 2.0, 3.0)), bone(1, translate(0.0, 1.0, 0.0))];
+        let g = bone_model_matrix(&rig2, &[], &[], 0, 2);
+        assert!((g[3][0] - 1.0).abs() < 1e-4 && (g[3][1] - 3.0).abs() < 1e-4 && (g[3][2] - 3.0).abs() < 1e-4);
+        // Out-of-range bone → identity (no translation).
+        let oob = bone_model_matrix(&rig, &[], &[], 0, 99);
+        assert_eq!(oob, ident());
+    }
 }
