@@ -9,15 +9,6 @@
 //!
 //! Faithful relocation of the former `main.rs` streaming render — no behaviour change.
 
-use std::sync::Arc;
-
-use winit::{
-    event::{Event, KeyEvent, WindowEvent},
-    event_loop::EventLoop,
-    keyboard::{KeyCode, PhysicalKey},
-    window::WindowBuilder,
-};
-
 use crate::mesh::{self, Vertex};
 use crate::render::{ClipAnim, LoadProgress, LoadedModel, TexMap};
 use crate::wad;
@@ -1231,324 +1222,243 @@ pub async fn run_game_world(
     spawn: Option<[f32; 3]>,
     overlays: Vec<String>,
     // GAME hook: once the streaming world's base geometry has loaded, the engine hands the game the
-    // live World / Scene / Wad so the GAME can spawn its own entities (player, PMC interior, mission
-    // objects…). The engine itself is asset-agnostic and knows nothing about any of that — game
-    // specifics live in `mercs2_game`, not here.
-    mut populate: impl FnMut(&mut mercs2_core::World, &mut crate::scene::Scene, &mut crate::wad::Wad)
-        + 'static,
+    // live World / Scene / Wad so the GAME can spawn its own entities (player, PMC interior, …). The
+    // engine is asset-agnostic and knows nothing about that — game specifics live in `mercs2_game`.
+    populate: impl FnMut(&mut mercs2_core::World, &mut crate::scene::Scene, &mut crate::wad::Wad) + 'static,
 ) {
-    use crate::scene::Scene;
-    use mercs2_core::frame::{LayerStack, LayerTransition, LAYER_GAME};
-    use mercs2_core::glam::{Mat4, Vec3};
-    use mercs2_core::streaming::StreamingConfig;
-    use mercs2_core::Time;
-    use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform, World};
-    use std::collections::HashSet;
-    use std::f32::consts::PI;
-    use winit::event::{DeviceEvent, ElementState};
-    use winit::window::CursorGrabMode;
-
-    const IDENTITY: [[f32; 4]; 4] = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-
-    // Runtime config: tighter per-frame budgets than the probe so wake/load disk I/O (container +
-    // texture extraction) doesn't stall a frame; proximity radii are generous for an aerial cam.
     match spawn {
         Some(s) => eprintln!("[boot] spawn = ({:.1}, {:.1}, {:.1})  <- from --spawn (PMC interior via mercs2_game)", s[0], s[1], s[2]),
         None => eprintln!("[boot] spawn = DEFAULT exterior bird's-eye (NO --spawn received)"),
     }
     eprintln!("[boot] {} vz_state overlay layer(s) requested via --overlays", overlays.len());
+    // The free-fly boot is now a `Game` over the unified engine loop (`app::run`); `FreeFlyGame` owns the
+    // free-fly camera + the `StreamingWorld`, while the engine owns the window / event loop / loading
+    // screen / render — the machinery this function used to duplicate against `run_scene_world_loading`.
+    crate::app::run(FreeFlyGame::new(wadpath, spawn, overlays, populate)).await
+}
 
-    let cfg = StreamingConfig {
-        block_unload_margin: 200.0,
-        block_budget: 2,
-        entity_budget: 6,
-        entity_hysteresis: 15.0,
-        entity_scan_cap: 700.0,
-        grid_cell: 128.0,
-        ..StreamingConfig::default()
-    };
+/// The dev free-fly boot as a [`crate::app::Game`]: streams the world around a WASDQE / mouse-look debug
+/// camera. `populate` is the caller's one-shot world-population hook (`mercs2_game` passes its PMC
+/// interior). This is the free-fly half of the unified `app::run` loop; the TPS game is `mercs2_game`'s
+/// `Mercs2Game`. It owns the free-fly camera state + the `StreamingWorld` executor (the engine loop is
+/// generic and knows about neither).
+struct FreeFlyGame<P> {
+    wadpath: String,
+    spawn: Option<[f32; 3]>,
+    overlays: Vec<String>,
+    populate: P,
+    free_pos: mercs2_core::glam::Vec3,
+    free_yaw: f32,
+    free_pitch: f32,
+    stream: Option<StreamingWorld>,
+    stat_last: std::time::Instant,
+}
 
-    let event_loop = EventLoop::new().expect("event loop");
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Mercenaries 2 — streaming world (free-fly)")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
-            .expect("window"),
-    );
-    if let Err(e) = window
-        .set_cursor_grab(CursorGrabMode::Confined)
-        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
-    {
-        eprintln!("[stream] cursor grab unavailable ({e}); arrow keys still steer");
-    }
-    window.set_cursor_visible(false);
-    let mut scene = Scene::new(window.clone()).await;
-    scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
-    // Sky/atmosphere + HDR tone-map + bloom. The base-game default ("afternoon", from
-    // mrxbootstrap.lua SetDefaultAtmosphere) drives the Rayleigh/Mie sky + fBloom* post chain. A
-    // world's Lua can override this by parsing its `Graphics.Atmosphere.*` block into an
-    // `Atmosphere` and calling `set_atmosphere` again (see mercs2_formats::atmosphere).
-    scene.set_atmosphere(mercs2_formats::atmosphere::Atmosphere::default());
-    match wad::shell_loading_plate(&wadpath) {
-        Ok(td) => scene.set_loading_art(&td),
-        Err(e) => eprintln!("[stream] loading art unavailable ({e}); spinner only"),
-    }
-
-    // Background loader.
-    let (tx, rx) = std::sync::mpsc::channel::<Result<StreamingWorldData, String>>();
-    let progress = Arc::new(LoadProgress::new(4));
-    let loader_progress = progress.clone();
-    let loader_wadpath = wadpath.clone();
-    let loader_overlays = overlays;
-    std::thread::spawn(move || {
-        let t0 = std::time::Instant::now();
-        let r = load_streaming_world_data(&loader_wadpath, cfg, &loader_overlays, &loader_progress);
-        if r.is_ok() {
-            println!("[stream] loaded in {:.1}s", t0.elapsed().as_secs_f64());
+impl<P> FreeFlyGame<P> {
+    fn new(wadpath: String, spawn: Option<[f32; 3]>, overlays: Vec<String>, populate: P) -> Self {
+        use mercs2_core::glam::Vec3;
+        use std::f32::consts::PI;
+        // The authored spawn Y (MrxUtil._TeleportHero) is the hero ROOT — feet on the floor. A free-fly
+        // camera sitting exactly there views from floor level, so start at standing EYE height above it.
+        const EYE_HEIGHT: f32 = 1.7;
+        let free_pos = match spawn {
+            Some(s) => Vec3::new(s[0], s[1] + EYE_HEIGHT, s[2]),
+            None => Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]),
+        };
+        // At a provided spawn (the PMC interior) face +Z level (look INTO the room); the exterior default
+        // is a downward bird's-eye facing -Z over the pool.
+        let (free_yaw, free_pitch) = match spawn {
+            Some(_) => (0.0, 0.0),
+            None => (PI, -0.35),
+        };
+        FreeFlyGame {
+            wadpath,
+            spawn,
+            overlays,
+            populate,
+            free_pos,
+            free_yaw,
+            free_pitch,
+            stream: None,
+            stat_last: std::time::Instant::now(),
         }
-        let _ = tx.send(r);
-    });
-
-    let mut world = World::new();
-    // The streaming runtime executor (K2: the reusable StreamingWorld owns the manager + WAD handle +
-    // all live bookkeeping). Wired in on loader completion; drives the world each frame via `step`.
-    let mut stream: Option<StreamingWorld> = None;
-
-    // Free-fly camera. Start over the PMC exterior spawn at a moderate height so nearby cells +
-    // props stream in immediately; WASDQE + mouse-look fly around.
-    // Free-fly camera start: the authored spawn if given (mercs2_game passes the authentic
-    // PMC-interior start), else an elevated bird's-eye over the exterior pool for free exploration.
-    // The authored spawn Y (MrxUtil._TeleportHero) is the hero ROOT — feet on the floor. A free-fly
-    // camera sitting exactly there views from floor level, which makes the room floor read as ~2 m too
-    // high. Start at standing EYE height above it so the floor sits where a standing player would see it.
-    const EYE_HEIGHT: f32 = 1.7;
-    let mut free_pos = match spawn {
-        Some(s) => Vec3::new(s[0], s[1] + EYE_HEIGHT, s[2]),
-        None => Vec3::new(EXTERIOR_SPAWN[0], 140.0, EXTERIOR_SPAWN[2]),
-    };
-    if let Some(s) = spawn {
-        eprintln!(
-            "[boot] interior camera at eye height: hero root Y {:.2} + {:.1} = {:.2}  (shell floor world Y = {:.1} = actor origin)",
-            s[1], EYE_HEIGHT, s[1] + EYE_HEIGHT, 450.0
-        );
     }
-    // Initial heading: at a provided spawn (the PMC interior) face +Z, level — the room extends +Z
-    // from the spawn's near edge, so you look INTO it rather than at the wall behind. The exterior
-    // default is a downward bird's-eye facing -Z over the pool.
-    let (mut free_yaw, mut free_pitch): (f32, f32) = match spawn {
-        Some(_) => (0.0, 0.0),
-        None => (PI, -0.35),
-    };
-    let mut held: HashSet<KeyCode> = HashSet::new();
-    // Keystone C — the master frame spine (docs/reverse_engineer/scheduler_tick_code_map.md). The
-    // shared fixed-sim `Time` clock drives the animation step (replacing the old private anim_dt); the
-    // application-layer stack replaces the `loading` bool — LAYER_LOADING renders the plate/spinner
-    // while the background loader runs, then loader-completion raises the target to LAYER_GAME and the
-    // one Ascending(GAME) transition realizes the world (the recovered 0→4 climb, `FUN_004c15e0`).
-    const LAYER_LOADING: usize = LAYER_GAME - 1;
-    let mut time = Time::new(60.0);
-    let mut layers = LayerStack::at(LAYER_LOADING);
-    let mut pending: Option<StreamingWorldData> = None;
-    let load_start = std::time::Instant::now();
-    let mut bar_shown = 0.0f32;
-    let mut bar_last_t = 0.0f32;
-    let mut last = std::time::Instant::now();
-    let mut mouse_acc: (f32, f32) = (0.0, 0.0);
-    let mut mouse_raw_acc: (f32, f32) = (0.0, 0.0);
-    let mut mouse_src: u8 = 0;
-    let mut mouse_sane_events: u32 = 0;
-    let mut stat_last = std::time::Instant::now();
+}
 
-    event_loop
-        .run(move |event, elwt| match event {
-            Event::WindowEvent { window_id, event } if window_id == scene.window.id() => match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::KeyboardInput {
-                    event: KeyEvent { physical_key: PhysicalKey::Code(code), state, .. },
-                    ..
-                } => match (code, state) {
-                    (KeyCode::Escape, _) => elwt.exit(),
-                    (c, ElementState::Pressed) => { held.insert(c); }
-                    (c, ElementState::Released) => { held.remove(&c); }
-                },
-                WindowEvent::Resized(size) => scene.resize(size),
-                WindowEvent::CursorMoved { position, .. } => {
-                    let (cx, cy) = (scene.size.width as f64 / 2.0, scene.size.height as f64 / 2.0);
-                    mouse_acc.0 += (position.x - cx) as f32;
-                    mouse_acc.1 += (position.y - cy) as f32;
-                    let _ = scene.window.set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
-                }
-                WindowEvent::RedrawRequested => {
-                    // ===== RunFrame (FUN_00630ef0) — faithful 9-stage per-frame order =====
-                    // (docs/reverse_engineer/scheduler_tick_code_map.md §2). Stages that are pure
-                    // platform glue on our side fold into wgpu/winit: (2) device re-init = the
-                    // surface-lost/outdated recovery in render()'s Err arm; (8) vsync/cap + (9) present
-                    // = wgpu's present mode + winit's AboutToWait redraw request.
+impl<P> crate::app::Game for FreeFlyGame<P>
+where
+    P: FnMut(&mut mercs2_core::World, &mut crate::scene::Scene, &mut crate::wad::Wad) + 'static,
+{
+    type LoadData = StreamingWorldData;
 
-                    // (1) frame-start timestamp — QPC on the exe; std Instant is our QPC source.
-                    let now = std::time::Instant::now();
-                    let real_dt = (now - last).as_secs_f32().min(0.1);
-                    last = now;
+    fn config(&self) -> crate::app::GameConfig {
+        crate::app::GameConfig {
+            title: "Mercenaries 2 — streaming world (free-fly)".into(),
+            size: (1280.0, 720.0),
+            grab_cursor: true,
+            fog: ([0.55, 0.62, 0.70], 0.00016, 60.0),
+            sun: None,
+            atmosphere: Some(mercs2_formats::atmosphere::Atmosphere::default()),
+            loading_plate_wad: Some(self.wadpath.clone()),
+            load_stages: 4,
+            bindings: crate::input::Bindings::default(),
+        }
+    }
 
-                    // (5a) MASTER UPDATE — mode logic for the active application layer. While loading,
-                    //      poll the background loader; on completion raise the target to the GAME layer.
-                    if layers.active() == LAYER_LOADING {
-                        match rx.try_recv() {
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                eprintln!("[stream] loader thread died"); elwt.exit(); return;
-                            }
-                            Ok(Err(e)) => { eprintln!("[stream] load failed: {e}"); elwt.exit(); return; }
-                            Ok(Ok(data)) => { pending = Some(data); layers.set_target(LAYER_GAME); }
-                        }
-                    }
-                    // (5b) climb the layer stack toward its target; realize the world exactly once on
-                    //      entering the GAME layer (the former loader-complete branch).
-                    while !layers.settled() {
-                        if let Some(LayerTransition::Ascending(LAYER_GAME)) = layers.advance() {
-                            let Some(mut data) = pending.take() else { continue };
-                            // Base terrain: one static entity at identity (verts already world-space).
-                            let terrain = data.terrain;
-                            let terrain_hash = terrain.hash;
-                            scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
-                            world.spawn((
-                                Transform::IDENTITY,
-                                ModelRef { model: terrain.hash },
-                                AnimState::default(),
-                                SkinPalette { mats: vec![IDENTITY] },
-                            ));
-                            // GAME world population: hand the game the live World/Scene/Wad so it can
-                            // spawn its own entities (player, PMC interior, …). The engine does not know
-                            // what a "PMC interior" is — that lives in `mercs2_game`.
-                            populate(&mut world, &mut scene, &mut data.wad);
-                            // Hand the harvested world lights to the scene (static placements; the scene
-                            // uploads the nearest set to the camera each frame).
-                            scene.set_lights(std::mem::take(&mut data.lights));
-                            // Take ownership of the streaming state into the reusable executor.
-                            stream = Some(StreamingWorld::new(
-                                data.wad,
-                                data.manager,
-                                data.props,
-                                data.terrain_tiles,
-                                data.lowres_draw_by_cell,
-                                terrain_hash,
-                            ));
-                        }
-                    }
-
-                    // (6-loading) While still on the loading layer, render the plate/spinner and stop
-                    //      here — the GAME-layer master update + render below only run once realized.
-                    if layers.active() != LAYER_GAME {
-                        let t = load_start.elapsed().as_secs_f32();
-                        let dt = (t - bar_last_t).max(0.0);
-                        bar_last_t = t;
-                        bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
-                        match scene.render_loading(t, bar_shown) {
-                            Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                            Err(e) => eprintln!("surface error: {e:?}"),
-                        }
-                        return;
-                    }
-
-                    // (5c) GAME-layer Update (layer 4). The camera is the free-fly DEBUG cam and stays
-                    //      variable-rate (the real PgSysCamera is a fixed-sim layer-4 system); the sim
-                    //      work (streaming decision + animation) drains the decoupled fixed-sim clock.
-                    // (3+4) timestep compute + fixed-sim accumulator drain.
-                    let steps = time.advance_frame(real_dt);
-                    let look = 1.6 * real_dt;
-
-                    // --- mouse-look (dual-source; see run_scene_world_loading) ---
-                    const MOUSE_SENS: f32 = 0.0008;
-                    let src = if mouse_src == 1 { mouse_raw_acc } else { mouse_acc };
-                    let mdx = src.0.clamp(-80.0, 80.0) * MOUSE_SENS;
-                    let mdy = src.1.clamp(-80.0, 80.0) * MOUSE_SENS;
-                    mouse_acc = (0.0, 0.0);
-                    mouse_raw_acc = (0.0, 0.0);
-                    free_yaw += mdx;
-                    free_pitch = (free_pitch - mdy).clamp(-1.5, 1.5);
-
-                    // --- free-fly movement ---
-                    if held.contains(&KeyCode::ArrowUp) { free_pitch += look; }
-                    if held.contains(&KeyCode::ArrowDown) { free_pitch -= look; }
-                    if held.contains(&KeyCode::ArrowLeft) { free_yaw -= look; }
-                    if held.contains(&KeyCode::ArrowRight) { free_yaw += look; }
-                    free_pitch = free_pitch.clamp(-1.5, 1.5);
-                    let fwd = Vec3::new(free_pitch.cos() * free_yaw.sin(), free_pitch.sin(), free_pitch.cos() * free_yaw.cos()).normalize();
-                    let right = Vec3::Y.cross(fwd).normalize();
-                    let mut mv = Vec3::ZERO;
-                    if held.contains(&KeyCode::KeyW) { mv += fwd; }
-                    if held.contains(&KeyCode::KeyS) { mv -= fwd; }
-                    if held.contains(&KeyCode::KeyD) { mv += right; }
-                    if held.contains(&KeyCode::KeyA) { mv -= right; }
-                    if held.contains(&KeyCode::KeyE) { mv += Vec3::Y; }
-                    if held.contains(&KeyCode::KeyQ) { mv -= Vec3::Y; }
-                    let sp = if held.contains(&KeyCode::ShiftLeft) { 900.0 } else { 260.0 };
-                    if mv != Vec3::ZERO { free_pos += mv.normalize() * sp * real_dt; }
-                    let view = Mat4::look_to_lh(free_pos, fwd, Vec3::Y);
-
-                    // --- streaming tick: decide + execute the diff (the reusable StreamingWorld) ---
-                    if let Some(sw) = stream.as_mut() {
-                        sw.step(&mut scene, &mut world, [free_pos.x, free_pos.y, free_pos.z]);
-                        // Periodic streaming stats to the console (proof the runtime is live).
-                        if stat_last.elapsed().as_secs_f32() >= 1.0 {
-                            stat_last = std::time::Instant::now();
-                            let s = sw.stats();
-                            println!(
-                                "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={}",
-                                free_pos.x, free_pos.y, free_pos.z,
-                                s.resident, s.awake, s.cached_regions, s.regions,
-                                s.block_ents, s.props, s.models
-                            );
-                        }
-                    }
-
-                    // --- animation pass (fixed-timestep): woken rigged props, via StreamingWorld::animate
-                    //     on the shared mercs2_core `Time` clock (same pose math as the mercs2_game player
-                    //     system). `steps == 0` (render faster than the sim tick) holds the previous pose.
-                    if steps > 0 {
-                        if let Some(sw) = stream.as_ref() {
-                            sw.animate(&mut world, steps as f32 * time.fixed_dt);
-                        }
-                    }
-
-                    scene.set_view(view, 0.5, 30000.0);
-                    match scene.render(&world) {
-                        Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                        Err(e) => eprintln!("surface error: {e:?}"),
-                    }
-                }
-                _ => {}
-            },
-            Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-                let (dx, dy) = (delta.0 as f32, delta.1 as f32);
-                if mouse_src != 2 {
-                    if dx.abs() > 2000.0 || dy.abs() > 2000.0 {
-                        mouse_src = 2;
-                        eprintln!("[stream] absolute-coordinate raw input detected -> cursor-recentre mode");
-                    } else {
-                        mouse_raw_acc.0 += dx;
-                        mouse_raw_acc.1 += dy;
-                        if mouse_src == 0 && (dx != 0.0 || dy != 0.0) {
-                            mouse_sane_events += 1;
-                            if mouse_sane_events >= 10 { mouse_src = 1; }
-                        }
-                    }
-                }
+    fn spawn_loader(
+        &self,
+        progress: std::sync::Arc<crate::render::LoadProgress>,
+    ) -> std::sync::mpsc::Receiver<Result<StreamingWorldData, String>> {
+        use mercs2_core::streaming::StreamingConfig;
+        // Tighter per-frame budgets than the probe so wake/load disk I/O doesn't stall a frame; radii
+        // generous for an aerial cam.
+        let cfg = StreamingConfig {
+            block_unload_margin: 200.0,
+            block_budget: 2,
+            entity_budget: 6,
+            entity_hysteresis: 15.0,
+            entity_scan_cap: 700.0,
+            grid_cell: 128.0,
+            ..StreamingConfig::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wadpath = self.wadpath.clone();
+        let overlays = self.overlays.clone();
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let r = load_streaming_world_data(&wadpath, cfg, &overlays, &progress);
+            if r.is_ok() {
+                println!("[stream] loaded in {:.1}s", t0.elapsed().as_secs_f64());
             }
-            Event::AboutToWait => scene.window.request_redraw(),
-            _ => {}
-        })
-        .expect("event loop run");
+            let _ = tx.send(r);
+        });
+        rx
+    }
+
+    fn setup(&mut self, ctx: &mut crate::app::Ctx, mut data: StreamingWorldData) {
+        use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
+        const IDENTITY: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        // Base terrain: one static entity at identity (verts already world-space).
+        let terrain = data.terrain;
+        let terrain_hash = terrain.hash;
+        ctx.scene.load_model(
+            terrain.hash,
+            &terrain.verts,
+            &terrain.indices,
+            &terrain.draws,
+            &terrain.textures,
+            &terrain.skin,
+        );
+        {
+            let mut w = ctx.world.borrow_mut();
+            w.spawn((
+                Transform::IDENTITY,
+                ModelRef { model: terrain.hash },
+                AnimState::default(),
+                SkinPalette { mats: vec![IDENTITY] },
+            ));
+        }
+        // GAME population hook: hand the game the live World/Scene/Wad so it can spawn its own entities.
+        {
+            let mut w = ctx.world.borrow_mut();
+            (self.populate)(&mut w, ctx.scene, &mut data.wad);
+        }
+        ctx.scene.set_lights(std::mem::take(&mut data.lights));
+        // Take ownership of the streaming state into the reusable executor.
+        self.stream = Some(StreamingWorld::new(
+            data.wad,
+            data.manager,
+            data.props,
+            data.terrain_tiles,
+            data.lowres_draw_by_cell,
+            terrain_hash,
+        ));
+    }
+
+    fn update(&mut self, ctx: &mut crate::app::Ctx) -> crate::app::Camera {
+        use mercs2_core::glam::{Mat4, Vec3};
+        use winit::keyboard::KeyCode;
+        // Mouse-look (the App resolved the dual-source delta; we apply the free-fly sensitivity).
+        const MOUSE_SENS: f32 = 0.0008;
+        let mdx = ctx.mouse_delta.0.clamp(-80.0, 80.0) * MOUSE_SENS;
+        let mdy = ctx.mouse_delta.1.clamp(-80.0, 80.0) * MOUSE_SENS;
+        self.free_yaw += mdx;
+        self.free_pitch = (self.free_pitch - mdy).clamp(-1.5, 1.5);
+        let look = 1.6 * ctx.dt;
+        let k = ctx.input.keys;
+        if k.contains(&KeyCode::ArrowUp) {
+            self.free_pitch += look;
+        }
+        if k.contains(&KeyCode::ArrowDown) {
+            self.free_pitch -= look;
+        }
+        if k.contains(&KeyCode::ArrowLeft) {
+            self.free_yaw -= look;
+        }
+        if k.contains(&KeyCode::ArrowRight) {
+            self.free_yaw += look;
+        }
+        self.free_pitch = self.free_pitch.clamp(-1.5, 1.5);
+        let fwd = Vec3::new(
+            self.free_pitch.cos() * self.free_yaw.sin(),
+            self.free_pitch.sin(),
+            self.free_pitch.cos() * self.free_yaw.cos(),
+        )
+        .normalize();
+        let right = Vec3::Y.cross(fwd).normalize();
+        let mut mv = Vec3::ZERO;
+        if k.contains(&KeyCode::KeyW) {
+            mv += fwd;
+        }
+        if k.contains(&KeyCode::KeyS) {
+            mv -= fwd;
+        }
+        if k.contains(&KeyCode::KeyD) {
+            mv += right;
+        }
+        if k.contains(&KeyCode::KeyA) {
+            mv -= right;
+        }
+        if k.contains(&KeyCode::KeyE) {
+            mv += Vec3::Y;
+        }
+        if k.contains(&KeyCode::KeyQ) {
+            mv -= Vec3::Y;
+        }
+        let sp = if k.contains(&KeyCode::ShiftLeft) { 900.0 } else { 260.0 };
+        if mv != Vec3::ZERO {
+            self.free_pos += mv.normalize() * sp * ctx.dt;
+        }
+        let view = Mat4::look_to_lh(self.free_pos, fwd, Vec3::Y);
+
+        // Streaming tick: decide + execute the diff around the (now final) camera position.
+        if let Some(sw) = self.stream.as_mut() {
+            let pos = [self.free_pos.x, self.free_pos.y, self.free_pos.z];
+            let mut w = ctx.world.borrow_mut();
+            sw.step(&mut *ctx.scene, &mut w, pos);
+            drop(w);
+            if self.stat_last.elapsed().as_secs_f32() >= 1.0 {
+                self.stat_last = std::time::Instant::now();
+                let s = sw.stats();
+                println!(
+                    "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={}",
+                    self.free_pos.x, self.free_pos.y, self.free_pos.z,
+                    s.resident, s.awake, s.cached_regions, s.regions, s.block_ents, s.props, s.models
+                );
+            }
+        }
+
+        crate::app::Camera { view, pos: self.free_pos, near: 0.5, far: 30000.0 }
+    }
+
+    fn fixed_update(&mut self, ctx: &mut crate::app::Ctx) {
+        // Animation pass (fixed-timestep): woken rigged props, via StreamingWorld::animate.
+        if let Some(sw) = self.stream.as_ref() {
+            let mut w = ctx.world.borrow_mut();
+            sw.animate(&mut w, ctx.time.fixed_dt);
+        }
+    }
 }
 
 /// Decrement a model's live-reference count; free its GPU resources when it reaches zero (net-new

@@ -31,6 +31,21 @@ fontdue = "0.9"
 mercs2_formats = { path = "../mercs2_formats" }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
 mercs2_core = { path = "../mercs2_core" }
+# Mechanism crates: the engine OWNS and re-exports (`pub use … as <name>`) every gameplay/AV/render
+# subsystem so the game depends only on the engine. None of these depend on the engine (cycle-free);
+# game-specific SELECTION/content lives in `mercs2_game`, the mechanism lives here.
+mercs2_script = { path = "../mercs2_script" }
+mercs2_audio = { path = "../mercs2_audio" }
+mercs2_physics = { path = "../mercs2_physics" }
+mercs2_vehicle = { path = "../mercs2_vehicle" }
+mercs2_ai = { path = "../mercs2_ai" }
+mercs2_anim = { path = "../mercs2_anim" }
+mercs2_water = { path = "../mercs2_water" }
+mercs2_decal = { path = "../mercs2_decal" }
+mercs2_population = { path = "../mercs2_population" }
+mercs2_combat = { path = "../mercs2_combat" }
+mercs2_faction = { path = "../mercs2_faction" }
+mercs2_ui = { path = "../mercs2_ui" }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key

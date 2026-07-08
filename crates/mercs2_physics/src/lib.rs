@@ -47,6 +47,10 @@
 use mercs2_core::glam::Vec3;
 use mercs2_core::physics_query::{ClosestPoint, PhysicsQuery, RayHit};
 
+/// Lightweight direct-triangle-soup collision (capsule controller + camera raycast over `&[[Vec3;3]]`),
+/// folded from the game's on-foot collision. Bbox-culled (large-triangle-safe). See [`soup`].
+pub mod soup;
+
 // ---------------------------------------------------------------------------
 //   Triangle primitives (ported from mercs2_game::collision — leaf crate must
 //   not depend on mercs2_game, so the math lives here directly).

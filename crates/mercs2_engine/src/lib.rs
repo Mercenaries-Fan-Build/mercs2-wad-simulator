@@ -14,11 +14,24 @@
 //! **in-process** via `game_world::run_game_world` instead of shelling out to a separate engine
 //! binary. This follows `docs/modernization/pangea_engine_alignment.md` §6.
 
+pub mod app;
+pub mod asset;
+pub mod camera;
 pub mod diag;
+// The Lua host + simulation cluster. Lua is a core engine pillar, not just WAD content: the VM binding
+// surface (`Pg.*`/`Object.*`/`Player.*`/`Ai.*`/…) marries the scripts to the live engine systems (World,
+// physics, audio, AI). `script_host` implements `mercs2_script`'s `EngineHost`; `runtime`/`gameplay`/
+// `spawn` are the ECS-driven fleet tick + spawn resolver it drives. The game supplies scripts (WADs) +
+// policy (namespace/hero/economy/faction seed) via the constructor/setters.
+pub mod gameplay;
+pub mod runtime;
+pub mod script_host;
+pub mod spawn;
 pub mod game_world;
 pub mod input;
 pub mod mesh;
 pub mod particles;
+pub mod player;
 pub mod pose;
 pub mod post;
 pub mod render;
@@ -28,6 +41,26 @@ pub mod ui;
 pub mod wad;
 pub mod water;
 pub mod worldutil;
+
+// Mechanism re-exports. The engine OWNS these subsystems; the game reaches them ONLY through the
+// engine (`mercs2_engine::physics::…`) so it can depend on the engine alone. Each `pub use … as <name>`
+// is a zero-cost alias to the same underlying type — `mercs2_engine::physics::X` *is* `mercs2_physics::X`
+// — so a game `use` flip and the eventual direct-dep drop are decoupled and never mismatch mid-flight.
+pub use mercs2_ai as ai;
+pub use mercs2_anim as anim;
+pub use mercs2_audio as audio;
+pub use mercs2_combat as combat;
+pub use mercs2_decal as decal;
+pub use mercs2_faction as faction;
+pub use mercs2_physics as physics;
+pub use mercs2_population as population;
+pub use mercs2_script as script;
+pub use mercs2_vehicle as vehicle;
+// `water_sim`/`widgets` avoid the name clash with the engine's own render modules `water` (the water
+// surface `RenderNode`) and `ui` (the 2D overlay pass): `mercs2_water` is the watermap/swim DATA crate,
+// `mercs2_ui` is the retained HUD widget tree the `Hud.*` bindings drive.
+pub use mercs2_ui as widgets;
+pub use mercs2_water as water_sim;
 
 /// Wave-0 Tier-2 seam guard (seam F, `docs/modernization/wave0_seam_review.md`).
 ///
