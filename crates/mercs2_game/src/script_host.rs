@@ -156,6 +156,9 @@ pub struct GameScriptHost {
     net_events: Vec<(String, Vec<String>)>,
     /// Generic engine-command log (Hud/Object/Camera/Lti/Sys/Gui action verbs) the runtime consumes.
     script_cmds: Vec<(String, Vec<String>)>,
+    /// Requested game states (`Sys.RequestGameState`) awaiting the engine's state-machine service — the
+    /// resident pump drains these and fires the matching `Event.GameStateChange` to advance `MrxState`.
+    pending_game_states: Vec<String>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -392,6 +395,7 @@ impl GameScriptHost {
             sound_cmds: Vec::new(),
             net_events: Vec::new(),
             script_cmds: Vec::new(),
+            pending_game_states: Vec::new(),
         }
     }
 
@@ -445,6 +449,12 @@ impl GameScriptHost {
     /// reads to position the player (supersedes the engine-side marker shortcut). `None` until it fires.
     pub fn take_hero_spawn(&mut self) -> Option<[f32; 3]> {
         self.hero_spawn.take()
+    }
+
+    /// Drain the requested game states awaiting the state-machine service (the resident pump fires the
+    /// matching `Event.GameStateChange` for each to advance the `MrxState` world-load chain).
+    pub fn take_pending_game_states(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_game_states)
     }
 
     /// The hero spawn position the game's Lua requested via `MrxUtil._TeleportHero`, if any. The boot
@@ -680,6 +690,11 @@ impl EngineHost for GameScriptHost {
     }
 
     // ===== Sys engine-config store (Set* ↔ Get* real roundtrips). =====
+    fn sys_request_game_state(&mut self, state: &str) {
+        // Queue the requested state; the resident pump services it (fires Event.GameStateChange) so the
+        // MrxState world-load chain advances (Loading → WaitForGame → GlobalEnter → … → GlobalExit).
+        self.pending_game_states.push(state.to_string());
+    }
     fn sys_set_time_scale(&mut self, scale: f32) {
         self.settings.time_scale = scale.max(0.0);
     }
@@ -1320,7 +1335,7 @@ pub fn resident_script_host(host: Rc<RefCell<GameScriptHost>>) -> Option<ScriptH
 /// this is exactly what to diff against vanilla to find the first divergence. The spawn itself
 /// (`MrxPlayer.OnPlayerJoined` → `SetSpawnLocations`/`CreatePlayerCharacter`) is event-driven — it fires
 /// once the engine signals GUI-loaded + player-joined (wired next). Errors are logged, not fatal.
-pub fn run_boot_flow(sh: &ScriptHost, contract: &str, character: &str) {
+pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, contract: &str, character: &str) {
     println!("[world] ===== vanilla boot Lua flow: MrxBootstrap.Start() =====");
     // Drive the flow the way the engine does: MrxBootstrap.Start() registers the callbacks, then the
     // mission flow sets the spawn location (SetSpawnLocations(<Contract>_Start1)) and the player-joined
@@ -1330,15 +1345,40 @@ pub fn run_boot_flow(sh: &ScriptHost, contract: &str, character: &str) {
     let src = format!(
         "import(\"MrxBootstrap\")\n\
          import(\"MrxPlayer\")\n\
+         import(\"LevelBootstrap\")\n\
          MrxBootstrap.Start()\n\
+         LevelBootstrap.LoadLevel(\"vz\", \"vz\")\n\
          MrxPlayer.SetSpawnLocations({{ \"{contract}_Start1\" }})\n\
          local ok, err = pcall(MrxPlayer.CreatePlayerCharacter, true, 0, \"{character}\", \"{contract}_Start1\")\n\
          if not ok then Debug.Printf(\"CreatePlayerCharacter aborted: \" .. tostring(err)) end\n"
     );
     match sh.exec(&src, "@boot_flow") {
-        Ok(()) => println!("[world] ===== boot flow returned (Start + spawn) ====="),
+        Ok(()) => println!("[world] ===== boot flow started (Start + spawn); servicing state machine ====="),
         Err(e) => println!("[world] ===== boot flow error (first divergence): {e} ====="),
     }
+
+    // Service the world-load state machine: pump the Lua timer/event system and fire the
+    // `Event.GameStateChange` events for each `Sys.RequestGameState` the chain requests (we have no real
+    // streaming/tether wait, so each requested state completes immediately — enter then exit). This
+    // advances MrxState: Loading → WaitForGame → GlobalEnter → WaitForStreaming → … → GlobalExit.
+    let mut idle_rounds = 0;
+    for _ in 0..600 {
+        pump_resident(sh, 0.1);
+        let states = host.borrow_mut().take_pending_game_states();
+        if states.is_empty() {
+            idle_rounds += 1;
+            if idle_rounds >= 3 {
+                break; // settled: no more state requests + timers drained
+            }
+            continue;
+        }
+        idle_rounds = 0;
+        for st in states {
+            let _ = sh.fire_state_change(&st, "enter");
+            let _ = sh.fire_state_change(&st, "exit");
+        }
+    }
+    println!("[world] ===== boot flow settled =====");
 }
 
 /// Advance the resident script host one fixed step: pump the Lua event/timer system (`Event.__pump(dt)`)
@@ -1960,7 +2000,7 @@ mod tests {
             return;
         };
         host.borrow_mut().set_boot_context(std::collections::HashMap::new(), "chris");
-        run_boot_flow(&sh, "PmcCon001", "chris");
+        run_boot_flow(&sh, &host, "PmcCon001", "chris");
         let lines = host.borrow().lua_log_lines;
         assert!(
             lines > 100,

@@ -1241,7 +1241,7 @@ pub async fn run_scene_world_loading(
                                     script_host
                                         .borrow_mut()
                                         .set_boot_context(data.named_locations.clone(), hero_character.clone());
-                                    crate::script_host::run_boot_flow(sh, &active_contract, &hero_character);
+                                    crate::script_host::run_boot_flow(sh, &script_host, &active_contract, &hero_character);
                                     if let Some(p) = script_host.borrow_mut().take_hero_spawn() {
                                         player.pos = Vec3::new(p[0], p[1], p[2]);
                                         println!("[world] hero spawn via boot Lua flow: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);

@@ -90,6 +90,9 @@ struct EventReg {
     timer_period: Option<f32>,
     // Condition kinds (ObjectDeath/…): the subject GUID the engine fires against.
     subject: Option<u64>,
+    // GameStateChange: the `(stateName, phase)` this handler waits for (e.g. `("WaitForStreaming",
+    // "exit")`), fired by the engine's state machine via `fire_game_state_change`.
+    state_match: Option<(String, String)>,
 }
 
 /// The script-side event manager: a handle→registration table. Shared (`Rc<RefCell>`) across the
@@ -120,26 +123,31 @@ fn make(
     persistent: bool,
 ) -> LuaResult<i64> {
     let cbargs = seq_values(&cbargs)?;
-    let (script_name, filter, timer_remaining, timer_period, subject) = if kind == KIND_SCRIPT_EVENT {
+    let (script_name, filter, timer_remaining, timer_period, subject, state_match) = if kind == KIND_SCRIPT_EVENT {
         // params = { name, [filter_fn] }
-        (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None)
+        (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None, None)
     } else if kind == KIND_TIMER_RELATIVE {
         // params = { seconds }
         let secs: f32 = params.get(1).unwrap_or(0.0);
-        (None, None, Some(secs), Some(secs), None)
+        (None, None, Some(secs), Some(secs), None, None)
     } else if kind == KIND_OBJECT_DEATH {
         // params = { guid } — fired by the engine when that object dies (Object.Kill / damage).
         let g: Option<i64> = params.get(1).ok();
-        (None, None, None, None, g.map(|x| x as u64))
+        (None, None, None, None, g.map(|x| x as u64), None)
+    } else if kind == KIND_GAME_STATE_CHANGE {
+        // params = { stateName, phase } — fired by the engine's state machine (e.g. {"WaitForStreaming","exit"}).
+        let st = params.get::<String>(1).ok();
+        let ph = params.get::<String>(2).ok();
+        (None, None, None, None, None, st.map(|s| (s, ph.unwrap_or_default())))
     } else {
-        (None, None, None, None, None)
+        (None, None, None, None, None, None)
     };
     let mut m = mgr.borrow_mut();
     m.next += 1;
     let h = m.next;
     m.regs.insert(
         h,
-        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject },
+        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, state_match },
     );
     Ok(h)
 }
@@ -270,6 +278,34 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 /// calls this when an object dies — today from the `Object.Kill` binding; later from the damage
 /// solver / destruction FSM. No-op if the event system isn't installed. This is the condition-feed
 /// pattern the other condition kinds (Proximity/Boundary/InSeat) will follow.
+/// Fire every `GameStateChange` handler waiting on `(state, phase)` — the engine's state machine
+/// calls this when a requested game state reaches that phase (e.g. `("WaitForStreaming", "exit")`),
+/// advancing the `MrxState` load chain (`_StateComplete` → next state → … → GlobalEnter/GlobalExit).
+pub fn fire_game_state_change(lua: &Lua, state: &str, phase: &str) -> LuaResult<()> {
+    let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
+        Some(m) => (*m).clone(),
+        None => return Ok(()),
+    };
+    let fired: Vec<(i64, Function, Vec<Value>, bool)> = {
+        let m = mgr.borrow();
+        m.regs
+            .iter()
+            .filter(|(_, r)| {
+                r.kind == KIND_GAME_STATE_CHANGE
+                    && r.state_match.as_ref().is_some_and(|(s, p)| s == state && p == phase)
+            })
+            .map(|(h, r)| (*h, r.callback.clone(), r.cbargs.clone(), r.persistent))
+            .collect()
+    };
+    for (h, callback, cbargs, persistent) in fired {
+        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        if !persistent {
+            mgr.borrow_mut().regs.remove(&h);
+        }
+    }
+    Ok(())
+}
+
 pub fn fire_object_death(lua: &Lua, guid: u64) -> LuaResult<()> {
     let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
         Some(m) => (*m).clone(),

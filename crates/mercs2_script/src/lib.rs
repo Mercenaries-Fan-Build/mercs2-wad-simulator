@@ -1555,6 +1555,13 @@ impl ScriptHost {
     pub fn eval<T: mlua::FromLuaMulti>(&self, src: &str) -> LuaResult<T> {
         self.lua.load(src).eval()
     }
+
+    /// Fire the `GameStateChange` handlers waiting on `(state, phase)` — the engine's world-load state
+    /// machine calls this (via the resident pump) to advance the `MrxState` chain when a requested game
+    /// state reaches that phase.
+    pub fn fire_state_change(&self, state: &str, phase: &str) -> LuaResult<()> {
+        crate::bindings::event::fire_game_state_change(&self.lua, state, phase)
+    }
 }
 
 /// Recursively index `*.lua` files under `dir` by lowercased file stem → path. First writer wins on a

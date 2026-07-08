@@ -41,7 +41,7 @@ mod bloom;
 mod camera;
 mod camera_fx;
 mod debug;
-mod event;
+pub(crate) mod event;
 mod face;
 mod fade;
 mod fire;
