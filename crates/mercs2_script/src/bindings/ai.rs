@@ -244,15 +244,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // --- UNBACKED residue → honest no-ops (NOT "faithful"): these want a perception-subject list, a
     // spawn-list channel model, exclusion zones, or road/lane spawning toggles the engine does not have
     // yet. Tracked in docs/modernization/binding_burndown.md — de-stub as those systems land. ---
-    for name in [
+    super::record_all(&mut b, lua, host, "Ai", &[
         "LivingWorld", "SetPerceivability", "SetTrafficSpawning", "SetSidewalkSpawning",
         "SetRoadSpawning", "SetLaneActive", "ShowObjectSpawners", "SetSpawnList",
         "ClearSpawnListChanges", "ResetAllSpawnLists", "SetExclusionZone", "AddRoadException",
         "RemoveRoadException", "RemoveExclusionZone", "AddSubject", "RemoveSubject", "RemoveAllSubjects",
         "ThreatPerception", "SetFeeling", "SetDriveThroughMassRatio",
-    ] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     b.install_global(GLOBAL)
 }

@@ -140,15 +140,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // --- UNBACKED residue (burn-down): faction/vehicle/pickup/player marker CATEGORY toggles (need a
     // marker-category config + the render pass), sign-in/shell lifecycle, loading hints, PIX. No-ops. ---
-    for name in [
+    super::record_all(&mut b, lua, host, "Gui", &[
         "SetFactionMarkerVisibleDistance", "EnableFactionMarkers", "SetFactionMarkerSize",
         "SetVehicleEntranceMarkerVisibleDistance", "EnableVehicleEntranceMarkers",
         "SetVehicleEntranceMarkerSize", "EnablePickupMarkers", "SetPickupMarkerSize",
         "SetPickupMarkerVisibleDistance", "EnablePlayerMarkers", "GetLanguageNum", "DoSigninCheck",
         "OnShellLoaded", "OnGlobalExit", "ShowLoadingHints", "OutputToPIX",
-    ] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     // Input-mode queries gate KB/M-vs-controller branches — PC default = keyboard/mouse.
     b.real(

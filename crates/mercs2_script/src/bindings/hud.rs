@@ -468,11 +468,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "MinimapSetRange", "SetMinimapRadius", "SetMinimapOwner", "MinimapSetPlayerLocation",
         "MinimapSetFocusLocation", "MinimapAddObjective", "MinimapRemoveObjective",
     ];
-    for &name in STUB_NAMES {
-        if !BACKED.contains(&name) {
-            b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-        }
-    }
+    // The non-backed widget residue (callbacks / interpolation / pie-slice / clock / text+sprite
+    // animation / flash VM input / PDA blips) → recorded HUD commands the widget runtime drains.
+    let residue: Vec<&'static str> = STUB_NAMES.iter().copied().filter(|n| !BACKED.contains(n)).collect();
+    super::record_all(&mut b, lua, host, "Hud", &residue)?;
 
     b.install_global(GLOBAL)
 }

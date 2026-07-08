@@ -69,10 +69,17 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("DestroyAllWeapons", lua.create_function(move |_, c: i64| { h.borrow_mut().inventory_destroy_all(c as u64); Ok(()) })?)?;
 
-    // UNBACKED residue: GetVehicleWeapon needs the vehicle↔weapon link; ReloadAll needs a per-weapon
-    // ammo model (no ammo store yet). Honest defaults.
+    // GetVehicleWeapon → nil until the vehicle↔weapon link exists. ReloadAll(character) → reload every
+    // weapon in the character's loadout to capacity (real, via the weapon ammo store).
     b.real("GetVehicleWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
-    b.stub("ReloadAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    let h = host.clone();
+    b.real("ReloadAll", lua.create_function(move |_, c: i64| {
+        let weapons = h.borrow().inventory_weapons(c as u64);
+        for w in weapons {
+            h.borrow_mut().weapon_reload(w);
+        }
+        Ok(())
+    })?)?;
 
     b.install_global(GLOBAL)
 }

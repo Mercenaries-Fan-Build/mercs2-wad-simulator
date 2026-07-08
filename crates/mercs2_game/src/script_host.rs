@@ -151,6 +151,8 @@ pub struct GameScriptHost {
     sound_cmds: Vec<(String, Vec<String>)>,
     /// Replicated mission-event log (`Net.SendEvent_*` etc.) the runtime realizes locally in SP.
     net_events: Vec<(String, Vec<String>)>,
+    /// Generic engine-command log (Hud/Object/Camera/Lti/Sys/Gui action verbs) the runtime consumes.
+    script_cmds: Vec<(String, Vec<String>)>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -376,6 +378,7 @@ impl GameScriptHost {
             human_seats: HashMap::new(),
             sound_cmds: Vec::new(),
             net_events: Vec::new(),
+            script_cmds: Vec::new(),
         }
     }
 
@@ -1218,6 +1221,9 @@ impl EngineHost for GameScriptHost {
     }
     fn net_event(&mut self, verb: &str, args: Vec<String>) {
         self.net_events.push((verb.to_string(), args));
+    }
+    fn script_cmd(&mut self, verb: &str, args: Vec<String>) {
+        self.script_cmds.push((verb.to_string(), args));
     }
 }
 

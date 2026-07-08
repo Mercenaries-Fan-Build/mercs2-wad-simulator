@@ -1257,6 +1257,14 @@ pub trait EngineHost {
     fn net_event(&mut self, verb: &str, args: Vec<String>) {
         let _ = (verb, args);
     }
+
+    /// Record a generic engine command (`Hud` animation/callbacks, `Object` animation/winch/impulse,
+    /// `Camera` extras, `Lti` options-menu navigation, `Sys`/`Graphics` misc, `Gui` marker-category
+    /// toggles, …) onto the drainable command log the corresponding runtime system consumes. The verb
+    /// is namespaced (`"Ns.Verb"`) so one log serves every remaining action surface.
+    fn script_cmd(&mut self, verb: &str, args: Vec<String>) {
+        let _ = (verb, args);
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1668,9 +1676,12 @@ mod tests {
         // (input/cinematic/survival/grapple/scope/vehicle-lock/disguise/PDA/satellite + scalars) wired
         // to a real player-mode store (real +18); seat occupancy (Enter/Transfer/ForceExit) +
         // Vehicle.RestoreAmmo wired to real host state (real +4); Sound dynamic-music/DSP command log +
-        // Net SendEvent_* mission-event log wired as real recorded intents (real +120).
-        const EXPECTED_REAL: usize = 796;
-        const EXPECTED_STUB: usize = 290;
+        // Net SendEvent_* mission-event log wired as real recorded intents (real +120); the entire
+        // action residue (Hud/Object/Lti/Pg/Camera/Sys/Gui/Ai/Atmosphere/Vo/ObjectFilter/ObjectState
+        // animation/menu/spawner/param/marker-category verbs) → recorded command logs (real +231).
+        // Remaining unbacked = genuine dev stubs (debug menu, asset dumps) + a few getters/subsystem gaps.
+        const EXPECTED_REAL: usize = 1027;
+        const EXPECTED_STUB: usize = 59;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1696,10 +1707,10 @@ mod tests {
         // Spot-check the boot-slice namespaces route correctly.
         let by = |name: &str| cov.iter().find(|c| c.namespace == name).unwrap();
         assert_eq!(by("Debug").real_count(), 1);
-        assert_eq!(by("Sys").real_count(), 54);
-        assert_eq!(by("Pg").real_count(), 40);
-        assert_eq!(by("Object").real_count(), 64);
-        assert_eq!(by("Object").stub_count(), 23);
+        assert_eq!(by("Sys").real_count(), 64);
+        assert_eq!(by("Pg").real_count(), 80);
+        assert_eq!(by("Object").real_count(), 86);
+        assert_eq!(by("Object").stub_count(), 1);
         assert_eq!(by("Player").real_count(), 83);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 40);

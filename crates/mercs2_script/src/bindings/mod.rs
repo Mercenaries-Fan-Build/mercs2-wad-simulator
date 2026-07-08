@@ -70,6 +70,32 @@ mod vehicle;
 mod vo;
 mod weapon;
 
+/// Back a list of action cfuncs as **recorded commands** on the host's generic command log
+/// (`EngineHost::script_cmd`): each records `"Ns.Verb"` + its stringified args — a real intent the
+/// corresponding runtime system drains, not a dropped no-op. Use for animation/callback/menu/action
+/// verbs that have no queryable state of their own.
+pub(crate) fn record_all(
+    b: &mut NsBuilder,
+    lua: &Lua,
+    host: &SharedHost,
+    ns: &'static str,
+    names: &[&'static str],
+) -> LuaResult<()> {
+    for &name in names {
+        let h = host.clone();
+        let verb: std::rc::Rc<str> = std::rc::Rc::from(format!("{ns}.{name}").as_str());
+        b.real(
+            name,
+            lua.create_function(move |_, args: mlua::MultiValue| {
+                let sa: Vec<String> = args.iter().map(stringify_arg).collect();
+                h.borrow_mut().script_cmd(&verb, sa);
+                Ok(())
+            })?,
+        )?;
+    }
+    Ok(())
+}
+
 /// Stringify a Lua argument for a recorded command log (string/number/bool/nil → text; other → "").
 pub(crate) fn stringify_arg(v: &mlua::Value) -> String {
     match v {

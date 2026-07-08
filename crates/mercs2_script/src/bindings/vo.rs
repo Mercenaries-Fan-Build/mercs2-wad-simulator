@@ -75,9 +75,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("SetCinematicMode", lua.create_function(move |_, on: Option<bool>| { h.borrow_mut().vo_set_cinematic_mode(on.unwrap_or(true)); Ok(()) })?)?;
 
-    // UNBACKED residue (burn-down): VO sequence playlists need a sequence model (not in vo.rs yet).
-    b.stub("AddSequence", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("RemoveSequence", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // VO sequence playlists → recorded VO commands the dialogue director drains.
+    super::record_all(&mut b, lua, host, "Vo", &["AddSequence", "RemoveSequence"])?;
 
     b.install_global(GLOBAL)
 }

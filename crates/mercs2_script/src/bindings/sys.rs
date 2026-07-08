@@ -252,12 +252,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // --- UNBACKED residue (burn-down): asset-preload/streaming controls + string-DB + intro movies +
     // mission-skip need the asset/streaming + localization subsystems. Honest no-ops. ---
-    for name in [
+    super::record_all(&mut b, lua, host, "Sys", &[
         "RequiredAsset", "Callback", "SetSkipMission", "SetINIBriefing", "DisableAssetPreload",
         "FlushAssets", "PlayIntroMovies", "AddStringDb", "ClearStringDb", "ForceNextAutosave",
-    ] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     b.install_global(GLOBAL)
 }

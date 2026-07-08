@@ -312,10 +312,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("DisablePhysics", lua.create_function(move |_, guid: i64| { h.borrow_mut().object_set_physics_enabled(guid as u64, false); Ok(()) })?)?;
 
-    // --- animation / winch / cargo / impulse / disposer / accel actions: faithful no-ops ---
-    // (No per-object material-anim / winch / rigid-body-impulse runtime yet; the game's Lua control flow
-    // runs unchanged and simply produces no physical side effect.)
-    for name in [
+    // --- animation / winch / cargo / impulse / disposer / accel actions → recorded object commands
+    // the anim/physics/winch runtime drains (verb + args = the requested action). ---
+    super::record_all(&mut b, lua, host, "Object", &[
         "SetPositionToObject",
         "PlayAnimation",
         "StopAnimation",
@@ -338,9 +337,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "AddToDisposer",
         "RemoveFromDisposer",
         "RevertHibernationDistance",
-    ] {
-        b.stub(name.trim(), lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     b.install_global(GLOBAL)
 }

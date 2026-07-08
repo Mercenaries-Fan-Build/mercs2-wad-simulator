@@ -88,9 +88,11 @@ pub const REQUIRED: &[Required] = &[
 /// The game reaches this surface exclusively through the `LTILibName` alias (`LTILibName.FirstRun()`,
 /// `LTILibName.ChangeShellState(..)`, …) — never a bare `Lti.*`. The table installs as the `Lti`
 /// global and is also bound to the `LTILibName` global below so those shell lookups resolve.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for name in [
+    // The options-menu / shell-state navigation surface (video/input/joystick/profile/precache) →
+    // recorded LTI commands the shell state machine drains (menu transitions + applied settings).
+    super::record_all(&mut b, lua, host, "Lti", &[
         "LTIMovieStart",
         "LTIMovieStop",
         "LTIMoviePause",
@@ -142,9 +144,7 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
         "LTIGetDateFormat",
         "LTICamera",
         "LTIupdateSupportQuickSlot",
-    ] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-    }
+    ])?;
     // Shell first-boot gate: `if FirstRun() == 1` — report a normal (non-first) session.
     b.real(
         "FirstRun",

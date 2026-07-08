@@ -88,8 +88,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
 
-    // UNBACKED residue: cross-object state-machine messaging + the debug dumps. Honest no-ops.
-    b.stub("SendMessage", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Cross-object state-machine messaging → recorded ObjectState commands. The Print/Debug dumps are
+    // genuine dev stubs (PC strips the debug menu).
+    super::record_all(&mut b, lua, host, "ObjectState", &["SendMessage"])?;
     b.stub("PrintStateMachine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("DebugStateMachine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
 

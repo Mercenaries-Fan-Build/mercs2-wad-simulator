@@ -116,23 +116,14 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("ToggleAlarm", lua.create_function(move |_, guid: i64| Ok(h.borrow_mut().pg_alarm_toggle(guid as u64)))?)?;
 
-    // Pure no-op stubs (asset/install/debug side-effect cfuncs + retail-style dev dumps).
-    for name in [
-        "Subdue",
-        "DrawPath",
-        "InstallToHDD",
-        "UseExistingInstall",
-        "DumpAssets",
-        "DumpAssetsDiff",
-        "DumpTextures",
-        "DumpAssetMemory",
-        "DumpMemory",
-        "LoadScript",
-        "LoadFunctions",
-        "LoadData",
-        "SetQGrey",
-        "DumpStats",
-    ] {
+    // Install-manager + script/data loaders + misc actions → recorded Pg commands the world/install
+    // runtime drains.
+    super::record_all(&mut b, lua, host, "Pg", &[
+        "Subdue", "DrawPath", "InstallToHDD", "UseExistingInstall", "LoadScript", "LoadFunctions",
+        "LoadData", "SetQGrey",
+    ])?;
+    // Genuine retail dev-dump stubs (stripped/no-op on the PC build).
+    for name in ["DumpAssets", "DumpAssetsDiff", "DumpTextures", "DumpAssetMemory", "DumpMemory", "DumpStats"] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
     }
 

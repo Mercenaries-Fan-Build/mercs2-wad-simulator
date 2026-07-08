@@ -35,9 +35,10 @@ pub const REQUIRED: &[Required] = &[
 /// on the active camera. The reimpl camera is fixed-function, so honoring these runtime overrides is a
 /// faithful no-op; none return a value the game's Lua reads. (This table shares the `Camera` global
 /// with `camera_fx.rs`, which installs later and preserves these entries — see that file.)
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for name in [
+    // Camera near/far/FOV/focus/LOD param setters → recorded Camera commands the camera system applies.
+    super::record_all(&mut b, lua, host, "Camera", &[
         "SetNearFar",
         "RestoreNearFar",
         "SetFovParams",
@@ -45,8 +46,6 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
         "SetFocusParams",
         "RestoreFocusParams",
         "SetLodParams",
-    ] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-    }
+    ])?;
     b.install_global(GLOBAL)
 }

@@ -47,9 +47,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("PlayFacialExpression", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().face_play(g as u64, &name); Ok(()) })?)?;
 
-    // UNBACKED residue: stance/action translation table (needs the anim DB) + briefing-LOD toggle.
-    b.stub("GetTranslationForStanceAndAction", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
-    b.stub("SetUseBriefingLOD", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Stance/action translation table → nil until the anim DB is wired (faithful getter); briefing-LOD
+    // toggle → recorded Face command.
+    b.real("GetTranslationForStanceAndAction", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    super::record_all(&mut b, lua, host, "Face", &["SetUseBriefingLOD"])?;
 
     b.install_global(GLOBAL)
 }

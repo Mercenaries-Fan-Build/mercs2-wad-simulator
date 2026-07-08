@@ -94,12 +94,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     b.real("GetCoopPlayerGuid", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
 
-    // UNBACKED residue (0 shipped calls): filter-graph association/relation edges — a filter-to-filter
-    // relation model not yet built. Honest no-ops (see burn-down).
-    b.stub("SetAssociation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("ClearAssociation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SetRelation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("ClearRelation", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Filter-graph association/relation edges → recorded ObjectFilter commands (the filter-graph
+    // relation model consumes them).
+    super::record_all(&mut b, lua, host, "ObjectFilter", &[
+        "SetAssociation", "ClearAssociation", "SetRelation", "ClearRelation",
+    ])?;
 
     b.install_global(GLOBAL)
 }

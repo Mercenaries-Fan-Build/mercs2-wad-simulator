@@ -226,7 +226,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Layer/asset streaming, context actions, region radii, rumble, roads, save/contract signals,
     // achievements, the whole pursuit-director surface, heli-wave + skirmish spawners. Wired to real
     // behavior by later world/AI silos; the game's Lua control flow runs unchanged here.
-    for name in [
+    // Layer/asset load, context actions, boundary + pursuit control, contract lifecycle, heli-wave/
+    // skirmish spawners → recorded Pg commands the world/pursuit/streaming runtime drains.
+    super::record_all(&mut b, lua, host, "Pg", &[
         "ResetSingletonDone",
         "LoadLayer",
         "UnloadLayer",
@@ -267,9 +269,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "SetSkirmishTable",
         "AddSkirmishTemplate",
         "SetGlobalSkirmishState",
-    ] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     b.install_global(GLOBAL)
 }

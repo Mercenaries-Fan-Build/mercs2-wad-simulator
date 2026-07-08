@@ -160,13 +160,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // UNBACKED residue: preset/region/interpolation engine (Change/*LineRegion*/Restore/
     // GetCurrentSetting/EnableImmediatelyChangeMode/SetAtmosphere) + multi-face ambient cube + wind/
     // particle-rate emitters — need the sky-transition + particle subsystems. Honest no-ops.
-    for name in [
+    super::record_all(&mut b, lua, host, "Atmosphere", &[
         "SetAmbientCube", "SetAtmosphere", "SetWindDirection", "SetParticlesPerSecond", "Change",
         "ChangeLineRegionSetting", "GetLineRegionSetting", "GetLineRegion", "Restore",
         "GetCurrentSetting", "EnableImmediatelyChangeMode",
-    ] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
-    }
+    ])?;
 
     let installed = b.install_global(GLOBAL)?;
 
