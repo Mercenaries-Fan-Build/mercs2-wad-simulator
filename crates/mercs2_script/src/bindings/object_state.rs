@@ -70,11 +70,26 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(h.borrow_mut().object_send_damage(target as u64, amount))
     })?)?;
 
-    // State machine + node-emitter FX actions — faithful no-ops (state machine + particle system).
+    // State-machine state + node emitters → real host state (the emitter's particle *rendering* is a
+    // separate render pass; the active-emitter set + state name are engine state).
+    let h = host.clone();
+    b.real("SetState", lua.create_function(move |_, (guid, state): (i64, String)| {
+        h.borrow_mut().object_sm_set_state(guid as u64, &state);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("StartEmitter", lua.create_function(move |_, (guid, name): (i64, String)| {
+        h.borrow_mut().object_start_emitter(guid as u64, &name);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("StopEmitter", lua.create_function(move |_, (guid, name): (i64, String)| {
+        h.borrow_mut().object_stop_emitter(guid as u64, &name);
+        Ok(())
+    })?)?;
+
+    // UNBACKED residue: cross-object state-machine messaging + the debug dumps. Honest no-ops.
     b.stub("SendMessage", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("SetState", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("StartEmitter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("StopEmitter", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("PrintStateMachine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("DebugStateMachine", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
 

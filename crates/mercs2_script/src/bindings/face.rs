@@ -33,13 +33,21 @@ pub const REQUIRED: &[Required] = &[
 /// Facial animation driver. The engine doesn't drive face anim in the reimpl, so every cfunc is a
 /// faithful no-op (`GetTranslationForStanceAndAction` returns nil — no translation). None of these are
 /// called by the game Lua corpus.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    b.stub("BindFaceAnimSet", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("UnbindFaceAnimSet", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("PlayFaceAnim", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("PlayFacialExpression", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Facial anim set binding + current expression → real per-face host state (the facial-anim playback
+    // is a render/anim-channel concern; the bound set + current expression are engine state).
+    let h = host.clone();
+    b.real("BindFaceAnimSet", lua.create_function(move |_, (g, set): (i64, String)| { h.borrow_mut().face_bind_anim_set(g as u64, Some(&set)); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("UnbindFaceAnimSet", lua.create_function(move |_, g: i64| { h.borrow_mut().face_bind_anim_set(g as u64, None); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("PlayFaceAnim", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().face_play(g as u64, &name); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("PlayFacialExpression", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().face_play(g as u64, &name); Ok(()) })?)?;
+
+    // UNBACKED residue: stance/action translation table (needs the anim DB) + briefing-LOD toggle.
     b.stub("GetTranslationForStanceAndAction", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
     b.stub("SetUseBriefingLOD", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
 

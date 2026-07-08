@@ -133,6 +133,14 @@ pub struct GameScriptHost {
     human_flags: HashMap<u64, HumanFlags>,
     /// Network session state (`Net.*`).
     net: NetState,
+    /// Per-object state-machine state (`ObjectState.SetState`).
+    object_states_sm: HashMap<u64, String>,
+    /// Active node FX emitters per object (`ObjectState.StartEmitter`/`StopEmitter`).
+    emitters: HashMap<u64, std::collections::HashSet<String>>,
+    /// Bound facial anim set + current expression per face (`Face.*`).
+    faces: HashMap<u64, (String, String)>,
+    /// The active mission report `(faction, delay)` (`Report.*`).
+    report: Option<(u64, f32)>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -349,6 +357,10 @@ impl GameScriptHost {
             airstrikes: Vec::new(),
             human_flags: HashMap::new(),
             net: NetState::default(),
+            object_states_sm: HashMap::new(),
+            emitters: HashMap::new(),
+            faces: HashMap::new(),
+            report: None,
         }
     }
 
@@ -1103,6 +1115,62 @@ impl EngineHost for GameScriptHost {
     fn net_host_name(&self) -> String {
         self.net.host_name.clone()
     }
+
+    // ===== Object state machine + emitters. =====
+    fn object_sm_set_state(&mut self, guid: u64, state: &str) {
+        self.object_states_sm.insert(guid, state.to_string());
+    }
+    fn object_sm_state(&self, guid: u64) -> String {
+        self.object_states_sm.get(&guid).cloned().unwrap_or_default()
+    }
+    fn object_start_emitter(&mut self, guid: u64, name: &str) {
+        self.emitters.entry(guid).or_default().insert(name.to_string());
+    }
+    fn object_stop_emitter(&mut self, guid: u64, name: &str) {
+        if let Some(set) = self.emitters.get_mut(&guid) {
+            set.remove(name);
+        }
+    }
+    fn object_emitter_active(&self, guid: u64, name: &str) -> bool {
+        self.emitters.get(&guid).is_some_and(|s| s.contains(name))
+    }
+
+    // ===== Facial animation. =====
+    fn face_bind_anim_set(&mut self, guid: u64, set: Option<&str>) {
+        let e = self.faces.entry(guid).or_default();
+        e.0 = set.unwrap_or("").to_string();
+    }
+    fn face_play(&mut self, guid: u64, name: &str) {
+        self.faces.entry(guid).or_default().1 = name.to_string();
+    }
+    fn face_current(&self, guid: u64) -> String {
+        self.faces.get(&guid).map(|(_, e)| e.clone()).unwrap_or_default()
+    }
+
+    // ===== Mission report → the faction manager. =====
+    fn report_init(&mut self, faction: u64) {
+        self.report = Some((faction, 0.0));
+    }
+    fn report_set_delay(&mut self, seconds: f32) {
+        if let Some(r) = self.report.as_mut() {
+            r.1 = seconds;
+        }
+    }
+    fn report_finish(&mut self, _success: bool) {
+        // Finalize: flush the faction's accumulated infractions into its relation (the mood report).
+        if let Some((faction, _)) = self.report.take() {
+            self.faction.report(faction as u32);
+        }
+    }
+    fn report_infractions(&self) -> i64 {
+        match self.report {
+            Some((faction, _)) => {
+                let acc = self.faction.accumulator(faction as u32);
+                if acc.is_empty() { 0 } else { 1 }
+            }
+            None => 0,
+        }
+    }
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
@@ -1723,6 +1791,31 @@ mod tests {
         sh.exec("Net.Stop()", "@net").unwrap();
         assert!(sh.eval::<bool>("return Net.IsServer()").unwrap());
         assert!(!sh.eval::<bool>("return Net.IsActive()").unwrap());
+    }
+
+    /// ObjectState emitters/state, Face expression, and Report lifecycle drive real host state.
+    #[test]
+    fn game_lua_objectstate_face_report() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Emitters + state-machine state.
+        sh.exec(r#"ObjectState.StartEmitter(0x10, "smoke"); ObjectState.SetState(0x10, "Damaged")"#, "@os").unwrap();
+        assert!(host.borrow().object_emitter_active(0x10, "smoke"));
+        assert_eq!(host.borrow().object_sm_state(0x10), "Damaged");
+        sh.exec(r#"ObjectState.StopEmitter(0x10, "smoke")"#, "@os").unwrap();
+        assert!(!host.borrow().object_emitter_active(0x10, "smoke"));
+
+        // Face: bound set + current expression.
+        sh.exec(r#"Face.BindFaceAnimSet(0x20, "mattias_faces"); Face.PlayFacialExpression(0x20, "angry")"#, "@fa").unwrap();
+        assert_eq!(host.borrow().face_current(0x20), "angry");
+
+        // Report lifecycle finalizes the faction mood report (no infractions → 0).
+        sh.exec("Report.Init(777); Report.SetDelay(2.0)", "@rp").unwrap();
+        let inf: i64 = sh.eval("return Report.GetInfractions()").unwrap();
+        assert_eq!(inf, 0);
+        sh.exec("Report.Completed()", "@rp").unwrap();
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

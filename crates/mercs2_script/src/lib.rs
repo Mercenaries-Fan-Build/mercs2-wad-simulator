@@ -1150,6 +1150,63 @@ pub trait EngineHost {
     fn net_host_name(&self) -> String {
         String::new()
     }
+
+    // ===== Object state machine + node emitters (`ObjectState.*`). =====
+    /// `ObjectState.SetState(guid, state)` — set the object's state-machine state.
+    fn object_sm_set_state(&mut self, guid: u64, state: &str) {
+        let _ = (guid, state);
+    }
+    /// The object's current state-machine state (empty if none).
+    fn object_sm_state(&self, guid: u64) -> String {
+        let _ = guid;
+        String::new()
+    }
+    /// `ObjectState.StartEmitter(guid, name)` — start a named node FX emitter on the object.
+    fn object_start_emitter(&mut self, guid: u64, name: &str) {
+        let _ = (guid, name);
+    }
+    /// `ObjectState.StopEmitter(guid, name)` — stop a named emitter.
+    fn object_stop_emitter(&mut self, guid: u64, name: &str) {
+        let _ = (guid, name);
+    }
+    /// Whether a named emitter is currently active on the object.
+    fn object_emitter_active(&self, guid: u64, name: &str) -> bool {
+        let _ = (guid, name);
+        false
+    }
+
+    // ===== Facial animation (`Face.*`). =====
+    /// `Face.BindFaceAnimSet(guid, set)` / `UnbindFaceAnimSet(guid)` — the bound facial anim set.
+    fn face_bind_anim_set(&mut self, guid: u64, set: Option<&str>) {
+        let _ = (guid, set);
+    }
+    /// `Face.PlayFaceAnim`/`PlayFacialExpression(guid, name)` — the current facial anim/expression.
+    fn face_play(&mut self, guid: u64, name: &str) {
+        let _ = (guid, name);
+    }
+    /// The current facial expression on a face (empty if none).
+    fn face_current(&self, guid: u64) -> String {
+        let _ = guid;
+        String::new()
+    }
+
+    // ===== Mission report (`Report.*`) — the faction reporting lifecycle. =====
+    /// `Report.Init(faction)` — begin a mission report against `faction`.
+    fn report_init(&mut self, faction: u64) {
+        let _ = faction;
+    }
+    /// `Report.SetDelay(seconds)` — set the report delay.
+    fn report_set_delay(&mut self, seconds: f32) {
+        let _ = seconds;
+    }
+    /// `Report.Completed`/`Failed` — finalize the active report.
+    fn report_finish(&mut self, success: bool) {
+        let _ = success;
+    }
+    /// `Report.GetInfractions()` — the pending infraction count for the active report's faction.
+    fn report_infractions(&self) -> i64 {
+        0
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1556,9 +1613,10 @@ mod tests {
         // designator lifecycle + recorded ordnance spawns wired to real host state (real +13); Human
         // weapon/ragdoll/grapple/carry/jostle flag verbs wired to a per-human flag store (real +13);
         // Net session mode (IsServer/IsClient/IsActive/IsLobby/GetHostName + Start/Connect/Lobby/Stop)
-        // wired to a real NetState (real +6).
-        const EXPECTED_REAL: usize = 642;
-        const EXPECTED_STUB: usize = 444;
+        // wired to a real NetState (real +6); ObjectState SetState/emitters + Face bind/play + Report
+        // faction-report lifecycle wired to real host state (real +12).
+        const EXPECTED_REAL: usize = 654;
+        const EXPECTED_STUB: usize = 432;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

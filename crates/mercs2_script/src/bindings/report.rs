@@ -33,13 +33,20 @@ pub const REQUIRED: &[Required] = &[
 /// stubs. The sole getter, `GetInfractions`, is consumed under an `if tInfractions then` guard in
 /// `mrxfactionmanager.lua`, so a no-op (nil) return simply skips the optional mood-adjustment path —
 /// a faithful degrade for a build with reporting disabled.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for r in REQUIRED {
-        b.stub(
-            r.name,
-            lua.create_function(|_, _: mlua::MultiValue| Ok(()))?,
-        )?;
-    }
+
+    // The faction-report lifecycle → the real faction manager (mercs2_faction mood report).
+    let h = host.clone();
+    b.real("Init", lua.create_function(move |_, faction: i64| { h.borrow_mut().report_init(faction as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetDelay", lua.create_function(move |_, secs: f32| { h.borrow_mut().report_set_delay(secs); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Completed", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().report_finish(true); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("Failed", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().report_finish(false); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetInfractions", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().report_infractions()))?)?;
+
     b.install_global(GLOBAL)
 }
