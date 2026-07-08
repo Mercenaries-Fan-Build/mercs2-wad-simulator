@@ -145,6 +145,8 @@ pub struct GameScriptHost {
     player_modes: HashMap<String, bool>,
     /// Named player-mode scalars (`SetHealthClamp`/`SetSwimmingSearchRadius`/`SetAimMode`).
     player_scalars: HashMap<String, f32>,
+    /// Which seat GUID each human occupies (`Vehicle.EnterBySeatGuid`/`TransferToSeat`, `ForceExitSeat`).
+    human_seats: HashMap<u64, u64>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -367,6 +369,7 @@ impl GameScriptHost {
             report: None,
             player_modes: HashMap::new(),
             player_scalars: HashMap::new(),
+            human_seats: HashMap::new(),
         }
     }
 
@@ -1188,6 +1191,22 @@ impl EngineHost for GameScriptHost {
     fn player_set_mode_scalar(&mut self, key: &str, value: f32) {
         self.player_scalars.insert(key.to_string(), value);
     }
+
+    // ===== Seat occupancy + weapon restore. =====
+    fn human_enter_seat(&mut self, human: u64, seat: u64) {
+        self.human_seats.insert(human, seat);
+    }
+    fn human_exit_seat(&mut self, human: u64) {
+        self.human_seats.remove(&human);
+    }
+    fn human_seat(&self, human: u64) -> u64 {
+        self.human_seats.get(&human).copied().unwrap_or(0)
+    }
+    fn weapon_restore_ammo(&mut self, weapon: u64) {
+        let w = self.weapons.entry(weapon).or_default();
+        w.clip = w.max_clip;
+        w.reserve = w.max_reserve;
+    }
 }
 
 /// Boot the PMC interior THROUGH the script host and return the actor-spawn intents the engine must
@@ -1477,6 +1496,14 @@ mod tests {
             .eval("Vehicle.HijackStart(0x3000); return Vehicle.CancelHijack(0x3000)")
             .unwrap();
         assert_eq!(cancelled, "idle");
+
+        // Seat occupancy + weapon restore land on real host state.
+        sh.exec("Vehicle.EnterBySeatGuid(0x11, 0x99)", "@v").unwrap();
+        assert_eq!(host.borrow().human_seat(0x11), 0x99);
+        sh.exec("Human.ForceExitSeatNoSnap(0x11)", "@v").unwrap();
+        assert_eq!(host.borrow().human_seat(0x11), 0);
+        sh.exec("Weapon.SetClipAmmo(0x88, 1); Vehicle.RestoreAmmo(0x88)", "@v").unwrap();
+        assert_eq!(host.borrow().weapon_clip(0x88), host.borrow().weapon_max_clip(0x88));
     }
 
     /// The `Sys.Set*` config surface is WIRED to a real settings store: `Set*` ↔ `Get*` roundtrip

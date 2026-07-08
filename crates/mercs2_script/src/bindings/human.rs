@@ -110,9 +110,12 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("PlayRawAnimation", lua.create_function(move |_, (g, anim): (i64, String)| { h.borrow_mut().human_do_action(g as u64, &anim); Ok(()) })?)?;
 
-    // --- UNBACKED residue (burn-down): one-shot side effects needing the vehicle/transform/cleanup
-    // runtime (seat exit, transform persistence, scrub). Honest no-ops. ---
-    for name in ["ForceExitSeatNoSnap", "PersistTransform", "Scrub"] {
+    // ForceExitSeatNoSnap → clear the human's seat occupancy (real host state).
+    let h = host.clone();
+    b.real("ForceExitSeatNoSnap", lua.create_function(move |_, g: i64| { h.borrow_mut().human_exit_seat(g as u64); Ok(()) })?)?;
+
+    // --- UNBACKED residue: transform persistence + scrub need the transform/cleanup runtime. ---
+    for name in ["PersistTransform", "Scrub"] {
         b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     }
 

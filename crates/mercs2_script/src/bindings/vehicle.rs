@@ -174,11 +174,22 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
 
-    // --- UNBACKED residue (burn-down): seat-transfer needs the seat-guid resolution seam; RestoreAmmo
-    // needs a per-object ammo store. Honest no-ops until those land. ---
-    for name in ["EnterBySeatGuid", "TransferToSeat", "RestoreAmmo"] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    }
+    // --- seat occupancy + weapon restore → real host state. ---
+    let h = host.clone();
+    b.real("EnterBySeatGuid", lua.create_function(move |_, (human, seat): (i64, i64)| {
+        h.borrow_mut().human_enter_seat(human as u64, seat as u64);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("TransferToSeat", lua.create_function(move |_, (human, seat): (i64, i64)| {
+        h.borrow_mut().human_enter_seat(human as u64, seat as u64);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("RestoreAmmo", lua.create_function(move |_, weapon: i64| {
+        h.borrow_mut().weapon_restore_ammo(weapon as u64);
+        Ok(())
+    })?)?;
 
     b.install_global(GLOBAL)
 }

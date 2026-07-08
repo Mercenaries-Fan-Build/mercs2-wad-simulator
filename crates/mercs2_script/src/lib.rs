@@ -1223,6 +1223,25 @@ pub trait EngineHost {
     fn player_set_mode_scalar(&mut self, key: &str, value: f32) {
         let _ = (key, value);
     }
+
+    // ===== Seat occupancy (`Vehicle.EnterBySeatGuid`/`TransferToSeat`, `Human.ForceExitSeatNoSnap`). =====
+    /// Seat a human in `seat` (a seat GUID), moving it out of any previous seat.
+    fn human_enter_seat(&mut self, human: u64, seat: u64) {
+        let _ = (human, seat);
+    }
+    /// Remove a human from its seat.
+    fn human_exit_seat(&mut self, human: u64) {
+        let _ = human;
+    }
+    /// The seat GUID a human occupies (0 = none).
+    fn human_seat(&self, human: u64) -> u64 {
+        let _ = human;
+        0
+    }
+    /// `Vehicle.RestoreAmmo(weapon)` — refill the weapon's clip + reserve to capacity.
+    fn weapon_restore_ammo(&mut self, weapon: u64) {
+        let _ = weapon;
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1632,9 +1651,10 @@ mod tests {
         // wired to a real NetState (real +6); ObjectState SetState/emitters + Face bind/play + Report
         // faction-report lifecycle wired to real host state (real +12); Player mode gates
         // (input/cinematic/survival/grapple/scope/vehicle-lock/disguise/PDA/satellite + scalars) wired
-        // to a real player-mode store (real +18).
-        const EXPECTED_REAL: usize = 672;
-        const EXPECTED_STUB: usize = 414;
+        // to a real player-mode store (real +18); seat occupancy (Enter/Transfer/ForceExit) +
+        // Vehicle.RestoreAmmo wired to real host state (real +4).
+        const EXPECTED_REAL: usize = 676;
+        const EXPECTED_STUB: usize = 410;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1666,7 +1686,7 @@ mod tests {
         assert_eq!(by("Object").stub_count(), 23);
         assert_eq!(by("Player").real_count(), 83);
         assert_eq!(by("Event").real_count(), 4);
-        assert_eq!(by("Vehicle").real_count(), 37);
+        assert_eq!(by("Vehicle").real_count(), 40);
         assert_eq!(by("Sound").real_count(), 41);
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);
