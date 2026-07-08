@@ -58,6 +58,9 @@ pub struct PlayerController {
     pub dur_run: f32,
     pub has_run: bool,
     pub idle: u32,
+    /// Swimming locomotion clip (shared human swim anim, resolved at load). `0` = none loaded → the
+    /// locomotion clips are used as a fallback while swimming.
+    pub swim_clip: u32,
     pub entity: Option<Entity>,
     /// Vertical velocity (m/s) for jump/fall, and whether the feet are on the ground this frame.
     pub vel_y: f32,
@@ -84,6 +87,7 @@ impl PlayerController {
             dur_run: 1.0,
             has_run: false,
             idle: CLIP_IDLE,
+            swim_clip: 0,
             entity: None,
             vel_y: 0.0,
             grounded: true,
@@ -206,7 +210,11 @@ impl PlayerController {
         // Run under Shift, walk while moving, idle otherwise. A switch crossfades from the old clip;
         // walk<->run carries the normalized cycle phase so the feet stay in step (idle restarts at 0).
         if let Ok(mut a) = world.get::<&mut AnimState>(e) {
-            let want = if mv != Vec3::ZERO {
+            let want = if swimming && self.swim_clip != 0 {
+                // In water the whole body swims (arm strokes / tread) — one shared swim clip covers both
+                // stroking forward and treading in place.
+                self.swim_clip
+            } else if mv != Vec3::ZERO {
                 if sprint && self.has_run { CLIP_RUN } else { CLIP_WALK }
             } else {
                 self.idle
@@ -358,5 +366,31 @@ mod tests {
             feet_y > -SWIM_WATERLINE - 0.3 && feet_y < 0.3,
             "buoyancy should float the body to the surface waterline; feet_y = {feet_y}"
         );
+    }
+
+    /// While swimming, the animation FSM plays the resolved swim clip (not walk/run/idle) — on land it
+    /// returns to the locomotion clips.
+    #[test]
+    fn swimming_plays_the_swim_clip() {
+        const SWIM: u32 = 0x52CC_8375; // a resolved shared swim clip hash
+        let water = flat_water(0.0);
+        let mut world = World::new();
+        let start = Vec3::new(0.0, -3.0, 0.0);
+        let e = spawn_player(&mut world, start);
+        let mut p = PlayerController::new(start);
+        p.entity = Some(e);
+        p.swim_clip = SWIM;
+        // In deep water — moving or not — the swim clip plays.
+        for _ in 0..60 {
+            p.update(&mut world, Vec3::new(0.0, 0.0, 1.0), false, false, &[], None, Some(&water), false, 1.0 / 60.0);
+        }
+        assert!(p.swim.in_water());
+        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, SWIM, "swimming should play the swim clip");
+        // Back on dry land (no watermap): the walk clip returns.
+        for _ in 0..120 {
+            p.update(&mut world, Vec3::new(0.0, 0.0, 1.0), false, false, &[], None, None, true, 1.0 / 60.0);
+        }
+        assert!(!p.swim.in_water());
+        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIP_WALK, "on land the walk clip returns");
     }
 }

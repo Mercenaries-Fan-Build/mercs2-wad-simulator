@@ -130,6 +130,9 @@ impl LoadProgress {
 struct WorldData {
     terrain: LoadedModel,
     player: Option<LoadedModel>,
+    /// The shared swim locomotion clip hash resolved for the hero (loaded into `player.clips`), so the
+    /// controller can switch to it in water. `None` if unresolved.
+    player_swim_clip: Option<u32>,
     cells: Vec<(LoadedModel, [f32; 3])>,
     /// Merged placement-marker mesh (one model + one static entity), when `--placements` is set.
     placements: Option<LoadedModel>,
@@ -214,6 +217,35 @@ fn resolve_player_idle(w: &mut wad::Wad, character: u32) -> Option<u32> {
     None
 }
 
+/// Resolve a swimming locomotion clip through the real ActionTable + AnimationLookup (resident block
+/// 3185). Swim animations are SHARED across mercs — the AnimationLookup keys them under the NONE
+/// character sentinel (`0x27DE7135`), not each merc's hash — so the engine plays the same swim clips
+/// for everyone in the `Swim` stance (`m2("Swim") = 0x614DB965`). Returns a surface-swim clip,
+/// preferring one that is not the `Dive` plunge (`m2("Dive")` handle → `0x64B3CC44`).
+fn resolve_player_swim(w: &mut wad::Wad) -> Option<u32> {
+    use mercs2_formats::anim_select::AnimSelector;
+    const NONE_KEY: u32 = 0x27DE_7135; // shared/character-agnostic AnimationLookup key
+    const DIVE_CLIP: u32 = 0x64B3_CC44; // the m2("Dive") swim clip — a plunge, not surface locomotion
+    let dec = wad::decompress_block_index(w, 3185).ok()?;
+    let sel = AnimSelector::from_resident_block(&dec)?;
+    let swim = mercs2_formats::hash::pandemic_hash_m2("Swim");
+    let mut fallback = None;
+    for (st, ac) in sel.action_states() {
+        if st != swim {
+            continue;
+        }
+        for h in sel.handles_for_state(st, ac) {
+            if let Some(c) = sel.resolve_handle(h, NONE_KEY) {
+                if c != DIVE_CLIP {
+                    return Some(c);
+                }
+                fallback = fallback.or(Some(c));
+            }
+        }
+    }
+    fallback
+}
+
 fn load_world_data(
     wadpath: &str,
     load_cells: bool,
@@ -295,6 +327,7 @@ fn load_world_data(
         .unwrap_or(0x24F8_C8E6);
     println!("[world] player merc '{merc}' (CharacterName 0x{character:08X}) → idle clip 0x{idle_clip:08X}");
 
+    let mut player_swim_clip: Option<u32> = None;
     let mut player_loaded = None;
     for name in player_models {
         let hash = name
@@ -316,8 +349,15 @@ fn load_world_data(
             s.center = [0.0, 0.0, 0.0];
             s.scale = 1.0;
             let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
-            let wanted = [idle_clip, 0x5368_2784, 0x867B_166D]; // idle (per-merc, data-driven), walk, run
-            let names = ["idle", "walk", "run"];
+            // Swim locomotion clip (shared, data-driven from the ActionTable). 0 when unresolved → the
+            // load below simply finds no clip for it, and the controller falls back to walk/run in water.
+            let swim_clip = resolve_player_swim(&mut w).unwrap_or(0);
+            if swim_clip != 0 {
+                println!("[world] player swim clip 0x{swim_clip:08X} (shared Swim-stance anim)");
+            }
+            let wanted = [idle_clip, 0x5368_2784, 0x867B_166D, swim_clip]; // idle (per-merc), walk, run, swim
+            let names = ["idle", "walk", "run", "swim"];
+            player_swim_clip = (swim_clip != 0).then_some(swim_clip);
             let mut clips: Vec<ClipAnim> = Vec::new();
             for (found, (&h, name)) in load_clips_for_rig(&mut w, &hier, &wanted)
                 .into_iter()
@@ -486,7 +526,7 @@ fn load_world_data(
         None => println!("[world] no watermap in WAD (swim disabled)"),
     }
 
-    Ok(WorldData { terrain, player, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, lights, particle_fx, glow_cards })
+    Ok(WorldData { terrain, player, player_swim_clip, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, lights, particle_fx, glow_cards })
 }
 
 /// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
@@ -1408,10 +1448,14 @@ pub async fn run_scene_world_loading(
                                 // Player avatar (optional): near map centre, feet snapped to the terrain heightmap.
                                 if let Some(p) = data.player {
                                     player.has_run = p.clips.iter().any(|c| c.name_hash == crate::player::CLIP_RUN);
-                                    // The idle clip = the loaded player clip that isn't walk/run
+                                    // Swim clip (shared, resolved at load) — the controller switches to it in water.
+                                    player.swim_clip = data.player_swim_clip.unwrap_or(0);
+                                    // The idle clip = the loaded player clip that isn't walk/run/swim
                                     // (idle was resolved per-merc in load_world_data).
                                     player.idle = p.clips.iter().map(|c| c.name_hash)
-                                        .find(|h| *h != crate::player::CLIP_WALK && *h != crate::player::CLIP_RUN)
+                                        .find(|h| *h != crate::player::CLIP_WALK
+                                            && *h != crate::player::CLIP_RUN
+                                            && Some(*h) != data.player_swim_clip)
                                         .unwrap_or(crate::player::CLIP_IDLE);
                                     for c in &p.clips {
                                         let d = c.clip.duration.max(1e-3);

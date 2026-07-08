@@ -225,6 +225,71 @@ impl AnimSelector {
         self.resolve_handle(PRIMARY_IDLE_HANDLE, character)
     }
 
+    /// Every AnimationLookup `(CharacterName, clip)` row keyed to `handle` — for probing which character
+    /// key a shared (non-per-merc) animation resolves under. Empty if the handle has no lookup rows.
+    pub fn handle_clips(&self, handle: u32) -> Vec<(u32, u32)> {
+        let td = self.lookup.total_dims;
+        let mut out = Vec::new();
+        for row in 0..self.lookup.row_count() {
+            let base = row * td;
+            if self.lookup.rows[base + self.h] == handle {
+                let idx = self.lookup.rows[base + self.an] as usize;
+                if let Some(&clip) = self.lookup.asto.get(idx) {
+                    out.push((self.lookup.rows[base + self.cn], clip));
+                }
+            }
+        }
+        out
+    }
+
+    /// The AnimationHandles the ActionTable assigns to a `(stance, action)` state key (there may be
+    /// several rows). Empty when no ActionTable is loaded or the state is absent.
+    pub fn handles_for_state(&self, stance: u32, action: u32) -> Vec<u32> {
+        let Some((t, c)) = self.actions.as_ref() else { return Vec::new() };
+        let td = t.total_dims;
+        let mut out = Vec::new();
+        for row in 0..t.row_count() {
+            let base = row * td;
+            if t.rows[base + c.stance] == stance && t.rows[base + c.action] == action {
+                out.push(t.rows[base + c.animation_handles]);
+            }
+        }
+        out
+    }
+
+    /// Every distinct `(Stance, Action)` pair present in the ActionTable — for probing the state
+    /// vocabulary (reverse the hashes via the rainbow table). Empty when no ActionTable is loaded.
+    pub fn action_states(&self) -> Vec<(u32, u32)> {
+        let Some((t, c)) = self.actions.as_ref() else { return Vec::new() };
+        let td = t.total_dims;
+        let mut seen = std::collections::BTreeSet::new();
+        for row in 0..t.row_count() {
+            let base = row * td;
+            seen.insert((t.rows[base + c.stance], t.rows[base + c.action]));
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Resolve a clip for a game-state key `(stance, action)` and `character` — the engine's
+    /// `HumanAnimationSystem` path: find the first ActionTable row whose `Stance`+`Action` match, take
+    /// its `AnimationHandles`, then resolve that handle for the character through the lookup. `stance`
+    /// and `action` are `pandemic_hash_m2` of the state names (e.g. `m2("Swim")`, `m2("Move")`).
+    /// `None` if the table has no such state row or the character has no clip for the handle.
+    pub fn resolve_state(&self, stance: u32, action: u32, character: u32) -> Option<u32> {
+        let (t, c) = self.actions.as_ref()?;
+        let td = t.total_dims;
+        for row in 0..t.row_count() {
+            let base = row * td;
+            if t.rows[base + c.stance] == stance && t.rows[base + c.action] == action {
+                let handle = t.rows[base + c.animation_handles];
+                if let Some(clip) = self.resolve_handle(handle, character) {
+                    return Some(clip);
+                }
+            }
+        }
+        None
+    }
+
     /// Every AnimationLookup row keyed to `character`, resolved through `ASTO` — the
     /// character's own animation set, in table order (equipment/gender variant rows share a
     /// Handle and resolve to their own clips). Empty when the character has no personal rows.
@@ -599,6 +664,16 @@ mod tests {
         assert_eq!(ctx[0].min_time_scale, -1.0);
         // Wrong character → no rows.
         assert!(sel.lookup_context(PRIMARY_IDLE_HANDLE, 0xF314_4C8E).is_empty());
+
+        // State-key resolution: (Upright, Fidget) → PRIMARY_IDLE_HANDLE → mattias → asto[1] = 0xBBBB.
+        // This is the path the swim-clip resolver uses with (Swim, <action>) under the NONE character.
+        assert_eq!(sel.handles_for_state(0x12C0_7B18, 0x0C0A_7FA6), vec![PRIMARY_IDLE_HANDLE]);
+        assert_eq!(sel.resolve_state(0x12C0_7B18, 0x0C0A_7FA6, 0x030E_6C38), Some(0xBBBB));
+        // Unknown state → nothing.
+        assert!(sel.handles_for_state(0xDEAD_0000, 0x0C0A_7FA6).is_empty());
+        assert_eq!(sel.resolve_state(0x12C0_7B18, 0x0C0A_7FA6, 0xF314_4C8E), None); // wrong character
+        // handle_clips exposes the shared/character key a handle resolves under (here mattias).
+        assert_eq!(sel.handle_clips(PRIMARY_IDLE_HANDLE), vec![(0x030E_6C38, 0xBBBB)]);
     }
 
     #[test]
