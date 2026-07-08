@@ -446,6 +446,14 @@ impl GameScriptHost {
     pub fn set_boot_context(&mut self, named_locations: std::collections::HashMap<String, [f32; 3]>, hero_character: impl Into<String>) {
         self.named_locations = named_locations;
         self.hero_character = hero_character.into();
+        // The engine tags the player character object with its identity label (mattias/jennifer/chris) at
+        // creation; the game reads it via `MrxUtil.GetCharacterIdentity → Object.HasLabel(uChar, <id>)`
+        // (mrxutil.lua:649) throughout the mission/faction/HUD code. Wire that label onto the hero object
+        // so identity resolves to the chosen merc instead of erroring "not one of M/J/C".
+        let id = self.hero_character.to_ascii_lowercase();
+        if !id.is_empty() {
+            self.object_add_label(HERO_GUID, &id);
+        }
     }
 
     /// The hero template the boot spawns (for the fired boot flow's `CreatePlayerCharacter`).
@@ -564,6 +572,12 @@ impl EngineHost for GameScriptHost {
         HERO_GUID
     }
     fn player_local_character(&self) -> u64 {
+        HERO_GUID
+    }
+    fn player_primary_character(&self) -> u64 {
+        // Single-player boot: the primary character IS the local hero. The game queries this constantly
+        // (GetCharacterIdentity(Player.GetPrimaryCharacter()), weapon/HUD/mission code); the trait default
+        // returned 0 → HasLabel(0,…) failed → "not one of M/J/C".
         HERO_GUID
     }
     fn object_set_yaw(&mut self, guid: u64, yaw: f32) {

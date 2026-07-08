@@ -140,6 +140,14 @@ impl GameRuntime {
         self.decal.update(dt);
     }
 
+    /// Register a hit produced outside the ECS combat tick — the local hero firing their weapon (the
+    /// player is a controller, not a `RuntimeWeapon` ECS entity). Spawns the impact's decal and stashes
+    /// it for the particle burst, exactly as [`tick`](Self::tick) handles the combat-system impacts.
+    pub fn push_impact(&mut self, imp: mercs2_combat::Impact) {
+        self.decal.spawn(impact_decal_type(imp.kind), imp.position, imp.normal, perp(imp.normal));
+        self.render_impacts.push(imp);
+    }
+
     /// Drain the combat impacts recorded this frame so the render layer can emit a particle burst at
     /// each (the FX sink lives on the `Scene`). Drain-then-clear.
     pub fn take_render_impacts(&mut self) -> Vec<mercs2_combat::Impact> {
@@ -230,6 +238,22 @@ mod tests {
         // perp is a unit vector orthogonal to the surface normal.
         let t = perp(Vec3::Y);
         assert!((t.length() - 1.0).abs() < 1e-3 && t.dot(Vec3::Y).abs() < 1e-3);
+    }
+
+    /// A player weapon hit (the hero firing, fed via `push_impact`) becomes a drainable render impact —
+    /// the wire that carries a bullet hole + particle burst from the local hero's shot into the FX sink.
+    #[test]
+    fn player_shot_pushes_a_render_impact() {
+        let audio = Rc::new(RefCell::new(AudioEngine::default()));
+        let mut rt = GameRuntime::new(audio);
+        let hit = Vec3::new(2.0, 1.0, 5.0);
+        rt.push_impact(mercs2_combat::Impact::from_hit(hit, Vec3::ZERO, Vec3::Z, false));
+        let drained = rt.take_render_impacts();
+        assert_eq!(drained.len(), 1, "the player shot should record exactly one render impact");
+        assert_eq!(drained[0].position, hit);
+        assert_eq!(drained[0].kind, mercs2_combat::ImpactKind::Bullet);
+        // Drained: the next frame starts clean.
+        assert!(rt.take_render_impacts().is_empty());
     }
 
     /// The AI perception update runs through `GameRuntime::tick`: a hostile observer in range makes the

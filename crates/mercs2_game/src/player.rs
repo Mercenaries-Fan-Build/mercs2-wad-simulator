@@ -30,6 +30,16 @@ const FOOT_SYNC: bool = true; // scale locomotion playback by current/target spe
 const PLAYER_RADIUS: f32 = 0.35;
 const PLAYER_HEIGHT: f32 = 1.8;
 const STEP: f32 = 0.5;
+/// Jump/fall vertical dynamics. `GRAVITY` ≈ the game's human gravity; `JUMP_SPEED` gives a ~1 m hop
+/// (v²/2g). Landing is caught by a downward probe reaching `LAND_PROBE` below the feet.
+const GRAVITY: f32 = 18.0; // m/s²
+const JUMP_SPEED: f32 = 6.0; // m/s launch (apex ≈ 1.0 m)
+const LAND_PROBE: f32 = 4.0; // m — how far below the feet a landing surface is caught
+/// Swim locomotion: planar swim speed, the chest-deep rest waterline the body floats to (feet this far
+/// below the surface), and how fast buoyancy eases the body to that line.
+const SWIM_SPEED: f32 = 2.6; // m/s
+const SWIM_WATERLINE: f32 = 1.2; // m — feet depth at the floating rest line
+const BUOYANCY_RATE: f32 = 4.0; // m/s vertical ease toward the waterline
 
 /// The third-person player: locomotion state + the entity it drives. `walk_speed`/`run_speed`/
 /// `dur_walk`/`dur_run`/`foot`/`idle`/`has_run`/`entity` are filled when the avatar loads (the ground
@@ -49,6 +59,13 @@ pub struct PlayerController {
     pub has_run: bool,
     pub idle: u32,
     pub entity: Option<Entity>,
+    /// Vertical velocity (m/s) for jump/fall, and whether the feet are on the ground this frame.
+    pub vel_y: f32,
+    pub grounded: bool,
+    /// Rising-edge latch for the jump button (jump fires once per press, not while held).
+    jump_latch: bool,
+    /// Swim FSM state driven by the watermap (feet-depth → OnLand/Wading/Swimming/Submerged).
+    pub swim: mercs2_water::SwimState,
 }
 
 impl PlayerController {
@@ -68,26 +85,54 @@ impl PlayerController {
             has_run: false,
             idle: CLIP_IDLE,
             entity: None,
+            vel_y: 0.0,
+            grounded: true,
+            jump_latch: false,
+            swim: mercs2_water::SwimState::OnLand,
         }
     }
 
-    /// Advance one frame for planar move `mv` (input direction × magnitude): ease ground speed toward
-    /// the walk/run target, collide-and-slide against `collision` (or terrain ground-snap when not
-    /// `interior`), turn toward motion, and drive the walk/run/idle clip FSM on the entity's
-    /// `AnimState`. Mutates the entity's `Transform`+`AnimState` in `world`.
+    /// Advance one frame for planar move `mv` (input direction × magnitude): classify swim state from the
+    /// `water` map, ease ground speed toward the walk/run/swim target, collide-and-slide against
+    /// `collision`, apply jump/gravity (or buoyant float while swimming) for the vertical axis, turn
+    /// toward motion, and drive the walk/run/idle clip FSM. `jump` is the raw Jump-button state (this
+    /// controller rising-edge-latches it, so holding it hops once). Mutates the entity's
+    /// `Transform`+`AnimState` in `world`.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         world: &mut World,
         mv: Vec3,
         sprint: bool,
+        jump: bool,
         collision: &[[Vec3; 3]],
         hmap: Option<&HeightMap>,
+        water: Option<&mercs2_water::Watermap>,
         interior: bool,
         dt: f32,
     ) {
-        // Speed ramp: ease toward the walk/run target (or 0) so starts/stops/gait changes aren't instant.
+        let swim_cfg = mercs2_water::SwimConfig::default();
+
+        // --- Swim classification: feet depth below the water surface drives the OnLand→Submerged FSM. ---
+        let feet_y = self.pos.y - self.foot;
+        let depth = water
+            .map(|wm| {
+                let s = wm.sample(self.pos.x, self.pos.z);
+                if s.is_water { s.surface_height - feet_y } else { -1.0 }
+            })
+            .unwrap_or(-1.0);
+        self.swim = swim_cfg.advance(self.swim, depth);
+        let swimming = self.swim.is_swimming();
+
+        // --- Horizontal speed ramp: ease toward the swim/walk/run target (or 0). ---
         let target_sp = if mv != Vec3::ZERO {
-            if sprint { self.run_speed } else { self.walk_speed }
+            if swimming {
+                SWIM_SPEED
+            } else if sprint {
+                self.run_speed
+            } else {
+                self.walk_speed
+            }
         } else {
             0.0
         };
@@ -100,21 +145,53 @@ impl PlayerController {
         if moving {
             let horiz = self.move_dir * self.speed * dt;
             if !collision.is_empty() {
-                // Capsule controller: collide-and-slide + (interior) ground probe — mirrors the engine's
-                // Havok capsule (MatchCapsuleToPose). Exterior Y comes from the terrain heightmap below.
+                // Capsule collide-and-slide against walls; Y is owned below (jump/gravity/float), so the
+                // ground probe here is disabled (follow_ground=false).
                 self.pos = collision::move_character(
-                    collision, self.pos, horiz, PLAYER_RADIUS, PLAYER_HEIGHT, STEP, interior,
+                    collision, self.pos, horiz, PLAYER_RADIUS, PLAYER_HEIGHT, STEP, false,
                 );
             } else {
                 self.pos += horiz;
             }
         }
-        // Ground snap: feet follow the terrain heightmap (skipped for interior, floor at Y≈450).
-        if !interior {
-            if let Some(hm) = hmap {
-                self.pos.y = hm.height_at_near(self.pos.x, self.pos.z, self.pos.y - self.foot) + self.foot;
+
+        // --- Vertical axis: buoyant float while swimming, else jump + gravity onto the ground. ---
+        if swimming {
+            // Buoyancy: ease the feet toward a rest waterline (chest-deep) so the body floats at the
+            // surface instead of sinking. No ground snap, no gravity while swimming.
+            if let Some(wm) = water {
+                let surface = wm.sample(self.pos.x, self.pos.z).surface_height;
+                let target_y = surface - SWIM_WATERLINE + self.foot;
+                self.pos.y += (target_y - self.pos.y).clamp(-BUOYANCY_RATE * dt, BUOYANCY_RATE * dt);
+            }
+            self.vel_y = 0.0;
+            self.grounded = false;
+        } else {
+            // Ground height under the feet: terrain heightmap outdoors, a downward capsule probe indoors.
+            let ground = if !interior {
+                hmap.map(|hm| hm.height_at_near(self.pos.x, self.pos.z, self.pos.y - self.foot) + self.foot)
+            } else {
+                collision::ground_below(collision, self.pos, PLAYER_RADIUS, LAND_PROBE)
+            };
+            // Jump on the button's rising edge, only when grounded.
+            if jump && !self.jump_latch && self.grounded {
+                self.vel_y = JUMP_SPEED;
+                self.grounded = false;
+            }
+            self.vel_y -= GRAVITY * dt;
+            self.pos.y += self.vel_y * dt;
+            match ground {
+                Some(gy) if self.pos.y <= gy && self.vel_y <= 0.0 => {
+                    // Landed (or standing): rest on the ground, cancel downward velocity.
+                    self.pos.y = gy;
+                    self.vel_y = 0.0;
+                    self.grounded = true;
+                }
+                _ => self.grounded = false, // airborne (jumping/falling) or over a gap
             }
         }
+        self.jump_latch = jump;
+
         let Some(e) = self.entity else { return };
         if let Ok(mut t) = world.get::<&mut Transform>(e) {
             t.translation = self.pos;
@@ -174,7 +251,7 @@ mod tests {
         let mut p = PlayerController::new(Vec3::ZERO);
         p.entity = Some(e);
         for _ in 0..120 {
-            p.update(&mut world, Vec3::new(0.0, 0.0, 1.0), false, &[], None, true, 1.0 / 60.0);
+            p.update(&mut world, Vec3::new(0.0, 0.0, 1.0), false, false, &[], None, None, true, 1.0 / 60.0);
         }
         assert!(p.pos.z > 1.0, "player should walk forward; z = {}", p.pos.z);
         assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIP_WALK);
@@ -189,7 +266,7 @@ mod tests {
         p.entity = Some(e);
         p.speed = 5.0; // moving
         for _ in 0..60 {
-            p.update(&mut world, Vec3::ZERO, false, &[], None, true, 1.0 / 60.0);
+            p.update(&mut world, Vec3::ZERO, false, false, &[], None, None, true, 1.0 / 60.0);
         }
         assert!(p.speed < 1e-2, "no input must decay speed to ~0, got {}", p.speed);
         assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIP_IDLE);
@@ -207,10 +284,79 @@ mod tests {
         run.entity = Some(er);
         run.has_run = true;
         for _ in 0..120 {
-            walk.update(&mut world, Vec3::new(0.0, 0.0, 1.0), false, &[], None, true, 1.0 / 60.0);
-            run.update(&mut world, Vec3::new(0.0, 0.0, 1.0), true, &[], None, true, 1.0 / 60.0);
+            walk.update(&mut world, Vec3::new(0.0, 0.0, 1.0), false, false, &[], None, None, true, 1.0 / 60.0);
+            run.update(&mut world, Vec3::new(0.0, 0.0, 1.0), true, false, &[], None, None, true, 1.0 / 60.0);
         }
         assert_eq!(world.get::<&AnimState>(er).unwrap().clip, CLIP_RUN);
         assert!(run.pos.z > walk.pos.z, "sprint should cover more ground: run {} vs walk {}", run.pos.z, walk.pos.z);
+    }
+
+    /// A flat walkable floor of unit triangles at `y` spanning the origin (for jump/ground tests).
+    fn flat_floor(y: f32) -> Vec<[Vec3; 3]> {
+        let mut tris = Vec::new();
+        for xi in -3..3 {
+            for zi in -3..3 {
+                let (x0, x1) = (xi as f32, xi as f32 + 1.0);
+                let (z0, z1) = (zi as f32, zi as f32 + 1.0);
+                tris.push([Vec3::new(x0, y, z0), Vec3::new(x1, y, z0), Vec3::new(x1, y, z1)]);
+                tris.push([Vec3::new(x0, y, z0), Vec3::new(x1, y, z1), Vec3::new(x0, y, z1)]);
+            }
+        }
+        tris
+    }
+
+    /// A synthetic uniform water map: surface at `surface`, every cell wet (for swim tests). The wet
+    /// mask uses the format's WET sentinel (255), not a bare 1.
+    fn flat_water(surface: f32) -> mercs2_water::Watermap {
+        let (w, h) = (4usize, 4usize);
+        mercs2_water::Watermap::from_parts(w, h, 32.0, -48.0, -48.0, vec![surface; w * h], vec![255u8; w * h])
+    }
+
+    /// Pressing Jump launches the player off the floor (apex ≈ 1 m), then gravity returns them to the
+    /// ground and re-grounds them. The button is edge-latched: holding it does not re-launch mid-air.
+    #[test]
+    fn jump_launches_and_lands() {
+        let tris = flat_floor(0.0);
+        let mut world = World::new();
+        let e = spawn_player(&mut world, Vec3::ZERO);
+        let mut p = PlayerController::new(Vec3::ZERO);
+        p.entity = Some(e);
+        // Settle on the floor first.
+        p.update(&mut world, Vec3::ZERO, false, false, &tris, None, None, true, 1.0 / 60.0);
+        assert!(p.grounded, "player should rest on the floor");
+        // Jump (held): rises off the floor. Latch means the hold only launches once.
+        let mut peak = p.pos.y;
+        for _ in 0..24 {
+            p.update(&mut world, Vec3::ZERO, false, true, &tris, None, None, true, 1.0 / 60.0);
+            peak = peak.max(p.pos.y);
+        }
+        assert!(peak > 0.5, "jump should lift the player well off the floor; peak y = {peak}");
+        // Release + fall: lands back on the floor, grounded again.
+        for _ in 0..180 {
+            p.update(&mut world, Vec3::ZERO, false, false, &tris, None, None, true, 1.0 / 60.0);
+        }
+        assert!(p.pos.y.abs() < 0.05, "player should land back on the floor; y = {}", p.pos.y);
+        assert!(p.grounded, "player should be grounded after landing");
+    }
+
+    /// Dropped into deep water, the swim FSM leaves land (reaches an in-water state) and buoyancy floats
+    /// the body up toward the surface waterline instead of sinking away.
+    #[test]
+    fn swims_and_floats_in_deep_water() {
+        let water = flat_water(0.0); // surface at y = 0
+        let mut world = World::new();
+        let start = Vec3::new(0.0, -3.0, 0.0); // start submerged
+        let e = spawn_player(&mut world, start);
+        let mut p = PlayerController::new(start);
+        p.entity = Some(e);
+        for _ in 0..240 {
+            p.update(&mut world, Vec3::ZERO, false, false, &[], None, Some(&water), false, 1.0 / 60.0);
+        }
+        assert!(p.swim.in_water(), "should be in water; swim state = {:?}", p.swim);
+        let feet_y = p.pos.y - p.foot;
+        assert!(
+            feet_y > -SWIM_WATERLINE - 0.3 && feet_y < 0.3,
+            "buoyancy should float the body to the surface waterline; feet_y = {feet_y}"
+        );
     }
 }

@@ -148,6 +148,10 @@ struct WorldData {
     /// Interior `ModelName` furniture (`--interior`): distinct mesh + its placement instances (all).
     interior_props: Vec<(u32, LoadedModel, Vec<PropInstance>)>,
     hmap: HeightMap,
+    /// Static watermap (the `watr` singleton) — surface height + wet mask over the Maracaibo XZ grid.
+    /// Drives the player's swim-state FSM (wade/swim/submerge) and buoyant float. `None` if the WAD has
+    /// no watermap (e.g. the interior-only boot).
+    watermap: Option<mercs2_water::Watermap>,
     /// Dynamic `LightObject` point lights harvested from layers_static + the interior state blocks
     /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
     lights: Vec<mercs2_engine::render::GpuLight>,
@@ -169,6 +173,12 @@ const LOAD_STAGES: u32 = 11;
 /// `EXTERIOR_PROP_CAP` distinct meshes, so `--props` stays light next to the full map.
 const EXTERIOR_PROP_RADIUS: f32 = 400.0;
 const EXTERIOR_PROP_CAP: usize = 200;
+
+/// Player weapon: eye/muzzle height above the feet, the raycast range, and the full-auto fire interval
+/// (≈600 rpm) that gates PrimaryAttack.
+const PLAYER_EYE_HEIGHT: f32 = 1.6;
+const PLAYER_WEAPON_RANGE: f32 = 300.0;
+const PLAYER_FIRE_INTERVAL: f32 = 0.1;
 
 /// The `--world` loading work (WAD open, terrain merge, heightmap, player avatar + clips,
 /// optional c3 cells + placement markers) — the former inline `run_world` body plus placements.
@@ -468,7 +478,31 @@ fn load_world_data(
     // used to run AFTER the bar hit 100% — count it as the final stage so the progress reflects reality.
     progress.step("lights + fx");
 
-    Ok(WorldData { terrain, player, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, lights, particle_fx, glow_cards })
+    // Static watermap (the `watr` singleton in the resident block) — the surface-height + wet-mask grid
+    // the player's swim FSM samples. Best-effort: a WAD without it (interior-only) just yields no swim.
+    let watermap = load_watermap(&mut w);
+    match &watermap {
+        Some(_) => println!("[world] watermap loaded (swim enabled)"),
+        None => println!("[world] no watermap in WAD (swim disabled)"),
+    }
+
+    Ok(WorldData { terrain, player, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, lights, particle_fx, glow_cards })
+}
+
+/// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
+/// resolve its UCFX container, pull the `watr` chunk body, and parse the height-field + wet mask.
+fn load_watermap(w: &mut wad::Wad) -> Option<mercs2_water::Watermap> {
+    let name_hash = mercs2_formats::hash::pandemic_hash_m2("watermap");
+    let container =
+        wad::extract_container_typed(w, name_hash, mercs2_formats::types::TYPE_HASH_WATERMAP).ok()?;
+    let watr = mercs2_formats::ucfx::extract_chunk_body(&container, b"watr")?;
+    match mercs2_water::Watermap::from_watr_bytes(&watr) {
+        Ok(wm) => Some(wm),
+        Err(e) => {
+            println!("[world] watermap parse failed: {e:?}");
+            None
+        }
+    }
 }
 
 /// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
@@ -920,6 +954,10 @@ pub async fn run_scene_world_loading(
 
     // World-dependent state, wired in when the loader finishes (defaults until then).
     let mut hmap: Option<HeightMap> = None;
+    // Static watermap (swim FSM source), moved out of WorldData when the load completes.
+    let mut watermap: Option<mercs2_water::Watermap> = None;
+    // Player weapon fire cadence: seconds until the next round can fire (full-auto while held).
+    let mut fire_cooldown: f32 = 0.0;
     let store = Rc::new(RefCell::new(AssetStore::default()));
     // Hero spawn is resolved DATA-DRIVEN from a NAMED world marker once the world loads (in the
     // realize branch below), NOT from a hardcoded coordinate. The base game does exactly this:
@@ -1433,6 +1471,7 @@ pub async fn run_scene_world_loading(
                                     )));
                                 }
                                 hmap = Some(data.hmap);
+                                watermap = data.watermap;
                                 println!("[world] collision: {} world-space triangles (buildings + interior shells)", collision_tris.len());
                                 // Hand the streamed collision soup to the fleet physics world so the
                                 // vehicle/weapon systems can raycast against it via PhysicsQuery.
@@ -1583,11 +1622,39 @@ pub async fn run_scene_world_loading(
                                 &mut world,
                                 mv,
                                 inp.held(Action::Sprint),
+                                inp.held(Action::Jump),
                                 &collision_tris,
                                 hmap.as_ref(),
+                                watermap.as_ref(),
                                 spawn_interior,
                                 dt,
                             );
+                            // Player weapon fire: PrimaryAttack raycasts from the hero's eye along the aim
+                            // (camera yaw+pitch); a hit on the world soup spawns a bullet-hole decal +
+                            // particle burst via the same impact channel the ECS combat system feeds.
+                            // Full-auto cadence gated by fire_cooldown; no ground swim-firing (hands busy).
+                            fire_cooldown = (fire_cooldown - dt).max(0.0);
+                            let can_fire = !player.swim.is_swimming();
+                            if can_fire && inp.held(Action::PrimaryAttack) && fire_cooldown <= 0.0 {
+                                fire_cooldown = PLAYER_FIRE_INTERVAL;
+                                let aim = Vec3::new(
+                                    tp_pitch.cos() * tp_yaw.sin(),
+                                    tp_pitch.sin(),
+                                    tp_pitch.cos() * tp_yaw.cos(),
+                                )
+                                .normalize();
+                                let eye = player.pos + Vec3::Y * PLAYER_EYE_HEIGHT;
+                                if let Some(t) =
+                                    crate::collision::raycast(&collision_tris, eye, aim, PLAYER_WEAPON_RANGE)
+                                {
+                                    let point = eye + aim * t;
+                                    // Surface normal unknown from a bare distance raycast → from_hit derives
+                                    // a facing from the shot heading. World geometry ⇒ a bullet-hole decal.
+                                    runtime.push_impact(mercs2_combat::Impact::from_hit(
+                                        point, Vec3::ZERO, aim, false,
+                                    ));
+                                }
+                            }
                             // Over-the-shoulder framing + boom-collision — the extracted, unit-tested
                             // crate::camera::third_person_view (pure geometry of player pos + look angles).
                             crate::camera::third_person_view(player.pos, tp_yaw, tp_pitch, &collision_tris)

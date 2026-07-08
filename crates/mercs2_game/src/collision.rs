@@ -250,6 +250,34 @@ fn ground_y(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, step: f32) -> Option<f32
     best
 }
 
+/// Highest walkable surface at or below `pos.y` within `max_drop` metres (a downward probe from
+/// slightly above the feet). Unlike [`ground_y`] (a short step probe), this reaches far enough down to
+/// catch a **landing** after a jump/fall. `None` = no ground within `max_drop` (a real drop / gap).
+pub fn ground_below(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, max_drop: f32) -> Option<f32> {
+    let origin = pos + Vec3::Y * 0.1;
+    let max_t = max_drop + 0.1;
+    let cull2 = (radius + 2.0) * (radius + 2.0);
+    let mut best: Option<f32> = None;
+    for t in tris {
+        if is_wall(t) {
+            continue;
+        }
+        let horiz = ((t[0] - pos) * Vec3::new(1.0, 0.0, 1.0)).length_squared();
+        if horiz > cull2 {
+            continue;
+        }
+        if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+            if d <= max_t {
+                let y = origin.y - d;
+                if best.map_or(true, |b| y > b) {
+                    best = Some(y);
+                }
+            }
+        }
+    }
+    best
+}
+
 /// Move the player capsule by a horizontal displacement with collide-and-slide against walls, then
 /// (when `follow_ground`) place the feet on the surface underneath within `step`. Returns the new feet
 /// position. `follow_ground=false` leaves Y to the caller (e.g. the exterior terrain heightmap).
