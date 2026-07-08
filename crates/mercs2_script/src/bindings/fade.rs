@@ -31,10 +31,25 @@ pub const REQUIRED: &[Required] = &[
 /// Screen/terrain fade cfuncs — presentation only. The reimpl's fixed-function renderer has no fade
 /// compositor, so each is a faithful no-op (the fade is treated as instantly complete). None of these
 /// return a value the game's Lua reads, so all are stubs.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for name in ["AmbientTop", "AmbientSides", "Terrain", "CameraFade"] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+
+    // Fade colors → the real `mercs2_core::FadeState` (the compositor lerps toward them). Each takes
+    // `(r, g, b, a [, time])`; the target color is stored (the fade timing is a render-pass concern).
+    macro_rules! fset {
+        ($name:literal, |$fade:ident, $c:ident| $body:block) => {{
+            let h = host.clone();
+            b.real($name, lua.create_function(move |_, (r, g, bl, a, _t): (f32, f32, f32, Option<f32>, Option<f32>)| {
+                let $c = [r, g, bl, a.unwrap_or(1.0)];
+                if let Some(rs) = h.borrow_mut().render_state() { let $fade = &mut rs.fade; $body }
+                Ok(())
+            })?)?;
+        }};
     }
+    fset!("AmbientTop", |f, c| { f.ambient_top = c; });
+    fset!("AmbientSides", |f, c| { f.ambient_sides = c; });
+    fset!("Terrain", |f, c| { f.terrain = c; });
+    fset!("CameraFade", |f, c| { f.camera_fade = c; });
+
     b.install_global(GLOBAL)
 }

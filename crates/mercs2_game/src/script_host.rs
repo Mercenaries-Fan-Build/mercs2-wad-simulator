@@ -107,6 +107,8 @@ pub struct GameScriptHost {
     hud: mercs2_ui::WidgetTree,
     /// The HUD world-marker set the `Gui._Marker*` Lua drives.
     markers: mercs2_ui::MarkerSet,
+    /// Global render/post-FX parameter state the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua drives.
+    render: mercs2_core::RenderState,
 }
 
 /// Stable hash of a VO cue name → its cue guid, so `VO.Cue(name)` and a later `VO.Cancel(name)` address
@@ -194,6 +196,7 @@ impl GameScriptHost {
             attachments: HashMap::new(),
             hud: mercs2_ui::WidgetTree::new(),
             markers: mercs2_ui::MarkerSet::new(),
+            render: mercs2_core::RenderState::new(),
         }
     }
 
@@ -588,6 +591,12 @@ impl EngineHost for GameScriptHost {
     }
     fn markers_ref(&self) -> Option<&mercs2_ui::MarkerSet> {
         Some(&self.markers)
+    }
+    fn render_state(&mut self) -> Option<&mut mercs2_core::RenderState> {
+        Some(&mut self.render)
+    }
+    fn render_state_ref(&self) -> Option<&mercs2_core::RenderState> {
+        Some(&self.render)
     }
 
     // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
@@ -1146,6 +1155,31 @@ mod tests {
         assert_eq!(marker.location, [300.0, 5.0, 400.0]);
         assert_eq!(marker.follow_guid, 0x1234);
         assert!(marker.pulsing);
+    }
+
+    /// The presentation namespaces drive the real `mercs2_core::RenderState`: the atmosphere generic
+    /// value/color store + bloom/graphics/fade params round-trip through Lua (were no-op stubs).
+    #[test]
+    fn game_lua_render_state_roundtrip() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        // Atmosphere generic value store (the dominant real usage).
+        let v: f32 = sh.eval(r#"Atmosphere.SetValue("fog_density", 0.35); return Atmosphere.GetValue("fog_density")"#).unwrap();
+        assert_eq!(v, 0.35);
+        sh.exec("Atmosphere.Begin(); Atmosphere.SetLightIntensity(2.5)", "@atm").unwrap();
+        assert!(host.borrow().render.atmosphere.active);
+        assert_eq!(host.borrow().render.atmosphere.value("light_intensity"), 2.5);
+
+        // Bloom + graphics + fade land on the state.
+        sh.exec("Bloom.SetThreshold(0.8); Graphics.SetGamma(1.2); Fade.CameraFade(0,0,0,1)", "@fx").unwrap();
+        assert_eq!(host.borrow().render.bloom.threshold, 0.8);
+        assert_eq!(host.borrow().render.graphics.gamma, 1.2);
+        assert_eq!(host.borrow().render.fade.camera_fade, [0.0, 0.0, 0.0, 1.0]);
+        // Graphics shadow distance Set↔Get round-trips.
+        let sd: f32 = sh.eval("Graphics.SetShadowBaseDistance(250); return Graphics.GetShadowBaseDistance()").unwrap();
+        assert_eq!(sd, 250.0);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

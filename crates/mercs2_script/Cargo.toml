@@ -14,6 +14,9 @@ path = "src/lib.rs"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 # The HUD widget tree + marker set the `Hud.*`/`Gui.*` bindings drive (via the EngineHost seam).
 mercs2_ui = { path = "../mercs2_ui" }
+# The render/post-FX parameter state (RenderState) the `Atmosphere`/`Bloom`/`Graphics`/`Fade` drive,
+# and the ObjectFilter/render-state types the EngineHost seam names.
+mercs2_core = { path = "../mercs2_core" }
 
 [dev-dependencies]
 # The game-hook harness backs its EngineHost with the real AI mechanism so the Ai.* hooks exercise

@@ -44,26 +44,32 @@ pub const REQUIRED: &[Required] = &[
 /// saved value. It doesn't gate control flow, but the return is consumed, so it's real and reports a
 /// stable neutral base distance the save/restore round-trips cleanly. `GetScreenRatio` is never
 /// called by the corpus and stays a no-op.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for name in [
-        "ScreenShot",
-        "SetNumFrameSync",
-        "SetScreenRatio",
-        "GetScreenRatio",
-        "ReloadShaders",
-        "SetGamma",
-        "SetShadowBaseDistance",
-        "InitTinyGeometry",
-        "ShowTinyGeometryObject",
-        "SetBoundaryEffect",
-    ] {
+
+    // Graphics settings → the real `mercs2_core::GraphicsState` (Set*↔Get* round-trip).
+    let h = host.clone();
+    b.real("SetGamma", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.gamma = v; } Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetShadowBaseDistance", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.shadow_base_distance = v; } Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetShadowBaseDistance", lua.create_function(move |_, _: mlua::MultiValue| {
+        Ok(h.borrow().render_state_ref().map(|rs| rs.graphics.shadow_base_distance).unwrap_or(0.0))
+    })?)?;
+    let h = host.clone();
+    b.real("SetScreenRatio", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.screen_ratio = v; } Ok(()) })?)?;
+    let h = host.clone();
+    b.real("GetScreenRatio", lua.create_function(move |_, _: mlua::MultiValue| {
+        Ok(h.borrow().render_state_ref().map(|rs| rs.graphics.screen_ratio).unwrap_or(16.0 / 9.0))
+    })?)?;
+    let h = host.clone();
+    b.real("SetBoundaryEffect", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.boundary_effect = v; } Ok(()) })?)?;
+
+    // UNBACKED residue: screenshot capture, frame-sync, shader reload, tiny-geometry debug viz — all
+    // need the live render device. Honest no-ops.
+    for name in ["ScreenShot", "SetNumFrameSync", "ReloadShaders", "InitTinyGeometry", "ShowTinyGeometryObject"] {
         b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
     }
-    // Saved-and-restored by briefing scripts; report a stable neutral base distance.
-    b.real(
-        "GetShadowBaseDistance",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(100.0f64))?,
-    )?;
+
     b.install_global(GLOBAL)
 }

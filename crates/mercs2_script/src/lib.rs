@@ -250,6 +250,16 @@ pub trait EngineHost {
     fn markers_ref(&self) -> Option<&mercs2_ui::MarkerSet> {
         None
     }
+
+    // ===== Render / post-FX parameter state (`Atmosphere`/`Bloom`/`Graphics`/`Fade`) → mercs2_core. =====
+    /// The global render/post-FX parameter state, if this host owns one.
+    fn render_state(&mut self) -> Option<&mut mercs2_core::RenderState> {
+        None
+    }
+    /// Read-only view of the render state (for `Get*` queries).
+    fn render_state_ref(&self) -> Option<&mercs2_core::RenderState> {
+        None
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1274,9 +1284,10 @@ mod tests {
         // cinematic-mode to the real VoManager (real +7); HUD wired the retained-mode widget tree
         // (mercs2_ui::WidgetTree) — widget/image/text/sprite/movie/flash/minimap create+mutate+query
         // (real +55); Gui wired the world-marker set (mercs2_ui::MarkerSet) + texture/font handles
-        // (real +16).
-        const EXPECTED_REAL: usize = 546;
-        const EXPECTED_STUB: usize = 540;
+        // (real +16); render-state vertical wired Atmosphere (generic value/color/int store + time) +
+        // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40).
+        const EXPECTED_REAL: usize = 586;
+        const EXPECTED_STUB: usize = 500;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

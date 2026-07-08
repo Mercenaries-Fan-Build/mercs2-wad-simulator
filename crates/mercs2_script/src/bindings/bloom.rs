@@ -33,18 +33,26 @@ pub const REQUIRED: &[Required] = &[
 
 /// HDR-bloom post tuning setters — presentation only. The fixed-function renderer has no bloom pass,
 /// so each is a faithful no-op. All are setters; none return a value the game's Lua reads.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
-    for name in [
-        "SetBlurRadius",
-        "SetThreshold",
-        "SetMultiplier",
-        "SetAmount",
-        "SetTargetLuminance",
-        "SetAdaptiveLuminancePercent",
-        "SetAdaptiveLuminanceScale",
-    ] {
-        b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
+
+    // HDR bloom parameters → the real `mercs2_core::BloomState` (the render pass reads them).
+    macro_rules! bset {
+        ($name:literal, |$bl:ident, $v:ident| $body:block) => {{
+            let h = host.clone();
+            b.real($name, lua.create_function(move |_, $v: f32| {
+                if let Some(rs) = h.borrow_mut().render_state() { let $bl = &mut rs.bloom; $body }
+                Ok(())
+            })?)?;
+        }};
     }
+    bset!("SetBlurRadius", |bl, v| { bl.blur_radius = v; });
+    bset!("SetThreshold", |bl, v| { bl.threshold = v; });
+    bset!("SetMultiplier", |bl, v| { bl.multiplier = v; });
+    bset!("SetAmount", |bl, v| { bl.amount = v; });
+    bset!("SetTargetLuminance", |bl, v| { bl.target_luminance = v; });
+    bset!("SetAdaptiveLuminancePercent", |bl, v| { bl.adaptive_luminance_percent = v; });
+    bset!("SetAdaptiveLuminanceScale", |bl, v| { bl.adaptive_luminance_scale = v; });
+
     b.install_global(GLOBAL)
 }

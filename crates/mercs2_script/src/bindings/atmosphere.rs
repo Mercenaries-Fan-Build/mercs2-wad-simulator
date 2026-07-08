@@ -74,57 +74,99 @@ pub const REQUIRED: &[Required] = &[
 /// The game addresses this whole surface as `Graphics.Atmosphere.*` (every observed call site); this
 /// table installs as the `Atmosphere` global and is *also* mirrored onto the `Graphics` global below so
 /// those lookups resolve. `Graphics` installs earlier in `install_all`, so its table already exists.
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
+
+    // Typed single-value setter → a canonical named key in the atmosphere value store.
+    macro_rules! aset {
+        ($name:literal, $key:literal) => {{
+            let h = host.clone();
+            b.real($name, lua.create_function(move |_, v: f32| {
+                if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_value($key, v); }
+                Ok(())
+            })?)?;
+        }};
+    }
+
+    // --- generic named-parameter store (the dominant real usage: SetValue×109, SetColorValue×78). ---
+    let h = host.clone();
+    b.real("SetValue", lua.create_function(move |_, (key, v): (String, f32)| {
+        if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_value(&key, v); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("GetValue", lua.create_function(move |_, key: String| {
+        Ok(h.borrow().render_state_ref().map(|rs| rs.atmosphere.value(&key)).unwrap_or(0.0))
+    })?)?;
+    let h = host.clone();
+    b.real("SetColorValue", lua.create_function(move |_, (key, r, g, bl, a): (String, f32, f32, f32, Option<f32>)| {
+        if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_color(&key, [r, g, bl, a.unwrap_or(1.0)]); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("GetColorValue", lua.create_function(move |_, key: String| {
+        let c = h.borrow().render_state_ref().map(|rs| rs.atmosphere.color(&key)).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        Ok((c[0], c[1], c[2], c[3]))
+    })?)?;
+    let h = host.clone();
+    b.real("SetIntValue", lua.create_function(move |_, (key, v): (String, i64)| {
+        if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_int(&key, v); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("GetIntValue", lua.create_function(move |_, key: String| {
+        Ok(h.borrow().render_state_ref().map(|rs| rs.atmosphere.int(&key)).unwrap_or(0))
+    })?)?;
+
+    // --- edit block + time of day ---
+    let h = host.clone();
+    b.real("Begin", lua.create_function(move |_, _: mlua::MultiValue| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.active = true; } Ok(()) })?)?;
+    let h = host.clone();
+    b.real("End", lua.create_function(move |_, _: mlua::MultiValue| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.active = false; } Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetTime", lua.create_function(move |_, t: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.time = t; } Ok(()) })?)?;
+    let h = host.clone();
+    b.real("SetTimeSpeed", lua.create_function(move |_, s: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.time_speed = s; } Ok(()) })?)?;
+
+    // --- typed scalar setters routed into the value store under canonical keys ---
+    aset!("SetLightIntensity", "light_intensity");
+    aset!("SetLightModifier", "light_modifier");
+    aset!("SetLightAngle", "light_angle");
+    aset!("SetTurbinity", "turbinity");
+    aset!("SetInscatteringMultiplier", "inscattering");
+    aset!("SetExtinctionMultiplier", "extinction");
+    aset!("SetBetaRayMultiplier", "beta_ray");
+    aset!("SetBetaMieMultiplier", "beta_mie");
+    aset!("SetHenyeyGreensteinConst", "henyey_greenstein");
+    aset!("SetHaze", "haze");
+    aset!("SetRainSpeed", "rain_speed");
+    aset!("SetRainDensity", "rain_density");
+    aset!("SetSky", "sky");
+    // typed color setters → color store
+    let h = host.clone();
+    b.real("SetAmbientColor", lua.create_function(move |_, (r, g, bl, a): (f32, f32, f32, Option<f32>)| {
+        if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_color("ambient", [r, g, bl, a.unwrap_or(1.0)]); }
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("SetRimColor", lua.create_function(move |_, (r, g, bl, a): (f32, f32, f32, Option<f32>)| {
+        if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.set_color("rim", [r, g, bl, a.unwrap_or(1.0)]); }
+        Ok(())
+    })?)?;
+
+    // No sky transition is ever in flight — the game proceeds (`not IsInterpolating()`).
+    b.real("IsInterpolating", lua.create_function(|_, _: mlua::MultiValue| Ok(false))?)?;
+
+    // UNBACKED residue: preset/region/interpolation engine (Change/*LineRegion*/Restore/
+    // GetCurrentSetting/EnableImmediatelyChangeMode/SetAtmosphere) + multi-face ambient cube + wind/
+    // particle-rate emitters — need the sky-transition + particle subsystems. Honest no-ops.
     for name in [
-        "Begin",
-        "End",
-        "SetTime",
-        "SetTimeSpeed",
-        "SetLightIntensity",
-        "SetLightModifier",
-        "SetLightAngle",
-        "SetAmbientColor",
-        "SetAmbientCube",
-        "SetRimColor",
-        "SetTurbinity",
-        "SetInscatteringMultiplier",
-        "SetExtinctionMultiplier",
-        "SetBetaRayMultiplier",
-        "SetBetaMieMultiplier",
-        "SetHenyeyGreensteinConst",
-        "SetAtmosphere",
-        "SetHaze",
-        "SetWindDirection",
-        "SetParticlesPerSecond",
-        "Change",
-        "ChangeLineRegionSetting",
-        "GetLineRegionSetting",
-        "GetLineRegion",
-        "Restore",
-        "GetCurrentSetting",
-        "EnableImmediatelyChangeMode",
-        "SetRainSpeed",
-        "SetRainDensity",
-        "SetValue",
-        "GetColorValue",
-        "SetColorValue",
-        "GetIntValue",
-        "SetIntValue",
-        "SetSky",
+        "SetAmbientCube", "SetAtmosphere", "SetWindDirection", "SetParticlesPerSecond", "Change",
+        "ChangeLineRegionSetting", "GetLineRegionSetting", "GetLineRegion", "Restore",
+        "GetCurrentSetting", "EnableImmediatelyChangeMode",
     ] {
         b.stub(name, lua.create_function(|_, _: mlua::MultiValue| Ok(()))?)?;
     }
-    // No sky transition is ever in flight — the game proceeds (`not IsInterpolating()`).
-    b.real(
-        "IsInterpolating",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
-    )?;
-    // Reads a tone/bloom parameter into gameplay arithmetic — neutral numeric.
-    b.real(
-        "GetValue",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(0.0f64))?,
-    )?;
 
     let installed = b.install_global(GLOBAL)?;
 

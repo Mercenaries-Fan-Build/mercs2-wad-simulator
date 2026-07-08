@@ -36,6 +36,11 @@ pub use registry::{ComponentDescriptor, ComponentRegistry};
 pub mod object_filter;
 pub use object_filter::{eval_label_expr, ObjectFilter, ObjectFilterRegistry};
 
+/// Global render / post-FX parameter state (see `render_state.rs`): the sky/bloom/graphics/fade params
+/// the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua namespaces drive and the render passes read.
+pub mod render_state;
+pub use render_state::{AtmosphereState, BloomState, FadeState, GraphicsState, RenderState};
+
 /// Keystone B — the serialized event / RPC bus (see `event.rs`): the one name-hash-keyed event bus
 /// the engine shares across GUI (`ToggleHud`), Networking (`NetEventCallback`), and AI
 /// (`DirectAction`). Typed args (≤7), an immediate dispatch path, and a bounded deferred queue
