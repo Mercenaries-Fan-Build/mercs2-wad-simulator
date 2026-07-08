@@ -147,6 +147,9 @@ pub struct GameScriptHost {
     player_scalars: HashMap<String, f32>,
     /// Which seat GUID each human occupies (`Vehicle.EnterBySeatGuid`/`TransferToSeat`, `ForceExitSeat`).
     human_seats: HashMap<u64, u64>,
+    /// Count of `[lua]` `Debug.Printf` lines the game's Lua has emitted — the ground-truth that the
+    /// game code is executing against the engine (used by the boot-flow regression test).
+    pub lua_log_lines: usize,
     /// Dynamic-music / DSP / audio-mode command log (`Sound.*` director config).
     sound_cmds: Vec<(String, Vec<String>)>,
     /// Replicated mission-event log (`Net.SendEvent_*` etc.) the runtime realizes locally in SP.
@@ -385,6 +388,7 @@ impl GameScriptHost {
             player_modes: HashMap::new(),
             player_scalars: HashMap::new(),
             human_seats: HashMap::new(),
+            lua_log_lines: 0,
             sound_cmds: Vec::new(),
             net_events: Vec::new(),
             script_cmds: Vec::new(),
@@ -457,6 +461,9 @@ impl GameScriptHost {
 
 impl EngineHost for GameScriptHost {
     fn log(&mut self, source: &str, msg: &str) {
+        if source == "lua" {
+            self.lua_log_lines += 1;
+        }
         println!("[{source}] {msg}");
     }
     fn get_level_name(&self) -> String {
@@ -1938,6 +1945,28 @@ mod tests {
         assert!(h.script_cmds.iter().any(|(v, _)| v == "Ai.SetRoadSpawning"), "Ai.SetRoadSpawning recorded");
         assert!(h.net_events.iter().any(|(v, a)| v == "SendEvent_Fanfare" && a == &["victory", "3"]), "net event recorded with args");
         assert!(h.sound_cmds.iter().any(|(v, a)| v == "AddFactionMusic" && a == &["42", "china_theme"]), "sound cmd recorded with args");
+    }
+
+    /// The REAL vanilla boot Lua flow runs against the on-disk corpus and executes deep (the module
+    /// `Init()` two-phase convention, `getfenv`/`setfenv`, the `debug` lib, `_GuiInternal`, and the
+    /// numeric `_GetLibVersion` all have to work). Asserts the game's Lua emitted a substantial number
+    /// of `[lua]` `Debug.Printf` lines — the ground-truth that it's running against the engine. Skipped
+    /// (not failed) if the decompiled corpus isn't present (CI without `docs/mercs2-luacd`).
+    #[test]
+    fn boot_flow_runs_real_game_lua() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let Some(sh) = resident_script_host(host.clone()) else {
+            eprintln!("[skip] decompiled Lua corpus not present — boot-flow regression skipped");
+            return;
+        };
+        host.borrow_mut().set_boot_context(std::collections::HashMap::new(), "chris");
+        run_boot_flow(&sh, "PmcCon001", "chris");
+        let lines = host.borrow().lua_log_lines;
+        assert!(
+            lines > 100,
+            "expected the game's Lua to run deep (>100 [lua] Debug.Printf lines); got {lines} — a boot \
+             regression (module Init / getfenv / debug lib / _GuiInternal / _GetLibVersion)"
+        );
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

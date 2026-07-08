@@ -28,7 +28,7 @@
 //! Later phases widen the binding surface toward the captured 53-table / 1216-fn Surface-B inventory
 //! (`mods/lua_trace_asi/reference/binding_map.json`) and run the real `mrxbootstrap` module tree.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -672,9 +672,10 @@ pub trait EngineHost {
     fn sound_audio_dir(&self) -> String {
         String::new()
     }
-    /// `Sound._GetLibVersion`.
-    fn sound_lib_version(&self) -> String {
-        "PgAudio".into()
+    /// `Sound._GetLibVersion` — the audio library version NUMBER (the game gates features on
+    /// `>= 10/11/12`, so this must be numeric). The final PC build reports the newest tier.
+    fn sound_lib_version(&self) -> i64 {
+        12
     }
     /// `Sound.LockActionLevelMusic`.
     fn sound_lock_action_level_music(&mut self, level: i64) {
@@ -1283,6 +1284,44 @@ if not table.getn then function table.getn(t) return #t end end
 math.mod = math.mod or math.fmod
 string.gfind = string.gfind or string.gmatch
 _MODULES = _MODULES or {}
+
+-- 5.1 getfenv/setfenv shims over 5.4's _ENV-as-upvalue model (used by prototype-inheritance modules
+-- like AntiAir: `local m = getfenv(); for _,p in pairs(protos) do setmetatable(p,{__index=m}) end`).
+-- The module loader runs each module with its module table as the `_ENV` upvalue, so returning/replacing
+-- that upvalue is faithful.
+local function _env_upvalue_index(f)
+  local i = 1
+  while true do
+    local name = debug.getupvalue(f, i)
+    if not name then return nil end
+    if name == "_ENV" then return i end
+    i = i + 1
+  end
+end
+if not getfenv then
+  function getfenv(f)
+    if type(f) == "function" then
+      local i = _env_upvalue_index(f)
+      return i and select(2, debug.getupvalue(f, i)) or _G
+    end
+    local lvl = (type(f) == "number") and f or 1
+    if lvl == 0 then return _G end
+    local info = debug.getinfo(lvl + 1, "f")               -- +1 for this shim frame
+    if info and info.func then
+      local i = _env_upvalue_index(info.func)
+      if i then return select(2, debug.getupvalue(info.func, i)) end
+    end
+    return _G
+  end
+end
+if not setfenv then
+  function setfenv(f, env)
+    local fn = (type(f) == "function") and f or debug.getinfo(((type(f) == "number") and f or 1) + 1, "f").func
+    local i = _env_upvalue_index(fn)
+    if i then debug.setupvalue(fn, i, env) end
+    return fn
+  end
+end
 "#;
 
 /// Bring-up auto-stub layer (opt-in). Installs a `_G` metatable so a read of an as-yet-unimplemented
@@ -1320,6 +1359,13 @@ struct Loader {
     /// Stack of environment tables for the currently-executing `import` chain, so `inherit()` can find
     /// "the module being defined right now" and set its `__index` to the base.
     stack: RefCell<Vec<Table>>,
+    /// Modules whose body has finished loading and that define a parameterless `Init()`, awaiting the
+    /// deferred **two-phase** init flush (load ALL modules, then run their `Init`s in load order). This
+    /// is what the engine does — running a module's `Init` immediately would fire it mid-cycle while a
+    /// dependency is only half-loaded (e.g. `MrxShop.Init` before `MrxFactionManager` finished).
+    pending_init: RefCell<Vec<Table>>,
+    /// Re-entrancy guard: true while the init queue is being flushed (an `Init` may itself `import`).
+    flushing: Cell<bool>,
 }
 
 impl Loader {
@@ -1332,6 +1378,8 @@ impl Loader {
             index,
             loaded: RefCell::new(HashMap::new()),
             stack: RefCell::new(Vec::new()),
+            pending_init: RefCell::new(Vec::new()),
+            flushing: Cell::new(false),
         }
     }
 
@@ -1366,6 +1414,33 @@ impl Loader {
             .exec();
         self.stack.borrow_mut().pop();
         res?;
+
+        // Pandemic module convention: a module's parameterless `Init()` is auto-invoked by the loader
+        // (no explicit `Module.Init()` call exists anywhere in the 62 modules that define one — the
+        // framework owns that call; it builds the module's state tables, e.g. `MrxGuiManager.Init` →
+        // `_tPlayerGuiList = {}`). It is DEFERRED into a queue and flushed only when the whole import
+        // chain has settled (two-phase: load all, then Init all in load order) — running it eagerly
+        // would fire a module's Init mid-cycle while a dependency is still half-loaded.
+        if env.get::<mlua::Function>("Init").is_ok() {
+            self.pending_init.borrow_mut().push(env.clone());
+        }
+        if self.stack.borrow().is_empty() && !self.flushing.get() {
+            self.flushing.set(true);
+            // Drain FIFO; an `Init` that imports more modules appends to the queue and is drained too.
+            let mut i = 0;
+            loop {
+                let next = self.pending_init.borrow().get(i).cloned();
+                let Some(m) = next else { break };
+                i += 1;
+                let init: mlua::Function = m.get("Init")?;
+                self.stack.borrow_mut().push(m.clone());
+                let r = init.call::<()>(());
+                self.stack.borrow_mut().pop();
+                r?;
+            }
+            self.pending_init.borrow_mut().clear();
+            self.flushing.set(false);
+        }
         Ok(env)
     }
 
@@ -1394,7 +1469,10 @@ impl ScriptHost {
     /// Build a host whose `import`/`inherit` resolve module names against `roots` (recursively indexed
     /// `.lua` files — e.g. `docs/mercs2-luacd/src`). Installs the compat prelude and the module system.
     pub fn new(roots: Vec<PathBuf>) -> LuaResult<Self> {
-        let lua = Lua::new();
+        // All stdlibs incl. `debug` (the game Lua uses the 5.1 `getfenv`/`setfenv`, which our compat
+        // shims implement via `debug.getupvalue`/`setupvalue`). This host runs TRUSTED decompiled game
+        // Lua, so the unsafe `debug` library is acceptable.
+        let lua = unsafe { Lua::unsafe_new_with(mlua::StdLib::ALL, mlua::LuaOptions::default()) };
         lua.load(COMPAT_PRELUDE).set_name("@compat_prelude").exec()?;
 
         let loader = Rc::new(Loader::new(&roots));

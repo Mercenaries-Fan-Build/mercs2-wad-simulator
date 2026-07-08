@@ -276,8 +276,8 @@ impl EngineHost for HarnessHost {
         self.current_music = state.to_string();
         true
     }
-    fn sound_lib_version(&self) -> String {
-        "PgAudio-harness".into()
+    fn sound_lib_version(&self) -> i64 {
+        12
     }
 
     // movement

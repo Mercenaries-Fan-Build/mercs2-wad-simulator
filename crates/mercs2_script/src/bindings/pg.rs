@@ -114,8 +114,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real(
         "GetGuidByName",
-        lua.create_function(move |_, name: String| {
-            let guid = h.borrow_mut().guid_by_name(&name);
+        // Tolerant of a nil/absent name (the game calls this with an unresolved cargo/marker template,
+        // e.g. mrxsupportdelivery) → nil, matching the lenient engine rather than erroring on the arg.
+        lua.create_function(move |_, name: Option<String>| {
+            let guid = match name {
+                Some(n) if !n.is_empty() => h.borrow_mut().guid_by_name(&n),
+                _ => 0,
+            };
             Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
         })?,
     )?;

@@ -473,5 +473,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let residue: Vec<&'static str> = STUB_NAMES.iter().copied().filter(|n| !BACKED.contains(n)).collect();
     super::record_all(&mut b, lua, host, "Hud", &residue)?;
 
-    b.install_global(GLOBAL)
+    let installed = b.install_global(GLOBAL)?;
+    // `_GuiInternal` is the internal alias for this same widget table (`MrxGuiBase` drives the HUD
+    // through it — identical method set). Bind the alias to the installed table.
+    if let Ok(hud) = lua.globals().get::<mlua::Table>(GLOBAL) {
+        let _ = lua.globals().set("_GuiInternal", hud);
+    }
+    Ok(installed)
 }
