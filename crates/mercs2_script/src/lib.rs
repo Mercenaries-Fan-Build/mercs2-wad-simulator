@@ -782,6 +782,14 @@ pub trait EngineHost {
         let _ = guid;
         Vec::new()
     }
+    /// `Object.Attach(child, parent)` — parent `child` under `parent` in the attachment graph.
+    fn object_attach(&mut self, child: u64, parent: u64) {
+        let _ = (child, parent);
+    }
+    /// `Object.Detach(child)` — remove `child` from its parent.
+    fn object_detach(&mut self, child: u64) {
+        let _ = child;
+    }
     /// `Object.IsTemplate(guid)`.
     fn object_is_template(&self, guid: u64) -> bool {
         let _ = guid;
@@ -1228,9 +1236,10 @@ mod tests {
         // + turret aim + RestoreHealth (real +13); Sound vertical wired category pitch + the bank
         // load/unload/ambience residency family (real +12); Sys vertical wired the engine-config store
         // (time scale / level+master-script / tutorials / autosave / save-version / viewports; real +10);
-        // ObjectFilter vertical wired the label-expr query registry + object label store (real +7).
-        const EXPECTED_REAL: usize = 466;
-        const EXPECTED_STUB: usize = 620;
+        // ObjectFilter vertical wired the label-expr query registry + object label store (real +7);
+        // Object Attach/Detach wired the real attachment graph (real +2).
+        const EXPECTED_REAL: usize = 468;
+        const EXPECTED_STUB: usize = 618;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1258,8 +1267,8 @@ mod tests {
         assert_eq!(by("Debug").real_count(), 1);
         assert_eq!(by("Sys").real_count(), 54);
         assert_eq!(by("Pg").real_count(), 40);
-        assert_eq!(by("Object").real_count(), 62);
-        assert_eq!(by("Object").stub_count(), 25);
+        assert_eq!(by("Object").real_count(), 64);
+        assert_eq!(by("Object").stub_count(), 23);
         assert_eq!(by("Player").real_count(), 65);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 37);

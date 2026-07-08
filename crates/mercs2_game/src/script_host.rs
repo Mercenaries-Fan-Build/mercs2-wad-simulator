@@ -100,6 +100,9 @@ pub struct GameScriptHost {
     object_labels: HashMap<u64, std::collections::HashSet<String>>,
     /// The `ObjectFilter.*` handle registry (label boolean-expr + include/exclude sets).
     object_filters: mercs2_core::ObjectFilterRegistry,
+    /// The object attachment graph: child GUID → parent GUID (`Object.Attach`/`Detach`). `GetParent`/
+    /// `IsAttached`/`GetAttachedObjects` read it.
+    attachments: HashMap<u64, u64>,
 }
 
 /// The `Sys.*` engine-config the script host owns (`Sys.SetTimeScale`/`SetTutorialsEnabled`/… write it;
@@ -173,6 +176,7 @@ impl GameScriptHost {
             settings: SysSettings::default(),
             object_labels: HashMap::new(),
             object_filters: mercs2_core::ObjectFilterRegistry::new(),
+            attachments: HashMap::new(),
         }
     }
 
@@ -553,6 +557,23 @@ impl EngineHost for GameScriptHost {
     }
     fn object_filter_gc(&mut self, handle: u64) {
         self.object_filters.remove(handle);
+    }
+
+    // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
+    fn object_attach(&mut self, child: u64, parent: u64) {
+        self.attachments.insert(child, parent);
+    }
+    fn object_detach(&mut self, child: u64) {
+        self.attachments.remove(&child);
+    }
+    fn object_parent(&self, guid: u64) -> u64 {
+        self.attachments.get(&guid).copied().unwrap_or(0)
+    }
+    fn object_is_attached(&self, guid: u64) -> bool {
+        self.attachments.contains_key(&guid)
+    }
+    fn object_attached_objects(&self, guid: u64) -> Vec<u64> {
+        self.attachments.iter().filter(|(_, &p)| p == guid).map(|(&c, _)| c).collect()
     }
 
     // ===== Player identity / session / binding (single local player controlling the hero). =====
@@ -972,6 +993,28 @@ mod tests {
         assert!(m200b, "explicit include forces a match");
         let objs: Vec<i64> = sh.eval("return ObjectFilter.GetObjects(uFilter, false)").unwrap();
         assert_eq!(objs, vec![200]);
+    }
+
+    /// `Object.Attach`/`Detach` drive a REAL attachment graph the getters read (were no-op stubs +
+    /// default getters — the parent never changed).
+    #[test]
+    fn game_lua_object_attach_graph() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        sh.exec("Object.Attach(500, 10); Object.Attach(501, 10)", "@a").unwrap();
+        let parent: i64 = sh.eval("return Object.GetParent(500)").unwrap();
+        assert_eq!(parent, 10, "GetParent reads the attachment graph");
+        let attached: bool = sh.eval("return Object.IsAttached(500)").unwrap();
+        assert!(attached);
+        let mut kids: Vec<i64> = sh.eval("return Object.GetAttachedObjects(10)").unwrap();
+        kids.sort();
+        assert_eq!(kids, vec![500, 501], "both children read back");
+
+        sh.exec("Object.Detach(500)", "@a").unwrap();
+        assert_eq!(host.borrow().object_parent(500), 0, "Detach clears the parent");
+        assert!(!host.borrow().object_is_attached(500));
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained

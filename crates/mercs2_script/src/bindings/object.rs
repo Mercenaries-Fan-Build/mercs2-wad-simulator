@@ -292,12 +292,22 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // usable coords rather than nil (no per-object basis modelled yet).
     b.real("TransformLocalToWorld", lua.create_function(|_, (_guid, x, y, z): (i64, f32, f32, f32)| Ok((x, y, z)))?)?;
 
-    // Anchor/attachment + physics toggles: no-ops so the full SpawnActor body runs.
+    // Anchor/attachment: Attach/Detach drive the real host attachment graph (GetParent/IsAttached/
+    // GetAttachedObjects read it). SetTransformToObject (snap-to-anchor) has no per-object basis yet.
     b.stub(
         "SetTransformToObject",
         lua.create_function(|_, _: MultiValue| Ok(()))?,
     )?;
-    b.stub("Attach", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    let h = host.clone();
+    b.real("Attach", lua.create_function(move |_, (child, parent): (i64, i64)| {
+        h.borrow_mut().object_attach(child as u64, parent as u64);
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("Detach", lua.create_function(move |_, child: i64| {
+        h.borrow_mut().object_detach(child as u64);
+        Ok(())
+    })?)?;
     // DisablePhysics records the physics-disabled state on the host (mrxutil teleport disables it).
     let h = host.clone();
     b.real("DisablePhysics", lua.create_function(move |_, guid: i64| { h.borrow_mut().object_set_physics_enabled(guid as u64, false); Ok(()) })?)?;
@@ -307,7 +317,6 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // runs unchanged and simply produces no physical side effect.)
     for name in [
         "SetPositionToObject",
-        "Detach",
         "PlayAnimation",
         "StopAnimation",
         "StopAnimationChannel",
