@@ -1205,8 +1205,9 @@ impl EngineHost for GameScriptHost {
     }
 
     // ===== Mission report → the faction manager. =====
-    fn report_init(&mut self, faction: u64) {
-        self.report = Some((faction, 0.0));
+    fn report_init(&mut self) {
+        // The faction reporter scores infractions against the PMC faction.
+        self.report = Some((self.faction.pmc() as u64, 0.0));
     }
     fn report_set_delay(&mut self, seconds: f32) {
         if let Some(r) = self.report.as_mut() {
@@ -1969,7 +1970,7 @@ mod tests {
         assert_eq!(host.borrow().face_current(0x20), "angry");
 
         // Report lifecycle finalizes the faction mood report (no infractions → 0).
-        sh.exec("Report.Init(777); Report.SetDelay(2.0)", "@rp").unwrap();
+        sh.exec("Report.Init({ SimultaneousReporters = 1 }); Report.SetDelay(2.0)", "@rp").unwrap();
         let inf: i64 = sh.eval("return Report.GetInfractions()").unwrap();
         assert_eq!(inf, 0);
         sh.exec("Report.Completed()", "@rp").unwrap();

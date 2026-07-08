@@ -36,9 +36,11 @@ pub const REQUIRED: &[Required] = &[
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // The faction-report lifecycle → the real faction manager (mercs2_faction mood report).
+    // The faction-report lifecycle → the real faction manager (mercs2_faction mood report). Init takes
+    // a reporter-config table ({Callback, SimultaneousReporters, LossThreshold, GoalPriority}); the
+    // report is scored against the PMC faction.
     let h = host.clone();
-    b.real("Init", lua.create_function(move |_, faction: i64| { h.borrow_mut().report_init(faction as u64); Ok(()) })?)?;
+    b.real("Init", lua.create_function(move |_, _config: Option<mlua::Table>| { h.borrow_mut().report_init(); Ok(()) })?)?;
     let h = host.clone();
     b.real("SetDelay", lua.create_function(move |_, secs: f32| { h.borrow_mut().report_set_delay(secs); Ok(()) })?)?;
     let h = host.clone();

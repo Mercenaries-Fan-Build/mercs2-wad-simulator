@@ -142,14 +142,21 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(h.borrow_mut().ai_goal(guid as u64, &goal))
     })?)?;
 
+    // Relation get/set tolerate a nil faction guid (faction-manager setup queries relations for
+    // factions that aren't resolved yet) → neutral 0 / no-op, matching the lenient engine.
     let h = host.clone();
-    b.real("SetRelation", lua.create_function(move |_, (from, to, value): (i64, i64, i64)| {
-        h.borrow_mut().ai_set_relation(from as u64, to as u64, value);
+    b.real("SetRelation", lua.create_function(move |_, (from, to, value): (Option<i64>, Option<i64>, i64)| {
+        if let (Some(f), Some(t)) = (from, to) {
+            h.borrow_mut().ai_set_relation(f as u64, t as u64, value);
+        }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("GetRelation", lua.create_function(move |_, (from, to): (i64, i64)| {
-        Ok(h.borrow().ai_get_relation(from as u64, to as u64))
+    b.real("GetRelation", lua.create_function(move |_, (from, to): (Option<i64>, Option<i64>)| {
+        Ok(match (from, to) {
+            (Some(f), Some(t)) => h.borrow().ai_get_relation(f as u64, t as u64),
+            _ => 0,
+        })
     })?)?;
     let h = host.clone();
     b.real("SetState", lua.create_function(move |_, (guid, state, on): (i64, String, Option<bool>)| {

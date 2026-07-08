@@ -1192,10 +1192,8 @@ pub trait EngineHost {
     }
 
     // ===== Mission report (`Report.*`) — the faction reporting lifecycle. =====
-    /// `Report.Init(faction)` — begin a mission report against `faction`.
-    fn report_init(&mut self, faction: u64) {
-        let _ = faction;
-    }
+    /// `Report.Init(config)` — configure the faction reporter (the report is scored against the PMC).
+    fn report_init(&mut self) {}
     /// `Report.SetDelay(seconds)` — set the report delay.
     fn report_set_delay(&mut self, seconds: f32) {
         let _ = seconds;
