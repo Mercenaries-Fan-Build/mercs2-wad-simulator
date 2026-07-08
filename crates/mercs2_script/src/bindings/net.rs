@@ -183,8 +183,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         b.real(name, lua.create_function(|_, ()| Ok(false))?)?;
     }
 
-    // Everything else: a faithful no-op for SP (replication, net-routed events/setters, telemetry,
-    // online dialogs) — the co-op restore silo backs these against mercs2_net.
+    // Replication / net-routed mission events / telemetry / presence → recorded onto the mission-event
+    // log the runtime realizes locally (SP applies these in-process rather than over the wire). The
+    // online-dialog helpers record too (harmless in SP). This backs the whole SendEvent_* surface
+    // (AddMarkerObjective/Teleport/Fanfare/Support/Revive/…) + achievements/presence as real intents.
     const BACKED: &[&str] = &[
         "IsServer", "IsClient", "IsActive", "IsMultiplayer", "IsLobby", "GetHostName", "StartServer",
         "ConnectToServer", "EnterLobby", "AutoServer", "AutoClient", "AutoLobby", "Stop",
@@ -193,10 +195,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         if BACKED.contains(&r.name) || OFFLINE_FALSE.contains(&r.name) {
             continue;
         }
-        b.stub(
-            r.name,
-            lua.create_function(|_, _: mlua::MultiValue| Ok(()))?,
-        )?;
+        let h = host.clone();
+        let verb = r.name;
+        b.real(r.name, lua.create_function(move |_, args: mlua::MultiValue| {
+            let sa: Vec<String> = args.iter().map(super::stringify_arg).collect();
+            h.borrow_mut().net_event(verb, sa);
+            Ok(())
+        })?)?;
     }
 
     b.install_global(GLOBAL)

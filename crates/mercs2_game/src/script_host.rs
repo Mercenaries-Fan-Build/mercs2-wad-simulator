@@ -147,6 +147,10 @@ pub struct GameScriptHost {
     player_scalars: HashMap<String, f32>,
     /// Which seat GUID each human occupies (`Vehicle.EnterBySeatGuid`/`TransferToSeat`, `ForceExitSeat`).
     human_seats: HashMap<u64, u64>,
+    /// Dynamic-music / DSP / audio-mode command log (`Sound.*` director config).
+    sound_cmds: Vec<(String, Vec<String>)>,
+    /// Replicated mission-event log (`Net.SendEvent_*` etc.) the runtime realizes locally in SP.
+    net_events: Vec<(String, Vec<String>)>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -370,6 +374,8 @@ impl GameScriptHost {
             player_modes: HashMap::new(),
             player_scalars: HashMap::new(),
             human_seats: HashMap::new(),
+            sound_cmds: Vec::new(),
+            net_events: Vec::new(),
         }
     }
 
@@ -1206,6 +1212,12 @@ impl EngineHost for GameScriptHost {
         let w = self.weapons.entry(weapon).or_default();
         w.clip = w.max_clip;
         w.reserve = w.max_reserve;
+    }
+    fn sound_cmd(&mut self, verb: &str, args: Vec<String>) {
+        self.sound_cmds.push((verb.to_string(), args));
+    }
+    fn net_event(&mut self, verb: &str, args: Vec<String>) {
+        self.net_events.push((verb.to_string(), args));
     }
 }
 

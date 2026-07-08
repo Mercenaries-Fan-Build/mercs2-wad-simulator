@@ -1242,6 +1242,21 @@ pub trait EngineHost {
     fn weapon_restore_ammo(&mut self, weapon: u64) {
         let _ = weapon;
     }
+
+    /// Record a dynamic-music / DSP / audio-mode command (`Sound.AddFactionMusic`/`SetSourceMusic`/
+    /// `SetReverbPreset`/… — a command-queue the audio director consumes; the verb + stringified args
+    /// are the config the mixer/music FSM applies).
+    fn sound_cmd(&mut self, verb: &str, args: Vec<String>) {
+        let _ = (verb, args);
+    }
+
+    /// Record a replicated mission event (`Net.SendEvent_AddMarkerObjective`/`TeleportPlayer`/`Fanfare`/
+    /// `Support`/… + telemetry/presence) onto the drainable event log the runtime realizes (add/remove
+    /// objectives + markers, teleports, fanfares, support items, revives, achievements). In SP these are
+    /// applied locally rather than sent over the wire.
+    fn net_event(&mut self, verb: &str, args: Vec<String>) {
+        let _ = (verb, args);
+    }
 }
 
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
@@ -1652,9 +1667,10 @@ mod tests {
         // faction-report lifecycle wired to real host state (real +12); Player mode gates
         // (input/cinematic/survival/grapple/scope/vehicle-lock/disguise/PDA/satellite + scalars) wired
         // to a real player-mode store (real +18); seat occupancy (Enter/Transfer/ForceExit) +
-        // Vehicle.RestoreAmmo wired to real host state (real +4).
-        const EXPECTED_REAL: usize = 676;
-        const EXPECTED_STUB: usize = 410;
+        // Vehicle.RestoreAmmo wired to real host state (real +4); Sound dynamic-music/DSP command log +
+        // Net SendEvent_* mission-event log wired as real recorded intents (real +120).
+        const EXPECTED_REAL: usize = 796;
+        const EXPECTED_STUB: usize = 290;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();
@@ -1687,7 +1703,7 @@ mod tests {
         assert_eq!(by("Player").real_count(), 83);
         assert_eq!(by("Event").real_count(), 4);
         assert_eq!(by("Vehicle").real_count(), 40);
-        assert_eq!(by("Sound").real_count(), 41);
+        assert_eq!(by("Sound").real_count(), 88);
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);
 

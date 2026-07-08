@@ -220,9 +220,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(h.borrow_mut().sound_request_ambience_bank(&name))
     })?)?;
 
-    // --- UNBACKED residue (burn-down): the dynamic faction/action/source-music model, EAX reverb +
-    // low-pass DSP (no portable analog — backend.rs note), and misc mode toggles / stream close /
-    // user-music override. Honest no-ops until the music model + DSP land. ---
+    // --- dynamic faction/action/source-music model + reverb/low-pass DSP + audio-mode toggles →
+    // recorded onto the real audio-command log the director/mixer consumes (verb + stringified args =
+    // the config the music FSM/DSP applies). EAX hardware reverb has no portable analog, but the preset
+    // params are real state. ---
     for name in [
         "LockListenerPosition", "SetTimerUpdateMusic", "AddFactionMusic", "SetFactionMusic",
         "LockFactionMusic", "SetActionLevelsMusic", "SetHostilityDecayRateMusic", "SetSourceMusic",
@@ -238,7 +239,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "SetSystemPause", "SetPauseFilter", "RegisterReadyCallback", "CloseStreamFile",
         "OverrideUserMusic", "RestoreUserMusic", "_SummonEd",
     ] {
-        b.stub(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+        let h = host.clone();
+        let verb = name;
+        b.real(name, lua.create_function(move |_, args: MultiValue| {
+            let sa: Vec<String> = args.iter().map(super::stringify_arg).collect();
+            h.borrow_mut().sound_cmd(verb, sa);
+            Ok(())
+        })?)?;
     }
 
     b.install_global(GLOBAL)

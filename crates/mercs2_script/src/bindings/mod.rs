@@ -70,6 +70,17 @@ mod vehicle;
 mod vo;
 mod weapon;
 
+/// Stringify a Lua argument for a recorded command log (string/number/bool/nil → text; other → "").
+pub(crate) fn stringify_arg(v: &mlua::Value) -> String {
+    match v {
+        mlua::Value::String(s) => s.to_string_lossy().to_string(),
+        mlua::Value::Integer(i) => i.to_string(),
+        mlua::Value::Number(n) => n.to_string(),
+        mlua::Value::Boolean(b) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// One required cfunc in a namespace's surface. `corpus_calls` = call sites seen in the decompiled
 /// game Lua (`docs/mercs2-luacd`); `> 0` means the game actively calls it (a faithful blocker until
 /// it has a real body).
