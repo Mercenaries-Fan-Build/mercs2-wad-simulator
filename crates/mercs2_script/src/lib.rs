@@ -310,6 +310,39 @@ pub trait EngineHost {
     fn camera_set_shot(&mut self, shot: &str) {
         let _ = shot;
     }
+
+    // ===== Inventory: per-character weapon loadout (`Inventory.*`). =====
+    /// `SetAllWeapons(character, weapons)` — replace the character's weapon loadout.
+    fn inventory_set_weapons(&mut self, character: u64, weapons: Vec<u64>) {
+        let _ = (character, weapons);
+    }
+    /// `GetAllWeapons(character)` — the character's weapon GUIDs.
+    fn inventory_weapons(&self, character: u64) -> Vec<u64> {
+        let _ = character;
+        Vec::new()
+    }
+    /// `GetPrimaryWeapon(character)` — slot 0 (0 = none → nil).
+    fn inventory_primary(&self, character: u64) -> u64 {
+        let _ = character;
+        0
+    }
+    /// `GetSecondaryWeapon(character)` — slot 1 (0 = none → nil).
+    fn inventory_secondary(&self, character: u64) -> u64 {
+        let _ = character;
+        0
+    }
+    /// `EquipWeapon(character, weapon)` — add the weapon to the loadout (if absent).
+    fn inventory_equip(&mut self, character: u64, weapon: u64) {
+        let _ = (character, weapon);
+    }
+    /// `DropWeapon(character, weapon)` — remove the weapon from the loadout.
+    fn inventory_drop(&mut self, character: u64, weapon: u64) {
+        let _ = (character, weapon);
+    }
+    /// `DestroyAllWeapons(character)` — clear the loadout.
+    fn inventory_destroy_all(&mut self, character: u64) {
+        let _ = character;
+    }
     /// `Object.SetInvincible`.
     fn object_set_invincible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
@@ -1336,9 +1369,10 @@ mod tests {
         // (real +55); Gui wired the world-marker set (mercs2_ui::MarkerSet) + texture/font handles
         // (real +16); render-state vertical wired Atmosphere (generic value/color/int store + time) +
         // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40); CameraFx wired the cinematic
-        // camera controller pose/shake/blend/follow (real +13).
-        const EXPECTED_REAL: usize = 599;
-        const EXPECTED_STUB: usize = 487;
+        // camera controller pose/shake/blend/follow (real +13); Inventory wired the per-character
+        // weapon loadout (set/get/equip/drop/destroy) (real +4).
+        const EXPECTED_REAL: usize = 603;
+        const EXPECTED_STUB: usize = 483;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

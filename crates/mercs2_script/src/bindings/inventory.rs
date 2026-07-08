@@ -37,23 +37,42 @@ pub const REQUIRED: &[Required] = &[
 /// report an empty loadout (`nil` for a single slot, empty table for `GetAllWeapons`, so the game's
 /// `for w in tWeapons` iteration is a faithful no-op) and the mutators are accepted no-ops. A later
 /// silo backs these with the real inventory component (see report — needs `inventory_*` host methods).
-pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
+pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // Single-slot getters — empty loadout → nil.
-    b.real("GetPrimaryWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
-    b.real("GetSecondaryWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    // Slot getters read the real per-character loadout; 0 → nil so `if not w` control flow holds.
+    let h = host.clone();
+    b.real("GetPrimaryWeapon", lua.create_function(move |_, c: i64| {
+        let g = h.borrow().inventory_primary(c as u64);
+        Ok(if g == 0 { None } else { Some(g as i64) })
+    })?)?;
+    let h = host.clone();
+    b.real("GetSecondaryWeapon", lua.create_function(move |_, c: i64| {
+        let g = h.borrow().inventory_secondary(c as u64);
+        Ok(if g == 0 { None } else { Some(g as i64) })
+    })?)?;
+    let h = host.clone();
+    b.real("GetAllWeapons", lua.create_function(move |_, c: i64| {
+        Ok(h.borrow().inventory_weapons(c as u64).into_iter().map(|w| w as i64).collect::<Vec<_>>())
+    })?)?;
+
+    // Loadout mutators → the real loadout.
+    let h = host.clone();
+    b.real("SetAllWeapons", lua.create_function(move |_, (c, weapons): (i64, Vec<i64>)| {
+        h.borrow_mut().inventory_set_weapons(c as u64, weapons.into_iter().map(|w| w as u64).collect());
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("EquipWeapon", lua.create_function(move |_, (c, w): (i64, i64)| { h.borrow_mut().inventory_equip(c as u64, w as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("DropWeapon", lua.create_function(move |_, (c, w): (i64, i64)| { h.borrow_mut().inventory_drop(c as u64, w as u64); Ok(()) })?)?;
+    let h = host.clone();
+    b.real("DestroyAllWeapons", lua.create_function(move |_, c: i64| { h.borrow_mut().inventory_destroy_all(c as u64); Ok(()) })?)?;
+
+    // UNBACKED residue: GetVehicleWeapon needs the vehicle↔weapon link; ReloadAll needs a per-weapon
+    // ammo model (no ammo store yet). Honest defaults.
     b.real("GetVehicleWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
-
-    // Full-loadout getter — empty list (faithful: `for w in GetAllWeapons(c)` iterates nothing).
-    b.real("GetAllWeapons", lua.create_function(|_, _: MultiValue| Ok(Vec::<i64>::new()))?)?;
-
-    // Loadout mutators — accepted no-ops.
-    b.stub("SetAllWeapons", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("DropWeapon", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("EquipWeapon", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
     b.stub("ReloadAll", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
-    b.stub("DestroyAllWeapons", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
 
     b.install_global(GLOBAL)
 }

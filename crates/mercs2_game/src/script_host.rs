@@ -111,6 +111,8 @@ pub struct GameScriptHost {
     render: mercs2_core::RenderState,
     /// Cinematic camera controller state the `CameraFx.*` Lua drives.
     camera_fx: CameraFxState,
+    /// Per-character weapon loadout (`Inventory.*`): character GUID → its weapon GUIDs.
+    loadouts: HashMap<u64, Vec<u64>>,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -235,6 +237,7 @@ impl GameScriptHost {
             markers: mercs2_ui::MarkerSet::new(),
             render: mercs2_core::RenderState::new(),
             camera_fx: CameraFxState::default(),
+            loadouts: HashMap::new(),
         }
     }
 
@@ -651,6 +654,34 @@ impl EngineHost for GameScriptHost {
     fn camera_follow(&mut self, guid: u64) { self.camera_fx.follow_guid = guid; }
     fn camera_hold(&mut self, on: bool) { self.camera_fx.held = on; }
     fn camera_set_shot(&mut self, shot: &str) { self.camera_fx.shot = shot.to_string(); }
+
+    // ===== Inventory: per-character weapon loadout. =====
+    fn inventory_set_weapons(&mut self, character: u64, weapons: Vec<u64>) {
+        self.loadouts.insert(character, weapons);
+    }
+    fn inventory_weapons(&self, character: u64) -> Vec<u64> {
+        self.loadouts.get(&character).cloned().unwrap_or_default()
+    }
+    fn inventory_primary(&self, character: u64) -> u64 {
+        self.loadouts.get(&character).and_then(|w| w.first().copied()).unwrap_or(0)
+    }
+    fn inventory_secondary(&self, character: u64) -> u64 {
+        self.loadouts.get(&character).and_then(|w| w.get(1).copied()).unwrap_or(0)
+    }
+    fn inventory_equip(&mut self, character: u64, weapon: u64) {
+        let slots = self.loadouts.entry(character).or_default();
+        if !slots.contains(&weapon) {
+            slots.push(weapon);
+        }
+    }
+    fn inventory_drop(&mut self, character: u64, weapon: u64) {
+        if let Some(slots) = self.loadouts.get_mut(&character) {
+            slots.retain(|&w| w != weapon);
+        }
+    }
+    fn inventory_destroy_all(&mut self, character: u64) {
+        self.loadouts.remove(&character);
+    }
 
     // ===== Object attachment graph (Attach/Detach ↔ GetParent/IsAttached/GetAttachedObjects). =====
     fn object_attach(&mut self, child: u64, parent: u64) {
@@ -1241,6 +1272,31 @@ mod tests {
         assert_eq!(host.borrow().camera_fx.position, [1.0, 2.0, 3.0]);
         assert_eq!(host.borrow().camera_fx.follow_guid, 0x77);
         assert_eq!(host.borrow().camera_fx.shake, 0.5);
+    }
+
+    /// `Inventory.*` drives a REAL per-character weapon loadout: set/get/equip/drop round-trips through
+    /// Lua (was empty getters + no-op mutators).
+    #[test]
+    fn game_lua_inventory_loadout() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+
+        let c: i64 = 0x1000;
+        sh.exec(&format!("Inventory.SetAllWeapons({c}, {{10, 20, 30}})"), "@inv").unwrap();
+        let all: Vec<i64> = sh.eval(&format!("return Inventory.GetAllWeapons({c})")).unwrap();
+        assert_eq!(all, vec![10, 20, 30]);
+        let prim: i64 = sh.eval(&format!("return Inventory.GetPrimaryWeapon({c})")).unwrap();
+        let sec: i64 = sh.eval(&format!("return Inventory.GetSecondaryWeapon({c})")).unwrap();
+        assert_eq!((prim, sec), (10, 20));
+
+        // Equip adds, Drop removes.
+        sh.exec(&format!("Inventory.EquipWeapon({c}, 40); Inventory.DropWeapon({c}, 20)"), "@inv").unwrap();
+        let after: Vec<i64> = sh.eval(&format!("return Inventory.GetAllWeapons({c})")).unwrap();
+        assert_eq!(after, vec![10, 30, 40]);
+        // A character with no loadout reads nil primary.
+        let none: Option<i64> = sh.eval("return Inventory.GetPrimaryWeapon(0x9999)").unwrap();
+        assert_eq!(none, None);
     }
 
     /// The resident host (K1) stays alive across frames: a runtime `Pg.Spawn` is recorded and drained
