@@ -1472,6 +1472,23 @@ pub async fn run_scene_world_loading(
                                 }
                                 hmap = Some(data.hmap);
                                 watermap = data.watermap;
+                                // Register the translucent water surface (render-graph WaterSurface slot):
+                                // one blended quad per wet watermap cell, fog-matched to the scene. Skipped
+                                // when there is no watermap (interior boot) or no wet cells.
+                                if let Some(wm) = &watermap {
+                                    let (wpos, widx) = wm.surface_mesh();
+                                    let node = mercs2_engine::water::WaterNode::new(
+                                        scene.device(),
+                                        scene.surface_format(),
+                                        &wpos,
+                                        &widx,
+                                        mercs2_engine::water::WaterStyle::default(),
+                                    );
+                                    if let Some(node) = node {
+                                        println!("[world] water surface: {} quads", widx.len() / 6);
+                                        scene.add_render_node(Box::new(node));
+                                    }
+                                }
                                 println!("[world] collision: {} world-space triangles (buildings + interior shells)", collision_tris.len());
                                 // Hand the streamed collision soup to the fleet physics world so the
                                 // vehicle/weapon systems can raycast against it via PhysicsQuery.

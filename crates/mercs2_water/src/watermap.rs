@@ -194,6 +194,35 @@ impl Watermap {
         iz * self.width + ix
     }
 
+    /// Build a renderable surface mesh over every **wet** cell: one flat quad per cell at that cell's
+    /// Layer-0 surface height, in world space (game Y-up). Returns `(positions, indices)` for a
+    /// translucent water pass. Empty when the map has no wet cells. Positions are `[x, y, z]`; indices
+    /// are `u32` triangles (two per quad, CCW seen from above).
+    pub fn surface_mesh(&self) -> (Vec<[f32; 3]>, Vec<u32>) {
+        let mut pos = Vec::new();
+        let mut idx = Vec::new();
+        let cs = self.cell_size;
+        for iz in 0..self.height {
+            for ix in 0..self.width {
+                let i = self.idx(ix, iz);
+                if self.wet[i] != WET {
+                    continue;
+                }
+                let h = self.heights[i];
+                let x0 = self.origin_x + ix as f32 * cs;
+                let z0 = self.origin_z + iz as f32 * cs;
+                let (x1, z1) = (x0 + cs, z0 + cs);
+                let base = pos.len() as u32;
+                pos.push([x0, h, z0]);
+                pos.push([x1, h, z0]);
+                pos.push([x1, h, z1]);
+                pos.push([x0, h, z1]);
+                idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+        (pos, idx)
+    }
+
     /// The full query at a world XZ: wet flag + surface height. Positions outside the grid are dry with
     /// the dry sentinel height. This is the engine-owned waterline query used by swim/buoyancy (§5).
     pub fn sample(&self, x: f32, z: f32) -> WaterSample {
@@ -237,6 +266,32 @@ mod tests {
     #[test]
     fn centred_origin_matches_retail_extent() {
         assert_eq!(Watermap::centred_origin(GRID_DIM, CELL_SIZE_M), -4096.0);
+    }
+
+    /// `surface_mesh` emits one quad (4 verts, 6 indices) per WET cell at that cell's surface height,
+    /// in world space — and nothing for dry cells.
+    #[test]
+    fn surface_mesh_covers_only_wet_cells() {
+        // 2×2 grid, cell 10 m, origin (0,0). Two wet cells (heights 3.0), two dry.
+        let heights = vec![3.0, 3.0, -50.0, -50.0];
+        let wet = vec![WET, WET, 0, 0];
+        let wm = Watermap::from_parts(2, 2, 10.0, 0.0, 0.0, heights, wet);
+        let (pos, idx) = wm.surface_mesh();
+        assert_eq!(pos.len(), 8, "2 wet cells → 8 verts");
+        assert_eq!(idx.len(), 12, "2 wet cells → 12 indices (2 tris each)");
+        // Every emitted vertex sits at a wet cell's surface height.
+        assert!(pos.iter().all(|p| (p[1] - 3.0).abs() < 1e-6), "verts at the 3.0 m waterline");
+        // Cell (0,0) quad spans [0,10]×[0,10] in world XZ.
+        assert_eq!(pos[0], [0.0, 3.0, 0.0]);
+        assert_eq!(pos[2], [10.0, 3.0, 10.0]);
+    }
+
+    /// A dry map yields an empty mesh (the caller then skips registering the water node).
+    #[test]
+    fn surface_mesh_empty_when_no_water() {
+        let wm = Watermap::from_parts(2, 2, 10.0, 0.0, 0.0, vec![-50.0; 4], vec![0u8; 4]);
+        let (pos, idx) = wm.surface_mesh();
+        assert!(pos.is_empty() && idx.is_empty());
     }
 
     /// A round-trip through the `watr` byte parser recovers dimensions, height and mask, and centres

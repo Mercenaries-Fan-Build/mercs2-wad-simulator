@@ -26,6 +26,7 @@ pub mod render_graph;
 pub mod scene;
 pub mod ui;
 pub mod wad;
+pub mod water;
 pub mod worldutil;
 
 /// Wave-0 Tier-2 seam guard (seam F, `docs/modernization/wave0_seam_review.md`).

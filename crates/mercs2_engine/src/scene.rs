@@ -1755,6 +1755,7 @@ impl Scene {
         view_proj: glam::Mat4,
         view: glam::Mat4,
         cam_pos: glam::Vec3,
+        time: f32,
     ) {
         for node in &self.render_nodes {
             if node.id() != slot {
@@ -1773,6 +1774,7 @@ impl Scene {
                 lights_bind: &self.lights_bind,
                 surface_format: self.config.format,
                 items,
+                time,
             };
             node.record(&mut ctx);
         }
@@ -2076,7 +2078,7 @@ impl Scene {
             // After the built-in pass for this slot, run any Band-A silo node plugged into it, handed
             // the fully-populated PassCtx (camera + lights + surface format + the collected `items`
             // list). No registered nodes yet → this is a no-op and the frame stays byte-identical.
-            self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world);
+            self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -2155,6 +2157,7 @@ mod tests {
         validate_wgsl("sky.wgsl", include_str!("sky.wgsl"));
         validate_wgsl("loading.wgsl", include_str!("loading.wgsl"));
         validate_wgsl("blob.wgsl", include_str!("blob.wgsl"));
+        validate_wgsl("water.wgsl", include_str!("water.wgsl"));
     }
 
     /// The camera uniform we upload (44 f32 = 176 B) matches the shader `Camera` struct size, the point

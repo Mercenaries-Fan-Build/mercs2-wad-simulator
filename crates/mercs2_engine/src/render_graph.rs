@@ -244,6 +244,9 @@ pub struct PassCtx<'a> {
     /// re-draw the scene (reflection, z-prepass, shadow cascade, fading-trees) walk this instead of
     /// re-querying the ECS `World`. See [`RenderItem`]. Consumed by silos 2, 3, 4.
     pub items: &'a [RenderItem],
+    /// Frame time in seconds since scene start — for animated passes (water ripple, UV scroll). Consumed
+    /// by silo 4 (water surface).
+    pub time: f32,
 }
 
 /// A pluggable scene pass. **Band-A seam:** the reflection / water / decal / sky / particle silos
