@@ -96,9 +96,8 @@ fn import_obj(path: &Path) -> Result<Imported, String> {
                 index_start: *group_start,
                 index_count: indices.len() as u32 - *group_start,
                 diffuse: None,
-                specular: None,
-                normal: None,
                 group_index: draws.len(),
+                ..Default::default()
             });
             *group_start = indices.len() as u32;
         }
@@ -240,9 +239,8 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
                 index_start: start,
                 index_count: indices.len() as u32 - start,
                 diffuse,
-                specular: None,
-                normal: None,
                 group_index: draws.len(),
+                ..Default::default()
             });
         }
     }

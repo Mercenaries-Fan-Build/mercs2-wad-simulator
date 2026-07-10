@@ -111,9 +111,15 @@ fn find_model_span(decompressed: &[u8], want: Option<u32>) -> Option<(usize, usi
 
 /// Extract + decode the texture chunk `name_hash` from ONE specific block (not the ASET-resolved
 /// primary). For auditing texture streaming: the same texture hash appears in several blocks (a
-/// resident low-res tail in the model's block + a higher-res copy in a global texture block), and
-/// the game's global registry keeps whichever is loaded last. Returns None if the block has no
-/// matching texture chunk.
+/// resident low-res tail in the model's block + finer mips in the c3 subtree's deeper blocks).
+///
+/// The runtime registry keeps the FIRST block to register a hash, not the last: `FUN_004cc130` probes
+/// the 5120-cell pool and, on an occupied slot, returns the existing cell and creates nothing. Mips
+/// accumulate into that one cell (see `extract_texture_hires`); later blocks do not clobber it. (The
+/// last-wins rule that *does* exist is WAD-overlay file resolution — a different layer. See
+/// `registry.rs` and `docs/modernization/model_render_gate_spec.md` §2b.)
+///
+/// Returns None if the block has no matching texture chunk.
 pub fn tex_from_block(
     wad: &mut Wad,
     block: u16,

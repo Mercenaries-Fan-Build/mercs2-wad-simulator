@@ -12,6 +12,7 @@
 //! and `worldutil::add_overlay_to_catalog` is a DIFFERENT thing — `vz_state` layer *blocks inside one
 //! wad* folded into the streaming catalog. `AssetSource` is the file-stacking one.
 
+use crate::registry::{AssetRegistry, RegistryStats};
 use crate::wad::{self, Wad};
 use mercs2_formats::texture::TextureData;
 
@@ -23,6 +24,10 @@ pub struct AssetSource {
     /// The base WAD path — used to resolve sibling archives (e.g. `shell.wad`) without a second ad-hoc
     /// open scattered through the game.
     base_path: String,
+    /// Block residency + the global hash-keyed chunk registry — the retail asset layer. See
+    /// `registry.rs`: the WAD stack above is last-wins *file* resolution; registry insert is
+    /// first-wins. Both rules are live at once, exactly as retail composes them.
+    registry: AssetRegistry,
 }
 
 impl AssetSource {
@@ -41,7 +46,12 @@ impl AssetSource {
                 Err(e) => println!("[asset] overlay {o}: {e} (skipped)"),
             }
         }
-        Ok(AssetSource { wads, labels, base_path: base.to_string() })
+        Ok(AssetSource {
+            wads,
+            labels,
+            base_path: base.to_string(),
+            registry: AssetRegistry::default(),
+        })
     }
 
     /// Open `base` and auto-include the sibling `vz-patch.wad` overlay if it exists next to it — the
@@ -94,31 +104,43 @@ impl AssetSource {
         format!("+{stem}")
     }
 
-    /// Model container by hash — last overlay that has it wins, else the base.
-    pub fn extract_container(&mut self, hash: u32) -> Result<Vec<u8>, String> {
-        let mut last = format!("0x{hash:08X}: not in any open wad");
-        for i in (0..self.wads.len()).rev() {
-            match wad::extract_container(&mut self.wads[i], hash) {
-                Ok(c) => return Ok(c),
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
+    /// Resolve a chunk through the residency registry: `(type_hash, name_hash)` → bytes, streaming the
+    /// owning block in on demand and registering *every* chunk it carries. Returns `None` when the hash
+    /// is in no open archive.
+    ///
+    /// This is the seam the retail engine actually has. Resolving one asset makes its whole block
+    /// resident, so its block-mates are registered too and later lookups for them are free — which is
+    /// how a model in block 3350 binds textures that live in blocks 2976/2977.
+    pub fn resolve(&mut self, type_hash: u32, name_hash: u32) -> Option<Vec<u8>> {
+        let AssetSource { wads, registry, .. } = self;
+        let c = registry.resolve(wads, type_hash, name_hash)?;
+        registry.slice(c).map(<[u8]>::to_vec)
     }
 
-    /// A typed CHDR-class container (terrainmesh / watermap / wavebank / sounddb) by hash — last wins.
+    /// Residency + registry counters (resident blocks, registered chunks, first-wins shadowed, evicted).
+    pub fn registry_stats(&self) -> RegistryStats {
+        self.registry.stats()
+    }
+
+    /// Model container by hash.
+    pub fn extract_container(&mut self, hash: u32) -> Result<Vec<u8>, String> {
+        self.resolve(wad::MODEL_TYPE_HASH, hash)
+            .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
+    }
+
+    /// A typed CHDR-class container (terrainmesh / watermap / wavebank / sounddb) by hash.
     pub fn extract_container_typed(&mut self, hash: u32, chunk_type: u32) -> Result<Vec<u8>, String> {
-        let mut last = format!("0x{hash:08X}: not in any open wad");
-        for i in (0..self.wads.len()).rev() {
-            match wad::extract_container_typed(&mut self.wads[i], hash, chunk_type) {
-                Ok(c) => return Ok(c),
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
+        self.resolve(chunk_type, hash)
+            .ok_or_else(|| format!("0x{hash:08X}: no 0x{chunk_type:08X} chunk in any open wad"))
     }
 
     /// Resident-mip texture (fast path — model loads) by hash — last wins.
+    ///
+    /// NOT routed through the registry: a texture's mip chain is spread across the finer-LOD blocks of
+    /// its own c3 cell subtree and must be *assembled*, not picked (see `wad::extract_texture_hires`).
+    /// The registry's one-cell-per-hash rule is the right model for that — retail's pool holds a single
+    /// cell per texture and mips accumulate into it — but assembling into a registry cell is the next
+    /// step, not this one.
     pub fn extract_texture(&mut self, hash: u32) -> Result<TextureData, String> {
         let mut last = format!("0x{hash:08X}: not in any open wad");
         for i in (0..self.wads.len()).rev() {
@@ -167,6 +189,7 @@ mod tests {
             wads: Vec::new(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             base_path: labels.first().copied().unwrap_or_default().to_string(),
+            registry: AssetRegistry::default(),
         }
     }
 

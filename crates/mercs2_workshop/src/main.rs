@@ -433,6 +433,14 @@ fn main() {
             Ok(c) => c,
             Err(e) => return eprintln!("--check '{arg}' (0x{hash:08X}): {e}"),
         };
+        // What resolving ONE model cost the asset layer: the owning block went resident and every
+        // chunk it carries (sibling models, the resident texture tail, the scrub) is now registered.
+        // `shadowed` counts chunks a later block re-declared and lost to the first-wins insert rule.
+        let rs = w.registry.stats();
+        println!(
+            "asset layer: {} resident block(s), {} chunk(s) registered, {} shadowed, {} evicted",
+            rs.resident_blocks, rs.registered_chunks, rs.shadowed_total, rs.evicted_total
+        );
         match mesh::build_indexed_from_container(&container) {
             Ok((verts, indices, draws, stats)) => {
                 let mut tex_ok = 0usize;

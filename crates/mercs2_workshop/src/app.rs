@@ -59,6 +59,11 @@ pub struct Options {
 pub(crate) struct WadStack {
     pub wads: Vec<wad::Wad>,
     pub labels: Vec<String>,
+    /// The engine's block-residency + hash-keyed chunk registry. The workshop must resolve assets the
+    /// way the game does — make the owning block resident, register every chunk it carries, first-wins
+    /// — or it is inspecting containers in isolation rather than simulating the engine.
+    /// See `mercs2_engine::registry` and `docs/modernization/model_render_gate_spec.md` §2b.
+    pub registry: mercs2_engine::registry::AssetRegistry,
 }
 
 impl WadStack {
@@ -75,7 +80,7 @@ impl WadStack {
                 Err(e) => eprintln!("[workshop] overlay {o}: {e} (skipped)"),
             }
         }
-        Ok(WadStack { wads, labels })
+        Ok(WadStack { wads, labels, registry: Default::default() })
     }
 
     /// Short display tag for an asset's source wad (base = "", overlays = "+<file stem>").
@@ -90,15 +95,14 @@ impl WadStack {
         format!("+{stem}")
     }
 
+    /// Model container by hash, resolved through the engine's residency registry — the owning block
+    /// goes resident and registers all of its chunks, exactly as the game's block streaming does.
     pub fn extract_container(&mut self, hash: u32) -> Result<Vec<u8>, String> {
-        let mut last = format!("0x{hash:08X}: not in any open wad");
-        for i in (0..self.wads.len()).rev() {
-            match wad::extract_container(&mut self.wads[i], hash) {
-                Ok(c) => return Ok(c),
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
+        let WadStack { wads, registry, .. } = self;
+        registry
+            .resolve(wads, wad::MODEL_TYPE_HASH, hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
     }
 
     /// Resident-mip texture (fast path — model loads).
@@ -3007,6 +3011,7 @@ fn merge_placed(
                 specular: d.specular,
                 normal: d.normal,
                 group_index: draws.len(),
+                ..Default::default()
             });
         }
         for (h, t) in &md.textures {

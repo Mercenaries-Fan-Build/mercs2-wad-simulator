@@ -769,7 +769,7 @@ pub fn load_streaming_world_data(
     let mut draws = Vec::with_capacity(tm.tile_draws.len());
     let mut lowres_draw_by_cell: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     for (i, &(cell, start, count)) in tm.tile_draws.iter().enumerate() {
-        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, specular: None, normal: None, group_index: 0 });
+        draws.push(mesh::DrawGroup { index_start: start, index_count: count, diffuse, ..Default::default() });
         lowres_draw_by_cell.insert(cell, i);
     }
     let terrain = LoadedModel {

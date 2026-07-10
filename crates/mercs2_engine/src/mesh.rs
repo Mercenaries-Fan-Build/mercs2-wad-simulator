@@ -128,6 +128,35 @@ pub struct DrawGroup {
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
     pub group_index: usize,
+    /// `SEGM[sub_object].state_mask` — the set of LOD RUNGS this segment is present at. Tested against
+    /// the object's `view_state` with an ANY-bit overlap (`(view_state & lod_mask) != 0`). Clause 2 of
+    /// the engine's draw gate. NOT a destruction state — see `render_state`.
+    pub lod_mask: u8,
+    /// `SEGM[sub_object].node` — the HIER node index, SIGNED. Negative means "no node", i.e. always
+    /// visible. Doubles as the attachment bone and as the key into the object's node-enable table.
+    /// Clause 3 of the draw gate.
+    pub node: i16,
+    /// The `SEGM` record ordinal (== the parent `SKIN`/`MESH` sub-object under `GEOM`).
+    pub sub_object: usize,
+}
+
+impl Default for DrawGroup {
+    /// An unconditionally-visible group: present at every LOD rung, bound to no HIER node. This is
+    /// the right shape for geometry that has no `SEGM` record at all — terrain tiles, imported
+    /// meshes, procedural debug draws — so the draw gate never suppresses it.
+    fn default() -> DrawGroup {
+        DrawGroup {
+            index_start: 0,
+            index_count: 0,
+            diffuse: None,
+            specular: None,
+            normal: None,
+            group_index: 0,
+            lod_mask: 0xFF,
+            node: -1,
+            sub_object: 0,
+        }
+    }
 }
 
 /// Build INDEXED triangle geometry, selecting the render/destruction tier bit `0x01` (the default
@@ -168,9 +197,34 @@ pub fn state_tiers(container: &[u8]) -> Vec<u8> {
 /// most models — but destructible "livedin" building shells invert this (mask `0x03` = ruined, `0x04`
 /// = intact), so the PMC interior loads them with `active_bit = 0x04` to show the pristine building.
 /// Returns (vertices, indices, draw-groups, stats).
+/// Build the model WHOLE — every drawing group, every segment, nothing filtered — with each
+/// [`DrawGroup`] tagged by its `lod_mask` / `node` so visibility can be decided per-frame at DRAW
+/// time against the object's [`crate::render_state::RenderState`], the way the engine does it.
+///
+/// This is the target shape: the retail engine uploads one vertex buffer per model and gates each
+/// segment in the draw loop. Baking a visibility decision into the buffer (as [`build_indexed_state`]
+/// does) freezes LOD forever and makes two instances of the same model unable to differ in damage
+/// state. Prefer this.
+pub fn build_indexed_all(
+    container: &[u8],
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_filtered(container, None)
+}
+
 pub fn build_indexed_state(
     container: &[u8],
     active_bit: u8,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_filtered(container, Some(active_bit))
+}
+
+/// `lod_filter = Some(bit)` keeps the legacy build-time filter (a segment survives if its mask is 0
+/// or shares a bit with `bit`); `None` keeps everything. The `mask == 0 → always keep` special case is
+/// a LEGACY quirk: under the engine's real ANY-bit rule a zero mask overlaps nothing and would never
+/// draw. It is preserved here only so `build_indexed_state` stays bit-identical to what shipped.
+fn build_indexed_filtered(
+    container: &[u8],
+    lod_filter: Option<u8>,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
     use mercs2_formats::model_cubeize::ModelMesh;
     use mercs2_formats::skeleton::{
@@ -225,10 +279,10 @@ pub fn build_indexed_state(
         None => Vec::new(),
     };
 
-    // Active LOD/state tier: body sub-objects carry a single-bit mask (0x01/02/04/08), accessories
-    // 0x0f (all). Render only the caller's tier + accessories → no LOD/state overdraw (the triple hair
-    // / the intact-vs-ruined building states). `active_bit` defaults to 0x01 (see build_indexed_state).
-    let lod_bit = active_bit;
+    // NOTE on `lod_filter`: `SEGM.state_mask` is the set of LOD RUNGS a segment appears at (md500:
+    // 7 = rungs 0-2, 112 = rungs 4-6, 127 = all), so filtering to one bit bakes one rung into the
+    // vertex buffer. It also does NOT hide the wreck — that is the node-enable table, clause 3 of the
+    // gate, which this builder cannot see. `None` = keep everything and gate at draw time.
 
     // Per kept group: world-space geometry (rigid MESH groups transformed by their bone's rest).
     struct Placed<'a> {
@@ -255,9 +309,11 @@ pub fn build_indexed_state(
     let mut skipped = 0usize;
     let mut kept: Vec<Placed> = Vec::new();
     for m in &meshes {
-        if m.state_mask != 0 && (m.state_mask & lod_bit) == 0 {
-            skipped += 1; // inactive LOD/state tier
-            continue;
+        if let Some(bit) = lod_filter {
+            if m.state_mask != 0 && (m.state_mask & bit) == 0 {
+                skipped += 1; // segment absent from the selected LOD rung
+                continue;
+            }
         }
         // Placement bone: MESH rigid accessories use their SEGM bone; blend-less PRMG groups use
         // their INDX node (see above). Skinned groups (blend data present) are model-space.
@@ -378,6 +434,10 @@ pub fn build_indexed_state(
                 specular: mat.and_then(|m| m.specular()),
                 normal: mat.and_then(|m| m.textures.get(2).copied()),
                 group_index: m.group_index,
+                lod_mask: m.state_mask,
+                // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
+                node: m.bone as i16,
+                sub_object: m.sub_object,
             });
         };
         if m.submeshes.is_empty() {
