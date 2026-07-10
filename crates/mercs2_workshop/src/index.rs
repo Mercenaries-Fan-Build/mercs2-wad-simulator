@@ -40,6 +40,49 @@ impl AssetRow {
             None => format!("0x{:08X}", self.hash),
         }
     }
+
+    /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
+    /// off the `<faction>_veh_<class>_<name>` naming convention (plus a few irregular names like
+    /// `uh1huey`). The class token after `_veh_` is normalised into the 12-type taxonomy from
+    /// `docs/reverse_engineer/valid_model_structure_map.md` §6.
+    pub fn vehicle_class(&self) -> Option<&'static str> {
+        let n = self.name.as_ref()?.to_ascii_lowercase();
+        let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
+        Some(classify_vehicle_token(cls))
+    }
+}
+
+/// Normalise a `_veh_<token>_` class token into the model-structure-map taxonomy.
+pub fn classify_vehicle_token(cls: &str) -> &'static str {
+    if cls.contains("heli") || cls.starts_with("uh1") || cls.contains("huey") || cls.contains("copter") {
+        "helicopter"
+    } else if cls.contains("boat") || cls.contains("ship") {
+        "boat"
+    } else if cls.contains("tank") {
+        "tank"
+    } else if cls.contains("apc") {
+        "apc"
+    } else if cls.contains("vtol") || cls.contains("f35") || cls.contains("harrier") {
+        "vtol"
+    } else if cls.contains("moto") || cls.contains("bike") {
+        "motorcycle"
+    } else if cls.contains("semi") {
+        "semi"
+    } else if cls.contains("trailer") {
+        "trailer"
+    } else if cls.contains("van") {
+        "van"
+    } else if cls.contains("towed") || cls.contains("artillery") || cls.contains("howitzer") {
+        "towed"
+    } else if cls.contains("truck") {
+        "truck"
+    } else if cls == "car" || cls.contains("car") {
+        "car"
+    } else if cls.contains("jet") || cls.contains("plane") || cls.contains("a10") || cls.contains("f117") {
+        "jet"
+    } else {
+        "other"
+    }
 }
 
 pub struct AssetIndex {

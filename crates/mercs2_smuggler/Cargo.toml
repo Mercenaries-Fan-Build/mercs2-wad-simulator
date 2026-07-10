@@ -1,10 +1,10 @@
 [package]
-name = "cube_mod"
+name = "mercs2_smuggler"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "cube_mod"
+name = "smuggler"
 path = "src/main.rs"
 
 [dependencies]

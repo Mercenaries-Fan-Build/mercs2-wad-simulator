@@ -1852,6 +1852,484 @@ pub fn inject_into_donor_block(
     Ok((block, stats))
 }
 
+// ============================================================================
+// STATIC template injection (rigid props: heli/tank/dog/boat/building)
+//
+// Same conform principle as the skinned path, but the template is a rigid
+// static/vehicle model (no bone weights) and its vertex `decl` is preserved
+// VERBATIM — we encode the injected mesh into WHATEVER layout the template
+// declares (POSITION/TEXCOORD/NORMAL/TANGENT/COLOR at the template's own
+// offsets+types), so the shader binding the template already satisfies is never
+// disturbed. This is the "engine-accepted structure, novel geometry" path.
+// ============================================================================
+
+fn put_f16(vb: &mut [u8], o: usize, v: f32) {
+    let b = f16_le(v);
+    vb[o] = b[0];
+    vb[o + 1] = b[1];
+}
+
+/// One parsed decl vertex element.
+struct DeclElem {
+    offset: usize,
+    typ: u16,   // 16 = FLOAT16_4, 15 = FLOAT16_2, 4 = D3DCOLOR, ...
+    usage: u16, // 0=POS 1=BLENDWEIGHT 2=BLENDINDICES 3=NORMAL 5=TEXCOORD 6=TANGENT 7=BINORMAL 10=COLOR
+}
+
+/// Parse a `decl` chunk body into its element table (8B rows `{u16 stream,
+/// u16 offset, u16 type, u16 usage}`, `0xFF` sentinel terminates).
+fn parse_decl(decl: &[u8]) -> Vec<DeclElem> {
+    let mut out = Vec::new();
+    let mut p = 0usize;
+    while p + 8 <= decl.len() {
+        let stream = u16::from_le_bytes([decl[p], decl[p + 1]]);
+        let offset = u16::from_le_bytes([decl[p + 2], decl[p + 3]]);
+        let typ = u16::from_le_bytes([decl[p + 4], decl[p + 5]]);
+        let usage = u16::from_le_bytes([decl[p + 6], decl[p + 7]]);
+        if stream == 0xFF || offset == 0xFF {
+            break;
+        }
+        out.push(DeclElem { offset: offset as usize, typ, usage });
+        p += 8;
+    }
+    out
+}
+
+/// Encode the injected mesh into the template's exact vertex layout.
+fn encode_strm_from_decl(
+    m: &ExternalMesh,
+    tans: &[[f32; 4]],
+    elems: &[DeclElem],
+    stride: usize,
+) -> Vec<u8> {
+    let n = m.positions.len();
+    let mut vb = vec![0u8; n * stride];
+    for i in 0..n {
+        let base = i * stride;
+        let p = m.positions[i];
+        let uv = m.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+        let nrm = m.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
+        let t = tans.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]);
+        for e in elems {
+            let o = base + e.offset;
+            if o + 2 > vb.len() {
+                continue;
+            }
+            match e.usage {
+                0 => {
+                    // POSITION
+                    put_f16(&mut vb, o, p[0]);
+                    put_f16(&mut vb, o + 2, p[1]);
+                    put_f16(&mut vb, o + 4, p[2]);
+                    if e.typ == 16 {
+                        put_f16(&mut vb, o + 6, 1.0);
+                    }
+                }
+                5 => {
+                    // TEXCOORD
+                    put_f16(&mut vb, o, uv[0]);
+                    put_f16(&mut vb, o + 2, uv[1]);
+                }
+                3 => {
+                    // NORMAL
+                    put_f16(&mut vb, o, nrm[0]);
+                    put_f16(&mut vb, o + 2, nrm[1]);
+                    put_f16(&mut vb, o + 4, nrm[2]);
+                    if e.typ == 16 {
+                        put_f16(&mut vb, o + 6, 1.0);
+                    }
+                }
+                6 => {
+                    // TANGENT
+                    put_f16(&mut vb, o, t[0]);
+                    put_f16(&mut vb, o + 2, t[1]);
+                    put_f16(&mut vb, o + 4, t[2]);
+                    if e.typ == 16 {
+                        put_f16(&mut vb, o + 6, t[3]);
+                    }
+                }
+                7 => {
+                    // BINORMAL = cross(normal, tangent)
+                    let b = [
+                        nrm[1] * t[2] - nrm[2] * t[1],
+                        nrm[2] * t[0] - nrm[0] * t[2],
+                        nrm[0] * t[1] - nrm[1] * t[0],
+                    ];
+                    put_f16(&mut vb, o, b[0]);
+                    put_f16(&mut vb, o + 2, b[1]);
+                    put_f16(&mut vb, o + 4, b[2]);
+                    if e.typ == 16 {
+                        put_f16(&mut vb, o + 6, 1.0);
+                    }
+                }
+                10 => {
+                    // COLOR (D3DCOLOR) white
+                    if o + 4 <= vb.len() {
+                        vb[o..o + 4].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+                    }
+                }
+                1 => {
+                    // BLENDWEIGHT -> 1.0 to bone 0
+                    if o < vb.len() {
+                        vb[o] = 0xff;
+                    }
+                }
+                _ => {} // BLENDINDICES(2) etc. stay zero
+            }
+        }
+    }
+    vb
+}
+
+/// Inject `mesh` into a rigid STATIC template container, targeting one drawing
+/// group and neutralising the rest. The template's decl/material/shader/chunk
+/// layout are preserved; only geometry (STRM data, IBUF, PRMG bounds, PRMT
+/// ranges) is rebuilt and the top INFO bbox + CSUM recomputed. `repoints`
+/// re-point material texture hashes (value-scan over the MTRL chunk).
+pub fn inject_static_into_donor_block(
+    container_block: &[u8],
+    mesh: &ExternalMesh,
+    target_group_ordinal: usize,
+    repoints: &[MtrlRepoint],
+    new_name_hash: u32,
+    fit_to_template: bool,
+    flip_winding: bool,
+    keep_groups: bool,
+    all_groups: bool,
+    raw_targets: &[usize],
+    scale_mult: f32,
+) -> Result<(Vec<u8>, InjectStats), String> {
+    if container_block.len() < 20 {
+        return Err("block too small".into());
+    }
+    let ucfx_len = read_u32_le(container_block, 16) as usize;
+    let model_type = read_u32_le(container_block, 8);
+    let ucfx = &container_block[20..20 + ucfx_len];
+    if &ucfx[0..4] != b"UCFX" {
+        return Err("donor payload is not UCFX".into());
+    }
+    let (data_off, ndesc, mut rows) = parse_rows(ucfx);
+    let groups = find_groups(&rows);
+    if groups.is_empty() {
+        return Err("no PRMG groups found in donor".into());
+    }
+    let drawing: Vec<usize> = (0..groups.len())
+        .filter(|&gi| group_draws(ucfx, data_off, &rows, &groups[gi]))
+        .collect();
+    // Target selection:
+    //   usize::MAX          -> the LARGEST drawing group (most indices).
+    //   RAW_BASE + n        -> RAW group ordinal `n` (index into `groups`, NOT
+    //                          `drawing`) — needed to hit the specific state-machine
+    //                          RENDERED body group (e.g. UH1 group 14), which
+    //                          group_draws()'s "has-geometry" filter can't isolate.
+    //   otherwise           -> index into `drawing`.
+    const RAW_BASE: usize = 0x1000_0000;
+    let target_gi = if target_group_ordinal == usize::MAX {
+        *drawing
+            .iter()
+            .max_by_key(|&&gi| read_u32_le(leaf(ucfx, data_off, &rows[groups[gi].ibuf_info]), 0))
+            .ok_or("no drawing groups")?
+    } else if target_group_ordinal >= RAW_BASE {
+        let raw = target_group_ordinal - RAW_BASE;
+        if raw >= groups.len() {
+            return Err(format!("raw group {raw} out of range (0..{})", groups.len()));
+        }
+        raw
+    } else {
+        *drawing
+            .get(target_group_ordinal)
+            .ok_or_else(|| format!("target group {target_group_ordinal} out of range; drawing={drawing:?}"))?
+    };
+
+    // Auto-fit: uniform-scale + recenter the novel mesh into the template's REAL
+    // GEOMETRY ENVELOPE — the union bbox of the ORIGINAL vertices of every drawing
+    // group, i.e. the actual body the template occupies. NOT the top-INFO bbox:
+    // that is padded out to the rotor/collision *sweep sphere* (e.g. UH1 INFO is
+    // 17×6×17 m vs a real body of 5.5×3.2×11 m), so fitting to it oversizes the
+    // mesh AND its inflated centre floats the mesh off the ground. Fitting to the
+    // real envelope makes the novel mesh occupy exactly the replaced body's space:
+    // correct size and ground contact. `scale_mult` fine-tunes (1.0 = exact fit).
+    let fitted_store: Option<ExternalMesh> = if fit_to_template {
+        let mut tmin = [f32::MAX; 3];
+        let mut tmax = [f32::MIN; 3];
+        for &gi in &drawing {
+            let g = &groups[gi];
+            let si = leaf(ucfx, data_off, &rows[g.strm_info]);
+            let stride = read_u32_le(si, 4) as usize;
+            let vc = read_u32_le(si, 8) as usize;
+            if stride == 0 {
+                continue;
+            }
+            let decl = parse_decl(leaf(ucfx, data_off, &rows[g.strm_decl]));
+            let Some(poff) = decl.iter().find(|e| e.usage == 0).map(|e| e.offset) else {
+                continue;
+            };
+            let body = leaf(ucfx, data_off, &rows[g.strm_data]);
+            let n = vc.min(body.len() / stride);
+            for v in 0..n {
+                let o = v * stride + poff;
+                if o + 6 <= body.len() {
+                    for k in 0..3 {
+                        let val = read_f16_le(body, o + k * 2);
+                        if val.is_finite() {
+                            tmin[k] = tmin[k].min(val);
+                            tmax[k] = tmax[k].max(val);
+                        }
+                    }
+                }
+            }
+        }
+        if tmin[0] <= tmax[0] && !mesh.positions.is_empty() {
+            let (mut mmin, mut mmax) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in &mesh.positions {
+                for k in 0..3 {
+                    mmin[k] = mmin[k].min(p[k]);
+                    mmax[k] = mmax[k].max(p[k]);
+                }
+            }
+            let mut s = f32::MAX;
+            for k in 0..3 {
+                let ms = mmax[k] - mmin[k];
+                if ms > 1e-4 {
+                    s = s.min((tmax[k] - tmin[k]).abs() / ms);
+                }
+            }
+            if !s.is_finite() || s <= 0.0 {
+                s = 1.0;
+            }
+            s *= if scale_mult > 0.0 { scale_mult } else { 1.0 };
+            // X/Z: centre on the envelope. Y: BOTTOM-align (mesh min-Y → envelope
+            // min-Y) so the prop's feet/skids sit on the ground rather than floating
+            // (centre-aligning a mesh shorter than the envelope leaves it hovering).
+            let mcen = [(mmin[0] + mmax[0]) * 0.5, (mmin[1] + mmax[1]) * 0.5, (mmin[2] + mmax[2]) * 0.5];
+            let tcen = [(tmin[0] + tmax[0]) * 0.5, (tmin[1] + tmax[1]) * 0.5, (tmin[2] + tmax[2]) * 0.5];
+            let mut f = mesh.clone();
+            for p in f.positions.iter_mut() {
+                p[0] = (p[0] - mcen[0]) * s + tcen[0];
+                p[1] = (p[1] - mmin[1]) * s + tmin[1];
+                p[2] = (p[2] - mcen[2]) * s + tcen[2];
+            }
+            Some(f)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mesh: &ExternalMesh = fitted_store.as_ref().unwrap_or(mesh);
+
+    if mesh.positions.len() > 65534 {
+        return Err(format!("vertex count {} exceeds u16", mesh.positions.len()));
+    }
+    // Winding flip: fbx_preprocess maps Blender RH (Z-up,Y-fwd) -> engine LH
+    // (Y-up,Z-fwd) via (x,z,-y) but does NOT reverse triangle winding, so faces
+    // are inside-out for the engine → backface-culled → invisible. Reverse each
+    // triangle before strip-ification to correct it.
+    let flipped: Vec<[u32; 3]>;
+    let tris: &[[u32; 3]] = if flip_winding {
+        flipped = mesh.tris.iter().map(|&[a, b, c]| [a, c, b]).collect();
+        &flipped
+    } else {
+        &mesh.tris
+    };
+    let strip = to_strip(tris);
+    if strip.len() > 65534 {
+        return Err(format!("strip length {} exceeds u16", strip.len()));
+    }
+    let tans = synth_tangents(mesh);
+    let vc = mesh.positions.len() as u32;
+    let ic = strip.len() as u32;
+    let mut ib = Vec::with_capacity(strip.len() * 2);
+    for &x in &strip {
+        ib.extend_from_slice(&(x as u16).to_le_bytes());
+    }
+
+    // Injected-mesh bbox (drives PRMG group bounds + top INFO).
+    let mut bmin = [f32::INFINITY; 3];
+    let mut bmax = [f32::NEG_INFINITY; 3];
+    for p in &mesh.positions {
+        for k in 0..3 {
+            bmin[k] = bmin[k].min(p[k]);
+            bmax[k] = bmax[k].max(p[k]);
+        }
+    }
+    let cen = [(bmin[0] + bmax[0]) * 0.5, (bmin[1] + bmax[1]) * 0.5, (bmin[2] + bmax[2]) * 0.5];
+    let rad = {
+        let (dx, dy, dz) = ((bmax[0] - bmin[0]) * 0.5, (bmax[1] - bmin[1]) * 0.5, (bmax[2] - bmin[2]) * 0.5);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+
+    let mut stats = InjectStats {
+        target_group: target_gi,
+        vertex_count: vc as usize,
+        strip_len: ic as usize,
+        triangle_count: mesh.tris.len(),
+        ..Default::default()
+    };
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+
+    // Which group(s) receive the geometry:
+    //   raw_targets non-empty -> exactly those RAW group ordinals (the engine's
+    //     actually-rendered set from build_indexed_state — needed because the real
+    //     game requires ALL of a group's SEGM state-mask bits set, not just any,
+    //     so a mask-0x03 body group is skipped at a fresh mask-0x01 spawn).
+    //   all_groups            -> every drawing group.
+    //   otherwise             -> the single target_gi.
+    let targets: Vec<usize> = if !raw_targets.is_empty() {
+        raw_targets.iter().copied().filter(|&g| g < groups.len()).collect()
+    } else if all_groups {
+        drawing.clone()
+    } else {
+        vec![target_gi]
+    };
+    for &tgi in &targets {
+        let g = &groups[tgi];
+        let stride = read_u32_le(leaf(ucfx, data_off, &rows[g.strm_info]), 4) as usize;
+        if !(8..=256).contains(&stride) {
+            continue;
+        }
+        let decl_bytes = leaf(ucfx, data_off, &rows[g.strm_decl]).to_vec();
+        let elems = parse_decl(&decl_bytes);
+        if !elems.iter().any(|e| e.usage == 0) {
+            continue;
+        }
+        let vb = encode_strm_from_decl(mesh, &tans, &elems, stride);
+        // STRM info: keep template stride, new vcount. decl kept verbatim.
+        let f0 = read_u32_le(leaf(ucfx, data_off, &rows[g.strm_info]), 0);
+        let mut strm_info_body = Vec::with_capacity(12);
+        strm_info_body.extend_from_slice(&f0.to_le_bytes());
+        strm_info_body.extend_from_slice(&(stride as u32).to_le_bytes());
+        strm_info_body.extend_from_slice(&vc.to_le_bytes());
+        new_bodies.insert(g.strm_info, strm_info_body);
+        new_bodies.insert(g.strm_data, vb);
+        new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
+        new_bodies.insert(g.ibuf_data, ib.clone());
+        // PRMT: preserve field[0] (prim-type/matidx unresolved, registry §3).
+        let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
+        let nrec = (prmt_old.len() / 16).max(1);
+        let field0 = if prmt_old.len() >= 4 { read_u32_le(prmt_old, 0) } else { 6 };
+        let mut rec = Vec::with_capacity(16);
+        rec.extend_from_slice(&field0.to_le_bytes());
+        rec.extend_from_slice(&0u32.to_le_bytes());
+        rec.extend_from_slice(&(ic - 2).to_le_bytes());
+        rec.extend_from_slice(&((vc - 1) as u16).to_le_bytes());
+        rec.extend_from_slice(&(vc as u16).to_le_bytes());
+        let mut prmt_body = Vec::with_capacity(nrec * 16);
+        for _ in 0..nrec {
+            prmt_body.extend_from_slice(&rec);
+        }
+        new_bodies.insert(g.prmt, prmt_body);
+        // This group's PRMG INFO cull bounds → fit the injected geometry.
+        if let Some(pir) =
+            (0..g.strm_info).rev().find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+        {
+            let mut pi = leaf(ucfx, data_off, &rows[pir]).to_vec();
+            if pi.len() >= 60 {
+                for k in 0..3 {
+                    pi[20 + k * 4..24 + k * 4].copy_from_slice(&cen[k].to_le_bytes());
+                    pi[36 + k * 4..40 + k * 4].copy_from_slice(&bmin[k].to_le_bytes());
+                    pi[48 + k * 4..52 + k * 4].copy_from_slice(&bmax[k].to_le_bytes());
+                }
+                pi[32..36].copy_from_slice(&rad.to_le_bytes());
+                new_bodies.insert(pir, pi);
+            }
+        }
+    }
+
+    // Neutralise every drawing group NOT receiving geometry (unless keep_groups).
+    // With all_groups/raw_targets covering the whole rendered set this empties
+    // nothing; for a single target it empties the rest.
+    if !keep_groups {
+        for &gi in &drawing {
+            if targets.contains(&gi) {
+                continue;
+            }
+            let pg = &groups[gi];
+            let mut p = leaf(ucfx, data_off, &rows[pg.prmt]).to_vec();
+            let nr = p.len() / 16;
+            for r in 0..nr {
+                p[r * 16 + 8..r * 16 + 12].copy_from_slice(&0u32.to_le_bytes());
+            }
+            new_bodies.insert(pg.prmt, p);
+            stats.emptied_groups.push(gi);
+        }
+    }
+
+    // MTRL texture repoint (value-scan).
+    if let Some(mtrl_row) = rows.iter().position(|r| &r.tag == b"MTRL") {
+        let mut mtrl = leaf(ucfx, data_off, &rows[mtrl_row]).to_vec();
+        for rp in repoints {
+            let mut count = 0usize;
+            let mut off = 0usize;
+            while off + 4 <= mtrl.len() {
+                if read_u32_le(&mtrl, off) == rp.from {
+                    mtrl[off..off + 4].copy_from_slice(&rp.to.to_le_bytes());
+                    count += 1;
+                    off += 4;
+                } else {
+                    off += 1;
+                }
+            }
+            stats.mtrl_repoints.push((rp.from, rp.to, count));
+        }
+        new_bodies.insert(mtrl_row, mtrl);
+    }
+
+    // Top INFO bbox over injected verts (bmin/bmax computed above; per-group
+    // PRMG cull bounds were fitted in the geometry-write loop).
+    stats.bbox_min = bmin;
+    stats.bbox_max = bmax;
+    let mut top = leaf(ucfx, data_off, &rows[0]).to_vec();
+    if top.len() >= 28 {
+        for k in 0..3 {
+            top[4 + k * 4..8 + k * 4].copy_from_slice(&bmin[k].to_le_bytes());
+            top[16 + k * 4..20 + k * 4].copy_from_slice(&bmax[k].to_le_bytes());
+        }
+    }
+    new_bodies.insert(0, top);
+
+    // Reassemble container, recompute offsets, CSUM, rewrap in WAD block.
+    let mut new_data: Vec<u8> = Vec::new();
+    for (idx, r) in rows.iter_mut().enumerate() {
+        if r.u0 == 0xFFFF_FFFF {
+            continue;
+        }
+        let body = match new_bodies.get(&idx) {
+            Some(b) => b.clone(),
+            None => leaf(ucfx, data_off, r).to_vec(),
+        };
+        r.u0 = new_data.len() as u32;
+        r.size = body.len() as u32;
+        new_data.extend_from_slice(&body);
+    }
+    let new_data_off = (20 + ndesc * 20) as u32;
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"UCFX");
+    out.extend_from_slice(&new_data_off.to_le_bytes());
+    out.extend_from_slice(&ucfx[8..16]);
+    out.extend_from_slice(&(ndesc as u32).to_le_bytes());
+    for r in &rows {
+        out.extend_from_slice(&r.tag);
+        out.extend_from_slice(&r.u0.to_le_bytes());
+        out.extend_from_slice(&r.size.to_le_bytes());
+        out.extend_from_slice(&r.u2.to_le_bytes());
+        out.extend_from_slice(&r.u3.to_le_bytes());
+    }
+    out.extend_from_slice(&new_data);
+    let csum = crc32_mercs2(&out);
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&csum.to_le_bytes());
+
+    let mut block: Vec<u8> = Vec::with_capacity(20 + out.len());
+    block.extend_from_slice(&1u32.to_le_bytes());
+    block.extend_from_slice(&new_name_hash.to_le_bytes());
+    block.extend_from_slice(&model_type.to_le_bytes());
+    block.extend_from_slice(&0u32.to_le_bytes());
+    block.extend_from_slice(&(out.len() as u32).to_le_bytes());
+    block.extend_from_slice(&out);
+    Ok((block, stats))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

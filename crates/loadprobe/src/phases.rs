@@ -88,6 +88,21 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // model-instantiation frames 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. AV READ target=0
     // with EAX = a texture handle/hash being looked up and not found. NOT a teardown artifact.
     KnownEip { eip: 0x0085C8D0, label: "texture-bind/null-surface fault on wardrobe preview (menu-open)", teardown: false },
+    // 0x00478E43: mesh-geometry handler (cluster of 0x00478F2A/0x004719C0). AV READ with ECX/ESI =
+    // "CSUM" (0x4D555343) — the per-piece geometry read of a DESTRUCTIBLE model runs off the end of
+    // the replaced geometry into the container's CSUM trailer. Seen when a custom mesh is injected
+    // into a destructible donor (SEGM/SWIT/STAT/CHDR/CEXE preserved) whose piece partitions no longer
+    // match; fires at model instantiation (e.g. streaming a PMC building). Fix: use a non-destructible
+    // donor or strip the destruction chunks. NOT a teardown artifact.
+    KnownEip { eip: 0x00478E43, label: "mesh-geometry handler: destructible piece-geometry read off end (injected mesh in destructible donor; SEGM mismatch)", teardown: false },
+    // 0x00858DB8: inside Mtrl_Parse (FUN_00858790 +0x628). The parser reads each material as a FIXED
+    // record (104-byte preamble then a 128-byte record: u16 flags, u16 tex_count, tex_count u32 hashes,
+    // props, trailing shader ref) and ends with a SHADER-POOL lookup `[*shader_pool[slot] + 8]`. AV
+    // READ [null+8] = the pool entry is null. Root cause seen: a from-scratch MTRL record that is NOT
+    // exactly 128 bytes → the parser over-reads into the next chunk → garbage shader hash → pool miss →
+    // null. Fix: emit the full 128-byte material record (104-byte preamble + 128). Same site the DLC
+    // mattias_v5 skin crashed on (MTRL layout). NOT teardown.
+    KnownEip { eip: 0x00858DB8, label: "Mtrl_Parse (FUN_00858790+0x628) shader-pool lookup: MTRL record wrong size (must be 128B) -> parser over-reads -> garbage shader hash -> null pool entry", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {

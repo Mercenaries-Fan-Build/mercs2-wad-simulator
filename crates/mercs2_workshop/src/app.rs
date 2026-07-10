@@ -364,6 +364,44 @@ enum Act {
     ModRemove(usize),
     /// Publish the mod project to a patch WAD (background worker).
     Publish,
+    /// Conform: seed the transform fields from the real-envelope auto-fit (donor vs import).
+    ConformAutofit,
+    /// Conform: place the donor template into the sandbox at the origin as a visual reference.
+    LoadDonorRef,
+    /// Load a model by hash onto the preview pedestal (Model Workbench inventory click).
+    LoadModelHash(u32, String),
+}
+
+/// Top-level UI page. The Model Workbench is a full dedicated page (its own inventory + tools
+/// panels + viewport), NOT a section of the asset browser.
+#[derive(PartialEq, Clone, Copy)]
+enum WorkMode {
+    Browser,
+    Workbench,
+}
+
+/// Model Workbench vehicle-class display order (helicopters first, per user).
+const VEH_CLASS_ORDER: &[&str] = &[
+    "helicopter", "tank", "apc", "vtol", "jet", "car", "truck", "van", "semi", "trailer", "towed",
+    "motorcycle", "boat", "other",
+];
+
+/// Group the catalog's vehicle models by class for the workbench inventory.
+fn build_vehicle_inventory(index: &crate::index::AssetIndex) -> Vec<(&'static str, Vec<(u32, String)>)> {
+    let mut map: std::collections::HashMap<&'static str, Vec<(u32, String)>> = Default::default();
+    for r in &index.models {
+        if let Some(c) = r.vehicle_class() {
+            map.entry(c).or_default().push((r.hash, r.label()));
+        }
+    }
+    let mut out = Vec::new();
+    for &c in VEH_CLASS_ORDER {
+        if let Some(mut rows) = map.remove(c) {
+            rows.sort_by(|a, b| a.1.cmp(&b.1));
+            out.push((c, rows));
+        }
+    }
+    out
 }
 
 pub fn run(opts: Options) {
@@ -494,6 +532,21 @@ pub fn run(opts: Options) {
         .to_string_lossy()
         .into_owned();
     let mut publisher: Option<crate::publish::Publisher> = None;
+    // ── Conform transform (dedicated panel): interactively scale/rotate/place the imported mesh
+    // against the donor template, baked into the export. `conform_live` drives the preview entity
+    // from these fields so the placement is visible against a donor reference in the sandbox. ──
+    let mut conform_scale: f32 = 1.0;
+    let mut conform_t: [f32; 3] = [0.0, 0.0, 0.0];
+    let mut conform_r: [f32; 3] = [0.0, 0.0, 0.0]; // XYZ euler degrees
+    let mut conform_flip = false; // reverse winding on export (RH→LH); toggle if faces cull inside-out
+    let mut conform_live = true;
+    // Workbench: render a marker at EVERY HIER node of the previewed template so functional nodes
+    // (rotor hub, skids, seat, tail, hardpoints) are visible spatial anchors to map geometry onto.
+    let mut show_nodes = false;
+    // Model Workbench page: its own mode + vehicle inventory (rebuilt when names/overlays change).
+    let mut mode = WorkMode::Browser;
+    let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_vehicle_inventory(&index);
+    let mut inventory_dirty = false;
     let mut status = String::from("Enter loads the selected asset. Tab = edit mode. Esc quits.");
 
     // Orbit camera.
@@ -770,6 +823,7 @@ pub fn run(opts: Options) {
                                     index.apply_names(names);
                                     lua_corpus = lua;
                                     filtered = refilter(&index, kind, &filter);
+                                    inventory_dirty = true; // names now resolve → build the vehicle inventory
                                     sel = sel.min(filtered.len().saturating_sub(1));
                                     names_pending = false;
                                     // Swap the boot skull out for the shell plate (browse backdrop).
@@ -878,6 +932,7 @@ pub fn run(opts: Options) {
                                         let names = std::mem::take(&mut index.names);
                                         index = AssetIndex::build(&w.wads, names);
                                         filtered = refilter(&index, kind, &filter);
+                                        inventory_dirty = true;
                                         sel = sel.min(filtered.len().saturating_sub(1));
                                     }
                                     Err(e) => {
@@ -915,6 +970,24 @@ pub fn run(opts: Options) {
                         }
                     }
 
+                    // ── Conform live preview: drive the imported pedestal entity from the conform
+                    // panel's scale/pos/rot so its placement against the donor reference is visible
+                    // in the viewport (the same transform is baked into the export). ──
+                    if conform_live {
+                        if let Some(p) = &preview {
+                            if imported.contains_key(&p.hash) {
+                                let _ = world.insert_one(
+                                    p.entity,
+                                    Transform {
+                                        translation: Vec3::from(conform_t),
+                                        rotation: conform_quat(conform_r),
+                                        scale: Vec3::splat(conform_scale),
+                                    },
+                                );
+                            }
+                        }
+                    }
+
                     // ── Animation: sample the preview's active clip into its palette (paused =
                     // resample the held time, so scrubbing/pausing still shows the exact pose). ──
                     if let Some(p) = &mut preview {
@@ -940,10 +1013,18 @@ pub fn run(opts: Options) {
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
                     let mut hovered_bone: Option<usize> = None;
+                    if inventory_dirty {
+                        vehicle_inventory = build_vehicle_inventory(&index);
+                        inventory_dirty = false;
+                    }
                     gui.run(|ctx| {
                         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                             ui.horizontal(|ui| {
                                 ui.strong("Mercenaries 2 — Workshop");
+                                ui.separator();
+                                // Page switch: asset Browser <-> the Model Workbench.
+                                ui.selectable_value(&mut mode, WorkMode::Browser, "Browser");
+                                ui.selectable_value(&mut mode, WorkMode::Workbench, "Model Workbench");
                                 ui.separator();
                                 if ui.add_enabled(preview.is_some(), egui::Button::new("Place"))
                                     .on_hover_text("Add the preview to the sandbox (F6)")
@@ -1011,6 +1092,8 @@ pub fn run(opts: Options) {
                                 }
                             });
                         });
+                        // ── BROWSER PAGE: the asset browser + details inspector. ──
+                        if mode == WorkMode::Browser {
                         egui::SidePanel::left("browser").default_width(300.0).show(ctx, |ui| {
                             let before = (kind, filter.clone());
                             ui.horizontal(|ui| {
@@ -1748,6 +1831,53 @@ pub fn run(opts: Options) {
                                         ui.label("host group:");
                                         ui.add(egui::DragValue::new(&mut mod_group).range(0..=63));
                                     });
+                                    // ── Conform transform: place & scale the import against the
+                                    // donor. Fields bake into the export (external_mesh_transformed);
+                                    // `live` drives the pedestal so it moves in the viewport. ──
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Conform");
+                                        ui.checkbox(&mut conform_live, "live preview");
+                                        ui.checkbox(&mut show_nodes, "show nodes")
+                                            .on_hover_text("mark every HIER node of the previewed model — green = positioned attach point (rotor/skid/seat/hardpoint), grey = origin/structural — as spatial anchors to map geometry onto");
+                                        if ui
+                                            .button("Load donor ref")
+                                            .on_hover_text("place the donor template in the sandbox at the origin as a visual anchor")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::LoadDonorRef);
+                                        }
+                                        if ui
+                                            .button("Auto-fit")
+                                            .on_hover_text("seed scale + position from the donor's real geometry envelope (skids on the ground, centred)")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ConformAutofit);
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("scale");
+                                        ui.add(egui::DragValue::new(&mut conform_scale).speed(0.005).range(0.0001..=1000.0));
+                                        if ui.small_button("reset").clicked() {
+                                            conform_scale = 1.0;
+                                            conform_t = [0.0; 3];
+                                            conform_r = [0.0; 3];
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("pos");
+                                        ui.add(egui::DragValue::new(&mut conform_t[0]).speed(0.02).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[1]).speed(0.02).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[2]).speed(0.02).prefix("z "));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("rot°");
+                                        ui.add(egui::DragValue::new(&mut conform_r[0]).speed(1.0).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[1]).speed(1.0).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[2]).speed(1.0).prefix("z "));
+                                    });
+                                    ui.checkbox(&mut conform_flip, "flip winding on export (fix inside-out faces)");
+                                    ui.separator();
                                     ui.horizontal(|ui| {
                                         ui.label("name:");
                                         ui.text_edit_singleline(&mut mod_name);
@@ -1821,6 +1951,140 @@ pub fn run(opts: Options) {
                                 });
                             });
                         });
+                        } // ── end BROWSER PAGE ──
+
+                        // ── MODEL WORKBENCH PAGE: inventory (left) · viewport (centre) · tools
+                        // (right). A dedicated page, not a section of the browser. ──
+                        if mode == WorkMode::Workbench {
+                            egui::SidePanel::left("wb_inventory").default_width(280.0).show(ctx, |ui| {
+                                ui.heading("Model Workbench");
+                                ui.weak("Pick a vehicle template to inspect its nodes, then conform your own model onto it.");
+                                ui.separator();
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    if vehicle_inventory.is_empty() {
+                                        ui.weak("(loading catalog…)");
+                                    }
+                                    for (class, rows) in &vehicle_inventory {
+                                        egui::CollapsingHeader::new(format!("{class}  ({})", rows.len()))
+                                            .default_open(*class == "helicopter")
+                                            .show(ui, |ui| {
+                                                for (hash, label) in rows {
+                                                    let sel = preview.as_ref().is_some_and(|p| p.hash == *hash);
+                                                    if ui.selectable_label(sel, label).clicked() {
+                                                        actions.push(Act::LoadModelHash(*hash, label.clone()));
+                                                    }
+                                                }
+                                            });
+                                    }
+                                });
+                            });
+                            egui::SidePanel::right("wb_tools").default_width(350.0).show(ctx, |ui| {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    ui.heading("Template");
+                                    match &preview {
+                                        Some(p) => {
+                                            ui.label(format!("{}", p.label));
+                                            ui.monospace(format!("0x{:08X}", p.hash));
+                                            ui.label(format!(
+                                                "{} nodes · {} draw groups · {} textures",
+                                                p.rig.len(), p.draws.len(), p.tex_hashes.len()
+                                            ));
+                                            ui.checkbox(&mut show_nodes, "show node markers")
+                                                .on_hover_text("green = positioned attach node (rotor/skid/seat/tail/hardpoint) · grey = origin/structural");
+                                            ui.weak("green = attach node (rotor/skid/seat) · grey = structural");
+                                        }
+                                        None => {
+                                            ui.weak("← pick a vehicle from the inventory");
+                                        }
+                                    }
+                                    ui.separator();
+
+                                    ui.heading("Your model");
+                                    ui.weak("drag-drop .obj / .gltf / .glb onto the window");
+                                    let import_on_pedestal =
+                                        preview.as_ref().is_some_and(|p| imported.contains_key(&p.hash));
+                                    if import_on_pedestal {
+                                        ui.colored_label(egui::Color32::from_rgb(120, 230, 140), "import loaded on pedestal");
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Load donor ref")
+                                            .on_hover_text("place the conform donor template in the sandbox at origin as a visual anchor")
+                                            .clicked() { actions.push(Act::LoadDonorRef); }
+                                        if ui.button("Auto-fit")
+                                            .on_hover_text("seed scale + position from the donor's real geometry envelope (skids on ground, centred)")
+                                            .clicked() { actions.push(Act::ConformAutofit); }
+                                        ui.checkbox(&mut conform_live, "live");
+                                    });
+                                    ui.separator();
+
+                                    ui.heading("Conform transform");
+                                    ui.horizontal(|ui| {
+                                        ui.label("scale");
+                                        ui.add(egui::DragValue::new(&mut conform_scale).speed(0.005).range(0.0001..=1000.0));
+                                        if ui.small_button("reset").clicked() {
+                                            conform_scale = 1.0; conform_t = [0.0; 3]; conform_r = [0.0; 3];
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("pos");
+                                        ui.add(egui::DragValue::new(&mut conform_t[0]).speed(0.02).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[1]).speed(0.02).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[2]).speed(0.02).prefix("z "));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("rot°");
+                                        ui.add(egui::DragValue::new(&mut conform_r[0]).speed(1.0).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[1]).speed(1.0).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[2]).speed(1.0).prefix("z "));
+                                    });
+                                    ui.checkbox(&mut conform_flip, "flip winding on export (fix inside-out faces)");
+                                    ui.separator();
+
+                                    ui.heading("Export");
+                                    ui.horizontal(|ui| {
+                                        ui.label("donor:");
+                                        match &mod_donor {
+                                            Some((h, l)) => { ui.monospace(format!("0x{h:08X}")); ui.label(l.as_str()); }
+                                            None => { ui.weak("← click a template (sets donor)"); }
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("host group:");
+                                        ui.add(egui::DragValue::new(&mut mod_group).range(0..=63));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("name:");
+                                        ui.text_edit_singleline(&mut mod_name);
+                                    });
+                                    let can_add = import_on_pedestal && mod_donor.is_some() && !mod_name.is_empty();
+                                    if ui.add_enabled(can_add, egui::Button::new("Add to mod project")).clicked() {
+                                        actions.push(Act::ModAdd(mod_name.clone()));
+                                    }
+                                    if !can_add {
+                                        ui.weak("needs an imported model on the pedestal, a donor template, and a name");
+                                    }
+                                    for (i, it) in mod_items.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.monospace(format!("0x{:08X}", it.hash));
+                                            ui.label(it.name.as_str());
+                                            ui.weak(format!("← {} g{}", it.donor_label, it.target_group));
+                                            if ui.small_button("✖").clicked() { actions.push(Act::ModRemove(i)); }
+                                        });
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("output:");
+                                        ui.text_edit_singleline(&mut mod_out);
+                                    });
+                                    let busy = publisher.is_some();
+                                    if ui.add_enabled(!mod_items.is_empty() && !busy,
+                                        egui::Button::new(if busy { "publishing…" } else { "Publish patch WAD" })).clicked()
+                                    {
+                                        actions.push(Act::Publish);
+                                    }
+                                });
+                            });
+                        }
+
                         if let Some(tv) = &tex_view {
                             egui::Window::new("Texture")
                                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
@@ -1858,6 +2122,29 @@ pub fn run(opts: Options) {
                     // ── Execute the frame's queued actions (keyboard + GUI, one implementation). ──
                     for act in std::mem::take(&mut actions) {
                         match act {
+                            Act::LoadModelHash(hash, label) => {
+                                let t0 = std::time::Instant::now();
+                                match source_model_data(&mut w, &imported, hash) {
+                                    Ok(md) => {
+                                        let p = build_preview(
+                                            &mut w, &mut scene, &mut world, hash, label.clone(), md,
+                                            &preview, &placed, &index, &anim_sel, &lua_corpus,
+                                        );
+                                        cam_target = p.center;
+                                        cam_dist = (p.radius * 2.4).clamp(1.5, 15000.0);
+                                        sel_bone = None;
+                                        preview = Some(p);
+                                        // Loading a workbench template also sets it as the conform
+                                        // donor (its container hosts the injected geometry).
+                                        mod_donor = Some((hash, label.clone()));
+                                        status = format!(
+                                            "workbench template: {label} ({:.2}s)",
+                                            t0.elapsed().as_secs_f32()
+                                        );
+                                    }
+                                    Err(e) => status = format!("LOAD FAILED: {e}"),
+                                }
+                            }
                             Act::LoadRow(vi) => {
                                 let Some(&ri) = filtered.get(vi) else { continue };
                                 let row = &index.rows(kind)[ri];
@@ -2361,7 +2648,8 @@ pub fn run(opts: Options) {
                                     status = format!("mod project already has 0x{hash:08X}");
                                     continue;
                                 }
-                                let mesh = external_mesh_of(md);
+                                let mesh =
+                                    external_mesh_transformed(md, conform_scale, conform_t, conform_r);
                                 let (nv, nt) = (mesh.positions.len(), mesh.tris.len());
                                 mod_items.push(crate::publish::NewModelItem {
                                     name: name.clone(),
@@ -2369,6 +2657,7 @@ pub fn run(opts: Options) {
                                     donor,
                                     donor_label,
                                     target_group: mod_group,
+                                    flip: conform_flip,
                                     mesh,
                                 });
                                 status = format!(
@@ -2399,6 +2688,7 @@ pub fn run(opts: Options) {
                                     let names = std::mem::take(&mut index.names);
                                     index = AssetIndex::build(&w.wads, names);
                                     filtered = refilter(&index, kind, &filter);
+                                    inventory_dirty = true;
                                     sel = sel.min(filtered.len().saturating_sub(1));
                                 }
                                 status = format!(
@@ -2410,6 +2700,63 @@ pub fn run(opts: Options) {
                                     mod_items.clone(),
                                     std::path::PathBuf::from(mod_out.clone()),
                                 ));
+                            }
+                            Act::ConformAutofit => {
+                                let Some((dh, _)) = mod_donor.as_ref().map(|(h, l)| (*h, l.clone()))
+                                else {
+                                    status = "auto-fit: set a donor first".into();
+                                    continue;
+                                };
+                                let Some(imp) = preview.as_ref().and_then(|p| imported.get(&p.hash))
+                                else {
+                                    status = "auto-fit: the pedestal is not an imported model".into();
+                                    continue;
+                                };
+                                match load_model_data(&mut w, dh) {
+                                    Ok(donor_md) => {
+                                        let (s, t) = conform_autofit(&donor_md, imp);
+                                        conform_scale = s;
+                                        conform_t = t;
+                                        conform_r = [0.0; 3];
+                                        status = format!(
+                                            "auto-fit: scale {:.3}, pos [{:.2}, {:.2}, {:.2}]",
+                                            s, t[0], t[1], t[2]
+                                        );
+                                    }
+                                    Err(e) => status = format!("auto-fit: donor load failed: {e}"),
+                                }
+                            }
+                            Act::LoadDonorRef => {
+                                let Some((dh, dl)) = mod_donor.clone() else {
+                                    status = "donor ref: set a donor first".into();
+                                    continue;
+                                };
+                                if !scene.has_model(dh) {
+                                    if let Err(e) = load_gpu_only(&mut w, &mut scene, dh) {
+                                        status = format!("donor ref: {e}");
+                                        continue;
+                                    }
+                                }
+                                let bones = scene.model_bone_count(dh).max(1);
+                                let e = world.spawn((
+                                    Transform {
+                                        translation: Vec3::ZERO,
+                                        rotation: Quat::IDENTITY,
+                                        scale: Vec3::ONE,
+                                    },
+                                    ModelRef { model: dh },
+                                    AnimState::default(),
+                                    SkinPalette { mats: vec![IDENTITY; bones] },
+                                ));
+                                placed.push(Placed {
+                                    hash: dh,
+                                    label: format!("ref:{dl}"),
+                                    entity: e,
+                                    pos: Vec3::ZERO,
+                                    yaw: 0.0,
+                                    scale: 1.0,
+                                });
+                                status = format!("donor reference placed at origin: {dl}");
                             }
                             Act::TexClose => {
                                 tex_view = None;
@@ -2448,6 +2795,65 @@ pub fn run(opts: Options) {
                             if let Some(i) = sel_bone {
                                 if hovered_bone != Some(i) {
                                     push(i, [0.35, 0.9, 1.0, 0.9]); // cyan: pinned
+                                }
+                            }
+                            // Workbench: every node as a spatial anchor (after the hover/pin closure
+                            // releases its &mut cards). Colour by role heuristic — translated-away
+                            // nodes = functional attach points (rotor/skid/seat/tail/hardpoint);
+                            // nodes at the origin = structural/break-piece parents — so the user can
+                            // map imported geometry onto them by sight.
+                            if show_nodes {
+                                // Posed world position of every node.
+                                let node_pos: Vec<[f32; 3]> = p
+                                    .rig
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, b)| {
+                                        let m = match pal.as_ref().and_then(|pl| pl.mats.get(i)) {
+                                            Some(sm) => mercs2_formats::skeleton::mat4_mul(&b.world_bind, sm),
+                                            None => b.world_bind,
+                                        };
+                                        [m[3][0], m[3][1], m[3][2]]
+                                    })
+                                    .collect();
+                                // INTERLINK: dotted segments from each node to its parent so the
+                                // HIER hierarchy is legible (which nodes hang off which).
+                                for (i, b) in p.rig.iter().enumerate() {
+                                    if b.parent < 0 {
+                                        continue;
+                                    }
+                                    let Some(a) = node_pos.get(b.parent as usize).copied() else {
+                                        continue;
+                                    };
+                                    let c = node_pos[i];
+                                    let d = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 0.01 {
+                                        continue; // coincident with parent — no visible link
+                                    }
+                                    for s in 1..5 {
+                                        let f = s as f32 / 5.0;
+                                        cards.push(mercs2_engine::particles::GlowCard {
+                                            pos: [a[0] + d[0] * f, a[1] + d[1] * f, a[2] + d[2] * f],
+                                            size: (p.radius * 0.012).clamp(0.008, 0.12),
+                                            color: [0.25, 0.75, 0.85, 0.55], // teal link
+                                        });
+                                    }
+                                }
+                                // NODES: green = positioned attach point (moved off the model
+                                // origin: rotor/skid/seat/tail/hardpoint), grey = origin/structural.
+                                for (i, b) in p.rig.iter().enumerate() {
+                                    let t = [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]];
+                                    let off_origin = t[0].abs() + t[1].abs() + t[2].abs() > 0.05;
+                                    let color = if off_origin {
+                                        [0.30, 1.0, 0.45, 0.9]
+                                    } else {
+                                        [0.6, 0.6, 0.7, 0.5]
+                                    };
+                                    cards.push(mercs2_engine::particles::GlowCard {
+                                        pos: node_pos[i],
+                                        size: (p.radius * 0.04).clamp(0.02, 0.4),
+                                        color,
+                                    });
                                 }
                             }
                         }
@@ -2776,14 +3182,88 @@ pub(crate) fn character_candidates(label: &str) -> Vec<String> {
 /// triangles from the index buffer. Rigid (empty joints/weights = bone-0 bind in the donor) —
 /// skinned weight transfer is its own workstream. Donor-frame fit is the source file's job.
 fn external_mesh_of(md: &ModelData) -> mercs2_formats::model_inject::ExternalMesh {
+    external_mesh_transformed(md, 1.0, [0.0; 3], [0.0; 3])
+}
+
+/// Conform rotation from XYZ euler degrees (the panel's rotation fields).
+fn conform_quat(r_deg: [f32; 3]) -> Quat {
+    Quat::from_euler(
+        glam::EulerRot::XYZ,
+        r_deg[0].to_radians(),
+        r_deg[1].to_radians(),
+        r_deg[2].to_radians(),
+    )
+}
+
+/// Bake the conform panel's interactive transform (uniform scale → rotate → translate) into the
+/// mesh handed to the conform injector, so what the user positions against the template IS what
+/// ships. Normals are rotated (scale is uniform, translation ignored for normals).
+fn external_mesh_transformed(
+    md: &ModelData,
+    scale: f32,
+    t: [f32; 3],
+    r_deg: [f32; 3],
+) -> mercs2_formats::model_inject::ExternalMesh {
+    let q = conform_quat(r_deg);
+    let s = if scale.abs() > 1e-6 { scale } else { 1.0 };
+    let tv = Vec3::from(t);
+    let tp = |p: [f32; 3]| {
+        let v = q * (Vec3::from(p) * s) + tv;
+        [v.x, v.y, v.z]
+    };
+    let tn = |n: [f32; 3]| {
+        let v = (q * Vec3::from(n)).normalize_or_zero();
+        [v.x, v.y, v.z]
+    };
     mercs2_formats::model_inject::ExternalMesh {
-        positions: md.verts.iter().map(|v| v.pos).collect(),
-        normals: md.verts.iter().map(|v| v.normal).collect(),
+        positions: md.verts.iter().map(|v| tp(v.pos)).collect(),
+        normals: md.verts.iter().map(|v| tn(v.normal)).collect(),
         uvs: md.verts.iter().map(|v| v.uv).collect(),
         tris: md.indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
         joints: Vec::new(),
         weights: Vec::new(),
     }
+}
+
+/// Axis-aligned bbox (min,max) over a ModelData's vertex positions — the REAL geometry envelope
+/// used to seed the conform auto-fit (mirrors `inject_static`'s real-envelope fit, not the padded
+/// top-INFO bbox).
+fn model_pos_bbox(md: &ModelData) -> ([f32; 3], [f32; 3]) {
+    let mut mn = [f32::MAX; 3];
+    let mut mx = [f32::MIN; 3];
+    for v in &md.verts {
+        for k in 0..3 {
+            mn[k] = mn[k].min(v.pos[k]);
+            mx[k] = mx[k].max(v.pos[k]);
+        }
+    }
+    (mn, mx)
+}
+
+/// Seed the conform transform so the import fills the donor's real geometry envelope: uniform
+/// scale to the tightest axis, centred in X/Z, bottom-aligned in Y (feet/skids on the ground).
+/// Returns (scale, translate) for the panel fields; rotation is left to the user.
+fn conform_autofit(donor: &ModelData, import: &ModelData) -> (f32, [f32; 3]) {
+    let (tmin, tmax) = model_pos_bbox(donor);
+    let (mmin, mmax) = model_pos_bbox(import);
+    if tmin[0] > tmax[0] || mmin[0] > mmax[0] {
+        return (1.0, [0.0; 3]);
+    }
+    let mut s = f32::MAX;
+    for k in 0..3 {
+        let md = mmax[k] - mmin[k];
+        if md > 1e-4 {
+            s = s.min((tmax[k] - tmin[k]).abs() / md);
+        }
+    }
+    if !s.is_finite() || s <= 0.0 {
+        s = 1.0;
+    }
+    let mcen = [(mmin[0] + mmax[0]) * 0.5, mmin[1], (mmin[2] + mmax[2]) * 0.5];
+    let tgt = [(tmin[0] + tmax[0]) * 0.5, tmin[1], (tmin[2] + tmax[2]) * 0.5];
+    // translate = target - scale*mcen (so mesh min-Y and X/Z centre land on the envelope).
+    let t = [tgt[0] - s * mcen[0], tgt[1] - s * mcen[1], tgt[2] - s * mcen[2]];
+    (s, t)
 }
 
 /// GPU-upload a model by hash (used by the sandbox scene loader for models not previewed yet).

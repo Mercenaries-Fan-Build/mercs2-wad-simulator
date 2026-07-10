@@ -93,6 +93,34 @@ fn main() {
         return;
     }
 
+    // Headless: the Model Workbench vehicle inventory — models grouped by class (helicopter,
+    // tank, car, boat, …). `--inventory [class]` filters to one class.
+    if let Some(i) = args.iter().position(|a| a == "--inventory") {
+        let want = args.get(i + 1).filter(|s| !s.starts_with("--")).map(|s| s.to_ascii_lowercase());
+        let stack = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
+            std::collections::BTreeMap::new();
+        for r in &idx.models {
+            if let Some(c) = r.vehicle_class() {
+                if want.as_deref().is_none_or(|w| w == c) {
+                    by_class.entry(c).or_default().push(r);
+                }
+            }
+        }
+        for (class, mut rows) in by_class {
+            rows.sort_by(|a, b| a.label().cmp(&b.label()));
+            println!("\n== {class} ({}) ==", rows.len());
+            for r in rows {
+                println!("  0x{:08X}{}  {}", r.hash, stack.tag(r.src), r.label());
+            }
+        }
+        return;
+    }
+
     // Headless: publish a NOVEL new-hash model asset (the GUI Mod-project flow, scriptable).
     // --mod-new <name> <donor name|0xHASH> <mesh.obj|.gltf|.glb> [--mod-group N] [--mod-out path]
     if let Some(i) = args.iter().position(|a| a == "--mod-new") {
@@ -132,6 +160,7 @@ fn main() {
             donor,
             donor_label: donor_arg.clone(),
             target_group: group,
+            flip: false,
             mesh,
         };
         let mut paths = vec![wadpath.clone()];
