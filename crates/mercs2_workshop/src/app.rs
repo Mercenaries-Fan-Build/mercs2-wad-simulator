@@ -252,6 +252,13 @@ struct Preview {
     hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
     node_state: Vec<usize>,
+    /// The object's HEALTH fraction (1.0 = full, 0.0 = destroyed). Drives the destruction machine:
+    /// `node_states_for_health` picks each node's state, so the inspector shows the real pristine →
+    /// damaged → wreck progression instead of hand-picked states.
+    health: f32,
+    /// The model's authored header (AABB / node count / LOD-level count / LOD distance), for the
+    /// LOD panel + camera framing. `None` for imports.
+    header: Option<mercs2_formats::model_cubeize::ModelHeader>,
     /// Game scripts mentioning this asset: literal search hits from the decompiled corpus
     /// (needle shown alongside — these are search results, not classifications).
     lua_needle: String,
@@ -351,6 +358,10 @@ enum Act {
     ShowAllGroups,
     /// Put switch node `.0` into its state index `.1` and re-execute the machine's SHOW/Hide.
     NodeState(usize, usize),
+    /// Set the object's HEALTH fraction (0..1) and drive the destruction machine from it — pristine
+    /// at full, damaged/on-fire as it drops, wreck at 0. The systemic replacement for hand-picking
+    /// per-node states.
+    SetHealth(f32),
     TexOfPreview,
     TexNav(i32),
     TexClose,
@@ -1324,18 +1335,26 @@ pub fn run(opts: Options) {
                                                 }
                                             });
                                         if p.tiers.len() > 1 {
-                                            egui::CollapsingHeader::new(format!(
-                                                "States / LODs ({})",
-                                                p.tiers.len()
-                                            ))
+                                            let lodc = p
+                                                .header
+                                                .map(|h| h.lod_count)
+                                                .unwrap_or(p.tiers.len() as u32);
+                                            egui::CollapsingHeader::new(format!("LOD rungs ({lodc})"))
                                             .default_open(true)
                                             .show(ui, |ui| {
+                                                // Single-bit rungs: view_state = 1<<n. Correct for
+                                                // characters (each rung is a complete decimated body).
                                                 ui.horizontal_wrapped(|ui| {
+                                                    ui.label("rung:");
                                                     for &bit in &p.tiers {
+                                                        let n = bit.trailing_zeros();
                                                         if ui
                                                             .selectable_label(
                                                                 bit == p.tier,
-                                                                format!("0x{bit:02X}"),
+                                                                format!("{n} (0x{bit:02X})"),
+                                                            )
+                                                            .on_hover_text(
+                                                                "single SEGM tier bit (view_state = 1<<n)",
                                                             )
                                                             .clicked()
                                                         {
@@ -1343,7 +1362,34 @@ pub fn run(opts: Options) {
                                                         }
                                                     }
                                                 });
-                                                ui.weak("LOD chains + destruction states (SEGM tiers)");
+                                                // Cross-fade windows: view_state = 1<<(n-1)|1<<n|1<<(n+1)
+                                                // (FUN_0047724e). Some models — vehicles like the tank —
+                                                // author hull/turret/barrel on ADJACENT bits, so only a
+                                                // window assembles the whole object. Whether a given
+                                                // instance uses this is a per-CLASS attach flag (bit 9
+                                                // of OBJ+0x12), NOT stored in the model — pending a live
+                                                // read to settle the default. Exposed so you can see it.
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.label("window:");
+                                                    for n in 0..lodc {
+                                                        let w = window_view_state(n as u8);
+                                                        if ui
+                                                            .selectable_label(
+                                                                w == p.tier,
+                                                                format!("{n} (0x{w:02X})"),
+                                                            )
+                                                            .on_hover_text(
+                                                                "3-rung cross-fade window (1<<(n-1)|1<<n|1<<(n+1))",
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            actions.push(Act::Tier(w));
+                                                        }
+                                                    }
+                                                });
+                                                ui.weak(
+                                                    "LOD rungs are distance-selected in-game; destruction is a SEPARATE axis (below)",
+                                                );
                                             });
                                         }
                                         // Destruction — the ENGINE's state machine, interactive:
@@ -1359,6 +1405,32 @@ pub fn run(opts: Options) {
                                             ))
                                             .default_open(true)
                                             .show(ui, |ui| {
+                                                // HEALTH drives the machine — the object's real damage
+                                                // axis. Full = pristine; dropping = damaged/on-fire;
+                                                // 0 = wreck. Below, the per-node states it resolves to.
+                                                let mut hp = p.health * 100.0;
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Health");
+                                                    if ui
+                                                        .add(
+                                                            egui::Slider::new(&mut hp, 0.0..=100.0)
+                                                                .suffix("%")
+                                                                .fixed_decimals(0),
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        actions.push(Act::SetHealth(hp / 100.0));
+                                                    }
+                                                    if ui.small_button("100").clicked() {
+                                                        actions.push(Act::SetHealth(1.0));
+                                                    }
+                                                    if ui.small_button("0").clicked() {
+                                                        actions.push(Act::SetHealth(0.0));
+                                                    }
+                                                });
+                                                ui.weak(
+                                                    "drives the state machine from damage (HP→messages approximated; states are the engine's)",
+                                                );
                                                 let hier: std::collections::HashSet<u32> =
                                                     p.hier.iter().copied().collect();
                                                 let resolve = |h: u32| {
@@ -2186,49 +2258,62 @@ pub fn run(opts: Options) {
                                 }
                             }
                             a @ (Act::Tier(_) | Act::TierNext) => {
+                                // The model is uploaded WHOLE, so switching LOD rung is free: it just
+                                // changes `view_state` on this entity's render state. No rebuild, no
+                                // re-upload, and no effect on other placed instances of the same hash
+                                // (which the old per-hash `hidden_draws` path could not avoid).
                                 let want = match a {
-                                    Act::Tier(b) => preview.as_ref().map(|p| (p.hash, p.label.clone(), b)),
+                                    Act::Tier(b) => preview.as_ref().map(|_| b),
                                     _ => preview.as_ref().and_then(|p| {
                                         (p.tiers.len() > 1).then(|| {
-                                            let i = p
-                                                .tiers
-                                                .iter()
-                                                .position(|&b| b == p.tier)
-                                                .unwrap_or(0);
-                                            (p.hash, p.label.clone(), p.tiers[(i + 1) % p.tiers.len()])
+                                            let i =
+                                                p.tiers.iter().position(|&b| b == p.tier).unwrap_or(0);
+                                            p.tiers[(i + 1) % p.tiers.len()]
                                         })
                                     }),
                                 };
-                                let Some((hash, label, bit)) = want else {
+                                let Some(bit) = want else {
                                     if preview.is_some() {
-                                        status = "single-tier model (no other LOD/state)".into();
+                                        status = "single-tier model (no other LOD rung)".into();
                                     }
                                     continue;
                                 };
-                                if imported.contains_key(&hash) {
-                                    continue; // imports carry no tiers
-                                }
-                                match load_model_data_tier(&mut w, hash, bit) {
-                                    Ok(md) => {
-                                        scene.unload_model(hash);
-                                        let p = build_preview(
-                                            &mut w, &mut scene, &mut world, hash, label, md,
-                                            &preview, &placed, &index, &anim_sel, &lua_corpus,
-                                        );
-                                        let ti =
-                                            p.tiers.iter().position(|&b| b == p.tier).unwrap_or(0);
-                                        status = format!(
-                                            "state/LOD tier 0x{:02X} ({}/{}) — {} verts, {} groups",
-                                            p.tier,
-                                            ti + 1,
-                                            p.tiers.len(),
-                                            p.verts,
-                                            p.draws.len()
-                                        );
-                                        sel_bone = None;
-                                        preview = Some(p);
+                                if let Some(p) = &mut preview {
+                                    p.tier = bit;
+                                    let node_enable = p
+                                        .machine
+                                        .as_ref()
+                                        .map(|sm| {
+                                            mercs2_formats::orchestrator::machine_node_enable(
+                                                sm,
+                                                &p.hier_nodes,
+                                                &p.node_state,
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                    let rs = mercs2_engine::render_state::RenderState {
+                                        lod: bit.trailing_zeros() as u8,
+                                        view_state: bit,
+                                        node_enable,
+                                    };
+                                    for (gi, d) in p.draws.iter().enumerate() {
+                                        if rs.segment_visible(d.lod_mask, d.node) {
+                                            p.hidden.remove(&gi);
+                                        } else {
+                                            p.hidden.insert(gi);
+                                        }
                                     }
-                                    Err(e) => status = format!("TIER SWITCH FAILED: {e}"),
+                                    scene.set_entity_render_state(p.entity, rs);
+                                    let ti = p.tiers.iter().position(|&b| b == bit).unwrap_or(0);
+                                    status = format!(
+                                        "LOD rung {} (0x{:02X}, {}/{}) — {} of {} groups drawn",
+                                        bit.trailing_zeros(),
+                                        bit,
+                                        ti + 1,
+                                        p.tiers.len().max(1),
+                                        p.draws.len() - p.hidden.len(),
+                                        p.draws.len()
+                                    );
                                 }
                             }
                             a @ (Act::ClipSel(_) | Act::ClipNav(_)) => {
@@ -2311,6 +2396,13 @@ pub fn run(opts: Options) {
                                         AnimState::default(),
                                         SkinPalette { mats: p.bind.clone() },
                                     ));
+                                    // Inherit the preview's live render state (its LOD rung and the
+                                    // node states you picked), not a fresh default.
+                                    let rs = scene
+                                        .entity_render_state(p.entity)
+                                        .cloned()
+                                        .unwrap_or_else(|| default_render_state(&mut w, p.hash));
+                                    scene.set_entity_render_state(e, rs);
                                     placed.push(Placed {
                                         hash: p.hash,
                                         label: p.label.clone(),
@@ -2390,6 +2482,8 @@ pub fn run(opts: Options) {
                                     AnimState::default(),
                                     SkinPalette { mats: vec![IDENTITY; bones] },
                                 ));
+                                let rs = default_render_state(&mut w, hash);
+                                scene.set_entity_render_state(e, rs);
                                 placed.push(Placed { hash, label: label.clone(), entity: e, pos, yaw: 0.0, scale: 1.0 });
                                 sel_placed = Some(placed.len() - 1);
                                 status = format!("placed {label} ({} in sandbox)", placed.len());
@@ -2397,8 +2491,8 @@ pub fn run(opts: Options) {
                             Act::DuplicatePlaced(i) => {
                                 if let Some(src) = placed.get(i) {
                                     let pos = src.pos + Vec3::new(0.5, 0.0, 0.5);
-                                    let (hash, label, yaw, scale) =
-                                        (src.hash, src.label.clone(), src.yaw, src.scale);
+                                    let (hash, label, yaw, scale, src_entity) =
+                                        (src.hash, src.label.clone(), src.yaw, src.scale, src.entity);
                                     let bones = scene.model_bone_count(hash).max(1);
                                     let e = world.spawn((
                                         Transform {
@@ -2410,6 +2504,12 @@ pub fn run(opts: Options) {
                                         AnimState::default(),
                                         SkinPalette { mats: vec![IDENTITY; bones] },
                                     ));
+                                    // Per-entity state: the duplicate can now diverge from its source.
+                                    let rs = scene
+                                        .entity_render_state(src_entity)
+                                        .cloned()
+                                        .unwrap_or_else(|| default_render_state(&mut w, hash));
+                                    scene.set_entity_render_state(e, rs);
                                     placed.push(Placed { hash, label, entity: e, pos, yaw, scale });
                                     sel_placed = Some(placed.len() - 1);
                                 }
@@ -2449,31 +2549,70 @@ pub fn run(opts: Options) {
                                     p.hidden.clear();
                                 }
                             }
+                            Act::SetHealth(h) => {
+                                if let Some(p) = &mut preview {
+                                    p.health = h.clamp(0.0, 1.0);
+                                    if let Some(sm) = &p.machine {
+                                        // Run the machine from health: pick each node's state, then
+                                        // node-enable → render state. This IS the object's damage axis.
+                                        p.node_state = mercs2_formats::orchestrator::node_states_for_health(
+                                            sm, p.health, 0.99,
+                                        );
+                                        let node_enable =
+                                            mercs2_formats::orchestrator::machine_node_enable(
+                                                sm,
+                                                &p.hier_nodes,
+                                                &p.node_state,
+                                            );
+                                        let rs = mercs2_engine::render_state::RenderState {
+                                            lod: p.tier.trailing_zeros() as u8,
+                                            view_state: p.tier,
+                                            node_enable,
+                                        };
+                                        for (gi, d) in p.draws.iter().enumerate() {
+                                            if rs.segment_visible(d.lod_mask, d.node) {
+                                                p.hidden.remove(&gi);
+                                            } else {
+                                                p.hidden.insert(gi);
+                                            }
+                                        }
+                                        scene.set_entity_render_state(p.entity, rs);
+                                        let drawn = p.draws.len() - p.hidden.len();
+                                        status = format!(
+                                            "health {:.0}% — {drawn}/{} groups drawn",
+                                            p.health * 100.0,
+                                            p.draws.len()
+                                        );
+                                    }
+                                }
+                            }
                             Act::NodeState(ni, si) => {
                                 if let Some(p) = &mut preview {
                                     if let Some(sm) = &p.machine {
                                         if let Some(slot) = p.node_state.get_mut(ni) {
                                             *slot = si;
                                         }
-                                        let vis =
-                                            mercs2_formats::orchestrator::machine_group_visibility(
+                                        // Re-execute the machine into a node-enable table and hand it
+                                        // to the entity's render state. Node-keyed, like the engine.
+                                        let node_enable =
+                                            mercs2_formats::orchestrator::machine_node_enable(
                                                 sm,
                                                 &p.hier_nodes,
-                                                &p.indx,
                                                 &p.node_state,
                                             );
+                                        let rs = mercs2_engine::render_state::RenderState {
+                                            lod: p.tier.trailing_zeros() as u8,
+                                            view_state: p.tier,
+                                            node_enable,
+                                        };
                                         for (gi, d) in p.draws.iter().enumerate() {
-                                            let hide = vis
-                                                .get(d.group_index)
-                                                .map(|visible| !visible)
-                                                .unwrap_or(false);
-                                            if hide {
-                                                p.hidden.insert(gi);
-                                            } else {
+                                            if rs.segment_visible(d.lod_mask, d.node) {
                                                 p.hidden.remove(&gi);
+                                            } else {
+                                                p.hidden.insert(gi);
                                             }
-                                            scene.set_draw_hidden(p.hash, gi, hide);
                                         }
+                                        scene.set_entity_render_state(p.entity, rs);
                                         let sname = sm
                                             .nodes
                                             .get(ni)
@@ -2546,6 +2685,8 @@ pub fn run(opts: Options) {
                                                 AnimState::default(),
                                                 SkinPalette { mats: vec![IDENTITY; bones] },
                                             ));
+                                            let rs = default_render_state(&mut w, it.hash);
+                                            scene.set_entity_render_state(e, rs);
                                             placed.push(Placed {
                                                 hash: it.hash,
                                                 label,
@@ -2748,6 +2889,8 @@ pub fn run(opts: Options) {
                                     AnimState::default(),
                                     SkinPalette { mats: vec![IDENTITY; bones] },
                                 ));
+                                let rs = default_render_state(&mut w, dh);
+                                scene.set_entity_render_state(e, rs);
                                 placed.push(Placed {
                                     hash: dh,
                                     label: format!("ref:{dl}"),
@@ -3016,6 +3159,11 @@ struct ModelData {
     machine: Option<mercs2_formats::orchestrator::StateMachine>,
     hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
+    /// The container's top-level model header (authored AABB, node count, LOD-level count, LOD
+    /// distance) — the per-model data the engine's LOD selector reads. `None` for imports. This is
+    /// what makes the workshop AWARE of the model instead of assuming one global rule; the authored
+    /// AABB frames the camera correctly (break-piece anchors no longer inflate the radius).
+    header: Option<mercs2_formats::model_cubeize::ModelHeader>,
 }
 
 impl From<crate::import::Imported> for ModelData {
@@ -3032,6 +3180,7 @@ impl From<crate::import::Imported> for ModelData {
             machine: None,
             hier_nodes: Vec::new(),
             indx: Vec::new(),
+            header: None,
         }
     }
 }
@@ -3053,18 +3202,66 @@ fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, String> {
     load_model_data_tier(w, hash, 0x01)
 }
 
+/// The render state a freshly-placed instance of `hash` should have: LOD rung 0, plus the destruction
+/// machine's node-enable table at its DEFAULT state (pristine). Every spawned entity needs one —
+/// models are uploaded whole now, so an entity with no state draws its wreck too.
+///
+/// Imported/synthetic models resolve to no container; their draw groups carry `lod_mask = 0xFF` and
+/// `node = -1`, so the empty state draws them in full.
+fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine::render_state::RenderState {
+    use mercs2_formats::orchestrator as orch;
+    let Ok(c) = w.extract_container(hash) else {
+        return mercs2_engine::render_state::RenderState::rung0(0);
+    };
+    let hier = orch::parse_hier(&c);
+    let node_enable = orch::parse_state_machine(&c)
+        .map(|sm| {
+            let chosen: Vec<usize> = sm.nodes.iter().map(orch::default_state_index).collect();
+            orch::machine_node_enable(&sm, &hier, &chosen)
+        })
+        .unwrap_or_default();
+    mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable }
+}
+
+/// The 3-rung cross-fade `view_state` centred on rung `n`: `1<<(n-1) | 1<<n | 1<<(n+1)`, exactly
+/// `FUN_0047724e` (the `n-1` term drops off at rung 0; `n+1` past bit 7 falls out of the byte).
+fn window_view_state(n: u8) -> u8 {
+    let bit = |i: i32| -> u8 { if (0..8).contains(&i) { 1u8 << i } else { 0 } };
+    bit(n as i32 - 1) | bit(n as i32) | bit(n as i32 + 1)
+}
+
+/// The engine render state a preview should have: `view_state` = the selected LOD-rung bit, and the
+/// destruction machine's node-enable table for the chosen per-node states. A model with no machine
+/// gets an empty table, which passes clause 3 for every segment.
+fn preview_render_state(md: &ModelData, node_state: &[usize]) -> mercs2_engine::render_state::RenderState {
+    let node_enable = md
+        .machine
+        .as_ref()
+        .map(|sm| mercs2_formats::orchestrator::machine_node_enable(sm, &md.hier_nodes, node_state))
+        .unwrap_or_default();
+    mercs2_engine::render_state::RenderState {
+        lod: md.tier.trailing_zeros() as u8,
+        view_state: md.tier,
+        node_enable,
+    }
+}
+
 /// Load a model at a specific SEGM state/LOD tier (`active_bit` of `build_indexed_state`) —
 /// F11's rebuild path. Falls back to the container's first tier if the requested bit is absent.
 fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<ModelData, String> {
     let container = w.extract_container(hash)?;
     let tiers = mesh::state_tiers(&container);
     let tier = if tiers.contains(&want_bit) || tiers.is_empty() { want_bit } else { tiers[0] };
-    let (verts, indices, draws, stats) = mesh::build_indexed_state(&container, tier)?;
+    // Build the model WHOLE — every LOD rung, every destruction state. Visibility is decided per
+    // frame by the engine's draw gate against the entity's RenderState, not baked into the buffer.
+    // `tier` is now just the rung the preview STARTS at (it becomes `view_state`).
+    let (verts, indices, draws, stats) = mesh::build_indexed_all(&container)?;
     // The engine's own named-state machine + the HIER/INDX it acts on — ground-truth
     // destruction visibility comes from executing its scripts, nothing is classified.
     let machine = mercs2_formats::orchestrator::parse_state_machine(&container);
     let hier_nodes = mercs2_formats::orchestrator::parse_hier(&container);
     let indx = mercs2_formats::orchestrator::parse_indx(&container);
+    let header = mercs2_formats::model_cubeize::parse_model_header(&container);
     // RESIDENT mips only: `extract_texture_hires` walks the whole cell subtree per texture and
     // made model loads take seconds — the F3 plate view still fetches full-res on demand.
     let mut textures: TexMap = HashMap::new();
@@ -3093,6 +3290,7 @@ fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<Mod
         machine,
         hier_nodes,
         indx,
+        header,
     })
 }
 
@@ -3301,34 +3499,25 @@ fn build_preview(
     }
 
     scene.load_model(hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
-    // GROUND-TRUTH default visibility: each switch node enters its own default state (per its
-    // init script) and that state's SHOW/Hide commands decide what renders — exactly the
-    // engine's rule, no classification. Every group's hidden flag is set EXPLICITLY so stale
-    // per-hash scene state from a previous load can't linger.
+    // GROUND-TRUTH visibility, exactly the engine's three-clause draw gate, evaluated per segment
+    // against THIS entity's state — not baked into the vertex buffer and not keyed by model hash.
+    //  - clause 2: the LOD-rung mask vs `view_state` (the tier the preview starts at).
+    //  - clause 3: the node-enable table the destruction machine writes. Keyed by the SEGM record's
+    //    node, NOT by `INDX[group]` — they disagree (md500: 5 of 19 groups), and it is precisely that
+    //    disagreement that used to leave the wreck on screen next to the intact body.
     let node_state: Vec<usize> = md
         .machine
         .as_ref()
         .map(|sm| sm.nodes.iter().map(mercs2_formats::orchestrator::default_state_index).collect())
         .unwrap_or_default();
+    let rs = preview_render_state(&md, &node_state);
     let mut hidden: HashSet<usize> = HashSet::new();
-    let vis = md.machine.as_ref().map(|sm| {
-        mercs2_formats::orchestrator::machine_group_visibility(
-            sm,
-            &md.hier_nodes,
-            &md.indx,
-            &node_state,
-        )
-    });
     for (gi, d) in md.draws.iter().enumerate() {
-        let hide = vis
-            .as_ref()
-            .and_then(|v| v.get(d.group_index).copied())
-            .map(|visible| !visible)
-            .unwrap_or(false);
-        if hide {
+        // Clear any stale per-model override from a previous preview of this hash; the gate decides.
+        scene.set_draw_hidden(hash, gi, false);
+        if !rs.segment_visible(d.lod_mask, d.node) {
             hidden.insert(gi);
         }
-        scene.set_draw_hidden(hash, gi, hide);
     }
     let bind: Vec<[[f32; 4]; 4]> =
         if md.skin.bones.is_empty() { vec![IDENTITY] } else { md.skin.bones.clone() };
@@ -3338,9 +3527,16 @@ fn build_preview(
         AnimState::default(),
         SkinPalette { mats: bind.clone() },
     ));
+    scene.set_entity_render_state(entity, rs);
 
-    let bmin = Vec3::from(md.stats.bbox_min);
-    let bmax = Vec3::from(md.stats.bbox_max);
+    // Frame the camera from the AUTHORED model AABB (the header the engine's LOD selector reads),
+    // not the built-geometry bbox: the latter spans every break-piece anchor (ejected far from the
+    // body), which over-inflated the orbit radius (destroyer read ~90 m). Fall back to the built
+    // bbox for imports / headerless models.
+    let (bmin, bmax) = match &md.header {
+        Some(h) => (Vec3::from(h.aabb_min), Vec3::from(h.aabb_max)),
+        None => (Vec3::from(md.stats.bbox_min), Vec3::from(md.stats.bbox_max)),
+    };
     let center = (bmin + bmax) * 0.5;
     let radius = ((bmax - bmin).length() * 0.5).max(0.5);
     let mut tex_hashes: Vec<u32> = md.textures.keys().copied().collect();
@@ -3434,6 +3630,8 @@ fn build_preview(
         hier_nodes: md.hier_nodes.clone(),
         indx: md.indx.clone(),
         node_state,
+        health: 1.0,
+        header: md.header,
         lua_needle,
         lua_refs,
         cur_clip: None,
@@ -3532,6 +3730,7 @@ fn merge_placed(
         machine: None,
         hier_nodes: Vec::new(),
         indx: Vec::new(),
+        header: None,
     })
 }
 

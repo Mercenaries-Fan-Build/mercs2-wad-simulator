@@ -141,6 +141,45 @@ fn no_view_state_can_hide_uh1s_mask_03_body_while_drawing_its_mask_01_groups() {
 
 #[test]
 #[ignore = "needs the retail vz.wad"]
+fn clause_3_must_be_keyed_on_the_segm_node_not_on_indx() {
+    // THE bug, pinned. Clause 3 indexes the node-enable table by the SEGM record's signed `node`
+    // field. Keying it on `INDX[group_index]` instead — which is what the workshop used to do —
+    // disagrees on md500 and leaves the wreck drawn next to the intact body.
+    //
+    // md500 draw groups 0 and 1 both sit on SEGM node 2, which the machine's DEFAULT state disables.
+    // INDX maps group 0 to node 0 (enabled) and group 1 to node 2 (disabled). So the INDX keying
+    // hides exactly one of the pair, and group 0 — the wreck — survives.
+    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let c = wad::extract_container(&mut w, 0x9FCA_E910).expect("md500");
+    let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
+
+    let hier = mercs2_formats::orchestrator::parse_hier(&c);
+    let indx = mercs2_formats::orchestrator::parse_indx(&c);
+    let sm = mercs2_formats::orchestrator::parse_state_machine(&c).expect("md500 has a machine");
+    let chosen: Vec<usize> =
+        sm.nodes.iter().map(mercs2_formats::orchestrator::default_state_index).collect();
+    let node_enable = mercs2_formats::orchestrator::machine_node_enable(&sm, &hier, &chosen);
+
+    let rs = RenderState { lod: 0, view_state: 0x01, node_enable: node_enable.clone() };
+
+    // What the LOD mask alone admits at rung 0, and what clause 3 then removes.
+    let pass_mask: Vec<_> = all.iter().filter(|d| (rs.view_state & d.lod_mask) != 0).collect();
+    let drawn: Vec<_> =
+        pass_mask.iter().filter(|d| rs.segment_visible(d.lod_mask, d.node)).collect();
+    assert_eq!(pass_mask.len(), 8, "rung 0 admits the same 8 groups the legacy builder baked in");
+    assert_eq!(drawn.len(), 6, "clause 3 removes 2 of them (both on SEGM node 2)");
+
+    // The INDX keying removes only one — that missing removal IS the wreck on screen.
+    let indx_drawn = pass_mask
+        .iter()
+        .filter(|d| indx.get(d.group_index).is_none_or(|&n| node_enable.get(n).copied().unwrap_or(true)))
+        .count();
+    assert_eq!(indx_drawn, 7, "INDX keying leaves one extra group drawn");
+    assert!(indx_drawn > drawn.len(), "the INDX keying is strictly more permissive — that is the bug");
+}
+
+#[test]
+#[ignore = "needs the retail vz.wad"]
 fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
     // Clause 3 is orthogonal to clause 2: a disabled node is gone at all rungs, near and far. This is
     // the mechanism that hides a wreck, and the one we do not implement today.

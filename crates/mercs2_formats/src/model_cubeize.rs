@@ -235,6 +235,59 @@ pub struct SegRec {
 
 /// Parse the `SEGM` chunk into records `{u16 bone@0, u8 seg_id@2, u8 state_mask@3}` (4 bytes each).
 /// The k-th top-level `SKIN`/`MESH` sub-object under `GEOM` binds to record `k` (seg_id == k).
+/// The model container's top-level header — the 72-byte `INFO` leaf that is descriptor row 0, read
+/// into the runtime model-resource struct at load. These are the fields the LOD selector
+/// (`FUN_00470740`) reads as `M+0x7c` (LOD count), `M+0x84` (distance scale), etc.
+///
+/// Field offsets VERIFIED across 600 catalog models: `+0x20` == HIER node count (600/600), `+0x34`
+/// == the number of distinct SEGM LOD-mask bits the model carries (600/600). `+0x04`/`+0x10` are the
+/// model-space AABB; `+0x38` is a per-model LOD reference distance (10000 ≈ "never LOD out" for most
+/// props, 30 for close props, 20 for vehicles, 10 for characters).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelHeader {
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
+    /// HIER node count (`+0x20`, == `M`'s node count).
+    pub node_count: u32,
+    /// Number of LOD levels (`+0x34`) — the runtime maxLOD (`M+0x7c`); equals the count of distinct
+    /// SEGM state-mask bits. Selecting a rung `n` beyond `node_count-1`… — see `render_state`.
+    pub lod_count: u32,
+    /// LOD reference distance (`+0x38`) feeding the distance→rung selector.
+    pub lod_distance: f32,
+}
+
+/// Parse the top-level model [`ModelHeader`] (descriptor row 0, tag `INFO`, ≥ 0x3c bytes). Returns
+/// `None` for containers without it (imports, synthetic models).
+pub fn parse_model_header(container: &[u8]) -> Option<ModelHeader> {
+    if container.len() < 40 || &container[0..4] != b"UCFX" {
+        return None;
+    }
+    let data_off = read_u32_le(container, 4) as usize;
+    // Row 0 only: the model header is authored first. (Per-group INFO leaves are 60 bytes and live
+    // deeper; the model header is ≥ 0x40 and sits at the very front.)
+    if &container[20..24] != b"INFO" {
+        return None;
+    }
+    let u0 = read_u32_le(container, 24);
+    if u0 == 0xFFFF_FFFF {
+        return None;
+    }
+    let off = data_off + u0 as usize;
+    let size = read_u32_le(container, 28) as usize;
+    if size < 0x3c || off + 0x3c > container.len() {
+        return None;
+    }
+    let f = |o: usize| read_f32_le(container, off + o);
+    let u = |o: usize| read_u32_le(container, off + o);
+    Some(ModelHeader {
+        aabb_min: [f(0x04), f(0x08), f(0x0c)],
+        aabb_max: [f(0x10), f(0x14), f(0x18)],
+        node_count: u(0x20),
+        lod_count: u(0x34),
+        lod_distance: f(0x38),
+    })
+}
+
 pub fn parse_segm(container: &[u8]) -> Vec<SegRec> {
     if container.len() < 20 || &container[0..4] != b"UCFX" {
         return Vec::new();
@@ -1205,5 +1258,19 @@ mod tests {
                 assert!(!is.detail.contains("CSUM mismatch"), "CSUM: {}", is.detail);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    // Pure sanity of the header layout on a synthetic container is covered by the real-wad probe
+    // (mercs2_probe --bin gate_probe / the 600-model verification). Here we only guard the parse
+    // shape: a too-short or non-UCFX buffer yields None, never a panic.
+    use super::parse_model_header;
+
+    #[test]
+    fn header_parse_rejects_junk() {
+        assert!(parse_model_header(&[]).is_none());
+        assert!(parse_model_header(b"NOPExxxxxxxxxxxxxxxx").is_none());
     }
 }
