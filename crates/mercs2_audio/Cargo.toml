@@ -1,12 +1,14 @@
 [package]
 name = "mercs2_audio"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 14 (row 21): audio backend, mixer, dual-deck music FSM, banks, 3D. WAVE-1 impl."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-mercs2_core = { path = "../mercs2_core" }
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_core = { workspace = true }
+mercs2_formats = { workspace = true }
 
 # Portable device-output backend. This is a *faithful modern substitute* for the exe's DirectSound8
 # secondary-buffer sink (`FUN_00831b10` CreateDevice / `FUN_0083c880` mixer Init): we do the exact

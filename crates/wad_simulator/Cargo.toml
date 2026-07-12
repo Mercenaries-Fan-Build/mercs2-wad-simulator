@@ -1,10 +1,10 @@
 [package]
 name = "wad_simulator"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 description = "Engine-accurate WAD consumption simulator for Mercenaries 2"
-license = "MIT"
-repository = "https://github.com/aussieurban/mercenaries-game"
+license.workspace = true
+repository.workspace = true
 keywords = ["wad", "mercenaries", "simulation", "engine"]
 categories = ["development-tools", "command-line-utilities"]
 
@@ -13,9 +13,9 @@ name = "wad_simulator"
 path = "src/main.rs"
 
 [dependencies]
-mercs2_formats = { path = "../mercs2_formats" }
-mercs2_audio = { path = "../mercs2_audio" }
-ucfx_byteswap = { path = "../ucfx_byteswap" }
+mercs2_formats = { workspace = true }
+mercs2_audio = { workspace = true }
+ucfx_byteswap = { workspace = true }
 flate2 = "1.1.9"
 clap = { version = "4.6.1", features = ["derive"] }
 colored = "2.2.0"

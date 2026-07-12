@@ -1,8 +1,10 @@
 [package]
 name = "mercs2_engine"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu). Phase 1 skeleton."
+license.workspace = true
+repository.workspace = true
 
 # PURE LIBRARY — no binary. The engine is asset-agnostic machinery (WAD/mesh/render/stream + a typed
 # API + the `run_game_world` populate seam). Game exes (`mercs2_game`) and tooling (`mercs2_probe`)
@@ -28,24 +30,24 @@ font8x8 = "0.3"
 # Same UiPass API/layout; falls back to font8x8 when no system font is found. No C linking.
 fontdue = "0.9"
 # asset layer — the reimplementation consumes the original game's data through this crate.
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_formats = { workspace = true }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
-mercs2_core = { path = "../mercs2_core" }
+mercs2_core = { workspace = true }
 # Mechanism crates: the engine OWNS and re-exports (`pub use … as <name>`) every gameplay/AV/render
 # subsystem so the game depends only on the engine. None of these depend on the engine (cycle-free);
 # game-specific SELECTION/content lives in `mercs2_game`, the mechanism lives here.
-mercs2_script = { path = "../mercs2_script" }
-mercs2_audio = { path = "../mercs2_audio" }
-mercs2_physics = { path = "../mercs2_physics" }
-mercs2_vehicle = { path = "../mercs2_vehicle" }
-mercs2_ai = { path = "../mercs2_ai" }
-mercs2_anim = { path = "../mercs2_anim" }
-mercs2_water = { path = "../mercs2_water" }
-mercs2_decal = { path = "../mercs2_decal" }
-mercs2_population = { path = "../mercs2_population" }
-mercs2_combat = { path = "../mercs2_combat" }
-mercs2_faction = { path = "../mercs2_faction" }
-mercs2_ui = { path = "../mercs2_ui" }
+mercs2_script = { workspace = true }
+mercs2_audio = { workspace = true }
+mercs2_physics = { workspace = true }
+mercs2_vehicle = { workspace = true }
+mercs2_ai = { workspace = true }
+mercs2_anim = { workspace = true }
+mercs2_water = { workspace = true }
+mercs2_decal = { workspace = true }
+mercs2_population = { workspace = true }
+mercs2_combat = { workspace = true }
+mercs2_faction = { workspace = true }
+mercs2_ui = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key

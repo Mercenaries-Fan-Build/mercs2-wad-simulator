@@ -1,8 +1,10 @@
 [package]
 name = "mercs2_game"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 — the game exe: boots the engine from the player's save (profile → SaveState → world). Game-specific config lives here, driving the asset-agnostic engine."
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "mercs2_game"
@@ -11,10 +13,10 @@ path = "src/main.rs"
 [dependencies]
 # The game reads the player's save through the format layer, then drives the engine library's
 # streaming-world render IN-PROCESS (no separate engine binary): mercs2_game IS the game exe.
-mercs2_formats = { path = "../mercs2_formats" }
-mercs2_engine = { path = "../mercs2_engine" }
+mercs2_formats = { workspace = true }
+mercs2_engine = { workspace = true }
 # ECS components (Transform/ModelRef/AnimState/SkinPalette) the game spawns into the engine's World.
-mercs2_core = { path = "../mercs2_core" }
+mercs2_core = { workspace = true }
 # The game depends ONLY on the engine for all mercs2 mechanisms: the engine owns + re-exports every
 # subsystem crate (physics/combat/ai/anim/audio/vehicle/decal/population/faction/water/ui + the Lua
 # script host), so the game reaches them through `mercs2_engine::<name>::…`. The game's systems

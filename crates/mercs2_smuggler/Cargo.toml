@@ -1,12 +1,15 @@
 [package]
 name = "mercs2_smuggler"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "Mercenaries 2 modernization — asset-injection / override patch builder: smuggles new or replacement model/texture assets into the game via a by-hash vz-patch.wad overlay."
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "smuggler"
 path = "src/main.rs"
 
 [dependencies]
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_formats = { workspace = true }
 clap = { version = "4", features = ["derive"] }

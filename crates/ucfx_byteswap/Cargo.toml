@@ -1,10 +1,10 @@
 [package]
 name = "ucfx_byteswap"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 description = "Xbox 360 BE → PC LE UCFX block converter (library + CLI)"
-license = "MIT"
-repository = "https://github.com/mercenaries-game/wad-simulator"
+license.workspace = true
+repository.workspace = true
 keywords = ["mercs2", "ucfx", "byteswap", "xbox", "conversion"]
 categories = ["development-tools::profiling", "encoding"]
 
@@ -17,5 +17,5 @@ name = "ucfx_byteswap"
 path = "src/main.rs"
 
 [dependencies]
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_formats = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }

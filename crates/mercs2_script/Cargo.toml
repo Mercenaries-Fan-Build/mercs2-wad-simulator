@@ -1,8 +1,10 @@
 [package]
 name = "mercs2_script"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "The engine's Lua script host: VM + module system (import/inherit) + the Sys.*/engine binding mechanism. Asset-agnostic; the game's Mercenaries Lua runs ON it. Charter Phase 3 (embed Lua 5.4, Surface-B gated)."
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "mercs2_script"
@@ -13,12 +15,12 @@ path = "src/lib.rs"
 # MSVC `cc` toolchain (same one wgpu uses), so no system Lua is required.
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 # The HUD widget tree + marker set the `Hud.*`/`Gui.*` bindings drive (via the EngineHost seam).
-mercs2_ui = { path = "../mercs2_ui" }
+mercs2_ui = { workspace = true }
 # The render/post-FX parameter state (RenderState) the `Atmosphere`/`Bloom`/`Graphics`/`Fade` drive,
 # and the ObjectFilter/render-state types the EngineHost seam names.
-mercs2_core = { path = "../mercs2_core" }
+mercs2_core = { workspace = true }
 
 [dev-dependencies]
 # The game-hook harness backs its EngineHost with the real AI mechanism so the Ai.* hooks exercise
 # the recovered action ring + relation matrix (not a stand-in). Test-only — the lib stays standalone.
-mercs2_ai = { path = "../mercs2_ai" }
+mercs2_ai = { workspace = true }

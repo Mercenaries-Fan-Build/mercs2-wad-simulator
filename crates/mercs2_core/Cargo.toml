@@ -1,8 +1,10 @@
 [package]
 name = "mercs2_core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — the simulation spine (World, fixed tick, ordered schedule, components). Renderer- and asset-agnostic."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 hecs = "0.10"        # ECS storage substrate; the schedule/order is ours, mirroring the engine's tick

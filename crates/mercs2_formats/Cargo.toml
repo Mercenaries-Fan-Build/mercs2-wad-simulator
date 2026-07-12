@@ -1,7 +1,10 @@
 [package]
 name = "mercs2_formats"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
+description = "Mercenaries 2 modernization — asset format layer: WAD/sges/UCFX/mesh/texture/terrain container parsing and decompression."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 flate2 = "1"
