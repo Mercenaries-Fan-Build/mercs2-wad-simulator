@@ -670,7 +670,15 @@ pub fn parse_swit(buf: &[u8]) -> Vec<u32> {
     (0..size / 4).map(|i| u32_le(buf, off + i * 4)).collect()
 }
 
-/// Parse the first `INDX` chunk as a u16 array (MESH-group order → HIER node index).
+/// Parse the first `INDX` chunk as a u16 array: **drawing-group order → SEG_ID** (an index into the
+/// `SEGM` record array), NOT a HIER node index.
+///
+/// The old "→ HIER node" reading was wrong and is what scattered vehicle parts across the model.
+/// `SEGM[INDX[group]]` gives the group's real `{node, seg_id, lod_mask}`; the node is the attachment
+/// bone (a tank barrel's mount at turret height), the mask its LOD tier. A model carries far more
+/// SEGM records than groups (tank: 130 vs 12), so indexing SEGM by the group/sub-object ordinal reads
+/// unrelated records. Validated on `ch_veh_tank_ztz98` against the HIER node whose own bbox matches
+/// each mesh (`mercs2_probe --bin segfix_probe`).
 pub fn parse_indx(buf: &[u8]) -> Vec<usize> {
     let chunks = leaf_chunks(buf);
     let Some((off, size)) = find_chunk(&chunks, b"INDX") else {

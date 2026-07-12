@@ -329,9 +329,10 @@ pub struct ModelMesh {
     pub sub_object: usize,
     /// True if the parent sub-object is `MESH` (rigid accessory in bone-local space); false = `SKIN`.
     pub rigid: bool,
-    /// Attachment bone (HIER index) from `SEGM[sub_object]`. 0 = root for skinned body.
+    /// Attachment bone (HIER node index) from `SEGM[INDX[group]]` — the mesh's real mount (e.g. a
+    /// tank barrel's node at turret height). Rigid meshes are authored in this node's local space.
     pub bone: u16,
-    /// LOD/state bitmask from `SEGM[sub_object]` (1/2/4/8 tiers; 0x0F = all).
+    /// LOD tier bitmask from `SEGM[INDX[group]]`.
     pub state_mask: u8,
     pub positions: Vec<[f32; 3]>,
     /// TEXCOORD0 per vertex (decl usage 5, FLOAT16_2). Empty if the group has no UVs.
@@ -489,14 +490,32 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         .filter(|&i| tag(i) == b"PRMG" && u0(i) == 0xFFFF_FFFF)
         .collect();
 
-    // Sub-object → bone/LOD binding (SEGM + GEOM tree walk).
+    // Group → segment binding. `INDX[group]` is a **seg_id** — an index into the SEGM record array —
+    // NOT a HIER node index, and NOT the sub-object ordinal.
+    //
+    // We used to read `SEGM[sub_object]`, which is wrong: a model has FAR more SEGM records than
+    // sub-objects (the tank: 130 records, 12 sub-objects — several segments per node, one per LOD
+    // tier). Reading record `i` for mesh `i` therefore picked unrelated records, giving every mesh
+    // the wrong attachment node AND the wrong LOD mask. Symptom: rigid parts authored in mount-local
+    // space (a tank's barrel) resolved to a node at the origin and rendered lying on the ground,
+    // detached from the turret — while the merged single-mesh LOD, needing no assembly, looked fine.
+    //
+    // Verified on `ch_veh_tank_ztz98` against an independent witness (the HIER node whose OWN bbox
+    // matches the mesh): `SEGM[INDX[group]]` agrees on every mesh, and the barrels lift from y≈0 to
+    // y≈1.7 — turret height. See `mercs2_probe --bin segfix_probe`.
     let subobj = map_prmg_subobjects(container, n_desc);
     let segm = parse_segm(container);
+    let indx = crate::orchestrator::parse_indx(container);
 
     let mut out = Vec::new();
     for (gi, &pr) in prmg.iter().enumerate() {
         let (sub_object, rigid) = subobj.get(&pr).copied().unwrap_or((0, false));
-        let seg = segm.get(sub_object).copied().unwrap_or_default();
+        let seg = indx
+            .get(gi)
+            .and_then(|&seg_id| segm.get(seg_id))
+            .copied()
+            // No INDX row (imports / odd containers): fall back to the sub-object ordinal.
+            .unwrap_or_else(|| segm.get(sub_object).copied().unwrap_or_default());
         let nxt = prmg.get(gi + 1).copied().unwrap_or(n_desc);
         let (mut strm_info, mut strm_decl, mut strm_data) = (None, None, None);
         let (mut ibuf_info, mut ibuf_data, mut prmt) = (None, None, None);

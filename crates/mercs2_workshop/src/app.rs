@@ -256,6 +256,8 @@ struct Preview {
     /// `node_states_for_health` picks each node's state, so the inspector shows the real pristine →
     /// damaged → wreck progression instead of hand-picked states.
     health: f32,
+    /// Eyeball-test toggle: hide `*_ruin*` sub-strips to judge whether they're legit geometry.
+    hide_ruin: bool,
     /// The model's authored header (AABB / node count / LOD-level count / LOD distance), for the
     /// LOD panel + camera framing. `None` for imports.
     header: Option<mercs2_formats::model_cubeize::ModelHeader>,
@@ -362,6 +364,8 @@ enum Act {
     /// at full, damaged/on-fire as it drops, wreck at 0. The systemic replacement for hand-picking
     /// per-node states.
     SetHealth(f32),
+    /// Toggle hiding every draw group whose diffuse is a `*_ruin*` material (the eyeball test).
+    ToggleRuin,
     TexOfPreview,
     TexNav(i32),
     TexClose,
@@ -1496,6 +1500,18 @@ pub fn run(opts: Options) {
                                             p.draws.len()
                                         ))
                                         .show(ui, |ui| {
+                                            // Eyeball test (object_assembly_model.md §7): hide every
+                                            // sub-strip skinned with a `*_ruin*` material. If the tank
+                                            // then looks CORRECT, ruin should be gated at full health;
+                                            // if it looks INCOMPLETE, ruin is legit geometry we render
+                                            // wrong. Uses the model-level hidden override, not the gate.
+                                            let mut hr = p.hide_ruin;
+                                            if ui
+                                                .checkbox(&mut hr, "Hide *_ruin* sub-strips (eyeball test)")
+                                                .changed()
+                                            {
+                                                actions.push(Act::ToggleRuin);
+                                            }
                                             egui::ScrollArea::vertical()
                                                 .max_height(200.0)
                                                 .id_source("mtrl_scroll")
@@ -2586,6 +2602,32 @@ pub fn run(opts: Options) {
                                     }
                                 }
                             }
+                            Act::ToggleRuin => {
+                                if let Some(p) = &mut preview {
+                                    p.hide_ruin = !p.hide_ruin;
+                                    let mut n = 0usize;
+                                    for (gi, d) in p.draws.iter().enumerate() {
+                                        let ruin = d
+                                            .diffuse
+                                            .map(|h| name_or_hash(&index, h).to_lowercase().contains("ruin"))
+                                            .unwrap_or(false);
+                                        if ruin {
+                                            n += 1;
+                                            if p.hide_ruin {
+                                                p.hidden.insert(gi);
+                                                scene.set_draw_hidden(p.hash, gi, true);
+                                            } else {
+                                                p.hidden.remove(&gi);
+                                                scene.set_draw_hidden(p.hash, gi, false);
+                                            }
+                                        }
+                                    }
+                                    status = format!(
+                                        "{} {n} *_ruin* sub-strip(s)",
+                                        if p.hide_ruin { "hid" } else { "restored" }
+                                    );
+                                }
+                            }
                             Act::NodeState(ni, si) => {
                                 if let Some(p) = &mut preview {
                                     if let Some(sm) = &p.machine {
@@ -3251,10 +3293,8 @@ fn preview_render_state(md: &ModelData, node_state: &[usize]) -> mercs2_engine::
 fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<ModelData, String> {
     let container = w.extract_container(hash)?;
     let tiers = mesh::state_tiers(&container);
-    let tier = if tiers.contains(&want_bit) || tiers.is_empty() { want_bit } else { tiers[0] };
     // Build the model WHOLE — every LOD rung, every destruction state. Visibility is decided per
     // frame by the engine's draw gate against the entity's RenderState, not baked into the buffer.
-    // `tier` is now just the rung the preview STARTS at (it becomes `view_state`).
     let (verts, indices, draws, stats) = mesh::build_indexed_all(&container)?;
     // The engine's own named-state machine + the HIER/INDX it acts on — ground-truth
     // destruction visibility comes from executing its scripts, nothing is classified.
@@ -3262,6 +3302,11 @@ fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<Mod
     let hier_nodes = mercs2_formats::orchestrator::parse_hier(&container);
     let indx = mercs2_formats::orchestrator::parse_indx(&container);
     let header = mercs2_formats::model_cubeize::parse_model_header(&container);
+    // Starting view_state. Deliberately NOT a cleverness: the previous "fullest near view" picker was
+    // built on LOD masks we were reading from the WRONG SEGM records, so its conclusions were noise.
+    // With SEGM[INDX[group]] the masks are real; re-derive what they mean before defaulting to
+    // anything but the model's own first tier.
+    let tier = if tiers.contains(&want_bit) || tiers.is_empty() { want_bit } else { tiers[0] };
     // RESIDENT mips only: `extract_texture_hires` walks the whole cell subtree per texture and
     // made model loads take seconds — the F3 plate view still fetches full-res on demand.
     let mut textures: TexMap = HashMap::new();
@@ -3631,6 +3676,7 @@ fn build_preview(
         indx: md.indx.clone(),
         node_state,
         health: 1.0,
+        hide_ruin: false,
         header: md.header,
         lua_needle,
         lua_refs,
