@@ -128,16 +128,49 @@ pub struct DrawGroup {
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
     pub group_index: usize,
-    /// `SEGM[sub_object].state_mask` — the set of LOD RUNGS this segment is present at. Tested against
-    /// the object's `view_state` with an ANY-bit overlap (`(view_state & lod_mask) != 0`). Clause 2 of
-    /// the engine's draw gate. NOT a destruction state — see `render_state`.
+    /// `SEGM[INDX[group]].state_mask` — the LOD tier bitmask. Tested against the object's `view_state`
+    /// with an ANY-bit overlap. Clause 2 of the draw gate. NOT a destruction state.
     pub lod_mask: u8,
-    /// `SEGM[sub_object].node` — the HIER node index, SIGNED. Negative means "no node", i.e. always
-    /// visible. Doubles as the attachment bone and as the key into the object's node-enable table.
-    /// Clause 3 of the draw gate.
+    /// `SEGM[INDX[group]].node` — the HIER node, SIGNED (negative = no node = always visible). This is
+    /// the mesh's real ATTACHMENT MOUNT (rigid meshes are authored in its local space) and the key
+    /// into the object's node-enable table. Clause 3 of the draw gate.
     pub node: i16,
-    /// The `SEGM` record ordinal (== the parent `SKIN`/`MESH` sub-object under `GEOM`).
+    /// Parent `SKIN`/`MESH` sub-object ordinal under `GEOM`. NOT the SEGM index — see `seg_id`.
     pub sub_object: usize,
+    /// `INDX[group]` — this group's index into the SEGM record array.
+    pub seg_id: usize,
+}
+
+/// The `view_state` for a model's NEAREST (finest) LOD rung — `1 << minLOD`.
+///
+/// Bits `0..lod_count-1` are the LOD rungs (`lod_count` = the model header's `+0x34`). A mask equal to
+/// `(1<<lod_count)-1` (`0x0F` for a 4-rung character, `0x7F` for a 7-rung vehicle) means "present at
+/// EVERY rung" — accessories, hardpoint caps — so it says nothing about the model's LOD range. Every
+/// other mask is a real rung set.
+///
+/// `minLOD` is therefore the lowest rung at which the model's actual geometry exists: the minimum
+/// low-bit across the non-all-rungs masks. `ch_veh_tank_ztz98`'s body lives only on `0x70` (rungs
+/// 4-6), so its finest rung is **4** — a `view_state` of `0x01` draws literally nothing. A character's
+/// body tiers are `0x01/02/04/08`, so its finest rung is 0 and `0x01` gives one clean tier (a wider
+/// view_state would double-draw its hair LODs).
+///
+/// Derived from the model's own data. The engine reads the equivalent from `M+0x80`, whose on-disk
+/// source we have not located (see `docs/modernization/model_render_gate_spec.md`).
+pub fn near_view_state(draws: &[DrawGroup], lod_count: u32) -> u8 {
+    let all_rungs: u8 = if (1..=8).contains(&lod_count) {
+        ((1u16 << lod_count) - 1) as u8
+    } else {
+        0xFF
+    };
+    let min_lod = draws
+        .iter()
+        .map(|d| d.lod_mask)
+        .filter(|&m| m != 0 && m != all_rungs)
+        .map(|m| m.trailing_zeros())
+        .min()
+        // Every mesh is all-rungs (or there are none): rung 0 is as good as any.
+        .unwrap_or(0);
+    1u8 << min_lod.min(7)
 }
 
 impl Default for DrawGroup {
@@ -155,6 +188,7 @@ impl Default for DrawGroup {
             lod_mask: 0xFF,
             node: -1,
             sub_object: 0,
+            seg_id: 0,
         }
     }
 }
@@ -226,21 +260,38 @@ fn build_indexed_filtered(
     container: &[u8],
     lod_filter: Option<u8>,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
-    use mercs2_formats::model_cubeize::ModelMesh;
+    build_indexed_rung(container, None, lod_filter)
+}
+
+/// Build one LOD rung of a model. A vehicle's geometry is split across blocks: the RESIDENT block
+/// ships the object (HIER, SEGM, MTRL, physics, destruction machine) plus the coarsest meshes, and
+/// each finer block ships geometry + `INDX`/`PRMT` only. So a fine rung binds its groups against the
+/// resident block's SEGM (segment -> node + LOD mask) and MTRL (material table), while its own PRMT
+/// rows still choose which material each group uses. `resident = None` for a self-contained
+/// container — the resident rung itself, or a character, which ships no chain.
+pub fn build_indexed_rung(
+    container: &[u8],
+    resident: Option<&[u8]>,
+    lod_filter: Option<u8>,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    use mercs2_formats::model_cubeize::{read_model_meshes_segm, ModelMesh};
     use mercs2_formats::skeleton::{
         affine_inverse, mat4_mul, transform_dir, transform_point, Skeleton,
     };
 
-    let meshes = read_model_meshes(container)?;
-    let materials = mercs2_formats::texture::parse_mtrl(container);
+    let res_segm = resident.map(mercs2_formats::model_cubeize::parse_segm);
+    let meshes = read_model_meshes_segm(container, res_segm.as_deref())?;
+    let materials = mercs2_formats::texture::parse_mtrl(resident.unwrap_or(container));
     let group_mat = mercs2_formats::texture::group_material_indices(container);
 
     // Skeleton world-rest per bone, for placing rigid MESH accessories. from_block wants a
-    // 20-byte wrapper + UCFX.
-    let mut block = Vec::with_capacity(20 + container.len());
+    // 20-byte wrapper + UCFX. HIER lives only in the resident block, so a fine rung — whose SEGM
+    // records name nodes in that same hierarchy — must mount against the resident skeleton.
+    let skel_src = resident.unwrap_or(container);
+    let mut block = Vec::with_capacity(20 + skel_src.len());
     block.extend_from_slice(&[0u8; 20]);
-    block[16..20].copy_from_slice(&(container.len() as u32).to_le_bytes());
-    block.extend_from_slice(container);
+    block[16..20].copy_from_slice(&(skel_src.len() as u32).to_le_bytes());
+    block.extend_from_slice(skel_src);
     let skel = Skeleton::from_block(&block).ok();
 
     // Skinning palette: Skin[b] = InvBind[b] · Pose[b] (row-vector). Phase A is the bind-pose gate:
@@ -438,6 +489,7 @@ fn build_indexed_filtered(
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
                 node: m.bone as i16,
                 sub_object: m.sub_object,
+                seg_id: m.seg_id,
             });
         };
         if m.submeshes.is_empty() {

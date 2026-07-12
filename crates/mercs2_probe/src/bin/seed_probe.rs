@@ -37,7 +37,7 @@ fn main() {
     for (_, _, label) in COMBOS {
         print!(" {label:>10}");
     }
-    println!("   <- groups drawn at LOD rung 0");
+    println!("   <- TRIS drawn at each model's near rung");
 
     for (name, hash) in MODELS {
         let Ok(c) = wad::extract_container(&mut w, *hash) else {
@@ -47,7 +47,10 @@ fn main() {
         let Ok((_, _, draws, _)) = mesh::build_indexed_all(&c) else { continue };
         let hier = orch::parse_hier(&c);
         let machine = orch::parse_state_machine(&c);
-        let pass_mask = draws.iter().filter(|d| (0x01 & d.lod_mask) != 0).count();
+        let lodc = mercs2_formats::model_cubeize::parse_model_header(&c)
+            .map(|h| h.lod_count).unwrap_or(8);
+        let near = mesh::near_view_state(&draws, lodc);
+        let pass_mask = draws.iter().filter(|d| (near & d.lod_mask) != 0).count();
 
         print!("{name:<26} {:>7} {:>10}", draws.len(), pass_mask);
         for (seed, scope, _) in COMBOS {
@@ -59,9 +62,11 @@ fn main() {
                 }
                 None => Vec::new(),
             };
-            let rs = RenderState { lod: 0, view_state: 0x01, node_enable };
-            let n = draws.iter().filter(|d| rs.segment_visible(d.lod_mask, d.node)).count();
-            print!(" {n:>10}");
+            let rs = RenderState { lod: 0, view_state: near, node_enable };
+            let tris: u32 = draws.iter()
+                .filter(|d| rs.segment_visible(d.lod_mask, d.node))
+                .map(|d| d.index_count / 3).sum();
+            print!(" {tris:>10}");
         }
         println!();
     }

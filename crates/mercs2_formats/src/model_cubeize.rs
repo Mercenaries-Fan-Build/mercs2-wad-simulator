@@ -325,8 +325,12 @@ pub fn parse_segm(container: &[u8]) -> Vec<SegRec> {
 pub struct ModelMesh {
     /// The PRMG group ordinal this mesh came from (for material/segment lookup by group).
     pub group_index: usize,
-    /// Ordinal of the parent top-level `SKIN`/`MESH` sub-object under `GEOM` (== SEGM record index).
+    /// Ordinal of the parent top-level `SKIN`/`MESH` sub-object under `GEOM`. NOTE: this is *not* the
+    /// SEGM record index — see [`ModelMesh::seg_id`].
     pub sub_object: usize,
+    /// `INDX[group]` — the **seg_id**: this mesh's index into the `SEGM` record array. The record it
+    /// names supplies `bone` (mount) and `state_mask` (LOD tier).
+    pub seg_id: usize,
     /// True if the parent sub-object is `MESH` (rigid accessory in bone-local space); false = `SKIN`.
     pub rigid: bool,
     /// Attachment bone (HIER node index) from `SEGM[INDX[group]]` — the mesh's real mount (e.g. a
@@ -459,6 +463,17 @@ pub fn prmg_geom_offsets(container: &[u8]) -> Vec<[f32; 3]> {
 /// index count at `ibuf_info+0`). The strip is de-stripped to a triangle list (winding-aware).
 /// This is the 1d path: solid surfaces instead of a point cloud.
 pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
+    read_model_meshes_segm(container, None)
+}
+
+/// As [`read_model_meshes`], but binding `INDX` against a SEGM table from ANOTHER container — the
+/// resident LOD block. A model's finer rungs are geometry-only blocks with no SEGM of their own;
+/// their `INDX` rows name records in the resident block's table. Pass `None` for a self-contained
+/// container (the resident rung, or a character, which has no chain).
+pub fn read_model_meshes_segm(
+    container: &[u8],
+    segm_override: Option<&[SegRec]>,
+) -> Result<Vec<ModelMesh>, String> {
     if container.len() < 20 || &container[0..4] != b"UCFX" {
         return Err("not a UCFX container".into());
     }
@@ -504,15 +519,23 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
     // matches the mesh): `SEGM[INDX[group]]` agrees on every mesh, and the barrels lift from y≈0 to
     // y≈1.7 — turret height. See `mercs2_probe --bin segfix_probe`.
     let subobj = map_prmg_subobjects(container, n_desc);
-    let segm = parse_segm(container);
+    // A model's LOD rungs are separate blocks: the RESIDENT one ships HIER/SEGM/MTRL/state-machine,
+    // the finer ones ship only geometry + their own INDX. So a fine rung's INDX indexes the resident
+    // block's SEGM — that table is the master segment array for the whole chain (the tank's 130
+    // records serve 12 + 35 + 63 groups). `segm_override` supplies it; without one, a fine rung finds
+    // no SEGM of its own and every mesh would fall back to mask 0 / node 0.
+    let segm = match segm_override {
+        Some(s) => s.to_vec(),
+        None => parse_segm(container),
+    };
     let indx = crate::orchestrator::parse_indx(container);
 
     let mut out = Vec::new();
     for (gi, &pr) in prmg.iter().enumerate() {
         let (sub_object, rigid) = subobj.get(&pr).copied().unwrap_or((0, false));
-        let seg = indx
-            .get(gi)
-            .and_then(|&seg_id| segm.get(seg_id))
+        let seg_id = indx.get(gi).copied().unwrap_or(sub_object);
+        let seg = segm
+            .get(seg_id)
             .copied()
             // No INDX row (imports / odd containers): fall back to the sub-object ordinal.
             .unwrap_or_else(|| segm.get(sub_object).copied().unwrap_or_default());
@@ -678,6 +701,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         out.push(ModelMesh {
             group_index: gi,
             sub_object,
+            seg_id,
             rigid,
             bone: seg.bone,
             state_mask: seg.state_mask,

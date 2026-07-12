@@ -30,6 +30,7 @@ pub mod spawn;
 pub mod game_world;
 pub mod input;
 pub mod mesh;
+pub mod model;
 pub mod particles;
 pub mod player;
 pub mod pose;

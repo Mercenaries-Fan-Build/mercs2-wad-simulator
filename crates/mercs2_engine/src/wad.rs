@@ -93,6 +93,14 @@ pub fn model_list(wad: &Wad) -> Vec<(u32, u16)> {
 }
 
 /// Slice the model container (`type_hash == "model"`) out of a decompressed block.
+/// The model container for `name_hash` inside an already-decompressed block, if that block carries
+/// one. A model's LODs are not all in its primary ASET block (see `extract_texture_hires` for the
+/// same pattern on mips), so callers that assemble across a cell subtree need to ask block-by-block.
+pub fn model_span_in(decompressed: &[u8], name_hash: u32) -> Option<Vec<u8>> {
+    let (s, e) = find_model_span(decompressed, Some(name_hash))?;
+    Some(decompressed[s..e].to_vec())
+}
+
 fn find_model_span(decompressed: &[u8], want: Option<u32>) -> Option<(usize, usize)> {
     let (count, entries) = parse_block_entry_table(decompressed);
     let mut offset = 4 + count as usize * 16;
@@ -317,6 +325,82 @@ pub fn extract_container(wad: &mut Wad, name_hash: u32) -> Result<Vec<u8>, Strin
     let (s, e) = find_model_span(&dec, Some(name_hash))
         .ok_or_else(|| format!("model 0x{name_hash:08X} not found in block {block}"))?;
     Ok(dec[s..e].to_vec())
+}
+
+/// One rung of a model's on-disk LOD chain: the block it lives in and its container bytes.
+pub struct ModelLod {
+    pub block: u16,
+    /// `P000_Q3` (coarsest, resident) … `P002_Q1` (finest, streamed). Parsed from the block path.
+    pub level: u8,
+    pub container: Vec<u8>,
+}
+
+/// A model's FULL LOD chain, coarsest first. `extract_container` returns only the primary ASET
+/// block, which for every vehicle is the COARSEST rung — a low-poly proxy skinned `*_lod_dm`. The
+/// finer rungs stream from sibling blocks named `<model>_P00N_Q(3-N)`, the same c3 LOD-block scheme
+/// that carries a texture's higher mips (see [`extract_texture_hires`]). A tank's resident block
+/// holds 4,435 triangles; its `_P002_Q1` block holds 28,620. Characters ship a single block and have
+/// no chain. Coarse rungs carry per-mesh LOD masks; the streamed rungs do not — their rung IS the
+/// block.
+pub fn extract_model_lods(wad: &mut Wad, name_hash: u32) -> Result<Vec<ModelLod>, String> {
+    let resident = wad
+        .archive
+        .aset
+        .iter()
+        .find(|e| e.asset_hash == name_hash && e.type_id == MODEL_ASET_TYPE_ID && e.is_primary())
+        .or_else(|| {
+            wad.archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == name_hash && e.type_id == MODEL_ASET_TYPE_ID)
+        })
+        .map(|e| e.block_index())
+        .ok_or_else(|| format!("no model ASET for 0x{name_hash:08X}"))?;
+
+    // The chain is the resident block's cell subtree: the cell itself plus finer descendants, which
+    // append child cell ids (`c31664` -> `c31664-c20959`). Model-named blocks share the bare stem.
+    let stem = block_lod_stem(&wad.archive.paths, resident);
+    let candidates: Vec<u16> = match &stem {
+        None => vec![resident],
+        Some(s) => {
+            let dashed = format!("{s}-");
+            (0..wad.archive.paths.len() as u16)
+                .filter(|&b| match block_lod_stem(&wad.archive.paths, b) {
+                    Some(c) => c == *s || c.starts_with(&dashed),
+                    None => false,
+                })
+                .collect()
+        }
+    };
+
+    let mut lods: Vec<ModelLod> = Vec::new();
+    for b in candidates {
+        let level = block_lod_level(&wad.archive.paths, b).unwrap_or(0);
+        let Ok(dec) = decompress_block_index(wad, b) else { continue };
+        if let Some(container) = model_span_in(&dec, name_hash) {
+            lods.push(ModelLod { block: b, level, container });
+        }
+    }
+    if lods.is_empty() {
+        return Err(format!("model 0x{name_hash:08X} in no block"));
+    }
+    lods.sort_by_key(|l| l.level);
+    Ok(lods)
+}
+
+/// Stem of a LOD block path: `ch_veh_tank_ztz98_P002_Q1.block` -> `ch_veh_tank_ztz98`, and
+/// `c31664-c20959_P001_Q2.block` -> `c31664-c20959`. None if the block isn't `_P<level>_Q<n>`-named.
+fn block_lod_stem(paths: &[String], blk: u16) -> Option<String> {
+    let f = paths.get(blk as usize)?.rsplit(['\\', '/']).next()?;
+    Some(f[..f.find("_P")?].to_string())
+}
+
+/// The `N` in a `_P00N_` block name — the LOD rung, 0 = coarsest/resident.
+fn block_lod_level(paths: &[String], blk: u16) -> Option<u8> {
+    let f = paths.get(blk as usize)?.rsplit(['\\', '/']).next()?;
+    let i = f.find("_P")? + 2;
+    let digits: String = f[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// Extract a container chunk of a given CHDR class `chunk_type` (e.g. the `0x7C569307` terrainmesh)
