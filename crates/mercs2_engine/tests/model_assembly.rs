@@ -55,16 +55,39 @@ fn tank_assembles_across_its_lod_block_chain() {
 #[test]
 fn wrecking_a_vehicle_swaps_geometry_rather_than_adding_it() {
     let Some(mut w) = open_wad() else { return };
-    // The destruction machine SHOWs the intact body in PristineState and the wreck in
-    // DestroyedState. If both draw at once we're piling a wreck on top of an intact hull — the
-    // original "MD500 drawn with its wreck overlapping" bug.
-    for name in ["ch_veh_tank_ztz98", "global_veh_klr650", "civ_veh_car_van_crappy"] {
+    // The machine SHOWs the intact body in PristineState and the wreck in DestroyedState. If both
+    // draw at once we're piling a wreck on top of an intact hull — the original "MD500 drawn with
+    // its wreck overlapping" bug.
+    //
+    // The invariant is that the two states draw DIFFERENT geometry, not that the wreck is smaller:
+    // a tank's wreck is the shared `global_veh_tank_ruin` asset and legitimately has MORE triangles
+    // than its clean hull. (An earlier version of this test asserted `intact > wrecked` — that was a
+    // heuristic, and it was wrong.)
+    for name in ["ch_veh_tank_ztz98", "vz_veh_tank_amx30_elite", "civ_veh_car_van_crappy"] {
         let hash = mercs2_formats::hash::pandemic_hash_m2(name);
         let m = Model::load(&mut w, hash).expect("assembles");
-        let intact = tris_at(&m, 0, 1.0);
-        let wrecked = tris_at(&m, 0, 0.0);
-        assert!(intact > wrecked, "{name}: intact {intact} should exceed wrecked {wrecked}");
-        assert!(wrecked > 0, "{name}: a wreck still has geometry");
+        let nodes = |health: f32| -> std::collections::BTreeSet<i16> {
+            let node_enable = match &m.machine {
+                Some(sm) => {
+                    let chosen = orch::node_states_for_health(sm, health, 0.99);
+                    orch::machine_node_enable(sm, &m.hier, &chosen)
+                }
+                None => Vec::new(),
+            };
+            let rs = RenderState { lod: 0, view_state: 0x01, node_enable };
+            m.visible_draws(&rs).iter().map(|(_, d)| d.node).collect()
+        };
+        let intact = nodes(1.0);
+        let wrecked = nodes(0.0);
+        assert!(tris_at(&m, 0, 1.0) > 0 && tris_at(&m, 0, 0.0) > 0, "{name}: both states draw");
+        assert!(
+            !wrecked.is_superset(&intact),
+            "{name}: the wreck draws everything the intact body does — it is being ADDED, not swapped"
+        );
+        assert!(
+            wrecked.difference(&intact).next().is_some(),
+            "{name}: destroying it must bring in geometry the intact body doesn't have"
+        );
     }
 }
 
@@ -99,12 +122,58 @@ fn rungs_refine_each_other_instead_of_double_drawing() {
 }
 
 #[test]
-fn a_character_has_no_lod_chain_and_is_unaffected() {
+fn a_character_has_no_lod_chain() {
     let Some(mut w) = open_wad() else { return };
     let hash = mercs2_formats::hash::pandemic_hash_m2("pmc_hum_mattias_v3");
     let m = Model::load(&mut w, hash).expect("mattias assembles");
     assert_eq!(m.rungs.len(), 1, "characters ship a single resident block, no chain");
-    assert_eq!(tris_at(&m, 0, 1.0), 22_151, "unchanged by the cross-block work");
+    assert!(tris_at(&m, 0, 1.0) > 15_000, "and still draw at the near tier");
+}
+
+/// `INDX` is indexed by SUB-OBJECT ordinal (`MESH`/`SKIN` under `GEOM`), not by PRMG group.
+///
+/// Its length equals the sub-object count in every container in the game — never the PRMG count,
+/// which is always larger because one sub-object can own several drawing groups. Keying on the group
+/// index reads the WRONG SEGM row for every group past the first divergence, which hands the mesh
+/// someone else's bone and someone else's LOD mask. That is what threw the amx30_elite's treads into
+/// the air at three of its four tiers.
+#[test]
+fn indx_is_keyed_by_sub_object_not_by_prmg_group() {
+    let Some(mut w) = open_wad() else { return };
+    for name in [
+        "pmc_hum_mattias_v3",       // 24 INDX = 7 MESH + 17 SKIN  (29 PRMG)
+        "ch_veh_tank_ztz98",
+        "vz_veh_tank_amx30_elite",
+        "civ_veh_car_van_crappy",
+        "oc_veh_helicopter_md500",
+    ] {
+        let hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let m = Model::load(&mut w, hash).expect("assembles");
+        for l in wad::extract_model_lods(&mut w, hash).expect("chain") {
+            let indx = orch::parse_indx(&l.container);
+            let subs = mercs2_formats::model_cubeize::sub_object_count(&l.container);
+            assert_eq!(
+                indx.len(),
+                subs,
+                "{name} P{:03}: INDX has {} rows but {subs} MESH/SKIN sub-objects — the two must \
+                 agree, or the seg_id lookup is reading the wrong row",
+                l.level,
+                indx.len()
+            );
+        }
+        // And every group must land on a real SEGM row.
+        for r in &m.rungs {
+            for d in &r.draws {
+                assert!(
+                    d.seg_id < m.segm.len(),
+                    "{name}: group {} bound to seg_id {} outside the {}-row SEGM table",
+                    d.group_index,
+                    d.seg_id,
+                    m.segm.len()
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -393,6 +393,24 @@ pub struct SubMesh {
 /// Map each PRMG-marker row to its parent top-level sub-object: `(ordinal k, is_rigid)`. Walks
 /// GEOM's direct children (each marker consumes `1 + x3` rows); the k-th `SKIN`/`MESH` child is
 /// sub-object k → `SEGM` record k. See docs/modernization/accessory_bone_binding_A.md (double-blind).
+/// Number of top-level `MESH`/`SKIN` sub-objects under `GEOM` — the ordinal space `INDX` is keyed by.
+/// `INDX.len()` equals this in every container in the game (Mattias: 24 = 7 MESH + 17 SKIN), never
+/// the PRMG-group count, which is larger because a sub-object can own several drawing groups.
+pub fn sub_object_count(container: &[u8]) -> usize {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return 0;
+    }
+    let n_desc = read_u32_le(container, 16) as usize;
+    if n_desc > container.len().saturating_sub(20) / 20 {
+        return 0;
+    }
+    map_prmg_subobjects(container, n_desc)
+        .values()
+        .map(|(k, _)| *k + 1)
+        .max()
+        .unwrap_or(0)
+}
+
 fn map_prmg_subobjects(
     container: &[u8],
     n_desc: usize,
@@ -550,7 +568,13 @@ pub fn read_model_meshes_segm(
     let mut out = Vec::new();
     for (gi, &pr) in prmg.iter().enumerate() {
         let (sub_object, rigid) = subobj.get(&pr).copied().unwrap_or((0, false));
-        let seg_id = indx.get(gi).copied().unwrap_or(sub_object);
+        // INDX is indexed by SUB-OBJECT ordinal, not by PRMG group. Its length is exactly the
+        // MESH+SKIN count in every container measured (elite 9/20/31 vs PRMG 10/21/32; ztz98
+        // 12/34/62 vs PRMG 12/35/63) — a sub-object can own several PRMG groups, so the two
+        // ordinals diverge. Keying on the group index shifted the seg_id for every group past the
+        // first divergence, handing meshes the wrong bone AND the wrong LOD mask: the amx30_elite
+        // flung its treads into the air at three of its four tiers.
+        let seg_id = indx.get(sub_object).copied().unwrap_or(sub_object);
         let seg = segm
             .get(seg_id)
             .copied()
