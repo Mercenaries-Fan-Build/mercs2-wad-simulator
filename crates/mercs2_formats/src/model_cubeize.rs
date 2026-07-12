@@ -258,6 +258,23 @@ pub struct ModelHeader {
 
 /// Parse the top-level model [`ModelHeader`] (descriptor row 0, tag `INFO`, ≥ 0x3c bytes). Returns
 /// `None` for containers without it (imports, synthetic models).
+/// The raw bytes of the model header (descriptor row 0's `INFO` leaf) — the same leaf
+/// [`parse_model_header`] reads. Exposed for field hunting: the runtime's `minLOD` (`M+0x80`, which
+/// clamps the LOD rung alongside `maxLOD` at `M+0x7c`) has no known on-disk source yet.
+pub fn model_header_bytes(container: &[u8]) -> Option<&[u8]> {
+    if container.len() < 40 || &container[0..4] != b"UCFX" || &container[20..24] != b"INFO" {
+        return None;
+    }
+    let data_off = read_u32_le(container, 4) as usize;
+    let u0 = read_u32_le(container, 24);
+    if u0 == 0xFFFF_FFFF {
+        return None;
+    }
+    let off = data_off + u0 as usize;
+    let size = read_u32_le(container, 28) as usize;
+    (off + size <= container.len()).then(|| &container[off..off + size])
+}
+
 pub fn parse_model_header(container: &[u8]) -> Option<ModelHeader> {
     if container.len() < 40 || &container[0..4] != b"UCFX" {
         return None;

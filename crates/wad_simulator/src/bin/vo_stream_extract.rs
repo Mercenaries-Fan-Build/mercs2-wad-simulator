@@ -34,6 +34,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
+use mercs2_audio::wave;
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::sges::decompress_block;
@@ -73,6 +74,10 @@ struct Cli {
     /// Report only; write nothing.
     #[arg(long)]
     dry_run: bool,
+
+    /// Diagnose the payload: do the records tile the .pws, and what do the bytes look like?
+    #[arg(long)]
+    diag: bool,
 }
 
 fn rd32(b: &[u8], o: usize) -> u32 {
@@ -94,6 +99,9 @@ struct Wave {
     codec: u8,
     rate: u32,
     size: u32,
+    /// +16 — frames (samples per channel). For these streamed waves `size / sample_count` is
+    /// ~0.28 bytes/sample, so the payload is COMPRESSED: it is neither PCM16 (2.0) nor IMA (0.5).
+    sample_count: u32,
     offset: u32,
 }
 
@@ -180,6 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     codec: body[r + 6],
                     rate: rd32(&body, r + 8),
                     size: rd32(&body, r + 12),
+                    sample_count: rd32(&body, r + 16),
                     offset: rd32(&body, r + 32),
                 });
             }
@@ -238,6 +247,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("\n{} waves in vo_stream; {} attributed to a character bank", waves.len(), owner.len());
 
+    if cli.diag {
+        let pws_len = std::fs::metadata(&cli.pws)?.len();
+        let mut pws = File::open(&cli.pws)?;
+
+        // Do (offset,size) tile the .pws? If they do, the fields are right and only the CODEC is
+        // in question. If they don't, the offsets themselves are wrong.
+        let mut rows: Vec<(u64, u64, u32, u32)> = waves
+            .iter()
+            .map(|w| (w.offset as u64, w.size as u64, w.clip_hash, w.rate))
+            .collect();
+        rows.sort();
+        let total: u64 = rows.iter().map(|r| r.1).sum();
+        let max_end = rows.iter().map(|r| r.0 + r.1).max().unwrap_or(0);
+        let packed = rows
+            .windows(2)
+            .filter(|w| w[1].0.abs_diff(w[0].0 + w[0].1) <= 64)
+            .count();
+        println!(
+            "\npws {} B | sum(size) {} B ({:.1}%) | furthest {} | packed-deltas {}/{}",
+            pws_len,
+            total,
+            100.0 * total as f64 / pws_len as f64,
+            max_end,
+            packed,
+            rows.len() - 1
+        );
+
+        // Bytes/sample says what the codec CANNOT be: PCM16 is exactly 2.0, IMA-4bit is 0.5.
+        let mut bps: Vec<f64> = Vec::new();
+        for w in waves.iter().take(2000) {
+            let sc = rd32(&[], 0); // placeholder to keep types simple
+            let _ = sc;
+            if w.size > 0 && w.sample_count > 0 {
+                bps.push(w.size as f64 / w.sample_count as f64);
+            }
+        }
+        bps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if !bps.is_empty() {
+            println!(
+                "bytes/sample: min {:.3} median {:.3} max {:.3}  (PCM16 = 2.000, IMA4 = 0.500)",
+                bps[0],
+                bps[bps.len() / 2],
+                bps[bps.len() - 1]
+            );
+        }
+
+        for (i, w) in waves.iter().take(4).enumerate() {
+            let mut b = vec![0u8; 32.min(w.size as usize)];
+            pws.seek(SeekFrom::Start(w.offset as u64))?;
+            pws.read_exact(&mut b)?;
+            let hex: Vec<String> = b.iter().map(|x| format!("{x:02X}")).collect();
+            println!(
+                "  wave[{i}] 0x{:08X} off={} size={} samples={} rate={}\n    {}",
+                w.clip_hash,
+                w.offset,
+                w.size,
+                w.sample_count,
+                w.rate,
+                hex.join(" ")
+            );
+        }
+        return Ok(());
+    }
+
     if cli.dry_run {
         return Ok(());
     }
@@ -270,28 +343,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None => format!("{:05}__0x{:08X}", i, w.clip_hash),
         };
 
-        // The stream is MP3 (as on console), zero-padded ahead of the first frame. Skip the pad
-        // and REQUIRE a frame sync there; anything else is treated as raw PCM16.
-        let pad = blob.iter().position(|&b| b != 0).unwrap_or(blob.len());
-        let is_mp3 = pad + 2 <= blob.len() && blob[pad] == 0xFF && (blob[pad + 1] & 0xE0) == 0xE0;
+        // ★ The PC `.pws` is raw IMA ADPCM — 36-byte mono blocks / 72-byte stereo
+        // (docs/pandemic_audio_system_design.md §8), NOT PCM and NOT MP3 (that is the CONSOLE
+        // stream). The data agrees: every clip size is an exact multiple of 36 (41040 = 36x1140,
+        // 43200 = 36x1200, …) and the measured 0.281 bytes/sample rules PCM16 (2.0) out outright.
+        // Writing these bytes as PCM is what produced static.
         let rate = if w.rate == 0 { 44100 } else { w.rate };
-
-        if is_mp3 {
-            File::create(dir.join(format!("{base}.mp3")))?.write_all(&blob[pad..])?;
-            mp3 += 1;
-            // ~90 kbps mono
-            secs += (w.size - pad as u32) as f64 * 8.0 / 90_000.0;
+        let ch = w.channels.max(1) as u16;
+        let pcm = if ch >= 2 {
+            wave::decode_ima_stereo(&blob)
         } else {
-            let s: Vec<i16> = blob
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            write_wav(&dir.join(format!("{base}.wav")), &s, w.channels.max(1) as u16, rate)?;
-            pcm_n += 1;
-            secs += s.len() as f64 / w.channels.max(1) as f64 / rate as f64;
+            wave::decode_ima_mono(&blob)
+        };
+        if pcm.is_empty() {
+            oob += 1;
+            continue;
         }
+        write_wav(&dir.join(format!("{base}.wav")), &pcm, ch, rate)?;
+        pcm_n += 1;
+        secs += pcm.len() as f64 / ch as f64 / rate as f64;
         n += 1;
-        let _ = w.codec;
+        let _ = (w.codec, w.sample_count, &mut mp3);
     }
 
     println!(
