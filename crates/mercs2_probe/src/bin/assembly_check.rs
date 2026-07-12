@@ -45,6 +45,19 @@ fn main() {
             m.lod_count()
         );
         for r in &m.rungs {
+            // Do all rungs live in the SAME space? If a fine rung's bbox doesn't sit on top of the
+            // resident one, merging them into one buffer stacks misaligned copies of the object.
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for v in &r.vertices {
+                for i in 0..3 {
+                    lo[i] = lo[i].min(v.pos[i]);
+                    hi[i] = hi[i].max(v.pos[i]);
+                }
+            }
+            println!(
+                "        bbox  min [{:7.2} {:7.2} {:7.2}]  max [{:7.2} {:7.2} {:7.2}]",
+                lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]
+            );
             println!(
                 "     P{:03} block {:5}  {:6} tri  serves rungs {:?}",
                 r.level,
@@ -52,6 +65,18 @@ fn main() {
                 r.triangles(),
                 (0..8u8).filter(|b| r.lod_bits() & (1 << b) != 0).collect::<Vec<_>>()
             );
+            // The mask histogram AS THE MODEL BOUND IT — if a rung's segments resolved against the
+            // wrong SEGM row, the garbage shows up here as masks that don't belong to its band.
+            let mut hist: std::collections::BTreeMap<u8, (usize, u32, usize)> = Default::default();
+            for d in &r.draws {
+                let e = hist.entry(d.lod_mask).or_insert((0, 0, usize::MAX));
+                e.0 += 1;
+                e.1 += d.index_count / 3;
+                e.2 = e.2.min(d.group_index);
+            }
+            for (mask, (n, tris, _)) in &hist {
+                println!("            mask {mask:#04x}  {n:3} draws  {tris:6} tri");
+            }
         }
 
         // Full gate, per LOD rung, at full and zero health.
@@ -76,7 +101,7 @@ fn main() {
                     node_enable: node_enable.clone(),
                 };
                 let tris: u32 =
-                    m.visible_draws(&rs).map(|(_, d)| d.index_count / 3).sum();
+                    m.visible_draws(&rs).iter().map(|(_, d)| d.index_count / 3).sum();
                 print!(" {tris:>8}");
             }
             println!();

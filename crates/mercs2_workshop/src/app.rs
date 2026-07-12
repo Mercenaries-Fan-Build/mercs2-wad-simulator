@@ -105,6 +105,18 @@ impl WadStack {
             .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
     }
 
+    /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
+    pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
+        let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
+        for i in (0..self.wads.len()).rev() {
+            match mercs2_engine::model::Model::load(&mut self.wads[i], hash) {
+                Ok(m) => return Ok(m),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
     /// Resident-mip texture (fast path — model loads).
     pub fn texture_resident(&mut self, hash: u32) -> Result<mercs2_formats::texture::TextureData, String> {
         let mut last = format!("0x{hash:08X}: not in any open wad");
@@ -258,6 +270,9 @@ struct Preview {
     health: f32,
     /// Eyeball-test toggle: hide `*_ruin*` sub-strips to judge whether they're legit geometry.
     hide_ruin: bool,
+    /// The live node-enable table (clause 3) the gate is using — so the inspector can say WHY a mesh
+    /// is hidden (LOD-mask miss vs its HIER node switched off by the destruction state).
+    node_enable: Vec<bool>,
     /// The model's authored header (AABB / node count / LOD-level count / LOD distance), for the
     /// LOD panel + camera framing. `None` for imports.
     header: Option<mercs2_formats::model_cubeize::ModelHeader>,
@@ -1338,61 +1353,68 @@ pub fn run(opts: Options) {
                                                     }
                                                 }
                                             });
-                                        if p.tiers.len() > 1 {
-                                            let lodc = p
-                                                .header
-                                                .map(|h| h.lod_count)
-                                                .unwrap_or(p.tiers.len() as u32);
-                                            egui::CollapsingHeader::new(format!("LOD rungs ({lodc})"))
+                                        // LOD — driven by the model's REAL tier masks, not invented
+                                        // "rungs". A mesh's mask comes from SEGM[INDX[group]]; several
+                                        // meshes usually share one mask. We show the masks the model
+                                        // actually carries (with how many meshes each covers) and let
+                                        // you drive `view_state` bit by bit, so every click maps to a
+                                        // visible change. (The old rung/window chips were built on
+                                        // masks we were reading from the WRONG records.)
+                                        {
+                                            use std::collections::BTreeMap;
+                                            let mut by_mask: BTreeMap<u8, usize> = BTreeMap::new();
+                                            for d in &p.draws {
+                                                *by_mask.entry(d.lod_mask).or_default() += 1;
+                                            }
+                                            let drawn_at = |vs: u8| -> usize {
+                                                p.draws
+                                                    .iter()
+                                                    .filter(|d| (vs & d.lod_mask) != 0)
+                                                    .count()
+                                            };
+                                            egui::CollapsingHeader::new(format!(
+                                                "LOD  —  view_state 0x{:02X}  ({} of {} meshes pass)",
+                                                p.tier,
+                                                drawn_at(p.tier),
+                                                p.draws.len()
+                                            ))
                                             .default_open(true)
                                             .show(ui, |ui| {
-                                                // Single-bit rungs: view_state = 1<<n. Correct for
-                                                // characters (each rung is a complete decimated body).
                                                 ui.horizontal_wrapped(|ui| {
-                                                    ui.label("rung:");
-                                                    for &bit in &p.tiers {
-                                                        let n = bit.trailing_zeros();
+                                                    ui.label("view_state bits:");
+                                                    for b in 0..8u8 {
+                                                        let bit = 1u8 << b;
+                                                        let mut on = (p.tier & bit) != 0;
                                                         if ui
-                                                            .selectable_label(
-                                                                bit == p.tier,
-                                                                format!("{n} (0x{bit:02X})"),
-                                                            )
-                                                            .on_hover_text(
-                                                                "single SEGM tier bit (view_state = 1<<n)",
-                                                            )
-                                                            .clicked()
+                                                            .checkbox(&mut on, format!("{b}"))
+                                                            .on_hover_text(format!(
+                                                                "bit {b} (0x{bit:02X}) — a mesh draws if                                                                  its mask shares ANY bit with view_state"
+                                                            ))
+                                                            .changed()
                                                         {
-                                                            actions.push(Act::Tier(bit));
+                                                            actions.push(Act::Tier(p.tier ^ bit));
                                                         }
                                                     }
                                                 });
-                                                // Cross-fade windows: view_state = 1<<(n-1)|1<<n|1<<(n+1)
-                                                // (FUN_0047724e). Some models — vehicles like the tank —
-                                                // author hull/turret/barrel on ADJACENT bits, so only a
-                                                // window assembles the whole object. Whether a given
-                                                // instance uses this is a per-CLASS attach flag (bit 9
-                                                // of OBJ+0x12), NOT stored in the model — pending a live
-                                                // read to settle the default. Exposed so you can see it.
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.label("window:");
-                                                    for n in 0..lodc {
-                                                        let w = window_view_state(n as u8);
-                                                        if ui
-                                                            .selectable_label(
-                                                                w == p.tier,
-                                                                format!("{n} (0x{w:02X})"),
-                                                            )
-                                                            .on_hover_text(
-                                                                "3-rung cross-fade window (1<<(n-1)|1<<n|1<<(n+1))",
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            actions.push(Act::Tier(w));
-                                                        }
+                                                ui.separator();
+                                                ui.label("masks this model actually carries:");
+                                                for (&mask, &n) in &by_mask {
+                                                    let hit = (p.tier & mask) != 0;
+                                                    let label = format!(
+                                                        "0x{mask:02X}   {n} mesh{}   {}",
+                                                        if n == 1 { "" } else { "es" },
+                                                        if hit { "✔ passes" } else { "✖ filtered out" }
+                                                    );
+                                                    if ui
+                                                        .selectable_label(hit, label)
+                                                        .on_hover_text("click to set view_state to exactly this mask")
+                                                        .clicked()
+                                                    {
+                                                        actions.push(Act::Tier(mask));
                                                     }
-                                                });
+                                                }
                                                 ui.weak(
-                                                    "LOD rungs are distance-selected in-game; destruction is a SEPARATE axis (below)",
+                                                    "LOD is one axis; destruction (below) is the other. A mesh draws only if BOTH pass.",
                                                 );
                                             });
                                         }
@@ -1496,36 +1518,64 @@ pub fn run(opts: Options) {
                                             });
                                         }
                                         egui::CollapsingHeader::new(format!(
-                                            "Materials ({})",
+                                            "Segments  \u{2014}  {} of {} drawn",
+                                            p.draws.len() - p.hidden.len(),
                                             p.draws.len()
                                         ))
+                                        .default_open(true)
                                         .show(ui, |ui| {
-                                            // Eyeball test (object_assembly_model.md §7): hide every
-                                            // sub-strip skinned with a `*_ruin*` material. If the tank
-                                            // then looks CORRECT, ruin should be gated at full health;
-                                            // if it looks INCOMPLETE, ruin is legit geometry we render
-                                            // wrong. Uses the model-level hidden override, not the gate.
+                                            // THE disassembly view. Per mesh: its seg_id (INDX[group]),
+                                            // its real mount NODE (from SEGM[INDX[group]]), its LOD mask,
+                                            // its material \u{2014} and when it is NOT drawn, WHICH CLAUSE
+                                            // gated it. This is what makes the panel map to the picture.
                                             let mut hr = p.hide_ruin;
                                             if ui
-                                                .checkbox(&mut hr, "Hide *_ruin* sub-strips (eyeball test)")
+                                                .checkbox(&mut hr, "Hide *_ruin* sub-strips")
                                                 .changed()
                                             {
                                                 actions.push(Act::ToggleRuin);
                                             }
                                             egui::ScrollArea::vertical()
-                                                .max_height(200.0)
+                                                .max_height(260.0)
                                                 .id_source("mtrl_scroll")
                                                 .show(ui, |ui| {
                                                     for gi in 0..p.draws.len() {
-                                                        let tris = p.draws[gi].index_count / 3;
-                                                        let (diff, norm, spec) = (
-                                                            p.draws[gi].diffuse,
-                                                            p.draws[gi].normal,
-                                                            p.draws[gi].specular,
-                                                        );
+                                                        let d = p.draws[gi].clone();
+                                                        let tris = d.index_count / 3;
+                                                        let (diff, norm, spec) =
+                                                            (d.diffuse, d.normal, d.specular);
                                                         let tex = diff
                                                             .map(|h| name_or_hash(&index, h))
                                                             .unwrap_or_else(|| "-".into());
+                                                        // Why is this mesh not drawn? Ask the gate.
+                                                        let lod_ok = (p.tier & d.lod_mask) != 0;
+                                                        let node_ok = d.node < 0
+                                                            || p.node_enable
+                                                                .get(d.node as usize)
+                                                                .copied()
+                                                                .unwrap_or(true);
+                                                        let hidden = p.hidden.contains(&gi);
+                                                        let (mark, why) = if lod_ok && node_ok && hidden {
+                                                            ("x", "hidden by hand".to_string())
+                                                        } else if !lod_ok {
+                                                            ("x", format!(
+                                                                "LOD: mask 0x{:02X} shares no bit with view_state 0x{:02X}",
+                                                                d.lod_mask, p.tier))
+                                                        } else if !node_ok {
+                                                            ("x", format!(
+                                                                "DESTRUCTION: node {} is switched off in this state",
+                                                                d.node))
+                                                        } else {
+                                                            ("*", "drawn".to_string())
+                                                        };
+                                                        let node_lbl = if d.node < 0 {
+                                                            "-".to_string()
+                                                        } else {
+                                                            p.hier_nodes
+                                                                .get(d.node as usize)
+                                                                .map(|h| name_or_hash(&index, h.hash))
+                                                                .unwrap_or_else(|| d.node.to_string())
+                                                        };
                                                         ui.horizontal(|ui| {
                                                             let mut vis = !p.hidden.contains(&gi);
                                                             if ui.checkbox(&mut vis, "").changed() {
@@ -1533,8 +1583,12 @@ pub fn run(opts: Options) {
                                                             }
                                                             let row = ui.selectable_label(
                                                                 p.sel_group == gi,
-                                                                format!("{gi:2}  {tris:5} tri  {tex}"),
-                                                            );
+                                                                format!(
+                                                                    "{mark} {gi:2} seg{:3} node {:>3} {}  mask 0x{:02X}  {tris:5} tri  {tex}",
+                                                                    d.seg_id, d.node, node_lbl, d.lod_mask
+                                                                ),
+                                                            )
+                                                            .on_hover_text(&why);
                                                             if row.clicked() {
                                                                 p.sel_group = gi;
                                                             }
@@ -2319,6 +2373,7 @@ pub fn run(opts: Options) {
                                             p.hidden.insert(gi);
                                         }
                                     }
+                                    p.node_enable = rs.node_enable.clone();
                                     scene.set_entity_render_state(p.entity, rs);
                                     let ti = p.tiers.iter().position(|&b| b == bit).unwrap_or(0);
                                     status = format!(
@@ -2592,6 +2647,7 @@ pub fn run(opts: Options) {
                                                 p.hidden.insert(gi);
                                             }
                                         }
+                                        p.node_enable = rs.node_enable.clone();
                                         scene.set_entity_render_state(p.entity, rs);
                                         let drawn = p.draws.len() - p.hidden.len();
                                         status = format!(
@@ -2654,6 +2710,7 @@ pub fn run(opts: Options) {
                                                 p.hidden.insert(gi);
                                             }
                                         }
+                                        p.node_enable = rs.node_enable.clone();
                                         scene.set_entity_render_state(p.entity, rs);
                                         let sname = sm
                                             .nodes
@@ -3291,22 +3348,30 @@ fn preview_render_state(md: &ModelData, node_state: &[usize]) -> mercs2_engine::
 /// Load a model at a specific SEGM state/LOD tier (`active_bit` of `build_indexed_state`) —
 /// F11's rebuild path. Falls back to the container's first tier if the requested bit is absent.
 fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<ModelData, String> {
-    let container = w.extract_container(hash)?;
+    // A model is scattered across BLOCKS, not held in one container: the resident block ships the
+    // object (HIER, SEGM, MTRL, physics, destruction machine) plus its coarsest meshes, and each
+    // finer `_P00N_Q(3-N)` block ships geometry + an INDX that names rows in the RESIDENT block's
+    // SEGM. Loading only the resident block is what made every vehicle a low-poly far-LOD proxy —
+    // a 371-triangle tank in a `_lod_dm` skin. Bind each rung against the resident block and merge
+    // them into one buffer; the draw gate then selects per segment, which is what it is for.
+    // `Model` owns the cross-block rules — binding each rung's INDX against the resident SEGM, and
+    // clearing the tier bits a finer block re-authors so the rungs refine rather than double-draw.
+    // Same assembly the game world loads through; visibility stays a per-frame gate decision.
+    let m = w.model(hash)?;
+    let container = m.resident.clone();
     let tiers = mesh::state_tiers(&container);
-    // Build the model WHOLE — every LOD rung, every destruction state. Visibility is decided per
-    // frame by the engine's draw gate against the entity's RenderState, not baked into the buffer.
-    let (verts, indices, draws, stats) = mesh::build_indexed_all(&container)?;
+    let (verts, indices, draws, stats) = m.flatten();
     // The engine's own named-state machine + the HIER/INDX it acts on — ground-truth
     // destruction visibility comes from executing its scripts, nothing is classified.
     let machine = mercs2_formats::orchestrator::parse_state_machine(&container);
     let hier_nodes = mercs2_formats::orchestrator::parse_hier(&container);
     let indx = mercs2_formats::orchestrator::parse_indx(&container);
     let header = mercs2_formats::model_cubeize::parse_model_header(&container);
-    // Starting view_state. Deliberately NOT a cleverness: the previous "fullest near view" picker was
-    // built on LOD masks we were reading from the WRONG SEGM records, so its conclusions were noise.
-    // With SEGM[INDX[group]] the masks are real; re-derive what they mean before defaulting to
-    // anything but the model's own first tier.
-    let tier = if tiers.contains(&want_bit) || tiers.is_empty() { want_bit } else { tiers[0] };
+    // Rung 0 — the closest tier, what you see standing next to the thing. It used to be empty for
+    // vehicles (their near geometry was in a block we never opened), so a "pick the fullest tier"
+    // heuristic stood in for it. With the chain assembled, tier 0 is real geometry and needs no
+    // guess.
+    let tier = if want_bit != 0x01 && tiers.contains(&want_bit) { want_bit } else { 0x01 };
     // RESIDENT mips only: `extract_texture_hires` walks the whole cell subtree per texture and
     // made model loads take seconds — the F3 plate view still fetches full-res on demand.
     let mut textures: TexMap = HashMap::new();
@@ -3556,6 +3621,7 @@ fn build_preview(
         .map(|sm| sm.nodes.iter().map(mercs2_formats::orchestrator::default_state_index).collect())
         .unwrap_or_default();
     let rs = preview_render_state(&md, &node_state);
+    let rs_node_enable = rs.node_enable.clone();
     let mut hidden: HashSet<usize> = HashSet::new();
     for (gi, d) in md.draws.iter().enumerate() {
         // Clear any stale per-model override from a previous preview of this hash; the gate decides.
@@ -3677,6 +3743,7 @@ fn build_preview(
         node_state,
         health: 1.0,
         hide_ruin: false,
+        node_enable: rs_node_enable,
         header: md.header,
         lua_needle,
         lua_refs,

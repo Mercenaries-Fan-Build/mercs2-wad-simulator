@@ -90,6 +90,20 @@ impl SkinData {
 }
 
 impl ModelStats {
+    /// Fold another LOD rung's stats in. A model's geometry spans several blocks (see
+    /// [`crate::model::Model`]); each rung is built separately but they are one object, so counts and
+    /// bounds accumulate. The rig/bones/prelit flags come from the RESIDENT rung — the only block
+    /// that ships a skeleton — so they are left alone here.
+    pub fn absorb(&mut self, other: &ModelStats) {
+        self.meshes += other.meshes;
+        self.vertices += other.vertices;
+        self.skipped += other.skipped;
+        for i in 0..3 {
+            self.bbox_min[i] = self.bbox_min[i].min(other.bbox_min[i]);
+            self.bbox_max[i] = self.bbox_max[i].max(other.bbox_max[i]);
+        }
+    }
+
     pub fn skin_data(&self) -> SkinData {
         SkinData {
             center: self.fit_center,
@@ -140,39 +154,6 @@ pub struct DrawGroup {
     /// `INDX[group]` — this group's index into the SEGM record array.
     pub seg_id: usize,
 }
-
-/// The `view_state` for a model's NEAREST (finest) LOD rung — `1 << minLOD`.
-///
-/// Bits `0..lod_count-1` are the LOD rungs (`lod_count` = the model header's `+0x34`). A mask equal to
-/// `(1<<lod_count)-1` (`0x0F` for a 4-rung character, `0x7F` for a 7-rung vehicle) means "present at
-/// EVERY rung" — accessories, hardpoint caps — so it says nothing about the model's LOD range. Every
-/// other mask is a real rung set.
-///
-/// `minLOD` is therefore the lowest rung at which the model's actual geometry exists: the minimum
-/// low-bit across the non-all-rungs masks. `ch_veh_tank_ztz98`'s body lives only on `0x70` (rungs
-/// 4-6), so its finest rung is **4** — a `view_state` of `0x01` draws literally nothing. A character's
-/// body tiers are `0x01/02/04/08`, so its finest rung is 0 and `0x01` gives one clean tier (a wider
-/// view_state would double-draw its hair LODs).
-///
-/// Derived from the model's own data. The engine reads the equivalent from `M+0x80`, whose on-disk
-/// source we have not located (see `docs/modernization/model_render_gate_spec.md`).
-pub fn near_view_state(draws: &[DrawGroup], lod_count: u32) -> u8 {
-    let all_rungs: u8 = if (1..=8).contains(&lod_count) {
-        ((1u16 << lod_count) - 1) as u8
-    } else {
-        0xFF
-    };
-    let min_lod = draws
-        .iter()
-        .map(|d| d.lod_mask)
-        .filter(|&m| m != 0 && m != all_rungs)
-        .map(|m| m.trailing_zeros())
-        .min()
-        // Every mesh is all-rungs (or there are none): rung 0 is as good as any.
-        .unwrap_or(0);
-    1u8 << min_lod.min(7)
-}
-
 impl Default for DrawGroup {
     /// An unconditionally-visible group: present at every LOD rung, bound to no HIER node. This is
     /// the right shape for geometry that has no `SEGM` record at all — terrain tiles, imported

@@ -21,6 +21,7 @@
 //! `node_enable` does destruction. Characters ship a single block and no chain.
 
 use crate::mesh::{self, DrawGroup, Vertex};
+use std::collections::HashMap;
 use crate::render_state::RenderState;
 use crate::wad::{self, Wad};
 use mercs2_formats::model_cubeize::{ModelHeader, SegRec};
@@ -36,6 +37,8 @@ pub struct Rung {
     /// Draw groups, each carrying the node + LOD mask from the RESIDENT `SEGM` record its `INDX`
     /// row named.
     pub draws: Vec<DrawGroup>,
+    /// Bounds/rig/prelit for this rung's geometry (the rig comes from the resident skeleton).
+    pub stats: crate::mesh::ModelStats,
 }
 
 impl Rung {
@@ -74,9 +77,11 @@ impl Model {
         for l in &lods {
             // The resident rung binds against itself; finer rungs borrow its SEGM/HIER/MTRL.
             let res = if l.level == lods[0].level { None } else { Some(resident.as_slice()) };
-            let (vertices, indices, draws, _) = mesh::build_indexed_rung(&l.container, res, None)?;
-            rungs.push(Rung { level: l.level, block: l.block, vertices, indices, draws });
+            let (vertices, indices, draws, stats) =
+                mesh::build_indexed_rung(&l.container, res, None)?;
+            rungs.push(Rung { level: l.level, block: l.block, vertices, indices, draws, stats });
         }
+        apply_supersede(&mut rungs);
 
         Ok(Model {
             name_hash,
@@ -96,29 +101,99 @@ impl Model {
 
     /// Every draw group in the object that survives the render gate, as `(rung, group)`.
     ///
-    /// There is no "pick the right rung" step — that would be a rule the engine doesn't have. Once a
-    /// block is resident its segments join one pool, and the per-segment gate does the selecting:
-    /// clause 2 (`view_state` vs the segment's LOD mask) and clause 3 (`node_enable`, the destruction
-    /// machine). The masks partition the tiers across the chain precisely so this works — on the tank
-    /// the resident block's segments claim rungs 4-6, `P001` claims 2-3, `P002` claims 0-1, and the
-    /// handful of all-tier (`0x7f`) segments draw at every tier from whichever block ships them.
+    /// The rungs REFINE each other, they do not sum. The resident block is a complete, self-contained
+    /// low-detail model covering every tier — the fallback for an object whose finer blocks haven't
+    /// streamed — and each finer block SUPERSEDES it for the nodes it re-authors. The car van's body
+    /// (node 3) exists as 736 triangles in the resident block and 9,360 in `P001`; drawing both puts
+    /// two detail levels of the same panel in the same space.
     ///
-    /// A rung whose block isn't loaded simply contributes nothing, which is exactly what happens in
-    /// the game when an object is too far away to have streamed its fine geometry.
-    pub fn visible_draws<'a>(
-        &'a self,
-        state: &'a RenderState,
-    ) -> impl Iterator<Item = (&'a Rung, &'a DrawGroup)> + 'a {
-        self.rungs.iter().flat_map(move |r| {
-            r.draws
-                .iter()
-                .filter(move |d| state.segment_visible(d.lod_mask, d.node))
-                .map(move |d| (r, d))
-        })
+    /// So selection is **per node, per tier: the finest loaded rung that covers it wins**, and only
+    /// then do the gate's clauses apply. This mirrors the texture chain exactly — a finer mip block
+    /// replaces the top of the resident chain rather than adding to it (see
+    /// [`crate::wad::extract_texture_hires`]).
+    ///
+    /// A rung whose block hasn't streamed simply isn't in `rungs`, and the coarser version takes over
+    /// on its own — which is what the game shows you as an object recedes.
+    pub fn visible_draws<'a>(&'a self, state: &RenderState) -> Vec<(&'a Rung, &'a DrawGroup)> {
+        let mut out = Vec::new();
+        for r in &self.rungs {
+            for d in r.draws.iter().filter(|d| state.segment_visible(d.lod_mask, d.node)) {
+                out.push((r, d));
+            }
+        }
+        out
     }
 
     /// Total triangles across the whole chain (all rungs) — the "raid array" reassembled.
     pub fn triangles(&self) -> u32 {
         self.rungs.iter().map(|r| r.triangles()).sum()
+    }
+
+    /// Flatten every rung into ONE vertex/index buffer with rebased draw groups — the shape both the
+    /// renderer and the workshop want to upload. Masks already carry the supersede resolution, so a
+    /// consumer just runs the normal draw gate and gets the right tier's geometry.
+    pub fn flatten(&self) -> (Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, mesh::ModelStats) {
+        let (mut verts, mut indices, mut draws) = (Vec::new(), Vec::new(), Vec::new());
+        let mut stats: Option<mesh::ModelStats> = None;
+        for r in &self.rungs {
+            let (vbase, ibase) = (verts.len() as u32, indices.len() as u32);
+            verts.extend_from_slice(&r.vertices);
+            indices.extend(r.indices.iter().map(|x| x + vbase));
+            draws.extend(r.draws.iter().cloned().map(|mut g| {
+                g.index_start += ibase;
+                g
+            }));
+            match &mut stats {
+                Some(s) => s.absorb(&r.stats),
+                None => stats = Some(r.stats.clone()),
+            }
+        }
+        let mut stats = stats.unwrap_or_else(|| self.rungs[0].stats.clone());
+        stats.vertices = verts.len();
+        (verts, indices, draws, stats)
+    }
+}
+
+/// Resolve the overlap between LOD rungs, by clearing tier bits a finer block has taken over.
+///
+/// The rungs REFINE each other, they do not sum. The resident block is a complete, self-contained
+/// low-detail model spanning every tier — the fallback for an object whose finer blocks haven't
+/// streamed in — and each finer block RE-AUTHORS some of those nodes at the near tiers. The car
+/// van's body sits on node 3 as **736 triangles in the resident block and 9,360 in `P001`**, both
+/// masked for tier 0. Draw both and you get two detail levels of the same panel fighting for the
+/// same pixels; on that car it was 11,604 of 19,107 triangles drawn twice.
+///
+/// So for each (node, tier), only the FINEST rung that covers it survives — the coarser block's bit
+/// for that tier is cleared. Baking it into `lod_mask` means every downstream consumer (the draw
+/// gate, the workshop, the scene) gets the right answer without knowing rungs exist. This mirrors
+/// the texture chain: a finer mip block replaces the top of the resident chain rather than adding
+/// to it (see [`crate::wad::extract_texture_hires`]).
+///
+/// Geometry bound to no node (`node < 0`) is never superseded — nothing re-authors it.
+fn apply_supersede(rungs: &mut [Rung]) {
+    // (node, tier) -> finest rung level that carries it.
+    let mut finest: HashMap<(i16, u8), u8> = HashMap::new();
+    for r in rungs.iter() {
+        for d in r.draws.iter().filter(|d| d.node >= 0) {
+            for tier in 0..8u8 {
+                if d.lod_mask & (1 << tier) != 0 {
+                    let e = finest.entry((d.node, tier)).or_insert(r.level);
+                    *e = (*e).max(r.level);
+                }
+            }
+        }
+    }
+    for r in rungs.iter_mut() {
+        let level = r.level;
+        for d in r.draws.iter_mut().filter(|d| d.node >= 0) {
+            for tier in 0..8u8 {
+                let bit = 1u8 << tier;
+                if d.lod_mask & bit != 0
+                    && finest.get(&(d.node, tier)).copied().unwrap_or(level) > level
+                {
+                    d.lod_mask &= !bit;
+                }
+            }
+        }
     }
 }

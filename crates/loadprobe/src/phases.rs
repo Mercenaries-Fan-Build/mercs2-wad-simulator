@@ -103,6 +103,14 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // null. Fix: emit the full 128-byte material record (104-byte preamble + 128). Same site the DLC
     // mattias_v5 skin crashed on (MTRL layout). NOT teardown.
     KnownEip { eip: 0x00858DB8, label: "Mtrl_Parse (FUN_00858790+0x628) shader-pool lookup: MTRL record wrong size (must be 128B) -> parser over-reads -> garbage shader hash -> null pool entry", teardown: false },
+    // 0x750BD9: texture BODY null-reader deref (the "null DXT1" crash). The streaming
+    // upload loop at 0x750BA2 reads a texture's BODY chunk and dereferences the result at
+    // 0x750BD9 (EDX="DXT1"=0x31545844) without a NULL check -> AV read target=0 when the
+    // body is null/empty. Causes: a texture whose resident BODY is empty (pixels are in the
+    // streaming tiers), or a base texture whose block was overridden by a patch WAD that
+    // ships an empty-bodied replacement (e.g. booting `vz` with the DLC level-replacement
+    // patch mounted). patch_anim_table.py guard #3 (@0x750B90) is the runtime NULL-guard.
+    KnownEip { eip: 0x00750BD9, label: "texture BODY null-reader deref (null-DXT1): streaming upload derefs a null/empty texture body (patch override or streamed-empty body)", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {

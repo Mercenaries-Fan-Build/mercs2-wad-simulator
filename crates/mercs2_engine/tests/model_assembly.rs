@@ -27,7 +27,7 @@ fn tris_at(m: &Model, rung: u8, health: f32) -> u32 {
         None => Vec::new(),
     };
     let rs = RenderState { lod: rung, view_state: 1u8 << rung.min(7), node_enable };
-    m.visible_draws(&rs).map(|(_, d)| d.index_count / 3).sum()
+    m.visible_draws(&rs).iter().map(|(_, d)| d.index_count / 3).sum()
 }
 
 #[test]
@@ -65,6 +65,36 @@ fn wrecking_a_vehicle_swaps_geometry_rather_than_adding_it() {
         let wrecked = tris_at(&m, 0, 0.0);
         assert!(intact > wrecked, "{name}: intact {intact} should exceed wrecked {wrecked}");
         assert!(wrecked > 0, "{name}: a wreck still has geometry");
+    }
+}
+
+#[test]
+fn rungs_refine_each_other_instead_of_double_drawing() {
+    let Some(mut w) = open_wad() else { return };
+    // The resident block is a COMPLETE low-detail model spanning every tier; the finer blocks
+    // re-author some of its nodes. Pooling them draws the same part twice at two detail levels — on
+    // the car van that was 11,604 of 19,107 triangles. `apply_supersede` clears the coarser block's
+    // bit for any (node, tier) a finer block covers, so no node may be drawn by two rungs at once.
+    for name in ["civ_veh_car_van_crappy", "ch_veh_tank_ztz98", "vz_veh_tank_scorpion90"] {
+        let hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let m = Model::load(&mut w, hash).expect("assembles");
+        for tier in 0..8u8 {
+            let bit = 1u8 << tier;
+            let mut owner: std::collections::HashMap<i16, u8> = Default::default();
+            for r in &m.rungs {
+                for d in r.draws.iter().filter(|d| d.node >= 0 && d.lod_mask & bit != 0) {
+                    if let Some(&prev) = owner.get(&d.node) {
+                        assert_eq!(
+                            prev, r.level,
+                            "{name}: node {} at tier {tier} is drawn by rung {prev} AND rung {} \
+                             — two detail levels of one part in the same space",
+                            d.node, r.level
+                        );
+                    }
+                    owner.insert(d.node, r.level);
+                }
+            }
+        }
     }
 }
 

@@ -166,8 +166,14 @@ pub fn load_model_by_hash_state(
     hash: u32,
     active_bit: u8,
 ) -> Option<(LoadedModel, [f32; 3], [f32; 3])> {
-    let container = wad::extract_container(w, hash).ok()?;
-    let (verts, indices, draws, stats) = mesh::build_indexed_state(&container, active_bit).ok()?;
+    // Assemble the model across its LOD-block chain (see `crate::model::Model`) — the primary ASET
+    // block alone is a vehicle's far-LOD proxy, so a world loaded from it renders 371-triangle tanks.
+    // `active_bit` keeps the legacy build-time tier filter: a segment survives if it has no mask or
+    // shares a bit with the requested tier (`mesh::build_indexed_state`'s rule, applied to the
+    // assembled draws instead of one container's).
+    let m = crate::model::Model::load(w, hash).ok()?;
+    let (verts, indices, mut draws, stats) = m.flatten();
+    draws.retain(|d| d.lod_mask == 0 || d.lod_mask & active_bit != 0);
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
         for h in [d.diffuse, d.normal].into_iter().flatten() {

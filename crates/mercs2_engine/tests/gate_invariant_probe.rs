@@ -112,74 +112,6 @@ fn build_indexed_all_is_a_superset_of_every_rung() {
 
 #[test]
 #[ignore = "needs the retail vz.wad"]
-fn no_view_state_can_hide_uh1s_mask_03_body_while_drawing_its_mask_01_groups() {
-    // THE load-bearing claim. Field evidence: UH1 draws groups 20/24 (mask 0x01) at spawn but NOT
-    // group 14 (mask 0x03). A memory concluded the rule must be all-bits `(mask & S) == mask`.
-    //
-    // Under the real ANY-bit rule, mask 0x03 is a SUPERSET of mask 0x01, so any `view_state` that
-    // lights a 0x01 segment necessarily lights a 0x03 one. No `view_state` produces the observed
-    // split. Therefore the mask never suppressed group 14 — clause 3 (the node-enable table) did.
-    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
-    let c = wad::extract_container(&mut w, 0x89D8_DE72).expect("uh1");
-    let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
-
-    let masks: std::collections::HashSet<u8> = all.iter().map(|d| d.lod_mask).collect();
-    assert!(masks.contains(&0x01), "uh1 should carry mask-0x01 segments; got {masks:?}");
-    assert!(masks.contains(&0x03), "uh1 should carry mask-0x03 segments; got {masks:?}");
-
-    for s in 0..=u8::MAX {
-        let rs = RenderState { lod: 0, view_state: s, node_enable: Vec::new() };
-        if rs.segment_visible(0x01, -1) {
-            assert!(
-                rs.segment_visible(0x03, -1),
-                "view_state 0x{s:02X} drew mask-0x01 but not mask-0x03 — the LOD mask WOULD then \
-                 explain the UH1 observation, and the three-clause reading is wrong"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "needs the retail vz.wad"]
-fn clause_3_must_be_keyed_on_the_segm_node_not_on_indx() {
-    // THE bug, pinned. Clause 3 indexes the node-enable table by the SEGM record's signed `node`
-    // field. Keying it on `INDX[group_index]` instead — which is what the workshop used to do —
-    // disagrees on md500 and leaves the wreck drawn next to the intact body.
-    //
-    // md500 draw groups 0 and 1 both sit on SEGM node 2, which the machine's DEFAULT state disables.
-    // INDX maps group 0 to node 0 (enabled) and group 1 to node 2 (disabled). So the INDX keying
-    // hides exactly one of the pair, and group 0 — the wreck — survives.
-    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
-    let c = wad::extract_container(&mut w, 0x9FCA_E910).expect("md500");
-    let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
-
-    let hier = mercs2_formats::orchestrator::parse_hier(&c);
-    let indx = mercs2_formats::orchestrator::parse_indx(&c);
-    let sm = mercs2_formats::orchestrator::parse_state_machine(&c).expect("md500 has a machine");
-    let chosen: Vec<usize> =
-        sm.nodes.iter().map(mercs2_formats::orchestrator::default_state_index).collect();
-    let node_enable = mercs2_formats::orchestrator::machine_node_enable(&sm, &hier, &chosen);
-
-    let rs = RenderState { lod: 0, view_state: 0x01, node_enable: node_enable.clone() };
-
-    // What the LOD mask alone admits at rung 0, and what clause 3 then removes.
-    let pass_mask: Vec<_> = all.iter().filter(|d| (rs.view_state & d.lod_mask) != 0).collect();
-    let drawn: Vec<_> =
-        pass_mask.iter().filter(|d| rs.segment_visible(d.lod_mask, d.node)).collect();
-    assert_eq!(pass_mask.len(), 8, "rung 0 admits the same 8 groups the legacy builder baked in");
-    assert_eq!(drawn.len(), 6, "clause 3 removes 2 of them (both on SEGM node 2)");
-
-    // The INDX keying removes only one — that missing removal IS the wreck on screen.
-    let indx_drawn = pass_mask
-        .iter()
-        .filter(|d| indx.get(d.group_index).is_none_or(|&n| node_enable.get(n).copied().unwrap_or(true)))
-        .count();
-    assert_eq!(indx_drawn, 7, "INDX keying leaves one extra group drawn");
-    assert!(indx_drawn > drawn.len(), "the INDX keying is strictly more permissive — that is the bug");
-}
-
-#[test]
-#[ignore = "needs the retail vz.wad"]
 fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
     // Clause 3 is orthogonal to clause 2: a disabled node is gone at all rungs, near and far. This is
     // the mechanism that hides a wreck, and the one we do not implement today.
@@ -209,4 +141,91 @@ fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
         }
     }
     assert!(suppressed > 0, "the sample node had no segments — test proves nothing");
+}
+
+#[test]
+#[ignore = "needs the retail vz.wad"]
+fn a_meshs_segment_record_is_segm_indx_group_not_segm_group() {
+    // THE assembly rule, validated against an independent witness. `INDX[group]` is a SEG_ID; the
+    // mesh's record is `SEGM[INDX[group]]`. Reading `SEGM[group]` (what we used to do) picks
+    // unrelated records — a model has far more segments than groups (tank: 130 vs 12) — giving every
+    // mesh the wrong attachment node and the wrong LOD mask. The visible symptom was a tank barrel
+    // rendering on the ground, detached from its turret.
+    //
+    // Witness: the HIER node whose OWN bbox matches the mesh. It must agree with the node the rule
+    // yields, and the barrel must land at turret height.
+    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let c = wad::extract_container(&mut w, 0xF881_47A1).expect("ch_veh_tank_ztz98");
+
+    let mut blk = vec![0u8; 20];
+    blk[16..20].copy_from_slice(&(c.len() as u32).to_le_bytes());
+    blk.extend_from_slice(&c);
+    let skel = mercs2_formats::skeleton::Skeleton::from_block(&blk).expect("skeleton");
+    let hier = mercs2_formats::orchestrator::parse_hier(&c);
+    let meshes = mercs2_formats::model_cubeize::read_model_meshes(&c).expect("meshes");
+
+    let mut checked = 0;
+    for m in &meshes {
+        if m.positions.is_empty() {
+            continue;
+        }
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for p in &m.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        let msz = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        // Skip the symmetric caps: a left/right mirror pair has an identical bbox, so the witness
+        // cannot distinguish them (it is ambiguous, not wrong).
+        if msz.iter().all(|&v| v < 1.0) {
+            continue;
+        }
+        let mut best = (f32::MAX, usize::MAX);
+        for (i, h) in hier.iter().enumerate() {
+            let hs = [
+                h.bbox_max[0] - h.bbox_min[0],
+                h.bbox_max[1] - h.bbox_min[1],
+                h.bbox_max[2] - h.bbox_min[2],
+            ];
+            if hs.iter().all(|&v| v <= 0.001) {
+                continue;
+            }
+            let err: f32 = (0..3).map(|k| (hs[k] - msz[k]).abs()).sum();
+            if err < best.0 {
+                best = (err, i);
+            }
+        }
+        assert_eq!(
+            m.bone as usize, best.1,
+            "group {} ({:.1}x{:.1}x{:.1}): builder placed it on node {}, but the HIER node whose own \
+             bbox matches is {} — the SEGM[INDX[group]] rule regressed",
+            m.group_index, msz[0], msz[1], msz[2], m.bone, best.1
+        );
+        checked += 1;
+    }
+    assert!(checked >= 5, "witness matched too few meshes to mean anything ({checked})");
+
+    // And the barrel actually lifts to the turret: its node's world Y must be well above the ground.
+    let barrel = meshes
+        .iter()
+        .find(|m| {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in &m.positions {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            // long, thin, and forward — the gun
+            !m.positions.is_empty() && (hi[2] - lo[2]) > 2.5 && (hi[1] - lo[1]) < 1.0
+        })
+        .expect("a barrel-shaped mesh");
+    let y = skel.bones[barrel.bone as usize].world[3][1];
+    assert!(
+        y > 1.0,
+        "the barrel's mount node sits at y={y:.2} — on the ground. It must be at turret height \
+         (~1.7). The SEGM index regressed."
+    );
 }

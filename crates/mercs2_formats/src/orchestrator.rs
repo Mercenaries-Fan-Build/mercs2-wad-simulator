@@ -546,13 +546,18 @@ pub enum NodeSeed {
 }
 
 /// Whether a `SHOW`/`Hide` command applies to the named HIER node alone, or to its whole subtree.
-/// Also NOT settled from the exe — the terminal byte write is past an indirect jump. Measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NodeScope {
     /// The command marks only the node it names.
-    #[default]
     NodeOnly,
     /// The command marks the node and every descendant.
+    ///
+    /// THE DEFAULT, and it must be. A switch slot names a *grouping* node; the geometry hangs on its
+    /// CHILDREN. `ch_veh_tank_ztz98`'s turret slot is node 4 (`0x54C595F0`, no geometry of its own) and
+    /// the turret/barrel meshes live on child nodes 5 and 11. Marking node-only leaves those children
+    /// untouched, so the turret renders identically at 100% and 0% health while the hull (whose mesh
+    /// IS on the named node) switches — the exact symptom that exposed this.
+    #[default]
     Subtree,
 }
 
