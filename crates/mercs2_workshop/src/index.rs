@@ -236,7 +236,19 @@ pub fn load_all_names_raw(
     for (h, n) in default_rainbow_json().map(load_rainbow_json).unwrap_or_default() {
         names.insert(h, n);
     }
-    report(0.90, "live registry names");
+    report(0.88, "ASET-derived names");
+    // Names cracked from the WAD's own naming convention rather than a wordlist: a texture
+    // `X_dm`/`X_nm`/`X_sm` names its own model `X`, so a named texture yields its model's exact
+    // preimage. Textures resolve ~95% but models only ~46%, so this closes a gap the rainbow
+    // table structurally cannot — it is what makes most unnamed vehicle/prop models (the whole
+    // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
+    // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
+    for p in discovered_name_fragments() {
+        for (h, n) in load_rainbow_json(p) {
+            names.insert(h, n);
+        }
+    }
+    report(0.92, "live registry names");
     for (h, n) in names_csv.map(load_names_csv).unwrap_or_default() {
         names.insert(h, n);
     }
@@ -318,6 +330,31 @@ fn repo_walk_up(rel: &str) -> Option<PathBuf> {
 /// Find `docs/data/bone_name_candidates.txt` by walking up from the CWD.
 fn default_bone_candidates() -> Option<PathBuf> {
     repo_walk_up("docs/data/bone_name_candidates.txt")
+}
+
+/// The ASET-derived name fragments (same JSON shape as the rainbow table), each a set of
+/// preimages cracked from the WAD itself rather than from a wordlist:
+///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
+///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
+///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)
+/// A bundled copy wins over the repo copy so a packaged workshop stays self-contained.
+fn discovered_name_fragments() -> Vec<PathBuf> {
+    [
+        "aset_discovered_names.json",
+        "aset_block_strings.json",
+        "aset_expanded_names.json",
+    ]
+    .iter()
+    .filter_map(|f| {
+        if let Some(home) = data_home() {
+            let p = home.join(f);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        repo_walk_up(&format!("docs/data/{f}"))
+    })
+    .collect()
 }
 
 /// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`.
