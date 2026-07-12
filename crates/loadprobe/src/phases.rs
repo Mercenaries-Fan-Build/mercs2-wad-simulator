@@ -111,6 +111,19 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // ships an empty-bodied replacement (e.g. booting `vz` with the DLC level-replacement
     // patch mounted). patch_anim_table.py guard #3 (@0x750B90) is the runtime NULL-guard.
     KnownEip { eip: 0x00750BD9, label: "texture BODY null-reader deref (null-DXT1): streaming upload derefs a null/empty texture body (patch override or streamed-empty body)", teardown: false },
+    // 0x00855691: inside the draw-item loop of FUN_00855420 (the scene render driver, reached from
+    // its only caller FUN_0085a960 -> return addr 0x0085A97C on the stack). Per draw item (0x58
+    // bytes) it resolves the material's SHADER object out of the registry at DAT_00ff46f4:
+    //   shader = *(void**)(DAT_00ff46f4 + *(u16*)(item+0x3c) * 4);
+    //   perm   = *(i16*)(shader + 0x182) + light_class;   // <- AV READ [null+0x182]
+    // A clean NULL (not a wild pointer) => the index is IN RANGE but that registry slot was never
+    // filled. Cause seen: two MTRL records sharing the same NAME HASH (record+0x00). The engine
+    // registers materials into the shader registry by that hash FIRST-WINS, so a duplicate loses the
+    // race and never gets a slot. Hit by cloning a material record verbatim to add a skin. Fix: give
+    // every appended MTRL record a UNIQUE name hash (inject_parts --add-mtrl does this now).
+    // Fires only when the model is actually DRAWN (load succeeds; the camera turning to it crashes).
+    // Draw-time twin of the parse-time 0x00858DB8. NOT teardown.
+    KnownEip { eip: 0x00855691, label: "render draw-loop (FUN_00855420) shader-registry lookup: material's shader slot is NULL -> duplicate MTRL name hash (record+0x00) lost the first-wins registration", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
