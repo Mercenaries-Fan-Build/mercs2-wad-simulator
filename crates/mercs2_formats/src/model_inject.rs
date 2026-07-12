@@ -85,6 +85,9 @@ pub struct InjectStats {
     /// Average normal / tangent magnitude across injected verts (should be ~1.0).
     pub avg_normal_len: f32,
     pub avg_tangent_len: f32,
+    /// SEGM row rewritten to `{node: -1, lod_mask: 0x7f}` to host the mesh unconditionally
+    /// (always visible, every LOD tier, never superseded, model-space).
+    pub unbound_seg: Option<usize>,
 }
 
 // --------------------------------------------------------------------- f16
@@ -1998,6 +2001,7 @@ pub fn inject_static_into_donor_block(
     all_groups: bool,
     raw_targets: &[usize],
     scale_mult: f32,
+    neutralize_only: bool,
 ) -> Result<(Vec<u8>, InjectStats), String> {
     if container_block.len() < 20 {
         return Err("block too small".into());
@@ -2050,35 +2054,19 @@ pub fn inject_static_into_donor_block(
     // real envelope makes the novel mesh occupy exactly the replaced body's space:
     // correct size and ground contact. `scale_mult` fine-tunes (1.0 = exact fit).
     let fitted_store: Option<ExternalMesh> = if fit_to_template {
-        let mut tmin = [f32::MAX; 3];
-        let mut tmax = [f32::MIN; 3];
-        for &gi in &drawing {
-            let g = &groups[gi];
-            let si = leaf(ucfx, data_off, &rows[g.strm_info]);
-            let stride = read_u32_le(si, 4) as usize;
-            let vc = read_u32_le(si, 8) as usize;
-            if stride == 0 {
-                continue;
-            }
-            let decl = parse_decl(leaf(ucfx, data_off, &rows[g.strm_decl]));
-            let Some(poff) = decl.iter().find(|e| e.usage == 0).map(|e| e.offset) else {
-                continue;
-            };
-            let body = leaf(ucfx, data_off, &rows[g.strm_data]);
-            let n = vc.min(body.len() / stride);
-            for v in 0..n {
-                let o = v * stride + poff;
-                if o + 6 <= body.len() {
-                    for k in 0..3 {
-                        let val = read_f16_le(body, o + k * 2);
-                        if val.is_finite() {
-                            tmin[k] = tmin[k].min(val);
-                            tmax[k] = tmax[k].max(val);
-                        }
-                    }
-                }
-            }
-        }
+        // ★Fit target = the model header AABB (descriptor row 0's INFO, `+0x04` min / `+0x10` max) —
+        // the container's MODEL-SPACE bounds (vehicle_model_spec.md §7; `model_cubeize` header doc).
+        // Do NOT union the drawing groups' vertices: a rigid `MESH` sub-object is stored in its
+        // BONE-LOCAL space, so that union mixes coordinate frames and reads far too small. Since the
+        // host SEGM row is unbound to `node = -1`, no bone matrix is applied and our mesh is consumed
+        // in model space — the same frame this AABB describes.
+        let t = leaf(ucfx, data_off, &rows[0]);
+        let (tmin, tmax) = if t.len() >= 28 {
+            let rf = |o: usize| f32::from_bits(read_u32_le(t, o));
+            ([rf(4), rf(8), rf(12)], [rf(16), rf(20), rf(24)])
+        } else {
+            ([f32::MAX; 3], [f32::MIN; 3])
+        };
         if tmin[0] <= tmax[0] && !mesh.positions.is_empty() {
             let (mut mmin, mut mmax) = ([f32::MAX; 3], [f32::MIN; 3]);
             for p in &mesh.positions {
@@ -2175,7 +2163,13 @@ pub fn inject_static_into_donor_block(
     //     so a mask-0x03 body group is skipped at a fresh mask-0x01 spawn).
     //   all_groups            -> every drawing group.
     //   otherwise             -> the single target_gi.
-    let targets: Vec<usize> = if !raw_targets.is_empty() {
+    // `neutralize_only`: host NO geometry — every drawing group is emptied. This is how a vehicle's
+    // FINER LOD rungs (`_P001_`, `_P002_`) are silenced so the template's original near-tier geometry
+    // cannot draw over the conformed mesh (the resident rung alone would otherwise be out-detailed
+    // at close range). See docs/modernization/vehicle_model_spec.md §1/§3.
+    let targets: Vec<usize> = if neutralize_only {
+        Vec::new()
+    } else if !raw_targets.is_empty() {
         raw_targets.iter().copied().filter(|&g| g < groups.len()).collect()
     } else if all_groups {
         drawing.clone()
@@ -2275,18 +2269,51 @@ pub fn inject_static_into_donor_block(
         new_bodies.insert(mtrl_row, mtrl);
     }
 
-    // Top INFO bbox over injected verts (bmin/bmax computed above; per-group
-    // PRMG cull bounds were fitted in the geometry-write loop).
-    stats.bbox_min = bmin;
-    stats.bbox_max = bmax;
-    let mut top = leaf(ucfx, data_off, &rows[0]).to_vec();
-    if top.len() >= 28 {
-        for k in 0..3 {
-            top[4 + k * 4..8 + k * 4].copy_from_slice(&bmin[k].to_le_bytes());
-            top[16 + k * 4..20 + k * 4].copy_from_slice(&bmax[k].to_le_bytes());
+    // ★UNBIND THE HOST SEGM ROW (the corrected binding — vehicle_model_spec.md §2/§4).
+    // The group's segment record is reached group → parent MESH/SKIN sub-object → INDX[sub_object]
+    // = seg_id → SEGM[seg_id]  (NOT INDX[group], and the value is a seg_id, not a node).
+    // Rewrite that record to `{node: -1, lod_mask: 0x7f}`, which makes the injected mesh:
+    //   • pass draw-gate clause 3 unconditionally (`node < 0` = never destruction-gated),
+    //   • never be superseded by a finer LOD rung (`apply_supersede` skips `node < 0`),
+    //   • draw at EVERY LOD tier (0x7f), so it survives at any camera distance,
+    //   • and be consumed in MODEL space — no bone world-rest matrix is applied, which is exactly
+    //     the space our mesh is authored in (a rigid MESH on a real node would be interpreted as
+    //     bone-LOCAL and get flung by that node's transform).
+    // `SEGM[i].seg_id == i` is the format's self-check invariant — preserve it.
+    if !neutralize_only {
+        let seg_id = crate::model_cubeize::read_model_meshes(ucfx)
+            .ok()
+            .and_then(|ms| ms.iter().find(|m| m.group_index == target_gi).map(|m| m.seg_id));
+        let segm_row = rows
+            .iter()
+            .position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF);
+        if let (Some(seg_id), Some(sr)) = (seg_id, segm_row) {
+            let mut segm = leaf(ucfx, data_off, &rows[sr]).to_vec();
+            let o = seg_id * 4;
+            if o + 4 <= segm.len() {
+                segm[o..o + 2].copy_from_slice(&0xFFFFu16.to_le_bytes()); // node = -1 (i16)
+                segm[o + 2] = seg_id as u8; // seg_id self-reference invariant
+                segm[o + 3] = 0x7F; // present at every LOD tier
+                new_bodies.insert(sr, segm);
+                stats.unbound_seg = Some(seg_id);
+            }
         }
     }
-    new_bodies.insert(0, top);
+
+    // Top INFO bbox over injected verts (bmin/bmax computed above; per-group
+    // PRMG cull bounds were fitted in the geometry-write loop).
+    if !neutralize_only && bmin[0] <= bmax[0] {
+        stats.bbox_min = bmin;
+        stats.bbox_max = bmax;
+        let mut top = leaf(ucfx, data_off, &rows[0]).to_vec();
+        if top.len() >= 28 {
+            for k in 0..3 {
+                top[4 + k * 4..8 + k * 4].copy_from_slice(&bmin[k].to_le_bytes());
+                top[16 + k * 4..20 + k * 4].copy_from_slice(&bmax[k].to_le_bytes());
+            }
+        }
+        new_bodies.insert(0, top);
+    }
 
     // Reassemble container, recompute offsets, CSUM, rewrap in WAD block.
     let mut new_data: Vec<u8> = Vec::new();
@@ -2619,4 +2646,527 @@ mod tests {
         block.extend_from_slice(&ucfx);
         block
     }
+}
+
+// ============================================================================
+// MULTI-PART conform (vehicles): several meshes -> several PRMG groups, each with
+// its own material and its own SEGM binding.
+//
+// `inject_static_into_donor_block` hosts one rigid mesh in one group. A vehicle needs
+// more (docs/modernization/vehicle_model_spec.md 2/4):
+//   * one material PER GROUP  - PRMT word 0 IS the MTRL index, so body/gear/glass/rotor
+//     each need their own group to carry their own skin;
+//   * moving parts must be bound to the HIER NODE that moves them (the rotor node is
+//     driven by BoneCtrlLocalRotation), and a rigid MESH is authored in that node LOCAL
+//     space - so its verts go through inverse(node.world);
+//   * static parts take node = -1: model space, always visible (clause 3 cannot gate a
+//     negative node), every LOD tier, never superseded by a finer rung.
+// ============================================================================
+
+/// One part of a multi-part conform.
+pub struct PartSpec {
+    pub label: String,
+    pub mesh: ExternalMesh,
+    /// Host PRMG drawing-group ordinal.
+    pub group: usize,
+    /// HIER node to bind to. **ALWAYS give a REAL node** — see the `node = -1` trap below.
+    ///
+    /// ★`node = -1` IS NOT A VALID HOST for a rigid `MESH`. The draw gate treats a negative node
+    /// as "always visible" (clause 3 can't gate it) and `apply_supersede` skips it, so the spec's
+    /// "bound to no node" reads like a free pass — but a rigid MESH sub-object is authored in its
+    /// node's LOCAL space and the engine MULTIPLIES it by that node's matrix. With `-1` the engine
+    /// indexes the node-matrix array at -1 → out-of-bounds → a garbage matrix that changes every
+    /// frame. Observed in-game: the mesh flickered ~1 frame in 60 and rendered wherever the CAMERA
+    /// was looking (it was picking up view-matrix memory). Visibility was fine; the transform was junk.
+    ///
+    /// Bind static parts to a real, default-ENABLED, non-animated node instead — the intact-body
+    /// slot `0x255EAB53` is the right one (translation (0,0,0), so its matrix is a no-op), and this
+    /// conform pre-multiplies by `inverse(node.world)` so the geometry still lands in model space.
+    pub node: i32,
+    /// MTRL record index this group draws with (PRMT word 0).
+    pub material_index: u32,
+    /// Re-centre this part's X/Z onto its node's origin before binding.
+    ///
+    /// A SPINNING part must straddle its node's axis or it ORBITS instead of rotating: the engine
+    /// spins the NODE, so geometry offset from the node origin sweeps a circle around it. Our
+    /// rotor's hub sits wherever the source model put it, which is not where the template's mast
+    /// node is — observed in-game as blades that spin visibly off-centre. Aligning the part's X/Z
+    /// bbox centre to the node origin puts the hub on the axis. Y is left alone (the rotor's height
+    /// comes from our own model, not the template's mast).
+    ///
+    /// Only for parts on a node that actually moves — never for static parts, which would slide.
+    pub recenter_xz: bool,
+}
+
+#[derive(Default)]
+pub struct PartStat {
+    pub label: String,
+    pub group: usize,
+    pub node: i32,
+    pub material_index: u32,
+    pub seg_id: usize,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+}
+
+#[derive(Default)]
+pub struct PartsStats {
+    pub fit_scale: f32,
+    pub bbox_min: [f32; 3],
+    pub bbox_max: [f32; 3],
+    pub parts: Vec<PartStat>,
+    pub emptied_groups: Vec<usize>,
+    pub mtrl_repoints: usize,
+}
+
+/// Conform a multi-part model into a real vehicle template container (raw UCFX in, raw UCFX out).
+pub fn inject_parts_into_template(
+    ucfx: &[u8],
+    parts: &[PartSpec],
+    repoints: &[(u32, u32)],
+    // Set a specific MTRL record's diffuse BY INDEX. Hash repoints cannot express per-part skins
+    // when a template shares one texture across several materials (the ztz98 has 8 materials but
+    // only 4 distinct diffuse hashes), yet a vehicle wants a separate skin per part — and the
+    // TRACK materials must keep their own texture because they are the ones that scroll.
+    mtrl_sets: &[(usize, u32)],
+    // APPEND a material: clone record `src` and give the copy a new diffuse. A novel model needs
+    // more skins than the donor happens to carry, and NOT every donor material is usable — the
+    // ztz98's materials 0/1/2 have flags 0x0000 / tex_count 2 (an untextured shader variant) and
+    // render as a flat colour no matter what texture you bind. Only the flags-0x0080+ materials
+    // sample a texture. Cloning a known-good one is how we get another valid skin slot.
+    mtrl_adds: &[(usize, u32)],
+    new_name_hash: u32,
+    scale_mult: f32,
+    flip_winding: bool,
+    y_offset: f32,
+    // Percentile (0-100) used to measure the model for the FIT SCALE. 100 = the raw bbox.
+    //
+    // ★Use <100 when a thin outlier inflates a dimension. The uniform fit picks the TIGHTEST axis,
+    // so a 20-vertex radio antenna sticking 33% above the turret makes "height" the binding axis and
+    // shrinks the WHOLE tank by ~25% — the model reads squashed, and no donor ever "fits". Measuring
+    // at the 99.5th percentile ignores such spikes. Position still uses the TRUE extents (the mast
+    // is still drawn; it is just not allowed to dictate scale).
+    fit_percentile: f32,
+) -> Result<(Vec<u8>, PartsStats), String> {
+    if ucfx.len() < 20 || &ucfx[0..4] != b"UCFX" {
+        return Err("template is not a UCFX container".into());
+    }
+    let (data_off, ndesc, mut rows) = parse_rows(ucfx);
+    let groups = find_groups(&rows);
+    let drawing: Vec<usize> =
+        (0..groups.len()).filter(|&gi| group_draws(ucfx, data_off, &rows, &groups[gi])).collect();
+    let mut stats = PartsStats { fit_scale: 1.0, ..Default::default() };
+
+    // ---- ONE global fit for the whole model: union bbox of every part -> the template
+    // model-space AABB (header INFO +0x04/+0x10). All parts MUST share one transform or they
+    // fall apart relative to each other. X/Z centred, Y bottom-aligned (gear on the ground).
+    let (mut umin, mut umax) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in parts {
+        for v in &p.mesh.positions {
+            for k in 0..3 {
+                umin[k] = umin[k].min(v[k]);
+                umax[k] = umax[k].max(v[k]);
+            }
+        }
+    }
+    if umin[0] > umax[0] {
+        return Err("parts have no geometry".into());
+    }
+    // Robust extents for the SCALE only (see `fit_percentile`): trim the tails per axis so a thin
+    // antenna cannot dictate the uniform scale. `umin/umax` (true extents) still drive placement.
+    let (mut smin, mut smax) = (umin, umax);
+    if fit_percentile < 100.0 {
+        let q = (fit_percentile.clamp(50.0, 100.0) / 100.0) as f64;
+        for k in 0..3 {
+            let mut vals: Vec<f32> =
+                parts.iter().flat_map(|p| p.mesh.positions.iter().map(move |v| v[k])).collect();
+            if vals.len() < 8 {
+                continue;
+            }
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = vals.len() as f64;
+            let lo = (((1.0 - q) * n) as usize).min(vals.len() - 1);
+            let hi = ((q * n) as usize).min(vals.len() - 1);
+            smin[k] = vals[lo];
+            smax[k] = vals[hi];
+        }
+    }
+    let t = leaf(ucfx, data_off, &rows[0]);
+    if t.len() < 28 {
+        return Err("template header INFO too small for an AABB".into());
+    }
+    let rf = |o: usize| f32::from_bits(read_u32_le(t, o));
+    let (tmin, tmax) = ([rf(4), rf(8), rf(12)], [rf(16), rf(20), rf(24)]);
+    let mut s = f32::MAX;
+    for k in 0..3 {
+        let d = smax[k] - smin[k];
+        if d > 1e-4 {
+            s = s.min((tmax[k] - tmin[k]).abs() / d);
+        }
+    }
+    if !s.is_finite() || s <= 0.0 {
+        s = 1.0;
+    }
+    s *= if scale_mult > 0.0 { scale_mult } else { 1.0 };
+    // X/Z centred on the template; Y BOTTOM-aligned to the ground plane.
+    //
+    // ★Ground = y 0, NOT the template AABB's min-y. A template's own min-y is wherever ITS lowest
+    // geometry happens to sit (the Hind reads 0.17 m), so bottom-aligning to it left our gear
+    // hovering that far up — in-game, a visible ~6-inch float. Vehicles rest on y = 0; put our
+    // lowest vertex there. `y_offset` trims from that (negative sinks it in).
+    let ucen = [(umin[0] + umax[0]) * 0.5, umin[1], (umin[2] + umax[2]) * 0.5];
+    let tgt = [(tmin[0] + tmax[0]) * 0.5, y_offset, (tmin[2] + tmax[2]) * 0.5];
+    let fit = |p: [f32; 3]| {
+        [
+            (p[0] - ucen[0]) * s + tgt[0],
+            (p[1] - ucen[1]) * s + tgt[1],
+            (p[2] - ucen[2]) * s + tgt[2],
+        ]
+    };
+    stats.fit_scale = s;
+
+    let (mut bmin, mut bmax) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in parts {
+        for v in &p.mesh.positions {
+            let w = fit(*v);
+            for k in 0..3 {
+                bmin[k] = bmin[k].min(w[k]);
+                bmax[k] = bmax[k].max(w[k]);
+            }
+        }
+    }
+    stats.bbox_min = bmin;
+    stats.bbox_max = bmax;
+
+    // HIER world-rest matrices: needed to push a node-bound part into its node LOCAL space.
+    let wrapped = wrap_block(ucfx, new_name_hash);
+    let skel = crate::skeleton::Skeleton::from_block(&wrapped).ok();
+    let meshes = crate::model_cubeize::read_model_meshes(ucfx).unwrap_or_default();
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    let mut segm_body: Option<Vec<u8>> = None;
+    let segm_row = rows.iter().position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF);
+
+    for spec in parts {
+        let g = groups.get(spec.group).ok_or_else(|| format!("group {} out of range", spec.group))?;
+
+        // Fit to model space, then (if node-bound) into that node LOCAL space, because a rigid
+        // MESH sub-object is authored bone-local and the engine multiplies it by node.world.
+        let mut m = spec.mesh.clone();
+        let node_inv = if spec.node >= 0 {
+            let b = skel
+                .as_ref()
+                .and_then(|s| s.bones.get(spec.node as usize))
+                .ok_or_else(|| format!("node {} not in HIER", spec.node))?;
+            Some(crate::skeleton::affine_inverse(&b.world))
+        } else {
+            None
+        };
+        // A spinning part must straddle its node's axis or it ORBITS the node instead of rotating
+        // about itself. Shift the part's X/Z bbox centre onto the node origin (Y untouched).
+        let mut shift = [0.0f32, 0.0, 0.0];
+        if spec.recenter_xz && spec.node >= 0 {
+            let (mut pmn, mut pmx) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for v in &m.positions {
+                let w = fit(*v);
+                for k in 0..3 {
+                    pmn[k] = pmn[k].min(w[k]);
+                    pmx[k] = pmx[k].max(w[k]);
+                }
+            }
+            if let Some(b) = skel.as_ref().and_then(|s| s.bones.get(spec.node as usize)) {
+                shift[0] = b.world[3][0] - (pmn[0] + pmx[0]) * 0.5;
+                shift[2] = b.world[3][2] - (pmn[2] + pmx[2]) * 0.5;
+            }
+        }
+
+        for i in 0..m.positions.len() {
+            let f = fit(m.positions[i]);
+            let w = [f[0] + shift[0], f[1] + shift[1], f[2] + shift[2]];
+            m.positions[i] = match &node_inv {
+                Some(inv) => crate::skeleton::transform_point(inv, w),
+                None => w,
+            };
+            if let Some(inv) = &node_inv {
+                let n = crate::skeleton::transform_dir(inv, m.normals[i]);
+                let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-8);
+                m.normals[i] = [n[0] / l, n[1] / l, n[2] / l];
+            }
+        }
+
+        let flipped: Vec<[u32; 3]>;
+        let tris: &[[u32; 3]] = if flip_winding {
+            flipped = m.tris.iter().map(|&[a, b, c]| [a, c, b]).collect();
+            &flipped
+        } else {
+            &m.tris
+        };
+        let strip = to_strip(tris);
+        if m.positions.len() > 65534 {
+            return Err(format!("{}: {} verts exceeds u16", spec.label, m.positions.len()));
+        }
+        if strip.len() > 65534 {
+            return Err(format!(
+                "{}: strip {} exceeds u16 - lower this part triangle budget",
+                spec.label,
+                strip.len()
+            ));
+        }
+        let tans = synth_tangents(&m);
+        let (vc, ic) = (m.positions.len() as u32, strip.len() as u32);
+        let mut ib = Vec::with_capacity(strip.len() * 2);
+        for &x in &strip {
+            ib.extend_from_slice(&(x as u16).to_le_bytes());
+        }
+
+        let stride = read_u32_le(leaf(ucfx, data_off, &rows[g.strm_info]), 4) as usize;
+        let decl = parse_decl(leaf(ucfx, data_off, &rows[g.strm_decl]));
+        let vb = encode_strm_from_decl(&m, &tans, &decl, stride);
+        let f0 = read_u32_le(leaf(ucfx, data_off, &rows[g.strm_info]), 0);
+        let mut si = Vec::new();
+        si.extend_from_slice(&f0.to_le_bytes());
+        si.extend_from_slice(&(stride as u32).to_le_bytes());
+        si.extend_from_slice(&vc.to_le_bytes());
+        new_bodies.insert(g.strm_info, si);
+        new_bodies.insert(g.strm_data, vb);
+        new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
+        new_bodies.insert(g.ibuf_data, ib);
+
+        // PRMT: word 0 = the MTRL index (this is what gives the part its own skin).
+        let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
+        let nrec = (prmt_old.len() / 16).max(1);
+        let mut rec = Vec::with_capacity(16);
+        rec.extend_from_slice(&spec.material_index.to_le_bytes());
+        rec.extend_from_slice(&0u32.to_le_bytes());
+        rec.extend_from_slice(&(ic - 2).to_le_bytes());
+        rec.extend_from_slice(&((vc - 1) as u16).to_le_bytes());
+        rec.extend_from_slice(&(vc as u16).to_le_bytes());
+        let mut pb = Vec::with_capacity(nrec * 16);
+        pb.extend_from_slice(&rec);
+        for _ in 1..nrec {
+            pb.extend_from_slice(&[0u8; 16]); // extra sub-strips draw nothing
+        }
+        new_bodies.insert(g.prmt, pb);
+
+        let (mut pmin, mut pmax) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &m.positions {
+            for k in 0..3 {
+                pmin[k] = pmin[k].min(v[k]);
+                pmax[k] = pmax[k].max(v[k]);
+            }
+        }
+        if let Some(pir) =
+            (0..g.strm_info).rev().find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+        {
+            let mut pi = leaf(ucfx, data_off, &rows[pir]).to_vec();
+            if pi.len() >= 60 {
+                let cen = [
+                    (pmin[0] + pmax[0]) * 0.5,
+                    (pmin[1] + pmax[1]) * 0.5,
+                    (pmin[2] + pmax[2]) * 0.5,
+                ];
+                let (dx, dy, dz) = (
+                    (pmax[0] - pmin[0]) * 0.5,
+                    (pmax[1] - pmin[1]) * 0.5,
+                    (pmax[2] - pmin[2]) * 0.5,
+                );
+                let rad = (dx * dx + dy * dy + dz * dz).sqrt();
+                for k in 0..3 {
+                    pi[20 + k * 4..24 + k * 4].copy_from_slice(&cen[k].to_le_bytes());
+                    pi[36 + k * 4..40 + k * 4].copy_from_slice(&pmin[k].to_le_bytes());
+                    pi[48 + k * 4..52 + k * 4].copy_from_slice(&pmax[k].to_le_bytes());
+                }
+                pi[32..36].copy_from_slice(&rad.to_le_bytes());
+                new_bodies.insert(pir, pi);
+            }
+        }
+
+        // SEGM: bind this group segment to the requested node, at EVERY LOD tier.
+        // Reached: group -> parent sub-object -> INDX[sub_object] = seg_id -> SEGM[seg_id].
+        let seg_id = meshes
+            .iter()
+            .find(|mm| mm.group_index == spec.group)
+            .map(|mm| mm.seg_id)
+            .ok_or_else(|| format!("group {} has no INDX/SEGM binding", spec.group))?;
+        let body = segm_body.get_or_insert_with(|| {
+            segm_row.map(|sr| leaf(ucfx, data_off, &rows[sr]).to_vec()).unwrap_or_default()
+        });
+        let o = seg_id * 4;
+        if o + 4 > body.len() {
+            return Err(format!("seg_id {seg_id} outside SEGM"));
+        }
+        body[o..o + 2].copy_from_slice(&(spec.node as i16).to_le_bytes());
+        body[o + 2] = seg_id as u8; // SEGM[i].seg_id == i invariant
+        body[o + 3] = 0x7F; // present at every LOD tier
+
+        stats.parts.push(PartStat {
+            label: spec.label.clone(),
+            group: spec.group,
+            node: spec.node,
+            material_index: spec.material_index,
+            seg_id,
+            vertex_count: vc as usize,
+            triangle_count: m.tris.len(),
+        });
+    }
+    if let (Some(sr), Some(b)) = (segm_row, segm_body) {
+        new_bodies.insert(sr, b);
+    }
+
+    // Every group we did NOT host geometry in draws nothing.
+    let hosted: Vec<usize> = parts.iter().map(|p| p.group).collect();
+    for &gi in &drawing {
+        if hosted.contains(&gi) {
+            continue;
+        }
+        let pg = &groups[gi];
+        let mut p = leaf(ucfx, data_off, &rows[pg.prmt]).to_vec();
+        for r in 0..p.len() / 16 {
+            p[r * 16 + 8..r * 16 + 12].copy_from_slice(&0u32.to_le_bytes());
+        }
+        new_bodies.insert(pg.prmt, p);
+        stats.emptied_groups.push(gi);
+    }
+
+    // APPEND cloned materials first, so --set-mtrl indices can refer to them.
+    if !mtrl_adds.is_empty() {
+        if let Some(mi) = rows.iter().position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF) {
+            let mut m = leaf(ucfx, data_off, &rows[mi]).to_vec();
+            // Index the existing records (offset, stride).
+            let mut recs: Vec<(usize, usize)> = Vec::new();
+            let mut o = 0usize;
+            while o + 112 <= m.len() {
+                let texc = u16::from_le_bytes([m[o + 106], m[o + 107]]) as usize;
+                if !(1..=10).contains(&texc) {
+                    break;
+                }
+                let stride = 116 + texc * 4;
+                recs.push((o, stride));
+                o += stride;
+            }
+            for &(src, tex) in mtrl_adds {
+                let Some(&(so, stride)) = recs.get(src) else { continue };
+                let mut rec = m[so..so + stride].to_vec();
+                rec[108..112].copy_from_slice(&tex.to_le_bytes());
+                // ★A material record's first u32 is its NAME HASH, and the engine registers
+                // materials into the shader registry by that hash, FIRST-WINS. A verbatim clone
+                // therefore keeps the source's hash, loses the race, and never gets a registry
+                // slot -- so at draw time `shader_table[mtrl_idx]` is NULL and the renderer faults
+                // dereferencing it (+0x182) in FUN_00855420. Give the copy its own hash.
+                let name = format!("mtrl_clone_{src}_{tex:08x}");
+                rec[0..4].copy_from_slice(&crate::hash::pandemic_hash_m2(&name).to_le_bytes());
+                let no = m.len();
+                m.extend_from_slice(&rec);
+                recs.push((no, stride));
+                stats.mtrl_repoints += 1;
+            }
+            new_bodies.insert(mi, m);
+        }
+    }
+
+    // MTRL diffuse BY MATERIAL INDEX. Record stride = 116 + tex_count*4; flags@104, tex_count@106,
+    // texture hashes from @108 (diffuse = the first). Walk records and rewrite the requested ones.
+    if !mtrl_sets.is_empty() {
+        if let Some(mi) = rows.iter().position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF) {
+            let mut m = new_bodies
+                .get(&mi)
+                .cloned()
+                .unwrap_or_else(|| leaf(ucfx, data_off, &rows[mi]).to_vec());
+            let mut o = 0usize;
+            let mut idx = 0usize;
+            while o + 112 <= m.len() {
+                let texc = u16::from_le_bytes([m[o + 106], m[o + 107]]) as usize;
+                if !(1..=10).contains(&texc) {
+                    break;
+                }
+                if let Some(&(_, tex)) = mtrl_sets.iter().find(|(i, _)| *i == idx) {
+                    if o + 108 + 4 <= m.len() {
+                        m[o + 108..o + 112].copy_from_slice(&tex.to_le_bytes());
+                        stats.mtrl_repoints += 1;
+                    }
+                }
+                o += 116 + texc * 4;
+                idx += 1;
+            }
+            new_bodies.insert(mi, m);
+        }
+    }
+
+    // MTRL texture repoints (give each hosted material our skin).
+    if !repoints.is_empty() {
+        for (i, r) in rows.iter().enumerate() {
+            if &r.tag != b"MTRL" || r.u0 == 0xFFFF_FFFF {
+                continue;
+            }
+            let mut m = leaf(ucfx, data_off, r).to_vec();
+            let mut n = 0usize;
+            let mut o = 0usize;
+            while o + 4 <= m.len() {
+                let v = read_u32_le(&m, o);
+                if let Some(&(_, to)) = repoints.iter().find(|(from, _)| *from == v) {
+                    m[o..o + 4].copy_from_slice(&to.to_le_bytes());
+                    n += 1;
+                }
+                o += 4;
+            }
+            if n > 0 {
+                stats.mtrl_repoints += n;
+                new_bodies.insert(i, m);
+            }
+        }
+    }
+
+    let mut top = leaf(ucfx, data_off, &rows[0]).to_vec();
+    if top.len() >= 28 {
+        for k in 0..3 {
+            top[4 + k * 4..8 + k * 4].copy_from_slice(&bmin[k].to_le_bytes());
+            top[16 + k * 4..20 + k * 4].copy_from_slice(&bmax[k].to_le_bytes());
+        }
+    }
+    new_bodies.insert(0, top);
+
+    // Reassemble + CSUM.
+    let mut new_data: Vec<u8> = Vec::new();
+    for (idx, r) in rows.iter_mut().enumerate() {
+        if r.u0 == 0xFFFF_FFFF {
+            continue;
+        }
+        let body = match new_bodies.get(&idx) {
+            Some(b) => b.clone(),
+            None => leaf(ucfx, data_off, r).to_vec(),
+        };
+        r.u0 = new_data.len() as u32;
+        r.size = body.len() as u32;
+        new_data.extend_from_slice(&body);
+    }
+    let new_data_off = (20 + ndesc * 20) as u32;
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"UCFX");
+    out.extend_from_slice(&new_data_off.to_le_bytes());
+    out.extend_from_slice(&ucfx[8..16]);
+    out.extend_from_slice(&(ndesc as u32).to_le_bytes());
+    for r in &rows {
+        out.extend_from_slice(&r.tag);
+        out.extend_from_slice(&r.u0.to_le_bytes());
+        out.extend_from_slice(&r.size.to_le_bytes());
+        out.extend_from_slice(&r.u2.to_le_bytes());
+        out.extend_from_slice(&r.u3.to_le_bytes());
+    }
+    out.extend_from_slice(&new_data);
+    let csum = crc32_mercs2(&out);
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&csum.to_le_bytes());
+    Ok((out, stats))
+}
+
+/// Wrap a raw UCFX container in the 20-byte single-entry block header Skeleton::from_block wants.
+fn wrap_block(ucfx: &[u8], name_hash: u32) -> Vec<u8> {
+    const MODEL_TYPE_HASH: u32 = 0x5B72_4250;
+    let mut b = Vec::with_capacity(20 + ucfx.len());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&name_hash.to_le_bytes());
+    b.extend_from_slice(&MODEL_TYPE_HASH.to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
+    b.extend_from_slice(ucfx);
+    b
 }

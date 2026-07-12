@@ -41,6 +41,9 @@ fn run() -> i32 {
     let mut all = false; // --all-groups: inject the mesh into EVERY drawing group (guarantees visibility)
     let mut raw_targets: Vec<usize> = Vec::new(); // --raw-groups N,M,...: inject into these RAW group ordinals (the engine's rendered set)
     let mut scale_mult = 1.0f32; // --scale S: multiply the auto-fit scale (1.0 = exact fit to real body envelope)
+    // --neutralize-only: host no geometry, empty EVERY drawing group. Used on a vehicle's finer LOD
+    // rungs (_P001_/_P002_) so the template's near-tier geometry can't draw over the conformed mesh.
+    let mut neutralize_only = false;
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -62,6 +65,7 @@ fn run() -> i32 {
             "--diffuse-to" => dt = it.next().and_then(|s| parse_hash(s)),
             "--natural-scale" => fit = false,
             "--scale" => scale_mult = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            "--neutralize-only" => neutralize_only = true,
             "--no-flip" => flip = false,
             "--keep-groups" => keep = true,
             "--all-groups" => all = true,
@@ -124,7 +128,7 @@ fn run() -> i32 {
     };
 
     // ---- inject, then unwrap the block back to raw UCFX ----
-    let (out_block, stats) = match inject_static_into_donor_block(&block, &mesh, group, &repoints, name_hash, fit, flip, keep, all, &raw_targets, scale_mult) {
+    let (out_block, stats) = match inject_static_into_donor_block(&block, &mesh, group, &repoints, name_hash, fit, flip, keep, all, &raw_targets, scale_mult, neutralize_only) {
         Ok(v) => v,
         Err(e) => { eprintln!("inject_static: {e}"); return 1; }
     };
@@ -133,9 +137,19 @@ fn run() -> i32 {
     if let Err(e) = std::fs::write(&pos[2], out_ucfx) {
         eprintln!("write {}: {e}", pos[2]); return 1;
     }
+    if neutralize_only {
+        println!(
+            "neutralised {} drawing group(s) — no geometry hosted -> {} ({} UCFX bytes)",
+            stats.emptied_groups.len(),
+            pos[2],
+            out_ucfx.len()
+        );
+        return 0;
+    }
     println!(
-        "injected {} verts / {} tris into group {} (neutralised {} groups); bbox=[{:.2},{:.2},{:.2}]..[{:.2},{:.2},{:.2}]; MTRL repoints={:?} -> {} ({} UCFX bytes)",
-        stats.vertex_count, stats.triangle_count, stats.target_group, stats.emptied_groups.len(),
+        "injected {} verts / {} tris into group {} (SEGM seg_id {:?} unbound -> node=-1, lod_mask=0x7f; neutralised {} groups); bbox=[{:.2},{:.2},{:.2}]..[{:.2},{:.2},{:.2}]; MTRL repoints={:?} -> {} ({} UCFX bytes)",
+        stats.vertex_count, stats.triangle_count, stats.target_group, stats.unbound_seg,
+        stats.emptied_groups.len(),
         stats.bbox_min[0], stats.bbox_min[1], stats.bbox_min[2],
         stats.bbox_max[0], stats.bbox_max[1], stats.bbox_max[2],
         stats.mtrl_repoints, pos[2], out_ucfx.len()
