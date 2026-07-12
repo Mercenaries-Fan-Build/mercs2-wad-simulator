@@ -1,14 +1,24 @@
-//! Destruction state machine reader — turns a model's `HIER` node tree + `SWIT`
-//! switch list (+ `INDX` mesh→node map) into a per-node
-//! **intact / break_piece / static** classification.
+//! Destruction reader: the engine's own per-model **state machine** (`parse_state_machine` —
+//! `SWIT` + `NODE`/`STAT`/`CHDR`/`CEXE`, mirroring `FUN_004cf340`), plus a legacy heuristic
+//! classifier kept only for callers that predate it.
 //!
-//! Why this exists: the engine never co-renders a destructible's intact body and
-//! its break pieces — it switches between them. That switch is `SWIT`, which lists
-//! the HIER nodes participating in a destruction swap. A model's `submeshes`
-//! attach to HIER nodes via `INDX`, so node-state → submesh-state lets a viewer
-//! show one state at a time instead of overlapping everything.
+//! Why this exists: the engine never co-renders a destructible's intact body and its wreck — it
+//! switches between them, by running a named state's enter-script (`SHOW`/`HIDE`, which act on whole
+//! HIER **subtrees**). `PristineState` (`0xACB51200`) shows the intact body (`0x255EAB53`);
+//! `DestroyedState` (`0x7687DF41`) shows the wreck body (`0x75F1F74D`), which is geometry in the
+//! container. Use `parse_state_machine` + `machine_node_enable` for anything real.
 //!
-//! Classification rule (deterministic, from real bytes — validated on the
+//! ★**The `intact / break_piece / static` classification below is a HEURISTIC and is SUPERSEDED.**
+//! It was inferred from `SWIT` sibling structure before the real machine was recovered. It has no
+//! notion of health, states, or messages, and its "static = always rendered" category is misleading
+//! — a node the machine never names is still hidden as a *child* of a governed parent. Do not build
+//! on it. See `docs/modernization/vehicle_model_spec.md` §5.
+//!
+//! ★Note also: the doc-comment's "`INDX` mesh→node map" is wrong — `INDX` is keyed by **sub-object**
+//! ordinal and yields a **seg_id into `SEGM`**, whose `bone` is the node. See `vehicle_model_spec.md`
+//! §2 and `model_cubeize::read_model_meshes_segm`.
+//!
+//! Legacy classification rule (deterministic, from real bytes — validated on the
 //! resident2 up-crate, see tests):
 //! - A **switch group** is a set of sibling HIER nodes that appear in `SWIT` and
 //!   share a parent that is *not* in `SWIT` (the group roots).
