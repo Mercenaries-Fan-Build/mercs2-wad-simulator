@@ -49,6 +49,18 @@ struct Cli {
     /// Explicit block index(es) to target (repeatable). Overrides --target-name.
     #[arg(long)]
     block_index: Vec<usize>,
+    /// Honour --block-index VERBATIM: read/write the model container in exactly that block, with
+    /// NO redirect to the ASET-primary block.
+    ///
+    /// By default both --dump-container and --inject-container resolve the model's ASET-PRIMARY
+    /// block, which is right for a vehicle's RESIDENT rung but makes the rest of the chain
+    /// unreachable: a vehicle's geometry is spread over `_P000_Q3` (resident) -> `_P001_` ->
+    /// `_P002_`, and pointing at a finer rung just bounces you back to the resident. The finer
+    /// rungs are where a tank's animated tracks and its full-res materials live, and a model with
+    /// no primary ASET row (sub-entry only, e.g. the Mi-26) cannot be reached at all. Use this to
+    /// dump/override one specific rung. See docs/modernization/vehicle_model_spec.md §1.
+    #[arg(long)]
+    exact_block: bool,
     /// Comma-separated path substrings to auto-select when --block-index is absent.
     #[arg(long, default_value = "deliverycrate,crateaid")]
     target_name: String,
@@ -124,6 +136,7 @@ fn build_block(
     shape: CubeShape,
     inject: Option<&[u8]>,
     verbose: bool,
+    exact: bool,
 ) -> Result<Option<Built>, String> {
     let probe = decompress_block(file, &archive.indx, block_index as u16)
         .map_err(|e| format!("decompress block {block_index}: {e}"))?;
@@ -132,13 +145,18 @@ fn build_block(
         None => return Ok(None),
     };
 
-    // Source from the block the engine instantiates (ASET primary block_index).
-    let src_block_index = archive
-        .aset
-        .iter()
-        .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
-        .map(|e| e.block_index() as usize)
-        .unwrap_or(block_index);
+    // Source from the block the engine instantiates (ASET primary block_index) — unless the caller
+    // asked for this EXACT block (--exact-block), which is how the finer LOD rungs are reached.
+    let src_block_index = if exact {
+        block_index
+    } else {
+        archive
+            .aset
+            .iter()
+            .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
+            .map(|e| e.block_index() as usize)
+            .unwrap_or(block_index)
+    };
 
     let (src_bytes, from_index) = if src_block_index != block_index {
         let b = decompress_block(file, &archive.indx, src_block_index as u16)
@@ -343,12 +361,16 @@ fn run() -> Result<(), String> {
         let model_name = find_model(&probe, None)
             .map(|(_, _, name, _, _)| name)
             .ok_or_else(|| format!("block {idx} contains no model container"))?;
-        let src_block_index = archive
-            .aset
-            .iter()
-            .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
-            .map(|e| e.block_index() as usize)
-            .unwrap_or(idx);
+        let src_block_index = if cli.exact_block {
+            idx
+        } else {
+            archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
+                .map(|e| e.block_index() as usize)
+                .unwrap_or(idx)
+        };
         let src_bytes = if src_block_index != idx {
             decompress_block(&mut file, &archive.indx, src_block_index as u16)
                 .map_err(|e| format!("decompress ASET block {src_block_index}: {e}"))?
@@ -381,7 +403,7 @@ fn run() -> Result<(), String> {
         if idx >= archive.indx.len() {
             return Err(format!("block_index {idx} >= INDX count {}", archive.indx.len()));
         }
-        match build_block(&mut file, &archive, idx, cli.no_cubeize, shape, inject_bytes.as_deref(), cli.verbose)? {
+        match build_block(&mut file, &archive, idx, cli.no_cubeize, shape, inject_bytes.as_deref(), cli.verbose, cli.exact_block)? {
             Some(b) => {
                 if seen.insert(b.model_hash) {
                     blocks.push(b.block);
