@@ -3870,6 +3870,50 @@ pub(crate) fn export_by_hash(
     export_model_data(&md, label)
 }
 
+/// LOSSLESS bundle export: editable glTF (+PNG skins) alongside the ORIGINAL container bytes of
+/// every LOD rung, plus the manifest that maps one onto the other. See `bundle.rs` — the point is
+/// that chunks we have not reversed (PHY2/CHDR/CEXE/SWIT/...) survive byte-exact, so the asset can
+/// always be rebuilt even where our understanding is incomplete.
+pub(crate) fn export_bundle_by_hash(
+    base: &str,
+    overlays: &[String],
+    hash: u32,
+    label: &str,
+    outroot: &std::path::Path,
+) -> Result<String, String> {
+    let mut w = WadStack::open(base, overlays)?;
+    let md = load_model_data(&mut w, hash)?;
+    // The LOD chain, raw. Resolution walks the whole open stack (base + patch overlays).
+    let mut lods: Vec<mercs2_engine::wad::ModelLod> = Vec::new();
+    for wad in w.wads.iter_mut().rev() {
+        if let Ok(l) = mercs2_engine::wad::extract_model_lods(wad, hash) {
+            lods = l;
+            break;
+        }
+    }
+    if lods.is_empty() {
+        return Err(format!("no model container for 0x{hash:08X}"));
+    }
+    let safe: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let dir = outroot.join(&safe);
+    crate::bundle::export_bundle(
+        &dir,
+        label,
+        hash,
+        &lods,
+        &md.verts,
+        &md.indices,
+        &md.draws,
+        &md.textures,
+        &md.hier_nodes,
+        md.header.as_ref(),
+    )?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// Write a model to `workshop_export/<label>/` as OBJ + MTL + decoded PNG textures (game-space
 /// coordinates, one `usemtl` per draw group). Works for WAD assets, imports, and merge results —
 /// the hand-off point into the UCFX/patch pipeline.

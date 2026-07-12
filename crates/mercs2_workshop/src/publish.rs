@@ -181,6 +181,7 @@ fn publish(
             false, // all_groups
             &[item.target_group],
             1.0,
+            false, // neutralize_only
         )
         .map_err(|e| format!("{}: inject into donor {}: {e}", item.name, item.donor_label))?;
         let compressed =

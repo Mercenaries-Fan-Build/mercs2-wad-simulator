@@ -17,6 +17,7 @@
 //!   wad is auto-loaded, exactly as the retail exe does; `--no-auto-patch` disables that.
 
 mod app;
+mod bundle;
 mod gui;
 mod import;
 mod index;
@@ -192,6 +193,48 @@ fn main() {
             Ok(dir) => println!("exported {arg} -> {dir}"),
             Err(e) => eprintln!("--export {arg}: {e}"),
         }
+        return;
+    }
+
+    // Headless: LOSSLESS export bundle(s) — editable glTF + PNG skins + the ORIGINAL container
+    // bytes of every LOD rung + a reassembly manifest. `--export-bundle <name|0xHASH|class:heli>`.
+    // Nothing is discarded: chunks we cannot yet decode survive byte-exact in raw/.
+    if let Some(i) = args.iter().position(|a| a == "--export-bundle") {
+        let arg = args.get(i + 1).cloned().unwrap_or_default();
+        let outroot = std::path::PathBuf::from(
+            args.iter().position(|a| a == "--out").and_then(|j| args.get(j + 1)).cloned()
+                .unwrap_or_else(|| "workshop_export".into()),
+        );
+        let stack = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        // A whole vehicle class ("class:helicopter") or a single asset.
+        let targets: Vec<(u32, String)> = if let Some(cls) = arg.strip_prefix("class:") {
+            idx.models.iter()
+                .filter(|r| r.vehicle_class() == Some(cls))
+                .map(|r| (r.hash, r.label()))
+                .collect()
+        } else {
+            let h = arg.strip_prefix("0x").and_then(|x| u32::from_str_radix(x, 16).ok())
+                .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&arg));
+            let label = idx.names.get(&h).cloned().unwrap_or_else(|| arg.clone());
+            vec![(h, label)]
+        };
+        if targets.is_empty() {
+            return eprintln!("--export-bundle: nothing matched '{arg}'");
+        }
+        drop(stack);
+        let (mut ok, mut fail) = (0, 0);
+        for (h, label) in &targets {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &outroot) {
+                Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
+                Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
+            }
+        }
+        println!("
+exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         return;
     }
 
