@@ -15,7 +15,10 @@
 //! `[faithful-blocker: no]` deferred item (see `DEFERRED.md`). The whole crate runs headless via
 //! [`NullSink`] when no device is present, so tests and servers never need audio hardware.
 
+// Only the cpal ring uses these; the decode-only build (`device` off) has no ring.
+#[cfg(feature = "device")]
 use std::collections::VecDeque;
+#[cfg(feature = "device")]
 use std::sync::{Arc, Mutex};
 
 /// A sink that finished int16 PCM frames are streamed to. The mixer is device-independent; a sink is
@@ -94,6 +97,11 @@ impl AudioSink for CaptureSink {
 /// A real device sink over **cpal** (the DirectSound-secondary-buffer substitute). Submitted frames
 /// are pushed into a shared ring the audio callback drains; underruns produce silence (as the exe's
 /// buffer does on a mix stall). Holds the cpal stream alive for the sink's lifetime.
+///
+/// Present whenever the `device` feature is on, which is the DEFAULT — the engine and game always
+/// have it. It is compiled out only for the headless decode-side CLIs, which never open a device and
+/// must not link `libasound` (see the `cpal` note in Cargo.toml).
+#[cfg(feature = "device")]
 pub struct CpalSink {
     sample_rate: u32,
     channels: usize,
@@ -102,6 +110,7 @@ pub struct CpalSink {
     _stream: cpal::Stream,
 }
 
+#[cfg(feature = "device")]
 impl CpalSink {
     /// Open the default output device and start a stream. Returns `Err` (so the engine can fall back
     /// to [`NullSink`]) if there is no device or the format cannot be built.
@@ -181,6 +190,7 @@ impl CpalSink {
     }
 }
 
+#[cfg(feature = "device")]
 impl AudioSink for CpalSink {
     fn submit(&mut self, samples: &[i16]) {
         if let Ok(mut r) = self.ring.lock() {
