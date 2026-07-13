@@ -1,14 +1,34 @@
 //! Stage-2 destruction-state extractor.
 //!
-//! `destruction_extract <blob> --out-dir <dir>` reads a decompressed block, and
-//! for every model container that carries a `SWIT` switch list, classifies its
-//! HIER nodes into intact / break_piece / static (via
-//! [`mercs2_formats::orchestrator`]). Emits `destruction.json` keyed by model
-//! hash. A block with no switching models writes `{"orchestrated": false}`.
+//! `destruction_extract <blob> --out-dir <dir>` reads a decompressed block and walks its containers
+//! ([`mercs2_formats::ucfx::walk_decompressed_block`]). Every container that looks like a model —
+//! one carrying an `INDX` and/or a `SWIT` switch list — becomes one record in `destruction.json`,
+//! keyed by the block-table entry's model hash:
+//!
+//! - `nodes`: per-HIER-node `intact` / `break_piece` / `static` + switch group, from
+//!   [`mercs2_formats::orchestrator::classify`] (only for the `SWIT`-bearing *orchestrator*
+//!   container; geometry containers carry `INDX` only and get an empty list).
+//! - `indx`: the container's `INDX` table (sub-object ordinal → `seg_id` into `SEGM`).
+//! - `hulls`: grounded PHY2 convex hulls (`{node, vertices}`), model-space, hull→node from `SEGM`.
+//! - `switch_group_count`, `hull_count`, `warnings`.
+//!
+//! The manifest is always written: `{"schema": "mercs2_destruction/1", "extractor":
+//! "mercs2_formats::orchestrator", "orchestrated": <bool>, "orchestrated_models": [...]}`.
+//! `orchestrated` is true only if some container yielded classified nodes — a block with no
+//! switching models still emits the manifest (with `orchestrated: false`) and may still list
+//! `INDX`-only models.
+//!
+//! ★The `intact / break_piece / static` labels are the **legacy heuristic** in
+//! [`mercs2_formats::orchestrator`] and are superseded by the recovered state machine there
+//! (`parse_state_machine` + `machine_node_enable`, mirroring `FUN_004cf340`). This binary has not
+//! been moved onto it; treat `destruction_state` in the JSON as a label, not ground truth. See
+//! `docs/modernization/vehicle_model_spec.md` §5.
 //!
 //! The post-stage-2 join (`tools/destruction_join.py`) maps a stripped geometry
 //! block's submeshes to its orchestrator's `destruction.json` by model hash +
 //! HIER node, so the workbench can show one destruction state at a time.
+//!
+//! Driven per block by `scripts/stage2_parallel.sh`; built by `make build-destruction-extract`.
 
 use mercs2_formats::orchestrator;
 use mercs2_formats::ucfx;
