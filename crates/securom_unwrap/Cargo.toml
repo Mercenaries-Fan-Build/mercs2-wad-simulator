@@ -2,6 +2,7 @@
 name = "securom_unwrap"
 version = "0.1.0"
 publish = false                # excluded from the crates.io release set
+readme = "README.md"
 edition = "2021"
 
 [lib]
