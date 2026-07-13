@@ -1,10 +1,28 @@
 //! All-Rust DLC porter: Xbox 360 DLC RAR/STFS → PC `vz-patch.wad`.
 //!
 //! Reimplements the core of `tools/dlc_port.py::port_x360_dlc` using the Rust
-//! pipeline: STFS extract → BE FFCS parse → per-block (BE-sges decompress →
-//! convert BE→LE → sges recompress) → global-ASET resolution + synthetic ASET →
-//! FFCS assembly. The intricate contract/import-chain/validation/sub-entry ASET
-//! passes and the bootstrap injection are not yet ported (warned at runtime).
+//! pipeline: STFS extract → BE FFCS parse → per-block (BE-sges decompress or
+//! XFCU passthrough → convert BE→LE → sges recompress + round-trip verify) →
+//! content-routed ASET resolution + synthetic ASET → FFCS assembly.
+//!
+//! ASET routing is by *content*, not by index: the Xbox `block_index` cannot be
+//! rebased arithmetically (the DLC's blocks are not a contiguous run in the
+//! source index space), so every row — per-block and `0xFFFF` "global" alike —
+//! is routed to whichever converted block actually owns its `asset_hash`, and
+//! its `type_id` is refined from that entry's `type_hash`. Rows owned by no
+//! shipped block are dropped so the retail WAD resolves them instead.
+//!
+//! The bootstrap / import-chain injection is deliberately *not* performed: those
+//! passes existed to graft the DLC contracts into the *vz* master script, but the
+//! DLC ships its own master script and boots as its own level via
+//! `LevelBootstrap.LoadLevel("dlc01", "dlc01")`. A note is printed on every run.
+//!
+//! Formats are borrowed, not re-derived: `mercs2_formats` supplies the STFS
+//! reader, the BE FFCS/INDX/ASET/PTHS parsers, the sges codec, the UCFX block
+//! entry table and the patch-WAD assembler; `ucfx_byteswap` supplies `convert_block`.
+//!
+//! Run `--list-blocks` to dump the block table without converting anything;
+//! `--start-block` / `--max-blocks` narrow the converted range while iterating.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

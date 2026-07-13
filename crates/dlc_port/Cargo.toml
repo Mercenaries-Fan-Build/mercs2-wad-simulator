@@ -3,6 +3,7 @@ name = "dlc_port"
 version = "0.1.0"
 publish = false                # excluded from the crates.io release set
 edition = "2021"
+readme = "README.md"
 
 [[bin]]
 name = "dlc_port"
