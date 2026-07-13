@@ -49,6 +49,38 @@
 //!   is invented here;
 //! - the registered Jobtype **handlers** themselves are engine `FUN_` bodies (§2) — recorded as hashes
 //!   in [`job::REGISTERED_JOBTYPES`], not reimplemented (they belong to the animation/streaming crates).
+//!
+//! ## Module map
+//!
+//! | module | owns |
+//! |---|---|
+//! | [`job`] | [`Job`] (Jobtype hash + optional fence + bound handler closure), [`CompletionFence`], [`Priority`], [`JOB_ELEM_SIZE`] (`0x60`), [`REGISTERED_JOBTYPES`] (the 7 recovered hashes). |
+//! | [`ring`] | [`JobRing`] — the bounded CS-guarded FIFO — plus the recovered capacities [`RING_CAP_INIT`] (`0x10`), [`RING_CAP_WORKER_ITER`] (`0x1000`), [`RING_CAP_WORKER_DRAIN`] (`0x400`). |
+//!
+//! The crate root owns [`WorkerPool`] (submit / fork / drain) and [`pimp_num_cpus`].
+//!
+//! ## Example — fork/join
+//!
+//! ```
+//! use mercs2_jobs::{CompletionFence, Job, Priority, WorkerPool};
+//! use std::cell::RefCell;
+//! use std::rc::Rc;
+//!
+//! let mut pool = WorkerPool::new();          // one worker per usable CPU (pimpGetNumCpus)
+//! let fence = CompletionFence::new();
+//! let sum = Rc::new(RefCell::new(0u32));
+//! for i in 1..=5u32 {
+//!     let s = sum.clone();
+//!     // 0xcd4a518c = a recovered AnimCpu*Job Jobtype hash; pass 0 for an ad-hoc closure.
+//!     pool.fork(Priority::High, 0xcd4a518c, &fence, move || *s.borrow_mut() += i).unwrap();
+//! }
+//! pool.submit(Priority::Low, Job::from_fn(|| {})).unwrap();  // fire-and-forget, no fence
+//!
+//! assert_eq!(fence.count(), 0);   // nothing has run yet
+//! pool.run_all();                 // the fork/join point: drain both rings
+//! assert_eq!(fence.count(), 5);   // the join sees all 5 forked jobs complete
+//! assert_eq!(*sum.borrow(), 15);
+//! ```
 
 pub mod job;
 pub mod ring;
