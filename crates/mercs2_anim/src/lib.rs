@@ -18,7 +18,25 @@
 //! The [`pose`] module is the `hkQsTransform` sample/compose/blend math, ported from
 //! `mercs2_engine::pose` so this crate never depends on the renderer.
 //!
-//! **Ragdoll is DEFERRED** — it needs physics rigid bodies from silo 7. See `DEFERRED.md`.
+//! # Module map
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`select`] | [`ClipPicker`], [`StateKey`], [`ResolvedClip`] — the forward `(character, state) → clip` resolver. |
+//! | [`controller`] | [`HumanAnimationSet`] + [`AnimController`] components, the [`AnimAssets`]/[`SampledPose`] asset seam, and [`animation_system`]. |
+//! | [`pose`] | [`BoneRig`] and the `hkQsTransform` math (`bind_qs`/`model_poses`/`skin_palette`/`havok_palette*`/`qs_blend`/`clip_root_speed`). |
+//! | [`ik`] | [`solve_two_bone`], [`FootPlacementIk`], [`LegChain`], [`IkResult`]. |
+//!
+//! Assets reach the runtime through the [`AnimAssets`] trait (rig / clip duration / sampled pose) and
+//! ground through `mercs2_core::PhysicsQuery`, so the only dependencies are `mercs2_core` +
+//! `mercs2_formats` — no renderer, no loader, no leaf→leaf edge to the physics silo.
+//!
+//! **Ragdoll and FaceFX are DEFERRED** — ragdoll needs physics rigid bodies from silo 7; FaceFX
+//! (evaluator `FUN_00686ce0`) needs its curve format decoded. Neither exists in this crate despite
+//! the package description listing them. Other known faithfulness gaps: the per-transition crossfade
+//! table (`AnimationTransition 0xAB8FE34B` — the controller uses a fixed [`ANIM_BLEND_SEC`] instead),
+//! the walk↔run locomotion blend space, and foot-IK surface-normal orientation + pelvis drop. All are
+//! tracked in `DEFERRED.md`.
 
 pub mod controller;
 pub mod ik;
