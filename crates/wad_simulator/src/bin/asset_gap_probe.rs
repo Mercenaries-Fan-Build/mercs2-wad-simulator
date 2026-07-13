@@ -46,6 +46,49 @@ struct Cli {
     emit: Option<PathBuf>,
 }
 
+/// Every base name a texture's name can legitimately derive, longest first.
+///
+/// A PROP or VEHICLE model `X` names its textures `X_dm`/`X_nm`/`X_sm`, so stripping the material-map
+/// suffix lands straight on the model. A CHARACTER does not: its textures are per BODY PART —
+/// `civ_hum_beachfemale_b_head`, `_ub`, `_lb`, `_hair` — and those stack with a map suffix
+/// (`civ_hum_beachfemale_b_head_nm`). Stripping only the map suffix therefore lands on ANOTHER
+/// TEXTURE's name, never the model's. That is why all three beachfemale models sat unnamed in the
+/// workshop while their 33 textures resolved: the model is two suffixes up, not one.
+///
+/// Rather than curate a body-part list and miss whatever it omits, peel trailing `_token`s
+/// progressively and let the WAD arbitrate. This CANNOT mis-name anything: the caller records
+/// `hash(candidate) -> candidate`, i.e. a verified PREIMAGE, and only when that hash is really an
+/// asset in the WAD. A wrong guess hashes to nothing and is dropped.
+fn candidate_bases(name: &str) -> Vec<String> {
+    let lower = name.to_lowercase();
+    // Longest matching map suffix wins ("_lod_dm" beats "_dm").
+    let mut best: Option<&str> = None;
+    for s in TEX_SUFFIXES {
+        if lower.ends_with(s) && best.map(|b| s.len() > b.len()).unwrap_or(true) {
+            best = Some(s);
+        }
+    }
+    let mut base = name.to_string();
+    if let Some(sfx) = best {
+        base.truncate(base.len() - sfx.len());
+    }
+    if base.is_empty() {
+        return Vec::new();
+    }
+
+    // `civ_hum_beachfemale_b_head` -> `civ_hum_beachfemale_b` -> `civ_hum_beachfemale`. Stop at
+    // MIN_TOKENS so we never walk up to a meaningless stem ("civ_hum") that could belong to anything.
+    const MIN_TOKENS: usize = 3;
+    let mut out = vec![base.clone()];
+    let mut cur = base;
+    while cur.matches('_').count() + 1 > MIN_TOKENS {
+        let Some(i) = cur.rfind('_') else { break };
+        cur.truncate(i);
+        out.push(cur.clone());
+    }
+    out
+}
+
 /// Texture suffixes appended to a model's base name (engine convention).
 const TEX_SUFFIXES: &[&str] = &[
     "_dm", "_nm", "_sm", "_em", "_lod_dm", "_lod_nm", "_lod_sm", "_lod",
@@ -93,6 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut name_of: HashMap<u32, String> = HashMap::new();
     // base name -> (texture names seen, blocks seen)
     let mut tex_bases: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    /// Deeper name candidates (see `candidate_bases`) — the character body-part convention needs
+    /// more than one suffix peeled to reach the model.
+    let mut derived_bases: BTreeSet<String> = BTreeSet::new();
 
     for line in text.lines().skip(1) {
         let f = csv_split(line);
@@ -131,6 +177,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     e.1.insert(block.clone());
                 }
             }
+            // Kept SEPARATE from `tex_bases` on purpose: `tex_bases` drives the "textures shipped,
+            // model missing" gap report, whose meaning depends on the strict one-suffix rule. These
+            // deeper candidates only feed the name emit, where the ASET hash set verifies each one.
+            derived_bases.extend(candidate_bases(&name));
         }
     }
     eprintln!(
@@ -285,11 +335,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 by_tex += 1;
             }
         }
+        // The deeper candidates: a character's model sits TWO suffixes up from its textures
+        // (`civ_hum_beachfemale_b_head_nm` -> `civ_hum_beachfemale_b`). Same verification gate.
+        let mut by_deep = 0usize;
+        let mut deep_models = 0usize;
+        for base in &derived_bases {
+            let h = pandemic_hash_m2(base);
+            if !hash_types.contains_key(&h) {
+                continue;
+            }
+            if record(h, base, &mut map) {
+                by_deep += 1;
+                if has_model(h) {
+                    deep_models += 1;
+                }
+            }
+        }
         for (h, (name, _)) in &hits {
             record(*h, name, &mut map);
         }
         println!(
-            "\n  emit: {} names ({by_tex} from texture-base derivation); {fresh} not otherwise resolvable",
+            "\n  emit: {} names ({by_tex} from texture-base derivation, \
+             {by_deep} from deeper body-part derivation of which {deep_models} are MODELS); \
+             {fresh} not otherwise resolvable",
             map.len()
         );
         if let Some(d) = path.parent() {
