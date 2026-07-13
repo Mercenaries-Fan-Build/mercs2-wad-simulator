@@ -102,31 +102,18 @@ fn run() -> Result<(), String> {
 
     let output = cli.output.ok_or("--output is required")?;
 
-    // ── Build ASET maps: per-block + global (block_index 0xFFFF) ──
-    let mut real_indices: Vec<u16> = Vec::new();
-    let mut global_aset: Vec<AsetEntry> = Vec::new();
-    for ae in &aset {
-        if ae.block_index() == 0xFFFF {
-            global_aset.push(AsetEntry::new(ae.asset_hash, ae.u1, strip_xbox_sub_entry(ae.u2), ae.u3));
-        } else {
-            real_indices.push(ae.block_index());
-        }
-    }
-    let aset_base = real_indices.iter().copied().min().unwrap_or(0) as usize;
-    let mut aset_by_block: HashMap<usize, Vec<AsetEntry>> = HashMap::new();
-    for ae in &aset {
-        if ae.block_index() == 0xFFFF {
-            continue;
-        }
-        let local = ae.block_index() as usize - aset_base;
-        aset_by_block
-            .entry(local)
-            .or_default()
-            .push(AsetEntry::new(ae.asset_hash, ae.u1, strip_xbox_sub_entry(ae.u2), ae.u3));
-    }
-    if !global_aset.is_empty() {
-        println!("  Global ASET entries (block_index=0xFFFF): {}", global_aset.len());
-    }
+    // ── Normalize every ASET row; routing is resolved from block CONTENT below.
+    //
+    // The Xbox block_index cannot be rebased arithmetically: the DLC's blocks are
+    // not a contiguous run in the source index space, so `idx - min(idx)` misroutes
+    // (measured: 1045 texture rows landing on the wrong block). Instead every row —
+    // both per-block and the 0xFFFF "global" ones — is routed to whichever converted
+    // block actually contains its asset_hash.
+    let pending_aset: Vec<AsetEntry> = aset
+        .iter()
+        .map(|ae| AsetEntry::new(ae.asset_hash, ae.u1, strip_xbox_sub_entry(ae.u2), ae.u3))
+        .collect();
+    println!("  ASET rows to route by content: {}", pending_aset.len());
 
     // ── Step 3: per-block convert + recompress ──
     QUIET.store(true, Ordering::Relaxed); // silence convert_block's per-block diagnostics
@@ -198,11 +185,10 @@ fn run() -> Result<(), String> {
         let pages = ((swapped.len() + 0x7FFF) / 0x8000) as u32;
         let recomputed_packed = (xbox_tier << 24) | pages;
 
-        let block_asets = aset_by_block.get(&blk_idx).cloned().unwrap_or_default();
         converted.push(PatchBlock {
             compressed_data: pc_sges,
             path_string: path,
-            aset_entries: block_asets,
+            aset_entries: Vec::new(),
             packed_field: recomputed_packed,
             flags: e.flags,
         });
@@ -216,38 +202,35 @@ fn run() -> Result<(), String> {
         return Err("No blocks converted".into());
     }
 
-    // ── Global ASET resolution: map asset_hash → converted-block index ──
-    if !global_aset.is_empty() {
-        let mut hash_to_block: HashMap<u32, usize> = HashMap::new();
-        for (i, blk) in converted.iter().enumerate() {
-            if let Ok(raw) = decompress_sges(&blk.compressed_data) {
-                let (_, entries) = parse_block_entry_table(&raw);
-                for ent in entries {
-                    hash_to_block.entry(ent.name_hash).or_insert(i);
-                }
+    // ── ASET resolution: route every row to the block that actually owns its hash ──
+    // Owner map + the owning entry's type_hash, built once from the converted blocks.
+    let mut hash_owner: HashMap<u32, (usize, u32)> = HashMap::new();
+    for (i, blk) in converted.iter().enumerate() {
+        if let Ok(raw) = decompress_sges(&blk.compressed_data) {
+            let (_, entries) = parse_block_entry_table(&raw);
+            for ent in entries {
+                hash_owner.entry(ent.name_hash).or_insert((i, ent.type_hash));
             }
         }
-        let (mut resolved, mut unresolved) = (0usize, 0usize);
-        let globals = std::mem::take(&mut global_aset);
-        for mut gae in globals {
-            if let Some(&i) = hash_to_block.get(&gae.asset_hash) {
-                // Refine type_id from the owning block's entry table.
-                if let Ok(raw) = decompress_sges(&converted[i].compressed_data) {
-                    let (_, entries) = parse_block_entry_table(&raw);
-                    if let Some(ent) = entries.iter().find(|e| e.name_hash == gae.asset_hash) {
-                        if let Some(tid) = type_id_for_type_hash(ent.type_hash) {
-                            gae.u32_3 = tid;
-                        }
-                    }
-                }
-                converted[i].aset_entries.push(gae);
-                resolved += 1;
-            } else {
-                unresolved += 1;
-            }
-        }
-        println!("  Global ASET resolved: {resolved}, unresolved: {unresolved}");
     }
+    let (mut resolved, mut unresolved) = (0usize, 0usize);
+    for mut ae in pending_aset {
+        match hash_owner.get(&ae.asset_hash) {
+            Some(&(i, type_hash)) => {
+                // Refine type_id from the owning entry rather than trusting the Xbox row.
+                if let Some(tid) = type_id_for_type_hash(type_hash) {
+                    ae.u32_3 = tid;
+                }
+                converted[i].aset_entries.push(ae);
+                resolved += 1;
+            }
+            // Hash owned by no shipped block: an Xbox row for a base-game asset that
+            // lives in the retail WAD. Dropping it lets the base WAD resolve it instead
+            // of shadowing it with a dangling patch row.
+            None => unresolved += 1,
+        }
+    }
+    println!("  ASET routed by content: {resolved}, dropped (not owned by any shipped block): {unresolved}");
 
     // ── Synthetic ASET for script / stringdb entries lacking a row ──
     let (mut script_added, mut stringdb_added) = (0usize, 0usize);
@@ -279,11 +262,12 @@ fn run() -> Result<(), String> {
         println!("  ASET fix: +{script_added} script, +{stringdb_added} stringdb synthetic rows");
     }
 
-    // ── Not-yet-ported passes (faithful port pending) ──
-    eprintln!("  WARNING: contract/import-chain ASET fixes NOT ported (ensure_import_chain_*)");
-    eprintln!("  WARNING: ASET content-validation filter NOT ported (--no-aset-validation behavior)");
-    eprintln!("  WARNING: ASET sub-entry recompute NOT ported (_recompute_aset_sub_entries)");
-    eprintln!("  WARNING: bootstrap injection NOT ported (assets-only output)");
+    // ── Not-yet-ported passes ──
+    // The import-chain/bootstrap passes deliberately stay out: they existed to graft the
+    // DLC contracts into the *vz* master script. The DLC ships its own master script
+    // (dlc01), so it is loaded as a level via LevelBootstrap.LoadLevel("dlc01","dlc01")
+    // instead of being injected into Venezuela.
+    eprintln!("  NOTE: bootstrap/import-chain injection intentionally omitted (dlc01 boots as its own level)");
 
     // ── Assemble FFCS patch WAD ──
     let wad = build_patch_wad_multi(&converted, csum_value, csum_meta, &FFCS_CERT_BLOB);

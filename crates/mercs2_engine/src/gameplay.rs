@@ -15,11 +15,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mercs2_audio::AudioEngine;
+use crate::audio::AudioEngine;
 use mercs2_core::glam::Vec3;
 use mercs2_core::{EventBus, PhysicsQuery, World};
-use mercs2_physics::StaticSoupPhysics;
-use mercs2_vehicle::DonutLut;
+use crate::physics::StaticSoupPhysics;
+use crate::vehicle::DonutLut;
 
 /// The fleet gameplay systems + their shared per-frame state, ticked once per fixed step by the loop.
 pub struct GameplaySystems {
@@ -31,7 +31,7 @@ pub struct GameplaySystems {
     /// blood hit points) can be drained for the decal + particle producers. See [`take_impacts`].
     ///
     /// [`take_impacts`]: GameplaySystems::take_impacts
-    weapons: mercs2_combat::WeaponSystem,
+    weapons: crate::combat::WeaponSystem,
     /// The vehicle steering donut sine-LUT (built once).
     lut: DonutLut,
     /// Shared audio engine — the loop ticks the SAME engine the Lua `Sound.*` cues into.
@@ -44,7 +44,7 @@ impl GameplaySystems {
         GameplaySystems {
             physics: StaticSoupPhysics::new(Vec::new()),
             bus: EventBus::new(),
-            weapons: mercs2_combat::WeaponSystem::default(),
+            weapons: crate::combat::WeaponSystem::default(),
             lut: DonutLut::new(),
             audio,
         }
@@ -60,7 +60,7 @@ impl GameplaySystems {
     /// props) resolve over open terrain — not just where a c3 building cell happens to supply triangles.
     /// Closes the §6.2 "terrain heightmap never handed to the fleet physics" gap (cars fell through
     /// open ground). `None` clears it (e.g. the interior boot, which has no terrain).
-    pub fn set_heightmap(&mut self, heightmap: Option<mercs2_physics::Heightmap>) {
+    pub fn set_heightmap(&mut self, heightmap: Option<crate::physics::Heightmap>) {
         self.physics.set_heightmap(heightmap);
     }
 
@@ -69,7 +69,7 @@ impl GameplaySystems {
     /// World carrying none of the fleet components yet.
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         let phys: &dyn PhysicsQuery = &self.physics;
-        mercs2_vehicle::drive_step_system(world, phys, &self.lut, dt);
+        crate::vehicle::drive_step_system(world, phys, &self.lut, dt);
         // Instance tick (not the static `update`) so the impact channel accumulates for draining.
         self.weapons.tick(world, dt, &mut self.bus, Some(phys));
         self.bus.dispatch_all();
@@ -78,7 +78,7 @@ impl GameplaySystems {
 
     /// Drain this fixed step's combat impacts (bullet/explosion/blood hit points + normals). The
     /// runtime turns each into a projected decal and a particle burst. Drain-then-clear.
-    pub fn take_impacts(&mut self) -> Vec<mercs2_combat::Impact> {
+    pub fn take_impacts(&mut self) -> Vec<crate::combat::Impact> {
         self.weapons.take_impacts()
     }
 }
@@ -95,11 +95,11 @@ mod tests {
     #[test]
     fn vehicle_system_acts_through_gameplay_tick() {
         use mercs2_core::Transform;
-        use mercs2_vehicle::components::{
+        use crate::vehicle::components::{
             ChassisBody, Vehicle, VehicleClass, VehicleControls, VehicleRuntime, VehicleTuning, Wheel,
             WheelSet,
         };
-        use mercs2_vehicle::lua_surface::{default_car_seating, spawn_vehicle};
+        use crate::vehicle::lua_surface::{default_car_seating, spawn_vehicle};
 
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
         let mut gp = GameplaySystems::new(audio);

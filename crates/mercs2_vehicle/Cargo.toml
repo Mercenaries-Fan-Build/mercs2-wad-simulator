@@ -1,11 +1,13 @@
 [package]
 name = "mercs2_vehicle"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 25 (rows 25/19): vehicle actors + custom raycast drive model + command-ring transport + camera modes. Exe is the oracle (docs/reverse_engineer/vehicle_code_map.md)."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-mercs2_core = { path = "../mercs2_core" }
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_core = { workspace = true }
+mercs2_formats = { workspace = true }
 glam = "0.27"   # same version as mercs2_core so Transform's Vec3/Quat types unify
 hecs = "0.10"   # ECS substrate, matches mercs2_core

@@ -1,14 +1,24 @@
-//! Destruction state machine reader — turns a model's `HIER` node tree + `SWIT`
-//! switch list (+ `INDX` mesh→node map) into a per-node
-//! **intact / break_piece / static** classification.
+//! Destruction reader: the engine's own per-model **state machine** (`parse_state_machine` —
+//! `SWIT` + `NODE`/`STAT`/`CHDR`/`CEXE`, mirroring `FUN_004cf340`), plus a legacy heuristic
+//! classifier kept only for callers that predate it.
 //!
-//! Why this exists: the engine never co-renders a destructible's intact body and
-//! its break pieces — it switches between them. That switch is `SWIT`, which lists
-//! the HIER nodes participating in a destruction swap. A model's `submeshes`
-//! attach to HIER nodes via `INDX`, so node-state → submesh-state lets a viewer
-//! show one state at a time instead of overlapping everything.
+//! Why this exists: the engine never co-renders a destructible's intact body and its wreck — it
+//! switches between them, by running a named state's enter-script (`SHOW`/`HIDE`, which act on whole
+//! HIER **subtrees**). `PristineState` (`0xACB51200`) shows the intact body (`0x255EAB53`);
+//! `DestroyedState` (`0x7687DF41`) shows the wreck body (`0x75F1F74D`), which is geometry in the
+//! container. Use `parse_state_machine` + `machine_node_enable` for anything real.
 //!
-//! Classification rule (deterministic, from real bytes — validated on the
+//! ★**The `intact / break_piece / static` classification below is a HEURISTIC and is SUPERSEDED.**
+//! It was inferred from `SWIT` sibling structure before the real machine was recovered. It has no
+//! notion of health, states, or messages, and its "static = always rendered" category is misleading
+//! — a node the machine never names is still hidden as a *child* of a governed parent. Do not build
+//! on it. See `docs/modernization/vehicle_model_spec.md` §5.
+//!
+//! ★Note also: the doc-comment's "`INDX` mesh→node map" is wrong — `INDX` is keyed by **sub-object**
+//! ordinal and yields a **seg_id into `SEGM`**, whose `bone` is the node. See `vehicle_model_spec.md`
+//! §2 and `model_cubeize::read_model_meshes_segm`.
+//!
+//! Legacy classification rule (deterministic, from real bytes — validated on the
 //! resident2 up-crate, see tests):
 //! - A **switch group** is a set of sibling HIER nodes that appear in `SWIT` and
 //!   share a parent that is *not* in `SWIT` (the group roots).
@@ -383,15 +393,214 @@ pub fn default_state_index(node: &SwitchNodeDef) -> usize {
     0
 }
 
-/// GROUND-TRUTH per-mesh-group visibility from the engine state machine — no classification
-/// heuristics: every `SWIT` participant subtree starts hidden, then each switch node's CHOSEN
-/// state executes its enter-script `SHOW`/`Hide` commands over the HIER; mesh groups map through
-/// `INDX`. `chosen[i]` = state index for `sm.nodes[i]` (see [`default_state_index`]).
+// ── Health-driven destruction: run the state machine as the engine does, from HEALTH. ───────────
+// The engine drives each switch node through its state graph via DAMAGE MESSAGES (SetStateOnMsg),
+// against native Health/RuntimeNodeHealth components. We reconstruct that: given how much damage has
+// been dealt (a health fraction), deliver the corresponding messages and follow the transitions to
+// the state each node lands in. This is the real mechanism; only the HP→which-message THRESHOLDS are
+// approximated (the per-hit HP math is string-only/live-only — see object_assembly_model.md §7).
+
+/// Global destruction state vocabulary — shared across all vehicles (verified on the live tank machine
+/// + the jul08 devkit strings). Terminal = the object is wrecked; pristine = full health.
+pub const STATE_PRISTINE: u32 = 0xACB5_1200;
+pub const STATE_WRECK: u32 = 0x9279_1EBB;
+pub const STATE_TERMINAL: u32 = 0xCA26_1E5B;
+
+/// Decode a state enter/exit script (`0x1`=arg, `0x2`=cmd, `0x3`=end) into `(command_hash, args)`.
+fn commands(script: &[u32]) -> Vec<(u32, Vec<u32>)> {
+    let mut out = Vec::new();
+    let mut args: Vec<u32> = Vec::new();
+    let mut i = 0;
+    while i < script.len() {
+        match script[i] {
+            1 if i + 1 < script.len() => {
+                args.push(script[i + 1]);
+                i += 2;
+            }
+            2 if i + 1 < script.len() => {
+                out.push((script[i + 1], std::mem::take(&mut args)));
+                i += 2;
+            }
+            3 => i += 1,
+            _ => {
+                args.push(script[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn is_terminal(target: u32) -> bool {
+    target == STATE_WRECK || target == STATE_TERMINAL
+}
+
+/// The state one switch node settles in after `delivered` damage messages have fired. Starts at the
+/// node's pristine state and follows transitions until stable, with engine-plausible priority:
+/// a delivered terminal transition (→ wreck) wins over an unconditional passthrough `SetState`,
+/// which wins over a delivered non-terminal transition (→ on-fire/damaged).
+fn simulate_node_state(node: &SwitchNodeDef, delivered: &std::collections::HashSet<u32>) -> usize {
+    let setstate = crate::hash::pandemic_hash_m2("setstate");
+    let setstateonmsg = crate::hash::pandemic_hash_m2("setstateonmsg");
+    let find = |t: u32| node.states.iter().position(|s| s.name_hash == t);
+    let mut cur = default_state_index(node);
+    for _ in 0..node.states.len() * 2 + 4 {
+        let Some(state) = node.states.get(cur) else { break };
+        let (mut terminal, mut passthrough, mut minor) = (None, None, None);
+        for (cmd, args) in commands(&state.enter) {
+            if cmd == setstate {
+                if let Some(&t) = args.first() {
+                    passthrough = find(t);
+                }
+            } else if cmd == setstateonmsg {
+                if let (Some(&t), Some(&msg)) = (args.first(), args.get(1)) {
+                    if delivered.contains(&msg) {
+                        if is_terminal(t) {
+                            terminal = find(t);
+                        } else {
+                            minor = find(t);
+                        }
+                    }
+                }
+            }
+        }
+        let next = terminal.or(passthrough).or(minor);
+        match next {
+            Some(n) if n != cur => cur = n,
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// The distinct damage-event message hashes, classified by what they do **from full health**: a
+/// message is `terminal` (→ wreck/destroyed) if any node's PRISTINE state routes it to a terminal
+/// state; `minor` (→ increasingly-damaged / fire) otherwise. Classifying from the pristine states
+/// (not every state) is what keeps the death messages out of the minor band — the same message hash
+/// can lead somewhere else once already damaged.
+pub fn damage_messages(sm: &StateMachine) -> (Vec<u32>, Vec<u32>) {
+    let setstateonmsg = crate::hash::pandemic_hash_m2("setstateonmsg");
+    let mut terminal: Vec<u32> = Vec::new();
+    let mut minor: Vec<u32> = Vec::new();
+    for node in &sm.nodes {
+        let Some(pristine) = node.states.get(default_state_index(node)) else { continue };
+        for (cmd, args) in commands(&pristine.enter) {
+            if cmd != setstateonmsg {
+                continue;
+            }
+            if let (Some(&t), Some(&msg)) = (args.first(), args.get(1)) {
+                if is_terminal(t) {
+                    if !terminal.contains(&msg) {
+                        terminal.push(msg);
+                    }
+                } else if !minor.contains(&msg) {
+                    minor.push(msg);
+                }
+            }
+        }
+    }
+    // Death dominates: a message that ever means "wreck" is never treated as minor.
+    minor.retain(|m| !terminal.contains(m));
+    (minor, terminal)
+}
+
+/// Per-switch-node chosen state for a given HEALTH fraction (1.0 = full, 0.0 = destroyed). Delivers
+/// the machine's damage messages by band — none at full health, the `minor` set once damaged, and the
+/// `terminal` set at zero — then runs [`simulate_node_state`]. Feed the result to
+/// [`machine_node_enable`] to get the render node-enable table.
+///
+/// The band thresholds are our approximation of the (live-only) HP math; the STATES reached are the
+/// engine's own. `damaged_below` = health fraction under which minor damage shows.
+pub fn node_states_for_health(sm: &StateMachine, health: f32, damaged_below: f32) -> Vec<usize> {
+    let (minor, terminal) = damage_messages(sm);
+    let mut delivered = std::collections::HashSet::new();
+    if health <= 0.0 {
+        delivered.extend(minor.iter().copied());
+        delivered.extend(terminal.iter().copied());
+    } else if health < damaged_below {
+        delivered.extend(minor.iter().copied());
+    }
+    sm.nodes.iter().map(|n| simulate_node_state(n, &delivered)).collect()
+}
+
+/// GROUND-TRUTH per-**HIER-node** enable flags from the engine state machine — the runtime's
+/// `OBJ+0x2a0` node-enable table, which SEGM records index by their signed `node` field (clause 3 of
+/// the draw gate; see `mercs2_engine::render_state`).
+///
+/// No classification heuristics. The seeding is DATA: every `SWIT` participant subtree starts
+/// **hidden**, everything else starts visible; then each switch node's CHOSEN state executes its
+/// enter-script `SHOW`/`Hide` commands over the HIER, flipping whole subtrees. So a pristine body
+/// (not under a switch slot) is enabled by default and break pieces stay disabled until a state shows
+/// them. `chosen[i]` = state index for `sm.nodes[i]` (see [`default_state_index`]).
+pub fn machine_node_enable(sm: &StateMachine, hier: &[HierNode], chosen: &[usize]) -> Vec<bool> {
+    machine_node_enable_seeded(sm, hier, chosen, NodeSeed::default(), NodeScope::default())
+}
+
+/// How the node-enable table (`OBJ+0x2a0`) is INITIALISED before any state's enter script runs.
+///
+/// **This is not settled from the exe.** The constructor's `memset` sits behind a register alias in
+/// the decomp (see `docs/modernization/model_render_gate_spec.md` §6), so the seed is chosen here and
+/// validated against real models. Do not describe either variant as "ground truth".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NodeSeed {
+    /// Every node starts ENABLED; only an explicit `Hide` in an entered state's script turns one off.
+    AllEnabled,
+    /// Every `SWIT` participant subtree starts HIDDEN; a `SHOW` must turn it back on.
+    ///
+    /// The DEFAULT, on evidence rather than proof: `oc_veh_helicopter_md500`'s default states contain
+    /// no `Hide` command at all, so under [`NodeSeed::AllEnabled`] its wreck renders on top of the
+    /// intact body. Only this seeding suppresses it. `ch_veh_tank_ztz98` is indifferent (its default
+    /// state Hides its break pieces explicitly).
+    #[default]
+    SwitchSlotsHidden,
+}
+
+/// Whether a `SHOW`/`Hide` command applies to the named HIER node alone, or to its whole subtree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NodeScope {
+    /// The command marks only the node it names.
+    NodeOnly,
+    /// The command marks the node and every descendant.
+    ///
+    /// THE DEFAULT, and it must be. A switch slot names a *grouping* node; the geometry hangs on its
+    /// CHILDREN. `ch_veh_tank_ztz98`'s turret slot is node 4 (`0x54C595F0`, no geometry of its own) and
+    /// the turret/barrel meshes live on child nodes 5 and 11. Marking node-only leaves those children
+    /// untouched, so the turret renders identically at 100% and 0% health while the hull (whose mesh
+    /// IS on the named node) switches — the exact symptom that exposed this.
+    #[default]
+    Subtree,
+}
+
+/// [`machine_node_enable`] with an explicit seed — the knob for comparing the variants against real
+/// models rather than asserting one.
+pub fn machine_node_enable_seeded(
+    sm: &StateMachine,
+    hier: &[HierNode],
+    chosen: &[usize],
+    seed: NodeSeed,
+    scope: NodeScope,
+) -> Vec<bool> {
+    machine_node_hidden(sm, hier, chosen, seed, scope).into_iter().map(|h| !h).collect()
+}
+
+/// Per-mesh-group visibility: [`machine_node_enable`] resolved through `INDX` (mesh group → HIER
+/// node). Kept for callers that reason in draw groups; the engine itself gates per SEGM record.
 pub fn machine_group_visibility(
     sm: &StateMachine,
     hier: &[HierNode],
     indx: &[usize],
     chosen: &[usize],
+) -> Vec<bool> {
+    let hidden = machine_node_hidden(sm, hier, chosen, NodeSeed::default(), NodeScope::default());
+    indx.iter().map(|&n| hidden.get(n).map(|h| !h).unwrap_or(true)).collect()
+}
+
+fn machine_node_hidden(
+    sm: &StateMachine,
+    hier: &[HierNode],
+    chosen: &[usize],
+    seed: NodeSeed,
+    scope: NodeScope,
 ) -> Vec<bool> {
     let show = crate::hash::pandemic_hash_m2("show");
     let hide = crate::hash::pandemic_hash_m2("hide");
@@ -405,7 +614,13 @@ pub fn machine_group_visibility(
             }
         }
     }
-    fn mark(children: &[Vec<usize>], hidden: &mut [bool], root: usize, v: bool) {
+    fn mark(children: &[Vec<usize>], hidden: &mut [bool], root: usize, v: bool, scope: NodeScope) {
+        if scope == NodeScope::NodeOnly {
+            if root < hidden.len() {
+                hidden[root] = v;
+            }
+            return;
+        }
         let mut stack = vec![root];
         while let Some(x) = stack.pop() {
             if x < hidden.len() {
@@ -415,9 +630,11 @@ pub fn machine_group_visibility(
         }
     }
     let mut hidden = vec![false; hier.len()];
-    for &slot in &sm.switch_slots {
-        if let Some(&i) = hash_to_idx.get(&slot) {
-            mark(&children, &mut hidden, i, true);
+    if seed == NodeSeed::SwitchSlotsHidden {
+        for &slot in &sm.switch_slots {
+            if let Some(&i) = hash_to_idx.get(&slot) {
+                mark(&children, &mut hidden, i, true, scope);
+            }
         }
     }
     for (ni, node) in sm.nodes.iter().enumerate() {
@@ -441,7 +658,7 @@ pub fn machine_group_visibility(
                     if cmd == show || cmd == hide {
                         for a in &args {
                             if let Some(&idx) = hash_to_idx.get(a) {
-                                mark(&children, &mut hidden, idx, cmd == hide);
+                                mark(&children, &mut hidden, idx, cmd == hide, scope);
                             }
                         }
                     }
@@ -456,7 +673,7 @@ pub fn machine_group_visibility(
             }
         }
     }
-    indx.iter().map(|&n| hidden.get(n).map(|h| !h).unwrap_or(true)).collect()
+    hidden
 }
 
 /// Parse the first `SWIT` chunk as a flat u32 node-hash list.
@@ -468,7 +685,15 @@ pub fn parse_swit(buf: &[u8]) -> Vec<u32> {
     (0..size / 4).map(|i| u32_le(buf, off + i * 4)).collect()
 }
 
-/// Parse the first `INDX` chunk as a u16 array (MESH-group order → HIER node index).
+/// Parse the first `INDX` chunk as a u16 array: **drawing-group order → SEG_ID** (an index into the
+/// `SEGM` record array), NOT a HIER node index.
+///
+/// The old "→ HIER node" reading was wrong and is what scattered vehicle parts across the model.
+/// `SEGM[INDX[group]]` gives the group's real `{node, seg_id, lod_mask}`; the node is the attachment
+/// bone (a tank barrel's mount at turret height), the mask its LOD tier. A model carries far more
+/// SEGM records than groups (tank: 130 vs 12), so indexing SEGM by the group/sub-object ordinal reads
+/// unrelated records. Validated on `ch_veh_tank_ztz98` against the HIER node whose own bbox matches
+/// each mesh (`mercs2_probe --bin segfix_probe`).
 pub fn parse_indx(buf: &[u8]) -> Vec<usize> {
     let chunks = leaf_chunks(buf);
     let Some((off, size)) = find_chunk(&chunks, b"INDX") else {

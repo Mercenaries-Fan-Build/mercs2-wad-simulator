@@ -59,6 +59,16 @@ pub struct Options {
 pub(crate) struct WadStack {
     pub wads: Vec<wad::Wad>,
     pub labels: Vec<String>,
+    /// The engine's block-residency + hash-keyed chunk registry. The workshop must resolve assets the
+    /// way the game does — make the owning block resident, register every chunk it carries, first-wins
+    /// — or it is inspecting containers in isolation rather than simulating the engine.
+    /// See `mercs2_engine::registry` and `docs/modernization/model_render_gate_spec.md` §2b.
+    pub registry: mercs2_engine::registry::AssetRegistry,
+    /// Memo for [`WadStack::texture_best`]. Assembling a texture's full mip chain means walking its
+    /// whole c3-cell subtree, and a model's materials share textures (and cells) heavily — so the
+    /// uncached cost was paid once per material slot, which is what made full-res "too slow" and got
+    /// the resident tail wired into model loads instead. Cached, each texture is walked once.
+    tex_cache: HashMap<u32, mercs2_formats::texture::TextureData>,
 }
 
 impl WadStack {
@@ -75,7 +85,7 @@ impl WadStack {
                 Err(e) => eprintln!("[workshop] overlay {o}: {e} (skipped)"),
             }
         }
-        Ok(WadStack { wads, labels })
+        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new() })
     }
 
     /// Short display tag for an asset's source wad (base = "", overlays = "+<file stem>").
@@ -90,11 +100,22 @@ impl WadStack {
         format!("+{stem}")
     }
 
+    /// Model container by hash, resolved through the engine's residency registry — the owning block
+    /// goes resident and registers all of its chunks, exactly as the game's block streaming does.
     pub fn extract_container(&mut self, hash: u32) -> Result<Vec<u8>, String> {
-        let mut last = format!("0x{hash:08X}: not in any open wad");
+        let WadStack { wads, registry, .. } = self;
+        registry
+            .resolve(wads, wad::MODEL_TYPE_HASH, hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
+    }
+
+    /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
+    pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
+        let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
         for i in (0..self.wads.len()).rev() {
-            match wad::extract_container(&mut self.wads[i], hash) {
-                Ok(c) => return Ok(c),
+            match mercs2_engine::model::Model::load(&mut self.wads[i], hash) {
+                Ok(m) => return Ok(m),
                 Err(e) => last = e,
             }
         }
@@ -113,13 +134,23 @@ impl WadStack {
         Err(last)
     }
 
-    /// Full streamed resolution when available (plate view).
+    /// Full streamed resolution — the texture's higher mips assembled from the finer LOD blocks of
+    /// its own c3-cell subtree (`wad::extract_texture_hires`). This is what EVERY consumer wants:
+    /// the resident block alone ships a coarse mip tail, so a 1024² normal map resolves to 32×32 and
+    /// a PNG written from it is a mostly-empty plate. Memoized, because the subtree walk is the only
+    /// reason anything settled for the tail.
     pub fn texture_best(&mut self, hash: u32) -> Result<mercs2_formats::texture::TextureData, String> {
+        if let Some(t) = self.tex_cache.get(&hash) {
+            return Ok(t.clone());
+        }
         let mut last = format!("0x{hash:08X}: not in any open wad");
         for i in (0..self.wads.len()).rev() {
             let w = &mut self.wads[i];
             match wad::extract_texture_hires(w, hash).or_else(|_| wad::extract_texture(w, hash)) {
-                Ok(t) => return Ok(t),
+                Ok(t) => {
+                    self.tex_cache.insert(hash, t.clone());
+                    return Ok(t);
+                }
                 Err(e) => last = e,
             }
         }
@@ -248,6 +279,18 @@ struct Preview {
     hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
     node_state: Vec<usize>,
+    /// The object's HEALTH fraction (1.0 = full, 0.0 = destroyed). Drives the destruction machine:
+    /// `node_states_for_health` picks each node's state, so the inspector shows the real pristine →
+    /// damaged → wreck progression instead of hand-picked states.
+    health: f32,
+    /// Eyeball-test toggle: hide `*_ruin*` sub-strips to judge whether they're legit geometry.
+    hide_ruin: bool,
+    /// The live node-enable table (clause 3) the gate is using — so the inspector can say WHY a mesh
+    /// is hidden (LOD-mask miss vs its HIER node switched off by the destruction state).
+    node_enable: Vec<bool>,
+    /// The model's authored header (AABB / node count / LOD-level count / LOD distance), for the
+    /// LOD panel + camera framing. `None` for imports.
+    header: Option<mercs2_formats::model_cubeize::ModelHeader>,
     /// Game scripts mentioning this asset: literal search hits from the decompiled corpus
     /// (needle shown alongside — these are search results, not classifications).
     lua_needle: String,
@@ -347,6 +390,12 @@ enum Act {
     ShowAllGroups,
     /// Put switch node `.0` into its state index `.1` and re-execute the machine's SHOW/Hide.
     NodeState(usize, usize),
+    /// Set the object's HEALTH fraction (0..1) and drive the destruction machine from it — pristine
+    /// at full, damaged/on-fire as it drops, wreck at 0. The systemic replacement for hand-picking
+    /// per-node states.
+    SetHealth(f32),
+    /// Toggle hiding every draw group whose diffuse is a `*_ruin*` material (the eyeball test).
+    ToggleRuin,
     TexOfPreview,
     TexNav(i32),
     TexClose,
@@ -360,6 +409,68 @@ enum Act {
     ModRemove(usize),
     /// Publish the mod project to a patch WAD (background worker).
     Publish,
+    /// Conform: seed the transform fields from the real-envelope auto-fit (donor vs import).
+    ConformAutofit,
+    /// Conform: place the donor template into the sandbox at the origin as a visual reference.
+    LoadDonorRef,
+    /// Load a model by hash onto the preview pedestal (Model Workbench inventory click).
+    LoadModelHash(u32, String),
+}
+
+/// Top-level UI page. The Model Workbench is a full dedicated page (its own inventory + tools
+/// panels + viewport), NOT a section of the asset browser.
+#[derive(PartialEq, Clone, Copy)]
+enum WorkMode {
+    Browser,
+    Workbench,
+}
+
+/// Model Workbench vehicle-class display order (helicopters first, per user).
+const VEH_CLASS_ORDER: &[&str] = &[
+    "helicopter", "tank", "apc", "vtol", "jet", "car", "truck", "van", "semi", "trailer", "towed",
+    "motorcycle", "boat", "other",
+];
+
+/// Group the catalog's vehicle models by class for the workbench inventory.
+/// Resolve HIER node-name hashes to names by hashing every candidate in the bone-name list
+/// (`docs/data/bone_name_candidates.txt`) — the same trick `mercs2_probe hier` uses. We only care
+/// about the `hp_*` INTERACTION points (seat / exhaust / wheel / barrel tip).
+fn resolve_node_names(hashes: &[u32]) -> std::collections::HashMap<u32, String> {
+    use mercs2_formats::hash::pandemic_hash_m2;
+    let want: std::collections::HashSet<u32> = hashes.iter().copied().collect();
+    let mut out = std::collections::HashMap::new();
+    for root in ["docs/data/bone_name_candidates.txt", "../../docs/data/bone_name_candidates.txt"] {
+        let Ok(txt) = std::fs::read_to_string(root) else { continue };
+        for line in txt.lines() {
+            let c = line.trim();
+            if c.len() < 2 {
+                continue;
+            }
+            let h = pandemic_hash_m2(c);
+            if want.contains(&h) {
+                out.entry(h).or_insert_with(|| c.to_string());
+            }
+        }
+        break;
+    }
+    out
+}
+
+fn build_vehicle_inventory(index: &crate::index::AssetIndex) -> Vec<(&'static str, Vec<(u32, String)>)> {
+    let mut map: std::collections::HashMap<&'static str, Vec<(u32, String)>> = Default::default();
+    for r in &index.models {
+        if let Some(c) = r.vehicle_class() {
+            map.entry(c).or_default().push((r.hash, r.label()));
+        }
+    }
+    let mut out = Vec::new();
+    for &c in VEH_CLASS_ORDER {
+        if let Some(mut rows) = map.remove(c) {
+            rows.sort_by(|a, b| a.1.cmp(&b.1));
+            out.push((c, rows));
+        }
+    }
+    out
 }
 
 pub fn run(opts: Options) {
@@ -490,6 +601,33 @@ pub fn run(opts: Options) {
         .to_string_lossy()
         .into_owned();
     let mut publisher: Option<crate::publish::Publisher> = None;
+    // ── Conform transform (dedicated panel): interactively scale/rotate/place the imported mesh
+    // against the donor template, baked into the export. `conform_live` drives the preview entity
+    // from these fields so the placement is visible against a donor reference in the sandbox. ──
+    let mut conform_scale: f32 = 1.0;
+    let mut conform_t: [f32; 3] = [0.0, 0.0, 0.0];
+    let mut conform_r: [f32; 3] = [0.0, 0.0, 0.0]; // XYZ euler degrees
+    let mut conform_flip = false; // reverse winding on export (RH→LH); toggle if faces cull inside-out
+    let mut conform_live = true;
+    // Workbench: render a marker at EVERY HIER node of the previewed template so functional nodes
+    // (rotor hub, skids, seat, tail, hardpoints) are visible spatial anchors to map geometry onto.
+    let mut show_nodes = false;
+    // ★HARDPOINT EDITOR. A vehicle's INTERACTION POINTS are HIER nodes named `hp_*` — hp_seat_lt is
+    // the seat you enter at, hp_fx_exhaust_* the exhaust emitters, hp_wheel_* the suspension points,
+    // hp_barreltip_a the muzzle. Conform a novel model at a different SIZE and these stay where the
+    // DONOR's were: on a 2x tank the seat ends up 5.5 m in the air on the turret roof and the vehicle
+    // simply cannot be entered. They must be RE-PLACED on the new model, which is a spatial job — so
+    // do it here, on the model, instead of guessing coordinates.
+    // `hp_edits[node] = new world position`; exported as `inject_parts --node-at <node>:<x>,<y>,<z>`.
+    let mut show_hardpoints = true;
+    let mut hp_edits: std::collections::BTreeMap<usize, [f32; 3]> = std::collections::BTreeMap::new();
+    let mut hp_selected: Option<usize> = None;
+    // node_hash -> resolved name, for the loaded template (hp_* names come from the bone-name list).
+    let mut hp_names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    // Model Workbench page: its own mode + vehicle inventory (rebuilt when names/overlays change).
+    let mut mode = WorkMode::Browser;
+    let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_vehicle_inventory(&index);
+    let mut inventory_dirty = false;
     let mut status = String::from("Enter loads the selected asset. Tab = edit mode. Esc quits.");
 
     // Orbit camera.
@@ -766,6 +904,7 @@ pub fn run(opts: Options) {
                                     index.apply_names(names);
                                     lua_corpus = lua;
                                     filtered = refilter(&index, kind, &filter);
+                                    inventory_dirty = true; // names now resolve → build the vehicle inventory
                                     sel = sel.min(filtered.len().saturating_sub(1));
                                     names_pending = false;
                                     // Swap the boot skull out for the shell plate (browse backdrop).
@@ -874,6 +1013,7 @@ pub fn run(opts: Options) {
                                         let names = std::mem::take(&mut index.names);
                                         index = AssetIndex::build(&w.wads, names);
                                         filtered = refilter(&index, kind, &filter);
+                                        inventory_dirty = true;
                                         sel = sel.min(filtered.len().saturating_sub(1));
                                     }
                                     Err(e) => {
@@ -911,6 +1051,24 @@ pub fn run(opts: Options) {
                         }
                     }
 
+                    // ── Conform live preview: drive the imported pedestal entity from the conform
+                    // panel's scale/pos/rot so its placement against the donor reference is visible
+                    // in the viewport (the same transform is baked into the export). ──
+                    if conform_live {
+                        if let Some(p) = &preview {
+                            if imported.contains_key(&p.hash) {
+                                let _ = world.insert_one(
+                                    p.entity,
+                                    Transform {
+                                        translation: Vec3::from(conform_t),
+                                        rotation: conform_quat(conform_r),
+                                        scale: Vec3::splat(conform_scale),
+                                    },
+                                );
+                            }
+                        }
+                    }
+
                     // ── Animation: sample the preview's active clip into its palette (paused =
                     // resample the held time, so scrubbing/pausing still shows the exact pose). ──
                     if let Some(p) = &mut preview {
@@ -936,10 +1094,18 @@ pub fn run(opts: Options) {
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
                     let mut hovered_bone: Option<usize> = None;
+                    if inventory_dirty {
+                        vehicle_inventory = build_vehicle_inventory(&index);
+                        inventory_dirty = false;
+                    }
                     gui.run(|ctx| {
                         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                             ui.horizontal(|ui| {
                                 ui.strong("Mercenaries 2 — Workshop");
+                                ui.separator();
+                                // Page switch: asset Browser <-> the Model Workbench.
+                                ui.selectable_value(&mut mode, WorkMode::Browser, "Browser");
+                                ui.selectable_value(&mut mode, WorkMode::Workbench, "Model Workbench");
                                 ui.separator();
                                 if ui.add_enabled(preview.is_some(), egui::Button::new("Place"))
                                     .on_hover_text("Add the preview to the sandbox (F6)")
@@ -1007,6 +1173,8 @@ pub fn run(opts: Options) {
                                 }
                             });
                         });
+                        // ── BROWSER PAGE: the asset browser + details inspector. ──
+                        if mode == WorkMode::Browser {
                         egui::SidePanel::left("browser").default_width(300.0).show(ctx, |ui| {
                             let before = (kind, filter.clone());
                             ui.horizontal(|ui| {
@@ -1236,27 +1404,69 @@ pub fn run(opts: Options) {
                                                     }
                                                 }
                                             });
-                                        if p.tiers.len() > 1 {
+                                        // LOD — driven by the model's REAL tier masks, not invented
+                                        // "rungs". A mesh's mask comes from SEGM[INDX[group]]; several
+                                        // meshes usually share one mask. We show the masks the model
+                                        // actually carries (with how many meshes each covers) and let
+                                        // you drive `view_state` bit by bit, so every click maps to a
+                                        // visible change. (The old rung/window chips were built on
+                                        // masks we were reading from the WRONG records.)
+                                        {
+                                            use std::collections::BTreeMap;
+                                            let mut by_mask: BTreeMap<u8, usize> = BTreeMap::new();
+                                            for d in &p.draws {
+                                                *by_mask.entry(d.lod_mask).or_default() += 1;
+                                            }
+                                            let drawn_at = |vs: u8| -> usize {
+                                                p.draws
+                                                    .iter()
+                                                    .filter(|d| (vs & d.lod_mask) != 0)
+                                                    .count()
+                                            };
                                             egui::CollapsingHeader::new(format!(
-                                                "States / LODs ({})",
-                                                p.tiers.len()
+                                                "LOD  —  view_state 0x{:02X}  ({} of {} meshes pass)",
+                                                p.tier,
+                                                drawn_at(p.tier),
+                                                p.draws.len()
                                             ))
                                             .default_open(true)
                                             .show(ui, |ui| {
                                                 ui.horizontal_wrapped(|ui| {
-                                                    for &bit in &p.tiers {
+                                                    ui.label("view_state bits:");
+                                                    for b in 0..8u8 {
+                                                        let bit = 1u8 << b;
+                                                        let mut on = (p.tier & bit) != 0;
                                                         if ui
-                                                            .selectable_label(
-                                                                bit == p.tier,
-                                                                format!("0x{bit:02X}"),
-                                                            )
-                                                            .clicked()
+                                                            .checkbox(&mut on, format!("{b}"))
+                                                            .on_hover_text(format!(
+                                                                "bit {b} (0x{bit:02X}) — a mesh draws if                                                                  its mask shares ANY bit with view_state"
+                                                            ))
+                                                            .changed()
                                                         {
-                                                            actions.push(Act::Tier(bit));
+                                                            actions.push(Act::Tier(p.tier ^ bit));
                                                         }
                                                     }
                                                 });
-                                                ui.weak("LOD chains + destruction states (SEGM tiers)");
+                                                ui.separator();
+                                                ui.label("masks this model actually carries:");
+                                                for (&mask, &n) in &by_mask {
+                                                    let hit = (p.tier & mask) != 0;
+                                                    let label = format!(
+                                                        "0x{mask:02X}   {n} mesh{}   {}",
+                                                        if n == 1 { "" } else { "es" },
+                                                        if hit { "✔ passes" } else { "✖ filtered out" }
+                                                    );
+                                                    if ui
+                                                        .selectable_label(hit, label)
+                                                        .on_hover_text("click to set view_state to exactly this mask")
+                                                        .clicked()
+                                                    {
+                                                        actions.push(Act::Tier(mask));
+                                                    }
+                                                }
+                                                ui.weak(
+                                                    "LOD is one axis; destruction (below) is the other. A mesh draws only if BOTH pass.",
+                                                );
                                             });
                                         }
                                         // Destruction — the ENGINE's state machine, interactive:
@@ -1272,6 +1482,32 @@ pub fn run(opts: Options) {
                                             ))
                                             .default_open(true)
                                             .show(ui, |ui| {
+                                                // HEALTH drives the machine — the object's real damage
+                                                // axis. Full = pristine; dropping = damaged/on-fire;
+                                                // 0 = wreck. Below, the per-node states it resolves to.
+                                                let mut hp = p.health * 100.0;
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Health");
+                                                    if ui
+                                                        .add(
+                                                            egui::Slider::new(&mut hp, 0.0..=100.0)
+                                                                .suffix("%")
+                                                                .fixed_decimals(0),
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        actions.push(Act::SetHealth(hp / 100.0));
+                                                    }
+                                                    if ui.small_button("100").clicked() {
+                                                        actions.push(Act::SetHealth(1.0));
+                                                    }
+                                                    if ui.small_button("0").clicked() {
+                                                        actions.push(Act::SetHealth(0.0));
+                                                    }
+                                                });
+                                                ui.weak(
+                                                    "drives the state machine from damage (HP→messages approximated; states are the engine's)",
+                                                );
                                                 let hier: std::collections::HashSet<u32> =
                                                     p.hier.iter().copied().collect();
                                                 let resolve = |h: u32| {
@@ -1333,24 +1569,64 @@ pub fn run(opts: Options) {
                                             });
                                         }
                                         egui::CollapsingHeader::new(format!(
-                                            "Materials ({})",
+                                            "Segments  \u{2014}  {} of {} drawn",
+                                            p.draws.len() - p.hidden.len(),
                                             p.draws.len()
                                         ))
+                                        .default_open(true)
                                         .show(ui, |ui| {
+                                            // THE disassembly view. Per mesh: its seg_id (INDX[group]),
+                                            // its real mount NODE (from SEGM[INDX[group]]), its LOD mask,
+                                            // its material \u{2014} and when it is NOT drawn, WHICH CLAUSE
+                                            // gated it. This is what makes the panel map to the picture.
+                                            let mut hr = p.hide_ruin;
+                                            if ui
+                                                .checkbox(&mut hr, "Hide *_ruin* sub-strips")
+                                                .changed()
+                                            {
+                                                actions.push(Act::ToggleRuin);
+                                            }
                                             egui::ScrollArea::vertical()
-                                                .max_height(200.0)
+                                                .max_height(260.0)
                                                 .id_source("mtrl_scroll")
                                                 .show(ui, |ui| {
                                                     for gi in 0..p.draws.len() {
-                                                        let tris = p.draws[gi].index_count / 3;
-                                                        let (diff, norm, spec) = (
-                                                            p.draws[gi].diffuse,
-                                                            p.draws[gi].normal,
-                                                            p.draws[gi].specular,
-                                                        );
+                                                        let d = p.draws[gi].clone();
+                                                        let tris = d.index_count / 3;
+                                                        let (diff, norm, spec) =
+                                                            (d.diffuse, d.normal, d.specular);
                                                         let tex = diff
                                                             .map(|h| name_or_hash(&index, h))
                                                             .unwrap_or_else(|| "-".into());
+                                                        // Why is this mesh not drawn? Ask the gate.
+                                                        let lod_ok = (p.tier & d.lod_mask) != 0;
+                                                        let node_ok = d.node < 0
+                                                            || p.node_enable
+                                                                .get(d.node as usize)
+                                                                .copied()
+                                                                .unwrap_or(true);
+                                                        let hidden = p.hidden.contains(&gi);
+                                                        let (mark, why) = if lod_ok && node_ok && hidden {
+                                                            ("x", "hidden by hand".to_string())
+                                                        } else if !lod_ok {
+                                                            ("x", format!(
+                                                                "LOD: mask 0x{:02X} shares no bit with view_state 0x{:02X}",
+                                                                d.lod_mask, p.tier))
+                                                        } else if !node_ok {
+                                                            ("x", format!(
+                                                                "DESTRUCTION: node {} is switched off in this state",
+                                                                d.node))
+                                                        } else {
+                                                            ("*", "drawn".to_string())
+                                                        };
+                                                        let node_lbl = if d.node < 0 {
+                                                            "-".to_string()
+                                                        } else {
+                                                            p.hier_nodes
+                                                                .get(d.node as usize)
+                                                                .map(|h| name_or_hash(&index, h.hash))
+                                                                .unwrap_or_else(|| d.node.to_string())
+                                                        };
                                                         ui.horizontal(|ui| {
                                                             let mut vis = !p.hidden.contains(&gi);
                                                             if ui.checkbox(&mut vis, "").changed() {
@@ -1358,8 +1634,12 @@ pub fn run(opts: Options) {
                                                             }
                                                             let row = ui.selectable_label(
                                                                 p.sel_group == gi,
-                                                                format!("{gi:2}  {tris:5} tri  {tex}"),
-                                                            );
+                                                                format!(
+                                                                    "{mark} {gi:2} seg{:3} node {:>3} {}  mask 0x{:02X}  {tris:5} tri  {tex}",
+                                                                    d.seg_id, d.node, node_lbl, d.lod_mask
+                                                                ),
+                                                            )
+                                                            .on_hover_text(&why);
                                                             if row.clicked() {
                                                                 p.sel_group = gi;
                                                             }
@@ -1744,6 +2024,53 @@ pub fn run(opts: Options) {
                                         ui.label("host group:");
                                         ui.add(egui::DragValue::new(&mut mod_group).range(0..=63));
                                     });
+                                    // ── Conform transform: place & scale the import against the
+                                    // donor. Fields bake into the export (external_mesh_transformed);
+                                    // `live` drives the pedestal so it moves in the viewport. ──
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Conform");
+                                        ui.checkbox(&mut conform_live, "live preview");
+                                        ui.checkbox(&mut show_nodes, "show nodes")
+                                            .on_hover_text("mark every HIER node of the previewed model — green = positioned attach point (rotor/skid/seat/hardpoint), grey = origin/structural — as spatial anchors to map geometry onto");
+                                        if ui
+                                            .button("Load donor ref")
+                                            .on_hover_text("place the donor template in the sandbox at the origin as a visual anchor")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::LoadDonorRef);
+                                        }
+                                        if ui
+                                            .button("Auto-fit")
+                                            .on_hover_text("seed scale + position from the donor's real geometry envelope (skids on the ground, centred)")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ConformAutofit);
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("scale");
+                                        ui.add(egui::DragValue::new(&mut conform_scale).speed(0.005).range(0.0001..=1000.0));
+                                        if ui.small_button("reset").clicked() {
+                                            conform_scale = 1.0;
+                                            conform_t = [0.0; 3];
+                                            conform_r = [0.0; 3];
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("pos");
+                                        ui.add(egui::DragValue::new(&mut conform_t[0]).speed(0.02).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[1]).speed(0.02).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[2]).speed(0.02).prefix("z "));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("rot°");
+                                        ui.add(egui::DragValue::new(&mut conform_r[0]).speed(1.0).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[1]).speed(1.0).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[2]).speed(1.0).prefix("z "));
+                                    });
+                                    ui.checkbox(&mut conform_flip, "flip winding on export (fix inside-out faces)");
+                                    ui.separator();
                                     ui.horizontal(|ui| {
                                         ui.label("name:");
                                         ui.text_edit_singleline(&mut mod_name);
@@ -1817,6 +2144,219 @@ pub fn run(opts: Options) {
                                 });
                             });
                         });
+                        } // ── end BROWSER PAGE ──
+
+                        // ── MODEL WORKBENCH PAGE: inventory (left) · viewport (centre) · tools
+                        // (right). A dedicated page, not a section of the browser. ──
+                        if mode == WorkMode::Workbench {
+                            egui::SidePanel::left("wb_inventory").default_width(280.0).show(ctx, |ui| {
+                                ui.heading("Model Workbench");
+                                ui.weak("Pick a vehicle template to inspect its nodes, then conform your own model onto it.");
+                                ui.separator();
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    if vehicle_inventory.is_empty() {
+                                        ui.weak("(loading catalog…)");
+                                    }
+                                    for (class, rows) in &vehicle_inventory {
+                                        egui::CollapsingHeader::new(format!("{class}  ({})", rows.len()))
+                                            .default_open(*class == "helicopter")
+                                            .show(ui, |ui| {
+                                                for (hash, label) in rows {
+                                                    let sel = preview.as_ref().is_some_and(|p| p.hash == *hash);
+                                                    if ui.selectable_label(sel, label).clicked() {
+                                                        actions.push(Act::LoadModelHash(*hash, label.clone()));
+                                                    }
+                                                }
+                                            });
+                                    }
+                                });
+                            });
+                            egui::SidePanel::right("wb_tools").default_width(350.0).show(ctx, |ui| {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    ui.heading("Template");
+                                    match &preview {
+                                        Some(p) => {
+                                            ui.label(format!("{}", p.label));
+                                            ui.monospace(format!("0x{:08X}", p.hash));
+                                            ui.label(format!(
+                                                "{} nodes · {} draw groups · {} textures",
+                                                p.rig.len(), p.draws.len(), p.tex_hashes.len()
+                                            ));
+                                            ui.checkbox(&mut show_nodes, "show node markers")
+                                                .on_hover_text("green = positioned attach node (rotor/skid/seat/tail/hardpoint) · grey = origin/structural");
+                                            ui.weak("green = attach node (rotor/skid/seat) · grey = structural");
+
+                                            // ---- INTERACTION HARDPOINTS ----
+                                            // A vehicle's interaction points are HIER nodes named
+                                            // `hp_*`: hp_seat_lt is where the player ENTERS,
+                                            // hp_fx_exhaust_* are emitters, hp_wheel_* the
+                                            // suspension points, hp_barreltip_a the muzzle.
+                                            // Conform a novel model at a different SIZE and these
+                                            // stay where the DONOR's were -- on a 2x tank the seat
+                                            // ends up 5.5 m up on the turret roof and the vehicle
+                                            // cannot be entered. Re-place them HERE, on the model.
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                ui.strong("Interaction hardpoints");
+                                                ui.checkbox(&mut show_hardpoints, "show");
+                                            });
+                                            if hp_names.is_empty() {
+                                                let hashes: Vec<u32> = p.rig.iter().map(|b| b.name_hash).collect();
+                                                hp_names = resolve_node_names(&hashes);
+                                            }
+                                            let mut hps: Vec<(usize, String, [f32; 3])> = Vec::new();
+                                            for (i, b) in p.rig.iter().enumerate() {
+                                                if let Some(n) = hp_names.get(&b.name_hash) {
+                                                    if n.starts_with("hp_") {
+                                                        let w = [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]];
+                                                        let pos = hp_edits.get(&i).copied().unwrap_or(w);
+                                                        hps.push((i, n.clone(), pos));
+                                                    }
+                                                }
+                                            }
+                                            if hps.is_empty() {
+                                                ui.weak("no hp_* nodes resolved for this model");
+                                            } else {
+                                                ui.weak(format!("{} hardpoints -- the SEAT is where the player enters", hps.len()));
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(180.0)
+                                                    .id_source("hp_list")
+                                                    .show(ui, |ui| {
+                                                        for (idx, name, pos) in &hps {
+                                                            let sel = hp_selected == Some(*idx);
+                                                            ui.horizontal(|ui| {
+                                                                if ui.selectable_label(sel, name.as_str()).clicked() {
+                                                                    hp_selected = if sel { None } else { Some(*idx) };
+                                                                }
+                                                                ui.weak(format!("n{idx}"));
+                                                            });
+                                                            let mut v = *pos;
+                                                            let mut changed = false;
+                                                            ui.horizontal(|ui| {
+                                                                for (k, ax) in ["x", "y", "z"].iter().enumerate() {
+                                                                    changed |= ui
+                                                                        .add(egui::DragValue::new(&mut v[k]).speed(0.02).prefix(format!("{ax} ")))
+                                                                        .changed();
+                                                                }
+                                                            });
+                                                            if changed {
+                                                                hp_edits.insert(*idx, v);
+                                                                hp_selected = Some(*idx);
+                                                            }
+                                                        }
+                                                    });
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("reset").clicked() {
+                                                        hp_edits.clear();
+                                                    }
+                                                    if ui.button("copy --node-at args").clicked() {
+                                                        let args: Vec<String> = hp_edits
+                                                            .iter()
+                                                            .map(|(n, v)| format!("--node-at {n}:{:.3},{:.3},{:.3}", v[0], v[1], v[2]))
+                                                            .collect();
+                                                        let joined = args.join(" ");
+                                                        ui.output_mut(|o| o.copied_text = joined.clone());
+                                                        status = if joined.is_empty() {
+                                                            "no hardpoint edits to copy".to_string()
+                                                        } else {
+                                                            format!("copied: {joined}")
+                                                        };
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        None => {
+                                            ui.weak("← pick a vehicle from the inventory");
+                                        }
+                                    }
+                                    ui.separator();
+
+                                    ui.heading("Your model");
+                                    ui.weak("drag-drop .obj / .gltf / .glb onto the window");
+                                    let import_on_pedestal =
+                                        preview.as_ref().is_some_and(|p| imported.contains_key(&p.hash));
+                                    if import_on_pedestal {
+                                        ui.colored_label(egui::Color32::from_rgb(120, 230, 140), "import loaded on pedestal");
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Load donor ref")
+                                            .on_hover_text("place the conform donor template in the sandbox at origin as a visual anchor")
+                                            .clicked() { actions.push(Act::LoadDonorRef); }
+                                        if ui.button("Auto-fit")
+                                            .on_hover_text("seed scale + position from the donor's real geometry envelope (skids on ground, centred)")
+                                            .clicked() { actions.push(Act::ConformAutofit); }
+                                        ui.checkbox(&mut conform_live, "live");
+                                    });
+                                    ui.separator();
+
+                                    ui.heading("Conform transform");
+                                    ui.horizontal(|ui| {
+                                        ui.label("scale");
+                                        ui.add(egui::DragValue::new(&mut conform_scale).speed(0.005).range(0.0001..=1000.0));
+                                        if ui.small_button("reset").clicked() {
+                                            conform_scale = 1.0; conform_t = [0.0; 3]; conform_r = [0.0; 3];
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("pos");
+                                        ui.add(egui::DragValue::new(&mut conform_t[0]).speed(0.02).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[1]).speed(0.02).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_t[2]).speed(0.02).prefix("z "));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("rot°");
+                                        ui.add(egui::DragValue::new(&mut conform_r[0]).speed(1.0).prefix("x "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[1]).speed(1.0).prefix("y "));
+                                        ui.add(egui::DragValue::new(&mut conform_r[2]).speed(1.0).prefix("z "));
+                                    });
+                                    ui.checkbox(&mut conform_flip, "flip winding on export (fix inside-out faces)");
+                                    ui.separator();
+
+                                    ui.heading("Export");
+                                    ui.horizontal(|ui| {
+                                        ui.label("donor:");
+                                        match &mod_donor {
+                                            Some((h, l)) => { ui.monospace(format!("0x{h:08X}")); ui.label(l.as_str()); }
+                                            None => { ui.weak("← click a template (sets donor)"); }
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("host group:");
+                                        ui.add(egui::DragValue::new(&mut mod_group).range(0..=63));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("name:");
+                                        ui.text_edit_singleline(&mut mod_name);
+                                    });
+                                    let can_add = import_on_pedestal && mod_donor.is_some() && !mod_name.is_empty();
+                                    if ui.add_enabled(can_add, egui::Button::new("Add to mod project")).clicked() {
+                                        actions.push(Act::ModAdd(mod_name.clone()));
+                                    }
+                                    if !can_add {
+                                        ui.weak("needs an imported model on the pedestal, a donor template, and a name");
+                                    }
+                                    for (i, it) in mod_items.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.monospace(format!("0x{:08X}", it.hash));
+                                            ui.label(it.name.as_str());
+                                            ui.weak(format!("← {} g{}", it.donor_label, it.target_group));
+                                            if ui.small_button("✖").clicked() { actions.push(Act::ModRemove(i)); }
+                                        });
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("output:");
+                                        ui.text_edit_singleline(&mut mod_out);
+                                    });
+                                    let busy = publisher.is_some();
+                                    if ui.add_enabled(!mod_items.is_empty() && !busy,
+                                        egui::Button::new(if busy { "publishing…" } else { "Publish patch WAD" })).clicked()
+                                    {
+                                        actions.push(Act::Publish);
+                                    }
+                                });
+                            });
+                        }
+
                         if let Some(tv) = &tex_view {
                             egui::Window::new("Texture")
                                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
@@ -1854,6 +2394,29 @@ pub fn run(opts: Options) {
                     // ── Execute the frame's queued actions (keyboard + GUI, one implementation). ──
                     for act in std::mem::take(&mut actions) {
                         match act {
+                            Act::LoadModelHash(hash, label) => {
+                                let t0 = std::time::Instant::now();
+                                match source_model_data(&mut w, &imported, hash) {
+                                    Ok(md) => {
+                                        let p = build_preview(
+                                            &mut w, &mut scene, &mut world, hash, label.clone(), md,
+                                            &preview, &placed, &index, &anim_sel, &lua_corpus,
+                                        );
+                                        cam_target = p.center;
+                                        cam_dist = (p.radius * 2.4).clamp(1.5, 15000.0);
+                                        sel_bone = None;
+                                        preview = Some(p);
+                                        // Loading a workbench template also sets it as the conform
+                                        // donor (its container hosts the injected geometry).
+                                        mod_donor = Some((hash, label.clone()));
+                                        status = format!(
+                                            "workbench template: {label} ({:.2}s)",
+                                            t0.elapsed().as_secs_f32()
+                                        );
+                                    }
+                                    Err(e) => status = format!("LOAD FAILED: {e}"),
+                                }
+                            }
                             Act::LoadRow(vi) => {
                                 let Some(&ri) = filtered.get(vi) else { continue };
                                 let row = &index.rows(kind)[ri];
@@ -1895,49 +2458,63 @@ pub fn run(opts: Options) {
                                 }
                             }
                             a @ (Act::Tier(_) | Act::TierNext) => {
+                                // The model is uploaded WHOLE, so switching LOD rung is free: it just
+                                // changes `view_state` on this entity's render state. No rebuild, no
+                                // re-upload, and no effect on other placed instances of the same hash
+                                // (which the old per-hash `hidden_draws` path could not avoid).
                                 let want = match a {
-                                    Act::Tier(b) => preview.as_ref().map(|p| (p.hash, p.label.clone(), b)),
+                                    Act::Tier(b) => preview.as_ref().map(|_| b),
                                     _ => preview.as_ref().and_then(|p| {
                                         (p.tiers.len() > 1).then(|| {
-                                            let i = p
-                                                .tiers
-                                                .iter()
-                                                .position(|&b| b == p.tier)
-                                                .unwrap_or(0);
-                                            (p.hash, p.label.clone(), p.tiers[(i + 1) % p.tiers.len()])
+                                            let i =
+                                                p.tiers.iter().position(|&b| b == p.tier).unwrap_or(0);
+                                            p.tiers[(i + 1) % p.tiers.len()]
                                         })
                                     }),
                                 };
-                                let Some((hash, label, bit)) = want else {
+                                let Some(bit) = want else {
                                     if preview.is_some() {
-                                        status = "single-tier model (no other LOD/state)".into();
+                                        status = "single-tier model (no other LOD rung)".into();
                                     }
                                     continue;
                                 };
-                                if imported.contains_key(&hash) {
-                                    continue; // imports carry no tiers
-                                }
-                                match load_model_data_tier(&mut w, hash, bit) {
-                                    Ok(md) => {
-                                        scene.unload_model(hash);
-                                        let p = build_preview(
-                                            &mut w, &mut scene, &mut world, hash, label, md,
-                                            &preview, &placed, &index, &anim_sel, &lua_corpus,
-                                        );
-                                        let ti =
-                                            p.tiers.iter().position(|&b| b == p.tier).unwrap_or(0);
-                                        status = format!(
-                                            "state/LOD tier 0x{:02X} ({}/{}) — {} verts, {} groups",
-                                            p.tier,
-                                            ti + 1,
-                                            p.tiers.len(),
-                                            p.verts,
-                                            p.draws.len()
-                                        );
-                                        sel_bone = None;
-                                        preview = Some(p);
+                                if let Some(p) = &mut preview {
+                                    p.tier = bit;
+                                    let node_enable = p
+                                        .machine
+                                        .as_ref()
+                                        .map(|sm| {
+                                            mercs2_formats::orchestrator::machine_node_enable(
+                                                sm,
+                                                &p.hier_nodes,
+                                                &p.node_state,
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                    let rs = mercs2_engine::render_state::RenderState {
+                                        lod: bit.trailing_zeros() as u8,
+                                        view_state: bit,
+                                        node_enable,
+                                    };
+                                    for (gi, d) in p.draws.iter().enumerate() {
+                                        if rs.segment_visible(d.lod_mask, d.node) {
+                                            p.hidden.remove(&gi);
+                                        } else {
+                                            p.hidden.insert(gi);
+                                        }
                                     }
-                                    Err(e) => status = format!("TIER SWITCH FAILED: {e}"),
+                                    p.node_enable = rs.node_enable.clone();
+                                    scene.set_entity_render_state(p.entity, rs);
+                                    let ti = p.tiers.iter().position(|&b| b == bit).unwrap_or(0);
+                                    status = format!(
+                                        "LOD rung {} (0x{:02X}, {}/{}) — {} of {} groups drawn",
+                                        bit.trailing_zeros(),
+                                        bit,
+                                        ti + 1,
+                                        p.tiers.len().max(1),
+                                        p.draws.len() - p.hidden.len(),
+                                        p.draws.len()
+                                    );
                                 }
                             }
                             a @ (Act::ClipSel(_) | Act::ClipNav(_)) => {
@@ -2020,6 +2597,13 @@ pub fn run(opts: Options) {
                                         AnimState::default(),
                                         SkinPalette { mats: p.bind.clone() },
                                     ));
+                                    // Inherit the preview's live render state (its LOD rung and the
+                                    // node states you picked), not a fresh default.
+                                    let rs = scene
+                                        .entity_render_state(p.entity)
+                                        .cloned()
+                                        .unwrap_or_else(|| default_render_state(&mut w, p.hash));
+                                    scene.set_entity_render_state(e, rs);
                                     placed.push(Placed {
                                         hash: p.hash,
                                         label: p.label.clone(),
@@ -2099,6 +2683,8 @@ pub fn run(opts: Options) {
                                     AnimState::default(),
                                     SkinPalette { mats: vec![IDENTITY; bones] },
                                 ));
+                                let rs = default_render_state(&mut w, hash);
+                                scene.set_entity_render_state(e, rs);
                                 placed.push(Placed { hash, label: label.clone(), entity: e, pos, yaw: 0.0, scale: 1.0 });
                                 sel_placed = Some(placed.len() - 1);
                                 status = format!("placed {label} ({} in sandbox)", placed.len());
@@ -2106,8 +2692,8 @@ pub fn run(opts: Options) {
                             Act::DuplicatePlaced(i) => {
                                 if let Some(src) = placed.get(i) {
                                     let pos = src.pos + Vec3::new(0.5, 0.0, 0.5);
-                                    let (hash, label, yaw, scale) =
-                                        (src.hash, src.label.clone(), src.yaw, src.scale);
+                                    let (hash, label, yaw, scale, src_entity) =
+                                        (src.hash, src.label.clone(), src.yaw, src.scale, src.entity);
                                     let bones = scene.model_bone_count(hash).max(1);
                                     let e = world.spawn((
                                         Transform {
@@ -2119,6 +2705,12 @@ pub fn run(opts: Options) {
                                         AnimState::default(),
                                         SkinPalette { mats: vec![IDENTITY; bones] },
                                     ));
+                                    // Per-entity state: the duplicate can now diverge from its source.
+                                    let rs = scene
+                                        .entity_render_state(src_entity)
+                                        .cloned()
+                                        .unwrap_or_else(|| default_render_state(&mut w, hash));
+                                    scene.set_entity_render_state(e, rs);
                                     placed.push(Placed { hash, label, entity: e, pos, yaw, scale });
                                     sel_placed = Some(placed.len() - 1);
                                 }
@@ -2158,31 +2750,98 @@ pub fn run(opts: Options) {
                                     p.hidden.clear();
                                 }
                             }
+                            Act::SetHealth(h) => {
+                                if let Some(p) = &mut preview {
+                                    p.health = h.clamp(0.0, 1.0);
+                                    if let Some(sm) = &p.machine {
+                                        // Run the machine from health: pick each node's state, then
+                                        // node-enable → render state. This IS the object's damage axis.
+                                        p.node_state = mercs2_formats::orchestrator::node_states_for_health(
+                                            sm, p.health, 0.99,
+                                        );
+                                        let node_enable =
+                                            mercs2_formats::orchestrator::machine_node_enable(
+                                                sm,
+                                                &p.hier_nodes,
+                                                &p.node_state,
+                                            );
+                                        let rs = mercs2_engine::render_state::RenderState {
+                                            lod: p.tier.trailing_zeros() as u8,
+                                            view_state: p.tier,
+                                            node_enable,
+                                        };
+                                        for (gi, d) in p.draws.iter().enumerate() {
+                                            if rs.segment_visible(d.lod_mask, d.node) {
+                                                p.hidden.remove(&gi);
+                                            } else {
+                                                p.hidden.insert(gi);
+                                            }
+                                        }
+                                        p.node_enable = rs.node_enable.clone();
+                                        scene.set_entity_render_state(p.entity, rs);
+                                        let drawn = p.draws.len() - p.hidden.len();
+                                        status = format!(
+                                            "health {:.0}% — {drawn}/{} groups drawn",
+                                            p.health * 100.0,
+                                            p.draws.len()
+                                        );
+                                    }
+                                }
+                            }
+                            Act::ToggleRuin => {
+                                if let Some(p) = &mut preview {
+                                    p.hide_ruin = !p.hide_ruin;
+                                    let mut n = 0usize;
+                                    for (gi, d) in p.draws.iter().enumerate() {
+                                        let ruin = d
+                                            .diffuse
+                                            .map(|h| name_or_hash(&index, h).to_lowercase().contains("ruin"))
+                                            .unwrap_or(false);
+                                        if ruin {
+                                            n += 1;
+                                            if p.hide_ruin {
+                                                p.hidden.insert(gi);
+                                                scene.set_draw_hidden(p.hash, gi, true);
+                                            } else {
+                                                p.hidden.remove(&gi);
+                                                scene.set_draw_hidden(p.hash, gi, false);
+                                            }
+                                        }
+                                    }
+                                    status = format!(
+                                        "{} {n} *_ruin* sub-strip(s)",
+                                        if p.hide_ruin { "hid" } else { "restored" }
+                                    );
+                                }
+                            }
                             Act::NodeState(ni, si) => {
                                 if let Some(p) = &mut preview {
                                     if let Some(sm) = &p.machine {
                                         if let Some(slot) = p.node_state.get_mut(ni) {
                                             *slot = si;
                                         }
-                                        let vis =
-                                            mercs2_formats::orchestrator::machine_group_visibility(
+                                        // Re-execute the machine into a node-enable table and hand it
+                                        // to the entity's render state. Node-keyed, like the engine.
+                                        let node_enable =
+                                            mercs2_formats::orchestrator::machine_node_enable(
                                                 sm,
                                                 &p.hier_nodes,
-                                                &p.indx,
                                                 &p.node_state,
                                             );
+                                        let rs = mercs2_engine::render_state::RenderState {
+                                            lod: p.tier.trailing_zeros() as u8,
+                                            view_state: p.tier,
+                                            node_enable,
+                                        };
                                         for (gi, d) in p.draws.iter().enumerate() {
-                                            let hide = vis
-                                                .get(d.group_index)
-                                                .map(|visible| !visible)
-                                                .unwrap_or(false);
-                                            if hide {
-                                                p.hidden.insert(gi);
-                                            } else {
+                                            if rs.segment_visible(d.lod_mask, d.node) {
                                                 p.hidden.remove(&gi);
+                                            } else {
+                                                p.hidden.insert(gi);
                                             }
-                                            scene.set_draw_hidden(p.hash, gi, hide);
                                         }
+                                        p.node_enable = rs.node_enable.clone();
+                                        scene.set_entity_render_state(p.entity, rs);
                                         let sname = sm
                                             .nodes
                                             .get(ni)
@@ -2255,6 +2914,8 @@ pub fn run(opts: Options) {
                                                 AnimState::default(),
                                                 SkinPalette { mats: vec![IDENTITY; bones] },
                                             ));
+                                            let rs = default_render_state(&mut w, it.hash);
+                                            scene.set_entity_render_state(e, rs);
                                             placed.push(Placed {
                                                 hash: it.hash,
                                                 label,
@@ -2357,7 +3018,8 @@ pub fn run(opts: Options) {
                                     status = format!("mod project already has 0x{hash:08X}");
                                     continue;
                                 }
-                                let mesh = external_mesh_of(md);
+                                let mesh =
+                                    external_mesh_transformed(md, conform_scale, conform_t, conform_r);
                                 let (nv, nt) = (mesh.positions.len(), mesh.tris.len());
                                 mod_items.push(crate::publish::NewModelItem {
                                     name: name.clone(),
@@ -2365,6 +3027,7 @@ pub fn run(opts: Options) {
                                     donor,
                                     donor_label,
                                     target_group: mod_group,
+                                    flip: conform_flip,
                                     mesh,
                                 });
                                 status = format!(
@@ -2395,6 +3058,7 @@ pub fn run(opts: Options) {
                                     let names = std::mem::take(&mut index.names);
                                     index = AssetIndex::build(&w.wads, names);
                                     filtered = refilter(&index, kind, &filter);
+                                    inventory_dirty = true;
                                     sel = sel.min(filtered.len().saturating_sub(1));
                                 }
                                 status = format!(
@@ -2406,6 +3070,65 @@ pub fn run(opts: Options) {
                                     mod_items.clone(),
                                     std::path::PathBuf::from(mod_out.clone()),
                                 ));
+                            }
+                            Act::ConformAutofit => {
+                                let Some((dh, _)) = mod_donor.as_ref().map(|(h, l)| (*h, l.clone()))
+                                else {
+                                    status = "auto-fit: set a donor first".into();
+                                    continue;
+                                };
+                                let Some(imp) = preview.as_ref().and_then(|p| imported.get(&p.hash))
+                                else {
+                                    status = "auto-fit: the pedestal is not an imported model".into();
+                                    continue;
+                                };
+                                match load_model_data(&mut w, dh) {
+                                    Ok(donor_md) => {
+                                        let (s, t) = conform_autofit(&donor_md, imp);
+                                        conform_scale = s;
+                                        conform_t = t;
+                                        conform_r = [0.0; 3];
+                                        status = format!(
+                                            "auto-fit: scale {:.3}, pos [{:.2}, {:.2}, {:.2}]",
+                                            s, t[0], t[1], t[2]
+                                        );
+                                    }
+                                    Err(e) => status = format!("auto-fit: donor load failed: {e}"),
+                                }
+                            }
+                            Act::LoadDonorRef => {
+                                let Some((dh, dl)) = mod_donor.clone() else {
+                                    status = "donor ref: set a donor first".into();
+                                    continue;
+                                };
+                                if !scene.has_model(dh) {
+                                    if let Err(e) = load_gpu_only(&mut w, &mut scene, dh) {
+                                        status = format!("donor ref: {e}");
+                                        continue;
+                                    }
+                                }
+                                let bones = scene.model_bone_count(dh).max(1);
+                                let e = world.spawn((
+                                    Transform {
+                                        translation: Vec3::ZERO,
+                                        rotation: Quat::IDENTITY,
+                                        scale: Vec3::ONE,
+                                    },
+                                    ModelRef { model: dh },
+                                    AnimState::default(),
+                                    SkinPalette { mats: vec![IDENTITY; bones] },
+                                ));
+                                let rs = default_render_state(&mut w, dh);
+                                scene.set_entity_render_state(e, rs);
+                                placed.push(Placed {
+                                    hash: dh,
+                                    label: format!("ref:{dl}"),
+                                    entity: e,
+                                    pos: Vec3::ZERO,
+                                    yaw: 0.0,
+                                    scale: 1.0,
+                                });
+                                status = format!("donor reference placed at origin: {dl}");
                             }
                             Act::TexClose => {
                                 tex_view = None;
@@ -2444,6 +3167,105 @@ pub fn run(opts: Options) {
                             if let Some(i) = sel_bone {
                                 if hovered_bone != Some(i) {
                                     push(i, [0.35, 0.9, 1.0, 0.9]); // cyan: pinned
+                                }
+                            }
+                            // Workbench: every node as a spatial anchor (after the hover/pin closure
+                            // releases its &mut cards). Colour by role heuristic — translated-away
+                            // nodes = functional attach points (rotor/skid/seat/tail/hardpoint);
+                            // nodes at the origin = structural/break-piece parents — so the user can
+                            // map imported geometry onto them by sight.
+                            if show_nodes {
+                                // Posed world position of every node.
+                                let node_pos: Vec<[f32; 3]> = p
+                                    .rig
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, b)| {
+                                        let m = match pal.as_ref().and_then(|pl| pl.mats.get(i)) {
+                                            Some(sm) => mercs2_formats::skeleton::mat4_mul(&b.world_bind, sm),
+                                            None => b.world_bind,
+                                        };
+                                        [m[3][0], m[3][1], m[3][2]]
+                                    })
+                                    .collect();
+                                // INTERLINK: dotted segments from each node to its parent so the
+                                // HIER hierarchy is legible (which nodes hang off which).
+                                for (i, b) in p.rig.iter().enumerate() {
+                                    if b.parent < 0 {
+                                        continue;
+                                    }
+                                    let Some(a) = node_pos.get(b.parent as usize).copied() else {
+                                        continue;
+                                    };
+                                    let c = node_pos[i];
+                                    let d = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 0.01 {
+                                        continue; // coincident with parent — no visible link
+                                    }
+                                    for s in 1..5 {
+                                        let f = s as f32 / 5.0;
+                                        cards.push(mercs2_engine::particles::GlowCard {
+                                            pos: [a[0] + d[0] * f, a[1] + d[1] * f, a[2] + d[2] * f],
+                                            size: (p.radius * 0.012).clamp(0.008, 0.12),
+                                            color: [0.25, 0.75, 0.85, 0.55], // teal link
+                                        });
+                                    }
+                                }
+                                // NODES: green = positioned attach point (moved off the model
+                                // origin: rotor/skid/seat/tail/hardpoint), grey = origin/structural.
+                                for (i, b) in p.rig.iter().enumerate() {
+                                    let t = [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]];
+                                    let off_origin = t[0].abs() + t[1].abs() + t[2].abs() > 0.05;
+                                    let color = if off_origin {
+                                        [0.30, 1.0, 0.45, 0.9]
+                                    } else {
+                                        [0.6, 0.6, 0.7, 0.5]
+                                    };
+                                    cards.push(mercs2_engine::particles::GlowCard {
+                                        pos: node_pos[i],
+                                        size: (p.radius * 0.04).clamp(0.02, 0.4),
+                                        color,
+                                    });
+                                }
+                            }
+
+                            // ---- INTERACTION HARDPOINTS: big, unmistakable, and at their EDITED
+                            // position. These are what the player touches (the seat is the ENTRY
+                            // point) -- so they must sit ON the new model, not where the donor's were.
+                            if show_hardpoints {
+                                for (i, b) in p.rig.iter().enumerate() {
+                                    let Some(n) = hp_names.get(&b.name_hash) else { continue };
+                                    if !n.starts_with("hp_") {
+                                        continue;
+                                    }
+                                    let base = [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]];
+                                    let pos = hp_edits.get(&i).copied().unwrap_or(base);
+                                    let is_seat = n.contains("seat");
+                                    let color = if hp_selected == Some(i) {
+                                        [1.0, 0.25, 0.9, 1.0]      // magenta = selected
+                                    } else if is_seat {
+                                        [1.0, 0.85, 0.15, 0.95]    // amber = the ENTRY point
+                                    } else {
+                                        [0.2, 0.6, 1.0, 0.8]       // blue = other hardpoint
+                                    };
+                                    cards.push(mercs2_engine::particles::GlowCard {
+                                        pos,
+                                        size: (p.radius * (if is_seat { 0.075 } else { 0.055 })).clamp(0.05, 0.7),
+                                        color,
+                                    });
+                                    // A moved hardpoint gets a dotted trail back to where the DONOR
+                                    // had it, so the displacement you are applying is visible.
+                                    let d = [pos[0] - base[0], pos[1] - base[1], pos[2] - base[2]];
+                                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 0.01 {
+                                        for st in 1..7 {
+                                            let f = st as f32 / 7.0;
+                                            cards.push(mercs2_engine::particles::GlowCard {
+                                                pos: [base[0] + d[0] * f, base[1] + d[1] * f, base[2] + d[2] * f],
+                                                size: (p.radius * 0.012).clamp(0.008, 0.12),
+                                                color: [1.0, 0.5, 0.1, 0.5],
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2588,16 +3410,16 @@ fn bind_tex_plate(w: &mut WadStack, scene: &mut Scene, tv: &mut TexView) {
 /// Everything `load_preview` and the sandbox loader share: container → indexed geometry →
 /// textures → skin (native metres) → clips.
 #[derive(Clone)]
-struct ModelData {
-    verts: Vec<mesh::Vertex>,
-    indices: Vec<u32>,
-    draws: Vec<DrawGroup>,
-    stats: mesh::ModelStats,
-    skin: mesh::SkinData,
-    textures: TexMap,
+pub(crate) struct ModelData {
+    pub(crate) verts: Vec<mesh::Vertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) draws: Vec<DrawGroup>,
+    pub(crate) stats: mesh::ModelStats,
+    pub(crate) skin: mesh::SkinData,
+    pub(crate) textures: TexMap,
     /// SEGM state/LOD tier bits the container carries (F11 cycles them; empty = single-tier /
     /// imported) and the bit this build used.
-    tiers: Vec<u8>,
+    pub(crate) tiers: Vec<u8>,
     tier: u8,
     /// The ENGINE's destruction state machine (named states + Enter/Exit command scripts) —
     /// docs/destruction_orchestrator_format.md. None = non-destructible. Together with
@@ -2606,6 +3428,11 @@ struct ModelData {
     machine: Option<mercs2_formats::orchestrator::StateMachine>,
     hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
+    /// The container's top-level model header (authored AABB, node count, LOD-level count, LOD
+    /// distance) — the per-model data the engine's LOD selector reads. `None` for imports. This is
+    /// what makes the workshop AWARE of the model instead of assuming one global rule; the authored
+    /// AABB frames the camera correctly (break-piece anchors no longer inflate the radius).
+    header: Option<mercs2_formats::model_cubeize::ModelHeader>,
 }
 
 impl From<crate::import::Imported> for ModelData {
@@ -2622,6 +3449,7 @@ impl From<crate::import::Imported> for ModelData {
             machine: None,
             hier_nodes: Vec::new(),
             indx: Vec::new(),
+            header: None,
         }
     }
 }
@@ -2639,29 +3467,91 @@ fn source_model_data(
     load_model_data(w, hash)
 }
 
-fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, String> {
+pub(crate) fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, String> {
     load_model_data_tier(w, hash, 0x01)
+}
+
+/// The render state a freshly-placed instance of `hash` should have: LOD rung 0, plus the destruction
+/// machine's node-enable table at its DEFAULT state (pristine). Every spawned entity needs one —
+/// models are uploaded whole now, so an entity with no state draws its wreck too.
+///
+/// Imported/synthetic models resolve to no container; their draw groups carry `lod_mask = 0xFF` and
+/// `node = -1`, so the empty state draws them in full.
+fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine::render_state::RenderState {
+    use mercs2_formats::orchestrator as orch;
+    let Ok(c) = w.extract_container(hash) else {
+        return mercs2_engine::render_state::RenderState::rung0(0);
+    };
+    let hier = orch::parse_hier(&c);
+    let node_enable = orch::parse_state_machine(&c)
+        .map(|sm| {
+            let chosen: Vec<usize> = sm.nodes.iter().map(orch::default_state_index).collect();
+            orch::machine_node_enable(&sm, &hier, &chosen)
+        })
+        .unwrap_or_default();
+    mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable }
+}
+
+/// The 3-rung cross-fade `view_state` centred on rung `n`: `1<<(n-1) | 1<<n | 1<<(n+1)`, exactly
+/// `FUN_0047724e` (the `n-1` term drops off at rung 0; `n+1` past bit 7 falls out of the byte).
+fn window_view_state(n: u8) -> u8 {
+    let bit = |i: i32| -> u8 { if (0..8).contains(&i) { 1u8 << i } else { 0 } };
+    bit(n as i32 - 1) | bit(n as i32) | bit(n as i32 + 1)
+}
+
+/// The engine render state a preview should have: `view_state` = the selected LOD-rung bit, and the
+/// destruction machine's node-enable table for the chosen per-node states. A model with no machine
+/// gets an empty table, which passes clause 3 for every segment.
+fn preview_render_state(md: &ModelData, node_state: &[usize]) -> mercs2_engine::render_state::RenderState {
+    let node_enable = md
+        .machine
+        .as_ref()
+        .map(|sm| mercs2_formats::orchestrator::machine_node_enable(sm, &md.hier_nodes, node_state))
+        .unwrap_or_default();
+    mercs2_engine::render_state::RenderState {
+        lod: md.tier.trailing_zeros() as u8,
+        view_state: md.tier,
+        node_enable,
+    }
 }
 
 /// Load a model at a specific SEGM state/LOD tier (`active_bit` of `build_indexed_state`) —
 /// F11's rebuild path. Falls back to the container's first tier if the requested bit is absent.
 fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<ModelData, String> {
-    let container = w.extract_container(hash)?;
+    // A model is scattered across BLOCKS, not held in one container: the resident block ships the
+    // object (HIER, SEGM, MTRL, physics, destruction machine) plus its coarsest meshes, and each
+    // finer `_P00N_Q(3-N)` block ships geometry + an INDX that names rows in the RESIDENT block's
+    // SEGM. Loading only the resident block is what made every vehicle a low-poly far-LOD proxy —
+    // a 371-triangle tank in a `_lod_dm` skin. Bind each rung against the resident block and merge
+    // them into one buffer; the draw gate then selects per segment, which is what it is for.
+    // `Model` owns the cross-block rules — binding each rung's INDX against the resident SEGM, and
+    // clearing the tier bits a finer block re-authors so the rungs refine rather than double-draw.
+    // Same assembly the game world loads through; visibility stays a per-frame gate decision.
+    let m = w.model(hash)?;
+    let container = m.resident.clone();
     let tiers = mesh::state_tiers(&container);
-    let tier = if tiers.contains(&want_bit) || tiers.is_empty() { want_bit } else { tiers[0] };
-    let (verts, indices, draws, stats) = mesh::build_indexed_state(&container, tier)?;
+    let (verts, indices, draws, stats) = m.flatten();
     // The engine's own named-state machine + the HIER/INDX it acts on — ground-truth
     // destruction visibility comes from executing its scripts, nothing is classified.
     let machine = mercs2_formats::orchestrator::parse_state_machine(&container);
     let hier_nodes = mercs2_formats::orchestrator::parse_hier(&container);
     let indx = mercs2_formats::orchestrator::parse_indx(&container);
-    // RESIDENT mips only: `extract_texture_hires` walks the whole cell subtree per texture and
-    // made model loads take seconds — the F3 plate view still fetches full-res on demand.
+    let header = mercs2_formats::model_cubeize::parse_model_header(&container);
+    // Rung 0 — the closest tier, what you see standing next to the thing. It used to be empty for
+    // vehicles (their near geometry was in a block we never opened), so a "pick the fullest tier"
+    // heuristic stood in for it. With the chain assembled, tier 0 is real geometry and needs no
+    // guess.
+    let tier = if want_bit != 0x01 && tiers.contains(&want_bit) { want_bit } else { 0x01 };
+    // FULL mip chain, all three slots. The resident block ships only a coarse mip tail (a 1024²
+    // normal map arrives as 1,360 B = 32×32), so loading the resident texture here was serving the
+    // preview a blurred model and writing near-empty PNGs on export. `texture_best` assembles the
+    // higher mips from the finer LOD blocks of the texture's own cell subtree and memoizes, so the
+    // subtree walk that made this "too slow" is now paid once per texture per session.
     let mut textures: TexMap = HashMap::new();
     for d in &draws {
         for h in [d.diffuse, d.normal, d.specular].into_iter().flatten() {
             if !textures.contains_key(&h) {
-                if let Ok(t) = w.texture_resident(h) {
+                if let Ok(t) = w.texture_best(h) {
                     textures.insert(h, t);
                 }
             }
@@ -2683,6 +3573,7 @@ fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<Mod
         machine,
         hier_nodes,
         indx,
+        header,
     })
 }
 
@@ -2752,6 +3643,90 @@ fn lua_references(
 
 /// CharacterName candidates from a model label: the tail after `hum_` (else the whole label),
 /// progressively stripping `_suffix` segments — `pmc_hum_mattias_v3` → `mattias_v3` → `mattias`.
+/// Every clip the GAME associates with this asset — the set an export must ship.
+///
+/// The generic rig-matched loader (`clips_for_model`) is the wrong source here: all humans share the
+/// same HIER, so it matches by skeleton coverage and is deliberately capped at `MAX_AUTO_CLIPS` (6)
+/// to bound decode cost in the preview. That is a working set, not the character's animation set —
+/// Mattias has ~100 clips and Chris ~111, and they are DISJOINT.
+///
+/// The authoritative source is the AnimationLookup table, keyed by `CharacterName = m2(name)`, which
+/// is how the engine itself picks a clip (see the human-animation-selection chain). Fall back to the
+/// generic set only for a rig the tables do not name — props, vehicles, unnamed skeletons.
+pub(crate) fn clips_for_export(
+    w: &mut WadStack,
+    label: &str,
+    rig: &[BoneRig],
+    index: &AssetIndex,
+) -> (Vec<ClipAnim>, HashMap<u32, String>) {
+    let mut names: HashMap<u32, String> = HashMap::new();
+    if rig.is_empty() {
+        return (Vec::new(), names);
+    }
+    let hier: Vec<u32> = rig.iter().map(|b| b.name_hash).collect();
+
+    // Character-specific: walk the label's name candidates (pmc_hum_mattias_v3 -> mattias_v3 ->
+    // mattias) until one names rows in the table, exactly as the preview's catalog does.
+    let mut want: Vec<u32> = Vec::new();
+    if let Some(sel) = w.anim_selector() {
+        for cand in character_candidates(label) {
+            let character = AnimSelector::character_name(&cand);
+            let rows = sel.character_clips(character);
+            if rows.is_empty() {
+                continue;
+            }
+            // A clip answers SEVERAL handles (equipment variants share clips); gather them all, as
+            // the name is derived from the game states those handles play.
+            let mut handles: HashMap<u32, Vec<u32>> = HashMap::new();
+            for r in &rows {
+                let hs = handles.entry(r.clip).or_default();
+                if hs.is_empty() {
+                    want.push(r.clip);
+                }
+                if !hs.contains(&r.handle) {
+                    hs.push(r.handle);
+                }
+            }
+            // Clip names are stripped on disk, so most resolve to nothing in the catalog. Fall back
+            // to the PROCEDURAL name the preview shows — Stance.Action.AimState... read straight out
+            // of the ActionTable, i.e. game-table values, not invented labels.
+            for &clip in &want {
+                let hs = &handles[&clip];
+                let mut actions = Vec::new();
+                let mut contexts = Vec::new();
+                for &h in hs {
+                    actions.extend(sel.handle_actions(h).into_iter().map(|a| (h, a)));
+                    contexts
+                        .extend(sel.lookup_context(h, character).into_iter().filter(|c| c.clip == clip));
+                }
+                if let Some(n) = index
+                    .names
+                    .get(&clip)
+                    .cloned()
+                    .or_else(|| procedural_clip_name(index, &actions, &contexts))
+                {
+                    names.insert(clip, n);
+                }
+            }
+            break;
+        }
+    }
+    if want.is_empty() {
+        // Not a table-named character: the rig-matched animgroup set is all there is.
+        let generic = w.clips_for_model(rig);
+        for c in &generic {
+            if let Some(n) = index.names.get(&c.name_hash) {
+                names.insert(c.name_hash, n.clone());
+            }
+        }
+        return (generic, names);
+    }
+    // A table row can name a clip this rig cannot bind; `clip_for_rig` still returns it (with zero
+    // tracks resolved), and the bundle records it as present-but-unbound rather than shipping a
+    // dead T-pose animation.
+    (want.iter().filter_map(|&h| w.clip_for_rig(&hier, h)).collect(), names)
+}
+
 pub(crate) fn character_candidates(label: &str) -> Vec<String> {
     let tail = label.find("hum_").map(|i| &label[i + 4..]).unwrap_or(label);
     let mut v = vec![tail.to_string()];
@@ -2772,14 +3747,88 @@ pub(crate) fn character_candidates(label: &str) -> Vec<String> {
 /// triangles from the index buffer. Rigid (empty joints/weights = bone-0 bind in the donor) —
 /// skinned weight transfer is its own workstream. Donor-frame fit is the source file's job.
 fn external_mesh_of(md: &ModelData) -> mercs2_formats::model_inject::ExternalMesh {
+    external_mesh_transformed(md, 1.0, [0.0; 3], [0.0; 3])
+}
+
+/// Conform rotation from XYZ euler degrees (the panel's rotation fields).
+fn conform_quat(r_deg: [f32; 3]) -> Quat {
+    Quat::from_euler(
+        glam::EulerRot::XYZ,
+        r_deg[0].to_radians(),
+        r_deg[1].to_radians(),
+        r_deg[2].to_radians(),
+    )
+}
+
+/// Bake the conform panel's interactive transform (uniform scale → rotate → translate) into the
+/// mesh handed to the conform injector, so what the user positions against the template IS what
+/// ships. Normals are rotated (scale is uniform, translation ignored for normals).
+fn external_mesh_transformed(
+    md: &ModelData,
+    scale: f32,
+    t: [f32; 3],
+    r_deg: [f32; 3],
+) -> mercs2_formats::model_inject::ExternalMesh {
+    let q = conform_quat(r_deg);
+    let s = if scale.abs() > 1e-6 { scale } else { 1.0 };
+    let tv = Vec3::from(t);
+    let tp = |p: [f32; 3]| {
+        let v = q * (Vec3::from(p) * s) + tv;
+        [v.x, v.y, v.z]
+    };
+    let tn = |n: [f32; 3]| {
+        let v = (q * Vec3::from(n)).normalize_or_zero();
+        [v.x, v.y, v.z]
+    };
     mercs2_formats::model_inject::ExternalMesh {
-        positions: md.verts.iter().map(|v| v.pos).collect(),
-        normals: md.verts.iter().map(|v| v.normal).collect(),
+        positions: md.verts.iter().map(|v| tp(v.pos)).collect(),
+        normals: md.verts.iter().map(|v| tn(v.normal)).collect(),
         uvs: md.verts.iter().map(|v| v.uv).collect(),
         tris: md.indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
         joints: Vec::new(),
         weights: Vec::new(),
     }
+}
+
+/// Axis-aligned bbox (min,max) over a ModelData's vertex positions — the REAL geometry envelope
+/// used to seed the conform auto-fit (mirrors `inject_static`'s real-envelope fit, not the padded
+/// top-INFO bbox).
+fn model_pos_bbox(md: &ModelData) -> ([f32; 3], [f32; 3]) {
+    let mut mn = [f32::MAX; 3];
+    let mut mx = [f32::MIN; 3];
+    for v in &md.verts {
+        for k in 0..3 {
+            mn[k] = mn[k].min(v.pos[k]);
+            mx[k] = mx[k].max(v.pos[k]);
+        }
+    }
+    (mn, mx)
+}
+
+/// Seed the conform transform so the import fills the donor's real geometry envelope: uniform
+/// scale to the tightest axis, centred in X/Z, bottom-aligned in Y (feet/skids on the ground).
+/// Returns (scale, translate) for the panel fields; rotation is left to the user.
+fn conform_autofit(donor: &ModelData, import: &ModelData) -> (f32, [f32; 3]) {
+    let (tmin, tmax) = model_pos_bbox(donor);
+    let (mmin, mmax) = model_pos_bbox(import);
+    if tmin[0] > tmax[0] || mmin[0] > mmax[0] {
+        return (1.0, [0.0; 3]);
+    }
+    let mut s = f32::MAX;
+    for k in 0..3 {
+        let md = mmax[k] - mmin[k];
+        if md > 1e-4 {
+            s = s.min((tmax[k] - tmin[k]).abs() / md);
+        }
+    }
+    if !s.is_finite() || s <= 0.0 {
+        s = 1.0;
+    }
+    let mcen = [(mmin[0] + mmax[0]) * 0.5, mmin[1], (mmin[2] + mmax[2]) * 0.5];
+    let tgt = [(tmin[0] + tmax[0]) * 0.5, tmin[1], (tmin[2] + tmax[2]) * 0.5];
+    // translate = target - scale*mcen (so mesh min-Y and X/Z centre land on the envelope).
+    let t = [tgt[0] - s * mcen[0], tgt[1] - s * mcen[1], tgt[2] - s * mcen[2]];
+    (s, t)
 }
 
 /// GPU-upload a model by hash (used by the sandbox scene loader for models not previewed yet).
@@ -2817,34 +3866,26 @@ fn build_preview(
     }
 
     scene.load_model(hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
-    // GROUND-TRUTH default visibility: each switch node enters its own default state (per its
-    // init script) and that state's SHOW/Hide commands decide what renders — exactly the
-    // engine's rule, no classification. Every group's hidden flag is set EXPLICITLY so stale
-    // per-hash scene state from a previous load can't linger.
+    // GROUND-TRUTH visibility, exactly the engine's three-clause draw gate, evaluated per segment
+    // against THIS entity's state — not baked into the vertex buffer and not keyed by model hash.
+    //  - clause 2: the LOD-rung mask vs `view_state` (the tier the preview starts at).
+    //  - clause 3: the node-enable table the destruction machine writes. Keyed by the SEGM record's
+    //    node, NOT by `INDX[group]` — they disagree (md500: 5 of 19 groups), and it is precisely that
+    //    disagreement that used to leave the wreck on screen next to the intact body.
     let node_state: Vec<usize> = md
         .machine
         .as_ref()
         .map(|sm| sm.nodes.iter().map(mercs2_formats::orchestrator::default_state_index).collect())
         .unwrap_or_default();
+    let rs = preview_render_state(&md, &node_state);
+    let rs_node_enable = rs.node_enable.clone();
     let mut hidden: HashSet<usize> = HashSet::new();
-    let vis = md.machine.as_ref().map(|sm| {
-        mercs2_formats::orchestrator::machine_group_visibility(
-            sm,
-            &md.hier_nodes,
-            &md.indx,
-            &node_state,
-        )
-    });
     for (gi, d) in md.draws.iter().enumerate() {
-        let hide = vis
-            .as_ref()
-            .and_then(|v| v.get(d.group_index).copied())
-            .map(|visible| !visible)
-            .unwrap_or(false);
-        if hide {
+        // Clear any stale per-model override from a previous preview of this hash; the gate decides.
+        scene.set_draw_hidden(hash, gi, false);
+        if !rs.segment_visible(d.lod_mask, d.node) {
             hidden.insert(gi);
         }
-        scene.set_draw_hidden(hash, gi, hide);
     }
     let bind: Vec<[[f32; 4]; 4]> =
         if md.skin.bones.is_empty() { vec![IDENTITY] } else { md.skin.bones.clone() };
@@ -2854,9 +3895,16 @@ fn build_preview(
         AnimState::default(),
         SkinPalette { mats: bind.clone() },
     ));
+    scene.set_entity_render_state(entity, rs);
 
-    let bmin = Vec3::from(md.stats.bbox_min);
-    let bmax = Vec3::from(md.stats.bbox_max);
+    // Frame the camera from the AUTHORED model AABB (the header the engine's LOD selector reads),
+    // not the built-geometry bbox: the latter spans every break-piece anchor (ejected far from the
+    // body), which over-inflated the orbit radius (destroyer read ~90 m). Fall back to the built
+    // bbox for imports / headerless models.
+    let (bmin, bmax) = match &md.header {
+        Some(h) => (Vec3::from(h.aabb_min), Vec3::from(h.aabb_max)),
+        None => (Vec3::from(md.stats.bbox_min), Vec3::from(md.stats.bbox_max)),
+    };
     let center = (bmin + bmax) * 0.5;
     let radius = ((bmax - bmin).length() * 0.5).max(0.5);
     let mut tex_hashes: Vec<u32> = md.textures.keys().copied().collect();
@@ -2950,6 +3998,10 @@ fn build_preview(
         hier_nodes: md.hier_nodes.clone(),
         indx: md.indx.clone(),
         node_state,
+        health: 1.0,
+        hide_ruin: false,
+        node_enable: rs_node_enable,
+        header: md.header,
         lua_needle,
         lua_refs,
         cur_clip: None,
@@ -3007,6 +4059,7 @@ fn merge_placed(
                 specular: d.specular,
                 normal: d.normal,
                 group_index: draws.len(),
+                ..Default::default()
             });
         }
         for (h, t) in &md.textures {
@@ -3047,6 +4100,7 @@ fn merge_placed(
         machine: None,
         hier_nodes: Vec::new(),
         indx: Vec::new(),
+        header: None,
     })
 }
 
@@ -3073,6 +4127,58 @@ pub(crate) fn export_by_hash(
     export_model_data(&md, label)
 }
 
+/// LOSSLESS bundle export: editable glTF (+PNG skins) alongside the ORIGINAL container bytes of
+/// every LOD rung, plus the manifest that maps one onto the other. See `bundle.rs` — the point is
+/// that chunks we have not reversed (PHY2/CHDR/CEXE/SWIT/...) survive byte-exact, so the asset can
+/// always be rebuilt even where our understanding is incomplete.
+pub(crate) fn export_bundle_by_hash(
+    base: &str,
+    overlays: &[String],
+    hash: u32,
+    label: &str,
+    // The name catalog — also the source of each clip's procedural (ActionTable-derived) name.
+    index: &AssetIndex,
+    outroot: &std::path::Path,
+) -> Result<String, String> {
+    let mut w = WadStack::open(base, overlays)?;
+    let md = load_model_data(&mut w, hash)?;
+    // The LOD chain, raw. Resolution walks the whole open stack (base + patch overlays).
+    let mut lods: Vec<mercs2_engine::wad::ModelLod> = Vec::new();
+    for wad in w.wads.iter_mut().rev() {
+        if let Ok(l) = mercs2_engine::wad::extract_model_lods(wad, hash) {
+            lods = l;
+            break;
+        }
+    }
+    if lods.is_empty() {
+        return Err(format!("no model container for 0x{hash:08X}"));
+    }
+    // The character's FULL animation set from the AnimationLookup tables (~100 for Mattias), not the
+    // 6-clip working set the preview's generic loader is capped at.
+    let (clips, clip_names) = clips_for_export(&mut w, label, &md.skin.rig, index);
+    let safe: String = label
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let dir = outroot.join(&safe);
+    crate::bundle::export_bundle(
+        &dir,
+        label,
+        hash,
+        &lods,
+        &md.verts,
+        &md.indices,
+        &md.draws,
+        &md.textures,
+        &md.hier_nodes,
+        md.header.as_ref(),
+        &md.skin.rig,
+        &clips,
+        &clip_names,
+    )?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// Write a model to `workshop_export/<label>/` as OBJ + MTL + decoded PNG textures (game-space
 /// coordinates, one `usemtl` per draw group). Works for WAD assets, imports, and merge results —
 /// the hand-off point into the UCFX/patch pipeline.
@@ -3084,21 +4190,31 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     let dir = std::path::PathBuf::from("workshop_export").join(&safe);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Textures → PNG (decoded from BC), MTL materials per draw group.
+    // Textures → PNG (decoded from BC), MTL materials per draw group. Every slot the material binds
+    // is written, not just the diffuse: the normal (`_nm`) and specular (`_sm`) maps are half the
+    // look of these assets and a modder can't re-author what the export never handed them.
     let mut mtl = String::new();
+    let mut written: HashMap<u32, String> = HashMap::new();
+    let mut emit = |h: u32, dir: &std::path::Path| -> Result<Option<String>, String> {
+        if let Some(n) = written.get(&h) {
+            return Ok(Some(n.clone()));
+        }
+        let Some(td) = md.textures.get(&h) else { return Ok(None) };
+        let name = format!("tex_0x{h:08X}.png");
+        // Decoded dims, NOT the declared ones — a texture whose higher mips never streamed covers
+        // only a smaller surface, and writing it at the declared size yields a mostly-empty plate.
+        let (w, h_px, rgba) = crate::texpng::decode_bc(td);
+        crate::texpng::write_png(dir.join(&name).to_str().unwrap_or(&name), w, h_px, &rgba)?;
+        written.insert(h, name.clone());
+        Ok(Some(name))
+    };
     for (gi, d) in md.draws.iter().enumerate() {
         mtl.push_str(&format!("newmtl m{gi}\nKd 1 1 1\n"));
-        if let Some(h) = d.diffuse {
-            if let Some(td) = md.textures.get(&h) {
-                let name = format!("tex_0x{h:08X}.png");
-                let rgba = crate::texpng::decode_bc(td);
-                crate::texpng::write_png(
-                    dir.join(&name).to_str().unwrap_or(&name),
-                    td.width,
-                    td.height,
-                    &rgba,
-                )?;
-                mtl.push_str(&format!("map_Kd {name}\n"));
+        for (key, slot) in [("map_Kd", d.diffuse), ("map_Bump", d.normal), ("map_Ks", d.specular)] {
+            if let Some(h) = slot {
+                if let Some(name) = emit(h, &dir)? {
+                    mtl.push_str(&format!("{key} {name}\n"));
+                }
             }
         }
         mtl.push('\n');
@@ -3117,13 +4233,24 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     for v in &md.verts {
         obj.push_str(&format!("vn {} {} {}\n", v.normal[0], v.normal[1], v.normal[2]));
     }
-    for (gi, d) in md.draws.iter().enumerate() {
-        obj.push_str(&format!("g group{gi}\nusemtl m{gi}\n"));
-        let s = d.index_start as usize;
-        let e = ((d.index_start + d.index_count) as usize).min(md.indices.len());
-        for tri in md.indices[s..e].chunks_exact(3) {
-            let (a, b, c) = (tri[0] + 1, tri[1] + 1, tri[2] + 1);
-            obj.push_str(&format!("f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n"));
+    // One OBJ object per LOD rung. The rungs REFINE each other — the same HIER node is re-authored
+    // at each detail level, so the resident block's 736-triangle van body and P001's 9,360-triangle
+    // version occupy the same space. Emitting them flat stacked every detail level on top of the
+    // others. Nothing is dropped: each rung becomes its own `o LOD<n>` object (0 = resident/coarsest)
+    // that a modeller can isolate, hide, or edit independently.
+    let mut rungs: Vec<u8> = md.draws.iter().map(|d| d.rung).collect();
+    rungs.sort_unstable();
+    rungs.dedup();
+    for rung in rungs {
+        obj.push_str(&format!("o LOD{rung}\n"));
+        for (gi, d) in md.draws.iter().enumerate().filter(|(_, d)| d.rung == rung) {
+            obj.push_str(&format!("g LOD{rung}_group{gi}_seg{}_node{}\nusemtl m{gi}\n", d.seg_id, d.node));
+            let s = d.index_start as usize;
+            let e = ((d.index_start + d.index_count) as usize).min(md.indices.len());
+            for tri in md.indices[s..e].chunks_exact(3) {
+                let (a, b, c) = (tri[0] + 1, tri[1] + 1, tri[2] + 1);
+                obj.push_str(&format!("f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n"));
+            }
         }
     }
     std::fs::write(dir.join("model.obj"), obj).map_err(|e| e.to_string())?;

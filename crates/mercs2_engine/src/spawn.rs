@@ -15,10 +15,10 @@ use std::collections::HashMap;
 
 use mercs2_core::glam::Vec3;
 use mercs2_core::{Entity, Transform, World};
-use mercs2_vehicle::components::{
+use crate::vehicle::components::{
     ChassisBody, Vehicle, VehicleClass, VehicleControls, VehicleRuntime, VehicleTuning, Wheel, WheelSet,
 };
-use mercs2_vehicle::lua_surface::{default_car_seating, spawn_vehicle};
+use crate::vehicle::lua_surface::{default_car_seating, spawn_vehicle};
 
 /// The ECS entity shape a template resolves to. Extends as more fleet archetypes land (Weapon, …);
 /// today: a rendered prop, a drivable vehicle, or a full AI character.
@@ -110,9 +110,9 @@ pub fn spawn_default_vehicle(
 /// The render layer adds `ModelRef`/`SkinPalette` (model resolution is the render seam). `template_hash`
 /// doubles as the animation character id until a template→character map lands.
 pub fn spawn_character(world: &mut World, template_hash: u32, transform: Transform) -> Entity {
-    use mercs2_ai::{AiBehavior, AiFaction, AiSkill, Perception, PerceptionRecord, Squad, Stimulus, Target};
-    use mercs2_anim::{AnimController, HumanAnimationSet};
-    use mercs2_combat::components::Health;
+    use crate::ai::{AiBehavior, AiFaction, AiSkill, Perception, PerceptionRecord, Squad, Stimulus, Target};
+    use crate::anim::{AnimController, HumanAnimationSet};
+    use crate::combat::components::Health;
 
     world.spawn((
         transform,
@@ -137,7 +137,7 @@ pub fn spawn_character(world: &mut World, template_hash: u32, transform: Transfo
 /// channel to a faction id after [`spawn`](SpawnResolver::spawn). No-op if the entity has no
 /// `AiFaction` (e.g. it resolved to a prop/vehicle).
 pub fn set_faction(world: &mut World, entity: Entity, faction_id: u32) {
-    let _ = world.insert_one(entity, mercs2_ai::AiFaction(faction_id));
+    let _ = world.insert_one(entity, crate::ai::AiFaction(faction_id));
 }
 
 /// A standard 4-wheel car layout (front steered/unpowered, rear powered) — the hardpoints
@@ -160,9 +160,9 @@ mod tests {
     /// `set_faction` then overrides the neutral default with the real faction.
     #[test]
     fn character_template_spawns_the_full_actor_bundle() {
-        use mercs2_ai::{AiBehavior, AiFaction, Perception, PerceptionRecord, Stimulus, Target};
-        use mercs2_anim::{AnimController, HumanAnimationSet};
-        use mercs2_combat::components::Health;
+        use crate::ai::{AiBehavior, AiFaction, Perception, PerceptionRecord, Stimulus, Target};
+        use crate::anim::{AnimController, HumanAnimationSet};
+        use crate::combat::components::Health;
 
         let npc_tpl = mercs2_formats::hash::pandemic_hash_m2("vz_soldier");
         let mut r = SpawnResolver::new();
@@ -221,7 +221,7 @@ mod tests {
         let car = r.spawn(&mut world, tpl, 1, Transform::from_translation(Vec3::new(0.0, 0.85, 0.0)));
         world.get::<&mut VehicleControls>(car).unwrap().accel = 1.0; // throttle
 
-        let audio = Rc::new(RefCell::new(mercs2_audio::AudioEngine::default()));
+        let audio = Rc::new(RefCell::new(crate::audio::AudioEngine::default()));
         let mut gp = GameplaySystems::new(audio);
         let mut tris = Vec::new(); // tiled ground (small triangles, as real geometry streams)
         for xi in -15..15 {

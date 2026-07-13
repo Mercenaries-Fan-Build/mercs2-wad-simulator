@@ -90,6 +90,20 @@ impl SkinData {
 }
 
 impl ModelStats {
+    /// Fold another LOD rung's stats in. A model's geometry spans several blocks (see
+    /// [`crate::model::Model`]); each rung is built separately but they are one object, so counts and
+    /// bounds accumulate. The rig/bones/prelit flags come from the RESIDENT rung — the only block
+    /// that ships a skeleton — so they are left alone here.
+    pub fn absorb(&mut self, other: &ModelStats) {
+        self.meshes += other.meshes;
+        self.vertices += other.vertices;
+        self.skipped += other.skipped;
+        for i in 0..3 {
+            self.bbox_min[i] = self.bbox_min[i].min(other.bbox_min[i]);
+            self.bbox_max[i] = self.bbox_max[i].max(other.bbox_max[i]);
+        }
+    }
+
     pub fn skin_data(&self) -> SkinData {
         SkinData {
             center: self.fit_center,
@@ -128,6 +142,53 @@ pub struct DrawGroup {
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
     pub group_index: usize,
+    /// `SEGM[INDX[group]].state_mask` — the LOD tier bitmask. Tested against the object's `view_state`
+    /// with an ANY-bit overlap. Clause 2 of the draw gate. NOT a destruction state.
+    pub lod_mask: u8,
+    /// `SEGM[INDX[group]].node` — the HIER node, SIGNED (negative = no node = always visible). This is
+    /// the mesh's real ATTACHMENT MOUNT (rigid meshes are authored in its local space) and the key
+    /// into the object's node-enable table. Clause 3 of the draw gate.
+    pub node: i16,
+    /// Parent `SKIN`/`MESH` sub-object ordinal under `GEOM`. NOT the SEGM index — see `seg_id`.
+    pub sub_object: usize,
+    /// `INDX[group]` — this group's index into the SEGM record array.
+    pub seg_id: usize,
+    /// The LOD-block rung this geometry came from: `0` = the resident (coarsest) block, higher = a
+    /// finer `_P00N_` block. Stamped by [`crate::model::Model::load`]; a single-block model (every
+    /// character) is all rung 0. The renderer ignores it — `lod_mask` already carries the supersede
+    /// resolution — but an EXPORTER needs it, because the rungs re-author the same nodes and must be
+    /// written as separate, labelled detail levels rather than stacked in one space.
+    pub rung: u8,
+    /// This group carries its OWN `BLENDINDICES`/`BLENDWEIGHT` — a deforming skin (a character's
+    /// body). `false` means the group was NODE-RIGID and this builder already baked it into its
+    /// bone's bind-space and bound it 100% to that bone, so the same LBS palette carries it.
+    ///
+    /// Both kinds therefore end up in ONE space, driven by ONE palette. The distinction matters to
+    /// an exporter: a rigid group can be un-baked and re-parented under its bone (what a vehicle
+    /// wants), but a skinned group must NOT be — its vertices are shared across many bones and only
+    /// a real skin + inverse-bind matrices can reproduce them.
+    pub skinned: bool,
+}
+impl Default for DrawGroup {
+    /// An unconditionally-visible group: present at every LOD rung, bound to no HIER node. This is
+    /// the right shape for geometry that has no `SEGM` record at all — terrain tiles, imported
+    /// meshes, procedural debug draws — so the draw gate never suppresses it.
+    fn default() -> DrawGroup {
+        DrawGroup {
+            index_start: 0,
+            index_count: 0,
+            diffuse: None,
+            specular: None,
+            normal: None,
+            group_index: 0,
+            lod_mask: 0xFF,
+            node: -1,
+            sub_object: 0,
+            seg_id: 0,
+            rung: 0,
+            skinned: false,
+        }
+    }
 }
 
 /// Build INDEXED triangle geometry, selecting the render/destruction tier bit `0x01` (the default
@@ -168,25 +229,67 @@ pub fn state_tiers(container: &[u8]) -> Vec<u8> {
 /// most models — but destructible "livedin" building shells invert this (mask `0x03` = ruined, `0x04`
 /// = intact), so the PMC interior loads them with `active_bit = 0x04` to show the pristine building.
 /// Returns (vertices, indices, draw-groups, stats).
+/// Build the model WHOLE — every drawing group, every segment, nothing filtered — with each
+/// [`DrawGroup`] tagged by its `lod_mask` / `node` so visibility can be decided per-frame at DRAW
+/// time against the object's [`crate::render_state::RenderState`], the way the engine does it.
+///
+/// This is the target shape: the retail engine uploads one vertex buffer per model and gates each
+/// segment in the draw loop. Baking a visibility decision into the buffer (as [`build_indexed_state`]
+/// does) freezes LOD forever and makes two instances of the same model unable to differ in damage
+/// state. Prefer this.
+pub fn build_indexed_all(
+    container: &[u8],
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_filtered(container, None)
+}
+
 pub fn build_indexed_state(
     container: &[u8],
     active_bit: u8,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
-    use mercs2_formats::model_cubeize::ModelMesh;
+    build_indexed_filtered(container, Some(active_bit))
+}
+
+/// `lod_filter = Some(bit)` keeps the legacy build-time filter (a segment survives if its mask is 0
+/// or shares a bit with `bit`); `None` keeps everything. The `mask == 0 → always keep` special case is
+/// a LEGACY quirk: under the engine's real ANY-bit rule a zero mask overlaps nothing and would never
+/// draw. It is preserved here only so `build_indexed_state` stays bit-identical to what shipped.
+fn build_indexed_filtered(
+    container: &[u8],
+    lod_filter: Option<u8>,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_rung(container, None, lod_filter)
+}
+
+/// Build one LOD rung of a model. A vehicle's geometry is split across blocks: the RESIDENT block
+/// ships the object (HIER, SEGM, MTRL, physics, destruction machine) plus the coarsest meshes, and
+/// each finer block ships geometry + `INDX`/`PRMT` only. So a fine rung binds its groups against the
+/// resident block's SEGM (segment -> node + LOD mask) and MTRL (material table), while its own PRMT
+/// rows still choose which material each group uses. `resident = None` for a self-contained
+/// container — the resident rung itself, or a character, which ships no chain.
+pub fn build_indexed_rung(
+    container: &[u8],
+    resident: Option<&[u8]>,
+    lod_filter: Option<u8>,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    use mercs2_formats::model_cubeize::{read_model_meshes_segm, ModelMesh};
     use mercs2_formats::skeleton::{
         affine_inverse, mat4_mul, transform_dir, transform_point, Skeleton,
     };
 
-    let meshes = read_model_meshes(container)?;
-    let materials = mercs2_formats::texture::parse_mtrl(container);
+    let res_segm = resident.map(mercs2_formats::model_cubeize::parse_segm);
+    let meshes = read_model_meshes_segm(container, res_segm.as_deref())?;
+    let materials = mercs2_formats::texture::parse_mtrl(resident.unwrap_or(container));
     let group_mat = mercs2_formats::texture::group_material_indices(container);
 
     // Skeleton world-rest per bone, for placing rigid MESH accessories. from_block wants a
-    // 20-byte wrapper + UCFX.
-    let mut block = Vec::with_capacity(20 + container.len());
+    // 20-byte wrapper + UCFX. HIER lives only in the resident block, so a fine rung — whose SEGM
+    // records name nodes in that same hierarchy — must mount against the resident skeleton.
+    let skel_src = resident.unwrap_or(container);
+    let mut block = Vec::with_capacity(20 + skel_src.len());
     block.extend_from_slice(&[0u8; 20]);
-    block[16..20].copy_from_slice(&(container.len() as u32).to_le_bytes());
-    block.extend_from_slice(container);
+    block[16..20].copy_from_slice(&(skel_src.len() as u32).to_le_bytes());
+    block.extend_from_slice(skel_src);
     let skel = Skeleton::from_block(&block).ok();
 
     // Skinning palette: Skin[b] = InvBind[b] · Pose[b] (row-vector). Phase A is the bind-pose gate:
@@ -225,10 +328,10 @@ pub fn build_indexed_state(
         None => Vec::new(),
     };
 
-    // Active LOD/state tier: body sub-objects carry a single-bit mask (0x01/02/04/08), accessories
-    // 0x0f (all). Render only the caller's tier + accessories → no LOD/state overdraw (the triple hair
-    // / the intact-vs-ruined building states). `active_bit` defaults to 0x01 (see build_indexed_state).
-    let lod_bit = active_bit;
+    // NOTE on `lod_filter`: `SEGM.state_mask` is the set of LOD RUNGS a segment appears at (md500:
+    // 7 = rungs 0-2, 112 = rungs 4-6, 127 = all), so filtering to one bit bakes one rung into the
+    // vertex buffer. It also does NOT hide the wreck — that is the node-enable table, clause 3 of the
+    // gate, which this builder cannot see. `None` = keep everything and gate at draw time.
 
     // Per kept group: world-space geometry (rigid MESH groups transformed by their bone's rest).
     struct Placed<'a> {
@@ -255,9 +358,11 @@ pub fn build_indexed_state(
     let mut skipped = 0usize;
     let mut kept: Vec<Placed> = Vec::new();
     for m in &meshes {
-        if m.state_mask != 0 && (m.state_mask & lod_bit) == 0 {
-            skipped += 1; // inactive LOD/state tier
-            continue;
+        if let Some(bit) = lod_filter {
+            if m.state_mask != 0 && (m.state_mask & bit) == 0 {
+                skipped += 1; // segment absent from the selected LOD rung
+                continue;
+            }
         }
         // Placement bone: MESH rigid accessories use their SEGM bone; blend-less PRMG groups use
         // their INDX node (see above). Skinned groups (blend data present) are model-space.
@@ -378,6 +483,16 @@ pub fn build_indexed_state(
                 specular: mat.and_then(|m| m.specular()),
                 normal: mat.and_then(|m| m.textures.get(2).copied()),
                 group_index: m.group_index,
+                lod_mask: m.state_mask,
+                // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
+                node: m.bone as i16,
+                sub_object: m.sub_object,
+                seg_id: m.seg_id,
+                // This builder reads ONE container and can't know where it sits in the chain;
+                // `Model::load` stamps the real rung once it has walked the LOD blocks.
+                rung: 0,
+                // No placement bone = the group kept its own blend data = a real deforming skin.
+                skinned: pl.placed_bone.is_none(),
             });
         };
         if m.submeshes.is_empty() {

@@ -177,13 +177,24 @@ pub struct AssetStore {
 }
 
 /// GPU-side per-model resources (geometry + materials). Built once per distinct model.
+/// One draw group, plus the two SEGM fields the engine's draw gate tests against the OBJECT's
+/// render state: the LOD-rung membership mask and the HIER node (signed; `< 0` = no node).
+/// See `crate::render_state`.
+#[derive(Clone, Copy, Debug)]
+struct DrawCall {
+    index_start: u32,
+    index_count: u32,
+    bind: usize,
+    lod_mask: u8,
+    node: i16,
+}
+
 struct ModelGpu {
     vbuf: wgpu::Buffer,
     ibuf: Option<wgpu::Buffer>,
     nindices: u32,
     nverts: u32,
-    /// (index_start, index_count, tex_binds index) per draw group.
-    draw_calls: Vec<(u32, u32, usize)>,
+    draw_calls: Vec<DrawCall>,
     tex_binds: Vec<wgpu::BindGroup>,
     /// Number of bones in this model's palette (>=1; 1 = unskinned identity).
     bone_count: usize,
@@ -266,9 +277,16 @@ pub struct Scene {
     blobs: Vec<BlobInstance>,
     models: HashMap<u32, ModelGpu>,
     entities: HashMap<Entity, EntityGpu>,
-    /// Per-model set of draw-call indices to SKIP at render (e.g. low-res terrain tiles hidden where
-    /// their hi-res terrainmesh counterpart is resident — the terrain LOD swap).
+    /// Per-model set of draw-call indices to SKIP at render. This is a MODEL-level authoring/streaming
+    /// override, not object state: the terrain LOD swap (low-res tiles hidden where the hi-res
+    /// terrainmesh is resident) and the workshop's isolate-a-group tool. It is deliberately NOT how
+    /// destruction or LOD work — those are per-object, and live in `entity_state`.
     hidden_draws: HashMap<u32, HashSet<usize>>,
+    /// Per-ENTITY render state: the LOD-rung `view_state` and the destruction node-enable table that
+    /// the draw gate tests (`crate::render_state`). Keyed by entity, never by model hash, so two
+    /// instances of the same model can sit at different rungs and different damage states — which is
+    /// exactly what `hidden_draws` could never express.
+    entity_state: HashMap<Entity, crate::render_state::RenderState>,
     start: std::time::Instant,
     /// Explicit view matrix + (near, far) supplied per frame by a caller-driven camera
     /// (the fly / third-person camera). `None` = default close orbit around the origin (`--ecs`).
@@ -990,6 +1008,7 @@ impl Scene {
             blobs: Vec::new(),
             models: HashMap::new(),
             hidden_draws: HashMap::new(),
+            entity_state: HashMap::new(),
             entities: HashMap::new(),
             start: std::time::Instant::now(),
             view_cam: None,
@@ -1320,14 +1339,20 @@ impl Scene {
         let mut tex_binds = vec![make_tex_bind(
             &self.device, &self.tex_bgl, &self.sampler, &self.white, &self.flat_normal, &self.black,
         )];
-        let mut draw_calls: Vec<(u32, u32, usize)> = Vec::new();
+        let mut draw_calls: Vec<DrawCall> = Vec::new();
         for d in draws {
             let diff = d.diffuse.and_then(|h| views.get(&h)).unwrap_or(&self.white);
             let norm = d.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
             let spec = d.specular.and_then(|h| views.get(&h)).unwrap_or(&self.black);
             let idx = tex_binds.len();
             tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, spec));
-            draw_calls.push((d.index_start, d.index_count, idx));
+            draw_calls.push(DrawCall {
+                index_start: d.index_start,
+                index_count: d.index_count,
+                bind: idx,
+                lod_mask: d.lod_mask,
+                node: d.node,
+            });
         }
 
         let vbytes: &[u8] = bytemuck::cast_slice(verts);
@@ -1391,6 +1416,22 @@ impl Scene {
         }
     }
 
+    /// Install this entity's render state — the LOD rung it is at and its destruction node-enable
+    /// table. The draw loop gates every segment of its model against it. Clearing it (or never
+    /// setting it) draws the model whole.
+    pub fn set_entity_render_state(&mut self, e: Entity, rs: crate::render_state::RenderState) {
+        self.entity_state.insert(e, rs);
+    }
+
+    /// Read back an entity's render state, e.g. to advance only its LOD rung.
+    pub fn entity_render_state(&self, e: Entity) -> Option<&crate::render_state::RenderState> {
+        self.entity_state.get(&e)
+    }
+
+    pub fn clear_entity_render_state(&mut self, e: Entity) {
+        self.entity_state.remove(&e);
+    }
+
     /// Bone count of a loaded model (>=1; 1 = unskinned identity). 0 if the model isn't loaded.
     /// The streaming executor sizes a woken prop's identity `SkinPalette` to this so a rigged prop's
     /// verts (weighted to bone >= 1) don't collapse to the origin under a 1-bone palette.
@@ -1411,6 +1452,7 @@ impl Scene {
     /// map does not leak. Safe to call for an unknown entity.
     pub fn forget_entity(&mut self, e: Entity) {
         self.entities.remove(&e);
+        self.entity_state.remove(&e);
     }
 
     /// Create per-entity GPU resources (MVP + bone palette) sized to the model, once.
@@ -1480,12 +1522,19 @@ impl Scene {
             if let Some(ib) = &mg.ibuf {
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 let hidden = self.hidden_draws.get(model_hash);
-                for (di, &(start, count, bind)) in mg.draw_calls.iter().enumerate() {
+                // The engine's per-segment draw gate, evaluated against THIS ENTITY's render state:
+                // clause 2 (LOD-rung overlap) and clause 3 (destruction node-enable). An entity with
+                // no state draws everything, which is what unskinned/synthetic geometry wants.
+                let rs = self.entity_state.get(e);
+                for (di, dc) in mg.draw_calls.iter().enumerate() {
                     if hidden.is_some_and(|h| h.contains(&di)) {
-                        continue; // e.g. low-res terrain tile hidden under resident hi-res
+                        continue; // low-res terrain tile hidden under resident hi-res; workshop isolate
                     }
-                    pass.set_bind_group(1, &mg.tex_binds[bind], &[]);
-                    pass.draw_indexed(start..start + count, 0, 0..1);
+                    if rs.is_some_and(|rs| !rs.segment_visible(dc.lod_mask, dc.node)) {
+                        continue;
+                    }
+                    pass.set_bind_group(1, &mg.tex_binds[dc.bind], &[]);
+                    pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..1);
                 }
                 if mg.draw_calls.is_empty() {
                     pass.set_bind_group(1, &mg.tex_binds[0], &[]);

@@ -17,7 +17,7 @@ use std::sync::mpsc::{channel, Receiver};
 
 use mercs2_engine::{mesh, wad};
 use mercs2_formats::ffcs::{find_chunk, load_ffcs_archive};
-use mercs2_formats::model_inject::{inject_into_donor_block, ExternalMesh};
+use mercs2_formats::model_inject::{inject_static_into_donor_block, ExternalMesh};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_block};
 use mercs2_formats::ucfx::parse_block_entry_table;
@@ -34,8 +34,12 @@ pub struct NewModelItem {
     /// Donor model asset hash (its container hosts the injected geometry).
     pub donor: u32,
     pub donor_label: String,
-    /// Donor drawing-group ordinal that hosts the mesh (others are neutralised).
+    /// RAW donor group ordinal that hosts the mesh (others are neutralised). This is the
+    /// engine's actually-rendered group (see `inject_static`'s raw-group targeting), not a
+    /// loose "has geometry" index.
     pub target_group: usize,
+    /// Reverse triangle winding on inject (RH→LH) — set when imported faces cull inside-out.
+    pub flip: bool,
     pub mesh: ExternalMesh,
 }
 
@@ -162,9 +166,24 @@ fn publish(
     let mut blocks: Vec<PatchBlock> = Vec::new();
     for item in items {
         let donor = donor_block(wad_paths, item.donor)?;
-        let (new_block, stats) =
-            inject_into_donor_block(&donor, &item.mesh, item.target_group, &[], item.hash)
-                .map_err(|e| format!("{}: inject into donor {}: {e}", item.name, item.donor_label))?;
+        // The improved conform path: mesh already carries the user's baked transform, so auto-fit
+        // is OFF; target the RAW rendered group; winding per the item's flip flag; neutralise the
+        // rest. (`inject_static_into_donor_block` — same as the `inject_static` CLI.)
+        let (new_block, stats) = inject_static_into_donor_block(
+            &donor,
+            &item.mesh,
+            0,
+            &[],
+            item.hash,
+            false, // fit_to_template: OFF (the panel already positioned it)
+            item.flip,
+            false, // keep_groups
+            false, // all_groups
+            &[item.target_group],
+            1.0,
+            false, // neutralize_only
+        )
+        .map_err(|e| format!("{}: inject into donor {}: {e}", item.name, item.donor_label))?;
         let compressed =
             compress_sges(&new_block).map_err(|e| format!("{}: sges: {e}", item.name))?;
         let aset = vec![AsetEntry::new(item.hash, 0xFFFF_FFFF, 0x0000_FFFF, MODEL_ASET_TYPE_ID)];

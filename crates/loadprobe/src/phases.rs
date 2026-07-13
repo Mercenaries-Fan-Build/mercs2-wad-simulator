@@ -88,6 +88,43 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // model-instantiation frames 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. AV READ target=0
     // with EAX = a texture handle/hash being looked up and not found. NOT a teardown artifact.
     KnownEip { eip: 0x0085C8D0, label: "texture-bind/null-surface fault on wardrobe preview (menu-open)", teardown: false },
+    // 0x00478E43: mesh-geometry handler (cluster of 0x00478F2A/0x004719C0). AV READ with ECX/ESI =
+    // "CSUM" (0x4D555343) — the per-piece geometry read of a DESTRUCTIBLE model runs off the end of
+    // the replaced geometry into the container's CSUM trailer. Seen when a custom mesh is injected
+    // into a destructible donor (SEGM/SWIT/STAT/CHDR/CEXE preserved) whose piece partitions no longer
+    // match; fires at model instantiation (e.g. streaming a PMC building). Fix: use a non-destructible
+    // donor or strip the destruction chunks. NOT a teardown artifact.
+    KnownEip { eip: 0x00478E43, label: "mesh-geometry handler: destructible piece-geometry read off end (injected mesh in destructible donor; SEGM mismatch)", teardown: false },
+    // 0x00858DB8: inside Mtrl_Parse (FUN_00858790 +0x628). The parser reads each material as a FIXED
+    // record (104-byte preamble then a 128-byte record: u16 flags, u16 tex_count, tex_count u32 hashes,
+    // props, trailing shader ref) and ends with a SHADER-POOL lookup `[*shader_pool[slot] + 8]`. AV
+    // READ [null+8] = the pool entry is null. Root cause seen: a from-scratch MTRL record that is NOT
+    // exactly 128 bytes → the parser over-reads into the next chunk → garbage shader hash → pool miss →
+    // null. Fix: emit the full 128-byte material record (104-byte preamble + 128). Same site the DLC
+    // mattias_v5 skin crashed on (MTRL layout). NOT teardown.
+    KnownEip { eip: 0x00858DB8, label: "Mtrl_Parse (FUN_00858790+0x628) shader-pool lookup: MTRL record wrong size (must be 128B) -> parser over-reads -> garbage shader hash -> null pool entry", teardown: false },
+    // 0x750BD9: texture BODY null-reader deref (the "null DXT1" crash). The streaming
+    // upload loop at 0x750BA2 reads a texture's BODY chunk and dereferences the result at
+    // 0x750BD9 (EDX="DXT1"=0x31545844) without a NULL check -> AV read target=0 when the
+    // body is null/empty. Causes: a texture whose resident BODY is empty (pixels are in the
+    // streaming tiers), or a base texture whose block was overridden by a patch WAD that
+    // ships an empty-bodied replacement (e.g. booting `vz` with the DLC level-replacement
+    // patch mounted). patch_anim_table.py guard #3 (@0x750B90) is the runtime NULL-guard.
+    KnownEip { eip: 0x00750BD9, label: "texture BODY null-reader deref (null-DXT1): streaming upload derefs a null/empty texture body (patch override or streamed-empty body)", teardown: false },
+    // 0x00855691: inside the draw-item loop of FUN_00855420 (the scene render driver, reached from
+    // its only caller FUN_0085a960 -> return addr 0x0085A97C on the stack). Per draw item (0x58
+    // bytes) it resolves the material's SHADER object out of the registry at DAT_00ff46f4:
+    //   shader = *(void**)(DAT_00ff46f4 + *(u16*)(item+0x3c) * 4);
+    //   perm   = *(i16*)(shader + 0x182) + light_class;   // <- AV READ [null+0x182]
+    // A clean NULL (not a wild pointer) => the index is IN RANGE but that registry slot was never
+    // filled. Cause: the model has MORE MTRL records than the donor originally shipped. The engine
+    // sizes its per-model shader-registry entries from the donor's count, so an APPENDED material
+    // (the 9th of an 8-material donor) never gets a slot. Fix: never grow the record count --
+    // convert an unused/untextured record IN PLACE (inject_parts --replace-mtrl <dst>:<src>:<tex>).
+    // A unique name hash on the appended record does NOT help (tried; same crash, same EIP).
+    // Fires only when the model is actually DRAWN (load succeeds; the camera turning to it crashes).
+    // Draw-time cousin of the parse-time 0x00858DB8. NOT teardown.
+    KnownEip { eip: 0x00855691, label: "render draw-loop (FUN_00855420) shader-registry lookup: NULL shader slot -> model has MORE MTRL records than the donor (appended material gets no registry slot); convert a record in place instead of appending", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {

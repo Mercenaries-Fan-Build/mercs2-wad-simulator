@@ -1,3 +1,48 @@
 [workspace]
-members = ["crates/wad_simulator", "crates/mercs2_formats", "crates/ucfx_byteswap", "crates/dlc_port", "crates/loadprobe", "crates/cube_mod", "crates/havok_extract", "crates/destruction_extract", "crates/wad_builder", "crates/securom_unwrap", "crates/mercs2_core", "crates/mercs2_engine", "crates/mercs2_probe", "crates/mercs2_game", "crates/mercs2_script", "crates/anim_patch", "crates/mercs2_workshop", "crates/mercs2_reassemble", "crates/mercs2_physics", "crates/mercs2_anim", "crates/mercs2_vehicle", "crates/mercs2_combat", "crates/mercs2_ai", "crates/mercs2_faction", "crates/mercs2_audio", "crates/mercs2_ui", "crates/mercs2_net", "crates/mercs2_player", "crates/mercs2_population", "crates/mercs2_water", "crates/mercs2_decal", "crates/mercs2_jobs"]
+members = ["crates/wad_simulator", "crates/mercs2_formats", "crates/ucfx_byteswap", "crates/dlc_port", "crates/loadprobe", "crates/mercs2_smuggler", "crates/havok_extract", "crates/destruction_extract", "crates/wad_builder", "crates/securom_unwrap", "crates/mercs2_core", "crates/mercs2_engine", "crates/mercs2_probe", "crates/mercs2_game", "crates/mercs2_script", "crates/anim_patch", "crates/mercs2_workshop", "crates/mercs2_reassemble", "crates/mercs2_physics", "crates/mercs2_anim", "crates/mercs2_vehicle", "crates/mercs2_combat", "crates/mercs2_ai", "crates/mercs2_faction", "crates/mercs2_audio", "crates/mercs2_ui", "crates/mercs2_net", "crates/mercs2_player", "crates/mercs2_population", "crates/mercs2_water", "crates/mercs2_decal", "crates/mercs2_jobs"]
 resolver = "2"
+
+# Shared package metadata inherited by every publishable crate (`license.workspace = true`,
+# `repository.workspace = true`). Single source of truth — do not re-declare these per crate.
+[workspace.package]
+license = "MIT"
+repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game"
+
+# Internal crate versions for publishing. Each publishable member references its intra-workspace
+# deps as `<name> = { workspace = true }`; the version here is what crates.io resolves against.
+# The four originally-published crates (mercs2_formats, ucfx_byteswap, wad_simulator, loadprobe)
+# are at 2.0.0; the rest debut at 1.0.0.
+[workspace.dependencies]
+mercs2_formats = { path = "crates/mercs2_formats", version = "2.0.0" }
+ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.0.0" }
+mercs2_core = { path = "crates/mercs2_core", version = "1.0.0" }
+mercs2_audio = { path = "crates/mercs2_audio", version = "1.0.0" }
+mercs2_script = { path = "crates/mercs2_script", version = "1.0.0" }
+mercs2_physics = { path = "crates/mercs2_physics", version = "1.0.0" }
+mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.0.0" }
+mercs2_ai = { path = "crates/mercs2_ai", version = "1.0.0" }
+mercs2_anim = { path = "crates/mercs2_anim", version = "1.0.0" }
+mercs2_water = { path = "crates/mercs2_water", version = "1.0.0" }
+mercs2_decal = { path = "crates/mercs2_decal", version = "1.0.0" }
+mercs2_population = { path = "crates/mercs2_population", version = "1.0.0" }
+mercs2_combat = { path = "crates/mercs2_combat", version = "1.0.0" }
+mercs2_faction = { path = "crates/mercs2_faction", version = "1.0.0" }
+mercs2_ui = { path = "crates/mercs2_ui", version = "1.0.0" }
+mercs2_engine = { path = "crates/mercs2_engine", version = "1.0.0" }
+
+# The load path is CPU-bound `sges`/zlib block decompression + mesh assembly. In a plain `dev` build
+# those run UNOPTIMIZED, making the PMC-interior boot ~134s (vs ~15s optimized) — a ~9x tax purely from
+# debug codegen. These per-package overrides optimize the hot asset/decompress/mesh crates + all
+# dependencies at -O3 while leaving the game-logic crates (mercs2_game/engine glue) at debug for fast
+# iteration + symbols. `cargo run` (dev) now loads at near-release speed without a full release build.
+[profile.dev.package."*"]
+opt-level = 3          # all third-party deps (miniz/zlib inflate, glam, wgpu, etc.)
+
+[profile.dev.package.mercs2_formats]
+opt-level = 3          # sges decompress + terrain/texture/mesh container parsing (the load hot path)
+
+[profile.dev.package.mercs2_core]
+opt-level = 3          # glam-heavy math (pose/skin palettes, transforms)
+
+[profile.dev.package.mercs2_engine]
+opt-level = 3          # wad extract + mesh build + pose skinning driven from the loader

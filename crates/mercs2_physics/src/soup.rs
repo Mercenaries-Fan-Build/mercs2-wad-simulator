@@ -1,5 +1,12 @@
-//! CPU collision for the TPS world — a proper capsule character controller over a world-space triangle
-//! soup, not a point-push hack.
+//! CPU collision over a raw world-space triangle soup — a capsule character controller + camera-boom
+//! raycast operating directly on `&[[Vec3; 3]]`, no owning world object required.
+//!
+//! Folded here from `mercs2_game::collision` (the game owns *content*; the engine/physics owns the
+//! *mechanism*). This is the BBOX-culled variant: the broad phase culls by each triangle's bounding box,
+//! not the distance to one vertex — a large floor/wall triangle a player stands in the middle of is kept
+//! (the "fell through the floor after moving" fix). It complements [`crate::StaticSoupPhysics`] (the
+//! `PhysicsQuery` seam for the vehicle/combat/anim silos); this module is the lightweight direct-soup API
+//! the on-foot player controller + camera boom use.
 //!
 //! The player is a vertical CAPSULE (a core segment from `feet+radius` to `feet+height-radius`, swept by
 //! `radius`). Movement is **collide-and-slide**: attempt the move, then depenetrate the capsule out of
@@ -21,6 +28,23 @@ fn is_wall(t: &[Vec3; 3]) -> bool {
     let n = (t[1] - t[0]).cross(t[2] - t[0]);
     let nl = n.length();
     nl > 1e-6 && (n.y / nl).abs() < 0.5
+}
+
+/// Axis-aligned bounding box of a triangle (min, max). The broad-phase MUST cull by the triangle's
+/// bbox, not the distance to one vertex: a big floor/wall triangle's vertices can be far from a player
+/// standing in its middle, so a vertex-distance cull wrongly drops the geometry the player is on/against
+/// (the "fell through the floor after moving" bug).
+#[inline]
+fn tri_bbox(t: &[Vec3; 3]) -> (Vec3, Vec3) {
+    (t[0].min(t[1]).min(t[2]), t[0].max(t[1]).max(t[2]))
+}
+
+/// Does `pos.xz` fall within the triangle's XZ bbox expanded by `margin`? Broad-phase for the downward
+/// ground probes (the exact ray-tri test still runs on survivors).
+#[inline]
+fn xz_in_tri_bbox(t: &[Vec3; 3], pos: Vec3, margin: f32) -> bool {
+    let (b0, b1) = tri_bbox(t);
+    pos.x >= b0.x - margin && pos.x <= b1.x + margin && pos.z >= b0.z - margin && pos.z <= b1.z + margin
 }
 
 // ---------------------------------------------------------------------------
@@ -52,10 +76,14 @@ pub fn ray_tri(o: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
 
 /// Nearest triangle hit along `[o, o + dir*max_t]` (double-sided), with a cheap sphere broad-phase.
 pub fn raycast(tris: &[[Vec3; 3]], o: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
-    let cull2 = (max_t + 30.0) * (max_t + 30.0);
+    // Broad-phase: the ray SEGMENT's AABB vs each triangle AABB (bbox-based, so a large triangle whose
+    // first vertex is far from `o` is still tested).
+    let end = o + dir * max_t;
+    let (smin, smax) = (o.min(end), o.max(end));
     let mut best: Option<f32> = None;
     for t in tris {
-        if (t[0] - o).length_squared() > cull2 {
+        let (b0, b1) = tri_bbox(t);
+        if b1.x < smin.x || b0.x > smax.x || b1.y < smin.y || b0.y > smax.y || b1.z < smin.z || b0.z > smax.z {
             continue;
         }
         if let Some(d) = ray_tri(o, dir, t[0], t[1], t[2]) {
@@ -191,11 +219,22 @@ fn seg_tri_closest(a: Vec3, b: Vec3, t0: Vec3, t1: Vec3, t2: Vec3) -> (Vec3, Vec
 /// perpendicular to each contact preserves tangential motion → the capsule slides along walls. A few
 /// relaxation passes resolve inside corners. Floors are excluded (the ground probe owns Y).
 fn depenetrate(tris: &[[Vec3; 3]], mut pos: Vec3, radius: f32, height: f32) -> Vec3 {
-    let cull2 = (radius + height + 4.0) * (radius + height + 4.0);
     for _ in 0..4 {
         let mut moved = false;
         for t in tris {
-            if (t[0] - pos).length_squared() > cull2 || !is_wall(t) {
+            if !is_wall(t) {
+                continue;
+            }
+            // Broad-phase: the capsule's AABB (feet `pos`, up `height`, `radius` around) vs the triangle
+            // AABB. Bbox-based — a large wall triangle's first vertex can be far from the capsule.
+            let (b0, b1) = tri_bbox(t);
+            if b1.x < pos.x - radius
+                || b0.x > pos.x + radius
+                || b1.z < pos.z - radius
+                || b0.z > pos.z + radius
+                || b1.y < pos.y
+                || b0.y > pos.y + height
+            {
                 continue;
             }
             let a = pos + Vec3::Y * radius;
@@ -227,15 +266,13 @@ fn depenetrate(tris: &[[Vec3; 3]], mut pos: Vec3, radius: f32, height: f32) -> V
 fn ground_y(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, step: f32) -> Option<f32> {
     let origin = pos + Vec3::Y * step;
     let max_t = step * 2.0;
-    let cull2 = (radius + 2.0) * (radius + 2.0);
     let mut best: Option<f32> = None;
     for t in tris {
         // Only walkable (near-horizontal) surfaces are ground; skip walls.
         if is_wall(t) {
             continue;
         }
-        let horiz = ((t[0] - pos) * Vec3::new(1.0, 0.0, 1.0)).length_squared();
-        if horiz > cull2 {
+        if !xz_in_tri_bbox(t, pos, radius) {
             continue;
         }
         if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
@@ -256,14 +293,12 @@ fn ground_y(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, step: f32) -> Option<f32
 pub fn ground_below(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, max_drop: f32) -> Option<f32> {
     let origin = pos + Vec3::Y * 0.1;
     let max_t = max_drop + 0.1;
-    let cull2 = (radius + 2.0) * (radius + 2.0);
     let mut best: Option<f32> = None;
     for t in tris {
         if is_wall(t) {
             continue;
         }
-        let horiz = ((t[0] - pos) * Vec3::new(1.0, 0.0, 1.0)).length_squared();
-        if horiz > cull2 {
+        if !xz_in_tri_bbox(t, pos, radius) {
             continue;
         }
         if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
@@ -301,4 +336,40 @@ pub fn move_character(
         }
     }
     pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact bug the player hit: a LARGE floor triangle whose vertices are far from a player standing
+    /// in its MIDDLE. The old vertex-distance cull dropped it → `ground_below` returned `None` →
+    /// fall-through after moving. The bbox cull keeps it; a point off the floor still reads a real gap.
+    #[test]
+    fn ground_below_finds_a_large_floor_from_its_middle() {
+        let floor = [
+            [Vec3::new(-20.0, 0.0, -20.0), Vec3::new(20.0, 0.0, -20.0), Vec3::new(20.0, 0.0, 20.0)],
+            [Vec3::new(-20.0, 0.0, -20.0), Vec3::new(20.0, 0.0, 20.0), Vec3::new(-20.0, 0.0, 20.0)],
+        ];
+        // Dead centre, 20 m from the nearest vertex, 2 m up.
+        assert_eq!(
+            ground_below(&floor, Vec3::new(0.0, 2.0, 0.0), 0.4, 4.0),
+            Some(0.0),
+            "large floor must resolve from its middle (bbox cull, not vertex-distance)"
+        );
+        // Off the floor → a real gap.
+        assert_eq!(ground_below(&floor, Vec3::new(100.0, 2.0, 0.0), 0.4, 4.0), None);
+    }
+
+    /// A LARGE wall blocks the capsule even when approached far from its vertices.
+    #[test]
+    fn depenetrate_pushes_out_of_a_large_wall() {
+        let wall = [
+            [Vec3::new(0.0, 0.0, -20.0), Vec3::new(0.0, 40.0, -20.0), Vec3::new(0.0, 40.0, 20.0)],
+            [Vec3::new(0.0, 0.0, -20.0), Vec3::new(0.0, 40.0, 20.0), Vec3::new(0.0, 0.0, 20.0)],
+        ];
+        // Capsule slightly inside the wall from +X, 5 m up, far from any vertex.
+        let out = depenetrate(&wall, Vec3::new(0.2, 5.0, 0.0), 0.4, 1.8);
+        assert!(out.x >= 0.4 - 1e-3, "capsule pushed clear of the large wall (x={})", out.x);
+    }
 }

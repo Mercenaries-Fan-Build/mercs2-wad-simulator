@@ -357,6 +357,13 @@ fn convert_container(
     // apply_terrainmesh_reencode / docs/terrainmesh_reencode_implementation.md.
     if is_be && type_hash == types::TYPE_HASH_TERRAIN_MESH {
         apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, true)?;
+    } else if is_be && type_hash == types::TYPE_HASH_LOWRES_TERRAIN {
+        // The low-res terrain tile (0x1602815C) needs the same STRM vertex widening +
+        // info-stride rewrite, but PC keeps its IBUF as a triangle STRIP — de-stripping to a
+        // list over-inflates it (9500 BE → 13472 vs PC's 11852). It was never gated in at
+        // all, so its tiles kept the Xbox vertex format and their decoded positions fell
+        // outside their own BNDS envelope.
+        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, false)?;
     } else if is_be && type_hash == types::TYPE_HASH_MODEL {
         // Skinned character MODEL: the decl translation widened its DEC3N normals/tangents
         // to FLOAT16_4 (stride 32→40) but the data/info stayed 32, so the decl over-runs the

@@ -17,19 +17,24 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   `WAVE_FORMAT_EXTENSIBLE`; the mixer here renders the config's channel count but the pan law and
   listener-gain table (`DAT_00fc34b0`) are implemented for stereo. Surround needs the full per-listener
   channel-gain matrix.
-- **Sample-rate conversion** `[faithful-blocker: no]` — `PcmSource` assumes waves already match the
-  output rate; the exe's `PalSoundWaveDX8` mix kernels (`DAT_0198db60`, format axis PCM8/PCM16/ADPCM)
-  resample per-wave. A resampler + an ADPCM decoder belong with the wave-bank decode silo.
+- ~~**Sample-rate conversion**~~ **DONE** — `PcmSource::with_rate` resamples per-voice (linear interp,
+  clip rate→mixer rate) so a 22 050 Hz clip plays at correct pitch into a 44 100/48 000 Hz mix, matching
+  the per-wave pitch step of `PalSoundWaveDX8`. The IMA-ADPCM/PCM decoder now lives in `wave.rs`
+  (ported from the retail-verified tool decoder).
 - **Doppler applied to the mix** `[faithful-blocker: no]` — `spatial::doppler_pitch` is implemented and
-  matches `FUN_0083ade0`, but the mixer does not yet vary a voice's read rate by pitch (no per-voice
-  resampling). Wire it once SRC exists.
+  matches `FUN_0083ade0`; the per-voice resample step now EXISTS (`PcmSource::with_rate`), so wiring
+  Doppler is just folding the doppler ratio into that step — a small follow-up.
 
 ## Voices / mixer
 
-- **Real wave-bind on cue** `[faithful-blocker: no]` — `cue_sound` allocates a voice and (given a
-  `SampleSource`) mixes it, but resolving a cue's `bank_id`/`wave_index` into decoded PCM is the
-  wave-bank/streaming silo's job (`FUN_00603110` load-completion, WAD streaming manager). Until then a
-  cue with no supplied source is a silent (but correctly-arbitrated) voice.
+- ~~**Real wave-bind on cue**~~ **DONE** — `AudioEngine::load_wavebank` decodes a `wavebank` body into
+  resident clips (keyed by bank self-hash + clip hash); `cue_sound` auto-binds the resident wave a cue
+  routes to (`resolve_wave`: `cue.bank_hash` → resident `Wavebank`, `cue.wave_index` → its clip; fallback
+  clip-hash == cue-guid). The `sounddb` layout was CALIBRATED against shipped blocks (real 12-B
+  `{guid, bank_hash, wave_index}` record — the old 16-B guess read 0 cues). Verified end-to-end on
+  vz.wad (`mercs2_game/tests/audio_wad_probe.rs`): 226/853 resident cues → decoded PCM, RMS > 0.
+  Still deferred: the global `Mercs2Globals` catalog (extended header, not yet decoded) + streamed
+  `.pws` cues (below).
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.

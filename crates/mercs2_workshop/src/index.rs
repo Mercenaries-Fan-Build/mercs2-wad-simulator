@@ -40,6 +40,49 @@ impl AssetRow {
             None => format!("0x{:08X}", self.hash),
         }
     }
+
+    /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
+    /// off the `<faction>_veh_<class>_<name>` naming convention (plus a few irregular names like
+    /// `uh1huey`). The class token after `_veh_` is normalised into the 12-type taxonomy from
+    /// `docs/reverse_engineer/valid_model_structure_map.md` §6.
+    pub fn vehicle_class(&self) -> Option<&'static str> {
+        let n = self.name.as_ref()?.to_ascii_lowercase();
+        let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
+        Some(classify_vehicle_token(cls))
+    }
+}
+
+/// Normalise a `_veh_<token>_` class token into the model-structure-map taxonomy.
+pub fn classify_vehicle_token(cls: &str) -> &'static str {
+    if cls.contains("heli") || cls.starts_with("uh1") || cls.contains("huey") || cls.contains("copter") {
+        "helicopter"
+    } else if cls.contains("boat") || cls.contains("ship") {
+        "boat"
+    } else if cls.contains("tank") {
+        "tank"
+    } else if cls.contains("apc") {
+        "apc"
+    } else if cls.contains("vtol") || cls.contains("f35") || cls.contains("harrier") {
+        "vtol"
+    } else if cls.contains("moto") || cls.contains("bike") {
+        "motorcycle"
+    } else if cls.contains("semi") {
+        "semi"
+    } else if cls.contains("trailer") {
+        "trailer"
+    } else if cls.contains("van") {
+        "van"
+    } else if cls.contains("towed") || cls.contains("artillery") || cls.contains("howitzer") {
+        "towed"
+    } else if cls.contains("truck") {
+        "truck"
+    } else if cls == "car" || cls.contains("car") {
+        "car"
+    } else if cls.contains("jet") || cls.contains("plane") || cls.contains("a10") || cls.contains("f117") {
+        "jet"
+    } else {
+        "other"
+    }
 }
 
 pub struct AssetIndex {
@@ -193,7 +236,19 @@ pub fn load_all_names_raw(
     for (h, n) in default_rainbow_json().map(load_rainbow_json).unwrap_or_default() {
         names.insert(h, n);
     }
-    report(0.90, "live registry names");
+    report(0.88, "ASET-derived names");
+    // Names cracked from the WAD's own naming convention rather than a wordlist: a texture
+    // `X_dm`/`X_nm`/`X_sm` names its own model `X`, so a named texture yields its model's exact
+    // preimage. Textures resolve ~95% but models only ~46%, so this closes a gap the rainbow
+    // table structurally cannot — it is what makes most unnamed vehicle/prop models (the whole
+    // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
+    // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
+    for p in discovered_name_fragments() {
+        for (h, n) in load_rainbow_json(p) {
+            names.insert(h, n);
+        }
+    }
+    report(0.92, "live registry names");
     for (h, n) in names_csv.map(load_names_csv).unwrap_or_default() {
         names.insert(h, n);
     }
@@ -275,6 +330,42 @@ fn repo_walk_up(rel: &str) -> Option<PathBuf> {
 /// Find `docs/data/bone_name_candidates.txt` by walking up from the CWD.
 fn default_bone_candidates() -> Option<PathBuf> {
     repo_walk_up("docs/data/bone_name_candidates.txt")
+}
+
+/// The ASET-derived name fragments (same JSON shape as the rainbow table), each a set of
+/// preimages cracked from the WAD itself rather than from a wordlist:
+///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
+///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
+///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)
+///   `aset_external_names`   — block-path stems mined from the CONSOLE WADs (`aset_external_mine`).
+///                             The PC bake strips generated-asset names; the PS3/Xbox builds ship an
+///                             uncompressed block-path table that still spells them, and a block path
+///                             IS the asset's name. Biggest single source of model names (+510).
+///   `aset_model_names`      — per-model derivation from the textures the model ITSELF uses
+///                             (`mercs2_probe --bin model_namer`): the model name is an
+///                             order-preserving token SUBSEQUENCE of one of its texture names, which
+///                             catches the middle-token case (`civ_hum_casualfemale_ub_c` ->
+///                             `civ_hum_casualfemale_c`) that no suffix-strip can reach.
+/// A bundled copy wins over the repo copy so a packaged workshop stays self-contained.
+fn discovered_name_fragments() -> Vec<PathBuf> {
+    [
+        "aset_discovered_names.json",
+        "aset_block_strings.json",
+        "aset_expanded_names.json",
+        "aset_model_names.json",
+        "aset_external_names.json",
+    ]
+    .iter()
+    .filter_map(|f| {
+        if let Some(home) = data_home() {
+            let p = home.join(f);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        repo_walk_up(&format!("docs/data/{f}"))
+    })
+    .collect()
 }
 
 /// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`.

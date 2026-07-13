@@ -17,8 +17,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use mercs2_audio::{AudioEngine, VoiceId};
-use mercs2_script::{EngineHost, ScriptHost};
+use crate::audio::{AudioEngine, VoiceId};
+use mercs2_core::{Entity, GuidMap, Transform, World};
+use mercs2_formats::hash::pandemic_hash_m2;
+use crate::script::{EngineHost, ScriptHost};
 
 /// The engine's actor-template name for the PMC player HQ interior. `Pg.Spawn(PMC_INTERIOR_TEMPLATE)`
 /// resolves to the PMC interior geometry (see `game_world::load_pmc_interior`). The template→mesh
@@ -40,42 +42,44 @@ pub struct SpawnRequest {
 }
 
 /// The engine side of the script seam: Lua drives it; it records [`SpawnRequest`]s for the render loop
-/// to realize. Holds no GPU/ECS state — deliberately, so it can live behind the VM's `RefCell`.
+/// to realize. It holds no GPU state, and only a **shared** (`Rc<RefCell>`) handle to the ECS World +
+/// guidmap — so it still lives behind the VM's `RefCell` while its `Object.*`/`Pg.GetGuidByName` bodies
+/// resolve against LIVE entities instead of shadow tables (see [`attach_world`](Self::attach_world)).
 pub struct GameScriptHost {
     pub spawns: Vec<SpawnRequest>,
     by_name: HashMap<String, u64>,
     by_guid: HashMap<u64, usize>,
     next_guid: u64,
     level: String,
+    /// The live ECS World (single source of truth), shared with the frame loop. `None` when the host is
+    /// constructed standalone (tests) — those keep the shadow-table fallbacks below. When attached,
+    /// name/position/state reads resolve against live entities via [`guids`](Self::guids).
+    world: Option<Rc<RefCell<World>>>,
+    /// The guidmap singleton (name-hash → `Entity`, guid ↔ `Entity`), shared with the loop. Attached
+    /// alongside [`world`](Self::world) by [`attach_world`](Self::attach_world).
+    guids: Option<Rc<RefCell<GuidMap>>>,
     /// The live audio system the game's `Sound.*` / music Lua drives. **Shared** (`Rc<RefCell>`) so the
     /// game loop ticks the SAME engine each frame (`GameplaySystems::tick` → `audio.tick`) that the Lua
     /// `EngineHost` forwarding cues into — one `mercs2_audio` stack, driven from both sides.
     audio: Rc<RefCell<AudioEngine>>,
     /// The AI mechanism the game's `Ai.*` Lua drives: the recovered 1024-slot action ring + the
-    /// `[-100,100]` relation matrix (`mercs2_ai::AiWorld`, AI code map §8). `Ai.Goal` posts to the ring;
+    /// `[-100,100]` relation matrix (`crate::ai::AiWorld`, AI code map §8). `Ai.Goal` posts to the ring;
     /// `Ai.SetRelation`/`GetRelation` read/write the matrix. Per-entity perception records are ticked
     /// over the ECS world by the runtime, not here.
-    ai: mercs2_ai::AiWorld,
+    ai: crate::ai::AiWorld,
     /// Per-actor `AiBehavior` restriction flags set by `Ai.SetState` (keyed by actor GUID).
-    ai_states: std::collections::HashMap<u64, mercs2_ai::AiBehavior>,
+    ai_states: std::collections::HashMap<u64, crate::ai::AiBehavior>,
     /// The faction/reputation manager the game's `Ai.AddInfraction`/`SetInfractionMultiplier`/attitude
     /// Lua drives — the recovered combat→faction mood bridge + `[-100,100]` relation model
-    /// (`mercs2_faction::FactionWorld`, faction code map). Seeded with the recovered initial relations.
-    faction: mercs2_faction::FactionWorld,
+    /// (`crate::faction::FactionWorld`, faction code map). Seeded with the recovered initial relations.
+    faction: crate::faction::FactionWorld,
     /// The living-world population/spawner manager the game's `Ai.TweakAttachedSpawners*`/spawn-list Lua
-    /// drives (`mercs2_population::PopulationWorld`, world-streaming/AI code maps §7).
-    population: mercs2_population::PopulationWorld,
+    /// drives (`crate::population::PopulationWorld`, world-streaming/AI code maps §7).
+    population: crate::population::PopulationWorld,
     /// The hero spawn position the game's Lua set via `Object.SetPosition(Player.GetLocalCharacter(),
     /// …)` — the base game's `MrxUtil._TeleportHero` bottoms out to exactly that (mrxutil.lua:328). The
     /// boot reads this to place the player: the spawn is **Lua-authored, no engine-constant fallback**.
     hero_teleport: Option<[f32; 3]>,
-    /// The world's named markers (lowercased name → world pos) — the engine's `Pg.GetGuidByName`→pos
-    /// table. Set from the loaded world so the real boot flow's `CreatePlayerCharacter` resolves the
-    /// spawn location marker (e.g. `PmcCon001_Start1`) to coords.
-    named_locations: std::collections::HashMap<String, [f32; 3]>,
-    /// Minted GUID → the marker name it stands for, so `Object.GetPosition(guid)` on a
-    /// `Pg.GetGuidByName` result resolves back through `named_locations`.
-    marker_guids: std::collections::HashMap<u64, String>,
     /// Where the boot flow's `Pg.Spawn(hero, x, y, z, …)` placed the hero — the spawn the loop reads
     /// (the REAL flow result, superseding the engine-side marker shortcut).
     hero_spawn: Option<[f32; 3]>,
@@ -88,10 +92,10 @@ pub struct GameScriptHost {
     /// (`mrxutil.lua:314`) records `("upright","idle")`; civ/hijack scripts record their stance+anim.
     human_states: HashMap<u64, (String, String)>,
     /// Per-vehicle hijack FSM (`Vehicle.Hijack*`), keyed by vehicle GUID — the engine-owned state the
-    /// mission Lua drives through its lifecycle (`mercs2_vehicle::HijackFsm`).
-    hijacks: HashMap<u64, mercs2_vehicle::HijackFsm>,
+    /// mission Lua drives through its lifecycle (`crate::vehicle::HijackFsm`).
+    hijacks: HashMap<u64, crate::vehicle::HijackFsm>,
     /// Per-vehicle turret/rotor aim (`Vehicle.SetTurretPitch/Yaw`, `Vehicle.SpinHeli`).
-    turrets: HashMap<u64, mercs2_vehicle::TurretAim>,
+    turrets: HashMap<u64, crate::vehicle::TurretAim>,
     /// Engine settings the `Sys.Set*` config surface writes and the matching `Sys.*` getters read
     /// (the game holds these; the rest of the engine reads them). `Set*`→`Get*` are real roundtrips.
     settings: SysSettings,
@@ -103,10 +107,10 @@ pub struct GameScriptHost {
     /// The object attachment graph: child GUID → parent GUID (`Object.Attach`/`Detach`). `GetParent`/
     /// `IsAttached`/`GetAttachedObjects` read it.
     attachments: HashMap<u64, u64>,
-    /// The retained-mode HUD widget tree the `Hud.*` Lua drives (`mercs2_ui::WidgetTree`).
-    hud: mercs2_ui::WidgetTree,
+    /// The retained-mode HUD widget tree the `Hud.*` Lua drives (`crate::widgets::WidgetTree`).
+    hud: crate::widgets::WidgetTree,
     /// The HUD world-marker set the `Gui._Marker*` Lua drives.
-    markers: mercs2_ui::MarkerSet,
+    markers: crate::widgets::MarkerSet,
     /// Global render/post-FX parameter state the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua drives.
     render: mercs2_core::RenderState,
     /// Cinematic camera controller state the `CameraFx.*` Lua drives.
@@ -165,6 +169,12 @@ pub struct GameScriptHost {
     /// Requested game states (`Sys.RequestGameState`) awaiting the engine's state-machine service — the
     /// resident pump drains these and fires the matching `Event.GameStateChange` to advance `MrxState`.
     pending_game_states: Vec<String>,
+    /// The player economy singleton (`Player.GetCash`/`GetFuel` — signed i32 on `[0x1176054]`, the
+    /// money/fuel notes). Host-owned engine state (the correct home — not a shadow of ECS data); seeded
+    /// from the loaded save's stockpile at boot, then the game's Lua drives it. Was trait-default 0.
+    cash: i64,
+    fuel: i64,
+    fuel_capacity: i64,
 }
 
 /// Script-driven cinematic camera controller state (`CameraFx.*`): the pose/shake/blend the camera
@@ -356,14 +366,14 @@ impl GameScriptHost {
             by_guid: HashMap::new(),
             next_guid: 0x1000_0000, // distinct, non-zero GUID space for script-spawned actors
             level: level.into(),
+            world: None, // attached by the loop via `attach_world`; None in standalone tests
+            guids: None,
             audio: Rc::new(RefCell::new(AudioEngine::default())),
-            ai: mercs2_ai::AiWorld::new(),
+            ai: crate::ai::AiWorld::new(),
             ai_states: std::collections::HashMap::new(),
-            faction: mercs2_faction::FactionWorld::with_default_relations(),
-            population: mercs2_population::PopulationWorld::new(),
+            faction: crate::faction::FactionWorld::with_default_relations(),
+            population: crate::population::PopulationWorld::new(),
             hero_teleport: None,
-            named_locations: std::collections::HashMap::new(),
-            marker_guids: std::collections::HashMap::new(),
             hero_spawn: None,
             hero_character: String::new(),
             player_character: HashMap::new(),
@@ -374,8 +384,8 @@ impl GameScriptHost {
             object_labels: HashMap::new(),
             object_filters: mercs2_core::ObjectFilterRegistry::new(),
             attachments: HashMap::new(),
-            hud: mercs2_ui::WidgetTree::new(),
-            markers: mercs2_ui::MarkerSet::new(),
+            hud: crate::widgets::WidgetTree::new(),
+            markers: crate::widgets::MarkerSet::new(),
             render: mercs2_core::RenderState::new(),
             camera_fx: CameraFxState::default(),
             loadouts: HashMap::new(),
@@ -404,6 +414,83 @@ impl GameScriptHost {
             net_events: Vec::new(),
             script_cmds: Vec::new(),
             pending_game_states: Vec::new(),
+            cash: 0,
+            fuel: 0,
+            fuel_capacity: 0,
+        }
+    }
+
+    /// Seed the economy from the loaded save (the stockpile's cash pile). Fuel/capacity are set by the
+    /// game's Lua during init (support-data/player setup), so they start at 0 and round-trip from there.
+    pub fn set_cash(&mut self, cash: i64) {
+        self.cash = cash;
+    }
+
+    /// Attach the live ECS World + guidmap the frame loop owns, so this host's `Object.*` /
+    /// `Pg.GetGuidByName` bodies resolve against LIVE entities (position from the entity's `Transform`,
+    /// not a shadow table). Called once at boot. Standalone (test) hosts never attach → shadow fallback.
+    pub fn attach_world(&mut self, world: Rc<RefCell<World>>, guids: Rc<RefCell<GuidMap>>) {
+        self.world = Some(world);
+        self.guids = Some(guids);
+    }
+
+    /// The entity a GUID resolves to via the attached guidmap (None if no World attached / guid unknown).
+    fn entity_of(&self, guid: u64) -> Option<Entity> {
+        self.guids.as_ref()?.borrow().entity_by_guid(guid)
+    }
+
+    /// A copy of `guid`'s live `Transform` from the attached World, if the entity has one.
+    fn transform_of(&self, guid: u64) -> Option<Transform> {
+        let e = self.entity_of(guid)?;
+        let world = self.world.as_ref()?.borrow();
+        world.get::<&Transform>(e).ok().map(|t| *t)
+    }
+
+    /// Mutate `guid`'s live `Transform` in the attached World; returns whether it was applied.
+    fn with_transform_mut(&self, guid: u64, f: impl FnOnce(&mut Transform)) -> bool {
+        let Some(e) = self.entity_of(guid) else { return false };
+        let Some(world_rc) = self.world.as_ref() else { return false };
+        let world = world_rc.borrow();
+        let Ok(mut t) = world.get::<&mut Transform>(e) else { return false };
+        f(&mut t);
+        true
+    }
+
+    /// A copy of `guid`'s live `Health` component (the SAME component the combat silo reads/writes), if
+    /// the entity carries one — so Lua `Object.*Health` and combat damage never diverge for live actors.
+    fn health_of(&self, guid: u64) -> Option<crate::combat::Health> {
+        let e = self.entity_of(guid)?;
+        let world = self.world.as_ref()?.borrow();
+        world.get::<&crate::combat::Health>(e).ok().map(|h| *h)
+    }
+
+    /// Read-or-init (`max = default_max`) and mutate `guid`'s live `Health`, writing it back. Returns
+    /// whether it was applied (false if no live entity → the caller keeps the shadow fallback).
+    fn with_health(&self, guid: u64, default_max: f32, f: impl FnOnce(&mut crate::combat::Health)) -> bool {
+        let Some(e) = self.entity_of(guid) else { return false };
+        let Some(world_rc) = self.world.as_ref() else { return false };
+        let mut world = world_rc.borrow_mut();
+        let mut h = world
+            .get::<&crate::combat::Health>(e)
+            .map(|h| *h)
+            .unwrap_or_else(|_| crate::combat::Health::new(default_max));
+        f(&mut h);
+        world.insert_one(e, h).is_ok()
+    }
+
+    /// Register an entity into the attached guidmap under an explicit `guid` (+ optional name-hash) — the
+    /// loop calls this when it realizes a spawn or creates a named marker entity. No-op without a guidmap.
+    pub fn register_entity(&self, e: Entity, guid: u64, name_hash: Option<u32>) {
+        if let Some(g) = &self.guids {
+            g.borrow_mut().register(e, name_hash, guid);
+        }
+    }
+
+    /// Register a named marker/entity, minting a fresh guid; returns it (0 if no guidmap attached).
+    pub fn register_named_entity(&self, e: Entity, name_hash: u32) -> u64 {
+        match &self.guids {
+            Some(g) => g.borrow_mut().register_named(e, name_hash),
+            None => 0,
         }
     }
 
@@ -440,11 +527,10 @@ impl GameScriptHost {
         std::mem::take(&mut self.spawns)
     }
 
-    /// Give the host the world's named markers + the hero template, so the real boot flow's
-    /// `CreatePlayerCharacter(location=<name>)` resolves against them (`Pg.GetGuidByName`→`GetPosition`)
-    /// and `Pg.Spawn(hero, …)` places the hero at the marker.
-    pub fn set_boot_context(&mut self, named_locations: std::collections::HashMap<String, [f32; 3]>, hero_character: impl Into<String>) {
-        self.named_locations = named_locations;
+    /// Set the hero template for the boot flow, and tag the hero object with its identity label. Named
+    /// markers are no longer passed here — they live in the World + guidmap (the loader entity-izes them),
+    /// so `CreatePlayerCharacter(location=<name>)` resolves through `Pg.GetGuidByName` → the live entity.
+    pub fn set_boot_context(&mut self, hero_character: impl Into<String>) {
         self.hero_character = hero_character.into();
         // The engine tags the player character object with its identity label (mattias/jennifer/chris) at
         // creation; the game reads it via `MrxUtil.GetCharacterIdentity → Object.HasLabel(uChar, <id>)`
@@ -505,20 +591,17 @@ impl EngineHost for GameScriptHost {
         self.level.clone()
     }
     fn guid_by_name(&mut self, name: &str) -> u64 {
-        // A spawned object with that name wins; otherwise a NAMED WORLD MARKER (the base game's
-        // Pg.GetGuidByName over placed markers, e.g. spawn-location points) mints a stable GUID whose
-        // position resolves through `named_locations` in `object_get_position`.
+        // A spawned object with that name wins (record-then-realize keeps its guid).
         if let Some(g) = self.by_name.get(name).copied() {
             return g;
         }
-        if self.named_locations.contains_key(&name.to_ascii_lowercase()) {
-            self.next_guid += 1;
-            let guid = self.next_guid;
-            self.by_name.insert(name.to_string(), guid);
-            self.marker_guids.insert(guid, name.to_ascii_lowercase());
-            return guid;
-        }
-        0
+        // Resolve the named entity (a marker or a streamed/spawned object) through the live guidmap —
+        // the real `Pg.GetGuidByName` over live entities, not a side table. 0 when unknown / no world.
+        let h = pandemic_hash_m2(&name.to_ascii_lowercase());
+        self.guids
+            .as_ref()
+            .and_then(|gm| gm.borrow().guid_by_name_hash(h))
+            .unwrap_or(0)
     }
     fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, _high_detail: bool) -> u64 {
         self.next_guid += 1;
@@ -546,22 +629,28 @@ impl EngineHost for GameScriptHost {
         self.by_name.insert(name.to_string(), guid);
     }
     fn object_set_position(&mut self, guid: u64, pos: [f32; 3]) {
-        // The hero is a Lua-addressable object: teleporting it (the base game's _TeleportHero →
-        // Object.SetPosition path) records the spawn the boot consumes. Other GUIDs are spawn requests.
+        // The hero is teleported (`_TeleportHero` → Object.SetPosition) during the boot Lua flow, BEFORE
+        // its ECS entity exists — record it so the boot can place the player. (Once the hero entity is
+        // registered, the live move below also applies.)
         if guid == HERO_GUID {
             self.hero_teleport = Some(pos);
+        }
+        // Live entity: move its Transform in the World.
+        if self.with_transform_mut(guid, |t| t.translation = pos.into()) {
             return;
         }
+        // Fallback: an un-realized spawn request's recorded position (the entity isn't live yet).
         if let Some(r) = self.req_mut(guid) {
             r.pos = pos;
         }
     }
     fn object_get_position(&mut self, guid: u64) -> [f32; 3] {
-        // A named world marker (from Pg.GetGuidByName) resolves through named_locations — this is how
-        // CreatePlayerCharacter turns a spawn-location NAME into coords. Else a spawn request's pos.
-        if let Some(name) = self.marker_guids.get(&guid) {
-            return self.named_locations.get(name).copied().unwrap_or([0.0; 3]);
+        // Live entity (a named marker or a realized/streamed object) — position from its `Transform`.
+        // This is the real `Object.GetPosition`: a physics-moved object reports its CURRENT position.
+        if let Some(t) = self.transform_of(guid) {
+            return t.translation.to_array();
         }
+        // Fallback: an un-realized spawn request's recorded pos (the entity isn't live yet).
         self.by_guid
             .get(&guid)
             .and_then(|&i| self.spawns.get(i))
@@ -580,7 +669,37 @@ impl EngineHost for GameScriptHost {
         // returned 0 → HasLabel(0,…) failed → "not one of M/J/C".
         HERO_GUID
     }
+
+    // ===== Player economy → the host's real cash/fuel store (was trait-default 0). Signed-i32 domain
+    // with the documented 1-billion cash soft-clamp; fuel clamped to capacity. =====
+    fn player_cash(&self) -> i64 {
+        self.cash
+    }
+    fn player_set_cash(&mut self, cash: i64) {
+        self.cash = cash.clamp(0, 1_000_000_000);
+    }
+    fn player_fuel(&self) -> i64 {
+        self.fuel
+    }
+    fn player_set_fuel(&mut self, fuel: i64) {
+        // Clamp to capacity once it's been set; unbounded before then (Lua may set fuel before capacity).
+        let cap = if self.fuel_capacity > 0 { self.fuel_capacity } else { i64::MAX };
+        self.fuel = fuel.clamp(0, cap);
+    }
+    fn player_fuel_capacity(&self) -> i64 {
+        self.fuel_capacity
+    }
+    fn player_set_fuel_capacity(&mut self, cap: i64) {
+        self.fuel_capacity = cap.max(0);
+        self.fuel = self.fuel.min(self.fuel_capacity);
+    }
+
     fn object_set_yaw(&mut self, guid: u64, yaw: f32) {
+        // Live entity: set its Transform rotation about +Y.
+        if self.with_transform_mut(guid, |t| t.rotation = mercs2_core::glam::Quat::from_rotation_y(yaw)) {
+            return;
+        }
+        // Fallback: an un-realized spawn request's recorded yaw.
         if let Some(r) = self.req_mut(guid) {
             r.yaw = yaw;
         }
@@ -590,7 +709,7 @@ impl EngineHost for GameScriptHost {
     }
     fn add_layers(&mut self, _layers: &[String]) {}
 
-    // ===== Sound / music → the live `mercs2_audio::AudioEngine` (the fleet audio system, wired in). =====
+    // ===== Sound / music → the live `crate::audio::AudioEngine` (the fleet audio system, wired in). =====
     fn sound_cue(&mut self, cue: &str) -> u64 {
         // Unknown cue (no sounddb / not found) returns 0 → Lua nil, faithful to the exe.
         self.audio.borrow_mut().cue_sound_by_name(cue, None, None).map(|v| v.0 as u64).unwrap_or(0)
@@ -640,7 +759,7 @@ impl EngineHost for GameScriptHost {
         self.audio.borrow().bank_is_loaded(name)
     }
 
-    // ===== AI order surface → the recovered mechanism (`mercs2_ai::AiWorld`). =====
+    // ===== AI order surface → the recovered mechanism (`crate::ai::AiWorld`). =====
     fn ai_goal(&mut self, guid: u64, goal: &str) -> bool {
         self.ai.goal(guid as u32, goal)
     }
@@ -673,7 +792,7 @@ impl EngineHost for GameScriptHost {
             "off" | "despawn" | "disable" => Some(5u8),
             _ => None,
         });
-        let adjust = mercs2_population::SpawnerAdjust {
+        let adjust = crate::population::SpawnerAdjust {
             group_mask,
             spawner_state,
             spawn_list: None,
@@ -690,7 +809,7 @@ impl EngineHost for GameScriptHost {
 
     // ===== Vehicle hijack FSM + turret aim → `mercs2_vehicle` (held per-vehicle on the host). =====
     fn vehicle_hijack_event(&mut self, veh: u64, event: &str) -> String {
-        let fsm = self.hijacks.entry(veh).or_insert_with(mercs2_vehicle::HijackFsm::new);
+        let fsm = self.hijacks.entry(veh).or_insert_with(crate::vehicle::HijackFsm::new);
         let state = match event {
             "start" => fsm.start(),
             "tank_motion_on" => fsm.tank_motion(true),
@@ -708,7 +827,7 @@ impl EngineHost for GameScriptHost {
         self.hijacks.get(&veh).map(|f| f.state.name()).unwrap_or("idle").to_string()
     }
     fn vehicle_set_turret(&mut self, veh: u64, pitch: Option<f32>, yaw: Option<f32>, spin: Option<bool>) {
-        let aim = self.turrets.entry(veh).or_insert_with(mercs2_vehicle::TurretAim::new);
+        let aim = self.turrets.entry(veh).or_insert_with(crate::vehicle::TurretAim::new);
         if let Some(p) = pitch {
             aim.pitch = p;
         }
@@ -824,16 +943,16 @@ impl EngineHost for GameScriptHost {
     }
 
     // ===== HUD widget tree + markers → mercs2_ui. =====
-    fn hud(&mut self) -> Option<&mut mercs2_ui::WidgetTree> {
+    fn hud(&mut self) -> Option<&mut crate::widgets::WidgetTree> {
         Some(&mut self.hud)
     }
-    fn hud_ref(&self) -> Option<&mercs2_ui::WidgetTree> {
+    fn hud_ref(&self) -> Option<&crate::widgets::WidgetTree> {
         Some(&self.hud)
     }
-    fn markers(&mut self) -> Option<&mut mercs2_ui::MarkerSet> {
+    fn markers(&mut self) -> Option<&mut crate::widgets::MarkerSet> {
         Some(&mut self.markers)
     }
-    fn markers_ref(&self) -> Option<&mercs2_ui::MarkerSet> {
+    fn markers_ref(&self) -> Option<&crate::widgets::MarkerSet> {
         Some(&self.markers)
     }
     fn render_state(&mut self) -> Option<&mut mercs2_core::RenderState> {
@@ -935,29 +1054,54 @@ impl EngineHost for GameScriptHost {
         self.burning.contains(&object)
     }
 
-    // ===== Health / damage (backs Object.*Health + Kill/Revive + SendDamage). =====
+    // ===== Health / damage → the live `crate::combat::Health` component (shared with combat), with the
+    // shadow HashMap as the pre-realize / no-entity fallback (like `spawns[].pos` for position). =====
     fn object_health(&self, guid: u64) -> f32 {
+        if let Some(h) = self.health_of(guid) {
+            return h.cur;
+        }
         self.health.get(&guid).map(|&(c, _)| c).unwrap_or(DEFAULT_MAX_HEALTH)
     }
     fn object_set_health(&mut self, guid: u64, hp: f32) {
+        if self.with_health(guid, DEFAULT_MAX_HEALTH, |h| h.cur = hp.clamp(0.0, h.max)) {
+            return;
+        }
         let e = self.health.entry(guid).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
         e.0 = hp.clamp(0.0, e.1);
     }
     fn object_max_health(&self, guid: u64) -> f32 {
+        if let Some(h) = self.health_of(guid) {
+            return h.max;
+        }
         self.health.get(&guid).map(|&(_, m)| m).unwrap_or(DEFAULT_MAX_HEALTH)
     }
     fn object_is_alive(&self, guid: u64) -> bool {
+        if let Some(h) = self.health_of(guid) {
+            return h.cur > 0.0;
+        }
         self.health.get(&guid).map(|&(c, _)| c > 0.0).unwrap_or(true)
     }
     fn object_kill(&mut self, guid: u64) {
+        if self.with_health(guid, DEFAULT_MAX_HEALTH, |h| h.cur = 0.0) {
+            return;
+        }
         let e = self.health.entry(guid).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
         e.0 = 0.0;
     }
     fn object_revive(&mut self, guid: u64) {
+        if self.with_health(guid, DEFAULT_MAX_HEALTH, |h| h.cur = h.max) {
+            return;
+        }
         let e = self.health.entry(guid).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
         e.0 = e.1;
     }
     fn object_send_damage(&mut self, target: u64, amount: f32) -> bool {
+        // Live entity: subtract from the shared Health; report whether it died.
+        if let Some(h) = self.health_of(target) {
+            let died = (h.cur - amount) <= 0.0;
+            self.with_health(target, DEFAULT_MAX_HEALTH, |h| h.cur = (h.cur - amount).max(0.0));
+            return died;
+        }
         let e = self.health.entry(target).or_insert((DEFAULT_MAX_HEALTH, DEFAULT_MAX_HEALTH));
         e.0 = (e.0 - amount).max(0.0);
         e.0 <= 0.0
@@ -1028,12 +1172,12 @@ impl EngineHost for GameScriptHost {
         self.attachments.iter().filter(|(_, &p)| p == guid).map(|(&c, _)| c).collect()
     }
 
-    // ===== VO / dialogue → the real `mercs2_audio::VoManager` (via the shared AudioEngine). =====
+    // ===== VO / dialogue → the real `crate::audio::VoManager` (via the shared AudioEngine). =====
     fn vo_cue(&mut self, cue: &str) -> u64 {
         // Cue names hash to a stable u32 guid so Cue↔Cancel(cue) address the same VO line. Contract
         // priority is the default mission-dialogue tier; the VO routes through the real voice pool.
         let guid = vo_cue_hash(cue);
-        let ok = self.audio.borrow_mut().vo_cue(0, guid, mercs2_audio::VoPriority::Contract, true, None);
+        let ok = self.audio.borrow_mut().vo_cue(0, guid, crate::audio::VoPriority::Contract, true, None);
         if ok { guid as u64 } else { 0 }
     }
     fn vo_cancel(&mut self, cue: &str) {
@@ -1099,7 +1243,7 @@ impl EngineHost for GameScriptHost {
     fn object_is_valid(&self, guid: u64) -> bool {
         guid == HERO_GUID
             || self.by_guid.contains_key(&guid)
-            || self.marker_guids.contains_key(&guid)
+            || self.entity_of(guid).is_some()
     }
 
     // ===== Human driven state (record-then-realize, keyed by GUID). =====
@@ -1548,7 +1692,7 @@ pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
 mod tests {
     use super::*;
 
-    /// The audio system is wired in: real game `Sound.*` Lua drives the live `mercs2_audio::AudioEngine`
+    /// The audio system is wired in: real game `Sound.*` Lua drives the live `crate::audio::AudioEngine`
     /// through the `EngineHost` forwarding (not a test double). `SetDynamicMusic`/`IsDynamicMusic`
     /// round-trip deterministically; an unknown cue (no sounddb) returns nil, faithful to the exe.
     #[test]
@@ -1585,7 +1729,7 @@ mod tests {
     }
 
     /// The `Ai.*` order/faction/spawner surface is WIRED to real mechanisms (not no-ops): game Lua
-    /// drives `mercs2_ai::AiWorld` (the ring), `mercs2_faction::FactionWorld` (the mood bridge), and the
+    /// drives `crate::ai::AiWorld` (the ring), `crate::faction::FactionWorld` (the mood bridge), and the
     /// infraction-multiplier gate — asserted on the live host state the bindings forwarded into.
     #[test]
     fn game_lua_ai_drives_ring_and_faction() {
@@ -1737,7 +1881,7 @@ mod tests {
         assert!(!host.borrow().object_is_attached(500));
     }
 
-    /// `VO.*` drives the real `mercs2_audio::VoManager`: a cue plays a line (active), Cancel stops it,
+    /// `VO.*` drives the real `crate::audio::VoManager`: a cue plays a line (active), Cancel stops it,
     /// SetCinematicMode toggles the real flag — all through Lua (were no-op stubs).
     #[test]
     fn game_lua_vo_drives_real_vo_manager() {
@@ -1759,7 +1903,7 @@ mod tests {
         assert!(host.borrow().audio.borrow().vo_cinematic_mode());
     }
 
-    /// `Hud.*` drives the REAL `mercs2_ui::WidgetTree`: create widgets, set/get their state, parent
+    /// `Hud.*` drives the REAL `crate::widgets::WidgetTree`: create widgets, set/get their state, parent
     /// them, and text/image data round-trips — all through Lua (was a no-op HUD).
     #[test]
     fn game_lua_hud_drives_real_widget_tree() {
@@ -2061,7 +2205,7 @@ mod tests {
             eprintln!("[skip] decompiled Lua corpus not present — boot-flow regression skipped");
             return;
         };
-        host.borrow_mut().set_boot_context(std::collections::HashMap::new(), "chris");
+        host.borrow_mut().set_boot_context("chris");
         run_boot_flow(&sh, &host, "PmcCon001", "chris");
         let (lines, complete, layers) = {
             let h = host.borrow();
@@ -2160,18 +2304,26 @@ mod tests {
     }
 
     /// The full base-game spawn chain, host-side: `Pg.GetGuidByName(marker)` → `Object.GetPosition(guid)`
-    /// → `Pg.Spawn(hero, x,y,z)` — exactly what `MrxPlayer.CreatePlayerCharacter` runs. The marker
-    /// resolves through the world's `named_locations`, and the hero's Pg.Spawn position is captured for
-    /// the loop. No hardcoded coordinate anywhere.
+    /// → `Pg.Spawn(hero, x,y,z)` — exactly what `MrxPlayer.CreatePlayerCharacter` runs. The marker is a
+    /// LIVE entity in the World + guidmap (the loader entity-izes named markers the same way), so the name
+    /// resolves to a real entity and the position comes from its `Transform`. No shadow table, no const.
     #[test]
     fn boot_spawn_chain_resolves_marker_to_hero_spawn() {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
-        let mut nl = std::collections::HashMap::new();
-        nl.insert("pmccon001_start1".to_string(), [10.0, 20.0, 30.0]);
-        host.borrow_mut().set_boot_context(nl, "chris");
+        // Attach a live World + guidmap and register the spawn-location marker as a real entity.
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids.clone());
+        {
+            let e = world
+                .borrow_mut()
+                .spawn((Transform::from_translation(mercs2_core::glam::Vec3::new(10.0, 20.0, 30.0)),));
+            host.borrow().register_named_entity(e, pandemic_hash_m2("pmccon001_start1"));
+        }
+        host.borrow_mut().set_boot_context("chris");
         let sh = resident_script_host(host.clone()).expect("resident host");
 
-        // The CreatePlayerCharacter chain (name → guid → position → Pg.Spawn(hero)).
+        // The CreatePlayerCharacter chain (name → guid → live position → Pg.Spawn(hero)).
         sh.exec(
             "local g = Pg.GetGuidByName('PmcCon001_Start1')\n\
              local x, y, z = Object.GetPosition(g)\n\
@@ -2182,8 +2334,76 @@ mod tests {
         assert_eq!(
             host.borrow_mut().take_hero_spawn(),
             Some([10.0, 20.0, 30.0]),
-            "the hero must spawn at the marker the name resolved to — Lua-driven, no const"
+            "the hero must spawn at the marker the name resolved to — from the LIVE guidmap, no const"
         );
+    }
+
+    /// The core proof that this is real, not a shadow: `Object.GetPosition` reads the entity's LIVE
+    /// `Transform`, so moving the entity in the World (as physics/animation would) changes what the Lua
+    /// binding returns — something the old `named_locations`/`spawns[]` side tables could never do.
+    #[test]
+    fn object_get_position_reflects_a_live_world_move() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids.clone());
+        // A named entity at the origin.
+        let e = world.borrow_mut().spawn((Transform::IDENTITY,));
+        let guid = host.borrow().register_named_entity(e, pandemic_hash_m2("test_marker"));
+        assert_eq!(host.borrow_mut().object_get_position(guid), [0.0, 0.0, 0.0]);
+
+        // Move it in the World (the loop's physics/anim would do this) — the binding reports the new pos.
+        world.borrow().get::<&mut Transform>(e).unwrap().translation = mercs2_core::glam::Vec3::new(5.0, 6.0, 7.0);
+        assert_eq!(host.borrow_mut().object_get_position(guid), [5.0, 6.0, 7.0]);
+
+        // And name resolution + the write path round-trip through the same live entity.
+        assert_eq!(host.borrow_mut().guid_by_name("Test_Marker"), guid);
+        host.borrow_mut().object_set_position(guid, [1.0, 2.0, 3.0]);
+        assert_eq!(host.borrow_mut().object_get_position(guid), [1.0, 2.0, 3.0]);
+    }
+
+    /// Lua `Object.*Health` and the combat silo read/write the SAME `Health` component on a live entity —
+    /// no divergence. The old shadow HashMap and the combat `Health` were disjoint; now Lua damage is
+    /// visible to combat and vice-versa.
+    #[test]
+    fn health_binding_shares_the_combat_health_component() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids.clone());
+        // A combat entity carrying a Health component (as the resolver / streaming would spawn it).
+        let e = world.borrow_mut().spawn((Transform::IDENTITY, crate::combat::Health::new(100.0)));
+        let g = 0x1000_5000u64;
+        host.borrow().register_entity(e, g, None);
+
+        assert_eq!(host.borrow().object_health(g), 100.0);
+        // Lua damage writes the SAME component the combat silo reads.
+        assert!(!host.borrow_mut().object_send_damage(g, 30.0));
+        assert_eq!(host.borrow().object_health(g), 70.0);
+        assert_eq!(world.borrow().get::<&crate::combat::Health>(e).unwrap().cur, 70.0, "combat sees the Lua damage");
+        // Kill via Lua → combat sees dead.
+        host.borrow_mut().object_kill(g);
+        assert!(!host.borrow().object_is_alive(g));
+        assert!(world.borrow().get::<&crate::combat::Health>(e).unwrap().is_dead());
+    }
+
+    /// `Player.GetCash`/`GetFuel` now read a real store (were trait-default 0): seed + round-trip + the
+    /// documented 1-billion cash soft-cap + fuel clamped to capacity.
+    #[test]
+    fn player_economy_round_trips_and_caps() {
+        let mut h = GameScriptHost::new("vz");
+        assert_eq!(h.player_cash(), 0);
+        h.set_cash(50_000);
+        assert_eq!(h.player_cash(), 50_000);
+        h.player_set_cash(2_000_000_000); // over the 1B soft cap
+        assert_eq!(h.player_cash(), 1_000_000_000);
+
+        h.player_set_fuel(500); // capacity unset → unbounded
+        assert_eq!(h.player_fuel(), 500);
+        h.player_set_fuel_capacity(100); // clamps current fuel down
+        assert_eq!(h.player_fuel(), 100);
+        h.player_set_fuel(150); // clamp to capacity
+        assert_eq!(h.player_fuel(), 100);
     }
 
     #[test]

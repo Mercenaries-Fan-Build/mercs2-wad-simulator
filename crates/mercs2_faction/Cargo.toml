@@ -1,9 +1,11 @@
 [package]
 name = "mercs2_faction"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 13 (faction/reputation/pursuit): the combat->infraction->attitude->pursuit loop from faction_reputation_code_map.md."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-mercs2_core = { path = "../mercs2_core" }
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_core = { workspace = true }
+mercs2_formats = { workspace = true }

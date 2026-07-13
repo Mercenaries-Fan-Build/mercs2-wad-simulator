@@ -302,6 +302,61 @@ pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
     })
 }
 
+/// ★Uniformly SCALE every convex collision hull in a `PHY2` body, in place.
+///
+/// Conforming a novel model into a donor container leaves the DONOR's collision behind. If the new
+/// model is a different size, the vehicle you SEE and the volume bullets/impacts actually hit
+/// disagree — a 2x-scaled tank keeps a half-size hit box and rides on a half-size hull.
+///
+/// Scaling a `hkpConvexVerticesShape` is exact and size-preserving:
+///   * `m_rotatedVertices` (+64, FourVectors SoA: `X[4] Y[4] Z[4]` per 48-byte block) — scale every
+///     component. Trailing lanes in the last block are padding (a repeat of the last vertex or 0),
+///     and scaling them is harmless.
+///   * `m_planeEquations` (+80, `hkVector4 { n.xyz, -support }`) — the normal stays UNIT, only the
+///     support distance `w` scales. Scaling `n` would denormalise the half-space and break the
+///     narrow-phase.
+///
+/// Byte size is unchanged, so the packfile's section headers/fixups stay valid and the surrounding
+/// PHY2 header + trailing engine wrapper are untouched.
+pub fn scale_phy2_hulls(body: &mut [u8], s: f32) -> Result<usize, String> {
+    let off = find_sub(body, &HAVOK_MAGIC).ok_or("no embedded Havok packfile (legacy PHY2)")?;
+    let raw = parse_packfile_raw(&body[off..])?;
+    let (data_pk, lf) = (raw.data_pk, raw.lf);
+    let mut scaled = 0usize;
+    // Collect the writes first: `raw` borrows `body` immutably through the parse.
+    let mut writes: Vec<(usize, f32)> = Vec::new();
+    for (src, class) in &raw.vfixups {
+        if class != CONVEX {
+            continue;
+        }
+        let obj = off + data_pk + *src;
+        let nv = (u32_le(body, obj + 76) as usize).min(4096);
+        let vptr = off + data_pk + lf.get(&(*src + 64)).copied().unwrap_or(0);
+        // Whole 48-byte SoA blocks, so the padding lanes scale with the real ones.
+        let blocks = nv.div_ceil(4);
+        for b in 0..blocks {
+            for c in 0..12 {
+                let o = vptr + b * 48 + c * 4;
+                writes.push((o, f32_le(body, o) * s));
+            }
+        }
+        let pc = (u32_le(body, obj + 84) as usize).min(4096);
+        let pptr = off + data_pk + lf.get(&(*src + 80)).copied().unwrap_or(0);
+        for p in 0..pc {
+            // ONLY w (+12): the plane normal must stay unit-length.
+            let o = pptr + p * 16 + 12;
+            writes.push((o, f32_le(body, o) * s));
+        }
+        scaled += 1;
+    }
+    for (o, v) in writes {
+        if o + 4 <= body.len() {
+            body[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    Ok(scaled)
+}
+
 /// Parse a `PHY2` chunk body: the embedded Havok packfile is preceded by a u32
 /// header prefix, so the magic is *searched* (mirrors `validate_phy2`). Returns
 /// `Err` for a legacy PHY2 with no embedded packfile.

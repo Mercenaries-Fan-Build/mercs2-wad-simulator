@@ -165,6 +165,34 @@ impl EmitterDesc {
             looping: true,
         }
     }
+
+    /// A **one-shot** dust/smoke puff for a bullet impact: a non-looping burst that emits once and is
+    /// reaped once its particles die. Unlike [`demo_smoke`](Self::demo_smoke) (a *continuous* plume,
+    /// `looping: true`), this does NOT accumulate — the fix for impact emitters piling up forever.
+    pub fn impact_puff() -> Self {
+        EmitterDesc {
+            spawn_rate: 0.0,
+            burst: 10,
+            looping: false,
+            lifetime: 0.5,
+            lifetime_jitter: 0.3,
+            start_speed: 1.4,
+            start_size: 0.12,
+            end_size: 0.5,
+            ..Self::demo_smoke()
+        }
+    }
+
+    /// A **one-shot** fireball burst for an explosion impact (non-looping → auto-reaped).
+    pub fn impact_fire() -> Self {
+        EmitterDesc {
+            spawn_rate: 0.0,
+            burst: 26,
+            looping: false,
+            lifetime: 0.7,
+            ..Self::demo_fire()
+        }
+    }
 }
 
 /// A static, persistent additive glow billboard — the faithful cheap rendering of an authored

@@ -1,6 +1,7 @@
 [package]
 name = "destruction_extract"
 version = "1.0.0"
+publish = false                # excluded from the crates.io release set
 edition = "2021"
 description = "Stage-2 destruction-state extractor — HIER/SWIT → intact/break_piece/static per model (mercs2_formats::orchestrator)"
 

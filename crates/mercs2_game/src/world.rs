@@ -76,9 +76,7 @@ fn build_placement_markers(
         index_start: 0,
         index_count: indices.len() as u32,
         diffuse: None, // vertex-color only (white fallback texture)
-        specular: None,
-        normal: None,
-        group_index: 0,
+        ..Default::default()
     }];
     (verts, indices, draws)
 }
@@ -97,37 +95,13 @@ fn build_placement_markers(
 ///  (b) FINE-CELL QUADTREE: for a multi-tier c3 cell, are the fine leaf blocks spatially DISJOINT
 ///      (a real quadtree we can stream per-subregion by distance) or overlapping?
 
-struct LoadProgress {
-    current: std::sync::atomic::AtomicU32,
-    total: std::sync::atomic::AtomicU32,
-    t0: std::time::Instant,
-}
-
-impl LoadProgress {
-    fn new(total: u32) -> Self {
-        LoadProgress {
-            current: std::sync::atomic::AtomicU32::new(0),
-            total: std::sync::atomic::AtomicU32::new(total.max(1)),
-            t0: std::time::Instant::now(),
-        }
-    }
-    /// Mark a named stage complete (call AFTER the stage's work) and log it.
-    fn step(&self, name: &str) {
-        use std::sync::atomic::Ordering;
-        let k = self.current.fetch_add(1, Ordering::Relaxed) + 1;
-        let n = self.total.load(Ordering::Relaxed);
-        println!("[load] stage {k}/{n}: {name} (+{:.1}s)", self.t0.elapsed().as_secs_f64());
-    }
-    /// Completed fraction 0..1 (the bar's target; the render loop eases toward it).
-    fn fraction(&self) -> f32 {
-        use std::sync::atomic::Ordering;
-        self.current.load(Ordering::Relaxed) as f32 / self.total.load(Ordering::Relaxed) as f32
-    }
-}
+// `LoadProgress` now comes from the engine (`mercs2_engine::render::LoadProgress`, glob-imported above) —
+// the game's byte-identical copy was removed so the loader shares the engine's staged progress type that
+// `app::run` renders the bar off.
 
 /// Everything `--world` needs loaded before play: plain CPU data (Send), so it can be produced
 /// on a background thread while the window shows the loading spinner.
-struct WorldData {
+pub struct WorldData {
     terrain: LoadedModel,
     player: Option<LoadedModel>,
     /// The shared swim locomotion clip hash resolved for the hero (loaded into `player.clips`), so the
@@ -157,7 +131,10 @@ struct WorldData {
     /// Static watermap (the `watr` singleton) — surface height + wet mask over the Maracaibo XZ grid.
     /// Drives the player's swim-state FSM (wade/swim/submerge) and buoyant float. `None` if the WAD has
     /// no watermap (e.g. the interior-only boot).
-    watermap: Option<mercs2_water::Watermap>,
+    watermap: Option<mercs2_engine::water_sim::Watermap>,
+    /// The HQ-interior hero spawn, derived the base-game way (actor position + `hp_playerA_enter`
+    /// hardpoint) when `spawn_interior`. `None` for the exterior boot (the hero uses a named marker).
+    interior_spawn: Option<[f32; 3]>,
     /// Dynamic `LightObject` point lights harvested from layers_static + the interior state blocks
     /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
     lights: Vec<mercs2_engine::render::GpuLight>,
@@ -170,10 +147,53 @@ struct WorldData {
     /// — the PMC hall god rays descending from the dome). Position/size/tint are data-driven from the
     /// placement + the effect's `TRFM`/`COLR` (see `mercs2_engine::game_world::glow_card_for_effect`).
     glow_cards: Vec<mercs2_engine::particles::GlowCard>,
+    /// Resident audio, read off the load thread: decompressed `wavebank` bodies (the audio engine
+    /// decodes each to PCM) + per-bank `sounddb` bodies (the cue→wave routing catalog). Sourced from the
+    /// always-resident banks (`MrxSoundBootstrap.LoadBanks`); applied to the shared `AudioEngine` when
+    /// the load completes so scripted `Sound.*` cues play real decoded waves. Empty for interior-only.
+    wavebank_bodies: Vec<Vec<u8>>,
+    sounddb_bodies: Vec<Vec<u8>>,
 }
 
-/// Number of `progress.step` calls in `load_world_data` (keep in sync when adding stages).
-const LOAD_STAGES: u32 = 11;
+/// The always-resident gameplay / UI / ambience sound banks (`MrxSoundBootstrap.LoadBanks`) — loaded
+/// as both a `wavebank` (PCM) and a `sounddb` (cue routing) under the same asset name.
+const RESIDENT_SOUND_BANKS: &[&str] = &[
+    "ui_hud", "ui_shell", "wpn_shared", "veh_shared", "veh_support", "ambience", "amb_birds",
+    "amb_shared", "collision_shared", "destruction_shared", "fol_shared", "music",
+];
+
+/// Extract the resident wavebank + sounddb bodies from the WAD (best-effort per bank). A bank that
+/// doesn't resolve is skipped (logged once); a partial set is still useful — every bank that loads adds
+/// audible cues. Runs on the load thread, so it hands back raw bytes the main thread feeds the engine.
+fn load_resident_audio(w: &mut wad::Wad) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    const SOUNDDB_TYPE: u32 = 0xE527_3C14;
+    let mut wavebanks = Vec::new();
+    let mut sounddbs = Vec::new();
+    for name in RESIDENT_SOUND_BANKS {
+        let nh = mercs2_formats::hash::pandemic_hash_m2(name);
+        if let Ok(c) = wad::extract_container_typed(w, nh, mercs2_formats::types::TYPE_HASH_WAVEBANK) {
+            if let Some(body) = mercs2_formats::ucfx::extract_chunk_body(&c, b"data") {
+                wavebanks.push(body);
+            }
+        }
+        // The per-bank sounddb body is a `data` chunk or the raw container (starts with the 0x1D tag).
+        if let Ok(c) = wad::extract_container_typed(w, nh, SOUNDDB_TYPE) {
+            let body = mercs2_formats::ucfx::extract_chunk_body(&c, b"data").unwrap_or(c);
+            sounddbs.push(body);
+        }
+    }
+    (wavebanks, sounddbs)
+}
+
+/// The loader's real phases, in order — the SINGLE SOURCE OF TRUTH for the loading bar's total (no
+/// hand-synced magic number). `load_world_data` steps once per entry, so adding/removing a phase here
+/// (and its matching `progress.step`) keeps the bar honest automatically. These cover the WHOLE load,
+/// including the tail (watermap / resident audio / hero spawn) that used to run AFTER the bar hit 100%.
+const LOAD_PHASES: &[&str] = &[
+    "terrain", "heightmap", "vertices", "player", "clips", "cells", "placements", "interior", "props",
+    "interior props", "lights + fx", "watermap", "resident audio", "hero spawn",
+];
+pub(crate) const LOAD_STAGES: u32 = LOAD_PHASES.len() as u32;
 
 /// Exterior prop bounding: load only props within this radius (m) of the pool spawn, capped at
 /// `EXTERIOR_PROP_CAP` distinct meshes, so `--props` stays light next to the full map.
@@ -262,11 +282,11 @@ fn update_held_weapon(
     player_model: u32,
     hand_bone: usize,
 ) {
-    use mercs2_core::glam::{Mat4, Quat, Vec3};
-    // Grip transform in the hand-bone frame (tunable): a small offset into the palm + an orientation
-    // to align the AK's local axes with the fist. Needs a visual calibration pass to finalize.
+    use mercs2_core::glam::{Mat4, Vec3};
+    // Grip transform in the hand-bone frame (tunable, first-pass). NOTE: the AK itself is a HARDCODED
+    // stand-in (see load_world_data) — the real held weapon should come from the hero's inventory, and in
+    // the PMC safe zone the hero is unarmed. Calibrating this grip is deferred until that's wired.
     let grip = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2) * Mat4::from_translation(Vec3::new(0.05, 0.0, 0.0));
-
     let (ppos, prot, clip, time) = {
         let Ok(t) = world.get::<&Transform>(player_e) else { return };
         let Ok(a) = world.get::<&AnimState>(player_e) else { return };
@@ -288,7 +308,7 @@ fn update_held_weapon(
     }
 }
 
-fn load_world_data(
+pub(crate) fn load_world_data(
     wadpath: &str,
     load_cells: bool,
     load_placements: bool,
@@ -299,8 +319,11 @@ fn load_world_data(
     player_models: &[String],
     progress: &LoadProgress,
 ) -> Result<WorldData, String> {
-    let mut w = wad::open(wadpath)?;
-    let (low, ls) = find_terrain_blocks(&mut w)?;
+    // Cohesive asset layer: base vz.wad + auto-discovered `vz-patch.wad` overlay (the game's patch
+    // mechanism), resolved last-writer-wins. `base_mut()` feeds the base-only loader helpers unchanged;
+    // patch content wins wherever a call routes through the stack's `extract_*` resolvers.
+    let mut assets = mercs2_engine::asset::AssetSource::discover(wadpath, &[])?;
+    let (low, ls) = find_terrain_blocks(assets.base_mut())?;
     let tm = mercs2_formats::terrain::load_terrain(&low, &ls)?;
     let ntris = tm.indices.len() / 3;
     println!(
@@ -325,9 +348,7 @@ fn load_world_data(
             index_start: 0,
             index_count: tm.indices.len() as u32,
             diffuse: Some(0),
-            specular: None,
-            normal: None,
-            group_index: 0,
+            ..Default::default()
         }]
     } else {
         Vec::new()
@@ -364,7 +385,7 @@ fn load_world_data(
         "mattias"
     };
     let character = mercs2_formats::anim_select::AnimSelector::character_name(merc);
-    let idle_clip = resolve_player_idle(&mut w, character)
+    let idle_clip = resolve_player_idle(assets.base_mut(), character)
         .or_else(|| mercs2_formats::anim_select::fallback_idle(character))
         .unwrap_or(0x24F8_C8E6);
     println!("[world] player merc '{merc}' (CharacterName 0x{character:08X}) → idle clip 0x{idle_clip:08X}");
@@ -395,7 +416,7 @@ fn load_world_data(
             let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
             // Swim locomotion clip (shared, data-driven from the ActionTable). 0 when unresolved → the
             // load below simply finds no clip for it, and the controller falls back to walk/run in water.
-            let swim_clip = resolve_player_swim(&mut w).unwrap_or(0);
+            let swim_clip = resolve_player_swim(assets.base_mut()).unwrap_or(0);
             if swim_clip != 0 {
                 println!("[world] player swim clip 0x{swim_clip:08X} (shared Swim-stance anim)");
             }
@@ -403,26 +424,15 @@ fn load_world_data(
             let names = ["idle", "walk", "run", "swim"];
             player_swim_clip = (swim_clip != 0).then_some(swim_clip);
 
-            // Held weapon: locate the hero's right-hand bone (`bone_rhand` = m2("bone_rhand") =
-            // 0xD34F7713, in every merc rig) and load the gun MODEL. Weapon models are named
-            // `global_weapon_<name>` (per the corpus: `wpn_*` blocks are STATS and the registry "Assault
-            // Rifle" hashes are ENTITY TEMPLATES, not meshes) — AK-47 is the default sidearm.
-            const BONE_RHAND: u32 = 0xD34F_7713;
-            if let Some(hb) = s.rig.iter().position(|b| b.name_hash == BONE_RHAND) {
-                let wpn_hash = mercs2_formats::hash::pandemic_hash_m2("global_weapon_ak47");
-                match mercs2_engine::game_world::load_model_by_hash(&mut w, wpn_hash) {
-                    Some((wm, _, _)) => {
-                        println!("[world] held weapon global_weapon_ak47 (0x{wpn_hash:08X}): {} verts, bone_rhand rig idx {hb}", wm.verts.len());
-                        weapon = Some(wm);
-                        weapon_hand_bone = Some(hb);
-                    }
-                    None => println!("[world] held weapon model 0x{wpn_hash:08X} did not load"),
-                }
-            } else {
-                println!("[world] no bone_rhand in hero rig — held weapon skipped");
-            }
+            // Held weapon: NOT loaded here. There is no weapon-to-hand mapping in the exe that hands the
+            // hero a fixed gun — the equipped weapon is the hero's INVENTORY (`Human.Inventory`
+            // GetPrimaryWeapon/SetAllWeapons), populated by the loadout Lua / the save's inventory, and in
+            // the PMC safe zone the hero is UNARMED. So `weapon` stays `None` until that inventory is
+            // wired; the attachment mechanism (`update_held_weapon`) activates only when a real weapon is
+            // equipped. (Was a hardcoded `global_weapon_ak47` stand-in — removed: nothing in the
+            // disassembly asks for it.)
             let mut clips: Vec<ClipAnim> = Vec::new();
-            for (found, (&h, name)) in load_clips_for_rig(&mut w, &hier, &wanted)
+            for (found, (&h, name)) in load_clips_for_rig(assets.base_mut(), &hier, &wanted)
                 .into_iter()
                 .zip(wanted.iter().zip(names))
             {
@@ -449,7 +459,7 @@ fn load_world_data(
 
     // Hi-res c3 streaming-cell geometry near the spawn (opt-in; default off keeps --world stable).
     let cells = if load_cells {
-        load_c3_cells(&mut w, 400.0, 16)
+        load_c3_cells(assets.base_mut(), 400.0, 16)
     } else {
         Vec::new()
     };
@@ -484,7 +494,7 @@ fn load_world_data(
                     skin: mesh::SkinData::identity(),
                     clips: Vec::new(),
                 };
-                let pmc = resolve_pmc_geometry(&mut w, &pl);
+                let pmc = resolve_pmc_geometry(assets.base_mut(), &pl);
                 (Some(markers), pmc, named)
             }
             Err(e) => {
@@ -500,7 +510,7 @@ fn load_world_data(
     // PMC interior (`--interior`): placement-driven interior geometry from state block 667, placed
     // at authored world coords (floor Y≈450.8) so the spawn drops the player inside the room.
     let interior = if spawn_interior {
-        match load_pmc_interior(&mut w, recruits, stockpile) {
+        match load_pmc_interior(assets.base_mut(), recruits, stockpile) {
             Ok(v) => v,
             Err(e) => {
                 println!("[interior] load failed: {e}");
@@ -515,7 +525,7 @@ fn load_world_data(
     // Exterior props (`--props`): ModelName placements in layers_static (block 29) within
     // EXTERIOR_PROP_RADIUS of the pool spawn, cap EXTERIOR_PROP_CAP distinct meshes.
     let props = if load_props {
-        load_model_props(&mut w, &ls, Some(EXTERIOR_SPAWN), EXTERIOR_PROP_RADIUS, EXTERIOR_PROP_CAP)
+        load_model_props(assets.base_mut(), &ls, Some(EXTERIOR_SPAWN), EXTERIOR_PROP_RADIUS, EXTERIOR_PROP_CAP)
     } else {
         Vec::new()
     };
@@ -524,8 +534,8 @@ fn load_world_data(
     // Interior props (`--interior`): ALL ModelName furniture placements in state block 667, at
     // their authored world transforms (the same anchor the shells are centred on).
     let interior_props = if spawn_interior {
-        match wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK) {
-            Ok(dec) => load_model_props(&mut w, &dec, None, 0.0, usize::MAX),
+        match wad::decompress_block_index(assets.base_mut(), PMC_INTERIOR_STATE_BLOCK) {
+            Ok(dec) => load_model_props(assets.base_mut(), &dec, None, 0.0, usize::MAX),
             Err(e) => {
                 println!("[interior props] state block {PMC_INTERIOR_STATE_BLOCK} decompress failed: {e}");
                 Vec::new()
@@ -549,7 +559,7 @@ fn load_world_data(
     let mut particle_fx: Vec<(String, [f32; 3])> = Vec::new();
     let mut glow_cards: Vec<mercs2_engine::particles::GlowCard> = Vec::new();
     if spawn_interior {
-        if let Ok(dec) = wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK) {
+        if let Ok(dec) = wad::decompress_block_index(assets.base_mut(), PMC_INTERIOR_STATE_BLOCK) {
             lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(
                 &mercs2_formats::placement::light_inventory(&dec),
             ));
@@ -566,7 +576,7 @@ fn load_world_data(
                     continue;
                 }
                 if is_light_shaft_fx(name) {
-                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(&mut w, name, p.pos));
+                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos));
                 } else {
                     particle_fx.push((name.to_string(), p.pos));
                 }
@@ -583,23 +593,45 @@ fn load_world_data(
 
     // Static watermap (the `watr` singleton in the resident block) — the surface-height + wet-mask grid
     // the player's swim FSM samples. Best-effort: a WAD without it (interior-only) just yields no swim.
-    let watermap = load_watermap(&mut w);
+    let watermap = load_watermap(assets.base_mut());
     match &watermap {
         Some(_) => println!("[world] watermap loaded (swim enabled)"),
         None => println!("[world] no watermap in WAD (swim disabled)"),
     }
+    progress.step("watermap");
 
-    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, lights, particle_fx, glow_cards })
+    // Resident audio: the always-loaded gameplay/UI/ambience wavebanks + their cue-routing sounddbs.
+    // (Reads + decompresses ~12 wavebanks + 11 sounddbs — real, slow load work, now counted.)
+    let (wavebank_bodies, sounddb_bodies) = load_resident_audio(assets.base_mut());
+    println!(
+        "[world] resident audio: {} wavebanks + {} sounddbs read from WAD",
+        wavebank_bodies.len(),
+        sounddb_bodies.len()
+    );
+    progress.step("resident audio");
+
+    // HQ-interior hero spawn, derived the base-game way (actor position + hp_playerA_enter hardpoint) so
+    // the hero lands ON the interior floor (where the collision is), not at an exterior marker.
+    let interior_spawn = if spawn_interior {
+        let sp = crate::pmc::derive_interior_spawn(assets.base_mut());
+        println!("[world] interior spawn derived (actor + hp_playerA_enter): ({:.1}, {:.1}, {:.1})", sp[0], sp[1], sp[2]);
+        Some(sp)
+    } else {
+        None
+    };
+    progress.step("hero spawn");
+
+    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies })
 }
 
 /// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
 /// resolve its UCFX container, pull the `watr` chunk body, and parse the height-field + wet mask.
-fn load_watermap(w: &mut wad::Wad) -> Option<mercs2_water::Watermap> {
+fn load_watermap(w: &mut wad::Wad) -> Option<mercs2_engine::water_sim::Watermap> {
     let name_hash = mercs2_formats::hash::pandemic_hash_m2("watermap");
     let container =
         wad::extract_container_typed(w, name_hash, mercs2_formats::types::TYPE_HASH_WATERMAP).ok()?;
     let watr = mercs2_formats::ucfx::extract_chunk_body(&container, b"watr")?;
-    match mercs2_water::Watermap::from_watr_bytes(&watr) {
+    match mercs2_engine::water_sim::Watermap::from_watr_bytes(&watr) {
         Ok(wm) => Some(wm),
         Err(e) => {
             println!("[world] watermap parse failed: {e:?}");
@@ -662,11 +694,11 @@ fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::rend
 /// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`] for the particle sim.
 /// Static light-shaft FX are handled separately (see [`is_light_shaft_fx`] / glow cards) and never
 /// reach here. Name-heuristic mapping until the `EffectTemplate → EmitterDesc` decode is pinned.
-/// Sample the render terrain's `HeightMap` onto a regular grid → a `mercs2_physics::Heightmap` the
+/// Sample the render terrain's `HeightMap` onto a regular grid → a `mercs2_engine::physics::Heightmap` the
 /// fleet physics can raycast (K2 S3). The terrain extent is the engine's ±4000 m world square; a
 /// 257×257 grid (~31 m cells) bilinearly interpolates smoothly enough for vehicle ground contact. The
 /// render HeightMap keeps the exact triangles for the player walk; this is the physics-side heightfield.
-fn heightmap_to_physics(hm: &mercs2_engine::worldutil::HeightMap) -> mercs2_physics::Heightmap {
+fn heightmap_to_physics(hm: &mercs2_engine::worldutil::HeightMap) -> mercs2_engine::physics::Heightmap {
     const W: usize = 257;
     const MIN: f32 = -4000.0;
     const MAX: f32 = 4000.0;
@@ -679,7 +711,7 @@ fn heightmap_to_physics(hm: &mercs2_engine::worldutil::HeightMap) -> mercs2_phys
             heights.push(hm.height_at(x, z));
         }
     }
-    mercs2_physics::Heightmap::new(MIN, MIN, cell, W, W, heights)
+    mercs2_engine::physics::Heightmap::new(MIN, MIN, cell, W, W, heights)
 }
 
 fn classify_particle(name: &str) -> Option<mercs2_engine::particles::EmitterDesc> {
@@ -910,1009 +942,6 @@ fn tri_height_at(x: f32, z: f32, vx: [f32; 3], vz: [f32; 3], vy: [f32; 3]) -> Op
 /// Scene path for the terrain: build ONE merged world-space mesh, load it as a
 /// single model, spawn ONE static entity (identity transform / palette), and run
 /// an elevated bird's-eye camera framing the whole grid.
-/// World scene with two cameras: **free-fly** (dev/engine) and **third-person over-the-shoulder**
-/// (gameplay), toggled with Tab. Terrain is a static entity; the optional player avatar is placed
-/// on it and driven by WASD (camera-relative) with the camera trailing behind + above + shouldered.
-/// The animation system idles the avatar (walk clip while moving). Ground height comes from
-/// the heightmap. Start in third-person if `start_tps` and a player exists.
-///
-/// The window + `Scene` open IMMEDIATELY with an animated loading spinner; `load_world_data`
-/// runs on a background thread and the loaded world is wired in when its result arrives.
-///
-/// `menu`: `Some` = open on the SHELL MENU (main menu + save browser, `crate::menu`) and only
-/// start the world load when the player picks a save / new game — the retail boot flow. The
-/// `recruits`/`stockpile` arguments are then the NEW-GAME defaults, overridden by the selected
-/// save. `None` = boot straight into the load (explicit `.profile` CLI arg / dev flows).
-pub async fn run_scene_world_loading(
-    wadpath: String,
-    start_tps: bool,
-    load_cells: bool,
-    load_placements: bool,
-    spawn_interior: bool,
-    load_props: bool,
-    interior_orbit: bool,
-    recruits: crate::pmc::RecruitUnlocks,
-    stockpile: crate::pmc::Stockpile,
-    player_models: Vec<String>,
-    menu: Option<crate::menu::Menu>,
-) {
-    use mercs2_engine::scene::{AssetStore, ModelAnim, Scene};
-    use mercs2_core::frame::{LayerStack, LayerTransition, LAYER_GAME};
-    use mercs2_core::glam::{Mat4, Quat, Vec3};
-    use mercs2_core::{AnimState, Entity, ModelRef, Schedule, SkinPalette, Time, Transform, World};
-    use std::cell::RefCell;
-    use std::collections::HashSet;
-    use std::f32::consts::PI;
-    use std::rc::Rc;
-    use winit::event::{DeviceEvent, ElementState};
-    use winit::window::CursorGrabMode;
-
-    const IDENTITY: [[f32; 4]; 4] = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-    // Locomotion clip hashes + feel tunables now live on `crate::player::PlayerController`
-    // (extracted for unit testing). Only the schedule's animation crossfade duration is used here.
-    const ANIM_BLEND_SEC: f32 = 0.25; // crossfade duration on clip switches
-
-    let event_loop = EventLoop::new().expect("event loop");
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Mercenaries 2 — world (Tab: free / third-person)")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
-            .expect("window"),
-    );
-    // Mouse-look: grab + hide the cursor on the world window (Confined preferred, Locked
-    // fallback). Arrow keys stay as a fallback steer; Esc still exits. While the shell menu is
-    // up the cursor stays free/visible — the grab happens when the world boot starts.
-    let grab_cursor = |window: &winit::window::Window| {
-        if let Err(e) = window
-            .set_cursor_grab(CursorGrabMode::Confined)
-            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))
-        {
-            println!("[world] cursor grab unavailable ({e}); arrow keys still steer");
-        }
-        window.set_cursor_visible(false);
-    };
-    if menu.is_none() {
-        grab_cursor(&window);
-    }
-    let mut scene = Scene::new(window.clone()).await;
-    // Placeholder distance fog + sky (stand-in for PgSky/PgSun/PgCloud). Tunables: warm-haze
-    // color, density 0.00016 (~30% haze at 2.5 km, ~50% at 4.5 km — depth cue at ground level
-    // without white-out from the aerial free cam; 0.00035 washed out the whole map), start 60 m.
-    // Fog + sun differ indoors vs out. INTERIOR: no outdoor sun (windowless — baked lighting + interior
-    // point lights + ambient) and a DARK neutral-gray fog so distance recedes into shadow (a vignette
-    // feel), denser than the exterior since interior depths are metres not kilometres, start ~2 m.
-    // EXTERIOR: directional key light + the thin aerial haze. All tunable.
-    if spawn_interior {
-        scene.set_fog([0.16, 0.17, 0.18], 0.0075, 2.0);
-        scene.set_sun(0.0, 0.30);
-    } else {
-        scene.set_fog([0.55, 0.62, 0.70], 0.00016, 60.0);
-        scene.set_sun(0.9, 0.35);
-    }
-    // Real loading-screen art: the lti_precache1 plate from shell.wad (sibling of vz.wad),
-    // extracted up front (fast) so the loading phase shows it; spinner-only if unavailable.
-    match wad::shell_loading_plate(&wadpath) {
-        Ok(td) => {
-            println!(
-                "[load] shell.wad loading plate lti_precache1 (0x7329D083) {}x{} {:?}",
-                td.width, td.height, td.format
-            );
-            scene.set_loading_art(&td);
-        }
-        Err(e) => println!("[load] shell.wad loading art unavailable ({e}); spinner only"),
-    }
-    let mut world = World::new();
-
-    // Persistent mission-Lua host (keystone K1): resident across the whole loop — NOT the one-shot
-    // interior-boot host that is dropped after harvesting spawns. Each fixed step the loop pumps its
-    // Lua event/timer system (`Event.__pump`) and drains the runtime `Pg.Spawn`s it records into the
-    // ECS via the resolver. Its `AudioEngine` is SHARED with the fleet below, so the Lua `Sound.*` cues
-    // and `GameplaySystems::tick`→`audio.tick` drive one engine (fixes the split-brain audio seam).
-    let script_host = Rc::new(RefCell::new(crate::script_host::GameScriptHost::new("vz")));
-    let script = crate::script_host::resident_script_host(script_host.clone());
-    if script.is_some() {
-        println!("[world] persistent mission-Lua host resident (Event.__pump + runtime Pg.Spawn live)");
-    }
-
-    // Per-frame game update: the fleet gameplay systems (physics/vehicle/combat/audio) + the
-    // template→entity spawn resolver, bundled in crate::runtime::GameRuntime. Idle until entities
-    // carry their components; the audio engine mixes/advances from frame 1. Audio is the host's engine
-    // so scripted cues are audible.
-    let audio = script_host.borrow().audio();
-    let mut runtime = crate::runtime::GameRuntime::new(audio.clone());
-
-    // Background loader: all WAD/terrain/player parsing happens off the render thread; the
-    // result lands on this channel and is wired into the scene/world on arrival. With the shell
-    // menu up, the spawn is DEFERRED until the player picks a save (the retail flow); direct
-    // boots spawn it immediately as before.
-    let (tx, rx) = std::sync::mpsc::channel::<Result<WorldData, String>>();
-    let progress = Arc::new(LoadProgress::new(LOAD_STAGES));
-    let spawn_loader = {
-        let progress = progress.clone();
-        let wadpath = wadpath.clone();
-        move |recruits: crate::pmc::RecruitUnlocks, stockpile: crate::pmc::Stockpile, player_models: Vec<String>| {
-            let tx = tx.clone();
-            let progress = progress.clone();
-            let wadpath = wadpath.clone();
-            std::thread::spawn(move || {
-                let t0 = std::time::Instant::now();
-                let r = load_world_data(&wadpath, load_cells, load_placements, spawn_interior, load_props, recruits, &stockpile, &player_models, &progress);
-                if r.is_ok() {
-                    println!("[load] done in {:.1}s", t0.elapsed().as_secs_f64());
-                }
-                let _ = tx.send(r);
-            });
-        }
-    };
-    let mut menu = menu;
-    if menu.is_none() {
-        spawn_loader(recruits.clone(), stockpile.clone(), player_models.clone());
-    }
-
-    // World-dependent state, wired in when the loader finishes (defaults until then).
-    let mut hmap: Option<HeightMap> = None;
-    // Static watermap (swim FSM source), moved out of WorldData when the load completes.
-    let mut watermap: Option<mercs2_water::Watermap> = None;
-    // Player weapon fire cadence: seconds until the next round can fire (full-auto while held).
-    let mut fire_cooldown: f32 = 0.0;
-    // Held weapon: the entity rendering the gun in the hero's hand, the hero rig's right-hand bone
-    // index (`bone_rhand` 0xD34F7713), and the player's model hash (to sample its pose for the follow).
-    let mut weapon_entity: Option<Entity> = None;
-    let mut weapon_hand_bone: usize = 0;
-    let mut weapon_player_model: u32 = 0;
-    let store = Rc::new(RefCell::new(AssetStore::default()));
-    // Hero spawn is resolved DATA-DRIVEN from a NAMED world marker once the world loads (in the
-    // realize branch below), NOT from a hardcoded coordinate. The base game does exactly this:
-    // `SetSpawnLocations(<name>)` → `CreatePlayerCharacter(location=<name>)`, the name coming from the
-    // active contract / HQ portal and resolved to a position via `Pg.GetGuidByName` (our
-    // `data.named_locations`). The old `PMC_INTERIOR_SPAWN`/exterior consts were `_TeleportHero`
-    // *destinations*, not spawns — see `docs/modernization/vanilla_boot_load_order.md`. Placeholder
-    // until the marker resolves.
-    let mut player = crate::player::PlayerController::new(Vec3::ZERO);
-    // The selected save's active contract + hero (menu boot) — drive the base-game boot flow's
-    // SetSpawnLocations(`<Contract>_Start1`) + CreatePlayerCharacter(`<hero>`). Defaults for the dev boot.
-    let mut active_contract = String::from("PmcCon001");
-    let mut hero_character = String::from("mattias");
-
-    // World-space collision triangle soup, filled from the structural geometry (interior shells +
-    // c3 building cells) when the loader delivers. Consumed by the camera boom (raycast, so it
-    // stops clipping through walls) and the player (capsule push-out, so you can't walk through
-    // buildings). See `crate::collision`.
-    let mut collision_tris: Vec<[Vec3; 3]> = Vec::new();
-
-    // Animation system (idles/walks the avatar), same as the ECS scene except clips are selected
-    // by `AnimState.clip` and root locomotion is stripped (the entity Transform drives movement).
-    let mut time = Time::new(60.0);
-    let mut schedule = Schedule::new();
-    let assets = store.clone();
-    schedule.add_system("animation", move |world: &mut World, time: &Time| {
-        let assets = assets.borrow();
-        for (_e, (state, palette, mref)) in world
-            .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
-            .iter()
-        {
-            if !state.playing {
-                continue;
-            }
-            let Some(ma) = assets.models.get(&mref.model) else { continue };
-            let Some(ca) = ma.clips.get(&state.clip).or_else(|| ma.clips.values().next()) else { continue };
-            let dur = ca.clip.duration.max(1e-3);
-            state.time = (state.time + time.dt * state.speed) % dur;
-            // Crossfade: while the previous clip is still fading out, advance it on its own
-            // duration and blend its pose toward the current clip's (Havok blendPoses math).
-            if state.blend < 1.0 {
-                if let Some(cp) = ma.clips.get(&state.prev_clip) {
-                    let pdur = cp.clip.duration.max(1e-3);
-                    state.prev_time = (state.prev_time + time.dt * state.speed) % pdur;
-                    state.blend = (state.blend + time.dt / ANIM_BLEND_SEC).min(1.0);
-                    let sa = cp.clip.sample_local(state.prev_time);
-                    let sb = ca.clip.sample_local(state.time);
-                    palette.mats = pose::havok_palette_blend_in_place(
-                        &ma.rig,
-                        &sa, &cp.track_to_hier, cp.num_transform_tracks,
-                        &sb, &ca.track_to_hier, ca.num_transform_tracks,
-                        state.blend,
-                    );
-                    continue;
-                }
-                state.blend = 1.0;
-            }
-            let sample = ca.clip.sample_local(state.time);
-            palette.mats = pose::havok_palette_in_place(&ma.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks);
-        }
-    });
-
-    // Camera state. Free-fly starts elevated over the map centre; third-person orbits the player.
-    #[derive(PartialEq)]
-    enum CamMode {
-        Free,
-        ThirdPerson,
-    }
-    let mut mode = CamMode::Free; // switched to third-person when the loaded player spawns
-    let mut free_pos = Vec3::new(0.0, 2500.0, 4500.0);
-    // Spawn camera rotated 180° from the original (was PI, facing -Z) so it opens looking INTO the room.
-    let mut free_yaw: f32 = 0.0;
-    let mut free_pitch: f32 = -0.5;
-    // Third-person camera sits BEHIND the player (who spawns facing +Z), looking over the shoulder.
-    // tp_yaw = 0 => camera dir = +Z, eye on the -Z side of the focus (behind the player). Player facing
-    // and tp_yaw MUST stay consistent — a mismatch puts the eye in front (a face-cam) and swaps left/right.
-    let mut tp_yaw: f32 = 0.0;
-    let mut tp_pitch: f32 = -0.12;
-    let mut held: HashSet<KeyCode> = HashSet::new();
-    let mut mouse_btns: HashSet<winit::event::MouseButton> = HashSet::new();
-    // Input bindings from the retail Mercs2.ini (falls back to retail defaults if absent).
-    let bindings = mercs2_engine::input::find_mercs2_ini()
-        .map(|p| mercs2_engine::input::Bindings::load(&p))
-        .unwrap_or_default();
-    let mut gamepad = mercs2_engine::input::Gamepad::new();
-    use mercs2_engine::input::Action;
-    // Keystone C — the master frame spine (docs/reverse_engineer/scheduler_tick_code_map.md). The
-    // shell-menu / loading / in-game phases are the engine's lower→upper application layers; the
-    // LayerStack climbs frontend → loading → GAME (`FUN_004c15e0`, 0→4), replacing the old
-    // `menu.is_some()` + `loading` bool phase gates. A direct boot (no shell menu) starts already on
-    // the loading layer; the shell-menu boot starts on the frontend layer and climbs on selection.
-    const LAYER_MENU: usize = LAYER_GAME - 2;
-    const LAYER_LOADING: usize = LAYER_GAME - 1;
-    let mut layers = if menu.is_some() {
-        LayerStack::at(LAYER_MENU)
-    } else {
-        LayerStack::at(LAYER_LOADING)
-    };
-    let mut load_start = std::time::Instant::now();
-    // Shell-menu bookkeeping: a selection made in a keyboard/gamepad handler is parked here and
-    // executed at the top of the next redraw (ONE boot site). Gamepad nav is edge-detected
-    // against the previous frame's held-state.
-    let mut pending_boot: Option<Option<std::path::PathBuf>> = None;
-    let mut menu_gp_prev = [false; 4]; // up, down, select, back
-    let menu_open = std::time::Instant::now();
-    // Ignore menu activations for a short arm delay after opening: the keystroke that launched
-    // the exe from a terminal (locally or Shadow-streamed) can land on the freshly-focused window
-    // as a REAL keydown (winit's `is_synthetic` does not flag it) and would instantly select
-    // "Continue". Observed on the Shadow PC; retail shells latch input the same way.
-    const MENU_ARM_DELAY: f32 = 0.4;
-    // Bar fill shown on the loading screen: eased toward the loader's staged fraction each
-    // frame so stage completions animate instead of jumping.
-    let mut bar_shown = 0.0f32;
-    let mut bar_last_t = 0.0f32;
-    let mut last = std::time::Instant::now();
-    let mut mouse_acc: (f32, f32) = (0.0, 0.0); // cursor-path px accumulated between frames
-    let mut mouse_raw_acc: (f32, f32) = (0.0, 0.0); // raw-delta px accumulated between frames
-    let mut mouse_dbg_frames: u32 = 0;
-    // Mouse source auto-detect. Normal 2026 input = raw deltas (DeviceEvent::MouseMotion).
-    // Shadow cloud PCs stream ABSOLUTE 0..65535 coords through raw input, making those "deltas"
-    // huge/one-signed garbage — detect that and latch to the CursorMoved+recentre fallback.
-    // 0 = undecided (use cursor path), 1 = relative latched (raw), 2 = absolute latched (cursor).
-    let mut mouse_src: u8 = 0;
-    let mut mouse_sane_events: u32 = 0;
-
-    event_loop
-        .run(move |event, elwt| match event {
-            Event::WindowEvent { window_id, event } if window_id == scene.window.id() => match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::KeyboardInput {
-                    event: KeyEvent { physical_key: PhysicalKey::Code(code), state, .. },
-                    is_synthetic,
-                    ..
-                } => {
-                    // Shell menu owns the keyboard while it is up (retail shell state machine).
-                    // Synthetic presses (keys already down when the window gains focus — e.g. the
-                    // terminal Enter that launched the exe) must not activate a menu row.
-                    if let Some(m) = menu.as_mut() {
-                        if state == ElementState::Pressed
-                            && !is_synthetic
-                            && menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY
-                        {
-                            let nav = match code {
-                                KeyCode::ArrowUp | KeyCode::KeyW => Some(crate::menu::Nav::Up),
-                                KeyCode::ArrowDown | KeyCode::KeyS => Some(crate::menu::Nav::Down),
-                                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
-                                    Some(crate::menu::Nav::Select)
-                                }
-                                KeyCode::Escape | KeyCode::Backspace => Some(crate::menu::Nav::Back),
-                                _ => None,
-                            };
-                            if let Some(nav) = nav {
-                                match m.nav(nav) {
-                                    crate::menu::MenuAction::Boot(sel) => pending_boot = Some(sel),
-                                    crate::menu::MenuAction::Quit => elwt.exit(),
-                                    crate::menu::MenuAction::None => {}
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    match (code, state) {
-                    (KeyCode::Escape, _) => elwt.exit(),
-                    (KeyCode::Tab, ElementState::Pressed) => {
-                        mode = if mode == CamMode::Free { CamMode::ThirdPerson } else { CamMode::Free };
-                    }
-                    (c, ElementState::Pressed) => {
-                        held.insert(c);
-                    }
-                    (c, ElementState::Released) => {
-                        held.remove(&c);
-                    }
-                    }
-                }
-                WindowEvent::MouseInput { button, state, .. } => {
-                    if state == ElementState::Pressed {
-                        mouse_btns.insert(button);
-                    } else {
-                        mouse_btns.remove(&button);
-                    }
-                }
-                WindowEvent::Resized(size) => scene.resize(size),
-                // Cursor-position look: delta from window centre, then recentre. Works on
-                // absolute-input setups (streamed/cloud) where raw deltas are meaningless.
-                WindowEvent::CursorMoved { position, .. } => {
-                    // Shell menu: the cursor is free/visible — no look-accumulate, no recentre.
-                    if menu.is_some() {
-                        return;
-                    }
-                    let (cx, cy) = (scene.size.width as f64 / 2.0, scene.size.height as f64 / 2.0);
-                    mouse_acc.0 += (position.x - cx) as f32;
-                    mouse_acc.1 += (position.y - cy) as f32;
-                    let _ = scene
-                        .window
-                        .set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
-                }
-                WindowEvent::RedrawRequested => {
-                    // ===== RunFrame (FUN_00630ef0) — faithful 9-stage per-frame order =====
-                    // (docs/reverse_engineer/scheduler_tick_code_map.md §2). Platform-glue stages fold
-                    // into wgpu/winit: (2) device re-init = render()'s surface-lost recovery; (8)/(9)
-                    // vsync/present = wgpu's present mode + winit's AboutToWait redraw request.
-
-                    // (5a) MASTER UPDATE — mode logic for the active application layer. Shell menu
-                    //      (frontend) → loading → GAME are the engine's climbing application layers.
-                    if layers.active() == LAYER_MENU {
-                        // Execute a parked selection: resolve the save → boot config, start the world
-                        // load, and raise the target to the loading layer (the climb below grabs the
-                        // cursor, resets the loading clock, and drops the menu). Otherwise draw the
-                        // menu and stay on the frontend layer for this frame.
-                        if let Some(sel) = pending_boot.take() {
-                            let (r, sp, models, label, contract, character) = boot_config_from(sel.as_deref());
-                            active_contract = contract;
-                            hero_character = character;
-                            println!("[shell] boot: {label}");
-                            spawn_loader(r, sp, models);
-                            layers.set_target(LAYER_LOADING);
-                        } else {
-                            let m = menu.as_mut().unwrap();
-                            // Gamepad nav, edge-detected: dpad/stick up/down, A/Start = select,
-                            // B = back (ini [Controller] Up/Down/Jump/Start/Crouch bindings).
-                            gamepad.update();
-                            let inp = mercs2_engine::input::Input {
-                                bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad,
-                            };
-                            let (_, my) = inp.move_vec();
-                            let now = [
-                                inp.held(Action::SelectUp) || my > 0.5,
-                                inp.held(Action::SelectDown) || my < -0.5,
-                                inp.held(Action::Jump) || inp.held(Action::Start),
-                                inp.held(Action::Crouch),
-                            ];
-                            let navs = [
-                                crate::menu::Nav::Up,
-                                crate::menu::Nav::Down,
-                                crate::menu::Nav::Select,
-                                crate::menu::Nav::Back,
-                            ];
-                            let armed = menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY;
-                            for i in 0..4 {
-                                if armed && now[i] && !menu_gp_prev[i] {
-                                    match m.nav(navs[i]) {
-                                        crate::menu::MenuAction::Boot(sel) => pending_boot = Some(sel),
-                                        crate::menu::MenuAction::Quit => elwt.exit(),
-                                        crate::menu::MenuAction::None => {}
-                                    }
-                                }
-                            }
-                            menu_gp_prev = now;
-                            let t = menu_open.elapsed().as_secs_f32();
-                            m.draw(&mut scene, t);
-                            match scene.render_menu(t) {
-                                Ok(()) => {}
-                                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                                Err(e) => println!("surface error: {e:?}"),
-                            }
-                            return;
-                        }
-                    }
-                    // (5a cont.) Loading layer: poll the background loader; when it delivers, wire the
-                    // world in (GPU uploads + entity spawns) and raise the target to the GAME layer.
-                    // The Empty case falls through to the shared frontend render below.
-                    if layers.active() == LAYER_LOADING {
-                        match rx.try_recv() {
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                println!("[world] loader thread died without a result");
-                                elwt.exit();
-                                return;
-                            }
-                            Ok(Err(e)) => {
-                                println!("[world] load failed: {e}");
-                                elwt.exit();
-                                return;
-                            }
-                            Ok(Ok(mut data)) => {
-                                // Hero spawn (data-driven, base-game path): resolve a NAMED world marker
-                                // to a position — the `SetSpawnLocations`/`CreatePlayerCharacter(location=…)`
-                                // mechanism (Pg.GetGuidByName→pos via `data.named_locations`), not a
-                                // hardcoded coordinate. Candidate names, in vanilla priority: the HQ portal
-                                // entry `Pmc_Entry1` (mrxhq.tPortal.sStart1), then common contract starts.
-                                // The active-contract `<Contract>_Start1` is threaded next (pre-HQ saves).
-                                // Vanilla priority: the active contract's start (`<Contract>_Start1`,
-                                // the SetSpawnLocations name for a pre-HQ save), then the HQ portal entry.
-                                let contract_marker = format!("{}_start1", active_contract.to_ascii_lowercase());
-                                let candidates = [contract_marker.as_str(), "pmc_entry1", "pmc_start1"];
-                                let resolved = candidates
-                                    .iter()
-                                    .filter(|&&n| !n.is_empty() && n != "_start1")
-                                    .find_map(|&n| data.named_locations.get(n).map(|&p| (n, p)));
-                                match resolved {
-                                    Some((name, p)) => {
-                                        player.pos = Vec3::new(p[0], p[1], p[2]);
-                                        println!("[world] hero spawn: marker '{name}' -> ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
-                                    }
-                                    None => {
-                                        // Surface what IS in the data so we can find where the spawn markers live.
-                                        let spawnish: Vec<&String> = data
-                                            .named_locations
-                                            .keys()
-                                            .filter(|k| {
-                                                k.contains("start") || k.contains("entry") || k.contains("spawn") || k.starts_with("pmc")
-                                            })
-                                            .take(30)
-                                            .collect();
-                                        println!(
-                                            "[world] SPAWN MARKER unresolved ({} named markers total; none of {candidates:?}). \
-                                             spawn-ish markers present: {spawnish:?} — hero at origin (see vanilla_boot_load_order.md)",
-                                            data.named_locations.len()
-                                        );
-                                    }
-                                }
-                                // Run the REAL vanilla boot Lua flow (MrxBootstrap.Start + spawn) through
-                                // the resident host — the [lua] trace to diff against the pmc_bb log, and
-                                // the ACTUAL spawn: CreatePlayerCharacter → Pg.GetGuidByName →
-                                // Object.GetPosition → Pg.Spawn(hero) resolves the marker to coords via the
-                                // host's named_locations. Its result supersedes the engine-side shortcut.
-                                if let Some(sh) = &script {
-                                    script_host
-                                        .borrow_mut()
-                                        .set_boot_context(data.named_locations.clone(), hero_character.clone());
-                                    crate::script_host::run_boot_flow(sh, &script_host, &active_contract, &hero_character);
-                                    if let Some(p) = script_host.borrow_mut().take_hero_spawn() {
-                                        player.pos = Vec3::new(p[0], p[1], p[2]);
-                                        println!("[world] hero spawn via boot Lua flow: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
-                                    }
-                                }
-                                // Terrain: one static entity at identity (its verts are already world-space).
-                                // Skipped in --interior mode: the interior is off-map at Y~450 sitting above
-                                // the SE-corner terrain peak (~Y400), which otherwise occludes the whole room.
-                                let terrain = data.terrain;
-                                if !std::env::args().any(|a| a == "--interior") {
-                                    scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
-                                    world.spawn((
-                                        Transform::IDENTITY,
-                                        ModelRef { model: terrain.hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: vec![IDENTITY] },
-                                    ));
-                                }
-
-                                // Placement-marker DEBUG glyphs (the pyramids): one merged static entity
-                                // of a pyramid per placement. This is a diagnostic overlay — only render
-                                // it behind `--markers`, never in normal play (the named-marker spawn
-                                // resolution uses `data.named_locations`, built separately, so gating this
-                                // does not affect the hero spawn).
-                                if let (Some(pm), true) =
-                                    (data.placements, std::env::args().any(|a| a == "--markers"))
-                                {
-                                    scene.load_model(pm.hash, &pm.verts, &pm.indices, &pm.draws, &pm.textures, &pm.skin);
-                                    world.spawn((
-                                        Transform::IDENTITY,
-                                        ModelRef { model: pm.hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: vec![IDENTITY] },
-                                    ));
-                                }
-
-                                // PMC-subset real geometry (`--placements`): one static entity per
-                                // resolved model at its placement Transform (pos + yaw from quat).
-                                for (m, pos, yaw) in data.pmc_models {
-                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                    let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
-                                    t.rotation = Quat::from_rotation_y(yaw);
-                                    world.spawn((
-                                        t,
-                                        ModelRef { model: m.hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: vec![IDENTITY] },
-                                    ));
-                                }
-
-                                // Hi-res c3 cell geometry (`--cells`): static entities at their grid-cell origins.
-                                // These building cells are structural — collect their world-space triangles for
-                                // collision (walls the player and camera must not pass through).
-                                for (m, off) in data.cells {
-                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                    let tr = Vec3::new(off[0], off[1], off[2]);
-                                    for idx in m.indices.chunks_exact(3) {
-                                        collision_tris.push([
-                                            Vec3::from(m.verts[idx[0] as usize].pos) + tr,
-                                            Vec3::from(m.verts[idx[1] as usize].pos) + tr,
-                                            Vec3::from(m.verts[idx[2] as usize].pos) + tr,
-                                        ]);
-                                    }
-                                    world.spawn((
-                                        Transform::from_translation(tr),
-                                        ModelRef { model: m.hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: vec![IDENTITY] },
-                                    ));
-                                }
-
-                                // PMC interior geometry (`--interior`): one static entity per keyed
-                                // interior entity at its AUTHORED world Transform (pos + full quat,
-                                // native game space, no offset — floor Y≈450). A model may be uploaded
-                                // once and referenced by several instances; `load_model` is idempotent
-                                // on the hash key so repeats are cheap.
-                                for (m, pos, quat) in data.interior {
-                                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                    let tr = Vec3::new(pos[0], pos[1], pos[2]);
-                                    let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
-                                    let mut t = Transform::from_translation(tr);
-                                    t.rotation = q;
-                                    // Interior shells (hall/suites/garage/bays) are the walls — collect their
-                                    // world-space triangles for collision. Rigged furniture rides the props
-                                    // path (interior_props) and is intentionally left non-solid.
-                                    for idx in m.indices.chunks_exact(3) {
-                                        let w = |i: usize| q * Vec3::from(m.verts[i].pos) + tr;
-                                        collision_tris.push([w(idx[0] as usize), w(idx[1] as usize), w(idx[2] as usize)]);
-                                    }
-                                    // Identity palette sized to the mesh's bone count — a rigged prop's
-                                    // verts index several bones; a 1-bone palette collapses the rest to origin.
-                                    let nbones = m.skin.bones.len().max(1);
-                                    world.spawn((
-                                        t,
-                                        ModelRef { model: m.hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: vec![IDENTITY; nbones] },
-                                    ));
-                                }
-
-                                // ModelName props (`--props` exterior, `--interior` furniture): each
-                                // distinct mesh is uploaded ONCE, then one static entity is spawned per
-                                // placement instance (Transform pos + FULL quat, native game space).
-                                let mut prop_meshes = 0usize;
-                                let mut prop_instances = 0usize;
-                                for (hash, m, instances) in data.props.into_iter().chain(data.interior_props) {
-                                    scene.load_model(hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                                    prop_meshes += 1;
-                                    let nbones = m.skin.bones.len().max(1);
-                                    for (pos, quat) in instances {
-                                        let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
-                                        t.rotation = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
-                                        world.spawn((
-                                            t,
-                                            ModelRef { model: hash },
-                                            AnimState::default(),
-                                            SkinPalette { mats: vec![IDENTITY; nbones] },
-                                        ));
-                                        prop_instances += 1;
-                                    }
-                                }
-                                if prop_meshes > 0 {
-                                    println!("[world] props spawned: {prop_meshes} distinct meshes, {prop_instances} instances");
-                                }
-
-                                // Player avatar (optional): near map centre, feet snapped to the terrain heightmap.
-                                if let Some(p) = data.player {
-                                    player.has_run = p.clips.iter().any(|c| c.name_hash == crate::player::CLIP_RUN);
-                                    // Swim clip (shared, resolved at load) — the controller switches to it in water.
-                                    player.swim_clip = data.player_swim_clip.unwrap_or(0);
-                                    // The idle clip = the loaded player clip that isn't walk/run/swim
-                                    // (idle was resolved per-merc in load_world_data).
-                                    player.idle = p.clips.iter().map(|c| c.name_hash)
-                                        .find(|h| *h != crate::player::CLIP_WALK
-                                            && *h != crate::player::CLIP_RUN
-                                            && Some(*h) != data.player_swim_clip)
-                                        .unwrap_or(crate::player::CLIP_IDLE);
-                                    for c in &p.clips {
-                                        let d = c.clip.duration.max(1e-3);
-                                        // Authentic ground speed = the clip's baked root stride / duration.
-                                        let sp = pose::clip_root_speed(
-                                            &p.skin.rig,
-                                            &c.clip.sample_local(0.0),
-                                            &c.clip.sample_local(d * 0.999),
-                                            &c.track_to_hier,
-                                            c.num_transform_tracks,
-                                            d * 0.999,
-                                        );
-                                        if c.name_hash == crate::player::CLIP_WALK {
-                                            player.dur_walk = d;
-                                            if sp > 0.1 { player.walk_speed = sp; }
-                                            println!("[world] walk clip stride -> {sp:.2} m/s (fallback {})", crate::player::WALK_SPEED);
-                                        } else if c.name_hash == crate::player::CLIP_RUN {
-                                            player.dur_run = d;
-                                            if sp > 0.1 { player.run_speed = sp; }
-                                            println!("[world] run clip stride -> {sp:.2} m/s (fallback {})", crate::player::RUN_SPEED);
-                                        }
-                                    }
-                                    scene.load_model(p.hash, &p.verts, &p.indices, &p.draws, &p.textures, &p.skin);
-                                    let rig = p.skin.rig.clone();
-                                    let bind = if rig.is_empty() {
-                                        vec![IDENTITY]
-                                    } else {
-                                        let m = pose::model_poses(&rig, &pose::bind_qs(&rig));
-                                        pose::skin_palette(&rig, &m)
-                                    };
-                                    // Feet offset: origin-to-lowest-vertex, so the avatar stands ON the ground sample.
-                                    let min_y = p.verts.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min);
-                                    player.foot = if min_y.is_finite() { -min_y } else { 0.0 };
-                                    println!("[world] player foot offset = {:.3} (model min Y {min_y:.3})", player.foot);
-                                    // Spawn uses the boot-log authored Y verbatim (no snap) for BOTH
-                                    // modes; per-frame height-follow (exterior only) takes over on move.
-                                    let playing = !p.clips.is_empty();
-                                    store.borrow_mut().models.insert(p.hash, ModelAnim {
-                                        rig,
-                                        clips: p.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
-                                    });
-                                    let anim = if playing {
-                                        AnimState::playing(player.idle)
-                                    } else {
-                                        AnimState::default()
-                                    };
-                                    // Spawn facing +Z (into the open hall / toward the exit archway, matching the
-                                    // retail spawn), with the third-person camera behind on the -Z side (tp_yaw = 0)
-                                    // so the over-the-shoulder view opens behind the player's back.
-                                    let mut t = Transform::from_translation(player.pos);
-                                    t.rotation = Quat::from_rotation_y(0.0);
-                                    player.entity = Some(world.spawn((
-                                        t,
-                                        ModelRef { model: p.hash },
-                                        anim,
-                                        SkinPalette { mats: bind },
-                                    )));
-
-                                    // Held weapon: attach the gun (loaded at world-load) to the hero's
-                                    // right-hand bone. It follows the hand each frame (update_held_weapon).
-                                    if let (Some(mut wm), Some(hb)) = (data.weapon, data.weapon_hand_bone) {
-                                        // Native scale/placement (identity fit) so the mesh sits in the hand
-                                        // at true size, like the hero (whose fit is also identity).
-                                        wm.skin.center = [0.0, 0.0, 0.0];
-                                        wm.skin.scale = 1.0;
-                                        let ident = vec![IDENTITY; wm.skin.rig.len().max(1)];
-                                        scene.load_model(wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
-                                        weapon_entity = Some(world.spawn((
-                                            Transform::from_translation(player.pos),
-                                            ModelRef { model: wm.hash },
-                                            SkinPalette { mats: ident },
-                                        )));
-                                        weapon_hand_bone = hb;
-                                        weapon_player_model = p.hash;
-                                        println!("[world] held weapon 0x{:08X} on bone_rhand (rig idx {hb})", wm.hash);
-                                    }
-                                }
-                                hmap = Some(data.hmap);
-                                watermap = data.watermap;
-                                // Register the translucent water surface (render-graph WaterSurface slot):
-                                // one blended quad per wet watermap cell, fog-matched to the scene. Skipped
-                                // when there is no watermap (interior boot) or no wet cells.
-                                if let Some(wm) = &watermap {
-                                    let (wpos, widx) = wm.surface_mesh();
-                                    let node = mercs2_engine::water::WaterNode::new(
-                                        scene.device(),
-                                        scene.surface_format(),
-                                        &wpos,
-                                        &widx,
-                                        mercs2_engine::water::WaterStyle::default(),
-                                    );
-                                    if let Some(node) = node {
-                                        println!("[world] water surface: {} quads", widx.len() / 6);
-                                        scene.add_render_node(Box::new(node));
-                                    }
-                                }
-                                println!("[world] collision: {} world-space triangles (buildings + interior shells)", collision_tris.len());
-                                // Hand the streamed collision soup to the fleet physics world so the
-                                // vehicle/weapon systems can raycast against it via PhysicsQuery.
-                                runtime.set_collision(collision_tris.clone());
-                                // K2 S3: hand the terrain heightfield to the fleet physics too, so ground
-                                // raycasts resolve over open terrain (not just where a building cell
-                                // supplies triangles) — vehicles no longer fall through open ground.
-                                if let Some(hm) = hmap.as_ref() {
-                                    let phm = heightmap_to_physics(hm);
-                                    println!("[world] terrain heightmap -> fleet physics ({}x{} grid)", phm.width, phm.depth);
-                                    runtime.set_heightmap(Some(phm));
-                                }
-                                // Feed the harvested dynamic point lights to the renderer (nearest set
-                                // uploaded per frame). Without this the villa/world has no local lighting.
-                                scene.set_lights(std::mem::take(&mut data.lights));
-                                // Environmental FX (real, always-on, data-driven — no flag):
-                                //  * particle emitters (fire/smoke/steam) — classified by name → desc;
-                                //  * static light-shaft glows (god rays) — additive glow cards, already
-                                //    resolved from their effect template at load. Both are faithful; the
-                                //    god rays are the era-appropriate additive card, not a skipped gap.
-                                {
-                                    let cards = std::mem::take(&mut data.glow_cards);
-                                    let glows = cards.len();
-                                    scene.set_glow_cards(&cards);
-                                    let (mut started, mut skipped) = (0usize, 0usize);
-                                    for (name, pos) in std::mem::take(&mut data.particle_fx) {
-                                        match classify_particle(&name) {
-                                            Some(desc) => { scene.fx_start_desc(desc, pos); started += 1; }
-                                            None => skipped += 1,
-                                        }
-                                    }
-                                    if started + skipped + glows > 0 {
-                                        println!("[world] particle FX: {started} emitters + {glows} light-shaft glows started, {skipped} unsupported skipped");
-                                    }
-                                }
-                                if start_tps && player.entity.is_some() {
-                                    mode = CamMode::ThirdPerson;
-                                }
-                                layers.set_target(LAYER_GAME);
-                            }
-                        }
-                    }
-
-                    // (5b) climb the layer stack toward its target, firing enter transitions. The one
-                    //      transition with side effects is entering the loading layer FROM the shell
-                    //      menu (grab the cursor, reset the loading clock, drop the frontend menu).
-                    while !layers.settled() {
-                        if let Some(LayerTransition::Ascending(LAYER_LOADING)) = layers.advance() {
-                            grab_cursor(&scene.window);
-                            load_start = std::time::Instant::now();
-                            menu = None;
-                        }
-                    }
-
-                    // (6-frontend) Not in-game yet — the menu already returned above, so this is the
-                    //      loading layer: ease + render the loading plate/spinner, then stop this frame.
-                    if layers.active() != LAYER_GAME {
-                        let t = load_start.elapsed().as_secs_f32();
-                        let dt = (t - bar_last_t).max(0.0);
-                        bar_last_t = t;
-                        // Exponential ease toward the staged target (~6/s rate).
-                        bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
-                        match scene.render_loading(t, bar_shown) {
-                            Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                            Err(e) => println!("surface error: {e:?}"),
-                        }
-                        return;
-                    }
-
-                    // ===== (5c) GAME layer (4) — camera + player sim + fixed-tick Schedule + render.
-                    // Camera + player controller are variable-rate; the `animation` system runs at the
-                    // fixed sim tick inside `schedule.run_fixed` (the shared mercs2_core `Time` clock).
-                    let now = std::time::Instant::now();
-                    let dt = (now - last).as_secs_f32().min(0.1);
-                    last = now;
-                    let look = 1.6 * dt;
-
-                    // Drain the frame's mouse input from the active source onto the ACTIVE camera.
-                    // Per-frame total is clamped so event storms can't slam the pitch to a rail.
-                    // Sensitivity + InvertY come from Mercs2.ini [Mouse].
-                    let sens = bindings.mouse_rad_per_px; // rad per px (from [Mouse] Sensitivity)
-                    let inv_y = if bindings.invert_y { -1.0 } else { 1.0 };
-                    let src = if mouse_src == 1 { mouse_raw_acc } else { mouse_acc };
-                    let mdx = src.0.clamp(-80.0, 80.0) * sens;
-                    let mdy = src.1.clamp(-80.0, 80.0) * sens * inv_y;
-                    if src != (0.0, 0.0) && mouse_dbg_frames < 20 {
-                        println!("[mouse] src={} in=({:+.1},{:+.1}) applied=({:+.4},{:+.4})", mouse_src, src.0, src.1, mdx, mdy);
-                        mouse_dbg_frames += 1;
-                    }
-                    mouse_acc = (0.0, 0.0);
-                    mouse_raw_acc = (0.0, 0.0);
-                    match mode {
-                        CamMode::Free => {
-                            free_yaw += mdx;
-                            free_pitch = (free_pitch - mdy).clamp(-1.5, 1.5);
-                        }
-                        CamMode::ThirdPerson => {
-                            tp_yaw += mdx;
-                            tp_pitch = (tp_pitch - mdy).clamp(-1.2, 0.6);
-                        }
-                    }
-
-                    gamepad.update();
-                    let inp = mercs2_engine::input::Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                    // Gamepad right-stick look (analog) this frame, shared by both cameras.
-                    let (gp_yaw, gp_pitch) = inp.look_delta(dt);
-                    let mut view = match mode {
-                        CamMode::Free => {
-                            // Keyboard look: ini LookUp/Down/Left/Right (I/K/J/L) + arrows (kb-only, so the
-                            // right stick isn't double-counted); plus the analog right-stick delta.
-                            if held.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { free_pitch += look; }
-                            if held.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { free_pitch -= look; }
-                            if held.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { free_yaw -= look; }
-                            if held.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { free_yaw += look; }
-                            free_yaw += gp_yaw;
-                            free_pitch = (free_pitch + gp_pitch).clamp(-1.5, 1.5);
-                            let fwd = Vec3::new(free_pitch.cos() * free_yaw.sin(), free_pitch.sin(), free_pitch.cos() * free_yaw.cos()).normalize();
-                            // Strafe right is negated (fwd×Y, not Y×fwd) to match the clip-space X flip
-                            // (handedness fix in scene.rs) — otherwise A/D are swapped on the correct image.
-                            let right = fwd.cross(Vec3::Y).normalize();
-                            // Analog planar move (KB + left stick), then free-fly vertical on Jump/Crouch.
-                            let (mx, my) = inp.move_vec();
-                            let mut mv = fwd * my + right * mx;
-                            if inp.held(Action::Jump) { mv += Vec3::Y; }     // fly up (ini Jump)
-                            if inp.held(Action::Crouch) { mv -= Vec3::Y; }   // fly down (ini Crouch)
-                            let sp = if inp.held(Action::Sprint) { 3200.0 } else { 800.0 };
-                            if mv.length_squared() > 1e-6 { free_pos += mv.clamp_length_max(1.0) * sp * dt; }
-                            Mat4::look_to_lh(free_pos, fwd, Vec3::Y)
-                        }
-                        CamMode::ThirdPerson => {
-                            if held.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { tp_pitch += look; }
-                            if held.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { tp_pitch -= look; }
-                            if held.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { tp_yaw -= look; }
-                            if held.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { tp_yaw += look; }
-                            tp_yaw += gp_yaw;
-                            tp_pitch = (tp_pitch + gp_pitch).clamp(-1.2, 0.6);
-                            let fwd_flat = Vec3::new(tp_yaw.sin(), 0.0, tp_yaw.cos()).normalize();
-                            // Negated (fwd×Y) to match the clip-space X flip (handedness fix), so D=right.
-                            let right_flat = fwd_flat.cross(Vec3::Y).normalize();
-                            // Analog planar move (KB WASD + left stick).
-                            let (mx, my) = inp.move_vec();
-                            let mv = fwd_flat * my + right_flat * mx;
-                            // Player locomotion (eased speed + collide-and-slide + terrain ground-snap +
-                            // walk/run/idle clip FSM) is the extracted, unit-tested PlayerController.
-                            player.update(
-                                &mut world,
-                                mv,
-                                inp.held(Action::Sprint),
-                                inp.held(Action::Jump),
-                                &collision_tris,
-                                hmap.as_ref(),
-                                watermap.as_ref(),
-                                spawn_interior,
-                                dt,
-                            );
-                            // Player weapon fire: PrimaryAttack raycasts from the hero's eye along the aim
-                            // (camera yaw+pitch); a hit on the world soup spawns a bullet-hole decal +
-                            // particle burst via the same impact channel the ECS combat system feeds.
-                            // Full-auto cadence gated by fire_cooldown; no ground swim-firing (hands busy).
-                            fire_cooldown = (fire_cooldown - dt).max(0.0);
-                            let can_fire = !player.swim.is_swimming();
-                            if can_fire && inp.held(Action::PrimaryAttack) && fire_cooldown <= 0.0 {
-                                fire_cooldown = PLAYER_FIRE_INTERVAL;
-                                let aim = Vec3::new(
-                                    tp_pitch.cos() * tp_yaw.sin(),
-                                    tp_pitch.sin(),
-                                    tp_pitch.cos() * tp_yaw.cos(),
-                                )
-                                .normalize();
-                                let eye = player.pos + Vec3::Y * PLAYER_EYE_HEIGHT;
-                                if let Some(t) =
-                                    crate::collision::raycast(&collision_tris, eye, aim, PLAYER_WEAPON_RANGE)
-                                {
-                                    let point = eye + aim * t;
-                                    // Surface normal unknown from a bare distance raycast → from_hit derives
-                                    // a facing from the shot heading. World geometry ⇒ a bullet-hole decal.
-                                    runtime.push_impact(mercs2_combat::Impact::from_hit(
-                                        point, Vec3::ZERO, aim, false,
-                                    ));
-                                }
-                            }
-                            // Over-the-shoulder framing + boom-collision — the extracted, unit-tested
-                            // crate::camera::third_person_view (pure geometry of player pos + look angles).
-                            crate::camera::third_person_view(player.pos, tp_yaw, tp_pitch, &collision_tris)
-                        }
-                    };
-
-                    // Interior debug orbit (`--interior-orbit`): override the camera each frame with an
-                    // elevated auto-orbit CENTERED on the interior anchor (3794,470,-3911), radius ~120 m,
-                    // height ~+70, so the whole assembled room + player are framed from outside. The TPS
-                    // sim above still runs (player movement/anim); only the view matrix is replaced.
-                    if interior_orbit {
-                        const ANCHOR: Vec3 = Vec3::new(3779.8, 454.7, -3879.6);
-                        const RADIUS: f32 = 38.0;
-                        const HEIGHT: f32 = 52.0;
-                        let ang = load_start.elapsed().as_secs_f32() * 0.25; // ~24 s per revolution
-                        let eye = ANCHOR + Vec3::new(RADIUS * ang.sin(), HEIGHT, RADIUS * ang.cos());
-                        view = Mat4::look_at_lh(eye, ANCHOR, Vec3::Y);
-                    }
-
-                    let steps = schedule.run_fixed(&mut world, &mut time, dt);
-                    // Held weapon follows the hero's right-hand bone (after the anim schedule posed the
-                    // hero this frame). Skipped until the weapon + hand bone resolved at load.
-                    if let (Some(we), Some(pe)) = (weapon_entity, player.entity) {
-                        update_held_weapon(&mut world, &store.borrow(), pe, we, weapon_player_model, weapon_hand_bone);
-                    }
-                    // Tick the fleet gameplay systems (vehicle/combat/physics/audio) at the SAME fixed
-                    // cadence the animation schedule just ran — the layer-4 gameplay tick, now driven.
-                    for _ in 0..steps {
-                        runtime.tick(&mut world, time.fixed_dt);
-                        // Population update uses the player as the camera/death-distance anchor; its
-                        // spawn requests are realized through the shared resolver. Idle until spawners
-                        // are registered (the living-world data path is a later wire).
-                        runtime.tick_population(&mut world, time.fixed_dt, player.pos);
-                        // Persistent mission-Lua (K1): advance the Lua event/timer system, then realize
-                        // any runtime Pg.Spawns the script recorded this step through the same resolver.
-                        // The render layer attaches visuals to the returned entities (model resolution is
-                        // the render seam; bare-transform actors until a template→model map lands).
-                        if let Some(sh) = &script {
-                            crate::script_host::pump_resident(sh, time.fixed_dt);
-                            let new_spawns = script_host.borrow_mut().take_new_spawns();
-                            if !new_spawns.is_empty() {
-                                let realized = runtime.realize_spawns(&mut world, &new_spawns);
-                                println!("[world] realized {} runtime spawn(s) from mission Lua", realized.len());
-                            }
-                        }
-                    }
-                    // Combat impact FX: each resolved hit (decal already spawned in the runtime) also
-                    // emits a particle burst — explosion → fireball, bullet → dust puff. Blood is
-                    // decal-only (no particle desc). The FX sink lives on the Scene, so it's drained
-                    // here rather than in the GPU-free runtime bundle.
-                    for imp in runtime.take_render_impacts() {
-                        let desc = match imp.kind {
-                            mercs2_combat::ImpactKind::Explosion => {
-                                Some(mercs2_engine::particles::EmitterDesc::demo_fire())
-                            }
-                            mercs2_combat::ImpactKind::Bullet => {
-                                Some(mercs2_engine::particles::EmitterDesc::demo_smoke())
-                            }
-                            mercs2_combat::ImpactKind::Blood => None,
-                        };
-                        if let Some(d) = desc {
-                            scene.fx_start_desc(d, imp.position.to_array());
-                        }
-                    }
-                    // Directional shadow key light, centred on the player. The travel direction is the
-                    // negation of the main shader's fixed sun_dir (0.4,0.7,-0.5 = direction TO the sun),
-                    // so the cast shadows line up with the sun shading. half_extent ~18 m covers the
-                    // over-the-shoulder view around the player. (All three are tuning knobs.)
-                    // Indoors (sun off) the shadow comes from OVERHEAD (ceiling/interior lighting) so it
-                    // reads as a grounding contact shadow under the character, not an outdoor sun shadow;
-                    // outdoors it aligns to the sun. (Direction/extent are tuning knobs.)
-                    let shadow_dir = if spawn_interior { [-0.15, -1.0, 0.1] } else { [-0.4, -0.7, 0.5] };
-                    scene.set_shadow(player.pos.to_array(), shadow_dir, 18.0);
-                    scene.set_view(view, if interior_orbit { 1.0 } else { 0.5 }, 30000.0);
-                    match scene.render(&world) {
-                        Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
-                        Err(e) => println!("surface error: {e:?}"),
-                    }
-                }
-                _ => {}
-            },
-            // Raw deltas: the normal game input path. Feeds the accumulator only while sane;
-            // a single absurd event (absolute-coordinate stream, e.g. Shadow cloud PC) latches
-            // the cursor fallback for the rest of the session.
-            Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-                let (dx, dy) = (delta.0 as f32, delta.1 as f32);
-                if mouse_src != 2 {
-                    if dx.abs() > 2000.0 || dy.abs() > 2000.0 {
-                        mouse_src = 2; // absolute-coordinate stream detected -> cursor path
-                        println!("[mouse] absolute-coordinate raw input detected -> cursor-recentre mode");
-                    } else {
-                        mouse_raw_acc.0 += dx;
-                        mouse_raw_acc.1 += dy;
-                        if mouse_src == 0 && (dx != 0.0 || dy != 0.0) {
-                            mouse_sane_events += 1;
-                            if mouse_sane_events >= 10 {
-                                mouse_src = 1; // healthy relative deltas -> raw path
-                            }
-                        }
-                    }
-                }
-            }
-            Event::AboutToWait => scene.window.request_redraw(),
-            _ => {}
-        })
-        .expect("event loop run");
-}
-
 /// Resolve a shell-menu selection into the boot configuration. `Some(path)` = parse that save
 /// (recruit unlocks from the save's unlocked starters, stockpile cash from the header, and the
 /// PLAYER MODEL from the saved hero + wardrobe outfit) — the same derivation `main.rs` uses for
@@ -1988,8 +1017,11 @@ fn load_from_wad(
     animate: bool,
     clip_hash: Option<u32>,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<mesh::DrawGroup>, TexMap, mesh::SkinData, Option<ClipAnim>, u32, String), String> {
-    let mut w = wad::open(wadpath)?;
-    let models = wad::model_list(&w);
+    // Cohesive asset layer: base vz.wad + auto-discovered `vz-patch.wad` overlay (the game's patch
+    // mechanism), resolved last-writer-wins. `base_mut()` feeds the base-only loader helpers unchanged;
+    // patch content wins wherever a call routes through the stack's `extract_*` resolvers.
+    let mut assets = mercs2_engine::asset::AssetSource::discover(wadpath, &[])?;
+    let models = wad::model_list(assets.base());
     if models.is_empty() {
         return Err("no model assets in WAD".into());
     }
@@ -2004,7 +1036,7 @@ fn load_from_wad(
     } else {
         models[0].0
     };
-    let container = wad::extract_container(&mut w, hash)?;
+    let container = wad::extract_container(assets.base_mut(), hash)?;
     let (verts, indices, draws, s) = mesh::build_indexed_from_container(&container)?;
 
     // Extract each unique diffuse + normal-map texture (DXT/BC bytes) for the placed groups.
@@ -2012,7 +1044,7 @@ fn load_from_wad(
     for d in &draws {
         for h in [d.diffuse, d.normal].into_iter().flatten() {
             if !textures.contains_key(&h) {
-                match wad::extract_texture(&mut w, h) {
+                match wad::extract_texture(assets.base_mut(), h) {
                     Ok(t) => {
                         textures.insert(h, t);
                     }
@@ -2031,7 +1063,7 @@ fn load_from_wad(
     // Animation: bind the best-matching clip to this model's HIER (only when requested).
     let clip = if animate && !s.rig.is_empty() {
         let hier: Vec<u32> = s.rig.iter().map(|b| b.name_hash).collect();
-        match load_clip_for_rig(&mut w, &hier, clip_hash) {
+        match load_clip_for_rig(assets.base_mut(), &hier, clip_hash) {
             Some(ca) => {
                 let resolved = ca.track_to_hier.iter().filter(|r| r.is_some()).count();
                 println!(
@@ -2053,3 +1085,781 @@ fn load_from_wad(
     Ok((verts, indices, draws, textures, s.skin_data(), clip, hash, title))
 }
 
+
+// ===========================================================================
+//   Mercs2Game — the TPS boot as a `mercs2_engine::app::Game` (Phase 5b).
+//
+//   This is the relocation of `run_scene_world_loading`'s body onto the unified engine loop: the ~30
+//   `let mut` locals become fields; the world-realize block becomes `setup`; the variable-rate camera +
+//   player sim becomes `update`; the fixed sim tick becomes `fixed_update`; the per-frame FX/shadow
+//   becomes `render_prep`; the shell menu becomes `menu`. Behaviour is preserved verbatim — the engine
+//   now owns the window / event loop / loading screen / render that this used to duplicate.
+// ===========================================================================
+
+/// Third-person vs free-fly debug camera.
+#[derive(PartialEq)]
+enum CamMode {
+    Free,
+    ThirdPerson,
+}
+
+/// Row-major identity matrix for static-entity skin palettes.
+const GAME_IDENTITY: [[f32; 4]; 4] =
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+/// Animation crossfade duration on clip switches (was fn-local in run_scene_world_loading).
+const GAME_ANIM_BLEND_SEC: f32 = 0.25;
+
+/// The fixed-timestep animation system (idle/walk/run/swim clip playback + Havok crossfade), lifted
+/// from the world loop's `Schedule` closure so it can run once per fixed step from `fixed_update`.
+fn animate_world(world: &mut World, time: &Time, assets: &AssetStore) {
+    for (_e, (state, palette, mref)) in world
+        .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
+        .iter()
+    {
+        if !state.playing {
+            continue;
+        }
+        let Some(ma) = assets.models.get(&mref.model) else { continue };
+        let Some(ca) = ma.clips.get(&state.clip).or_else(|| ma.clips.values().next()) else { continue };
+        let dur = ca.clip.duration.max(1e-3);
+        state.time = (state.time + time.dt * state.speed) % dur;
+        if state.blend < 1.0 {
+            if let Some(cp) = ma.clips.get(&state.prev_clip) {
+                let pdur = cp.clip.duration.max(1e-3);
+                state.prev_time = (state.prev_time + time.dt * state.speed) % pdur;
+                state.blend = (state.blend + time.dt / GAME_ANIM_BLEND_SEC).min(1.0);
+                let sa = cp.clip.sample_local(state.prev_time);
+                let sb = ca.clip.sample_local(state.time);
+                palette.mats = pose::havok_palette_blend_in_place(
+                    &ma.rig,
+                    &sa, &cp.track_to_hier, cp.num_transform_tracks,
+                    &sb, &ca.track_to_hier, ca.num_transform_tracks,
+                    state.blend,
+                );
+                continue;
+            }
+            state.blend = 1.0;
+        }
+        let sample = ca.clip.sample_local(state.time);
+        palette.mats = pose::havok_palette_in_place(&ma.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks);
+    }
+}
+
+/// The Mercenaries 2 third-person game as a `Game` over the engine's unified `app::run` loop.
+pub struct Mercs2Game {
+    // Boot config (all `true` for the retail boot; `--interior-orbit` sets `interior_orbit`).
+    wadpath: String,
+    start_tps: bool,
+    load_cells: bool,
+    load_placements: bool,
+    spawn_interior: bool,
+    load_props: bool,
+    interior_orbit: bool,
+    // Shell menu + the selected (or direct-boot default) save parameters.
+    menu: Option<crate::menu::Menu>,
+    recruits: crate::pmc::RecruitUnlocks,
+    stockpile: crate::pmc::Stockpile,
+    player_models: Vec<String>,
+    active_contract: String,
+    hero_character: String,
+    test_world: bool,
+    menu_gp_prev: [bool; 4],
+    menu_open: std::time::Instant,
+    // Input bindings (Mercs2.ini) — for mouse sensitivity / invert-Y in `update`.
+    bindings: mercs2_engine::input::Bindings,
+    // The ECS World is owned by the engine (`app::run`) and lent via `Ctx` — the game does NOT keep its
+    // own World (that was a two-Worlds bug: models spawned into the game's copy never render, because the
+    // engine renders ITS World). The guidmap + Lua host are game-held; the host is attached to the app's
+    // World in `setup`.
+    guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>,
+    script_host: std::rc::Rc<std::cell::RefCell<mercs2_engine::script_host::GameScriptHost>>,
+    script: Option<mercs2_engine::script::ScriptHost>,
+    audio: std::rc::Rc<std::cell::RefCell<mercs2_engine::audio::AudioEngine>>,
+    store: std::rc::Rc<std::cell::RefCell<AssetStore>>,
+    runtime: mercs2_engine::runtime::GameRuntime,
+    // Gameplay/camera runtime state, wired in on load.
+    player: mercs2_engine::player::PlayerController,
+    mode: CamMode,
+    free_pos: Vec3,
+    free_yaw: f32,
+    free_pitch: f32,
+    tp_yaw: f32,
+    tp_pitch: f32,
+    collision_tris: Vec<[Vec3; 3]>,
+    hmap: Option<HeightMap>,
+    watermap: Option<mercs2_engine::water_sim::Watermap>,
+    fire_cooldown: f32,
+    weapon_entity: Option<Entity>,
+    weapon_hand_bone: usize,
+    weapon_player_model: u32,
+    game_start: std::time::Instant,
+    mouse_dbg_frames: u32,
+}
+
+impl Mercs2Game {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        wadpath: String,
+        start_tps: bool,
+        load_cells: bool,
+        load_placements: bool,
+        spawn_interior: bool,
+        load_props: bool,
+        interior_orbit: bool,
+        recruits: crate::pmc::RecruitUnlocks,
+        stockpile: crate::pmc::Stockpile,
+        player_models: Vec<String>,
+        menu: Option<crate::menu::Menu>,
+    ) -> Self {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let guids = Rc::new(RefCell::new(mercs2_core::GuidMap::new()));
+        // Persistent mission-Lua host. The live World is attached in `setup` (it's owned by the engine
+        // loop, not available at construction) so `Object.*`/`Pg.GetGuidByName` resolve real entities;
+        // seed the economy from the save now.
+        let script_host = Rc::new(RefCell::new(mercs2_engine::script_host::GameScriptHost::new("vz")));
+        script_host.borrow_mut().set_cash(stockpile.cash);
+        let script = mercs2_engine::script_host::resident_script_host(script_host.clone());
+        if script.is_some() {
+            println!("[world] persistent mission-Lua host resident (Event.__pump + runtime Pg.Spawn live)");
+        }
+        // Shared audio engine (host + fleet drive ONE engine); route it to the output device.
+        let audio = script_host.borrow().audio();
+        if audio.borrow_mut().attach_output_device() {
+            println!("[audio] output device attached — mixer live");
+        } else {
+            println!("[audio] no output device — running headless (silent)");
+        }
+        let runtime = mercs2_engine::runtime::GameRuntime::new(audio.clone());
+        let bindings = mercs2_engine::input::find_mercs2_ini()
+            .map(|p| mercs2_engine::input::Bindings::load(&p))
+            .unwrap_or_default();
+        Mercs2Game {
+            wadpath,
+            start_tps,
+            load_cells,
+            load_placements,
+            spawn_interior,
+            load_props,
+            interior_orbit,
+            menu,
+            recruits,
+            stockpile,
+            player_models,
+            active_contract: String::from("PmcCon001"),
+            hero_character: String::from("mattias"),
+            test_world: false,
+            menu_gp_prev: [false; 4],
+            menu_open: std::time::Instant::now(),
+            bindings,
+            guids,
+            script_host,
+            script,
+            audio,
+            store: Rc::new(RefCell::new(AssetStore::default())),
+            runtime,
+            player: mercs2_engine::player::PlayerController::new(Vec3::ZERO),
+            mode: CamMode::Free,
+            free_pos: Vec3::new(0.0, 2500.0, 4500.0),
+            free_yaw: 0.0,
+            free_pitch: -0.5,
+            tp_yaw: 0.0,
+            tp_pitch: -0.12,
+            collision_tris: Vec::new(),
+            hmap: None,
+            watermap: None,
+            fire_cooldown: 0.0,
+            weapon_entity: None,
+            weapon_hand_bone: 0,
+            weapon_player_model: 0,
+            game_start: std::time::Instant::now(),
+            mouse_dbg_frames: 0,
+        }
+    }
+
+    /// Resolve a picked save into the boot configuration and store it for `spawn_loader`.
+    fn apply_boot(&mut self, sel: Option<std::path::PathBuf>) {
+        let (r, sp, models, label, contract, character) = boot_config_from(sel.as_deref());
+        self.recruits = r;
+        self.stockpile = sp;
+        self.player_models = models;
+        self.active_contract = contract;
+        self.hero_character = character;
+        println!("[shell] boot: {label}");
+    }
+}
+
+impl mercs2_engine::app::Game for Mercs2Game {
+    type LoadData = WorldData;
+
+    fn config(&self) -> mercs2_engine::app::GameConfig {
+        // Interior: no outdoor sun + a dark neutral fog (metres, not km). Exterior: key light + thin haze.
+        let (fog, sun) = if self.spawn_interior {
+            (([0.16, 0.17, 0.18], 0.0075, 2.0), Some((0.0, 0.30)))
+        } else {
+            (([0.55, 0.62, 0.70], 0.00016, 60.0), Some((0.9, 0.35)))
+        };
+        let bindings = mercs2_engine::input::find_mercs2_ini()
+            .map(|p| mercs2_engine::input::Bindings::load(&p))
+            .unwrap_or_default();
+        mercs2_engine::app::GameConfig {
+            title: "Mercenaries 2 — world (Tab: free / third-person)".into(),
+            size: (1280.0, 720.0),
+            grab_cursor: true,
+            fog,
+            sun,
+            atmosphere: None, // TPS boot is fog-only (no explicit atmosphere), preserved
+            loading_plate_wad: Some(self.wadpath.clone()),
+            load_stages: LOAD_STAGES,
+            bindings,
+        }
+    }
+
+    fn starts_at_menu(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    fn menu(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::MenuOutcome {
+        use mercs2_engine::app::MenuOutcome;
+        use mercs2_engine::input::Action;
+        const MENU_ARM_DELAY: f32 = 0.4;
+        let armed = self.menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY;
+        // Gamepad edge nav (dpad/stick + A/Start select, B back), edge-detected vs last frame.
+        let (_, my) = ctx.input.move_vec();
+        let now = [
+            ctx.input.held(Action::SelectUp) || my > 0.5,
+            ctx.input.held(Action::SelectDown) || my < -0.5,
+            ctx.input.held(Action::Jump) || ctx.input.held(Action::Start),
+            ctx.input.held(Action::Crouch),
+        ];
+
+        // Nav + draw + render inside a scope that borrows only `self.menu` (disjoint from the fields
+        // `apply_boot`/`test_world` touch below), returning the resulting action as a value.
+        let action = {
+            let Some(m) = self.menu.as_mut() else { return MenuOutcome::StartLoad };
+            let mut action = crate::menu::MenuAction::None;
+            // Did the keyboard consume this frame's input? A MOVE (Up/Down/Back) returns
+            // `MenuAction::None`, so we CANNOT gate the gamepad path on `action == None` — the arrow keys
+            // also map to the `Select*` actions the gamepad reads, so a single Down would fire twice
+            // (keyboard move + gamepad "SelectDown"), skipping every other row.
+            let mut kbd_acted = false;
+            // Keyboard edge nav (rising key edges the engine resolved this frame).
+            if armed {
+                for &code in ctx.pressed.iter() {
+                    let nav = match code {
+                        KeyCode::ArrowUp | KeyCode::KeyW => Some(crate::menu::Nav::Up),
+                        KeyCode::ArrowDown | KeyCode::KeyS => Some(crate::menu::Nav::Down),
+                        KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => Some(crate::menu::Nav::Select),
+                        KeyCode::Escape | KeyCode::Backspace => Some(crate::menu::Nav::Back),
+                        _ => None,
+                    };
+                    if let Some(nav) = nav {
+                        action = m.nav(nav);
+                        kbd_acted = true;
+                        if !matches!(action, crate::menu::MenuAction::None) {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Gamepad nav only if the keyboard didn't already provide input this frame.
+            if !kbd_acted {
+                let navs = [crate::menu::Nav::Up, crate::menu::Nav::Down, crate::menu::Nav::Select, crate::menu::Nav::Back];
+                for i in 0..4 {
+                    if armed && now[i] && !self.menu_gp_prev[i] {
+                        action = m.nav(navs[i]);
+                        if !matches!(action, crate::menu::MenuAction::None) {
+                            break;
+                        }
+                    }
+                }
+            }
+            let t = self.menu_open.elapsed().as_secs_f32();
+            m.draw(ctx.scene, t);
+            match ctx.scene.render_menu(t) {
+                Ok(()) => {}
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+                Err(e) => println!("surface error: {e:?}"),
+            }
+            action
+        };
+        self.menu_gp_prev = now;
+
+        match action {
+            crate::menu::MenuAction::Boot(sel) => {
+                self.apply_boot(sel);
+                MenuOutcome::StartLoad
+            }
+            crate::menu::MenuAction::BootTestWorld => {
+                self.test_world = true;
+                self.apply_boot(None);
+                MenuOutcome::StartLoad
+            }
+            crate::menu::MenuAction::Quit => MenuOutcome::Exit,
+            crate::menu::MenuAction::None => MenuOutcome::Stay,
+        }
+    }
+
+    fn spawn_loader(
+        &self,
+        progress: std::sync::Arc<LoadProgress>,
+    ) -> std::sync::mpsc::Receiver<Result<WorldData, String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wadpath = self.wadpath.clone();
+        let (lc, lp, si, lpr) = (self.load_cells, self.load_placements, self.spawn_interior, self.load_props);
+        let recruits = self.recruits.clone();
+        let stockpile = self.stockpile.clone();
+        let models = self.player_models.clone();
+        std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
+            let r = load_world_data(&wadpath, lc, lp, si, lpr, recruits, &stockpile, &models, &progress);
+            if r.is_ok() {
+                println!("[load] done in {:.1}s", t0.elapsed().as_secs_f64());
+            }
+            let _ = tx.send(r);
+        });
+        rx
+    }
+
+    fn setup(&mut self, ctx: &mut mercs2_engine::app::Ctx, mut data: WorldData) {
+        const IDENTITY: [[f32; 4]; 4] = GAME_IDENTITY;
+        // Marry the Lua host to the engine's live World (the one the renderer draws): now `Object.*` /
+        // `Pg.GetGuidByName` and every spawn below land in the World that actually renders.
+        self.script_host.borrow_mut().attach_world(ctx.world.clone(), self.guids.clone());
+        let scene = &mut *ctx.scene;
+        // ---- Hero spawn (data-driven): interior derivation OR a named contract/HQ marker. ----
+        if let Some(sp) = data.interior_spawn {
+            self.player.pos = Vec3::new(sp[0], sp[1] + 2.0, sp[2]);
+            println!("[world] hero spawn: HQ interior (actor + hardpoint) -> ({:.1}, {:.1}, {:.1})", self.player.pos.x, self.player.pos.y, self.player.pos.z);
+        } else {
+            let contract_marker = format!("{}_start1", self.active_contract.to_ascii_lowercase());
+            let candidates = [contract_marker.as_str(), "pmc_entry1", "pmc_start1"];
+            let resolved = candidates
+                .iter()
+                .filter(|&&n| !n.is_empty() && n != "_start1")
+                .find_map(|&n| data.named_locations.get(n).map(|&p| (n, p)));
+            match resolved {
+                Some((name, p)) => {
+                    self.player.pos = Vec3::new(p[0], p[1], p[2]);
+                    println!("[world] hero spawn: marker '{name}' -> ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
+                }
+                None => {
+                    println!("[world] SPAWN MARKER unresolved ({} named markers total; none of {candidates:?})", data.named_locations.len());
+                }
+            }
+        }
+
+        // Entity-ize the named world markers into the live World + guidmap (so `Pg.GetGuidByName`
+        // resolves real entities), BEFORE the boot Lua flow's CreatePlayerCharacter → GetGuidByName.
+        {
+            let mut w = ctx.world.borrow_mut();
+            let host = self.script_host.borrow();
+            for (name, pos) in &data.named_locations {
+                let e = w.spawn((Transform::from_translation(Vec3::from(*pos)),));
+                host.register_named_entity(e, mercs2_formats::hash::pandemic_hash_m2(name));
+            }
+            println!("[world] {} named markers registered as live entities (guidmap)", data.named_locations.len());
+        }
+        if let Some(sh) = &self.script {
+            self.script_host.borrow_mut().set_boot_context(self.hero_character.clone());
+            mercs2_engine::script_host::run_boot_flow(sh, &self.script_host, &self.active_contract, &self.hero_character);
+            if data.interior_spawn.is_none() {
+                if let Some(p) = self.script_host.borrow_mut().take_hero_spawn() {
+                    self.player.pos = Vec3::new(p[0], p[1], p[2]);
+                    println!("[world] hero spawn via boot Lua flow: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
+                }
+            }
+        }
+
+        // Terrain (skipped in --interior: it sits above the SE terrain peak and would occlude the room).
+        let terrain = data.terrain;
+        if !std::env::args().any(|a| a == "--interior") {
+            scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
+            ctx.world.borrow_mut().spawn((
+                Transform::IDENTITY,
+                ModelRef { model: terrain.hash },
+                AnimState::default(),
+                SkinPalette { mats: vec![IDENTITY] },
+            ));
+        }
+
+        // Placement-marker DEBUG glyphs (`--markers`).
+        if let (Some(pm), true) = (data.placements, std::env::args().any(|a| a == "--markers")) {
+            scene.load_model(pm.hash, &pm.verts, &pm.indices, &pm.draws, &pm.textures, &pm.skin);
+            ctx.world.borrow_mut().spawn((
+                Transform::IDENTITY,
+                ModelRef { model: pm.hash },
+                AnimState::default(),
+                SkinPalette { mats: vec![IDENTITY] },
+            ));
+        }
+
+        // PMC-subset real geometry (`--placements`).
+        for (m, pos, yaw) in data.pmc_models {
+            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
+            t.rotation = Quat::from_rotation_y(yaw);
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY] }));
+        }
+
+        // Hi-res c3 cell geometry (`--cells`) — collect world-space triangles for collision.
+        for (m, off) in data.cells {
+            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            let tr = Vec3::new(off[0], off[1], off[2]);
+            for idx in m.indices.chunks_exact(3) {
+                self.collision_tris.push([
+                    Vec3::from(m.verts[idx[0] as usize].pos) + tr,
+                    Vec3::from(m.verts[idx[1] as usize].pos) + tr,
+                    Vec3::from(m.verts[idx[2] as usize].pos) + tr,
+                ]);
+            }
+            ctx.world.borrow_mut().spawn((
+                Transform::from_translation(tr),
+                ModelRef { model: m.hash },
+                AnimState::default(),
+                SkinPalette { mats: vec![IDENTITY] },
+            ));
+        }
+
+        // PMC interior geometry (`--interior`) — shells are walls → collision.
+        for (m, pos, quat) in data.interior {
+            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            let tr = Vec3::new(pos[0], pos[1], pos[2]);
+            let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
+            let mut t = Transform::from_translation(tr);
+            t.rotation = q;
+            for idx in m.indices.chunks_exact(3) {
+                let w = |i: usize| q * Vec3::from(m.verts[i].pos) + tr;
+                self.collision_tris.push([w(idx[0] as usize), w(idx[1] as usize), w(idx[2] as usize)]);
+            }
+            let nbones = m.skin.bones.len().max(1);
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+        }
+
+        // ModelName props (exterior + interior furniture) — each non-water instance blocks → collision.
+        let mut prop_meshes = 0usize;
+        let mut prop_instances = 0usize;
+        for (hash, m, instances) in data.props.into_iter().chain(data.interior_props) {
+            scene.load_model(hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            prop_meshes += 1;
+            let nbones = m.skin.bones.len().max(1);
+            for (pos, quat) in instances {
+                let tr = Vec3::new(pos[0], pos[1], pos[2]);
+                let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
+                for idx in m.indices.chunks_exact(3) {
+                    let w = |i: u32| q * Vec3::from(m.verts[i as usize].pos) + tr;
+                    self.collision_tris.push([w(idx[0]), w(idx[1]), w(idx[2])]);
+                }
+                let mut t = Transform::from_translation(tr);
+                t.rotation = q;
+                ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+                prop_instances += 1;
+            }
+        }
+        if prop_meshes > 0 {
+            println!("[world] props spawned: {prop_meshes} distinct meshes, {prop_instances} instances");
+        }
+
+        // Player avatar.
+        if let Some(p) = data.player {
+            self.player.has_run = p.clips.iter().any(|c| c.name_hash == mercs2_engine::player::CLIP_RUN);
+            self.player.swim_clip = data.player_swim_clip.unwrap_or(0);
+            self.player.idle = p.clips.iter().map(|c| c.name_hash)
+                .find(|h| *h != mercs2_engine::player::CLIP_WALK
+                    && *h != mercs2_engine::player::CLIP_RUN
+                    && Some(*h) != data.player_swim_clip)
+                .unwrap_or(mercs2_engine::player::CLIP_IDLE);
+            for c in &p.clips {
+                let d = c.clip.duration.max(1e-3);
+                let sp = pose::clip_root_speed(
+                    &p.skin.rig,
+                    &c.clip.sample_local(0.0),
+                    &c.clip.sample_local(d * 0.999),
+                    &c.track_to_hier,
+                    c.num_transform_tracks,
+                    d * 0.999,
+                );
+                if c.name_hash == mercs2_engine::player::CLIP_WALK {
+                    self.player.dur_walk = d;
+                    if sp > 0.1 { self.player.walk_speed = sp; }
+                } else if c.name_hash == mercs2_engine::player::CLIP_RUN {
+                    self.player.dur_run = d;
+                    if sp > 0.1 { self.player.run_speed = sp; }
+                }
+            }
+            scene.load_model(p.hash, &p.verts, &p.indices, &p.draws, &p.textures, &p.skin);
+            let rig = p.skin.rig.clone();
+            let bind = if rig.is_empty() {
+                vec![IDENTITY]
+            } else {
+                let m = pose::model_poses(&rig, &pose::bind_qs(&rig));
+                pose::skin_palette(&rig, &m)
+            };
+            let min_y = p.verts.iter().map(|v| v.pos[1]).fold(f32::INFINITY, f32::min);
+            self.player.foot = if min_y.is_finite() { -min_y } else { 0.0 };
+            let playing = !p.clips.is_empty();
+            self.store.borrow_mut().models.insert(p.hash, ModelAnim {
+                rig,
+                clips: p.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
+            });
+            let anim = if playing { AnimState::playing(self.player.idle) } else { AnimState::default() };
+            let npc_bind = if self.test_world { bind.clone() } else { Vec::new() };
+            let mut t = Transform::from_translation(self.player.pos);
+            t.rotation = Quat::from_rotation_y(0.0);
+            self.player.entity = Some(ctx.world.borrow_mut().spawn((t, ModelRef { model: p.hash }, anim, SkinPalette { mats: bind })));
+            if let Some(pe) = self.player.entity {
+                self.script_host.borrow().register_entity(pe, mercs2_engine::script_host::HERO_GUID, None);
+            }
+            // TEST WORLD: a visible NPC (same merc model) facing the hero — an actor to build onto.
+            if self.test_world {
+                let npc_pos = self.player.pos + Vec3::new(3.0, 0.0, 12.0);
+                let mut nt = Transform::from_translation(npc_pos);
+                nt.rotation = Quat::from_rotation_y(std::f32::consts::PI);
+                let npc_anim = if playing { AnimState::playing(self.player.idle) } else { AnimState::default() };
+                ctx.world.borrow_mut().spawn((nt, ModelRef { model: p.hash }, npc_anim, SkinPalette { mats: npc_bind }));
+                println!("[test-world] NPC placed at ({:.1},{:.1},{:.1}) facing the hero", npc_pos.x, npc_pos.y, npc_pos.z);
+            }
+            // Held weapon on the hero's right-hand bone.
+            if let (Some(mut wm), Some(hb)) = (data.weapon, data.weapon_hand_bone) {
+                wm.skin.center = [0.0, 0.0, 0.0];
+                wm.skin.scale = 1.0;
+                let ident = vec![IDENTITY; wm.skin.rig.len().max(1)];
+                scene.load_model(wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
+                self.weapon_entity = Some(ctx.world.borrow_mut().spawn((
+                    Transform::from_translation(self.player.pos),
+                    ModelRef { model: wm.hash },
+                    SkinPalette { mats: ident },
+                )));
+                self.weapon_hand_bone = hb;
+                self.weapon_player_model = p.hash;
+                println!("[world] held weapon 0x{:08X} on bone_rhand (rig idx {hb})", wm.hash);
+            }
+        }
+        self.hmap = Some(data.hmap);
+        self.watermap = data.watermap;
+
+        // Resident audio: decode wavebanks + merge sounddbs into one cue catalog.
+        if !data.wavebank_bodies.is_empty() {
+            let mut a = self.audio.borrow_mut();
+            let mut audible = 0usize;
+            for body in &data.wavebank_bodies {
+                audible += a.load_wavebank(body);
+            }
+            let mut catalog = mercs2_engine::audio::SoundDb::default();
+            for body in &data.sounddb_bodies {
+                if let Ok(db) = mercs2_engine::audio::SoundDb::parse(body) {
+                    catalog.merge(&db);
+                }
+            }
+            let cues = catalog.cues.len();
+            a.set_sounddb(catalog);
+            println!("[audio] resident: {} clips ({audible} audible), {cues} cues in catalog", a.resident_wave_count());
+        }
+
+        // Translucent water surface (render-graph node).
+        if let Some(wm) = &self.watermap {
+            let (wpos, widx) = wm.surface_mesh();
+            let node = mercs2_engine::water::WaterNode::new(
+                scene.device(),
+                scene.surface_format(),
+                &wpos,
+                &widx,
+                mercs2_engine::water::WaterStyle::default(),
+            );
+            if let Some(node) = node {
+                println!("[world] water surface: {} quads", widx.len() / 6);
+                scene.add_render_node(Box::new(node));
+            }
+        }
+        println!("[world] collision: {} world-space triangles (buildings + interior shells)", self.collision_tris.len());
+        self.runtime.set_collision(self.collision_tris.clone());
+        if let Some(hm) = self.hmap.as_ref() {
+            let phm = heightmap_to_physics(hm);
+            println!("[world] terrain heightmap -> fleet physics ({}x{} grid)", phm.width, phm.depth);
+            self.runtime.set_heightmap(Some(phm));
+        }
+        scene.set_lights(std::mem::take(&mut data.lights));
+        // Environmental FX: glow cards (god rays) + particle emitters (fire/smoke/steam).
+        {
+            let cards = std::mem::take(&mut data.glow_cards);
+            let glows = cards.len();
+            scene.set_glow_cards(&cards);
+            let (mut started, mut skipped) = (0usize, 0usize);
+            for (name, pos) in std::mem::take(&mut data.particle_fx) {
+                match classify_particle(&name) {
+                    Some(desc) => { scene.fx_start_desc(desc, pos); started += 1; }
+                    None => skipped += 1,
+                }
+            }
+            if started + skipped + glows > 0 {
+                println!("[world] particle FX: {started} emitters + {glows} light-shaft glows started, {skipped} unsupported skipped");
+            }
+        }
+        if self.start_tps && self.player.entity.is_some() {
+            self.mode = CamMode::ThirdPerson;
+        }
+        self.game_start = std::time::Instant::now();
+    }
+
+    fn update(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::Camera {
+        use mercs2_engine::input::Action;
+        // Tab toggles the free / third-person camera (rising edge).
+        if ctx.pressed.contains(&KeyCode::Tab) {
+            self.mode = if self.mode == CamMode::Free { CamMode::ThirdPerson } else { CamMode::Free };
+        }
+        let dt = ctx.dt;
+        let look = 1.6 * dt;
+        // Mouse-look: apply ini sensitivity + invert-Y to the engine-resolved delta.
+        let sens = self.bindings.mouse_rad_per_px;
+        let inv_y = if self.bindings.invert_y { -1.0 } else { 1.0 };
+        let src = ctx.mouse_delta;
+        let mdx = src.0.clamp(-80.0, 80.0) * sens;
+        let mdy = src.1.clamp(-80.0, 80.0) * sens * inv_y;
+        if src != (0.0, 0.0) && self.mouse_dbg_frames < 20 {
+            println!("[mouse] in=({:+.1},{:+.1}) applied=({:+.4},{:+.4})", src.0, src.1, mdx, mdy);
+            self.mouse_dbg_frames += 1;
+        }
+        match self.mode {
+            CamMode::Free => {
+                self.free_yaw += mdx;
+                self.free_pitch = (self.free_pitch - mdy).clamp(-1.5, 1.5);
+            }
+            CamMode::ThirdPerson => {
+                self.tp_yaw += mdx;
+                self.tp_pitch = (self.tp_pitch - mdy).clamp(-1.2, 0.6);
+            }
+        }
+
+        let inp = ctx.input;
+        let (gp_yaw, gp_pitch) = inp.look_delta(dt);
+        let mut view = match self.mode {
+            CamMode::Free => {
+                if inp.keys.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { self.free_pitch += look; }
+                if inp.keys.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { self.free_pitch -= look; }
+                if inp.keys.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { self.free_yaw -= look; }
+                if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { self.free_yaw += look; }
+                self.free_yaw += gp_yaw;
+                self.free_pitch = (self.free_pitch + gp_pitch).clamp(-1.5, 1.5);
+                let fwd = Vec3::new(self.free_pitch.cos() * self.free_yaw.sin(), self.free_pitch.sin(), self.free_pitch.cos() * self.free_yaw.cos()).normalize();
+                let right = fwd.cross(Vec3::Y).normalize();
+                let (mx, my) = inp.move_vec();
+                let mut mv = fwd * my + right * mx;
+                if inp.held(Action::Jump) { mv += Vec3::Y; }
+                if inp.held(Action::Crouch) { mv -= Vec3::Y; }
+                let sp = if inp.held(Action::Sprint) { 3200.0 } else { 800.0 };
+                if mv.length_squared() > 1e-6 { self.free_pos += mv.clamp_length_max(1.0) * sp * dt; }
+                Mat4::look_to_lh(self.free_pos, fwd, Vec3::Y)
+            }
+            CamMode::ThirdPerson => {
+                if inp.keys.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { self.tp_pitch += look; }
+                if inp.keys.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { self.tp_pitch -= look; }
+                if inp.keys.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { self.tp_yaw -= look; }
+                if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { self.tp_yaw += look; }
+                self.tp_yaw += gp_yaw;
+                self.tp_pitch = (self.tp_pitch + gp_pitch).clamp(-1.2, 0.6);
+                let fwd_flat = Vec3::new(self.tp_yaw.sin(), 0.0, self.tp_yaw.cos()).normalize();
+                let right_flat = fwd_flat.cross(Vec3::Y).normalize();
+                let (mx, my) = inp.move_vec();
+                let mv = fwd_flat * my + right_flat * mx;
+                self.player.update(
+                    &mut ctx.world.borrow_mut(),
+                    mv,
+                    inp.held(Action::Sprint),
+                    inp.held(Action::Jump),
+                    &self.collision_tris,
+                    self.hmap.as_ref(),
+                    self.watermap.as_ref(),
+                    self.spawn_interior,
+                    dt,
+                );
+                // Player weapon fire — STAND-IN (raycast + invented range/interval; the real path is the
+                // equipped weapon's `Weapon.*` fire through its `wpn_*` stats). Gated on actually holding a
+                // weapon, so with no equipped gun (e.g. the unarmed PMC) there is no fire.
+                self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
+                let can_fire = self.weapon_entity.is_some() && !self.player.swim.is_swimming();
+                if can_fire && inp.held(Action::PrimaryAttack) && self.fire_cooldown <= 0.0 {
+                    self.fire_cooldown = PLAYER_FIRE_INTERVAL;
+                    let aim = Vec3::new(self.tp_pitch.cos() * self.tp_yaw.sin(), self.tp_pitch.sin(), self.tp_pitch.cos() * self.tp_yaw.cos()).normalize();
+                    let eye = self.player.pos + Vec3::Y * PLAYER_EYE_HEIGHT;
+                    if let Some(t) = mercs2_engine::physics::soup::raycast(&self.collision_tris, eye, aim, PLAYER_WEAPON_RANGE) {
+                        let point = eye + aim * t;
+                        self.runtime.push_impact(mercs2_engine::combat::Impact::from_hit(point, Vec3::ZERO, aim, false));
+                    }
+                }
+                // Mode-based camera: pick the reflected preset from whatever the player is riding (on
+                // foot → OnFoot). `ridden` stays `None` until vehicle-riding is wired; the selection +
+                // preset are already the real engine shape.
+                let preset = mercs2_engine::camera::CameraMode::for_ridden(None).preset();
+                mercs2_engine::camera::view_with_preset(&preset, self.player.pos, self.tp_yaw, self.tp_pitch, &self.collision_tris)
+            }
+        };
+
+        // Interior debug orbit (`--interior-orbit`): replace the view with an auto-orbit each frame.
+        if self.interior_orbit {
+            const ANCHOR: Vec3 = Vec3::new(3779.8, 454.7, -3879.6);
+            const RADIUS: f32 = 38.0;
+            const HEIGHT: f32 = 52.0;
+            let ang = self.game_start.elapsed().as_secs_f32() * 0.25;
+            let eye = ANCHOR + Vec3::new(RADIUS * ang.sin(), HEIGHT, RADIUS * ang.cos());
+            view = Mat4::look_at_lh(eye, ANCHOR, Vec3::Y);
+        }
+
+        let pos = if self.mode == CamMode::Free { self.free_pos } else { self.player.pos };
+        // Near/far: on foot use the reflected preset (PMC `SetNearFar(0, 0.3, 500, 0)` from the game's
+        // Lua); free-fly/orbit keep the wide far so the whole world stays visible.
+        let (near, far) = if self.interior_orbit || self.mode == CamMode::Free {
+            (if self.interior_orbit { 1.0 } else { 0.5 }, 30000.0)
+        } else {
+            let p = mercs2_engine::camera::CameraMode::for_ridden(None).preset();
+            (p.near, p.far)
+        };
+        mercs2_engine::app::Camera { view, pos, near, far }
+    }
+
+    fn fixed_update(&mut self, ctx: &mut mercs2_engine::app::Ctx) {
+        // Animation (idle/walk/run/swim + crossfade) at the fixed tick.
+        animate_world(&mut ctx.world.borrow_mut(), ctx.time, &self.store.borrow());
+        // Fleet gameplay (vehicle/combat/physics/audio) + population, same fixed cadence.
+        self.runtime.tick(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt);
+        self.runtime.tick_population(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt, self.player.pos);
+        // Persistent mission-Lua: advance the event/timer system, then realize its runtime Pg.Spawns.
+        if let Some(sh) = &self.script {
+            mercs2_engine::script_host::pump_resident(sh, ctx.time.fixed_dt);
+            let new_spawns = self.script_host.borrow_mut().take_new_spawns();
+            if !new_spawns.is_empty() {
+                let realized = self.runtime.realize_spawns(&mut ctx.world.borrow_mut(), &new_spawns);
+                {
+                    let host = self.script_host.borrow();
+                    for (req, (e, _)) in new_spawns.iter().zip(&realized) {
+                        let nh = (!req.name.is_empty()).then(|| mercs2_formats::hash::pandemic_hash_m2(&req.name.to_ascii_lowercase()));
+                        host.register_entity(*e, req.guid, nh);
+                    }
+                }
+                println!("[world] realized {} runtime spawn(s) from mission Lua", realized.len());
+            }
+        }
+    }
+
+    fn render_prep(&mut self, ctx: &mut mercs2_engine::app::Ctx) {
+        // Pump the software mixer at wall-clock rate.
+        self.audio.borrow_mut().pump(ctx.dt);
+        // Held weapon follows the hero's right-hand bone (after the anim schedule posed the hero).
+        if let (Some(we), Some(pe)) = (self.weapon_entity, self.player.entity) {
+            update_held_weapon(&mut ctx.world.borrow_mut(), &self.store.borrow(), pe, we, self.weapon_player_model, self.weapon_hand_bone);
+        }
+        // Combat impact FX: explosion → fireball, bullet → dust puff (blood is decal-only).
+        for imp in self.runtime.take_render_impacts() {
+            let desc = match imp.kind {
+                mercs2_engine::combat::ImpactKind::Explosion => Some(mercs2_engine::particles::EmitterDesc::impact_fire()),
+                mercs2_engine::combat::ImpactKind::Bullet => Some(mercs2_engine::particles::EmitterDesc::impact_puff()),
+                mercs2_engine::combat::ImpactKind::Blood => None,
+            };
+            if let Some(d) = desc {
+                ctx.scene.fx_start_desc(d, imp.position.to_array());
+            }
+        }
+        // Directional shadow key light, centred on the player (overhead indoors, sun-aligned outdoors).
+        let shadow_dir = if self.spawn_interior { [-0.15, -1.0, 0.1] } else { [-0.4, -0.7, 0.5] };
+        ctx.scene.set_shadow(self.player.pos.to_array(), shadow_dir, 18.0);
+    }
+}

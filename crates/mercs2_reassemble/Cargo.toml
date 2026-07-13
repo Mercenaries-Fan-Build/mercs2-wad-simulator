@@ -1,8 +1,10 @@
 [package]
 name = "mercs2_reassemble"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Reassemble the decompiled Mercs2 engine from the 27k-function Ghidra corpus by joining every attribution source (code maps, annotations, memory) onto the master function list, and flag the unmapped residue for manual review."
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "mercs2_reassemble"

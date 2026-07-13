@@ -1,12 +1,15 @@
 [package]
 name = "wad_builder"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "Mercenaries 2 modernization — generic raw-asset to engine-format vz-patch.wad builder, with a byte-exact identity oracle for parse/serialize correctness."
+license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "wad_builder"
 path = "src/main.rs"
 
 [dependencies]
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_formats = { workspace = true }
 clap = { version = "4", features = ["derive"] }

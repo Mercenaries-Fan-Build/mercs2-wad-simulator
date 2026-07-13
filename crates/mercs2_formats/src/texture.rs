@@ -30,7 +30,7 @@
 
 use std::fs::File;
 
-use crate::ffcs::{read_u16_le, read_u32_le, FfcsArchive};
+use crate::ffcs::{read_f32_le, read_u16_le, read_u32_le, FfcsArchive};
 use crate::sges::decompress_block;
 use crate::texsize::{dxt_format, dxt_mip_count, linear_mip_chain_size};
 use crate::types::{TYPE_HASH_MODEL, TYPE_HASH_TEXTURE, TYPE_ID_MODEL, TYPE_ID_TEXTURE};
@@ -65,9 +65,17 @@ impl TexFormat {
 
 /// One parsed MTRL material record: its texture-asset hashes in slot order
 /// (diffuse, specular, normal, …). Slot 0 = diffuse.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MtrlMaterial {
     pub textures: Vec<u32>,
+    /// The `u16 flags@104` word. Encodes render mode (e.g. `0x0080` on 3-map materials, `0x0088`
+    /// adds a bit) — NOT a per-material intact/ruin gate (verified: the tank's ruin material and an
+    /// intact material share `0x0080`). Kept so material rendering can honour it instead of drawing
+    /// every submesh flat-opaque.
+    pub flags: u16,
+    /// The 104-byte float preamble before the flags — material properties (tint / blend / alpha /
+    /// specular params). 26 floats; not yet interpreted, but no longer discarded.
+    pub preamble: Vec<f32>,
 }
 
 impl MtrlMaterial {
@@ -199,7 +207,9 @@ fn parse_mtrl_body(body: &[u8], out: &mut Vec<MtrlMaterial>) {
         for k in 0..tex_count {
             textures.push(read_u32_le(body, p + 108 + k * 4));
         }
-        out.push(MtrlMaterial { textures });
+        let flags = read_u16_le(body, p + 104);
+        let preamble: Vec<f32> = (0..26).map(|k| read_f32_le(body, p + k * 4)).collect();
+        out.push(MtrlMaterial { textures, flags, preamble });
         p += 116 + tex_count * 4;
     }
 }

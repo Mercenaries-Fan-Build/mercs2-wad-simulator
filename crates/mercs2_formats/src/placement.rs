@@ -320,8 +320,13 @@ fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)
             None => s,
         };
         out.push((key, name));
-        // Consume the NUL terminator (and any run of padding NULs).
-        while p < blob.len() && blob[p] == 0 {
+        // Advance past the string's NUL terminator, then a per-record trailer/flag byte + any zero
+        // padding. Records are `[u32 key][cstring\0][u8 flag]` — the flag is `0x00` in most Name COMPs
+        // (so the old NUL-only skip happened to align) but `0x01` in the locator/starter-name COMP
+        // (sub-block 33: `PmcCon001_Start1`, `Starter_*`, …), which slipped every later key by a byte
+        // and dropped those names. Entity keys are dense mid-range ids whose low byte is never `0x00`/
+        // `0x01`, so a leading `0x00`/`0x01` after a name is a terminator/flag, not the next key.
+        while p < blob.len() && (blob[p] == 0x00 || blob[p] == 0x01) {
             p += 1;
         }
     }
@@ -339,23 +344,26 @@ pub fn load_placements(layers_static_block: &[u8]) -> Result<Vec<Placement>, Str
         return Err("no UCFX sub-blocks found in layers_static".into());
     }
 
-    let mut out: Vec<Placement> = Vec::new();
+    // Two passes so names match transforms by entity key GLOBALLY, not per sub-block: a locator's
+    // `Name` COMP and its `Transform` COMP can live in DIFFERENT UCFX sub-blocks (verified: contract
+    // start locators like `PmcCon001_Start1` split this way — the per-sub-block match dropped their
+    // name/position). Entity keys are globally unique within `layers_static` (the same key cross-refs
+    // vz_state overlays), so a global key→name map is correct.
+    let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut transforms: Vec<(u16, u32, [f32; 3], [f32; 4])> = Vec::new();
     for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
         let block_end = if si + 1 < ucfx_positions.len() {
             ucfx_positions[si + 1]
         } else {
             layers_static_block.len()
         };
-        let comps = walk_sub_block_comps(layers_static_block, ucfx_pos, block_end);
-
-        // Collect this sub-block's Transform records and Name map.
-        let mut transforms: Vec<(u32, [f32; 3], [f32; 4])> = Vec::new();
-        let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-        for c in &comps {
+        for c in &walk_sub_block_comps(layers_static_block, ucfx_pos, block_end) {
             let Some((off, size)) = c.data else { continue };
             match c.info_name.as_deref() {
                 Some("Transform") => {
-                    transforms.extend(parse_transform_records(layers_static_block, off, size));
+                    for (k, pos, quat) in parse_transform_records(layers_static_block, off, size) {
+                        transforms.push((si as u16, k, pos, quat));
+                    }
                 }
                 Some("Name") => {
                     for (k, n) in parse_name_records(layers_static_block, off, size) {
@@ -365,17 +373,18 @@ pub fn load_placements(layers_static_block: &[u8]) -> Result<Vec<Placement>, Str
                 _ => {}
             }
         }
-
-        for (key, pos, quat) in transforms {
-            out.push(Placement {
-                key,
-                name: names.get(&key).cloned(),
-                pos,
-                quat,
-                sub_block: si as u16,
-            });
-        }
     }
+
+    let out: Vec<Placement> = transforms
+        .into_iter()
+        .map(|(sub_block, key, pos, quat)| Placement {
+            key,
+            name: names.get(&key).cloned(),
+            pos,
+            quat,
+            sub_block,
+        })
+        .collect();
 
     if out.is_empty() {
         return Err("no Transform COMP records found in layers_static".into());

@@ -397,6 +397,59 @@ fn main() {
                 Ok(())
             })());
         }
+        "dump-block" => {
+            let bi = first_positional(&args).and_then(|s| s.parse::<u16>().ok()).unwrap_or_else(|| {
+                eprintln!("dump-block: usage: mercs2_probe dump-block <block-index> <out.bin>");
+                std::process::exit(2);
+            });
+            let out = args.iter().rev().find(|a| a.ends_with(".bin")).cloned().unwrap_or_else(|| format!("block_{bi}.bin"));
+            run((|| -> Result<(), String> {
+                let mut w = wad::open(&wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
+                let dec = wad::decompress_block_index(&mut w, bi).map_err(|e| format!("block {bi}: {e}"))?;
+                std::fs::write(&out, &dec).map_err(|e| format!("write {out}: {e}"))?;
+                println!("block {bi}: {} bytes decompressed -> {out}", dec.len());
+                Ok(())
+            })());
+        }
+        "find-placement" => {
+            let query = first_positional(&args).unwrap_or_default().to_lowercase();
+            run((|| -> Result<(), String> {
+                if query.is_empty() {
+                    return Err("usage: mercs2_probe find-placement <name-substring>".into());
+                }
+                let mut w = wad::open(&wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
+                let (mut scanned, mut hits, mut miss) = (0usize, 0usize, 0u32);
+                for bi in 0u16..6000 {
+                    match wad::decompress_block_index(&mut w, bi) {
+                        Ok(dec) => {
+                            miss = 0;
+                            scanned += 1;
+                            if let Ok(ps) = mercs2_formats::placement::load_placements(&dec) {
+                                for p in ps {
+                                    if let Some(n) = &p.name {
+                                        if n.to_lowercase().contains(&query) {
+                                            println!(
+                                                "block {bi:>5}  key=0x{:08X}  pos=[{:9.2},{:9.2},{:9.2}]  '{}'",
+                                                p.key, p.pos[0], p.pos[1], p.pos[2], n
+                                            );
+                                            hits += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            miss += 1;
+                            if miss > 96 && scanned > 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                eprintln!("[find-placement] scanned {scanned} blocks, {hits} match '{query}'");
+                Ok(())
+            })());
+        }
         "hier" => {
             let mh = model.as_deref().and_then(parse_hash).unwrap_or_else(|| {
                 eprintln!("hier: usage: mercs2_probe hier --model 0xHASH [names.txt]");

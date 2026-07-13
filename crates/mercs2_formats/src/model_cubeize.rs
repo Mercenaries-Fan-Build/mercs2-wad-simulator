@@ -235,6 +235,76 @@ pub struct SegRec {
 
 /// Parse the `SEGM` chunk into records `{u16 bone@0, u8 seg_id@2, u8 state_mask@3}` (4 bytes each).
 /// The k-th top-level `SKIN`/`MESH` sub-object under `GEOM` binds to record `k` (seg_id == k).
+/// The model container's top-level header — the 72-byte `INFO` leaf that is descriptor row 0, read
+/// into the runtime model-resource struct at load. These are the fields the LOD selector
+/// (`FUN_00470740`) reads as `M+0x7c` (LOD count), `M+0x84` (distance scale), etc.
+///
+/// Field offsets VERIFIED across 600 catalog models: `+0x20` == HIER node count (600/600), `+0x34`
+/// == the number of distinct SEGM LOD-mask bits the model carries (600/600). `+0x04`/`+0x10` are the
+/// model-space AABB; `+0x38` is a per-model LOD reference distance (10000 ≈ "never LOD out" for most
+/// props, 30 for close props, 20 for vehicles, 10 for characters).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelHeader {
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
+    /// HIER node count (`+0x20`, == `M`'s node count).
+    pub node_count: u32,
+    /// Number of LOD levels (`+0x34`) — the runtime maxLOD (`M+0x7c`); equals the count of distinct
+    /// SEGM state-mask bits. Selecting a rung `n` beyond `node_count-1`… — see `render_state`.
+    pub lod_count: u32,
+    /// LOD reference distance (`+0x38`) feeding the distance→rung selector.
+    pub lod_distance: f32,
+}
+
+/// Parse the top-level model [`ModelHeader`] (descriptor row 0, tag `INFO`, ≥ 0x3c bytes). Returns
+/// `None` for containers without it (imports, synthetic models).
+/// The raw bytes of the model header (descriptor row 0's `INFO` leaf) — the same leaf
+/// [`parse_model_header`] reads. Exposed for field hunting: the runtime's `minLOD` (`M+0x80`, which
+/// clamps the LOD rung alongside `maxLOD` at `M+0x7c`) has no known on-disk source yet.
+pub fn model_header_bytes(container: &[u8]) -> Option<&[u8]> {
+    if container.len() < 40 || &container[0..4] != b"UCFX" || &container[20..24] != b"INFO" {
+        return None;
+    }
+    let data_off = read_u32_le(container, 4) as usize;
+    let u0 = read_u32_le(container, 24);
+    if u0 == 0xFFFF_FFFF {
+        return None;
+    }
+    let off = data_off + u0 as usize;
+    let size = read_u32_le(container, 28) as usize;
+    (off + size <= container.len()).then(|| &container[off..off + size])
+}
+
+pub fn parse_model_header(container: &[u8]) -> Option<ModelHeader> {
+    if container.len() < 40 || &container[0..4] != b"UCFX" {
+        return None;
+    }
+    let data_off = read_u32_le(container, 4) as usize;
+    // Row 0 only: the model header is authored first. (Per-group INFO leaves are 60 bytes and live
+    // deeper; the model header is ≥ 0x40 and sits at the very front.)
+    if &container[20..24] != b"INFO" {
+        return None;
+    }
+    let u0 = read_u32_le(container, 24);
+    if u0 == 0xFFFF_FFFF {
+        return None;
+    }
+    let off = data_off + u0 as usize;
+    let size = read_u32_le(container, 28) as usize;
+    if size < 0x3c || off + 0x3c > container.len() {
+        return None;
+    }
+    let f = |o: usize| read_f32_le(container, off + o);
+    let u = |o: usize| read_u32_le(container, off + o);
+    Some(ModelHeader {
+        aabb_min: [f(0x04), f(0x08), f(0x0c)],
+        aabb_max: [f(0x10), f(0x14), f(0x18)],
+        node_count: u(0x20),
+        lod_count: u(0x34),
+        lod_distance: f(0x38),
+    })
+}
+
 pub fn parse_segm(container: &[u8]) -> Vec<SegRec> {
     if container.len() < 20 || &container[0..4] != b"UCFX" {
         return Vec::new();
@@ -272,13 +342,18 @@ pub fn parse_segm(container: &[u8]) -> Vec<SegRec> {
 pub struct ModelMesh {
     /// The PRMG group ordinal this mesh came from (for material/segment lookup by group).
     pub group_index: usize,
-    /// Ordinal of the parent top-level `SKIN`/`MESH` sub-object under `GEOM` (== SEGM record index).
+    /// Ordinal of the parent top-level `SKIN`/`MESH` sub-object under `GEOM`. NOTE: this is *not* the
+    /// SEGM record index — see [`ModelMesh::seg_id`].
     pub sub_object: usize,
+    /// `INDX[group]` — the **seg_id**: this mesh's index into the `SEGM` record array. The record it
+    /// names supplies `bone` (mount) and `state_mask` (LOD tier).
+    pub seg_id: usize,
     /// True if the parent sub-object is `MESH` (rigid accessory in bone-local space); false = `SKIN`.
     pub rigid: bool,
-    /// Attachment bone (HIER index) from `SEGM[sub_object]`. 0 = root for skinned body.
+    /// Attachment bone (HIER node index) from `SEGM[INDX[group]]` — the mesh's real mount (e.g. a
+    /// tank barrel's node at turret height). Rigid meshes are authored in this node's local space.
     pub bone: u16,
-    /// LOD/state bitmask from `SEGM[sub_object]` (1/2/4/8 tiers; 0x0F = all).
+    /// LOD tier bitmask from `SEGM[INDX[group]]`.
     pub state_mask: u8,
     pub positions: Vec<[f32; 3]>,
     /// TEXCOORD0 per vertex (decl usage 5, FLOAT16_2). Empty if the group has no UVs.
@@ -318,6 +393,24 @@ pub struct SubMesh {
 /// Map each PRMG-marker row to its parent top-level sub-object: `(ordinal k, is_rigid)`. Walks
 /// GEOM's direct children (each marker consumes `1 + x3` rows); the k-th `SKIN`/`MESH` child is
 /// sub-object k → `SEGM` record k. See docs/modernization/accessory_bone_binding_A.md (double-blind).
+/// Number of top-level `MESH`/`SKIN` sub-objects under `GEOM` — the ordinal space `INDX` is keyed by.
+/// `INDX.len()` equals this in every container in the game (Mattias: 24 = 7 MESH + 17 SKIN), never
+/// the PRMG-group count, which is larger because a sub-object can own several drawing groups.
+pub fn sub_object_count(container: &[u8]) -> usize {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return 0;
+    }
+    let n_desc = read_u32_le(container, 16) as usize;
+    if n_desc > container.len().saturating_sub(20) / 20 {
+        return 0;
+    }
+    map_prmg_subobjects(container, n_desc)
+        .values()
+        .map(|(k, _)| *k + 1)
+        .max()
+        .unwrap_or(0)
+}
+
 fn map_prmg_subobjects(
     container: &[u8],
     n_desc: usize,
@@ -405,6 +498,17 @@ pub fn prmg_geom_offsets(container: &[u8]) -> Vec<[f32; 3]> {
 /// index count at `ibuf_info+0`). The strip is de-stripped to a triangle list (winding-aware).
 /// This is the 1d path: solid surfaces instead of a point cloud.
 pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
+    read_model_meshes_segm(container, None)
+}
+
+/// As [`read_model_meshes`], but binding `INDX` against a SEGM table from ANOTHER container — the
+/// resident LOD block. A model's finer rungs are geometry-only blocks with no SEGM of their own;
+/// their `INDX` rows name records in the resident block's table. Pass `None` for a self-contained
+/// container (the resident rung, or a character, which has no chain).
+pub fn read_model_meshes_segm(
+    container: &[u8],
+    segm_override: Option<&[SegRec]>,
+) -> Result<Vec<ModelMesh>, String> {
     if container.len() < 20 || &container[0..4] != b"UCFX" {
         return Err("not a UCFX container".into());
     }
@@ -436,14 +540,46 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         .filter(|&i| tag(i) == b"PRMG" && u0(i) == 0xFFFF_FFFF)
         .collect();
 
-    // Sub-object → bone/LOD binding (SEGM + GEOM tree walk).
+    // Group → segment binding. `INDX[group]` is a **seg_id** — an index into the SEGM record array —
+    // NOT a HIER node index, and NOT the sub-object ordinal.
+    //
+    // We used to read `SEGM[sub_object]`, which is wrong: a model has FAR more SEGM records than
+    // sub-objects (the tank: 130 records, 12 sub-objects — several segments per node, one per LOD
+    // tier). Reading record `i` for mesh `i` therefore picked unrelated records, giving every mesh
+    // the wrong attachment node AND the wrong LOD mask. Symptom: rigid parts authored in mount-local
+    // space (a tank's barrel) resolved to a node at the origin and rendered lying on the ground,
+    // detached from the turret — while the merged single-mesh LOD, needing no assembly, looked fine.
+    //
+    // Verified on `ch_veh_tank_ztz98` against an independent witness (the HIER node whose OWN bbox
+    // matches the mesh): `SEGM[INDX[group]]` agrees on every mesh, and the barrels lift from y≈0 to
+    // y≈1.7 — turret height. See `mercs2_probe --bin segfix_probe`.
     let subobj = map_prmg_subobjects(container, n_desc);
-    let segm = parse_segm(container);
+    // A model's LOD rungs are separate blocks: the RESIDENT one ships HIER/SEGM/MTRL/state-machine,
+    // the finer ones ship only geometry + their own INDX. So a fine rung's INDX indexes the resident
+    // block's SEGM — that table is the master segment array for the whole chain (the tank's 130
+    // records serve 12 + 35 + 63 groups). `segm_override` supplies it; without one, a fine rung finds
+    // no SEGM of its own and every mesh would fall back to mask 0 / node 0.
+    let segm = match segm_override {
+        Some(s) => s.to_vec(),
+        None => parse_segm(container),
+    };
+    let indx = crate::orchestrator::parse_indx(container);
 
     let mut out = Vec::new();
     for (gi, &pr) in prmg.iter().enumerate() {
         let (sub_object, rigid) = subobj.get(&pr).copied().unwrap_or((0, false));
-        let seg = segm.get(sub_object).copied().unwrap_or_default();
+        // INDX is indexed by SUB-OBJECT ordinal, not by PRMG group. Its length is exactly the
+        // MESH+SKIN count in every container measured (elite 9/20/31 vs PRMG 10/21/32; ztz98
+        // 12/34/62 vs PRMG 12/35/63) — a sub-object can own several PRMG groups, so the two
+        // ordinals diverge. Keying on the group index shifted the seg_id for every group past the
+        // first divergence, handing meshes the wrong bone AND the wrong LOD mask: the amx30_elite
+        // flung its treads into the air at three of its four tiers.
+        let seg_id = indx.get(sub_object).copied().unwrap_or(sub_object);
+        let seg = segm
+            .get(seg_id)
+            .copied()
+            // No INDX row (imports / odd containers): fall back to the sub-object ordinal.
+            .unwrap_or_else(|| segm.get(sub_object).copied().unwrap_or_default());
         let nxt = prmg.get(gi + 1).copied().unwrap_or(n_desc);
         let (mut strm_info, mut strm_decl, mut strm_data) = (None, None, None);
         let (mut ibuf_info, mut ibuf_data, mut prmt) = (None, None, None);
@@ -606,6 +742,7 @@ pub fn read_model_meshes(container: &[u8]) -> Result<Vec<ModelMesh>, String> {
         out.push(ModelMesh {
             group_index: gi,
             sub_object,
+            seg_id,
             rigid,
             bone: seg.bone,
             state_mask: seg.state_mask,
@@ -1205,5 +1342,19 @@ mod tests {
                 assert!(!is.detail.contains("CSUM mismatch"), "CSUM: {}", is.detail);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    // Pure sanity of the header layout on a synthetic container is covered by the real-wad probe
+    // (mercs2_probe --bin gate_probe / the 600-model verification). Here we only guard the parse
+    // shape: a too-short or non-UCFX buffer yields None, never a panic.
+    use super::parse_model_header;
+
+    #[test]
+    fn header_parse_rejects_junk() {
+        assert!(parse_model_header(&[]).is_none());
+        assert!(parse_model_header(b"NOPExxxxxxxxxxxxxxxx").is_none());
     }
 }

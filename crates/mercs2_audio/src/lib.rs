@@ -38,6 +38,7 @@ pub mod sounddb;
 pub mod spatial;
 pub mod vo;
 pub mod voice;
+pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};
 pub use engine::{AudioEngine, SOUND_LIB_VERSION};
@@ -47,6 +48,7 @@ pub use sounddb::{CueEntry, SoundDb, SoundDbError, SOUNDDB_TAG};
 pub use spatial::{Listener, ListenerSet, MAX_LISTENERS};
 pub use vo::{VoManager, VoPriority};
 pub use voice::{InstanceState, Voice, VoiceId, VoicePool, VoiceRequest};
+pub use wave::{DecodedClip, Wavebank};
 
 #[cfg(test)]
 mod tests {
@@ -58,20 +60,18 @@ mod tests {
         let cues = vec![
             CueEntry {
                 guid: 0x0000_0001,
-                bank_id: 0,
+                bank_hash: 0,
                 wave_index: 0,
                 priority: 100,
                 category: 0,
                 flags: 0,
                 default_gain: 1.0,
-                // min/max distance are NOT part of the 16-byte sounddb record (they come from the
-                // wave descriptor at play time), so they stay 0 here and the round-trip is exact.
                 min_dist: 0.0,
                 max_dist: 0.0,
             },
             CueEntry {
                 guid: mercs2_formats::hash::pandemic_hash_m2("sfx_explosion"),
-                bank_id: 1,
+                bank_hash: 0,
                 wave_index: 3,
                 priority: 200,
                 category: 1,
@@ -105,21 +105,24 @@ mod tests {
             eprintln!("sounddb_parse_roundtrip_and_findcue: no real bank bundled — synthetic block");
         }
 
-        // Synthetic round-trip: build → serialize → parse must reproduce the DB.
-        let db = sample_db();
-        let bytes = db.to_bytes();
+        // Synthetic round-trip of the three on-disk routing fields (the play-time fields are not on
+        // disk — the exe reads them from the wave descriptor).
+        let routed = SoundDb::from_cues(
+            SOUNDDB_TAG,
+            vec![
+                CueEntry::routed(0x0000_0001, 0xBEEF, 0),
+                CueEntry::routed(0x00AA_BB01, 0xBEEF, 3),
+            ],
+        );
+        let bytes = routed.to_bytes();
         assert_eq!(bytes[0], SOUNDDB_TAG, "first byte is the 0x1D node tag");
-        let parsed = SoundDb::parse(&bytes).expect("parse synthesized block");
-        assert_eq!(parsed, db, "sounddb round-trips exactly");
+        assert_eq!(SoundDb::parse(&bytes).expect("parse synthesized block"), routed);
 
-        // FindCue: direct index path (id < 0x401).
-        let direct = parsed.find_cue(0).expect("cue index 0");
-        assert_eq!(direct.guid, 0x0000_0001);
-        // FindCue: hashed path (id >= 0x401) via the sorted GUID table.
-        let hashed = parsed
-            .find_cue_by_name("sfx_explosion")
-            .expect("hashed cue resolves");
-        assert_eq!(hashed.bank_id, 1);
+        // FindCue on the in-memory sample DB.
+        let db = sample_db();
+        assert_eq!(db.find_cue(0).expect("cue index 0").guid, 0x0000_0001); // direct index (< 0x401)
+        let hashed = db.find_cue_by_name("sfx_explosion").expect("hashed cue resolves"); // id >= 0x401
+        assert!(hashed.is_positional());
         assert_eq!(hashed.wave_index, 3);
 
         // A non-0x1D buffer is rejected.
@@ -280,6 +283,52 @@ mod tests {
         eng.unduck_master_volume(0.0);
         eng.tick(0.1);
         assert_eq!(eng.categories.master_volume(), 1.0, "restored when last ref released");
+    }
+
+    // ---- 6. a cue binds its resident wave and mixes to audible PCM (the last-mile wire) ----------
+
+    #[test]
+    fn cue_binds_resident_wave_and_mixes_audible() {
+        let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
+        let hash = 0x5FBA_3915u32; // >= 0x401 → resolves via the hashed FindCue path
+
+        // A resident, loud, constant mono clip under `hash` (as LoadWaveBank would leave it).
+        eng.add_wave(DecodedClip {
+            clip_hash: hash,
+            channels: 1,
+            sample_rate: 22050, // native rate ≠ mixer rate → exercises the resampler
+            samples: vec![8000i16; 6000],
+            streaming: false,
+        });
+        assert_eq!(eng.resident_wave_count(), 1);
+
+        // A sounddb whose single cue's guid == the clip hash (the one-shot-SFX fallback the cue path
+        // binds on when no bank routing resolves). No explicit source is passed — the engine must
+        // auto-bind the resident wave.
+        let cue = CueEntry::routed(hash, 0, 0);
+        eng.set_sounddb(SoundDb::from_cues(SOUNDDB_TAG, vec![cue]));
+
+        let id = eng.cue_sound(hash, None, None).expect("cue allocates a voice");
+        // Advance the voice FSM out of start/ready into Playing.
+        for _ in 0..8 {
+            eng.tick(0.02);
+        }
+        assert!(eng.pool.get(id).unwrap().state.is_audible(), "voice reached a playing state");
+
+        let buf = eng.render(2048);
+        assert!(
+            mixer::rms_i16(&buf) > 0.0,
+            "a cue's resident wave produced audible PCM through the real mixer path"
+        );
+
+        // A cue whose wave is NOT resident allocates a (silent) voice but binds no source — faithful to
+        // the exe allocating a voice before its wave streams in.
+        let other = 0x1234_5678u32;
+        eng.set_sounddb(SoundDb::from_cues(
+            SOUNDDB_TAG,
+            vec![CueEntry { guid: other, ..cue }],
+        ));
+        assert!(eng.cue_sound(other, None, None).is_some(), "still allocates a voice");
     }
 
     #[test]

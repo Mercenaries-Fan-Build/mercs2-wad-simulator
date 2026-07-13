@@ -13,6 +13,19 @@ pub struct RainbowTable {
 }
 
 impl RainbowTable {
+    /// Load and merge several rainbow-table files (later files add names for
+    /// hashes the earlier ones missed; existing entries are never overwritten).
+    pub fn load_many(paths: &[std::path::PathBuf]) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut merged = Self::default();
+        for p in paths {
+            let t = Self::load(p)?;
+            for (hash, names) in t.m2 {
+                merged.m2.entry(hash).or_insert(names);
+            }
+        }
+        Ok(merged)
+    }
+
     /// Load from a rainbow_table.json file.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let text = std::fs::read_to_string(path)?;
@@ -45,6 +58,12 @@ impl RainbowTable {
     /// Resolve a hash to the first (best) candidate name.
     pub fn resolve(&self, hash: u32) -> Option<&str> {
         self.m2.get(&hash).and_then(|v| v.first()).map(|s| s.as_str())
+    }
+
+    /// All candidate names for a hash (case variants / genuine collisions).
+    /// Empty slice when the hash is unresolved.
+    pub fn candidates(&self, hash: u32) -> &[String] {
+        self.m2.get(&hash).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Format a hash as "0x{hash:08X} (name)" or just "0x{hash:08X}" if unknown.

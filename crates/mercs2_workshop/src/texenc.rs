@@ -149,7 +149,7 @@ mod tests {
         }
         let td = encode_rgba(w, h, &rgba);
         assert_eq!(td.format, TexFormat::Bc1);
-        let back = crate::texpng::decode_bc(&td);
+        let (_, _, back) = crate::texpng::decode_bc(&td);
         for (a, b) in rgba.chunks_exact(4).zip(back.chunks_exact(4)) {
             assert!((a[0] as i32 - b[0] as i32).abs() <= 24, "{a:?} vs {b:?}");
             assert!((a[1] as i32 - b[1] as i32).abs() <= 24);
@@ -163,7 +163,7 @@ mod tests {
         let rgba = vec![128u8, 128, 128, 100, 128, 128, 128, 100, 128, 128, 128, 100, 128, 128, 128, 100];
         let td = encode_rgba(2, 2, &rgba);
         assert_eq!(td.format, TexFormat::Bc3);
-        let back = crate::texpng::decode_bc(&td);
+        let (_, _, back) = crate::texpng::decode_bc(&td);
         assert!((back[3] as i32 - 100).abs() <= 6);
     }
 }

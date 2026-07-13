@@ -48,6 +48,37 @@ pub struct ModelRef {
     pub model: u32,
 }
 
+/// The entity's health — mirrors the engine's native `RuntimeHealth` component (`{cur, max}` floats).
+/// The destruction system reads `fraction()` to drive each destructible node through its state graph
+/// (pristine → damaged/on-fire → wreck), exactly as the game drives it from damage messages against
+/// this component. `RuntimeNodeHealth` (per-node health, for parts that die independently) will hang
+/// off the destructible component when we model part-shedding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Health {
+    pub cur: f32,
+    pub max: f32,
+}
+
+impl Health {
+    pub fn full(max: f32) -> Self {
+        Health { cur: max, max }
+    }
+    /// 0.0 = destroyed, 1.0 = full. Clamped; a zero/negative max reads as destroyed.
+    pub fn fraction(&self) -> f32 {
+        if self.max <= 0.0 {
+            0.0
+        } else {
+            (self.cur / self.max).clamp(0.0, 1.0)
+        }
+    }
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Health::full(100.0)
+    }
+}
+
 /// Playback state for a bound animation clip. The animation system advances `time` each fixed
 /// tick and samples the clip into a [`SkinPalette`].
 #[derive(Clone, Copy, Debug, PartialEq)]

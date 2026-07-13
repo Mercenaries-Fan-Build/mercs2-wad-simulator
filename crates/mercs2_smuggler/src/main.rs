@@ -1,12 +1,14 @@
-//! cube_mod — custom-geometry / asset-override patch builder for Mercenaries 2 (PC).
+//! mercs2_smuggler — asset-injection / override patch builder for Mercenaries 2 (PC).
 //!
-//! Builds a `vz-patch.wad` overlay that overrides existing model (and texture)
-//! assets BY HASH (last-opened-wins). It sources each model from the block its
-//! ASET entry actually points to (so the HIER/structure the engine instantiates
-//! is preserved), then either:
+//! "Smuggles" new or replacement assets into the game by building a `vz-patch.wad`
+//! overlay that overrides existing model (and texture) assets BY HASH
+//! (last-opened-wins). It sources each model from the block its ASET entry actually
+//! points to (so the HIER/structure the engine instantiates is preserved), then
+//! either:
 //!   * `--inject-container <file>`: uses a pre-built model UCFX container (e.g. the
 //!     output of `tools/gltf_to_ucfx_model.py`), or
-//!   * default: cube-izes the model in place (`--shape corner|clamp`), or
+//!   * default: cube-izes the model in place (`--shape corner|clamp`) — the original
+//!     PoC mode, kept for plumbing bisection, or
 //!   * `--no-cubeize`: identity passthrough.
 //! `--inject-extra HASH:TYPEID:file` adds extra override blocks (e.g. a texture
 //! from `tools/dds_to_ucfx_texture.py`).
@@ -29,19 +31,44 @@ use mercs2_formats::ucfx::parse_block_entry_table;
 
 #[derive(Parser)]
 #[command(
-    name = "cube_mod",
-    about = "Build a vz-patch.wad overriding model/texture assets (cube-ize or inject custom containers)"
+    name = "smuggler",
+    about = "Smuggle assets into Mercenaries 2: build a vz-patch.wad overriding model/texture/script assets by hash (inject custom containers, or cube-ize)"
 )]
 struct Cli {
     /// Source vz.wad to read the target block(s) from.
     #[arg(long)]
     source_wad: PathBuf,
-    /// Output patch WAD path (typically <game>/data/vz-patch.wad).
+    /// Output patch WAD path (typically <game>/data/vz-patch.wad). Not needed with --dump-container.
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+    /// Extract the donor model container (raw UCFX bytes) to this file and exit. Reads the model
+    /// from --block-index[0] (or first --target-name match), resolving the ASET-primary source
+    /// block so HIER/MESH layout is preserved. Feed the result to the mesh converter as its donor.
+    #[arg(long)]
+    dump_container: Option<PathBuf>,
+
+    /// Dump the RAW DECOMPRESSED block bytes (every entry, not just a model container) for
+    /// --block-index, and exit. Some of a vehicle's LOD rungs are SUB-ENTRY models with no model
+    /// ASET row (the ztz98's `_P003_Q0` rung and its separate `resident2-..._tracks_*` chain), so
+    /// --dump-container cannot reach them at all — and leaving them alone leaves the DONOR's
+    /// geometry streaming in at close range. Pair with `--inject-block` to ship an edited copy.
+    #[arg(long)]
+    dump_block: Option<PathBuf>,
     /// Explicit block index(es) to target (repeatable). Overrides --target-name.
     #[arg(long)]
     block_index: Vec<usize>,
+    /// Honour --block-index VERBATIM: read/write the model container in exactly that block, with
+    /// NO redirect to the ASET-primary block.
+    ///
+    /// By default both --dump-container and --inject-container resolve the model's ASET-PRIMARY
+    /// block, which is right for a vehicle's RESIDENT rung but makes the rest of the chain
+    /// unreachable: a vehicle's geometry is spread over `_P000_Q3` (resident) -> `_P001_` ->
+    /// `_P002_`, and pointing at a finer rung just bounces you back to the resident. The finer
+    /// rungs are where a tank's animated tracks and its full-res materials live, and a model with
+    /// no primary ASET row (sub-entry only, e.g. the Mi-26) cannot be reached at all. Use this to
+    /// dump/override one specific rung. See docs/modernization/vehicle_model_spec.md §1.
+    #[arg(long)]
+    exact_block: bool,
     /// Comma-separated path substrings to auto-select when --block-index is absent.
     #[arg(long, default_value = "deliverycrate,crateaid")]
     target_name: String,
@@ -61,6 +88,16 @@ struct Cli {
     /// (repeatable). E.g. a texture: "0x21A2AFD1:27:heart.bin".
     #[arg(long)]
     inject_extra: Vec<String>,
+    /// Build ONLY the --inject-extra blocks (new-asset injection) — do NOT touch any donor block.
+    /// Use for from-scratch models/textures that override nothing existing.
+    #[arg(long)]
+    extra_only: bool,
+    /// Ship a raw DECOMPRESSED block override as "<path_substr>:<file>" (repeatable). Looks up the
+    /// block by path substring in the source WAD, carries its ASET entries + path, sges-compresses
+    /// the file, and overlays it. Use for content-additive block overrides (augmented layers_static
+    /// placements, edited resident-script blocks). Compose with --extra-only.
+    #[arg(long)]
+    inject_block: Vec<String>,
     #[arg(short, long)]
     verbose: bool,
 }
@@ -107,6 +144,7 @@ fn build_block(
     shape: CubeShape,
     inject: Option<&[u8]>,
     verbose: bool,
+    exact: bool,
 ) -> Result<Option<Built>, String> {
     let probe = decompress_block(file, &archive.indx, block_index as u16)
         .map_err(|e| format!("decompress block {block_index}: {e}"))?;
@@ -115,13 +153,18 @@ fn build_block(
         None => return Ok(None),
     };
 
-    // Source from the block the engine instantiates (ASET primary block_index).
-    let src_block_index = archive
-        .aset
-        .iter()
-        .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
-        .map(|e| e.block_index() as usize)
-        .unwrap_or(block_index);
+    // Source from the block the engine instantiates (ASET primary block_index) — unless the caller
+    // asked for this EXACT block (--exact-block), which is how the finer LOD rungs are reached.
+    let src_block_index = if exact {
+        block_index
+    } else {
+        archive
+            .aset
+            .iter()
+            .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
+            .map(|e| e.block_index() as usize)
+            .unwrap_or(block_index)
+    };
 
     let (src_bytes, from_index) = if src_block_index != block_index {
         let b = decompress_block(file, &archive.indx, src_block_index as u16)
@@ -224,6 +267,41 @@ fn build_extra(spec: &str) -> Result<PatchBlock, String> {
     Ok(pb)
 }
 
+/// Ship a raw decompressed block override "<path_substr>:<file>": look the source block up by path
+/// substring, carry its ASET entries + path, sges-compress the file, overlay it (content-additive).
+fn build_inject_block(archive: &FfcsArchive, spec: &str) -> Result<PatchBlock, String> {
+    let (needle, path) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("--inject-block '{spec}' must be <path_substr>:<file>"))?;
+    let ln = needle.to_lowercase();
+    let idx = archive
+        .paths
+        .iter()
+        .position(|p| p.to_lowercase().contains(&ln))
+        .ok_or_else(|| format!("no block path contains '{needle}'"))?;
+    let decompressed = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    let aset: Vec<AsetEntry> = archive
+        .aset
+        .iter()
+        .filter(|e| e.block_index() as usize == idx)
+        .map(|e| AsetEntry::new(e.asset_hash, e.secondary_ref, e.sub_entry() as u32, e.type_id))
+        .collect();
+    if aset.is_empty() {
+        return Err(format!("block {idx} ({}) has no ASET entries", archive.paths[idx]));
+    }
+    let compressed = compress_sges(&decompressed).map_err(|e| format!("sges: {e}"))?;
+    let pages = ((decompressed.len() + 0x7FFF) / 0x8000) as u32;
+    let mut pb = PatchBlock::new(compressed, archive.paths[idx].clone(), aset);
+    pb.packed_field = pages;
+    println!(
+        "  inject-block: [{idx}] {} ({} decompressed bytes, {} ASET entries)",
+        archive.paths[idx],
+        decompressed.len(),
+        pb.aset_entries.len()
+    );
+    Ok(pb)
+}
+
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     debug_assert_eq!(pandemic_hash_m2("model"), MODEL_TYPE_HASH);
@@ -276,18 +354,82 @@ fn run() -> Result<(), String> {
             .map(|(i, _)| i)
             .collect()
     };
-    if indices.is_empty() {
+    if indices.is_empty() && !cli.extra_only {
         return Err(format!("no blocks matched {needles:?} (try --list)"));
     }
+
+    // --dump-block: the RAW DECOMPRESSED block, regardless of whether it holds a primary model.
+    if let Some(dump_path) = &cli.dump_block {
+        let idx = indices[0];
+        if idx >= archive.indx.len() {
+            return Err(format!("block_index {idx} >= INDX count {}", archive.indx.len()));
+        }
+        let raw = decompress_block(&mut file, &archive.indx, idx as u16)
+            .map_err(|e| format!("decompress block {idx}: {e}"))?;
+        std::fs::write(dump_path, &raw).map_err(|e| format!("write {}: {e}", dump_path.display()))?;
+        let (count, _) = parse_block_entry_table(&raw);
+        println!(
+            "Dumped RAW block {idx} ({} bytes, {count} entries) -> {}",
+            raw.len(),
+            dump_path.display()
+        );
+        return Ok(());
+    }
+
+    // --dump-container: extract the donor model's raw UCFX bytes (ASET-primary source) and exit.
+    if let Some(dump_path) = &cli.dump_container {
+        let idx = indices[0];
+        if idx >= archive.indx.len() {
+            return Err(format!("block_index {idx} >= INDX count {}", archive.indx.len()));
+        }
+        let probe = decompress_block(&mut file, &archive.indx, idx as u16)
+            .map_err(|e| format!("decompress block {idx}: {e}"))?;
+        let model_name = find_model(&probe, None)
+            .map(|(_, _, name, _, _)| name)
+            .ok_or_else(|| format!("block {idx} contains no model container"))?;
+        let src_block_index = if cli.exact_block {
+            idx
+        } else {
+            archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == model_name && e.type_id == MODEL_ASET_TYPE_ID)
+                .map(|e| e.block_index() as usize)
+                .unwrap_or(idx)
+        };
+        let src_bytes = if src_block_index != idx {
+            decompress_block(&mut file, &archive.indx, src_block_index as u16)
+                .map_err(|e| format!("decompress ASET block {src_block_index}: {e}"))?
+        } else {
+            probe
+        };
+        let (mstart, mend, name, _ty, _fc) = find_model(&src_bytes, Some(model_name))
+            .ok_or_else(|| format!("model 0x{model_name:08X} not in source block {src_block_index}"))?;
+        std::fs::write(dump_path, &src_bytes[mstart..mend])
+            .map_err(|e| format!("write {}: {e}", dump_path.display()))?;
+        println!(
+            "Dumped donor container 0x{name:08X} from block {src_block_index} ({} bytes) -> {}",
+            mend - mstart,
+            dump_path.display()
+        );
+        return Ok(());
+    }
+
+    let output = cli
+        .output
+        .clone()
+        .ok_or_else(|| "--output is required (unless --dump-container)".to_string())?;
 
     let mut blocks: Vec<PatchBlock> = Vec::new();
     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut skipped_no_model = 0usize;
-    for &idx in &indices {
+    // --extra-only: skip every donor-override; build ONLY the --inject-extra new assets.
+    let override_indices: &[usize] = if cli.extra_only { &[] } else { &indices };
+    for &idx in override_indices {
         if idx >= archive.indx.len() {
             return Err(format!("block_index {idx} >= INDX count {}", archive.indx.len()));
         }
-        match build_block(&mut file, &archive, idx, cli.no_cubeize, shape, inject_bytes.as_deref(), cli.verbose)? {
+        match build_block(&mut file, &archive, idx, cli.no_cubeize, shape, inject_bytes.as_deref(), cli.verbose, cli.exact_block)? {
             Some(b) => {
                 if seen.insert(b.model_hash) {
                     blocks.push(b.block);
@@ -298,6 +440,9 @@ fn run() -> Result<(), String> {
     }
     for spec in &cli.inject_extra {
         blocks.push(build_extra(spec)?);
+    }
+    for spec in &cli.inject_block {
+        blocks.push(build_inject_block(&archive, spec)?);
     }
     if blocks.is_empty() {
         return Err("no model-bearing blocks among the targets".into());
@@ -317,13 +462,13 @@ fn run() -> Result<(), String> {
     let csum_meta = find_chunk(&archive.chunks, b"CSUM").map(|r| r.meta);
 
     let wad = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB);
-    if let Some(parent) = cli.output.parent() {
+    if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    std::fs::write(&cli.output, &wad).map_err(|e| format!("write: {e}"))?;
+    std::fs::write(&output, &wad).map_err(|e| format!("write: {e}"))?;
     println!(
         "Wrote {} ({} bytes / {:.2} MB, {} blocks)",
-        cli.output.display(),
+        output.display(),
         wad.len(),
         wad.len() as f64 / 1024.0 / 1024.0,
         blocks.len()
@@ -335,7 +480,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("cube_mod error: {e}");
+            eprintln!("smuggler error: {e}");
             ExitCode::FAILURE
         }
     }

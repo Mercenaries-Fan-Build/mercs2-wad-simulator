@@ -9,9 +9,9 @@ use std::f32::consts::PI;
 
 use mercs2_core::glam::{Quat, Vec3};
 use mercs2_core::{AnimState, Entity, Transform, World};
-use mercs2_engine::worldutil::HeightMap;
+use crate::worldutil::HeightMap;
 
-use crate::collision;
+use crate::physics::soup as collision;
 
 /// Player locomotion clip hashes (the per-merc idle is resolved at load; the FSM switches between
 /// these walk/run and the resolved idle).

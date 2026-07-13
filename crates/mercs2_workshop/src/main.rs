@@ -17,6 +17,7 @@
 //!   wad is auto-loaded, exactly as the retail exe does; `--no-auto-patch` disables that.
 
 mod app;
+mod bundle;
 mod gui;
 mod import;
 mod index;
@@ -93,6 +94,34 @@ fn main() {
         return;
     }
 
+    // Headless: the Model Workbench vehicle inventory — models grouped by class (helicopter,
+    // tank, car, boat, …). `--inventory [class]` filters to one class.
+    if let Some(i) = args.iter().position(|a| a == "--inventory") {
+        let want = args.get(i + 1).filter(|s| !s.starts_with("--")).map(|s| s.to_ascii_lowercase());
+        let stack = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
+            std::collections::BTreeMap::new();
+        for r in &idx.models {
+            if let Some(c) = r.vehicle_class() {
+                if want.as_deref().is_none_or(|w| w == c) {
+                    by_class.entry(c).or_default().push(r);
+                }
+            }
+        }
+        for (class, mut rows) in by_class {
+            rows.sort_by(|a, b| a.label().cmp(&b.label()));
+            println!("\n== {class} ({}) ==", rows.len());
+            for r in rows {
+                println!("  0x{:08X}{}  {}", r.hash, stack.tag(r.src), r.label());
+            }
+        }
+        return;
+    }
+
     // Headless: publish a NOVEL new-hash model asset (the GUI Mod-project flow, scriptable).
     // --mod-new <name> <donor name|0xHASH> <mesh.obj|.gltf|.glb> [--mod-group N] [--mod-out path]
     if let Some(i) = args.iter().position(|a| a == "--mod-new") {
@@ -132,6 +161,7 @@ fn main() {
             donor,
             donor_label: donor_arg.clone(),
             target_group: group,
+            flip: false,
             mesh,
         };
         let mut paths = vec![wadpath.clone()];
@@ -163,6 +193,48 @@ fn main() {
             Ok(dir) => println!("exported {arg} -> {dir}"),
             Err(e) => eprintln!("--export {arg}: {e}"),
         }
+        return;
+    }
+
+    // Headless: LOSSLESS export bundle(s) — editable glTF + PNG skins + the ORIGINAL container
+    // bytes of every LOD rung + a reassembly manifest. `--export-bundle <name|0xHASH|class:heli>`.
+    // Nothing is discarded: chunks we cannot yet decode survive byte-exact in raw/.
+    if let Some(i) = args.iter().position(|a| a == "--export-bundle") {
+        let arg = args.get(i + 1).cloned().unwrap_or_default();
+        let outroot = std::path::PathBuf::from(
+            args.iter().position(|a| a == "--out").and_then(|j| args.get(j + 1)).cloned()
+                .unwrap_or_else(|| "workshop_export".into()),
+        );
+        let stack = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        // A whole vehicle class ("class:helicopter") or a single asset.
+        let targets: Vec<(u32, String)> = if let Some(cls) = arg.strip_prefix("class:") {
+            idx.models.iter()
+                .filter(|r| r.vehicle_class() == Some(cls))
+                .map(|r| (r.hash, r.label()))
+                .collect()
+        } else {
+            let h = arg.strip_prefix("0x").and_then(|x| u32::from_str_radix(x, 16).ok())
+                .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&arg));
+            let label = idx.names.get(&h).cloned().unwrap_or_else(|| arg.clone());
+            vec![(h, label)]
+        };
+        if targets.is_empty() {
+            return eprintln!("--export-bundle: nothing matched '{arg}'");
+        }
+        drop(stack);
+        let (mut ok, mut fail) = (0, 0);
+        for (h, label) in &targets {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot) {
+                Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
+                Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
+            }
+        }
+        println!("
+exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         return;
     }
 
@@ -381,9 +453,11 @@ fn main() {
         };
         match wad::tex_from_block(&mut w, blk, hash) {
             Some(td) => {
-                let rgba = texpng::decode_bc(&td);
-                match texpng::write_png(out, td.width, td.height, &rgba) {
-                    Ok(()) => println!("blk {blk} 0x{hash:08X}: {}x{} {:?} -> {out}", td.width, td.height, td.format),
+                // Decoded dims, not declared: one block holds one mip level, so the surface here is
+                // usually coarser than the texture's full size.
+                let (pw, ph, rgba) = texpng::decode_bc(&td);
+                match texpng::write_png(out, pw, ph, &rgba) {
+                    Ok(()) => println!("blk {blk} 0x{hash:08X}: {pw}x{ph} of {}x{} {:?} -> {out}", td.width, td.height, td.format),
                     Err(e) => eprintln!("--tex-png-block: PNG write failed: {e}"),
                 }
             }
@@ -405,11 +479,13 @@ fn main() {
             Ok(w) => w,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        match wad::extract_texture(&mut w, hash) {
+        // Full mip chain assembled from the finer LOD blocks, falling back to the resident tail —
+        // a texture dump should hand back the real image, not the coarse residency budget.
+        match wad::extract_texture_hires(&mut w, hash).or_else(|_| wad::extract_texture(&mut w, hash)) {
             Ok(td) => {
-                let rgba = texpng::decode_bc(&td);
-                match texpng::write_png(out, td.width, td.height, &rgba) {
-                    Ok(()) => println!("0x{hash:08X}: {}x{} {:?} -> {out}", td.width, td.height, td.format),
+                let (pw, ph, rgba) = texpng::decode_bc(&td);
+                match texpng::write_png(out, pw, ph, &rgba) {
+                    Ok(()) => println!("0x{hash:08X}: {pw}x{ph} of {}x{} {:?} -> {out}", td.width, td.height, td.format),
                     Err(e) => eprintln!("--tex-png: PNG write failed: {e}"),
                 }
             }
@@ -433,22 +509,32 @@ fn main() {
             Ok(c) => c,
             Err(e) => return eprintln!("--check '{arg}' (0x{hash:08X}): {e}"),
         };
-        match mesh::build_indexed_from_container(&container) {
-            Ok((verts, indices, draws, stats)) => {
-                let mut tex_ok = 0usize;
+        // What resolving ONE model cost the asset layer: the owning block went resident and every
+        // chunk it carries (sibling models, the resident texture tail, the scrub) is now registered.
+        // `shadowed` counts chunks a later block re-declared and lost to the first-wins insert rule.
+        let rs = w.registry.stats();
+        println!(
+            "asset layer: {} resident block(s), {} chunk(s) registered, {} shadowed, {} evicted",
+            rs.resident_blocks, rs.registered_chunks, rs.shadowed_total, rs.evicted_total
+        );
+        // Load through the SAME path the preview and the exporter use: the full LOD-block chain.
+        // `build_indexed_from_container` reads only the resident block, so for any model whose near
+        // geometry lives in a finer rung it found nothing and reported "no placed drawing groups" —
+        // a false failure. `civ_hum_beachfemale_a` is the case in point: its resident container holds
+        // only mask-0x08 (far) geometry, and `Model::load` assembles 2 rungs / 15 draws just fine.
+        match app::load_model_data(&mut w, hash) {
+            Ok(md) => {
+                let (verts, indices, draws, stats) = (&md.verts, &md.indices, &md.draws, &md.stats);
                 let mut tex_all = std::collections::HashSet::new();
-                for d in &draws {
+                for d in draws {
                     for h in [d.diffuse, d.normal, d.specular].into_iter().flatten() {
-                        if tex_all.insert(h) && w.texture_resident(h).is_ok() {
-                            tex_ok += 1;
-                        }
+                        tex_all.insert(h);
                     }
                 }
-                let tiers: Vec<String> = mesh::state_tiers(&container)
-                    .iter()
-                    .map(|b| format!("0x{b:02X}"))
-                    .collect();
-                let skin = stats.skin_data();
+                // `load_model_data` already resolved every slot at full resolution.
+                let tex_ok = md.textures.len();
+                let tiers: Vec<String> = md.tiers.iter().map(|b| format!("0x{b:02X}")).collect();
+                let skin = &md.skin;
                 let clips = w.clips_for_model(&skin.rig);
                 println!(
                     "0x{hash:08X}: {} verts, {} tris, {} draw groups, {} bones, {} clips, {tex_ok}/{} textures, tiers [{}], bbox {:?}..{:?}",

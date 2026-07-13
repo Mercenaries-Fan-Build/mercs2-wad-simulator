@@ -15,7 +15,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mercs2_audio::AudioEngine;
+use crate::audio::AudioEngine;
 use mercs2_core::glam::{Quat, Vec3};
 use mercs2_core::{Entity, Transform, World};
 
@@ -36,33 +36,33 @@ pub struct GameRuntime {
     /// runs each fixed step over the world (idle until AI entities carry perception components, the
     /// same data-driven way the vehicle/combat systems idle). The `Ai.*` Lua surface drives the same
     /// relation matrix once the persistent mission-Lua host shares this in.
-    pub ai: mercs2_ai::AiWorld,
+    pub ai: crate::ai::AiWorld,
     /// The water mechanism (static watermap + swim FSM). `tick` advances every `Swimmer` against the
     /// watermap; idle until a watermap is loaded. Buoyancy is applied by the physics side.
-    pub water: mercs2_water::WaterWorld,
+    pub water: crate::water_sim::WaterWorld,
     /// The decal mechanism (decaltable + bounded instance pool). `tick` ages the pool and GCs expired
     /// decals; idle until decals are spawned. The render seam draws `decal.iter_live()`.
-    pub decal: mercs2_decal::DecalWorld,
+    pub decal: crate::decal::DecalWorld,
     /// The population mechanism (PgSysPopulation spawners + density + death). Ticked via
     /// [`tick_population`](Self::tick_population) (it needs the camera anchor for the death gate); its
     /// emitted `SpawnRequest`s are realized through the same [`SpawnResolver`] as script spawns.
-    pub population: mercs2_population::PopulationWorld,
+    pub population: crate::population::PopulationWorld,
     /// Monotonic runtime GUID source for population-spawned actors (distinct high space so they don't
     /// collide with script-spawned handles).
     next_pop_handle: u32,
     /// Combat impacts this step, stashed after their decals are spawned so the render layer can emit a
     /// matching particle burst (muzzle/impact/explosion FX live on the `Scene`, outside this bundle).
     /// Drained by [`take_render_impacts`](Self::take_render_impacts).
-    render_impacts: Vec<mercs2_combat::Impact>,
+    render_impacts: Vec<crate::combat::Impact>,
 }
 
-/// Map a combat [`ImpactKind`](mercs2_combat::ImpactKind) to the decal it leaves — the three
+/// Map a combat [`ImpactKind`](crate::combat::ImpactKind) to the decal it leaves — the three
 /// combat-produced `decaltable` categories.
-fn impact_decal_type(kind: mercs2_combat::ImpactKind) -> mercs2_decal::DecalType {
+fn impact_decal_type(kind: crate::combat::ImpactKind) -> crate::decal::DecalType {
     match kind {
-        mercs2_combat::ImpactKind::Bullet => mercs2_decal::DecalType::BulletHole,
-        mercs2_combat::ImpactKind::Explosion => mercs2_decal::DecalType::Scorch,
-        mercs2_combat::ImpactKind::Blood => mercs2_decal::DecalType::Blood,
+        crate::combat::ImpactKind::Bullet => crate::decal::DecalType::BulletHole,
+        crate::combat::ImpactKind::Explosion => crate::decal::DecalType::Scorch,
+        crate::combat::ImpactKind::Blood => crate::decal::DecalType::Blood,
     }
 }
 
@@ -81,10 +81,10 @@ impl GameRuntime {
         GameRuntime {
             gameplay: GameplaySystems::new(audio),
             resolver: SpawnResolver::new(),
-            ai: mercs2_ai::AiWorld::new(),
-            water: mercs2_water::WaterWorld::new(),
-            decal: mercs2_decal::DecalWorld::new(),
-            population: mercs2_population::PopulationWorld::new(),
+            ai: crate::ai::AiWorld::new(),
+            water: crate::water_sim::WaterWorld::new(),
+            decal: crate::decal::DecalWorld::new(),
+            population: crate::population::PopulationWorld::new(),
             next_pop_handle: 0x2000_0000,
             render_impacts: Vec::new(),
         }
@@ -98,7 +98,7 @@ impl GameRuntime {
 
     /// Hand the fleet physics the terrain heightfield (open-ground raycasts). See
     /// [`GameplaySystems::set_heightmap`].
-    pub fn set_heightmap(&mut self, heightmap: Option<mercs2_physics::Heightmap>) {
+    pub fn set_heightmap(&mut self, heightmap: Option<crate::physics::Heightmap>) {
         self.gameplay.set_heightmap(heightmap);
     }
 
@@ -143,14 +143,14 @@ impl GameRuntime {
     /// Register a hit produced outside the ECS combat tick — the local hero firing their weapon (the
     /// player is a controller, not a `RuntimeWeapon` ECS entity). Spawns the impact's decal and stashes
     /// it for the particle burst, exactly as [`tick`](Self::tick) handles the combat-system impacts.
-    pub fn push_impact(&mut self, imp: mercs2_combat::Impact) {
+    pub fn push_impact(&mut self, imp: crate::combat::Impact) {
         self.decal.spawn(impact_decal_type(imp.kind), imp.position, imp.normal, perp(imp.normal));
         self.render_impacts.push(imp);
     }
 
     /// Drain the combat impacts recorded this frame so the render layer can emit a particle burst at
     /// each (the FX sink lives on the `Scene`). Drain-then-clear.
-    pub fn take_render_impacts(&mut self) -> Vec<mercs2_combat::Impact> {
+    pub fn take_render_impacts(&mut self) -> Vec<crate::combat::Impact> {
         std::mem::take(&mut self.render_impacts)
     }
 
@@ -180,7 +180,7 @@ impl GameRuntime {
 mod tests {
     use super::*;
     use crate::spawn::Archetype;
-    use mercs2_vehicle::components::{Vehicle, VehicleClass, VehicleControls};
+    use crate::vehicle::components::{Vehicle, VehicleClass, VehicleControls};
 
     fn tiled_ground() -> Vec<[Vec3; 3]> {
         let mut tris = Vec::new();
@@ -230,8 +230,8 @@ mod tests {
     /// previously-empty decal pool).
     #[test]
     fn impact_kinds_map_to_their_decals() {
-        use mercs2_combat::ImpactKind;
-        use mercs2_decal::DecalType;
+        use crate::combat::ImpactKind;
+        use crate::decal::DecalType;
         assert_eq!(impact_decal_type(ImpactKind::Bullet), DecalType::BulletHole);
         assert_eq!(impact_decal_type(ImpactKind::Explosion), DecalType::Scorch);
         assert_eq!(impact_decal_type(ImpactKind::Blood), DecalType::Blood);
@@ -247,11 +247,11 @@ mod tests {
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
         let mut rt = GameRuntime::new(audio);
         let hit = Vec3::new(2.0, 1.0, 5.0);
-        rt.push_impact(mercs2_combat::Impact::from_hit(hit, Vec3::ZERO, Vec3::Z, false));
+        rt.push_impact(crate::combat::Impact::from_hit(hit, Vec3::ZERO, Vec3::Z, false));
         let drained = rt.take_render_impacts();
         assert_eq!(drained.len(), 1, "the player shot should record exactly one render impact");
         assert_eq!(drained[0].position, hit);
-        assert_eq!(drained[0].kind, mercs2_combat::ImpactKind::Bullet);
+        assert_eq!(drained[0].kind, crate::combat::ImpactKind::Bullet);
         // Drained: the next frame starts clean.
         assert!(rt.take_render_impacts().is_empty());
     }
@@ -261,7 +261,7 @@ mod tests {
     /// wired into the per-frame game update alongside the fleet, idle until AI entities exist.
     #[test]
     fn tick_runs_ai_perception_over_the_world() {
-        use mercs2_ai::{AiFaction, Perception, PerceptionRecord, Stimulus, Target};
+        use crate::ai::{AiFaction, Perception, PerceptionRecord, Stimulus, Target};
 
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
         let mut rt = GameRuntime::new(audio);
@@ -290,7 +290,7 @@ mod tests {
     fn tick_ages_the_decal_pool() {
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
         let mut rt = GameRuntime::new(audio);
-        rt.decal.spawn(mercs2_decal::DecalType::BulletHole, Vec3::new(1.0, 0.0, 0.0), Vec3::Y, Vec3::X);
+        rt.decal.spawn(crate::decal::DecalType::BulletHole, Vec3::new(1.0, 0.0, 0.0), Vec3::Y, Vec3::X);
         assert_eq!(rt.decal.pool.live_count(), 1);
 
         let mut world = World::new();
@@ -303,7 +303,7 @@ mod tests {
     /// script `Pg.Spawn`s take).
     #[test]
     fn tick_population_realizes_spawns_through_the_resolver() {
-        use mercs2_population::{SimpleSpawner, SpawnFaction, SpawnerFamily};
+        use crate::population::{SimpleSpawner, SpawnFaction, SpawnerFamily};
 
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
         let mut rt = GameRuntime::new(audio);

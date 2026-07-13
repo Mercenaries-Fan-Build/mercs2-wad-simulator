@@ -73,6 +73,10 @@ pub enum MenuAction {
     None,
     /// Boot the world from a save (`Some(path)`) or as a fresh new game (`None`).
     Boot(Option<PathBuf>),
+    /// Boot the controlled **integration test world** — the real game loop (render + UI + input + AI)
+    /// over a scripted scenario (player + armed hostile NPC + turret) so the AI/combat integrations can
+    /// be exercised and watched live. Not a save, not a CLI flag — a first-class menu entry.
+    BootTestWorld,
     Quit,
 }
 
@@ -89,10 +93,11 @@ pub enum Nav {
 /// Main-menu rows. Identity follows the retail .rdata option identifiers.
 #[derive(Clone, Copy, PartialEq)]
 enum MainOpt {
-    Continue, // `autoContinue` — boot the newest save
-    NewGame,  // `newGame`
-    LoadGame, // load / `disableLoad` gate in retail
-    Quit,     // `quitGame`
+    Continue,  // `autoContinue` — boot the newest save
+    NewGame,   // `newGame`
+    LoadGame,  // load / `disableLoad` gate in retail
+    TestWorld, // reimpl-only: the AI/combat integration test world
+    Quit,      // `quitGame`
 }
 
 #[derive(Clone, Copy)]
@@ -124,9 +129,9 @@ impl Menu {
     /// there is at least one save (retail `disableLoad`/`autoContinue` visibility).
     fn main_opts(&self) -> Vec<MainOpt> {
         if self.slots.is_empty() {
-            vec![MainOpt::NewGame, MainOpt::Quit]
+            vec![MainOpt::NewGame, MainOpt::TestWorld, MainOpt::Quit]
         } else {
-            vec![MainOpt::Continue, MainOpt::NewGame, MainOpt::LoadGame, MainOpt::Quit]
+            vec![MainOpt::Continue, MainOpt::NewGame, MainOpt::LoadGame, MainOpt::TestWorld, MainOpt::Quit]
         }
     }
 
@@ -142,6 +147,7 @@ impl Menu {
                         MainOpt::Continue => return MenuAction::Boot(Some(self.slots[0].path.clone())),
                         MainOpt::NewGame => return MenuAction::Boot(None),
                         MainOpt::LoadGame => self.screen = Screen::Load { sel: 0, scroll: 0 },
+                        MainOpt::TestWorld => return MenuAction::BootTestWorld,
                         MainOpt::Quit => return MenuAction::Quit,
                     },
                 }
@@ -203,6 +209,7 @@ impl Menu {
                         MainOpt::Continue => "CONTINUE".to_string(),
                         MainOpt::NewGame => "NEW GAME".to_string(),
                         MainOpt::LoadGame => "LOAD GAME".to_string(),
+                        MainOpt::TestWorld => "TEST WORLD".to_string(),
                         MainOpt::Quit => "QUIT".to_string(),
                     };
                     let y = y0 + i as f32 * row_h;
@@ -329,12 +336,13 @@ mod tests {
 
     #[test]
     fn main_menu_gates_on_saves() {
-        // No saves: Continue/Load hidden; first Select boots a new game.
+        // No saves: Continue/Load hidden → rows are [NEW GAME, TEST WORLD, QUIT].
         let mut m = Menu::new(Vec::new());
-        assert_eq!(m.nav(Nav::Select), MenuAction::Boot(None));
-        // Down from NEW GAME reaches QUIT.
+        assert_eq!(m.nav(Nav::Select), MenuAction::Boot(None)); // NEW GAME
         assert_eq!(m.nav(Nav::Down), MenuAction::None);
-        assert_eq!(m.nav(Nav::Select), MenuAction::Quit);
+        assert_eq!(m.nav(Nav::Select), MenuAction::BootTestWorld); // TEST WORLD
+        assert_eq!(m.nav(Nav::Down), MenuAction::None);
+        assert_eq!(m.nav(Nav::Select), MenuAction::Quit); // QUIT
     }
 
     #[test]

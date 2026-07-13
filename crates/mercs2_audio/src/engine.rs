@@ -19,18 +19,21 @@
 //! Every method here is named to match its Lua binding so that mapping is mechanical. The 9 retail
 //! `return 0` stubs (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful no-ops.
 
+use std::collections::HashMap;
+
 use mercs2_core::glam::Vec3;
 use mercs2_formats::hash::pandemic_hash_m2;
 
-use crate::backend::{AudioSink, NullSink};
+use crate::backend::{AudioSink, CpalSink, NullSink};
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
-use crate::mixer::{Mixer, MixerConfig, SampleSource};
+use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
 use crate::music::MusicStateMachine;
 use crate::sounddb::{CueEntry, SoundDb};
 use crate::spatial::{self, ListenerSet, Listener};
 use crate::vo::{VoManager, VoPriority};
 use crate::voice::{VoiceId, VoicePool, VoiceRequest};
+use crate::wave::{DecodedClip, Wavebank};
 
 /// Library version reported by `Sound._GetLibVersion` (`FUN_005e4300` → `DAT_00dfdb4c` = 12.0).
 pub const SOUND_LIB_VERSION: f32 = 12.0;
@@ -53,8 +56,20 @@ pub struct AudioEngine {
     pub vo: VoManager,
     /// 3D listeners.
     pub listeners: ListenerSet,
+    /// Resident wavebanks keyed by bank (self) hash — the real `sounddb` routing target
+    /// (`cue.bank_hash` → this bank, `cue.wave_index` → its clip).
+    wavebanks: HashMap<u32, Wavebank>,
+    /// Every resident clip flattened by clip hash — the fallback lookup for a cue whose guid *is* its
+    /// wave hash (one-shot SFX), and the store `add_wave` populates directly.
+    waves: HashMap<u32, DecodedClip>,
     /// Device sink (headless [`NullSink`] by default).
     sink: Box<dyn AudioSink>,
+    /// True once a real output device is attached ([`attach_output_device`](Self::attach_output_device));
+    /// gates the real-time [`pump`](Self::pump) so headless runs (tests/servers) never render for a
+    /// discarding sink.
+    has_device: bool,
+    /// Real-time pump accumulator (fractional frames owed to the sink since the last render).
+    pump_accum: f64,
     /// System pause (`Sound.SetSystemPause`) — freezes the runtime-sound submit pass.
     paused: bool,
     /// Survival-mode flag (`Sound.SetSurvivalMode`).
@@ -81,14 +96,120 @@ impl AudioEngine {
             music: MusicStateMachine::new(),
             vo: VoManager::new(),
             listeners: ListenerSet::default(),
+            wavebanks: HashMap::new(),
+            waves: HashMap::new(),
             sink: Box::new(NullSink {
                 sample_rate: cfg.sample_rate,
                 channels: cfg.channels,
             }),
+            has_device: false,
+            pump_accum: 0.0,
             paused: false,
             survival: false,
             audio_dir: "audio/".to_string(),
         }
+    }
+
+    // ---- device output + real-time pump -----------------------------------------------------------
+
+    /// Open the default output device and route the mixer to it (the DirectSound-secondary-buffer
+    /// analog). The mixer is rebuilt to the **device's own rate/channels** so its int16 frames feed the
+    /// stream with no format mismatch; per-voice resampling ([`PcmSource::with_rate`]) handles each
+    /// clip's native rate → this mixer rate. Returns `false` (staying headless on [`NullSink`]) when no
+    /// device is present — never a hard failure, never behind a build flag. Call once at startup, before
+    /// any voice is attached.
+    pub fn attach_output_device(&mut self) -> bool {
+        match CpalSink::try_default() {
+            Ok(sink) => {
+                let rate = sink.sample_rate();
+                let channels = sink.channels().max(1);
+                self.set_output_format(rate, channels);
+                self.sink = Box::new(sink);
+                self.has_device = true;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Rebuild the mixer at a new output format (drops any attached sources — call before playback).
+    pub fn set_output_format(&mut self, sample_rate: u32, channels: usize) {
+        self.mixer = Mixer::new(MixerConfig { sample_rate, channels: channels.max(1) });
+    }
+
+    /// Whether a real output device is attached.
+    pub fn has_device(&self) -> bool {
+        self.has_device
+    }
+
+    /// Real-time producer: render exactly the frames that elapsed in `dt` and submit them to the device
+    /// sink, keeping its ring fed at wall-clock rate. No-op when headless (no device) so tests/servers
+    /// never render into a discarding sink. A long stall is capped at 250 ms of catch-up so a hitch does
+    /// not burst-render a huge block. This is the frame-loop analog of the exe's 45 ms mixer thread.
+    pub fn pump(&mut self, dt: f32) {
+        if !self.has_device {
+            return;
+        }
+        let rate = self.mixer.config().sample_rate as f64;
+        self.pump_accum += (dt as f64).max(0.0) * rate;
+        let max_frames = (rate * 0.25) as usize; // 250 ms catch-up cap
+        let mut frames = self.pump_accum as usize;
+        if frames == 0 {
+            return;
+        }
+        if frames > max_frames {
+            frames = max_frames;
+            self.pump_accum = 0.0;
+        } else {
+            self.pump_accum -= frames as f64;
+        }
+        let _ = self.render(frames); // render() mixes + submits to the sink
+    }
+
+    // ---- resident waves (LoadWaveBank payload) ----------------------------------------------------
+
+    /// Decode a `wavebank` body (`Sound.LoadWaveBank`) and hold it resident, both as a bank (keyed by
+    /// its self hash, the `sounddb` routing target) and flattened by clip hash. Returns the number of
+    /// clips that carry decoded samples (streaming/undecodable clips are still registered so the slot
+    /// exists). The cue path binds these automatically via [`resolve_wave`](Self::resolve_wave).
+    pub fn load_wavebank(&mut self, body: &[u8]) -> usize {
+        let bank = Wavebank::parse(body);
+        let mut audible = 0;
+        for clip in &bank.clips {
+            if !clip.samples.is_empty() {
+                audible += 1;
+            }
+            self.waves.insert(clip.clip_hash, clip.clone());
+        }
+        self.wavebanks.insert(bank.self_hash, bank);
+        audible
+    }
+
+    /// Register one decoded clip directly (tests / synthesized banks).
+    pub fn add_wave(&mut self, clip: DecodedClip) {
+        self.waves.insert(clip.clip_hash, clip);
+    }
+
+    /// Number of resident wave clips.
+    pub fn resident_wave_count(&self) -> usize {
+        self.waves.len()
+    }
+
+    /// Resolve the resident wave a cue should play, by the real `sounddb` routing: the cue names its
+    /// `bank_hash` (a resident [`Wavebank`]) and a `wave_index` into that bank's clip list (calibrated
+    /// against the shipped `veh_support` block — see [`crate::sounddb`]). Falls back to a clip whose hash
+    /// *is* the cue guid (one-shot SFX). Returns `None` when the wave is not resident or streams
+    /// externally (empty samples) — the voice then plays silent, faithful to the exe allocating a voice
+    /// before its wave streams in.
+    pub fn resolve_wave(&self, cue: &CueEntry) -> Option<&DecodedClip> {
+        if let Some(bank) = self.wavebanks.get(&cue.bank_hash) {
+            if let Some(clip) = bank.clips.get(cue.wave_index as usize) {
+                if !clip.samples.is_empty() {
+                    return Some(clip);
+                }
+            }
+        }
+        self.waves.get(&cue.guid).filter(|c| !c.samples.is_empty())
     }
 
     /// Install the parsed sound database (chain: `Sound.AddPgAsset("Mercs2Globals","sounddb")`).
@@ -150,6 +271,20 @@ impl AudioEngine {
                 }
             }
         }
+
+        // Auto-bind the resident wave when the caller gave no explicit source, so scripted `Sound.*`
+        // cues are actually audible — resampled from the clip's native rate to the mixer rate.
+        let dst_rate = self.mixer.config().sample_rate;
+        let source = source.or_else(|| {
+            self.resolve_wave(&cue).map(|clip| {
+                Box::new(PcmSource::with_rate(
+                    clip.samples.clone(),
+                    clip.channels as usize,
+                    clip.sample_rate,
+                    dst_rate,
+                )) as Box<dyn SampleSource>
+            })
+        });
 
         let id = self.pool.acquire(&req)?;
         if let Some(src) = source {

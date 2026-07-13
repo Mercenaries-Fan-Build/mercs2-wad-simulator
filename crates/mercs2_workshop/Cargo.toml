@@ -1,8 +1,10 @@
 [package]
 name = "mercs2_workshop"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native asset workshop (browse / inspect / remix) on the mercs2_engine renderer."
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 winit = "0.29"
@@ -25,6 +27,6 @@ egui-wgpu = "0.28"
 arboard = "3"
 # NOTE (blueprint editor, planned): `full_moon` (Lua 5.1 AST, round-trip) + `egui-snarl`
 # (node graph) — see docs/modernization/workshop_charter.md §Mission designer.
-mercs2_engine = { path = "../mercs2_engine" }
-mercs2_core = { path = "../mercs2_core" }
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_engine = { workspace = true }
+mercs2_core = { workspace = true }
+mercs2_formats = { workspace = true }
