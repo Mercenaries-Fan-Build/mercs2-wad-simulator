@@ -3,9 +3,39 @@
 
 use mercs2_formats::texture::{TexFormat, TextureData};
 
-/// Decode mip0 to straight-alpha RGBA8.
-pub fn decode_bc(td: &TextureData) -> Vec<u8> {
-    let (w, h) = (td.width as usize, td.height as usize);
+/// Bytes one full mip surface occupies at this size/format.
+fn surface_bytes(w: usize, h: usize, f: TexFormat) -> usize {
+    let block_bytes = match f {
+        TexFormat::Bc1 => 8,
+        TexFormat::Bc3 => 16,
+    };
+    w.div_ceil(4).max(1) * h.div_ceil(4).max(1) * block_bytes
+}
+
+/// The finest mip level `td.mip0` actually holds enough bytes for. `0` = the full `width x height`.
+///
+/// A STREAMED texture's resident container declares the full `width`/`height` but ships only the
+/// coarse mip TAIL, so `mip0` can be a tiny fraction of a full surface — a 1024² BC3 normal map
+/// arrives as 1,360 bytes. The first surface in that tail is level L, not level 0. This is the same
+/// resolution the GPU path does in `make_bc_view`; without it a decoder writes a full-size image and
+/// leaves ~99% of it zeroed.
+fn usable_level(td: &TextureData) -> u32 {
+    (0..12)
+        .find(|&l| {
+            let (w, h) = ((td.width >> l).max(1) as usize, (td.height >> l).max(1) as usize);
+            surface_bytes(w, h, td.format) <= td.mip0.len()
+        })
+        .unwrap_or(11)
+}
+
+/// Decode the finest mip level the data actually covers, to straight-alpha RGBA8.
+///
+/// Returns the TRUE dimensions of what was decoded, which for a streamed texture that never had its
+/// higher mips assembled is smaller than `td.width`/`td.height` — callers must write the PNG at the
+/// returned size, not the declared one.
+pub fn decode_bc(td: &TextureData) -> (u32, u32, Vec<u8>) {
+    let level = usable_level(td);
+    let (w, h) = ((td.width >> level).max(1) as usize, (td.height >> level).max(1) as usize);
     let mut out = vec![0u8; w * h * 4];
     let bw = w.div_ceil(4);
     let bh = h.div_ceil(4);
@@ -35,7 +65,7 @@ pub fn decode_bc(td: &TextureData) -> Vec<u8> {
             }
         }
     }
-    out
+    (w as u32, h as u32, out)
 }
 
 fn rgb565(v: u16) -> [u8; 3] {
