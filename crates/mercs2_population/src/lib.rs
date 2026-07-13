@@ -17,6 +17,30 @@
 //!   cap-128 family queues, emitting [`SpawnRequest`]s, plus `TweakAttachedSpawners` apply (§6, H);
 //! - [`components`] — the population reflection components (hashes/strides/defaults/enums, §9).
 //!
+//! # Entry point
+//!
+//! [`PopulationWorld`] is the host-owned bundle of those three sub-mechanisms.
+//! [`tick`](PopulationWorld::tick) runs the per-fixed-step update; it **never mutates the entity world
+//! itself** — it stages [`SpawnRequest`]s and retired [`mercs2_core::Entity`]s, which the caller drains
+//! with [`take_requests`](PopulationWorld::take_requests) /
+//! [`take_retired`](PopulationWorld::take_retired) and realizes/despawns on the other side of the
+//! resolver seam. [`tweak_attached_spawners`](PopulationWorld::tweak_attached_spawners) is the
+//! script-facing lever (`Ai.TweakAttachedSpawners`). `mercs2_engine` re-exports this crate as
+//! `mercs2_engine::population` and holds a `PopulationWorld` in its runtime and script host.
+//!
+//! The ambient-density half is **queried, not ticked**: [`DensityController`] answers *how many* units
+//! of a class a zone may emit this frame (`min(headroom, per-tick budget)`, traffic-gated), because
+//! that is the granularity the code map actually recovered.
+//!
+//! # Module map
+//!
+//! | Module | Owns |
+//! | --- | --- |
+//! | [`death`] | [`DeathQueue`] / [`PendingDeath`], [`DEATH_BUDGET_PER_FRAME`] (20/frame), [`DEATH_DISTANCE_SQ_TABLE`] (9 squared radii). |
+//! | [`density`] | [`DensityController`] / [`DensityBudget`] (`10/10/2/2`), [`decay_spawn_history`], [`traffic_allows`], [`density_faction_participates`]. |
+//! | [`spawner`] | [`SimpleSpawnerManager`] / [`SimpleSpawner`] / [`SpawnQueue`] / [`SpawnRequest`] / [`SpawnerAdjust`] / [`SpawnerFamily`] + the recovered caps ([`SIMPLE_SPAWNER_POOL`] 768, [`SPAWN_QUEUE_CAP`] 128, [`SPAWNER_GROUP_COUNT`] 8, [`SPAWNER_STATE_TERMINAL`] 5). |
+//! | [`components`] | [`PopulationDensity`], [`PopulationDynamicRoad`], [`PopulationFlow`], [`SkirmishZone`], [`SkirmishSpawnList`], [`SocialUse`], [`RtPopMembership`], [`RuntimeTravelGroup`] + the [`TrafficControl`] / [`DynamicRoadType`] / [`FlowControlType`] / [`NeedType`] enums and the [`SpawnFaction`] spawn-list channels. |
+//!
 //! **What this crate deliberately does NOT build** (data / Lua / unrecovered per the code map):
 //! the main ambient driver body `FUN_00503020` (unread) and the per-player "best-priority containing
 //! region" spatial select (a data query) — a zone's density counters are consumed as caps, region
