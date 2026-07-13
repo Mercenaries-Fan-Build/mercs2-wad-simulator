@@ -46,6 +46,14 @@ struct Cli {
     /// block so HIER/MESH layout is preserved. Feed the result to the mesh converter as its donor.
     #[arg(long)]
     dump_container: Option<PathBuf>,
+
+    /// Dump the RAW DECOMPRESSED block bytes (every entry, not just a model container) for
+    /// --block-index, and exit. Some of a vehicle's LOD rungs are SUB-ENTRY models with no model
+    /// ASET row (the ztz98's `_P003_Q0` rung and its separate `resident2-..._tracks_*` chain), so
+    /// --dump-container cannot reach them at all — and leaving them alone leaves the DONOR's
+    /// geometry streaming in at close range. Pair with `--inject-block` to ship an edited copy.
+    #[arg(long)]
+    dump_block: Option<PathBuf>,
     /// Explicit block index(es) to target (repeatable). Overrides --target-name.
     #[arg(long)]
     block_index: Vec<usize>,
@@ -348,6 +356,24 @@ fn run() -> Result<(), String> {
     };
     if indices.is_empty() && !cli.extra_only {
         return Err(format!("no blocks matched {needles:?} (try --list)"));
+    }
+
+    // --dump-block: the RAW DECOMPRESSED block, regardless of whether it holds a primary model.
+    if let Some(dump_path) = &cli.dump_block {
+        let idx = indices[0];
+        if idx >= archive.indx.len() {
+            return Err(format!("block_index {idx} >= INDX count {}", archive.indx.len()));
+        }
+        let raw = decompress_block(&mut file, &archive.indx, idx as u16)
+            .map_err(|e| format!("decompress block {idx}: {e}"))?;
+        std::fs::write(dump_path, &raw).map_err(|e| format!("write {}: {e}", dump_path.display()))?;
+        let (count, _) = parse_block_entry_table(&raw);
+        println!(
+            "Dumped RAW block {idx} ({} bytes, {count} entries) -> {}",
+            raw.len(),
+            dump_path.display()
+        );
+        return Ok(());
     }
 
     // --dump-container: extract the donor model's raw UCFX bytes (ASET-primary source) and exit.
