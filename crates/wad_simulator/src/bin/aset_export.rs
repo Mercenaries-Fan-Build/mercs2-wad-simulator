@@ -140,9 +140,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             //   asset_gap_probe      — texture-base -> model convention
             //   block_string_harvest — identifiers mined from decompressed block payloads
             //   name_expand          — slot-grammar expansion of the above
+            //   aset_external_mine   — block-path stems mined from the CONSOLE WADs, which
+            //                          ship an uncompressed name table the PC bake strips
             PathBuf::from("docs/data/aset_discovered_names.json"),
             PathBuf::from("docs/data/aset_block_strings.json"),
             PathBuf::from("docs/data/aset_expanded_names.json"),
+            PathBuf::from("docs/data/aset_external_names.json"),
+            // aset_variant_names — models that are a DECORATED VARIANT of a named asset
+            // (`vz_veh_tank_amx30_base`), found per-model against its own hash (T=1).
+            PathBuf::from("docs/data/aset_variant_names.json"),
         ]
     } else {
         cli.rainbow.clone()
