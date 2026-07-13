@@ -3,6 +3,34 @@
 //! Scores how far a Mercenaries 2 world-load got against the milestone ladder,
 //! classifies the end-state (REACHED-WORLD / CRASH@EIP / HANG / TRUNCATED), and
 //! surfaces every non-routine ([lua]/[pool]) diagnostic line + high-signal Lua markers.
+//!
+//! The log is the one written by `tools/pmc_blackbox` (`[HH:MM:SS.mmm] [source] msg`,
+//! with the Lua hook's `  @script:line` suffix and the crash handler's
+//! `module+0xOFFSET` frames).
+//!
+//! The verdict is also the process exit code, so scripts can branch on it:
+//! `0` REACHED-WORLD, `10` CRASH, `11` HANG, `12` TRUNCATED (`2` = could not read
+//! the log / JSON error). A crash AFTER the world finished loading is reported as a
+//! post-load crash and does not demote the verdict; a crash at a `teardown` EIP
+//! (e.g. 0x874E7D) is a hard-close artifact and never becomes a CRASH headline.
+//!
+//! Beyond the verdict, the run also reports: the phase timeline with deltas,
+//! WAITFORSTREAMING cycles, progression (acts / player / portals / faction jobs),
+//! texture-component pool health from `[cc]`/`[pool]`, `[mtrl] OVERCOUNT` and
+//! `[stall]` dumps, the largest time gaps, the end-of-log tail, and a BUILD/RUN
+//! IDENTITY block (the log's own SHA-256 plus pmc_bb's `[blackbox] BUILD` artifact
+//! hashes) that binds the metrics to the exact bytes that produced them.
+//!
+//! Module map:
+//! * [`parse`] — log-line parser → ordered `LogLine`s (ts, source, msg, script:line).
+//! * [`phases`] — the static tables: milestone `LADDER`, `KNOWN_SOURCES`,
+//!   `KNOWN_EIPS` (+ teardown flags), job-module test. Extend HERE, not elsewhere.
+//! * [`report`] — analysis → `Report`, the colored text dump, and the JSON form.
+//! * [`symbolize`] — optional (`--symbolize`) COFF/exe-map naming of crash frames.
+//! * [`sha256`] — dependency-free SHA-256 for the log's own fingerprint.
+//!
+//! Integration tests in `tests/fixtures.rs` lock the classifier against four real
+//! captures in `storage/`.
 
 mod parse;
 mod phases;
