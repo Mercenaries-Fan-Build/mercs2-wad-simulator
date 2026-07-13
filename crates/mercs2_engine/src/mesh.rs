@@ -153,6 +153,21 @@ pub struct DrawGroup {
     pub sub_object: usize,
     /// `INDX[group]` — this group's index into the SEGM record array.
     pub seg_id: usize,
+    /// The LOD-block rung this geometry came from: `0` = the resident (coarsest) block, higher = a
+    /// finer `_P00N_` block. Stamped by [`crate::model::Model::load`]; a single-block model (every
+    /// character) is all rung 0. The renderer ignores it — `lod_mask` already carries the supersede
+    /// resolution — but an EXPORTER needs it, because the rungs re-author the same nodes and must be
+    /// written as separate, labelled detail levels rather than stacked in one space.
+    pub rung: u8,
+    /// This group carries its OWN `BLENDINDICES`/`BLENDWEIGHT` — a deforming skin (a character's
+    /// body). `false` means the group was NODE-RIGID and this builder already baked it into its
+    /// bone's bind-space and bound it 100% to that bone, so the same LBS palette carries it.
+    ///
+    /// Both kinds therefore end up in ONE space, driven by ONE palette. The distinction matters to
+    /// an exporter: a rigid group can be un-baked and re-parented under its bone (what a vehicle
+    /// wants), but a skinned group must NOT be — its vertices are shared across many bones and only
+    /// a real skin + inverse-bind matrices can reproduce them.
+    pub skinned: bool,
 }
 impl Default for DrawGroup {
     /// An unconditionally-visible group: present at every LOD rung, bound to no HIER node. This is
@@ -170,6 +185,8 @@ impl Default for DrawGroup {
             node: -1,
             sub_object: 0,
             seg_id: 0,
+            rung: 0,
+            skinned: false,
         }
     }
 }
@@ -471,6 +488,11 @@ pub fn build_indexed_rung(
                 node: m.bone as i16,
                 sub_object: m.sub_object,
                 seg_id: m.seg_id,
+                // This builder reads ONE container and can't know where it sits in the chain;
+                // `Model::load` stamps the real rung once it has walked the LOD blocks.
+                rung: 0,
+                // No placement bone = the group kept its own blend data = a real deforming skin.
+                skinned: pl.placed_bone.is_none(),
             });
         };
         if m.submeshes.is_empty() {
