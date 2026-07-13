@@ -58,6 +58,8 @@ pub struct FfcsArchive {
     pub indx: Vec<IndxEntry>,
     pub aset: Vec<AsetEntry>,
     pub paths: Vec<String>,
+    /// Little on the PC bake, Big on the PS3/Xbox360 bakes.
+    pub endian: Endian,
 }
 
 pub fn read_u32_le(data: &[u8], offset: usize) -> u32 {
@@ -89,35 +91,64 @@ pub fn read_f32_be(data: &[u8], offset: usize) -> f32 {
     f32::from_bits(read_u32_be(data, offset))
 }
 
-pub fn parse_ffcs_header(header: &[u8; FFCS_HEADER_SIZE]) -> Result<Vec<ChunkRow>, String> {
-    if &header[0..4] != b"FFCS" {
-        return Err(format!("Bad magic: {:?}", &header[0..4]));
+/// Byte order of a WAD. The PC bake is little-endian; the PS3/Xbox360 bakes are
+/// big-endian, which shows up in the magic: the same four bytes read as `SCFF`
+/// instead of `FFCS`, because every 4-byte field — TAGS INCLUDED — is byte-swapped.
+///
+/// This matters far beyond cosmetics: without it the console WADs cannot be opened at
+/// all, so their compressed block payloads (the only copy of many authored asset names —
+/// the PC bake strips them) stay unreadable. See [`crate::hash`] users / `aset_external_mine`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Endian {
+    Little,
+    Big,
+}
+
+impl Endian {
+    #[inline]
+    pub fn u32(self, data: &[u8], offset: usize) -> u32 {
+        match self {
+            Endian::Little => read_u32_le(data, offset),
+            Endian::Big => read_u32_be(data, offset),
+        }
     }
-    let version = read_u32_le(header, 4);
+}
+
+pub fn parse_ffcs_header(header: &[u8; FFCS_HEADER_SIZE]) -> Result<(Vec<ChunkRow>, Endian), String> {
+    let endian = match &header[0..4] {
+        b"FFCS" => Endian::Little,
+        b"SCFF" => Endian::Big, // console bake: the magic itself is byte-swapped
+        other => return Err(format!("Bad magic: {other:?}")),
+    };
+    let version = endian.u32(header, 4);
     if version != 2 {
         return Err(format!("Unexpected version: {version}"));
     }
-    let chunk_count = read_u32_le(header, 8);
+    let chunk_count = endian.u32(header, 8);
     let row_count = chunk_count.min(5) as usize;
     let mut rows = Vec::new();
     for i in 0..row_count {
         let base = 0x0C + i * 12;
         let mut tag = [0u8; 4];
         tag.copy_from_slice(&header[base..base + 4]);
+        // tags are 4-byte words too, so a BE bake stores them reversed (`XDNI` for INDX)
+        if endian == Endian::Big {
+            tag.reverse();
+        }
         rows.push(ChunkRow {
             tag,
-            offset: read_u32_le(header, base + 4),
-            meta: read_u32_le(header, base + 8),
+            offset: endian.u32(header, base + 4),
+            meta: endian.u32(header, base + 8),
         });
     }
-    Ok(rows)
+    Ok((rows, endian))
 }
 
 pub fn find_chunk<'a>(rows: &'a [ChunkRow], tag: &[u8; 4]) -> Option<&'a ChunkRow> {
     rows.iter().find(|r| &r.tag == tag)
 }
 
-pub fn parse_indx_entries(file: &mut File, row: &ChunkRow) -> io::Result<Vec<IndxEntry>> {
+pub fn parse_indx_entries(file: &mut File, row: &ChunkRow, e: Endian) -> io::Result<Vec<IndxEntry>> {
     let count = row.meta as usize;
     file.seek(SeekFrom::Start(row.offset as u64))?;
     let mut buf = vec![0u8; count * 12];
@@ -126,15 +157,15 @@ pub fn parse_indx_entries(file: &mut File, row: &ChunkRow) -> io::Result<Vec<Ind
     for i in 0..count {
         let base = i * 12;
         entries.push(IndxEntry {
-            page_index: read_u32_le(&buf, base),
-            packed_field: read_u32_le(&buf, base + 4),
-            flags_and_page_count: read_u32_le(&buf, base + 8),
+            page_index: e.u32(&buf, base),
+            packed_field: e.u32(&buf, base + 4),
+            flags_and_page_count: e.u32(&buf, base + 8),
         });
     }
     Ok(entries)
 }
 
-pub fn parse_aset_entries(file: &mut File, row: &ChunkRow) -> io::Result<Vec<AsetEntry>> {
+pub fn parse_aset_entries(file: &mut File, row: &ChunkRow, e: Endian) -> io::Result<Vec<AsetEntry>> {
     let count = row.meta as usize;
     file.seek(SeekFrom::Start(row.offset as u64))?;
     let mut buf = vec![0u8; count * 16];
@@ -143,10 +174,10 @@ pub fn parse_aset_entries(file: &mut File, row: &ChunkRow) -> io::Result<Vec<Ase
     for i in 0..count {
         let base = i * 16;
         entries.push(AsetEntry {
-            asset_hash: read_u32_le(&buf, base),
-            secondary_ref: read_u32_le(&buf, base + 4),
-            packed_block_ref: read_u32_le(&buf, base + 8),
-            type_id: read_u32_le(&buf, base + 12),
+            asset_hash: e.u32(&buf, base),
+            secondary_ref: e.u32(&buf, base + 4),
+            packed_block_ref: e.u32(&buf, base + 8),
+            type_id: e.u32(&buf, base + 12),
         });
     }
     Ok(entries)
@@ -202,11 +233,11 @@ pub fn load_ffcs_archive(file: &mut File, file_size: u64) -> Result<FfcsArchive,
     let mut header = [0u8; FFCS_HEADER_SIZE];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header)?;
-    let chunks = parse_ffcs_header(&header)?;
+    let (chunks, endian) = parse_ffcs_header(&header)?;
     let indx_row = find_chunk(&chunks, b"INDX").ok_or("Missing INDX")?;
     let aset_row = find_chunk(&chunks, b"ASET").ok_or("Missing ASET")?;
-    let indx = parse_indx_entries(file, indx_row)?;
-    let aset = parse_aset_entries(file, aset_row)?;
+    let indx = parse_indx_entries(file, indx_row, endian)?;
+    let aset = parse_aset_entries(file, aset_row, endian)?;
     let paths = if let Some(pths) = find_chunk(&chunks, b"PTHS") {
         parse_pths(file, pths, file_size).unwrap_or_default()
     } else {
@@ -217,6 +248,7 @@ pub fn load_ffcs_archive(file: &mut File, file_size: u64) -> Result<FfcsArchive,
         indx,
         aset,
         paths,
+        endian,
     })
 }
 
