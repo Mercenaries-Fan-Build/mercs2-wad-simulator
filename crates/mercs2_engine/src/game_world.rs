@@ -525,17 +525,31 @@ impl AnimClipIndex {
     }
 }
 
-static CLIP_INDEX: std::sync::OnceLock<AnimClipIndex> = std::sync::OnceLock::new();
+type ClipIndexCache = std::sync::Mutex<std::collections::HashMap<String, &'static AnimClipIndex>>;
+static CLIP_INDEX: std::sync::OnceLock<ClipIndexCache> = std::sync::OnceLock::new();
 
-/// Process-wide cached clip index, built from the first WAD handle to ask for it (the WAD is fixed
-/// per process). Building scans the ~190 animgroup blocks once (a few seconds); every later lookup is
-/// cheap integer comparison over the flat clip list.
+/// Cached clip index, keyed by the ARCHIVE it was built from.
+///
+/// This used to be one process-wide `OnceLock` on the premise that "the WAD is fixed per process".
+/// That is false for a WAD STACK: the workshop opens `vz.wad` + `vz-patch.wad`, and lookups walk the
+/// stack in reverse (patch first, the retail last-opened-wins rule). The patch ships no animgroup
+/// blocks, so the first caller built an EMPTY index from it and cached that globally — after which
+/// every model in every archive resolved zero clips, forever. Keying on the archive path fixes it:
+/// each WAD gets its own index, and the base WAD's real one is never shadowed by an overlay's.
+///
+/// Building scans the ~190 animgroup blocks once per archive (a few seconds); later lookups are cheap
+/// integer comparisons over the flat clip list. Indexes are leaked deliberately — one per open
+/// archive, for the life of the process.
 pub fn clip_index(w: &mut wad::Wad) -> &'static AnimClipIndex {
-    if let Some(ix) = CLIP_INDEX.get() {
+    let key = wad::wad_path(w).to_string();
+    let cache = CLIP_INDEX.get_or_init(Default::default);
+    if let Some(ix) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return ix;
     }
-    let ix = AnimClipIndex::build(w);
-    CLIP_INDEX.get_or_init(|| ix)
+    // Build OUTSIDE the lock: it is slow, and it needs `&mut w`.
+    let ix: &'static AnimClipIndex = Box::leak(Box::new(AnimClipIndex::build(w)));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    *guard.entry(key).or_insert(ix)
 }
 
 /// Minimum HIER bone count for a model to be treated as animatable (below this it is a static prop:
