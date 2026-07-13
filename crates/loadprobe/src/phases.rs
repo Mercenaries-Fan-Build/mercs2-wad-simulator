@@ -117,13 +117,14 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     //   shader = *(void**)(DAT_00ff46f4 + *(u16*)(item+0x3c) * 4);
     //   perm   = *(i16*)(shader + 0x182) + light_class;   // <- AV READ [null+0x182]
     // A clean NULL (not a wild pointer) => the index is IN RANGE but that registry slot was never
-    // filled. Cause seen: two MTRL records sharing the same NAME HASH (record+0x00). The engine
-    // registers materials into the shader registry by that hash FIRST-WINS, so a duplicate loses the
-    // race and never gets a slot. Hit by cloning a material record verbatim to add a skin. Fix: give
-    // every appended MTRL record a UNIQUE name hash (inject_parts --add-mtrl does this now).
+    // filled. Cause: the model has MORE MTRL records than the donor originally shipped. The engine
+    // sizes its per-model shader-registry entries from the donor's count, so an APPENDED material
+    // (the 9th of an 8-material donor) never gets a slot. Fix: never grow the record count --
+    // convert an unused/untextured record IN PLACE (inject_parts --replace-mtrl <dst>:<src>:<tex>).
+    // A unique name hash on the appended record does NOT help (tried; same crash, same EIP).
     // Fires only when the model is actually DRAWN (load succeeds; the camera turning to it crashes).
-    // Draw-time twin of the parse-time 0x00858DB8. NOT teardown.
-    KnownEip { eip: 0x00855691, label: "render draw-loop (FUN_00855420) shader-registry lookup: material's shader slot is NULL -> duplicate MTRL name hash (record+0x00) lost the first-wins registration", teardown: false },
+    // Draw-time cousin of the parse-time 0x00858DB8. NOT teardown.
+    KnownEip { eip: 0x00855691, label: "render draw-loop (FUN_00855420) shader-registry lookup: NULL shader slot -> model has MORE MTRL records than the donor (appended material gets no registry slot); convert a record in place instead of appending", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
