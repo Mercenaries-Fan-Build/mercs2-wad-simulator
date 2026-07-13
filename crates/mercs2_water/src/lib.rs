@@ -17,6 +17,14 @@
 //!   [`WaterDragTunables`] (`WaterDrag*` etc.), as pure force math over a body vs the water surface.
 //! - [`zone`] — the [`AiWaterZone`] reflection component (`0xdf6533de`), the AI water-type tag.
 //!
+//! At the root, [`WaterWorld`] bundles what is world-global (the loaded [`Watermap`] + the
+//! [`SwimConfig`]) and drives the per-fixed-step swim update over the ECS `World`; per-entity water
+//! state lives on the [`Swimmer`] / [`Buoyancy`] components.
+//!
+//! **Render seam.** [`Watermap::surface_mesh`] is the CPU side of that seam: one flat quad per wet
+//! cell at its Layer-0 height, in world space. `mercs2_engine`'s water render node consumes it and
+//! draws the translucent surface; no GPU or `wgpu` dependency exists here.
+//!
 //! **Deliberately NOT built (data / render-time / confirm-live per the code map):**
 //! - The **water render pass** (wake→occlusion→reflection→surface, the ping-pong `pHeightS`/`pNormalS`/
 //!   `pFoamMas` sim RTs, the reflection mirror-matrix, `PgWater*` shaders, `OWater::LOD` tessellation
