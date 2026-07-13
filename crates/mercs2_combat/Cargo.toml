@@ -3,6 +3,7 @@ name = "mercs2_combat"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 10 (row 26): weapons/combat (wpn_* stats, projectile lifecycle, homing FSM, damage/explosion applier)."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

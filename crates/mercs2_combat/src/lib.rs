@@ -23,6 +23,25 @@
 //!   `// CONFIRM-LIVE:`; its **outputs** (`DamageMsg`/`DestroyMsg` into the destruction FSM) are the
 //!   exe's known outputs. Also confirm-live: the exact `wpn_*` byte offset → named-stat binding
 //!   (`stats`), so per-weapon stats fall back to the recovered exe schema defaults. See `DEFERRED.md`.
+//!
+//! # Module map
+//! - [`components`] — the live ECS instances ([`RuntimeWeapon`], [`RuntimeProjectile`],
+//!   [`RuntimeHomingWeapon`], [`RuntimeExplosion`], [`HomingState`], [`Health`], [`Inventory`]).
+//! - [`stats`] — the `wpn_*` weapon-def blob parser ([`stats::parse_weapon_block`]) and the authored
+//!   stat structs ([`WeaponStats`], [`ExplosiveStats`], [`HomingStats`], [`FireType`]).
+//! - [`firing`] — trigger → shot: rate-of-fire, magazine/reload, hitscan-vs-projectile dispatch.
+//! - [`homing`] — the lock-on FSM, missile launch, and guided-flight integration.
+//! - [`projectile`] — projectile integration (gravity → movement → swept raycast) + the explosion pass.
+//! - [`damage`] — the confirm-live damage/explosion applier ([`DamageKey`], [`ExplosionSize`]).
+//! - [`impact`] — the [`Impact`]/[`ImpactKind`] output channel feeding the decal + particle consumers.
+//! - [`events`] — the verified combat event name-hashes posted on the bus.
+//! - [`lua_surface`] — engine-side bodies for the `Weapon.*` / `Human.Inventory.*` /
+//!   `Object.SetInfiniteAmmo` / `Airstrike.*` cfuncs (the bindings themselves live in `mercs2_script`).
+//!
+//! # Entry point
+//! [`WeaponSystem`] is the whole crate's driver: construct it, call [`WeaponSystem::tick`] once per
+//! fixed step, then [`WeaponSystem::take_impacts`] to hand the frame's hit-FX records to the decal /
+//! particle consumers. [`WeaponSystem::update`] is the stateless variant that discards them.
 
 use hecs::World;
 
