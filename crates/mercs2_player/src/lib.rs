@@ -15,6 +15,13 @@
 //! rules, plan §4). It depends only on `mercs2_core` (ECS/events/time + the `PhysicsQuery` seam) and
 //! `mercs2_formats`; it never depends on another leaf crate. The Wave-1 pass implements the subsystem
 //! against the code maps above with the exe as the oracle and zero stubbed Lua.
+//!
+//! # Current state
+//!
+//! Zero public items and zero modules: this file is the header plus a `scaffold_links` test that
+//! constructs a [`mercs2_core::Time`] to prove the dependency edge resolves. No other crate in the
+//! workspace depends on `mercs2_player` yet. Anything claiming a `Player` API here is describing
+//! future work, not shipped code.
 
 #[cfg(test)]
 mod tests {
