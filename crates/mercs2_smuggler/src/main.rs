@@ -1,20 +1,45 @@
 //! mercs2_smuggler — asset-injection / override patch builder for Mercenaries 2 (PC).
 //!
 //! "Smuggles" new or replacement assets into the game by building a `vz-patch.wad`
-//! overlay that overrides existing model (and texture) assets BY HASH
-//! (last-opened-wins). It sources each model from the block its ASET entry actually
-//! points to (so the HIER/structure the engine instantiates is preserved), then
-//! either:
-//!   * `--inject-container <file>`: uses a pre-built model UCFX container (e.g. the
-//!     output of `tools/gltf_to_ucfx_model.py`), or
-//!   * default: cube-izes the model in place (`--shape corner|clamp`) — the original
-//!     PoC mode, kept for plumbing bisection, or
-//!   * `--no-cubeize`: identity passthrough.
-//! `--inject-extra HASH:TYPEID:file` adds extra override blocks (e.g. a texture
-//! from `tools/dds_to_ucfx_texture.py`).
+//! overlay that overrides existing model / texture / script assets BY HASH
+//! (last-opened-wins) — nothing is ever injected into `vz.wad` itself. It sources each
+//! model from the block its ASET entry actually points to (so the HIER/structure the
+//! engine instantiates is preserved), rebuilds the block, sges-compresses it and emits
+//! a patch WAD carrying only the overridden/added blocks plus their ASET entries.
 //!
 //! Overriding by hash sidesteps the unsolved ASET name-hash (modding deep-dive
-//! Open Q#6). Default target: every delivery-crate / aid-crate model.
+//! Open Q#6). Default target: every delivery-crate / aid-crate model
+//! (`--target-name deliverycrate,crateaid`).
+//!
+//! # Build modes (composable in one run)
+//!   * `--inject-container <file>`: replace the donor block's model with a pre-built
+//!     model UCFX container (e.g. the output of `tools/gltf_to_ucfx_model.py`).
+//!   * `--inject-extra HASH:TYPEID:file` (repeatable): mint an extra single-asset
+//!     override block from a raw UCFX container — type_id 19 model / 27 texture /
+//!     35 script (see `type_hash_for_type_id`). `--extra-only` builds ONLY these and
+//!     touches no donor block (from-scratch assets that override nothing existing).
+//!   * `--inject-block <path_substr>:<file>` (repeatable): overlay a raw DECOMPRESSED
+//!     block, looked up by path substring, carrying its existing ASET entries + path
+//!     forward. For content-additive overrides (augmented `layers_static` placements,
+//!     edited resident-script blocks).
+//!   * default (no `--inject-container`): cube-izes the model in place
+//!     (`--shape corner|clamp`) — the original PoC mode, kept for plumbing bisection.
+//!   * `--no-cubeize`: identity passthrough.
+//!
+//! # Inspect / extract modes
+//!   * `--list`: list blocks matching `--target-name` that contain a model, and exit.
+//!   * `--dump-container <file>`: write the donor model's raw UCFX bytes (ASET-primary
+//!     source) — the structural donor a mesh converter needs.
+//!   * `--dump-block <file>`: write the whole raw decompressed block. Needed because
+//!     some LOD rungs are SUB-ENTRY models with no model ASET row, so
+//!     `--dump-container` cannot reach them at all.
+//!
+//! # Block resolution
+//! By default both `--dump-container` and `--inject-container` resolve the model's
+//! ASET-PRIMARY block. `--exact-block` honours `--block-index` verbatim instead, which
+//! is the only way to reach the finer rungs of a vehicle's LOD chain
+//! (`_P000_Q3` resident -> `_P001_` -> `_P002_`). See
+//! `docs/modernization/vehicle_model_spec.md` §1 and `docs/asset_injection_playbook.md`.
 
 use std::fs::File;
 use std::path::PathBuf;

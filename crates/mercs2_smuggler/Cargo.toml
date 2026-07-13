@@ -3,6 +3,7 @@ name = "mercs2_smuggler"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — asset-injection / override patch builder: smuggles new or replacement model/texture assets into the game via a by-hash vz-patch.wad overlay."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 
