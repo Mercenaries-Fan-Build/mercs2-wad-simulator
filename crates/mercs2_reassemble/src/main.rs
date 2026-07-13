@@ -1,18 +1,45 @@
 //! mercs2_reassemble — reassemble the decompiled Pangea engine from the Ghidra corpus.
 //!
-//! Joins every attribution source we have (structured `docs/data/*_code_map.json`,
-//! prose `docs/reverse_engineer/*_code_map.md`, `scripts/mercs2_annotations.json`,
-//! and a reference scrape of the rest of the docs/memory corpus) onto the master
-//! function list `output/_ghidra/all_functions_decomp.txt` (27k functions, keyed by
-//! virtual address), then emits:
-//!   * a regrouped decompiled-C source tree, one module per subsystem, and a sharded
-//!     `_unclassified/` bucket for the residue;
-//!   * `MANIFEST.json` / `MANIFEST.csv` — addr -> {system,name,tier,confidence,...};
-//!   * `REVIEW_QUEUE.md` / `.csv` — the un-identified functions, ranked for manual review;
-//!   * `COVERAGE.md` — per-subsystem coverage and the headline "how many still unmapped".
+//! Joins every attribution source we have onto the master function list
+//! `output/_ghidra/all_functions_decomp.txt` (27k functions, keyed by virtual address).
 //!
 //! The join key is the virtual address, normalised to `0x{:08x}`, so every source
-//! (`FUN_00478120`, `0x478120`, `0x00478120`) collapses to one identity.
+//! (`FUN_00478120`, `0x478120`, `0x00478120`) collapses to one identity. Each address
+//! keeps every raw `Hit`, reduced to one `Primary` (lowest tier, then highest confidence,
+//! then json over md). Tiers: T1 = subsystem-attributed, T2 = merely referenced, T3 = unmapped.
+//!
+//! # Sources (all optional but the master list; a missing one is logged and skipped)
+//!   * `docs/data/*code_map*.json` / `*function_map*.json` — structured subsystem code maps (T1).
+//!   * `docs/reverse_engineer/*_code_map.md` / `*_class_map.md` / `*_function_map.md` — prose
+//!     code maps; every address cited in the file is attributed to that file's subsystem (T1/med).
+//!   * `scripts/mercs2_annotations.json` — the load-path annotation map (`asset_load`).
+//!   * `output/_ghidra/func_class_map.csv` (ExportFuncClass.java) — Ghidra RTTI class -> subsystem.
+//!   * `output/_ghidra/fid_matches.csv` (FidApplyExport.java) — FID byte-signature library matches:
+//!     an exact body match, so evidence-grade identity plus a REAL name.
+//!   * `mods/lua_trace_asi/reference/binding_map.json` — `luaL_Reg` entries: real Lua cfunc names
+//!     for the scripting-host binding layer.
+//!   * recovered symbol names — a function literally named `strlen` IS the CRT (`classify_lib`).
+//!   * in-body binary signals (`SIGNAL_RULES`) — string-labels / imports / class-refs voting for a
+//!     subsystem; a decisive vote is promoted to T1/med (the token is in the compiled image).
+//!   * the rest of `docs/` + `mods/` + `--extra-refs` — a T2 "merely referenced" scrape.
+//!
+//! Whatever is still unlabeled is then classified *probabilistically* by `classify_residue`
+//! (address-locality between evidence anchors, call-graph majority propagation, and a
+//! `securom_drm` region label above `0x01000000`). Kept strictly apart from evidence.
+//!
+//! # Outputs (default `output/engine_reassembled/`, wiped and recreated each run)
+//!   * `<subsystem>.c` — regrouped decompiled-C source, one module per subsystem, and a sharded
+//!     `_unclassified/` bucket for the residue;
+//!   * `inferred/<subsystem>.c` — the probabilistic assignments, never mixed into the above;
+//!   * `MANIFEST.json` / `MANIFEST.csv` — addr -> {system,name,tier,confidence,...};
+//!   * `REVIEW_QUEUE.md` / `.csv` — the un-identified functions, ranked for manual review;
+//!   * `COVERAGE.md` — per-subsystem coverage and the headline "how many still unmapped";
+//!   * `CLASSIFICATION.md` / `.csv` — evidence / signal / inferred / artifact / unclassified split,
+//!     plus corroboration of each label against the independent body signal;
+//!   * `UTILITY_REPORT.md` — how much of the residue is shared library code, and the un-named
+//!     helpers whose callers span many subsystems.
+//!
+//! See README.md for the full command lines.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
