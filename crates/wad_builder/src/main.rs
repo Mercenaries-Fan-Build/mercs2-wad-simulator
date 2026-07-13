@@ -1,11 +1,39 @@
 //! wad_builder — generic "raw asset → engine format → vz-patch.wad" builder.
 //!
 //! Jumping off from `dlc_port`/`cube_mod`, this crate adds the build-side
-//! editing those lack: replacing a Lua script inside a multi-entry `scripts_vz`
-//! block (compile-from-source → re-wrap BINN/UCFX → fix CSUM + chunk_size).
+//! editing those lack. It started with Lua-script replacement inside a
+//! multi-entry `scripts_vz` block (compile-from-source → re-wrap BINN/UCFX → fix
+//! CSUM + chunk_size) and now covers model, texture and whole-WAD surgery too.
 //!
 //! `identity-test` is the correctness oracle: it proves the parse/serialize and
 //! CSUM model reproduce a real block byte-for-byte before any edit is applied.
+//! Every write path re-parses its own output and re-verifies all container CSUMs
+//! before touching disk.
+//!
+//! Subcommands, by layer:
+//!
+//! * DECOMPRESSED BLOCK edits — `identity-test`, `extract-lua`, `replace-lua`,
+//!   `fix-model-mtrl`, `fix-model-vertices`, `unwrap-mesh`, `reskin-eyes`,
+//!   `set-tex-specular`, `rebuild-resident-tex`, `repoint-tex`, `build-atlas`.
+//! * PATCH-WAD edits (via `mercs2_formats::patch_wad`) — `list-blocks`,
+//!   `dump-block`, `replace-block`, `filter-keep`, `drop-blocks`, `merge-blocks`.
+//!   The write paths recompute `packed_field` (INDX page count) from the
+//!   DECOMPRESSED size; it sizes the engine's decompression dest buffer as
+//!   `page_count << 15` (engine FUN_00875b00) and a stale value overruns the heap.
+//! * END TO END — `build-skin`: patch a script inside an existing patch WAD's
+//!   `scripts_vz` block, recompress (sges round-trip checked) and rebuild the WAD,
+//!   then re-read the output and assert the edit landed.
+//!
+//! Module map:
+//!
+//! * [`scripts_block`] — `ScriptsBlock`/`Entry` container model (parse, serialize,
+//!   CSUM verify, name lookup by `pandemic_hash_m2`, LuaQ extract/replace). The
+//!   block parse/re-emit spine every other edit reuses.
+//! * [`model_mtrl`] — MTRL material-array fixes: count transposition, texture-hash
+//!   repointing.
+//! * [`model_vertex`] — un-transpose FLOAT16 STRM vertex positions.
+//! * [`model_unwrap`] — static-`MESH` slot surgery (strip `AREA` / drop the slot).
+//! * [`model_reskin`] — convert a static `MESH` group into a skinned `SKIN` group.
 
 mod model_mtrl;
 mod model_reskin;
