@@ -16,3 +16,5 @@ mercs2_engine = { workspace = true }
 mercs2_formats = { workspace = true }
 # `overlays` reuses the streaming catalog fold (StreamingManager) to count what each vz_state overlay adds.
 mercs2_core = { workspace = true }
+# `model_namer` emits a rainbow-table name fragment (same JSON shape the workshop merges).
+serde_json = "1"
