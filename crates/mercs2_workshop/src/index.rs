@@ -337,12 +337,23 @@ fn default_bone_candidates() -> Option<PathBuf> {
 ///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
 ///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
 ///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)
+///   `aset_external_names`   — block-path stems mined from the CONSOLE WADs (`aset_external_mine`).
+///                             The PC bake strips generated-asset names; the PS3/Xbox builds ship an
+///                             uncompressed block-path table that still spells them, and a block path
+///                             IS the asset's name. Biggest single source of model names (+510).
+///   `aset_model_names`      — per-model derivation from the textures the model ITSELF uses
+///                             (`mercs2_probe --bin model_namer`): the model name is an
+///                             order-preserving token SUBSEQUENCE of one of its texture names, which
+///                             catches the middle-token case (`civ_hum_casualfemale_ub_c` ->
+///                             `civ_hum_casualfemale_c`) that no suffix-strip can reach.
 /// A bundled copy wins over the repo copy so a packaged workshop stays self-contained.
 fn discovered_name_fragments() -> Vec<PathBuf> {
     [
         "aset_discovered_names.json",
         "aset_block_strings.json",
         "aset_expanded_names.json",
+        "aset_model_names.json",
+        "aset_external_names.json",
     ]
     .iter()
     .filter_map(|f| {
