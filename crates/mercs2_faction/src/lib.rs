@@ -4,18 +4,35 @@
 //! **Scoreboard row(s):** cross-cutting (AI 23 / population 24 / HUD 27 / music 21) — no row of its own.
 //! **Code map:** `docs/reverse_engineer/faction_reputation_code_map.md` (§10 = the reimpl target),
 //! with `ai_code_map.md` for the `Suspect` per-faction wanted component.
-//! **Owned Lua surface:** `Ai.AddInfraction`, `Ai.Get/SetRelation`, `Pg.*Pursuit*`, `MrxFactionManager`.
+//! **Owned Lua surface:** `Ai.AddInfraction`, `Ai.Get/SetRelation`, `Ai.SetInfractionMultiplier`,
+//! `Pg.*Pursuit*`, `MrxFactionManager`.
 //!
 //! Per the code map's §10 disposition this crate supplies the **mechanism the engine owns** — a thin
 //! native layer under what was a Lua brain (`mrxfactionmanager.lua`). The faithful pieces:
 //!
 //! - [`mood`] — the combat→faction **7-key infraction accumulator** + the recovered mood weighting
-//!   (`FUN_005e0720` serialized these exact seven keys, §2);
+//!   (`FUN_005e0720` serialized these exact seven keys, §2) + the civilian-casualty penalty curve;
 //! - [`attitude`] — the relation `[-100,100]` → attitude-level / **price** / meter policy (§3);
 //! - [`pursuit`] — the per-faction **heat** level + dwell countdown (§5);
 //! - [`components`] — the `FactionMarker`/`FactionValue`/`FactionZone`/`RtFactionZone`/`Suspect`
 //!   reflection components (§4 + AI census);
 //! - [`factions`] — the eight faction identities + the recovered initial-relation policy (§3).
+//!
+//! # The loop
+//!
+//! Everything hangs off [`FactionWorld`]. Hostile acts accrue into a faction's accumulator
+//! ([`FactionWorld::add_infraction`]); a [`report`](FactionWorld::report) weights that accumulator into
+//! a single **mood**, folds the negated mood into the faction's relation toward the PMC, clears the
+//! accumulator, and escalates [`pursuit`] if the relation bottomed out at `-100`. The relation then
+//! reads out as an [`Attitude`] level → shop **price** ([`FactionWorld::price_multiplier`]), HUD
+//! colour, and [`meter`](FactionWorld::meter). [`FactionWorld::tick`] advances only the pursuit dwell
+//! countdowns — infractions never passively decay.
+//!
+//! Nothing is written straight out: the two **drainable output queues**
+//! ([`take_relation_changes`](FactionWorld::take_relation_changes) →
+//! [`RelationChange`], [`take_attitude_events`](FactionWorld::take_attitude_events) →
+//! [`AttitudeEvent`]) are what the game's script host mirrors into the AI relation matrix and onto the
+//! event bus.
 //!
 //! **Carve rule (plan §4):** leaf crates never depend on each other. The relation **write** is the
 //! `Ai.SetRelation` matrix owned by `mercs2_ai`, so this crate does **not** touch that matrix; it
