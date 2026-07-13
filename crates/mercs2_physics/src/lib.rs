@@ -43,6 +43,19 @@
 //! * Only static world geometry is modelled, so [`RayHit::entity`] / `ClosestPoint::entity` are always
 //!   `None` (per the trait doc — MOPP/heightfield report no owning entity). Dynamic rigid bodies
 //!   (`hkpRigidBody`) and ragdolls arrive with the physics silo.
+//!
+//! # Module map
+//!
+//! | item | owns |
+//! |------|------|
+//! | [`StaticSoupPhysics`] (root) | the [`PhysicsQuery`] impl: [`raycast`][PhysicsQuery::raycast] / [`closest_point`][PhysicsQuery::closest_point] / [`move_character`][PhysicsQuery::move_character], plus [`linear_cast`][StaticSoupPhysics::linear_cast], [`move_swept`][StaticSoupPhysics::move_swept], [`ground_hit`][StaticSoupPhysics::ground_hit] and [`step_rigid_body`][StaticSoupPhysics::step_rigid_body] |
+//! | [`Heightmap`] / [`GroundHit`] (root) | bilinear terrain grid (`hkpSampledHeightFieldShape` stand-in) + the walkable-ground probe result |
+//! | [`CharacterController`] / [`CharacterState`] / [`CharacterInput`] (root) | the OnGround/Jumping/InAir locomotion state machine, gravity, jump, slope + step limits ([`DEFAULT_GRAVITY`], [`DEFAULT_MAX_SLOPE_COS`]) |
+//! | [`RigidBody`] (root) | minimal sphere-body props/debris dynamics, stepped by [`StaticSoupPhysics::step_rigid_body`] |
+//! | [`soup`] | the lighter *direct-soup* API — free functions over a raw `&[[Vec3; 3]]` with no world object ([`soup::raycast`], [`soup::move_character`], [`soup::ground_below`], [`soup::ray_tri`]), used by the engine's on-foot player controller + camera boom. **Bbox-culled** broad phase, so a large floor/wall triangle a player stands in the middle of is kept (the root impl's culls are tuned for the game's small world triangles). |
+//!
+//! `mercs2_engine` re-exports this crate as `mercs2_engine::physics`. Deferred work (Climbing/Ladder
+//! states, MOPP broadphase, full rigid-body dynamics) is itemised in `DEFERRED.md`.
 
 use mercs2_core::glam::Vec3;
 use mercs2_core::physics_query::{ClosestPoint, PhysicsQuery, RayHit};
