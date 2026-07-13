@@ -6,15 +6,50 @@
 //! all without booting the game. See `docs/modernization/workshop_charter.md` for the
 //! workbench roadmap (mission design, model import/fix, AV replacement, unlock auditing).
 //!
-//! Run:
-//! - `cargo run -p mercs2_workshop`                       — open the workshop window
-//! - `cargo run -p mercs2_workshop -- --list [filter]`    — headless catalog dump
-//! - `cargo run -p mercs2_workshop -- --check <name|0xH>` — headless model load check
+//! Run `cargo run -p mercs2_workshop` to open the window. Every workbench action also has a
+//! headless flag, so the same code paths are scriptable.
+//!
+//! WAD selection (applies to all modes):
 //! - `--wad <path>` overrides the registry-discovered `vz.wad`.
 //! - `--overlay <path>` (repeatable) opens patch WADs ON TOP of the base — the game's own
 //!   `vz-patch.wad` mechanism (last-opened wins), which is how DLC-ported content (obama, sarah,
 //!   the DLC world blocks) gets into the workbench. A `vz-patch.wad` sitting next to the base
 //!   wad is auto-loaded, exactly as the retail exe does; `--no-auto-patch` disables that.
+//! - `--names <csv>` overrides the name corpus (default: see `index::default_names_csv`).
+//!
+//! Headless modes (each runs and exits). `<name|0xH>` takes a raw m2 hash or a name to hash:
+//! - `--list [filter]`                     — catalog dump (models + textures), substring-filtered
+//! - `--inventory [class]`                 — models grouped by vehicle class (heli, tank, car, …)
+//! - `--check <name|0xH>`                  — load a model end-to-end: geometry, textures, clips,
+//!                                           bones, LOD tiers, destruction SM, ActionTable coverage
+//! - `--states <name|0xH>`                 — dump the destruction state machine, names resolved
+//! - `--export <name|0xH>`                 — OBJ + MTL + PNG -> `workshop_export/<name>/`
+//! - `--export-bundle <name|0xH|class:X> [--out dir]`
+//!                                         — LOSSLESS bundle (see `bundle`): editable glTF + PNG
+//!                                           skins + every LOD rung's ORIGINAL bytes + manifest
+//! - `--mod-new <name> <donor|0xH> <mesh> [--mod-group N] [--mod-out path]`
+//!                                         — publish a NOVEL new-hash model into a patch WAD
+//! - `--import-check <file>`               — parse a foreign `.obj`/`.gltf`/`.glb`, print what imports
+//! - `--tex-check <name|0xH>`              — one texture's dims/format/mips
+//! - `--tex-png <name|0xH> <out.png>`      — decode a texture to PNG (full mip chain)
+//! - `--tex-png-block <blk> <0xH> <out.png>` — decode ONE block's texture chunk (one mip level)
+//! - `--tex-scan` / `--tex-scan-blocks`    — dims/format of every texture ASET / every texture CHUNK
+//! - `--hash <names…>` / `--hash-file <f>` — m2-hash names (hash-hunting)
+//! - `--block-strings <blk>`               — printable ASCII (≥5 chars) from a decompressed block
+//! - `--pack-data [dir]`                   — build the redistributable `workshop_data/` bundle
+//!
+//! Module map:
+//! - [`app`]     — the window: winit loop over the engine `Scene`, asset workbench, editable
+//!                 sandbox (`workshop_scene.json`), the OBJ/PNG exporter.
+//! - [`bundle`]  — the lossless export bundle; nothing is discarded (raw rung bytes survive).
+//! - [`gui`]     — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
+//! - [`import`]  — foreign model import (`.obj`/`.gltf`/`.glb`) into the engine's `ModelData`.
+//! - [`index`]   — asset catalog + name resolution (packed `names.bin`, embedded ASET dictionary,
+//!                 repo-corpora fallback).
+//! - [`luaview`] — read-only Lua source viewer (hand-rolled lexer/highlighter).
+//! - [`publish`] — background-threaded mod publishing: inject, compress, SHA-256, load self-test.
+//! - [`texenc`]  — CPU BC1/BC3 encode for imported images.
+//! - [`texpng`]  — CPU BC1/BC3 decode + PNG write for the headless texture dumps.
 
 mod app;
 mod bundle;
