@@ -78,8 +78,10 @@ fn run() -> i32 {
     let mut fit_percentile = 100.0f32;
     let mut parts: Vec<PartSpec> = Vec::new();
     let mut repoints: Vec<(u32, u32)> = Vec::new();
-    let mut mtrl_sets: Vec<(usize, u32)> = Vec::new();
+    let mut mtrl_sets: Vec<(usize, usize, u32)> = Vec::new();
     let mut mtrl_adds: Vec<(usize, u32)> = Vec::new();
+    let mut mtrl_replaces: Vec<(usize, usize, u32)> = Vec::new();
+    let mut node_ats: Vec<(usize, [f32; 3])> = Vec::new();
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -100,14 +102,68 @@ fn run() -> i32 {
                     }
                 }
             }
+            "--node-at" => {
+                // <node>:<x>,<y>,<z> — move a HIER node to this MODEL-SPACE point (post-fit), so the
+                // donor's rig lands on OUR tank's real axis (turret ring, gun trunnion). The node's
+                // whole subtree moves with it. This is the RIGHT way to re-rig a novel model: do NOT
+                // shove the geometry onto the donor's node (that displaces the part off the body).
+                if let Some(v) = it.next() {
+                    let mut p = v.split(':');
+                    let node = p.next().and_then(|s| s.parse::<usize>().ok());
+                    let xyz: Option<Vec<f32>> = p.next().map(|c| {
+                        c.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect()
+                    });
+                    match (node, xyz) {
+                        (Some(n), Some(v)) if v.len() == 3 => node_ats.push((n, [v[0], v[1], v[2]])),
+                        _ => {
+                            eprintln!("--node-at needs <node>:<x>,<y>,<z>");
+                            return 2;
+                        }
+                    }
+                }
+            }
+            "--replace-mtrl" => {
+                // <dst>:<src>:<0xTEXTURE> — overwrite material `dst` with a clone of `src` and a new
+                // diffuse, keeping `dst`'s own name hash. Unlike --add-mtrl this does NOT grow the
+                // material count, which is what a 9th material cannot survive (NULL shader slot ->
+                // draw-time crash 0x00855691). Use an unused/untextured record as the `dst`.
+                if let Some(v) = it.next() {
+                    let mut p = v.split(':');
+                    if let (Some(d), Some(s), Some(t)) = (
+                        p.next().and_then(|s| s.parse::<usize>().ok()),
+                        p.next().and_then(|s| s.parse::<usize>().ok()),
+                        p.next().and_then(parse_hash),
+                    ) {
+                        mtrl_replaces.push((d, s, t));
+                    }
+                }
+            }
             "--set-mtrl" => {
-                // <material_index>:<0xTEXTURE> — assign a skin to one MTRL record directly.
+                // <material_index>:<0xTEXTURE> — set the DIFFUSE (texture slot 0) of one MTRL record.
                 if let Some(v) = it.next() {
                     let mut p = v.split(':');
                     if let (Some(i), Some(t)) =
                         (p.next().and_then(|s| s.parse::<usize>().ok()), p.next().and_then(parse_hash))
                     {
-                        mtrl_sets.push((i, t));
+                        mtrl_sets.push((i, 0, t));
+                    }
+                }
+            }
+            "--set-tex" => {
+                // <material_index>:<slot>:<0xTEXTURE> — set ANY texture slot. slot 0 = diffuse,
+                // 1 = NORMAL, 2 = specular. The donor's normal map sampled through our UVs is what
+                // makes a novel model look like crumpled foil; repoint slot 1 as well as slot 0.
+                if let Some(v) = it.next() {
+                    let mut p = v.split(':');
+                    if let (Some(i), Some(sl), Some(t)) = (
+                        p.next().and_then(|s| s.parse::<usize>().ok()),
+                        p.next().and_then(|s| s.parse::<usize>().ok()),
+                        p.next().and_then(parse_hash),
+                    ) {
+                        mtrl_sets.push((i, sl, t));
+                    } else {
+                        eprintln!("--set-tex needs <mtrl>:<slot>:<0xTEX>");
+                        return 2;
                     }
                 }
             }
@@ -162,7 +218,7 @@ fn run() -> i32 {
             return 1;
         }
     };
-    let (out, stats) = match inject_parts_into_template(&ucfx, &parts, &repoints, &mtrl_sets, &mtrl_adds, name_hash, scale_mult, flip, y_offset, fit_percentile) {
+    let (out, stats) = match inject_parts_into_template(&ucfx, &parts, &repoints, &mtrl_sets, &mtrl_adds, &mtrl_replaces, &node_ats, name_hash, scale_mult, flip, y_offset, fit_percentile) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("inject_parts: {e}");
@@ -185,6 +241,12 @@ fn run() -> i32 {
             p.label, p.group, p.node, p.material_index, p.seg_id, p.vertex_count, p.triangle_count,
             if p.node >= 0 { "  [node-local: spins with its node]" } else { "  [model space, all tiers]" }
         );
+    }
+    if stats.phy2_hulls_scaled > 0 {
+        println!("  PHY2: rescaled {} collision hull(s) by {scale_mult}x", stats.phy2_hulls_scaled);
+    }
+    for (n, p) in &stats.nodes_moved {
+        println!("  node {n:3} RETARGETED -> ({:.2}, {:.2}, {:.2})  [subtree moved with it]", p[0], p[1], p[2]);
     }
     println!("neutralised {} other group(s); MTRL repoints: {}", stats.emptied_groups.len(), stats.mtrl_repoints);
     println!("-> {} ({} bytes)", pos[1], out.len());
