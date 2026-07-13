@@ -8,7 +8,7 @@ fn main() {
     let mut hdr = [0u8; FFCS_HEADER_SIZE];
     file.seek(SeekFrom::Start(0)).unwrap();
     file.read_exact(&mut hdr).unwrap();
-    let rows = parse_ffcs_header(&hdr).unwrap();
+    let (rows, _endian) = parse_ffcs_header(&hdr).unwrap();
     println!("FFCS chunks ({}):", rows.len());
     for r in &rows {
         println!("  {:?} offset=0x{:X} meta={}", std::str::from_utf8(&r.tag).unwrap_or("?"), r.offset, r.meta);
