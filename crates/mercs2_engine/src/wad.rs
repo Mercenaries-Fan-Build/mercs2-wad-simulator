@@ -16,6 +16,10 @@ pub const MODEL_ASET_TYPE_ID: u32 = 19;
 pub struct Wad {
     file: File,
     archive: FfcsArchive,
+    /// The path this archive was opened from — its identity. Caches that are per-ARCHIVE (the clip
+    /// index) must key on this: a WadStack holds several open Wads (base + patch overlays), so a
+    /// process-wide "the WAD is fixed" assumption silently serves one archive's data for another.
+    path: String,
     /// Small MRU cache of recently decompressed blocks (most-recent last). The hi-res texture
     /// assembler re-reads the same c3 finer-LOD blocks for every texture of a model that shares a
     /// cell subtree; caching the (often multi-MB) decompressed blocks avoids re-inflating them.
@@ -49,7 +53,12 @@ pub fn open(path: &str) -> Result<Wad, String> {
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let archive =
         load_ffcs_archive(&mut file, size).map_err(|e| format!("parse FFCS archive: {e}"))?;
-    Ok(Wad { file, archive, block_cache: Vec::new() })
+    Ok(Wad { file, archive, path: path.to_string(), block_cache: Vec::new() })
+}
+
+/// The archive's identity (the path it was opened from) — the key for any per-archive cache.
+pub fn wad_path(wad: &Wad) -> &str {
+    &wad.path
 }
 
 /// Every ASET `(type_id, is_primary, block_index)` a hash appears under (any type). For diagnosing
