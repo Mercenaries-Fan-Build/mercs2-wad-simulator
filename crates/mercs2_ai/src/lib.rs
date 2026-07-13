@@ -18,6 +18,19 @@
 //!
 //! The `Ai.*` Lua order surface (`Ai.Goal`, `Ai.SetRelation`, `Ai.SetState`, …) posts to this bus /
 //! sets these components via the game's `EngineHost` seam; the goals themselves stay authored content.
+//!
+//! # Module map
+//!
+//! | Module | Owns |
+//! | --- | --- |
+//! | [`bus`] | [`AiActionBus`] / [`AiAction`] / [`RING_CAP`] (`0x400`) / [`goal_action_hash`] — the 1024-slot `DirectAction` ring and verb hashing (`pandemic_hash_m2` of the lowercased verb). Over-cap posts are **dropped, not overwritten**. |
+//! | [`relation`] | [`RelationMatrix`] — the *directed* attitude matrix, clamped [`RELATION_MIN`]`..=`[`RELATION_MAX`] (`-100..=100`); unset pairs read `0`. |
+//! | [`perception`] | [`update_perception`] — recomputes every [`PerceptionRecord`] from observer positions, sight range and the relation matrix. Records are derived and reset each pass. |
+//! | [`components`] | [`AiBehavior`] / [`AiSkill`] / [`Perception`] / [`Stimulus`] / [`Target`] / [`Squad`] / [`PerceptionRecord`] with their m2 class hashes and recovered defaults, plus the [`AiFaction`] key the perception pass needs. |
+//!
+//! [`AiWorld`] bundles the two world-global pieces (bus + relations). `mercs2_engine` re-exports this
+//! crate as `mercs2_engine::ai`, holds an `AiWorld` on its runtime, ticks it each fixed step, and
+//! forwards the `Ai.*` bindings into it from the script host.
 
 pub mod bus;
 pub mod components;
