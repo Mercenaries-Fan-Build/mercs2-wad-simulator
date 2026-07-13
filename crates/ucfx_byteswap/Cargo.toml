@@ -3,6 +3,7 @@ name = "ucfx_byteswap"
 version = "2.0.0"
 edition = "2021"
 description = "Xbox 360 BE → PC LE UCFX block converter (library + CLI)"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 keywords = ["mercs2", "ucfx", "byteswap", "xbox", "conversion"]
