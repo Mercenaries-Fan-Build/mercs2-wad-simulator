@@ -14,19 +14,31 @@
 //! points *into* this crate (engine → script host), never the reverse — the same shape as the original
 //! `Sys.*` C-binding table calling into the native engine.
 //!
-//! ## What Phase 1 installs
-//! - Lua 5.4 (`mlua`, vendored) + the **measured** 5.1→5.4 compat prelude (charter migration table:
-//!   `unpack`, `table.getn`, `math.mod`, `string.gfind`, `loadstring`; the heavy constructs are 0 files).
-//! - The **module system**: `import(name)` loads a corpus `.lua` into its own `_ENV` table (metatable
-//!   `__index → _G`) so the file's bare `function Foo()` become module members; `inherit(base)` chains
-//!   `__index → base`; results cache in `_MODULES`. This is the C-level environment-set the original
-//!   engine did (`_SYS._IMPORT`), done here with `Chunk::set_environment`.
-//! - The confirmed **engine binding tables** the boot slice needs: `Debug`, `Sys`, `Pg`, `Event`, plus
-//!   a provisional `_Engine` seam for actor/layer spawning (renamed to its real C-binding once
-//!   `mrxutil.lua`'s `SpawnActor` bottom-out is pinned against `binding_map.json`).
+//! ## What the host installs
+//! - Lua 5.4 (`mlua`, vendored) + the **measured** 5.1→5.4 compat prelude (`COMPAT_PRELUDE`, charter
+//!   migration table: `unpack`, `table.getn`, `math.mod`, `string.gfind`, `loadstring`; the heavy
+//!   constructs are 0 files) + `getfenv`/`setfenv` shims over 5.4's `_ENV`-as-upvalue model, and the
+//!   engine's own `math.randi` / capitalized `Math` namespace.
+//! - The **module system**: `import(name)` / `dynamic_import(name)` load a corpus `.lua` into its own
+//!   `_ENV` table (metatable `__index → _G`) so the file's bare `function Foo()` become module members;
+//!   `inherit(base)` chains `__index → base`; results cache in `_MODULES`. This is the C-level
+//!   environment-set the original engine did (`_SYS._IMPORT`), done here with `Chunk::set_environment`.
+//!   A module's parameterless `Init()` is auto-invoked, **deferred** two-phase (load all, then Init in
+//!   load order).
+//! - The **engine binding surface**: 35 namespaces / 1086 required cfuncs, one [`bindings`] module per
+//!   `luaL_Reg` table, seeded from the live Surface-B trace
+//!   (`mods/lua_trace_asi/reference/binding_map.json`; human index
+//!   `docs/reverse_engineer/scripting_host_binding_code_map.md` §3). Coverage is machine-readable
+//!   ([`coverage_json`] → `binding_coverage.json`); the burn-down metric is `remaining` = required−real.
+//! - Optionally the bring-up auto-stub layer ([`ScriptHost::enable_autostub`]): unwired Capitalized
+//!   globals resolve to logged no-op stubs so the real import cascade completes, and every touched name
+//!   is recorded as a reimpl-side binding trace.
 //!
-//! Later phases widen the binding surface toward the captured 53-table / 1216-fn Surface-B inventory
-//! (`mods/lua_trace_asi/reference/binding_map.json`) and run the real `mrxbootstrap` module tree.
+//! ## Module map
+//! - [`ScriptHost`] — the VM + module loader + `register_engine` / `enable_autostub` / `fire_state_change`.
+//! - [`EngineHost`] / [`SharedHost`] — the IoC seam the bindings call; the engine implements it.
+//! - [`bindings`] — the per-namespace binding files + the coverage harness ([`install_all`], [`totals`],
+//!   [`coverage_json`], [`NsCoverage`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -1518,11 +1530,10 @@ impl ScriptHost {
     /// Install the engine binding tables backed by `host`. Idempotent-ish: call once after `new`.
     ///
     /// The surface is modular: one file per engine namespace under [`bindings`], each declaring its
-    /// required cfunc surface and installing this build's real/stub bodies. Phase 1's real bodies (the
-    /// boot + PMC-interior slice: `Debug`, `Sys`, `Pg`, `Object`, `Ai`, `Vehicle`, `Event`) live in
-    /// those files; every other namespace's cfuncs are still "stubs remaining" (see
-    /// [`Self::register_engine_reported`] / [`bindings::coverage_json`]). The `Mrx*` modules are
-    /// *game* Lua and come from the corpus via `import`, not from here.
+    /// required cfunc surface and installing this build's real/stub bodies. All 1086 required cfuncs
+    /// are installed and callable; the ones still lacking a real engine-backed body are the "stubs
+    /// remaining" tally (see [`Self::register_engine_reported`] / [`bindings::coverage_json`]). The
+    /// `Mrx*` modules are *game* Lua and come from the corpus via `import`, not from here.
     pub fn register_engine(&self, host: SharedHost) -> LuaResult<()> {
         self.register_engine_reported(host).map(|_| ())
     }
