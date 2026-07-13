@@ -16,6 +16,11 @@
 //!   `DecalsUpdate`/`DecalUnlock` aging/GC + reuse-oldest recycle + lifetime fade (§4);
 //! - [`components`] — the [`DisableDecals`]/[`Disable3DDecals`] ECS toggle tags (§3).
 //!
+//! At the crate root, [`DecalWorld`] is the table+pool pair the host holds and ticks: `spawn` /
+//! `spawn_by_key` / `spawn_on_entity` (`CreateDecals`, the last honouring the §3 suppression tags),
+//! `update` (`DecalsUpdate`/`DecalUnlock`) once per fixed step, and `iter_live` for the render seam.
+//! Library only — no binaries.
+//!
 //! The projection **shader** (`PgDecalVP`/`PgDecal2FP` + `_pl`/`_sl`/`_pl_sl`/`_li` light permutations
 //! and the `decalNormal`/`decalParam` bind slots, §2) and the actual **draw** are the render seam this
 //! crate hands off to `mercs2_engine`: each [`pool::DecalInstance`] carries the projection *inputs*
