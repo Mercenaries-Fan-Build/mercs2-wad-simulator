@@ -14,9 +14,12 @@
 //! buffer (see [`backend`]).
 //!
 //! ## Modules
-//! * [`sounddb`] — the `'\x1d'`-tagged sound/cue catalog parser (`FUN_00835b80`).
+//! * [`sounddb`] — the `'\x1d'`-tagged sound/cue catalog parser (`FUN_00835b80`). Layout CALIBRATED
+//!   against shipped blocks: 28-B header + 12-B `{guid, bank_hash, wave_index}` entries.
+//! * [`wave`] — `wavebank` record parser + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
 //! * [`voice`] — voice pool, priority-steal, the 16-state instance FSM (`FUN_00836c70`).
 //! * [`mixer`] — the software mixer (`FUN_00836610`): int32 accumulate → saturate int16, headless.
+//!   Per-voice resampling (clip rate → mixer rate) via [`PcmSource`].
 //! * [`spatial`] — 4 listeners, distance attenuation, stereo pan, Doppler, start-delay.
 //! * [`categories`] — per-category volume/pitch fades + ref-counted master duck.
 //! * [`music`] — the dual-deck crossfading music state machine (`FUN_0082d7a0`).
@@ -26,6 +29,25 @@
 //! * [`components`] — audio ECS components ([`AudioListener`], [`SoundEmitter`]).
 //! * [`engine`] — [`AudioEngine`], the facade exposing the real `Sound.*`/`VO.*` bodies + the
 //!   binding-wiring seam (see its module docs).
+//!
+//! ## Cue → audible PCM (the whole path)
+//! [`AudioEngine::set_sounddb`] installs the catalog; [`AudioEngine::load_wavebank`] decodes a
+//! `wavebank` body and holds its clips resident; [`AudioEngine::cue_sound`] resolves the cue, allocates
+//! a voice (priority-steal if the pool is full), auto-binds the resident wave it routes to, and applies
+//! 3D gains against the closest listener. [`AudioEngine::tick`] advances the FSMs/fades;
+//! [`AudioEngine::render`] mixes int16 frames, and [`AudioEngine::pump`] feeds them to the device at
+//! wall-clock rate (a no-op when headless). Verified end-to-end on retail data —
+//! `mercs2_game/tests/audio_wad_probe.rs`.
+//!
+//! ## Features
+//! `device` (**on by default**) links `cpal` for [`backend::CpalSink`]. No audio *behaviour* is gated
+//! behind it: with the feature off — or simply with no device present — the mixer runs fully headless
+//! on [`backend::NullSink`]. It exists only so the decode-side consumers (the WAD CLIs, which use just
+//! [`sounddb`] + [`wave`]) can build with `default-features = false` and avoid linking `alsa-sys`,
+//! which breaks the 32-bit cross build.
+//!
+//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, per-region music
+//! machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
 pub mod banks;

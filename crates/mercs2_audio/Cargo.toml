@@ -3,6 +3,7 @@ name = "mercs2_audio"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 14 (row 21): audio backend, mixer, dual-deck music FSM, banks, 3D. WAVE-1 impl."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 
