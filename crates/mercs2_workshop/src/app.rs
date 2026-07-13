@@ -64,6 +64,11 @@ pub(crate) struct WadStack {
     /// — or it is inspecting containers in isolation rather than simulating the engine.
     /// See `mercs2_engine::registry` and `docs/modernization/model_render_gate_spec.md` §2b.
     pub registry: mercs2_engine::registry::AssetRegistry,
+    /// Memo for [`WadStack::texture_best`]. Assembling a texture's full mip chain means walking its
+    /// whole c3-cell subtree, and a model's materials share textures (and cells) heavily — so the
+    /// uncached cost was paid once per material slot, which is what made full-res "too slow" and got
+    /// the resident tail wired into model loads instead. Cached, each texture is walked once.
+    tex_cache: HashMap<u32, mercs2_formats::texture::TextureData>,
 }
 
 impl WadStack {
@@ -80,7 +85,7 @@ impl WadStack {
                 Err(e) => eprintln!("[workshop] overlay {o}: {e} (skipped)"),
             }
         }
-        Ok(WadStack { wads, labels, registry: Default::default() })
+        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new() })
     }
 
     /// Short display tag for an asset's source wad (base = "", overlays = "+<file stem>").
@@ -129,13 +134,23 @@ impl WadStack {
         Err(last)
     }
 
-    /// Full streamed resolution when available (plate view).
+    /// Full streamed resolution — the texture's higher mips assembled from the finer LOD blocks of
+    /// its own c3-cell subtree (`wad::extract_texture_hires`). This is what EVERY consumer wants:
+    /// the resident block alone ships a coarse mip tail, so a 1024² normal map resolves to 32×32 and
+    /// a PNG written from it is a mostly-empty plate. Memoized, because the subtree walk is the only
+    /// reason anything settled for the tail.
     pub fn texture_best(&mut self, hash: u32) -> Result<mercs2_formats::texture::TextureData, String> {
+        if let Some(t) = self.tex_cache.get(&hash) {
+            return Ok(t.clone());
+        }
         let mut last = format!("0x{hash:08X}: not in any open wad");
         for i in (0..self.wads.len()).rev() {
             let w = &mut self.wads[i];
             match wad::extract_texture_hires(w, hash).or_else(|_| wad::extract_texture(w, hash)) {
-                Ok(t) => return Ok(t),
+                Ok(t) => {
+                    self.tex_cache.insert(hash, t.clone());
+                    return Ok(t);
+                }
                 Err(e) => last = e,
             }
         }
@@ -417,6 +432,30 @@ const VEH_CLASS_ORDER: &[&str] = &[
 ];
 
 /// Group the catalog's vehicle models by class for the workbench inventory.
+/// Resolve HIER node-name hashes to names by hashing every candidate in the bone-name list
+/// (`docs/data/bone_name_candidates.txt`) — the same trick `mercs2_probe hier` uses. We only care
+/// about the `hp_*` INTERACTION points (seat / exhaust / wheel / barrel tip).
+fn resolve_node_names(hashes: &[u32]) -> std::collections::HashMap<u32, String> {
+    use mercs2_formats::hash::pandemic_hash_m2;
+    let want: std::collections::HashSet<u32> = hashes.iter().copied().collect();
+    let mut out = std::collections::HashMap::new();
+    for root in ["docs/data/bone_name_candidates.txt", "../../docs/data/bone_name_candidates.txt"] {
+        let Ok(txt) = std::fs::read_to_string(root) else { continue };
+        for line in txt.lines() {
+            let c = line.trim();
+            if c.len() < 2 {
+                continue;
+            }
+            let h = pandemic_hash_m2(c);
+            if want.contains(&h) {
+                out.entry(h).or_insert_with(|| c.to_string());
+            }
+        }
+        break;
+    }
+    out
+}
+
 fn build_vehicle_inventory(index: &crate::index::AssetIndex) -> Vec<(&'static str, Vec<(u32, String)>)> {
     let mut map: std::collections::HashMap<&'static str, Vec<(u32, String)>> = Default::default();
     for r in &index.models {
@@ -573,6 +612,18 @@ pub fn run(opts: Options) {
     // Workbench: render a marker at EVERY HIER node of the previewed template so functional nodes
     // (rotor hub, skids, seat, tail, hardpoints) are visible spatial anchors to map geometry onto.
     let mut show_nodes = false;
+    // ★HARDPOINT EDITOR. A vehicle's INTERACTION POINTS are HIER nodes named `hp_*` — hp_seat_lt is
+    // the seat you enter at, hp_fx_exhaust_* the exhaust emitters, hp_wheel_* the suspension points,
+    // hp_barreltip_a the muzzle. Conform a novel model at a different SIZE and these stay where the
+    // DONOR's were: on a 2x tank the seat ends up 5.5 m in the air on the turret roof and the vehicle
+    // simply cannot be entered. They must be RE-PLACED on the new model, which is a spatial job — so
+    // do it here, on the model, instead of guessing coordinates.
+    // `hp_edits[node] = new world position`; exported as `inject_parts --node-at <node>:<x>,<y>,<z>`.
+    let mut show_hardpoints = true;
+    let mut hp_edits: std::collections::BTreeMap<usize, [f32; 3]> = std::collections::BTreeMap::new();
+    let mut hp_selected: Option<usize> = None;
+    // node_hash -> resolved name, for the loaded template (hp_* names come from the bone-name list).
+    let mut hp_names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     // Model Workbench page: its own mode + vehicle inventory (rebuilt when names/overlays change).
     let mut mode = WorkMode::Browser;
     let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_vehicle_inventory(&index);
@@ -2134,6 +2185,85 @@ pub fn run(opts: Options) {
                                             ui.checkbox(&mut show_nodes, "show node markers")
                                                 .on_hover_text("green = positioned attach node (rotor/skid/seat/tail/hardpoint) · grey = origin/structural");
                                             ui.weak("green = attach node (rotor/skid/seat) · grey = structural");
+
+                                            // ---- INTERACTION HARDPOINTS ----
+                                            // A vehicle's interaction points are HIER nodes named
+                                            // `hp_*`: hp_seat_lt is where the player ENTERS,
+                                            // hp_fx_exhaust_* are emitters, hp_wheel_* the
+                                            // suspension points, hp_barreltip_a the muzzle.
+                                            // Conform a novel model at a different SIZE and these
+                                            // stay where the DONOR's were -- on a 2x tank the seat
+                                            // ends up 5.5 m up on the turret roof and the vehicle
+                                            // cannot be entered. Re-place them HERE, on the model.
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                ui.strong("Interaction hardpoints");
+                                                ui.checkbox(&mut show_hardpoints, "show");
+                                            });
+                                            if hp_names.is_empty() {
+                                                let hashes: Vec<u32> = p.rig.iter().map(|b| b.name_hash).collect();
+                                                hp_names = resolve_node_names(&hashes);
+                                            }
+                                            let mut hps: Vec<(usize, String, [f32; 3])> = Vec::new();
+                                            for (i, b) in p.rig.iter().enumerate() {
+                                                if let Some(n) = hp_names.get(&b.name_hash) {
+                                                    if n.starts_with("hp_") {
+                                                        let w = [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]];
+                                                        let pos = hp_edits.get(&i).copied().unwrap_or(w);
+                                                        hps.push((i, n.clone(), pos));
+                                                    }
+                                                }
+                                            }
+                                            if hps.is_empty() {
+                                                ui.weak("no hp_* nodes resolved for this model");
+                                            } else {
+                                                ui.weak(format!("{} hardpoints -- the SEAT is where the player enters", hps.len()));
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(180.0)
+                                                    .id_source("hp_list")
+                                                    .show(ui, |ui| {
+                                                        for (idx, name, pos) in &hps {
+                                                            let sel = hp_selected == Some(*idx);
+                                                            ui.horizontal(|ui| {
+                                                                if ui.selectable_label(sel, name.as_str()).clicked() {
+                                                                    hp_selected = if sel { None } else { Some(*idx) };
+                                                                }
+                                                                ui.weak(format!("n{idx}"));
+                                                            });
+                                                            let mut v = *pos;
+                                                            let mut changed = false;
+                                                            ui.horizontal(|ui| {
+                                                                for (k, ax) in ["x", "y", "z"].iter().enumerate() {
+                                                                    changed |= ui
+                                                                        .add(egui::DragValue::new(&mut v[k]).speed(0.02).prefix(format!("{ax} ")))
+                                                                        .changed();
+                                                                }
+                                                            });
+                                                            if changed {
+                                                                hp_edits.insert(*idx, v);
+                                                                hp_selected = Some(*idx);
+                                                            }
+                                                        }
+                                                    });
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("reset").clicked() {
+                                                        hp_edits.clear();
+                                                    }
+                                                    if ui.button("copy --node-at args").clicked() {
+                                                        let args: Vec<String> = hp_edits
+                                                            .iter()
+                                                            .map(|(n, v)| format!("--node-at {n}:{:.3},{:.3},{:.3}", v[0], v[1], v[2]))
+                                                            .collect();
+                                                        let joined = args.join(" ");
+                                                        ui.output_mut(|o| o.copied_text = joined.clone());
+                                                        status = if joined.is_empty() {
+                                                            "no hardpoint edits to copy".to_string()
+                                                        } else {
+                                                            format!("copied: {joined}")
+                                                        };
+                                                    }
+                                                });
+                                            }
                                         }
                                         None => {
                                             ui.weak("← pick a vehicle from the inventory");
@@ -3098,6 +3228,46 @@ pub fn run(opts: Options) {
                                     });
                                 }
                             }
+
+                            // ---- INTERACTION HARDPOINTS: big, unmistakable, and at their EDITED
+                            // position. These are what the player touches (the seat is the ENTRY
+                            // point) -- so they must sit ON the new model, not where the donor's were.
+                            if show_hardpoints {
+                                for (i, b) in p.rig.iter().enumerate() {
+                                    let Some(n) = hp_names.get(&b.name_hash) else { continue };
+                                    if !n.starts_with("hp_") {
+                                        continue;
+                                    }
+                                    let base = [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]];
+                                    let pos = hp_edits.get(&i).copied().unwrap_or(base);
+                                    let is_seat = n.contains("seat");
+                                    let color = if hp_selected == Some(i) {
+                                        [1.0, 0.25, 0.9, 1.0]      // magenta = selected
+                                    } else if is_seat {
+                                        [1.0, 0.85, 0.15, 0.95]    // amber = the ENTRY point
+                                    } else {
+                                        [0.2, 0.6, 1.0, 0.8]       // blue = other hardpoint
+                                    };
+                                    cards.push(mercs2_engine::particles::GlowCard {
+                                        pos,
+                                        size: (p.radius * (if is_seat { 0.075 } else { 0.055 })).clamp(0.05, 0.7),
+                                        color,
+                                    });
+                                    // A moved hardpoint gets a dotted trail back to where the DONOR
+                                    // had it, so the displacement you are applying is visible.
+                                    let d = [pos[0] - base[0], pos[1] - base[1], pos[2] - base[2]];
+                                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 0.01 {
+                                        for st in 1..7 {
+                                            let f = st as f32 / 7.0;
+                                            cards.push(mercs2_engine::particles::GlowCard {
+                                                pos: [base[0] + d[0] * f, base[1] + d[1] * f, base[2] + d[2] * f],
+                                                size: (p.radius * 0.012).clamp(0.008, 0.12),
+                                                color: [1.0, 0.5, 0.1, 0.5],
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                         }
                         scene.set_glow_cards(&cards);
                     }
@@ -3240,16 +3410,16 @@ fn bind_tex_plate(w: &mut WadStack, scene: &mut Scene, tv: &mut TexView) {
 /// Everything `load_preview` and the sandbox loader share: container → indexed geometry →
 /// textures → skin (native metres) → clips.
 #[derive(Clone)]
-struct ModelData {
-    verts: Vec<mesh::Vertex>,
-    indices: Vec<u32>,
-    draws: Vec<DrawGroup>,
-    stats: mesh::ModelStats,
-    skin: mesh::SkinData,
-    textures: TexMap,
+pub(crate) struct ModelData {
+    pub(crate) verts: Vec<mesh::Vertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) draws: Vec<DrawGroup>,
+    pub(crate) stats: mesh::ModelStats,
+    pub(crate) skin: mesh::SkinData,
+    pub(crate) textures: TexMap,
     /// SEGM state/LOD tier bits the container carries (F11 cycles them; empty = single-tier /
     /// imported) and the bit this build used.
-    tiers: Vec<u8>,
+    pub(crate) tiers: Vec<u8>,
     tier: u8,
     /// The ENGINE's destruction state machine (named states + Enter/Exit command scripts) —
     /// docs/destruction_orchestrator_format.md. None = non-destructible. Together with
@@ -3297,7 +3467,7 @@ fn source_model_data(
     load_model_data(w, hash)
 }
 
-fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, String> {
+pub(crate) fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, String> {
     load_model_data_tier(w, hash, 0x01)
 }
 
@@ -3372,13 +3542,16 @@ fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<Mod
     // heuristic stood in for it. With the chain assembled, tier 0 is real geometry and needs no
     // guess.
     let tier = if want_bit != 0x01 && tiers.contains(&want_bit) { want_bit } else { 0x01 };
-    // RESIDENT mips only: `extract_texture_hires` walks the whole cell subtree per texture and
-    // made model loads take seconds — the F3 plate view still fetches full-res on demand.
+    // FULL mip chain, all three slots. The resident block ships only a coarse mip tail (a 1024²
+    // normal map arrives as 1,360 B = 32×32), so loading the resident texture here was serving the
+    // preview a blurred model and writing near-empty PNGs on export. `texture_best` assembles the
+    // higher mips from the finer LOD blocks of the texture's own cell subtree and memoizes, so the
+    // subtree walk that made this "too slow" is now paid once per texture per session.
     let mut textures: TexMap = HashMap::new();
     for d in &draws {
         for h in [d.diffuse, d.normal, d.specular].into_iter().flatten() {
             if !textures.contains_key(&h) {
-                if let Ok(t) = w.texture_resident(h) {
+                if let Ok(t) = w.texture_best(h) {
                     textures.insert(h, t);
                 }
             }
@@ -3470,6 +3643,90 @@ fn lua_references(
 
 /// CharacterName candidates from a model label: the tail after `hum_` (else the whole label),
 /// progressively stripping `_suffix` segments — `pmc_hum_mattias_v3` → `mattias_v3` → `mattias`.
+/// Every clip the GAME associates with this asset — the set an export must ship.
+///
+/// The generic rig-matched loader (`clips_for_model`) is the wrong source here: all humans share the
+/// same HIER, so it matches by skeleton coverage and is deliberately capped at `MAX_AUTO_CLIPS` (6)
+/// to bound decode cost in the preview. That is a working set, not the character's animation set —
+/// Mattias has ~100 clips and Chris ~111, and they are DISJOINT.
+///
+/// The authoritative source is the AnimationLookup table, keyed by `CharacterName = m2(name)`, which
+/// is how the engine itself picks a clip (see the human-animation-selection chain). Fall back to the
+/// generic set only for a rig the tables do not name — props, vehicles, unnamed skeletons.
+pub(crate) fn clips_for_export(
+    w: &mut WadStack,
+    label: &str,
+    rig: &[BoneRig],
+    index: &AssetIndex,
+) -> (Vec<ClipAnim>, HashMap<u32, String>) {
+    let mut names: HashMap<u32, String> = HashMap::new();
+    if rig.is_empty() {
+        return (Vec::new(), names);
+    }
+    let hier: Vec<u32> = rig.iter().map(|b| b.name_hash).collect();
+
+    // Character-specific: walk the label's name candidates (pmc_hum_mattias_v3 -> mattias_v3 ->
+    // mattias) until one names rows in the table, exactly as the preview's catalog does.
+    let mut want: Vec<u32> = Vec::new();
+    if let Some(sel) = w.anim_selector() {
+        for cand in character_candidates(label) {
+            let character = AnimSelector::character_name(&cand);
+            let rows = sel.character_clips(character);
+            if rows.is_empty() {
+                continue;
+            }
+            // A clip answers SEVERAL handles (equipment variants share clips); gather them all, as
+            // the name is derived from the game states those handles play.
+            let mut handles: HashMap<u32, Vec<u32>> = HashMap::new();
+            for r in &rows {
+                let hs = handles.entry(r.clip).or_default();
+                if hs.is_empty() {
+                    want.push(r.clip);
+                }
+                if !hs.contains(&r.handle) {
+                    hs.push(r.handle);
+                }
+            }
+            // Clip names are stripped on disk, so most resolve to nothing in the catalog. Fall back
+            // to the PROCEDURAL name the preview shows — Stance.Action.AimState... read straight out
+            // of the ActionTable, i.e. game-table values, not invented labels.
+            for &clip in &want {
+                let hs = &handles[&clip];
+                let mut actions = Vec::new();
+                let mut contexts = Vec::new();
+                for &h in hs {
+                    actions.extend(sel.handle_actions(h).into_iter().map(|a| (h, a)));
+                    contexts
+                        .extend(sel.lookup_context(h, character).into_iter().filter(|c| c.clip == clip));
+                }
+                if let Some(n) = index
+                    .names
+                    .get(&clip)
+                    .cloned()
+                    .or_else(|| procedural_clip_name(index, &actions, &contexts))
+                {
+                    names.insert(clip, n);
+                }
+            }
+            break;
+        }
+    }
+    if want.is_empty() {
+        // Not a table-named character: the rig-matched animgroup set is all there is.
+        let generic = w.clips_for_model(rig);
+        for c in &generic {
+            if let Some(n) = index.names.get(&c.name_hash) {
+                names.insert(c.name_hash, n.clone());
+            }
+        }
+        return (generic, names);
+    }
+    // A table row can name a clip this rig cannot bind; `clip_for_rig` still returns it (with zero
+    // tracks resolved), and the bundle records it as present-but-unbound rather than shipping a
+    // dead T-pose animation.
+    (want.iter().filter_map(|&h| w.clip_for_rig(&hier, h)).collect(), names)
+}
+
 pub(crate) fn character_candidates(label: &str) -> Vec<String> {
     let tail = label.find("hum_").map(|i| &label[i + 4..]).unwrap_or(label);
     let mut v = vec![tail.to_string()];
@@ -3879,6 +4136,8 @@ pub(crate) fn export_bundle_by_hash(
     overlays: &[String],
     hash: u32,
     label: &str,
+    // The name catalog — also the source of each clip's procedural (ActionTable-derived) name.
+    index: &AssetIndex,
     outroot: &std::path::Path,
 ) -> Result<String, String> {
     let mut w = WadStack::open(base, overlays)?;
@@ -3894,6 +4153,9 @@ pub(crate) fn export_bundle_by_hash(
     if lods.is_empty() {
         return Err(format!("no model container for 0x{hash:08X}"));
     }
+    // The character's FULL animation set from the AnimationLookup tables (~100 for Mattias), not the
+    // 6-clip working set the preview's generic loader is capped at.
+    let (clips, clip_names) = clips_for_export(&mut w, label, &md.skin.rig, index);
     let safe: String = label
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
@@ -3910,6 +4172,9 @@ pub(crate) fn export_bundle_by_hash(
         &md.textures,
         &md.hier_nodes,
         md.header.as_ref(),
+        &md.skin.rig,
+        &clips,
+        &clip_names,
     )?;
     Ok(dir.to_string_lossy().into_owned())
 }
@@ -3925,21 +4190,31 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     let dir = std::path::PathBuf::from("workshop_export").join(&safe);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Textures → PNG (decoded from BC), MTL materials per draw group.
+    // Textures → PNG (decoded from BC), MTL materials per draw group. Every slot the material binds
+    // is written, not just the diffuse: the normal (`_nm`) and specular (`_sm`) maps are half the
+    // look of these assets and a modder can't re-author what the export never handed them.
     let mut mtl = String::new();
+    let mut written: HashMap<u32, String> = HashMap::new();
+    let mut emit = |h: u32, dir: &std::path::Path| -> Result<Option<String>, String> {
+        if let Some(n) = written.get(&h) {
+            return Ok(Some(n.clone()));
+        }
+        let Some(td) = md.textures.get(&h) else { return Ok(None) };
+        let name = format!("tex_0x{h:08X}.png");
+        // Decoded dims, NOT the declared ones — a texture whose higher mips never streamed covers
+        // only a smaller surface, and writing it at the declared size yields a mostly-empty plate.
+        let (w, h_px, rgba) = crate::texpng::decode_bc(td);
+        crate::texpng::write_png(dir.join(&name).to_str().unwrap_or(&name), w, h_px, &rgba)?;
+        written.insert(h, name.clone());
+        Ok(Some(name))
+    };
     for (gi, d) in md.draws.iter().enumerate() {
         mtl.push_str(&format!("newmtl m{gi}\nKd 1 1 1\n"));
-        if let Some(h) = d.diffuse {
-            if let Some(td) = md.textures.get(&h) {
-                let name = format!("tex_0x{h:08X}.png");
-                let rgba = crate::texpng::decode_bc(td);
-                crate::texpng::write_png(
-                    dir.join(&name).to_str().unwrap_or(&name),
-                    td.width,
-                    td.height,
-                    &rgba,
-                )?;
-                mtl.push_str(&format!("map_Kd {name}\n"));
+        for (key, slot) in [("map_Kd", d.diffuse), ("map_Bump", d.normal), ("map_Ks", d.specular)] {
+            if let Some(h) = slot {
+                if let Some(name) = emit(h, &dir)? {
+                    mtl.push_str(&format!("{key} {name}\n"));
+                }
             }
         }
         mtl.push('\n');
@@ -3958,13 +4233,24 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     for v in &md.verts {
         obj.push_str(&format!("vn {} {} {}\n", v.normal[0], v.normal[1], v.normal[2]));
     }
-    for (gi, d) in md.draws.iter().enumerate() {
-        obj.push_str(&format!("g group{gi}\nusemtl m{gi}\n"));
-        let s = d.index_start as usize;
-        let e = ((d.index_start + d.index_count) as usize).min(md.indices.len());
-        for tri in md.indices[s..e].chunks_exact(3) {
-            let (a, b, c) = (tri[0] + 1, tri[1] + 1, tri[2] + 1);
-            obj.push_str(&format!("f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n"));
+    // One OBJ object per LOD rung. The rungs REFINE each other — the same HIER node is re-authored
+    // at each detail level, so the resident block's 736-triangle van body and P001's 9,360-triangle
+    // version occupy the same space. Emitting them flat stacked every detail level on top of the
+    // others. Nothing is dropped: each rung becomes its own `o LOD<n>` object (0 = resident/coarsest)
+    // that a modeller can isolate, hide, or edit independently.
+    let mut rungs: Vec<u8> = md.draws.iter().map(|d| d.rung).collect();
+    rungs.sort_unstable();
+    rungs.dedup();
+    for rung in rungs {
+        obj.push_str(&format!("o LOD{rung}\n"));
+        for (gi, d) in md.draws.iter().enumerate().filter(|(_, d)| d.rung == rung) {
+            obj.push_str(&format!("g LOD{rung}_group{gi}_seg{}_node{}\nusemtl m{gi}\n", d.seg_id, d.node));
+            let s = d.index_start as usize;
+            let e = ((d.index_start + d.index_count) as usize).min(md.indices.len());
+            for tri in md.indices[s..e].chunks_exact(3) {
+                let (a, b, c) = (tri[0] + 1, tri[1] + 1, tri[2] + 1);
+                obj.push_str(&format!("f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}\n"));
+            }
         }
     }
     std::fs::write(dir.join("model.obj"), obj).map_err(|e| e.to_string())?;
