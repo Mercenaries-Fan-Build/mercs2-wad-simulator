@@ -1,19 +1,50 @@
 ﻿//! `mercs2_game` — the Mercenaries 2 game exe.
 //!
 //! This is the *game* layer: it configures and boots the asset-agnostic engine from the player's real
-//! save. No Mercenaries-specific data lives in the engine; it lives here. The boot:
-//! 1. find the newest `.profile` in the player's save folder,
-//! 2. parse it → header + `SaveState` (active contract, mission flow, the `vz_state_*` world-state
-//!    overlays to activate, playtime — see `mercs2_formats::save`),
-//! 3. render the engine's streaming world IN-PROCESS at the authentic **PMC-interior spawn**
-//!    (`MrxUtil._TeleportHero` = `(3794, 451, -3911)`, off-map high-Y).
+//! save. No Mercenaries-specific data lives in the engine; it lives here.
 //!
-//! There is NO separate engine binary: `mercs2_game` IS the game exe. It calls the engine library's
-//! public render entry point (`mercs2_engine::game_world::run_game_world`) directly, so
-//! `cargo run -p mercs2_game` always rebuilds a fresh engine and opens the window itself.
+//! There is NO separate engine binary: `mercs2_game` IS the game exe. It drives the engine library
+//! in-process, so `cargo run -p mercs2_game` always rebuilds a fresh engine and opens the window
+//! itself.
+//!
+//! # Boot
+//! Default (retail flow) = the SHELL MENU: enumerate `SaveGames\*.profile` (header-only parse,
+//! [`menu::scan_slots`]) and open on the main menu; the player picks Continue / New Game / Load Game
+//! (save browser) / Quit, and the chosen save drives the world boot in-loop. The boot itself is
+//! [`world::Mercs2Game`] handed to `mercs2_engine::app::run` — the full third-person world (player
+//! avatar + TPS/free camera, terrain, heightmap, clips, c3 cells, placements, PMC interior +
+//! furniture, props, lights/FX, watermap, resident audio, hero spawn; `world::LOAD_PHASES` is the
+//! loading bar's single source of truth).
+//!
+//! A positional `.profile` path boots that save directly with no menu; the save is parsed to header +
+//! `SaveState` (active contract, mission flow, the `vz_state_*` world-state overlays to activate,
+//! playtime — see `mercs2_formats::save`), printed as a boot banner, and rendered. Either way the
+//! hero starts at the authentic **PMC-interior spawn** (`MrxUtil._TeleportHero` =
+//! `(3794, 451, -3911)`, off-map high-Y — [`pmc::PMC_INTERIOR_SPAWN`]).
+//!
+//! `--stream` selects the alternate free-fly streaming world (`mercs2_engine::game_world::
+//! run_game_world`) at the same spawn; `--interior-orbit` adds the debug orbit camera; `--plan`
+//! prints the boot-state without rendering.
+//!
+//! # Modules
+//! * [`world`] — the render/boot path: `Mercs2Game` (the engine's `Game` impl), `WorldData`, the
+//!   staged `load_world_data`, camera/player/collision/audio wiring.
+//! * [`pmc`] — PMC HQ interior: spawn + actor constants, `derive_interior_spawn`,
+//!   `load_pmc_interior`, `RecruitUnlocks`, `Stockpile`.
+//! * [`hero`] — the three playable heroes: templates, upgrade-tier looks, wardrobe outfits.
+//! * [`menu`] — the shell menu + save browser (native `ChangeShellState` reimpl).
+//!
+//! The Lua host + fleet-sim cluster (script_host/runtime/gameplay/spawn) live INSIDE the engine — Lua
+//! is a core engine pillar, married to the live engine systems — so the game reaches them (and every
+//! other mechanism: physics/combat/ai/anim/audio/vehicle/decal/population/faction/water/ui) through
+//! `mercs2_engine::…`.
+//!
+//! `main` also carries the game's headless dev tools, which parse their own args (the ENGINE never
+//! does): `--time-load`, `--interior-assemble`, `--find-mesh`, `--dump-asets`, `--comps`,
+//! `--interior-placements`, `--hall-hunt`, `--tex-audit`, `--tex-locate`, `--coll-probe`,
+//! `--c3-flat`. Each is documented at its dispatch site below.
 //!
 //! See `docs/modernization/pangea_engine_alignment.md` for the engine/game split this realizes.
-//! Run `mercs2_game` to boot; `mercs2_game --plan` to print the boot-state without rendering.
 
 use std::path::{Path, PathBuf};
 
