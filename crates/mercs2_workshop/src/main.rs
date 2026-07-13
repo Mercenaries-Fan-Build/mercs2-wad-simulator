@@ -228,7 +228,7 @@ fn main() {
         drop(stack);
         let (mut ok, mut fail) = (0, 0);
         for (h, label) in &targets {
-            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &outroot) {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot) {
                 Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
                 Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
             }
@@ -453,9 +453,11 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         };
         match wad::tex_from_block(&mut w, blk, hash) {
             Some(td) => {
-                let rgba = texpng::decode_bc(&td);
-                match texpng::write_png(out, td.width, td.height, &rgba) {
-                    Ok(()) => println!("blk {blk} 0x{hash:08X}: {}x{} {:?} -> {out}", td.width, td.height, td.format),
+                // Decoded dims, not declared: one block holds one mip level, so the surface here is
+                // usually coarser than the texture's full size.
+                let (pw, ph, rgba) = texpng::decode_bc(&td);
+                match texpng::write_png(out, pw, ph, &rgba) {
+                    Ok(()) => println!("blk {blk} 0x{hash:08X}: {pw}x{ph} of {}x{} {:?} -> {out}", td.width, td.height, td.format),
                     Err(e) => eprintln!("--tex-png-block: PNG write failed: {e}"),
                 }
             }
@@ -477,11 +479,13 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(w) => w,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        match wad::extract_texture(&mut w, hash) {
+        // Full mip chain assembled from the finer LOD blocks, falling back to the resident tail —
+        // a texture dump should hand back the real image, not the coarse residency budget.
+        match wad::extract_texture_hires(&mut w, hash).or_else(|_| wad::extract_texture(&mut w, hash)) {
             Ok(td) => {
-                let rgba = texpng::decode_bc(&td);
-                match texpng::write_png(out, td.width, td.height, &rgba) {
-                    Ok(()) => println!("0x{hash:08X}: {}x{} {:?} -> {out}", td.width, td.height, td.format),
+                let (pw, ph, rgba) = texpng::decode_bc(&td);
+                match texpng::write_png(out, pw, ph, &rgba) {
+                    Ok(()) => println!("0x{hash:08X}: {pw}x{ph} of {}x{} {:?} -> {out}", td.width, td.height, td.format),
                     Err(e) => eprintln!("--tex-png: PNG write failed: {e}"),
                 }
             }
@@ -513,22 +517,24 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             "asset layer: {} resident block(s), {} chunk(s) registered, {} shadowed, {} evicted",
             rs.resident_blocks, rs.registered_chunks, rs.shadowed_total, rs.evicted_total
         );
-        match mesh::build_indexed_from_container(&container) {
-            Ok((verts, indices, draws, stats)) => {
-                let mut tex_ok = 0usize;
+        // Load through the SAME path the preview and the exporter use: the full LOD-block chain.
+        // `build_indexed_from_container` reads only the resident block, so for any model whose near
+        // geometry lives in a finer rung it found nothing and reported "no placed drawing groups" —
+        // a false failure. `civ_hum_beachfemale_a` is the case in point: its resident container holds
+        // only mask-0x08 (far) geometry, and `Model::load` assembles 2 rungs / 15 draws just fine.
+        match app::load_model_data(&mut w, hash) {
+            Ok(md) => {
+                let (verts, indices, draws, stats) = (&md.verts, &md.indices, &md.draws, &md.stats);
                 let mut tex_all = std::collections::HashSet::new();
-                for d in &draws {
+                for d in draws {
                     for h in [d.diffuse, d.normal, d.specular].into_iter().flatten() {
-                        if tex_all.insert(h) && w.texture_resident(h).is_ok() {
-                            tex_ok += 1;
-                        }
+                        tex_all.insert(h);
                     }
                 }
-                let tiers: Vec<String> = mesh::state_tiers(&container)
-                    .iter()
-                    .map(|b| format!("0x{b:02X}"))
-                    .collect();
-                let skin = stats.skin_data();
+                // `load_model_data` already resolved every slot at full resolution.
+                let tex_ok = md.textures.len();
+                let tiers: Vec<String> = md.tiers.iter().map(|b| format!("0x{b:02X}")).collect();
+                let skin = &md.skin;
                 let clips = w.clips_for_model(&skin.rig);
                 println!(
                     "0x{hash:08X}: {} verts, {} tris, {} draw groups, {} bones, {} clips, {tex_ok}/{} textures, tiers [{}], bbox {:?}..{:?}",
