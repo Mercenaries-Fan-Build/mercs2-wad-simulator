@@ -3,6 +3,7 @@ name = "mercs2_vehicle"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 25 (rows 25/19): vehicle actors + custom raycast drive model + command-ring transport + camera modes. Exe is the oracle (docs/reverse_engineer/vehicle_code_map.md)."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

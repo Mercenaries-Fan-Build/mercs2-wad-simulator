@@ -12,14 +12,28 @@
 //! - [`lut`]       — the donut/turn sine LUT `DAT_00cf2900` (8192-entry, `& 0x1fff`).
 //! - [`tuning`]    — the `_CarPhysicsV2` (0x18c) / `_TankPhysics` (0x78) tuning-block → field map.
 //! - [`components`]— the vehicle ECS component set (defined in THIS crate per the carve rule).
-//! - [`command`]   — the 6-ring broadcast command transport + per-class `HandleCommand` switch.
+//! - [`command`]   — the broadcast command transport (car/tank ring `0x011C0230` cap 0x200,
+//!   boat/heli ring `0x011C2478` cap 100) + the per-class `HandleCommand` switch.
 //! - [`drive`]     — the decoded per-axle-friction + torque-falloff + donut-LUT drive math.
 //! - [`camera`]    — the data-driven camera modes (`CameraCarPreset`/`Tank`/`Turret`/`Helicopter`).
+//! - [`hijack`]    — the `Vehicle.Hijack*` lifecycle FSM ([`HijackFsm`]) + [`TurretAim`].
 //! - [`lua_surface`]— real engine bodies for the `Vehicle`/`Camera` Lua namespaces (binding seam).
 //! - [`system`]    — the ECS drive-step system + command pump.
 //!
+//! Runtime order (`vehicle_code_map.md` §1.4): pump the rings ([`pump_car_ring`] /
+//! [`pump_boat_heli_ring`]) FIRST, then [`drive_step_system`] — that is where the pump
+//! (`FUN_00532f80`) sits relative to the drive step in the master tick.
+//!
+//! Simulated today: [`VehicleClass::Car`] / [`VehicleClass::Bike`] ([`CarActor`]) and
+//! [`VehicleClass::Tank`] ([`TankActor`]). Boat / Helicopter / Jet are recognised for command-ring
+//! routing and camera-mode selection; their `applyAction` sims land in a later pass (`DEFERRED.md`).
+//!
 //! Wheel raycasts are grounded on `mercs2_core::PhysicsQuery` (the silo-7 seam); this crate never
 //! depends on `mercs2_physics`.
+//!
+//! The authored tuning defaults and the camera preset float layout are NOT decoded (field names /
+//! strings are stripped on PC). Those sites are marked `CONFIRM-LIVE` in-source and tracked in
+//! `DEFERRED.md`; the values present are structural placeholders, not oracle values.
 
 pub mod camera;
 pub mod command;
