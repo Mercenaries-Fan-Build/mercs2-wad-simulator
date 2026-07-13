@@ -2,7 +2,7 @@
 //! eyeball whether the hi-res streaming assembly is correct (e.g. the PMC floor "shifted/transposed"
 //! report). BMP is uncompressed → no extra deps. Separate binary so it isn't locked by a running game.
 //!
-//!   cargo run -p mercs2_engine --bin tex_dump -- 0x39AF17DC <out_dir>
+//!   cargo run -p mercs2_probe --bin tex_dump -- 0x39AF17DC <out_dir>
 
 use mercs2_engine::wad;
 use mercs2_formats::texture::{TexFormat, TextureData};

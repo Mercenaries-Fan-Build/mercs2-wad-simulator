@@ -1,8 +1,13 @@
 //! `mercs2_probe` — headless WAD diagnostic / export tool.
 //!
-//! Each subcommand runs one of the diagnostics carved out of the engine binary into
-//! `mercs2_engine::diag`. `vz.wad` is auto-discovered from the EA Games registry key (same as the
-//! engine), or passed explicitly with `--wad <path>`. No window is ever opened.
+//! Most subcommands run one of the diagnostics carved out of the engine binary into
+//! `mercs2_engine::diag`; the rest (`extract`, `dump-block`, `find-placement`, `hier`, `overlays`,
+//! `save-dump`) are implemented here in `main.rs`. `vz.wad` is auto-discovered from the EA Games
+//! registry key (same as the engine), or passed explicitly with `--wad <path>`. No window is ever
+//! opened.
+//!
+//! Flags are positional-value pairs: `--wad`, `--model`, `--index`, `--clip`, `--csv`. Everything
+//! else that doesn't start with `--` is a positional argument (see `first_positional`).
 //!
 //! Examples:
 //!   mercs2_probe c3-meta out.ndjson
@@ -14,7 +19,23 @@
 //!   mercs2_probe entity-find 0x000d3c77 0x..
 //!   mercs2_probe scan-hash 0xA3CD72A7 0x..
 //!   mercs2_probe block-probe 1234
+//!   mercs2_probe hier --model 0x.. [names.txt] --csv hier.csv
+//!   mercs2_probe extract --model 0x.. out.bin
+//!   mercs2_probe dump-block 667 block667.bin
+//!   mercs2_probe find-placement villa
+//!   mercs2_probe save-dump <profile> [grep-needle]
+//!   mercs2_probe overlays <profile>
 //!   mercs2_probe --wad D:/game/data/vz.wad comp-probe
+//!
+//! Beside this multiplexed binary the crate also ships ~34 single-purpose dev bins under
+//! `src/bin/` (`cargo run -p mercs2_probe --bin <name>`), each a standalone investigation of one
+//! question: model/LOD assembly (`lod_chunks`, `segm_join`, `viewstate_probe`, ...), the
+//! INDX->SEGM node binding (`indx_dump`, `node_witness`, `segfix_probe`, ...), the destruction
+//! state machine and draw gate (`sm_dump`, `gate_probe`, `health_probe`, ...), animation
+//! (`action_table_probe`, `charanim`, `clipbind`), textures/materials/FX (`tex_dump`, `texcmp`,
+//! `mtrl_probe`, `fx_probe`, `light_probe`) and archive naming (`aset_probe`, `model_namer`).
+//! Those bins take a model NAME (hashed with `pandemic_hash_m2`) or a `0xHASH`, and resolve
+//! `vz.wad` from the registry only — they have no `--wad` override.
 
 use mercs2_engine::diag;
 use mercs2_engine::wad;
@@ -31,8 +52,10 @@ fn usage() -> ! {
          \x20 animdiag/animcheck/skincheck [--model H] [--index I]        trackmap [... --clip H]\n\
          \x20 entity-find [0xKEY ...]       comp-probe                    comp-dump [Name]\n\
          \x20 block-grep <needle>           scan-hash <0xH ...>           find-ref <0xH ...>\n\
-         \x20 block-probe <index>           placement-names               hier --model H [names.txt]\n\
+         \x20 block-probe <index>           placement-names               hier --model H [names.txt] [--csv P]\n\
          \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
+         \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
+         \x20 save-dump <profile> [needle]  overlays <profile>\n\
          (vz.wad auto-discovers from the registry; override with --wad <path>)"
     );
     std::process::exit(2);

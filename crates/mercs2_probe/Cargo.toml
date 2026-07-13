@@ -3,6 +3,7 @@ name = "mercs2_probe"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — headless WAD diagnostic/export tool. Runs the carved-out diagnostics from mercs2_engine::diag as subcommands (no window)."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

@@ -1,6 +1,6 @@
 //! Dev bin: how many LightObject dynamic lights do we actually harvest, and how many are near the PMC
 //! villa spawn? Diagnoses "no interior lights showing".
-//!   cargo run -p mercs2_engine --bin light_probe
+//!   cargo run -p mercs2_probe --bin light_probe
 
 use mercs2_engine::{wad, worldutil};
 use mercs2_formats::placement::light_inventory;

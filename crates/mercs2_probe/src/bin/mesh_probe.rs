@@ -2,7 +2,7 @@
 //! groups are kept/skipped by `build_indexed_state`, and which state a baked-in prop group needs.
 //! Cross-references docs/ucfx_tag_registry.md §3/§6.
 //!
-//!   cargo run -p mercs2_engine --bin mesh_probe -- 0x39AF17DC
+//!   cargo run -p mercs2_probe --bin mesh_probe -- 0x39AF17DC
 
 use mercs2_engine::wad;
 use std::collections::BTreeMap;
