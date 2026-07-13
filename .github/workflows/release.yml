@@ -23,7 +23,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             suffix: "-linux-x86_64"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
           # 32-bit builds the ENGINE-FREE tools only: mercs2_engine — and mercs2_game/workshop with
           # it — is 64-bit by design, and its gilrs/cpal deps link C system libs (libudev, alsa)
           # that would need a full i386 multiarch sysroot to cross-build. The six crates below are
@@ -31,18 +31,18 @@ jobs:
           - os: ubuntu-22.04
             target: i686-unknown-linux-gnu
             suffix: "-linux-i686"
-            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder"
+            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder -p mercs2_formats"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: "-windows-x86_64.exe"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
           - os: windows-latest
             target: i686-pc-windows-msvc
             suffix: "-windows-i686.exe"
-            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder"
+            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder -p mercs2_formats"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static"
 
     runs-on: ${{ matrix.os }}
 
@@ -108,7 +108,24 @@ jobs:
             case " $published " in *" $n "*) ;; *) echo "  - $n";; esac
           done < built.txt
 
+      # The mesh/texture-prep Python scripts are the community's front-end to the authoring tools
+      # (FBX/glTF/PNG -> the blobs model_forge/smuggler consume). They are OS-independent, so bundle
+      # them ONCE — from the x86_64-linux job only — rather than 4x per platform. Shipped alongside
+      # the binaries so a modder doesn't have to hunt for them; see scripts/mesh-pipeline/README.md.
+      - name: Bundle mesh-pipeline scripts (once)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          if [ ! -d scripts/mesh-pipeline ]; then
+            echo "::error::scripts/mesh-pipeline missing — cannot bundle the pipeline scripts"; exit 1
+          fi
+          ( cd scripts && zip -r "../dist/mercs2-mesh-pipeline-scripts.zip" mesh-pipeline )
+          echo "bundled:"; unzip -l dist/mercs2-mesh-pipeline-scripts.zip | sed 's/^/  /'
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*${{ matrix.suffix }}
+          # Second glob matches only in the one job that built the scripts zip; a no-match is harmless.
+          files: |
+            dist/*${{ matrix.suffix }}
+            dist/mercs2-mesh-pipeline-scripts.zip
