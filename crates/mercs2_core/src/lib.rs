@@ -8,6 +8,29 @@
 //!
 //! Canonical space ≡ game space: left-handed, +Y up, +Z north, +X east
 //! (docs/coordinate_systems.md). The asset-load basis transform is the identity.
+//!
+//! # Module map
+//!
+//! At the crate root: the `hecs` [`World`]/[`Entity`] and `glam` re-exports, the fixed-step clock
+//! [`Time`], the ordered [`Schedule`], and the hot-path components ([`Transform`], [`ModelRef`],
+//! [`AnimState`], [`SkinPalette`]).
+//!
+//! | Module | Owns |
+//! |---|---|
+//! | [`registry`] | **Keystone A** — the reflection / component-descriptor table (type-hash → class, `cdbsizes.ini` pool budgets, reflected field layout). |
+//! | [`event`] | **Keystone B** — the name-hash event / RPC bus shared by GUI, Net and AI (typed args ≤ 7, immediate dispatch + a bounded deferred queue). |
+//! | [`frame`] | **Keystone C** — the master frame spine: the 5-slot application-[`LayerStack`](frame::LayerStack) the engine's master tick climbs 0→4. |
+//! | [`streaming`] | The world-streaming DECISION core: block residency, entity wake/hibernate, LOD tiers, the global LOD-budget governor and the population region cache. Emits a `StreamDiff` the host executes. |
+//! | [`guidmap`] | Name-hash → `Entity` and guid ↔ `Entity` (the engine's resident guidmap singleton). |
+//! | [`object_filter`] | The `ObjectFilter.*` script query: label boolean-expression + include/exclude sets. |
+//! | [`render_state`] | The `Atmosphere` / `Bloom` / `Graphics` / `Fade` parameter state the render passes read. |
+//! | [`physics_query`] | The `PhysicsQuery` collision-query seam the sim silos compile against (no leaf→leaf edge to `mercs2_physics`). |
+//!
+//! Name hashing is **caller-supplied** throughout: [`registry`], [`event`] and [`guidmap`] all key on
+//! a precomputed `u32` (the engine hash lives at the byte-decode boundary in `mercs2_formats`), so
+//! there is one implementation and no drift.
+//!
+//! Non-blocking gaps deliberately left open are tracked in this crate's `DEFERRED.md`.
 
 pub use glam;
 pub use hecs;
