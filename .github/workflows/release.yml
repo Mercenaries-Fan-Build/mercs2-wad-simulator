@@ -15,30 +15,34 @@ jobs:
           # Linux pinned to ubuntu-22.04 (glibc 2.35) to match the modkit's build
           # floor — the modkit downloads and runs these binaries, so a newer image
           # would raise the glibc requirement above what the modkit supports.
+          # PUBLISHED SET (curated — the workspace builds ~78 binaries, but the rest are one-off
+          # research probes that stay development-only). `bin:asset` renames on publish: the
+          # mercs2_smuggler crate's bin TARGET is called `smuggler`, which would ship as an asset
+          # nobody recognises.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             suffix: "-linux-x86_64"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe dlc_port mercs2_reassemble mercs2_probe mercs2_game mercs2_workshop"
-          # 32-bit targets build the engine-free CLI tools only. mercs2_engine — and
-          # everything that depends on it (mercs2_game/probe/workshop) — is 64-bit by
-          # design, and its gilrs/cpal deps link C system libs (libudev, alsa) that
-          # would need a full i386 multiarch sysroot to cross-build.
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder mercs2_game mercs2_workshop"
+          # 32-bit builds the ENGINE-FREE tools only: mercs2_engine — and mercs2_game/workshop with
+          # it — is 64-bit by design, and its gilrs/cpal deps link C system libs (libudev, alsa)
+          # that would need a full i386 multiarch sysroot to cross-build. The six crates below are
+          # engine-free and link no C libs, so they cross-compile clean.
           - os: ubuntu-22.04
             target: i686-unknown-linux-gnu
             suffix: "-linux-i686"
-            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p dlc_port -p mercs2_reassemble"
-            bins: "wad_simulator ucfx_byteswap loadprobe dlc_port mercs2_reassemble"
+            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: "-windows-x86_64.exe"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe dlc_port mercs2_reassemble mercs2_probe mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder mercs2_game mercs2_workshop"
           - os: windows-latest
             target: i686-pc-windows-msvc
             suffix: "-windows-i686.exe"
-            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p dlc_port -p mercs2_reassemble"
-            bins: "wad_simulator ucfx_byteswap loadprobe dlc_port mercs2_reassemble"
+            build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder"
 
     runs-on: ${{ matrix.os }}
 
@@ -59,20 +63,52 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libasound2-dev
 
+      # `--message-format=json` makes cargo report the path of every executable it produced, which is
+      # the only honest answer to "what did this build actually make". We publish a CURATED subset
+      # (the workspace builds ~78 binaries, but most are one-off research probes that stay dev-only),
+      # and the two guardrails below exist because the previous hand-written list rotted silently:
+      # it named 8 binaries while 70 others — mercs2_smuggler, inject_parts, the aset_* naming
+      # pipeline, vo_extract, … — were compiled every release and then thrown away, unnoticed.
       - name: Build binaries
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.build }}
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.build }} \
+            --message-format=json > cargo-build.json
+          # `--message-format=json` swallows human-readable diagnostics; put them back in the log.
+          grep -o '"rendered":"[^"]*"' cargo-build.json | sed 's/"rendered":"//; s/"$//' | head -50 || true
+          # Every executable this build produced (JSON-escapes \\ on Windows paths).
+          grep -o '"executable":"[^"]*"' cargo-build.json \
+            | sed 's/"executable":"//; s/"$//; s#\\\\#/#g' | sort -u > built.txt
+          echo "built $(wc -l < built.txt) executables"
 
       - name: Prepare artifacts
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            for b in ${{ matrix.bins }}; do cp "$b.exe" "$b${{ matrix.suffix }}"; done
-          else
-            for b in ${{ matrix.bins }}; do cp "$b" "$b${{ matrix.suffix }}"; done
-          fi
+          mkdir -p dist
+          published=""
+          for entry in ${{ matrix.bins }}; do
+            # `bin` or `bin:published_asset_name`
+            bin="${entry%%:*}"
+            asset="${entry##*:}"
+            src=$(grep -iE "/${bin}(\.exe)?$" built.txt | head -1)
+            # GUARDRAIL 1: a curated name that no longer builds is an ERROR, not a silent skip.
+            if [ -z "$src" ] || [ ! -f "$src" ]; then
+              echo "::error::'$bin' is in the publish list but was not built for ${{ matrix.target }}"
+              exit 1
+            fi
+            cp "$src" "dist/${asset}${{ matrix.suffix }}"
+            published="$published $bin"
+          done
+          echo "published $(ls dist | wc -l) binaries:"; ls dist | sed 's/^/  /'
+          # GUARDRAIL 2: surface what was built but NOT shipped, so a new tool cannot go unnoticed
+          # the way 70 of them did. Informational — dev-only probes are expected here.
+          echo "built but NOT published (dev-only tooling):"
+          while read -r exe; do
+            n=$(basename "$exe"); n="${n%.exe}"
+            case " $published " in *" $n "*) ;; *) echo "  - $n";; esac
+          done < built.txt
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/${{ matrix.target }}/release/*${{ matrix.suffix }}
+          files: dist/*${{ matrix.suffix }}
