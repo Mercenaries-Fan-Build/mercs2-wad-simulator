@@ -202,18 +202,58 @@ pub fn load_all_names_staged(
     names_csv: Option<PathBuf>,
     mut report: impl FnMut(f32, &'static str),
 ) -> HashMap<u32, String> {
+    // The speculative corpora (rainbow table, bone-name candidates) are found by walking up for a
+    // repo checkout. A RELEASED binary — downloaded on its own, run anywhere — finds none of them,
+    // so it showed every asset as a bare `0x…`. That is the state the published workshop shipped in.
+    //
+    // So the CURATED ASET dictionary is embedded (~750 KB): every name is a VERIFIED preimage of a
+    // real asset, which is all the public needs — not the 733k rainbow-table guesses. It is applied
+    // LAST so it OVERRIDES the speculative corpora rather than being overwritten by them: a
+    // brute-forced candidate must never shadow a name we actually cracked.
+    let mut names = HashMap::new();
+
+    let mut have_pack = false;
     if let Some(home) = data_home() {
         let pack = home.join("names.bin");
         if pack.is_file() {
             report(0.10, "bundled name pack");
-            if let Some(names) = load_names_pack(&pack) {
-                report(1.0, "done");
-                return names;
+            match load_names_pack(&pack) {
+                Some(pack_names) => {
+                    names = pack_names;
+                    have_pack = true;
+                }
+                None => eprintln!(
+                    "[names] {} unreadable — falling back to raw corpora",
+                    pack.display()
+                ),
             }
-            eprintln!("[names] {} unreadable — falling back to raw corpora", pack.display());
         }
     }
-    load_all_names_raw(names_csv, report)
+    if !have_pack {
+        names.extend(load_all_names_raw(names_csv, report));
+    }
+
+    names.extend(embedded_aset_names());
+    names
+}
+
+/// The curated ASET hash→name dictionary (every name we have actually CRACKED), compiled into the
+/// binary. Unlike the rainbow table this is not speculative — each entry is a verified preimage.
+const EMBEDDED_ASET_NAMES: &str = include_str!("../data/aset_names.tsv");
+
+/// Parse [`EMBEDDED_ASET_NAMES`] (`0xHASH\tname` per line, `#` comments).
+pub fn embedded_aset_names() -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    for line in EMBEDDED_ASET_NAMES.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let Some((h, name)) = line.split_once('\t') else { continue };
+        if let Ok(h) = u32::from_str_radix(h.trim().trim_start_matches("0x"), 16) {
+            out.insert(h, name.trim().to_string());
+        }
+    }
+    out
 }
 
 /// The RAW corpora merge (no `names.bin` fast path) — `--pack-data` uses this so rebuilding the
