@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use mercs2_core::glam::Vec3;
 use mercs2_formats::hash::pandemic_hash_m2;
 
-use crate::backend::{AudioSink, CpalSink, NullSink};
+use crate::backend::{AudioSink, NullSink};
+#[cfg(feature = "device")]
+use crate::backend::CpalSink;
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
 use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
@@ -118,6 +120,7 @@ impl AudioEngine {
     /// clip's native rate → this mixer rate. Returns `false` (staying headless on [`NullSink`]) when no
     /// device is present — never a hard failure, never behind a build flag. Call once at startup, before
     /// any voice is attached.
+    #[cfg(feature = "device")]
     pub fn attach_output_device(&mut self) -> bool {
         match CpalSink::try_default() {
             Ok(sink) => {
@@ -130,6 +133,14 @@ impl AudioEngine {
             }
             Err(_) => false,
         }
+    }
+
+    /// Decode-only build (`device` off — the headless WAD CLIs, which never open a device). Same
+    /// contract as the "no device present" path above: stay on [`NullSink`], report `false`, never a
+    /// hard failure. The engine and the game always compile with `device`, so they never see this.
+    #[cfg(not(feature = "device"))]
+    pub fn attach_output_device(&mut self) -> bool {
+        false
     }
 
     /// Rebuild the mixer at a new output format (drops any attached sources — call before playback).
