@@ -1,18 +1,26 @@
 //! Mercenaries 2 WAD engine consumption simulator.
 //!
-//! This crate provides an engine-accurate simulator for analyzing how the Mercenaries 2 game engine
-//! loads and consumes WAD (World Asset Database) files. It validates ASET (Asset Set) entries for
-//! out-of-bounds references, simulates the full asset consumption pipeline, and produces detailed
-//! diagnostic reports for modders.
+//! Walks the same load path the game engine does over a WAD (optionally overlaid on a base WAD):
+//! validates ASET hash ownership, decompresses and parses every referenced block, dispatches each
+//! asset to a consumer mirroring what the engine's handler for that type actually reads, and
+//! aggregates the findings into a JSON-exportable report.
 //!
 //! # Key Concepts
 //!
-//! - **ASET**: Asset Set section of a WAD; sparse array of asset metadata (hash, block index, type)
-//! - **OOB**: Out-of-bounds; ASET entries whose sub_entry offset exceeds the actual entry count in
-//!   the decompressed block, causing heap violations
+//! - **ASET**: Asset Set section of a WAD; array of 16-byte asset metadata rows
+//!   `{ asset_hash, secondary_ref, packed_ref, type_id }`, `packed_ref = { block_index:hi16,
+//!   sub_offset:lo16 }`. `sub_offset == 0xFFFF` = PRIMARY (resolve by hash in `block_index`);
+//!   otherwise `sub_offset` is the BYTE OFFSET of the asset's sub-resource descriptor within the
+//!   decompressed block — NOT an index into the entry table (see `aset_validate`).
+//! - **Hash ownership**: the authoritative ASET check — does each row's `asset_hash` actually exist
+//!   in the block the row claims? Rows are verified / misrouted (hash lives elsewhere, remappable)
+//!   / true ghost (hash in no block). This REPLACED the old "OOB" validator (see below).
 //! - **WAD Overlay**: Patch WAD entries override base WAD entries (last-opened-file-wins semantics)
 //! - **Block**: SGES compressed container; decompressed into UCFX asset format
 //! - **UCFX Container**: Asset format wrapper with header and typed chunks
+//! - **Fatal vs advisory**: only fatal findings drive the exit code (see
+//!   `simulate::simulate_exit_code`); the heuristic `*_advisory`, `needs_investigation` and
+//!   `dlc_texture_provenance` results are reported but excluded from the verdict.
 //!
 //! # Typical Usage
 //!
@@ -24,15 +32,41 @@
 //!   --json-output report.json
 //! ```
 //!
+//! Exit code 0 = no fatal finding, 1 = fatal finding (or a pass failed outright).
+//!
 //! # Simulation Stages
 //!
 //! 1. Load base and patch WADs via FFCS archive interface
 //! 2. Build virtual disk with overlay resolution (patch > base)
-//! 3. Validate ASET entries for OOB references
-//! 4. Discover and load auxiliary base WADs (optional)
-//! 5. Prefetch and decompress SGES blocks in parallel
+//! 3. Validate ASET hash ownership (`--skip-aset` to skip)
+//! 4. Discover and load auxiliary base WADs for cross-ref resolution (`--base-wad-dir`, optional;
+//!    their ASET hash sets are loaded, their assets are NOT consumed)
+//! 5. Prefetch and decompress SGES blocks in parallel (rayon, `--jobs`)
 //! 6. Parse UCFX containers and dispatch to type-specific consumers
 //! 7. Aggregate diagnostic results and export report
+//!
+//! # Module Map
+//!
+//! - `aset_validate` — ASET hash-ownership pass (verified / misrouted / true ghost)
+//! - `overlay` — virtual disk; patch ASET wins over base
+//! - `blocks` — parallel SGES decompression + per-block UCFX parse cache
+//! - `simulate` — pipeline orchestration, `SimulateReport`, exit-code verdict
+//! - `consume` — per-asset-type consumer trait and result aggregation
+//! - `chunk_invariants` — exe-derived structural invariants run on every UCFX chunk
+//! - `model` / `texture` / `material` / `animation` / `script` — per-type consumers
+//! - `placement` — layer/ECS_NODE Transform + `flgs` vz_state placement validation
+//! - `action_table` — ActionTable 1024-slot overflow check (the world-load livelock)
+//! - `resident` — resident singletons (watermap, fxdict)
+//! - `audio` / `pws` — wavebank + soundbank consumption; external `.pws` streaming audit
+//! - `names` — rainbow-table hash → name resolver
+//!
+//! # Removed: the "OOB" validator
+//!
+//! Earlier versions led with an ASET out-of-bounds pass (`run_aset_oob`) that read `packed_ref`'s
+//! low 16 bits as an entry-table INDEX and flagged `sub >= entry_count` as heap corruption. RE of
+//! retail `vz.wad` showed the low 16 bits are a byte offset: the old model held for 10 of 10,798
+//! non-primary entries, i.e. it false-flagged ~10,788 valid rows. It has been removed. The
+//! `--oob-only` flag it drove is retained on the CLI for compatibility but is no longer read.
 
 mod action_table;
 mod animation;
@@ -75,10 +109,13 @@ struct Cli {
     #[arg(long)]
     audios_dir: Option<PathBuf>,
 
-    /// Only show OOB entries in ASET section
+    /// NO-OP (retained for compatibility). The ASET OOB validator this drove was removed:
+    /// it read the packed-ref low-16 as an entry-table index and false-flagged ~10,788 of
+    /// 10,798 valid retail entries. Hash-ownership validation replaces it and always runs.
     #[arg(long, default_value_t = false)]
     oob_only: bool,
 
+    /// Max ASET rows to validate in the hash-ownership pass (0 = all)
     #[arg(long, default_value_t = 0)]
     limit: usize,
 

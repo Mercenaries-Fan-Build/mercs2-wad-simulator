@@ -3,6 +3,7 @@ name = "wad_simulator"
 version = "2.0.0"
 edition = "2021"
 description = "Engine-accurate WAD consumption simulator for Mercenaries 2"
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 keywords = ["wad", "mercenaries", "simulation", "engine"]
