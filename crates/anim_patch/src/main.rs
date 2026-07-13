@@ -10,12 +10,32 @@
 //! `0x24F8C8E6`, and (b) the optional in-place clip perturbation passes in
 //! [`perturb`].
 //!
+//! Block selection (precedence: `--block-index` > `--clip` > `--anim-name`):
+//! the default is `--anim-name characternameanimgroup_mattias`, i.e. the PLAYER's
+//! character rig. `--clip` is NOT a character selector — shared clip hashes like
+//! the player-idle `0x24F8C8E6` exist in every character's rig, so it grabs
+//! whichever copy appears first. A block only qualifies if it owns an ASET entry
+//! with `type_id == TYPE_ID_ANIMATION` (16).
+//!
 //! Modes:
 //!   --roundtrip  decompress → recompress UNMODIFIED → verify byte-exact → pack.
 //!   --freeze     zero every clip's dynamic wavelet coefficient data → pack.
+//!   --list       print the selected block's clips (hash @ havok_offset) and exit.
+//!   --dump PATH  write the selected block's DECOMPRESSED bytes and exit.
 //!
-//! Output goes to `--out` (default a scratch path); the real game vz-patch.wad
-//! is only touched when `--deploy` is passed.
+//! `--roundtrip` and `--freeze` are mutually exclusive, and one of the four modes
+//! is required. Every pack path re-decompresses the block it just compressed and
+//! asserts byte-exact equality before writing (`sges` is lossless).
+//!
+//! Output goes to `--out` (default `crates/anim_patch/out/vz-patch.wad`); the real
+//! game vz-patch.wad is only touched when `--deploy` is passed. The source vz.wad
+//! and the deploy target are discovered from the EA Games registry key on Windows;
+//! elsewhere `--wad` is mandatory.
+//!
+//! Module map:
+//!   `main`     — CLI, FFCS load, block selection, patch-WAD build/verify/write.
+//!   [`perturb`] — in-place perturbation passes on the DECOMPRESSED block bytes
+//!                 (currently [`perturb::freeze_clip`]).
 
 mod perturb;
 

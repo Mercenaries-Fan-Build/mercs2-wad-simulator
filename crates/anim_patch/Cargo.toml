@@ -3,6 +3,7 @@ name = "anim_patch"
 version = "0.1.0"
 publish = false                # excluded from the crates.io release set
 edition = "2021"
+readme = "README.md"
 
 [[bin]]
 name = "anim_patch"
