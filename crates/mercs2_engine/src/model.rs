@@ -77,8 +77,13 @@ impl Model {
         for l in &lods {
             // The resident rung binds against itself; finer rungs borrow its SEGM/HIER/MTRL.
             let res = if l.level == lods[0].level { None } else { Some(resident.as_slice()) };
-            let (vertices, indices, draws, stats) =
+            let (vertices, indices, mut draws, stats) =
                 mesh::build_indexed_rung(&l.container, res, None)?;
+            // The builder sees one container; only here do we know which rung it is. Exporters rely
+            // on this to keep the detail levels apart (they all re-author the same HIER nodes).
+            for d in &mut draws {
+                d.rung = l.level;
+            }
             rungs.push(Rung { level: l.level, block: l.block, vertices, indices, draws, stats });
         }
         apply_supersede(&mut rungs);
