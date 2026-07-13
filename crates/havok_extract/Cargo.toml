@@ -4,6 +4,7 @@ version = "1.0.0"
 publish = false                # excluded from the crates.io release set
 edition = "2021"
 description = "Stage-2 Havok collision extractor — exact LE packfile decode (replaces tools/havok_extractor.py)"
+readme = "README.md"
 
 [[bin]]
 name = "havok_extract"

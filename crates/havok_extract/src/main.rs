@@ -7,6 +7,25 @@
 //! the exact little-endian packfile decoder in [`mercs2_formats::havok`]:
 //! correct packfile bounds, real `hkpConvexVerticesShape` vertices + plane
 //! equations, and a structured manifest the webapp can ingest.
+//!
+//! Input is any blob that may embed PC-retail `PHY2` collision data (a
+//! decompressed block, a model container). [`find_packfiles`] scans it for the
+//! Havok 5.5 packfile magic — searched, not assumed at offset 0 — and every
+//! packfile found produces, in `--out-dir`:
+//!
+//! - `havok_NNNN_Havok.bin` — the packfile's true byte range (size from its
+//!   section headers).
+//! - `convex_hull_NNNN.obj` — one per [`Shape::Convex`], only with
+//!   `--emit-convex-obj`. Exact vertices; faces are reconstructed from the plane
+//!   equations for viewing (see [`hull_faces`]).
+//! - `manifest.json` — schema `mercs2_havok/2`: per packfile its `offset`,
+//!   `size_written`, Havok `version`, `class_counts` census, and a `shapes[]`
+//!   array tagged `convex` / `box` / `mopp` / `mesh` / `other`.
+//!
+//! `--max-len` is accepted and ignored (CLI parity with the Python tool); the
+//! real packfile size is always used. Exit codes: 0 ok, 1 I/O error, 2 usage.
+//! Wired into `scripts/stage2_parallel.sh` as `HAVOK_BIN`, with the Python tool
+//! kept as a fallback when this binary isn't built.
 
 use mercs2_formats::havok::{find_packfiles, ConvexHull, Shape};
 use serde_json::json;
