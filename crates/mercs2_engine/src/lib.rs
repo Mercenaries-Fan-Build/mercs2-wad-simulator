@@ -1,19 +1,48 @@
-//! `mercs2_engine` — the reimplementation's engine library surface.
+//! `mercs2_engine` — the native 64-bit engine of the Mercenaries 2 reimplementation (Rust/wgpu),
+//! running on the retail game's own data (`docs/modernization/00_charter.md`).
 //!
-//! Exposes the self-contained engine modules so sibling binaries (`mercs2_game`, `mercs2_probe`)
-//! and the engine binary itself share ONE implementation instead of the modules living privately
-//! inside `main.rs`:
-//! - `wad` — FFCS / `vz.wad` asset access (open, block decompress, ASET/container extraction, texture).
-//! - `mesh` — UCFX container → indexed geometry (`Vertex`, `BoneRig`, `build_indexed_from_container`).
-//! - `pose` — skeletal palette sampling (depends only on `mesh::BoneRig`).
-//! - `render` — wgpu helper glue + shared render types (`LoadedModel`, `ClipAnim`, `TexMap`, …).
-//! - `scene` — the multi-entity wgpu `Scene` renderer (ECS + streaming world).
-//! - `game_world` — the streaming-world render entry point `run_game_world` + its WAD loaders.
+//! This is a **pure library**: no binary, no `main`, no argument parsing. The engine is asset-agnostic
+//! machinery; the consumers (`mercs2_game` — the game exe — and `mercs2_probe` — the tooling) depend
+//! on it and configure it. The streaming-world render lives HERE, in the library, so the game drives it
+//! **in-process** via [`game_world::run_game_world`] instead of shelling out to a separate engine
+//! binary. Boundary rule, per `docs/modernization/pangea_engine_alignment.md` §6: **mechanism → engine;
+//! selection / content / tunables → game.**
 //!
-//! The streaming-world render now lives in the library so `mercs2_game` (the game exe) drives it
-//! **in-process** via `game_world::run_game_world` instead of shelling out to a separate engine
-//! binary. This follows `docs/modernization/pangea_engine_alignment.md` §6.
-
+//! # Boot paths
+//! - [`app::run`] — the single winit event loop. It owns the window, GPU, `Time`, the fixed step, raw
+//!   input, the background-load poll and the loading screen; an [`app::Game`] implementor supplies only
+//!   policy through the hooks (`config` / `spawn_loader` / `setup` / `update` / `fixed_update` /
+//!   `render_prep` / `ui`). Both the dev free-fly boot and the TPS game boot run on it.
+//! - [`game_world::run_game_world`] — the streaming world: background WAD loader plus the per-frame
+//!   executor that loads/unloads c3 cells + terrain tiles and wakes/hibernates `ModelName` props by
+//!   proximity, with a `populate` hook the GAME uses to spawn its own entities once base geometry lands.
+//!
+//! # Module map
+//! Asset layer
+//! - [`wad`] — FFCS / `vz.wad` access (open, block decompress, ASET/container extraction, textures).
+//! - [`asset`] — `AssetSource`: base WAD + an ordered stack of patch/overlay WADs, resolved last-wins.
+//! - [`registry`] — `AssetRegistry`: block residency + hash-keyed chunk tables (insert is FIRST-wins).
+//! - [`mesh`] — UCFX container → indexed geometry (`Vertex`, `BoneRig`, `build_indexed_from_container`).
+//! - [`model`] — cross-block model assembly over the `<model>_P00N_Q(3-N)` LOD chain.
+//! - [`worldutil`] — render-agnostic helpers: `HeightMap`, the streaming decision catalog, reverse-hash.
+//!
+//! Render
+//! - [`render`] — wgpu helper glue + shared types (`LoadedModel`, `ClipAnim`, `TexMap`, `LoadProgress`).
+//! - [`render_graph`] — the named-node scene pass order recovered from `FUN_00466d40`.
+//! - [`render_state`] — per-object state + the three-clause per-segment draw gate (`FUN_00472a50`).
+//! - [`scene`] — the multi-entity `Scene` renderer over the `mercs2_core` ECS `World`.
+//! - [`pose`] — skinning-palette recomposition (depends only on `mesh::BoneRig`).
+//! - [`post`] — HDR target + bright-pass → bloom → tone-map (fallible; degrades to plain forward).
+//! - [`water`] — `WaterNode`, the translucent water-surface render node.
+//! - [`particles`] — CPU billboard particle system driven by `fxdict` effect templates.
+//! - [`ui`] — 2D overlay pass: screen-space quads + monospace text (`ui.wgsl`).
+//!
+//! Simulation / game seam
+//! - [`camera`] — mode-based camera rig (`CameraMode` → `CameraPreset`) + boom-collision math.
+//! - [`player`] — `PlayerController`: third-person locomotion, collide-and-slide, ground snap, clip FSM.
+//! - [`input`] — data-driven action/binding layer read from the retail `Mercs2.ini`; KB/mouse/gamepad.
+//! - [`script_host`] / [`spawn`] / [`runtime`] / [`gameplay`] — the Lua host + simulation cluster (below).
+//! - [`diag`] — headless, render-agnostic diagnostics/exports consumed by `mercs2_probe`.
 pub mod app;
 pub mod asset;
 pub mod camera;

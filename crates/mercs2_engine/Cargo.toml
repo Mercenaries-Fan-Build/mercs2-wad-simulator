@@ -3,6 +3,7 @@ name = "mercs2_engine"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu). Phase 1 skeleton."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 
