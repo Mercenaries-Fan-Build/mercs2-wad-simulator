@@ -3,6 +3,7 @@ name = "mercs2_net"
 version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 16 (row 28): networking (Keystone-B replication, session/transport, FESL). WAVE-1 scaffold."
+readme = "README.md"
 license.workspace = true
 repository.workspace = true
 

@@ -1,4 +1,4 @@
-//! `mercs2_net` — Networking / replication (row 28), Layer-1 the reimpl target.
+//! `mercs2_net` — Networking / replication. **Layer 1 is the reimpl target** (row 28).
 //!
 //! **Silo 16** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
 //! **Scoreboard row(s):** 28.
@@ -22,6 +22,12 @@
 //!   when the host gate fires (mirrors the AI bus's `DirectAction` → replicate-if-hosting).
 //! - [`category`] — the `NetCategoryInfo` property-sync descriptor: the primary class + 8 `NetSubCat*`.
 //! - [`module_pull`] — the join-time module pull (`SynchNetImportModule`, gate hash `0x762c8f61`).
+//!
+//! The crate root ties the session and the module-sync state together in [`NetWorld`] (the world-global
+//! net spine the `Net.*` Lua surface drives): [`NetWorld::send_custom_event`] is the send path through
+//! the host gate, [`NetWorld::receive`] is the receive path through the module-pull gate, returning
+//! [`Received`]. This crate is a library only — it has no binaries and no transport of its own; the
+//! caller owns the socket and feeds `receive` the bytes.
 //!
 //! **Honest boundaries (what the map marks unrecovered/virtualized and this crate does NOT fabricate):**
 //! the local-vs-wire *predicate* and the *encode/emit* steps of `FUN_005a0cc0` are SecuROM-virtualized
