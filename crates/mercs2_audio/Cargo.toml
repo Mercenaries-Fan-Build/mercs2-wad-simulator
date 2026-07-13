@@ -15,5 +15,18 @@ mercs2_formats = { workspace = true }
 # software-mix the exe's own software mixer does (`FUN_00836610` MixSources → int32 accumulator →
 # packssdw-saturate → int16, code map §3.4) and hand the finished int16 PCM to cpal's output stream
 # instead of `IDirectSoundBuffer8`. cpal is optional at *runtime* (no device → the mixer runs fully
-# headless), never behind a build flag.
-cpal = "0.15"
+# headless), and `device` is ON BY DEFAULT — the engine and the game never opt out, so no audio
+# behaviour is gated behind a build flag.
+#
+# It is optional at *link* time for one reason: cpal pulls `alsa-sys`, which needs a full i386
+# multiarch sysroot to cross-compile. The headless WAD CLIs (`wad_simulator`'s vo_extract /
+# cue_probe / wavebank_layout_probe) use only the DECODE side of this crate — `sounddb` and `wave` —
+# and never open a device, yet linking libasound made the 32-bit release build fail outright
+# ("pkg-config has not been configured to support cross-compilation") and would have saddled the
+# shipped CLI with a runtime ALSA dependency it never calls. They build with default-features = false.
+cpal = { version = "0.15", optional = true }
+
+[features]
+default = ["device"]
+# Real device output (`backend::CpalSink`). Off only for headless decode-side consumers.
+device = ["dep:cpal"]

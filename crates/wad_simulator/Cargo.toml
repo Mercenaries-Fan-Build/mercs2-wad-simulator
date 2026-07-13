@@ -14,7 +14,11 @@ path = "src/main.rs"
 
 [dependencies]
 mercs2_formats = { workspace = true }
-mercs2_audio = { workspace = true }
+# Decode side only (sounddb + wave, for vo_extract / cue_probe / wavebank_layout_probe). These CLIs
+# never open an output device, and linking cpal -> alsa-sys breaks the 32-bit cross-build outright
+# ("pkg-config has not been configured to support cross-compilation") and would give the shipped CLI
+# a runtime ALSA dependency it never calls. The engine keeps the default `device` feature.
+mercs2_audio = { path = "../mercs2_audio", version = "1.0.0", default-features = false }
 ucfx_byteswap = { workspace = true }
 flate2 = "1.1.9"
 clap = { version = "4.6.1", features = ["derive"] }
