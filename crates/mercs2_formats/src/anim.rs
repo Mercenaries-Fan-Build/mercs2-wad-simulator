@@ -3,7 +3,7 @@
 //!
 //! This is the read side that pairs with [`crate::havok`]: it reuses that
 //! module's tested little-endian packfile walker
-//! ([`havok::parse_packfile_raw`]) for the section-header / classname / fixup
+//! ([`crate::havok::parse_packfile_raw`]) for the section-header / classname / fixup
 //! pass, and adds decoders for the *animation* virtual-fixup classes (the
 //! collision decoder in `havok.rs` handles the `hkp*Shape` classes). Do not
 //! re-implement the walker here.
