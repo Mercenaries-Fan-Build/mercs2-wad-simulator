@@ -282,9 +282,16 @@ fn read_trnm(container: &[u8]) -> Option<Vec<u32>> {
         // (a) `size == 8 + count*4`; (b) the wavelet frame-0 local translations match
         // the resolved HIER bind-local translations only under the +8 read
         // (mean|Δ| 0.028 vs 0.117); (c) the leading word resolves to no HIER bone.
-        let count = read_u32_le(t, 0) as usize;
-        // A valid trnm holds a leading word + count u32s in `size-4` bytes.
-        if count > (size - 4) / 4 {
+        // The count word is `[u16 count][u16 flags]`, NOT a u32. Retail ships flags=0 for most clips
+        // but 0xFFFF for a whole CLASS of them — the 50-track clips, 182 of the 725 in the Mattias
+        // animgroup (block 3185). Read as a u32 that is 0xFFFF0032 = 4,294,901,810, which failed the
+        // bound below, so `read_trnm` returned None and the clip silently lost its ENTIRE binding:
+        // every track resolved to no bone and the clip drove nothing. Two independent facts pin the
+        // low half as the count: the `size == 8 + 4*count` identity (208 == 8 + 4*50), and the Havok
+        // header's own `numTransformTracks` (50). The high half is a flag we do not need to read.
+        let count = (read_u32_le(t, 0) & 0xFFFF) as usize;
+        // A valid trnm is exactly `[u32 count/flags][u32 leading][count x u32 hash]`.
+        if size != 8 + count * 4 {
             return None;
         }
         let mut v = Vec::with_capacity(count);
@@ -584,10 +591,17 @@ mod tests {
     /// carries a `trnm` chunk with three bone name-hashes and a `data` chunk that
     /// is NOT a real packfile (so the header read fails gracefully).
     fn synth_block(track_hashes: &[u32]) -> Vec<u8> {
-        // trnm body: [count][leading entry][hashes...] — matches retail layout
+        synth_block_flags(track_hashes, 0)
+    }
+
+    /// Same, with an explicit value for the trnm count word's HIGH half (retail ships 0xFFFF on a
+    /// whole class of clips — see `read_trnm`).
+    fn synth_block_flags(track_hashes: &[u32], flags: u16) -> Vec<u8> {
+        // trnm body: [u16 count | u16 flags][leading entry][hashes...] — matches retail layout
         // (`size == 8 + count*4`; the per-track hashes start at offset +8).
         let mut trnm = Vec::new();
-        trnm.extend_from_slice(&(track_hashes.len() as u32).to_le_bytes());
+        let count_word = track_hashes.len() as u32 | ((flags as u32) << 16);
+        trnm.extend_from_slice(&count_word.to_le_bytes());
         trnm.extend_from_slice(&0xDEAD_0000u32.to_le_bytes()); // leading reference/motion entry
         for &h in track_hashes {
             trnm.extend_from_slice(&h.to_le_bytes());
@@ -615,6 +629,22 @@ mod tests {
         block.extend_from_slice(&(container.len() as u32).to_le_bytes());
         block.extend_from_slice(&container);
         block
+    }
+
+    /// REGRESSION: the trnm count word is `[u16 count][u16 flags]`. Retail sets flags=0xFFFF on a
+    /// whole class of clips (the 50-track ones — 182 of 725 in the Mattias animgroup). Reading the
+    /// word as a u32 yielded 0xFFFF0032, which failed validation, so the clip silently came back with
+    /// NO binding at all and drove zero bones. A clip must parse identically whatever the flags say.
+    #[test]
+    fn trnm_count_word_high_half_is_flags_not_count() {
+        let hashes = [0x1111_1111, 0x2222_2222, 0x3333_3333];
+        let plain = parse_animgroup(&synth_block_flags(&hashes, 0x0000)).expect("parse");
+        let flagged = parse_animgroup(&synth_block_flags(&hashes, 0xFFFF)).expect("parse");
+        assert_eq!(plain.clips[0].binding.track_to_bone_hash, hashes);
+        assert_eq!(
+            flagged.clips[0].binding.track_to_bone_hash, hashes,
+            "a 0xFFFF flag half must not destroy the binding"
+        );
     }
 
     #[test]
