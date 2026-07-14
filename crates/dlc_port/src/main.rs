@@ -288,7 +288,7 @@ fn run() -> Result<(), String> {
     eprintln!("  NOTE: bootstrap/import-chain injection intentionally omitted (dlc01 boots as its own level)");
 
     // ── Assemble FFCS patch WAD ──
-    let wad = build_patch_wad_multi(&converted, csum_value, csum_meta, &FFCS_CERT_BLOB);
+    let wad = build_patch_wad_multi(&converted, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }

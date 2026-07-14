@@ -39,7 +39,9 @@ mod model_mtrl;
 mod model_reskin;
 mod model_unwrap;
 mod model_vertex;
-mod scripts_block;
+// `scripts_block` now lives in `mercs2_formats` so library consumers (the modkit GUI)
+// can edit Lua without depending on this bin-only crate.
+use mercs2_formats::scripts_block;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -738,7 +740,7 @@ fn filter_keep(patch_wad: &PathBuf, keep: &[String], out: &PathBuf) -> Result<()
     if kept.is_empty() {
         return Err("no blocks matched --keep".into());
     }
-    let new_wad = build_patch_wad_multi(&kept, contents.csum_value, None, &FFCS_CERT_BLOB);
+    let new_wad = build_patch_wad_multi(&kept, contents.csum_value, None, &FFCS_CERT_BLOB)?;
     std::fs::write(out, &new_wad).map_err(|e| format!("write: {e}"))?;
     println!("Wrote {} ({} bytes, {} blocks)", out.display(), new_wad.len(), kept.len());
     Ok(())
@@ -809,7 +811,7 @@ fn drop_blocks(patch_wad: &PathBuf, drops: &[String], out: &PathBuf) -> Result<(
         return Err("no blocks matched --drop".into());
     }
     println!("Dropped {dropped} block(s); kept {}", kept.len());
-    let new_wad = build_patch_wad_multi(&kept, contents.csum_value, None, &FFCS_CERT_BLOB);
+    let new_wad = build_patch_wad_multi(&kept, contents.csum_value, None, &FFCS_CERT_BLOB)?;
     std::fs::write(out, &new_wad).map_err(|e| format!("write: {e}"))?;
     println!("Wrote {} ({} bytes, {} blocks)", out.display(), new_wad.len(), kept.len());
     Ok(())

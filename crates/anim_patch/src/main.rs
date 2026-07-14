@@ -317,7 +317,7 @@ fn build_block(loc: &Located, decompressed: &[u8]) -> Result<PatchBlock, String>
 fn write_wad(archive: &FfcsArchive, block: PatchBlock, out: &PathBuf) -> Result<usize, String> {
     let csum_value = find_chunk(&archive.chunks, b"CSUM").map(|r| r.offset).unwrap_or(0);
     let csum_meta = find_chunk(&archive.chunks, b"CSUM").map(|r| r.meta);
-    let wad = build_patch_wad_multi(&[block], csum_value, csum_meta, &FFCS_CERT_BLOB);
+    let wad = build_patch_wad_multi(&[block], csum_value, csum_meta, &FFCS_CERT_BLOB)?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }

@@ -1,0 +1,17 @@
+[package]
+name = "mercs2_mesh"
+version = "1.0.0"
+edition = "2021"
+description = "Mercenaries 2 — model container → indexed triangle geometry (vertices, indices, per-material draw groups). Renderer-agnostic."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mercs2_mesh"
+path = "src/lib.rs"
+
+[dependencies]
+# Pure geometry decode. No GPU, no windowing — so a GUI/tool can use it without pulling
+# in wgpu/winit (this crate was carved out of `mercs2_engine` for exactly that reason).
+mercs2_formats = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }

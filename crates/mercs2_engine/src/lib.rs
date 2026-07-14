@@ -58,7 +58,13 @@ pub mod script_host;
 pub mod spawn;
 pub mod game_world;
 pub mod input;
-pub mod mesh;
+/// Model container → indexed triangle geometry.
+///
+/// Carved out into its own crate (`mercs2_mesh`) because it is pure decode — no GPU, no
+/// windowing — and tools that are not the engine (the modkit GUI's 3D texture viewer) need
+/// it without pulling in wgpu/winit. Re-exported here so every `mercs2_engine::mesh::…` and
+/// `crate::mesh::…` path keeps working unchanged.
+pub use mercs2_mesh as mesh;
 pub mod model;
 pub mod particles;
 pub mod player;

@@ -18,9 +18,9 @@
 //! `chunk_size`. The container model is verified against the real block by an
 //! identity round-trip (re-serialize == input) plus a full CSUM re-verification.
 
-use mercs2_formats::crc32::crc32_mercs2;
-use mercs2_formats::hash::pandemic_hash_m2;
-use mercs2_formats::ucfx::walk_decompressed_block;
+use crate::crc32::crc32_mercs2;
+use crate::hash::pandemic_hash_m2;
+use crate::ucfx::walk_decompressed_block;
 
 const LUAQ_SIG: &[u8; 4] = b"\x1bLua";
 

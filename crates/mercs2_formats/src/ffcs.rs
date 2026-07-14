@@ -391,7 +391,8 @@ mod tests {
         header[8..12].copy_from_slice(&0u32.to_le_bytes());
         let result = parse_ffcs_header(&header);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 0);
+        let (rows, _endian) = result.unwrap();
+        assert_eq!(rows.len(), 0);
     }
 
     #[test]
@@ -406,11 +407,11 @@ mod tests {
         header[0x0C..0x10].copy_from_slice(b"INDX");
         header[0x10..0x14].copy_from_slice(&0x100u32.to_le_bytes());
         header[0x14..0x18].copy_from_slice(&10u32.to_le_bytes());
-        let result = parse_ffcs_header(&header).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].tag, *b"INDX");
-        assert_eq!(result[0].offset, 0x100);
-        assert_eq!(result[0].meta, 10);
+        let (rows, _endian) = parse_ffcs_header(&header).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tag, *b"INDX");
+        assert_eq!(rows[0].offset, 0x100);
+        assert_eq!(rows[0].meta, 10);
     }
 
     #[test]

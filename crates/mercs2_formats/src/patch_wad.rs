@@ -11,6 +11,10 @@ use crate::ffcs::read_u32_le;
 
 pub const PAGE_SIZE: usize = 0x8000; // 32 KB
 
+/// Page-aligned start of the DATA region. Everything above it (INDX + ASET + PTHS,
+/// from `0x8000`) must fit in the 2 MB below it.
+pub const DATA_OFFSET: usize = 0x208000;
+
 /// PTHS trailer (258 ASCII bytes), appended after the per-block path strings.
 pub const PTHS_TRAILER: &[u8; 258] = b"\
 xa37dd45ffe100bfffcc9753aabac325f07cb3fa231144fe2e33ae4783feead2\
@@ -64,6 +68,14 @@ pub struct PatchBlock {
 
 impl PatchBlock {
     /// Defaults match the Python dataclass: `packed_field=1`, `flags=0x8000`.
+    ///
+    /// ⚠️ `packed_field` is left at the placeholder `1`. That word sizes the engine's
+    /// decompression destination buffer (`decompressed_page_count << 15`, engine
+    /// `FUN_00875b00`), so a block whose *decompressed* size exceeds 32 KB and still
+    /// carries `packed_field = 1` overruns the heap at load. Callers using this
+    /// constructor MUST set `packed_field` themselves.
+    ///
+    /// Prefer [`PatchBlock::from_decompressed`], which computes it for you.
     pub fn new(compressed_data: Vec<u8>, path_string: String, aset_entries: Vec<AsetEntry>) -> Self {
         Self {
             compressed_data,
@@ -73,6 +85,43 @@ impl PatchBlock {
             flags: 0x8000,
         }
     }
+
+    /// Build a block from its **decompressed** bytes: sges-compresses them and sets
+    /// `packed_field` to the decompressed page count the engine needs to size its
+    /// destination buffer. This is the safe constructor — it makes the
+    /// under-sized-buffer footgun unrepresentable.
+    ///
+    /// The high byte of `packed_field` is an Xbox *tier* byte (`ffcs::IndxEntry`
+    /// masks the page count with `0x00FFFFFF`; `dlc_port` reads `>> 24`). Pass the
+    /// source block's original `packed_field` as `inherit_tier_from` to carry that
+    /// byte forward when re-emitting an existing block; pass `None` for a new one.
+    pub fn from_decompressed(
+        raw: &[u8],
+        path_string: String,
+        aset_entries: Vec<AsetEntry>,
+        inherit_tier_from: Option<u32>,
+    ) -> Result<Self, String> {
+        let compressed = crate::sges::compress_sges(raw)
+            .map_err(|e| format!("sges compress {path_string}: {e}"))?;
+        let tier = inherit_tier_from.unwrap_or(0) & 0xFF00_0000;
+        Ok(Self {
+            compressed_data: compressed,
+            path_string,
+            aset_entries,
+            packed_field: tier | decompressed_pages(raw.len()),
+            flags: 0x8000,
+        })
+    }
+
+    /// The decompressed page count this block declares to the engine.
+    pub fn declared_pages(&self) -> u32 {
+        self.packed_field & 0x00FF_FFFF
+    }
+}
+
+/// Pages needed to hold `len` decompressed bytes (the engine allocates `pages << 15`).
+pub fn decompressed_pages(len: usize) -> u32 {
+    len.div_ceil(PAGE_SIZE) as u32
 }
 
 /// Parsed contents of an existing patch WAD (for merging).
@@ -86,17 +135,90 @@ fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
+/// Validate the invariants a patch WAD must satisfy for the engine to load it safely.
+///
+/// Called by [`build_patch_wad_multi`]; exposed so a builder can pre-flight a block
+/// list and report problems against mod names before assembling anything.
+///
+/// 1. **One primary ASET row per asset hash.** The engine resolves an asset by hash to
+///    a single ASET row; two primary rows for one hash in one WAD leave the winner
+///    undefined. Sub-entry rows (low 16 bits != 0xFFFF) legitimately repeat and are
+///    not checked.
+/// 2. **`packed_field` covers the decompressed payload.** It sizes the engine's
+///    decompression buffer (`pages << 15`); under-declaring overruns the heap.
+///    Only checked for `sges` blocks, which are the ones the engine inflates.
+/// 3. **The header region fits under DATA.** INDX + ASET + PTHS share the 2 MB below
+///    `0x208000`; overflowing silently writes PTHS into the DATA region.
+pub fn validate_blocks(blocks: &[PatchBlock]) -> Result<(), String> {
+    // 1 — one primary ASET row per hash.
+    let mut primary_owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (bi, blk) in blocks.iter().enumerate() {
+        for entry in &blk.aset_entries {
+            if entry.u32_2 & 0xFFFF != 0xFFFF {
+                continue; // sub-entry row — repeats are legal
+            }
+            if let Some(prev) = primary_owner.insert(entry.asset_hash, bi) {
+                return Err(format!(
+                    "asset 0x{:08X} is claimed as PRIMARY by two blocks: [{prev}] {} and [{bi}] {} \
+                     — the engine's winner would be undefined",
+                    entry.asset_hash, blocks[prev].path_string, blk.path_string
+                ));
+            }
+        }
+    }
+
+    // 2 — packed_field must cover the decompressed payload.
+    for (bi, blk) in blocks.iter().enumerate() {
+        if blk.compressed_data.len() < 4 || &blk.compressed_data[0..4] != b"sges" {
+            continue; // stored/raw block: the engine does not inflate it
+        }
+        let raw = crate::sges::decompress_sges(&blk.compressed_data)
+            .map_err(|e| format!("block [{bi}] {}: {e}", blk.path_string))?;
+        let needed = decompressed_pages(raw.len());
+        if blk.declared_pages() < needed {
+            return Err(format!(
+                "block [{bi}] {} declares {} decompressed page(s) but inflates to {} bytes \
+                 ({needed} page(s)) — the engine would size its buffer at {} bytes and overrun the heap",
+                blk.path_string,
+                blk.declared_pages(),
+                raw.len(),
+                (blk.declared_pages() as usize) * PAGE_SIZE
+            ));
+        }
+    }
+
+    // 3 — header region must fit below DATA.
+    let total_aset: usize = blocks.iter().map(|b| b.aset_entries.len()).sum();
+    let pths_len: usize =
+        blocks.iter().map(|b| b.path_string.len() + 1).sum::<usize>() + PTHS_TRAILER.len() + 1;
+    let header_end = 0x8000 + blocks.len() * 12 + total_aset * 16 + pths_len;
+    if header_end > DATA_OFFSET {
+        return Err(format!(
+            "INDX+ASET+PTHS need {header_end} bytes but DATA starts at {DATA_OFFSET} \
+             — too many blocks/assets for the patch-WAD header region"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Build a PC FFCS patch WAD from one or more blocks.
 ///
 /// `csum_meta` sets the CSUM chunk's `meta` field. When `None`, it is
 /// auto-detected from the ASET-entry count of a block whose path ends with
-/// `\resident_p000_q3.block` (falling back to 0).
+/// `\resident_p000_q3.block` (falling back to 0). Pass it explicitly when any block
+/// may have been carried in from another WAD — an imported block with that path would
+/// otherwise silently hijack the value.
+///
+/// Errors if [`validate_blocks`] fails.
 pub fn build_patch_wad_multi(
     blocks: &[PatchBlock],
     csum_value: u32,
     csum_meta: Option<u32>,
     cert_blob: &[u8; 144],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
+    validate_blocks(blocks)?;
+
     let num_blocks = blocks.len();
 
     // ── INDX / ASET / PTHS layout ──
@@ -124,7 +246,7 @@ pub fn build_patch_wad_multi(
     pths_bytes.push(0);
 
     // ── DATA layout (page-aligned blocks starting at 0x208000) ──
-    let data_offset = 0x208000usize;
+    let data_offset = DATA_OFFSET;
     let data_page_start = data_offset / PAGE_SIZE;
 
     // (page_idx, pages, &data)
@@ -199,7 +321,7 @@ pub fn build_patch_wad_multi(
         out[blk_offset..blk_offset + blk_data.len()].copy_from_slice(blk_data);
     }
 
-    out
+    Ok(out)
 }
 
 /// Parse an existing patch WAD's structure (INDX/ASET/PTHS/DATA) for merging.
@@ -276,11 +398,20 @@ pub fn read_patch_wad(raw: &[u8]) -> Result<PatchWadContents, String> {
         let end = (blk_offset + blk_size).min(raw.len());
         let slice = &raw[blk_offset..end];
 
-        let mut actual_end = slice.len();
-        while actual_end > 4 && slice[actual_end - 1] == 0 {
-            actual_end -= 1;
-        }
-        actual_end = align_up(actual_end, 4).min(slice.len());
+        // Blocks are zero-padded out to a page boundary. For an `sges` block the segment
+        // table tells us exactly where the stream ends — ask it, rather than trimming
+        // trailing zeroes (which truncates any stream whose last segment ends in zeroes).
+        // Non-sges (stored/raw) blocks have no such table, so fall back to the trim.
+        let actual_end = match crate::sges::compressed_len(slice) {
+            Ok(n) => n.min(slice.len()),
+            Err(_) => {
+                let mut n = slice.len();
+                while n > 4 && slice[n - 1] == 0 {
+                    n -= 1;
+                }
+                align_up(n, 4).min(slice.len())
+            }
+        };
 
         let path = path_strings
             .get(i)
@@ -302,6 +433,12 @@ pub fn read_patch_wad(raw: &[u8]) -> Result<PatchWadContents, String> {
 }
 
 /// Read an existing patch WAD and append (or replace) blocks, returning new WAD bytes.
+///
+/// Blocks are matched by `path_string`. With `replace = false` a new block whose asset
+/// hashes collide with an existing block's is simply appended — [`validate_blocks`] then
+/// rejects the result rather than emitting a WAD with two primary ASET rows for one hash.
+/// If you are resolving overlapping mods, decide the winner *before* calling this and pass
+/// a fully-resolved block list to [`build_patch_wad_multi`] instead.
 pub fn merge_patch_wads(
     existing: &[u8],
     new_blocks: Vec<PatchBlock>,
@@ -325,12 +462,7 @@ pub fn merge_patch_wads(
         }
     }
 
-    Ok(build_patch_wad_multi(
-        &merged,
-        contents.csum_value,
-        None,
-        &FFCS_CERT_BLOB,
-    ))
+    build_patch_wad_multi(&merged, contents.csum_value, None, &FFCS_CERT_BLOB)
 }
 
 #[cfg(test)]
@@ -341,6 +473,94 @@ mod tests {
     fn pths_trailer_and_cert_sizes() {
         assert_eq!(PTHS_TRAILER.len(), 258);
         assert_eq!(FFCS_CERT_BLOB.len(), 144);
+    }
+
+    fn primary(hash: u32) -> AsetEntry {
+        AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, 19)
+    }
+
+    /// `PatchBlock::new` leaves `packed_field = 1`, which sizes the engine's
+    /// decompression buffer at one 32 KB page. `from_decompressed` must derive the real
+    /// page count from the *decompressed* length, or a big block overruns the heap.
+    #[test]
+    fn from_decompressed_sets_packed_field_from_decompressed_size() {
+        // 100 KB decompressed => 4 pages (100000 / 32768 = 3.05 -> 4).
+        let raw = vec![0x5Au8; 100_000];
+        let blk = PatchBlock::from_decompressed(&raw, "blocks\\big.block".into(), vec![], None)
+            .expect("compress");
+        assert_eq!(blk.declared_pages(), 4);
+        assert_eq!(decompressed_pages(raw.len()), 4);
+        // The footgun constructor, for contrast, would have declared a single page.
+        assert_eq!(
+            PatchBlock::new(vec![0u8; 8], "x".into(), vec![]).declared_pages(),
+            1
+        );
+    }
+
+    /// The high byte of `packed_field` is an Xbox tier byte (`ffcs` masks the page count
+    /// with 0x00FFFFFF); re-emitting a block must not clobber it.
+    #[test]
+    fn from_decompressed_preserves_the_xbox_tier_byte() {
+        let raw = vec![0x11u8; 40_000]; // 2 pages
+        let blk = PatchBlock::from_decompressed(
+            &raw,
+            "blocks\\tiered.block".into(),
+            vec![],
+            Some(0x7F00_0001), // tier 0x7F, stale page count 1
+        )
+        .expect("compress");
+        assert_eq!(blk.declared_pages(), 2, "page count recomputed");
+        assert_eq!(blk.packed_field >> 24, 0x7F, "tier byte carried forward");
+    }
+
+    /// Two primary ASET rows for one hash leave the engine's winner undefined.
+    #[test]
+    fn duplicate_primary_aset_hash_is_rejected() {
+        let a = PatchBlock::from_decompressed(b"aaaa", "blocks\\a.block".into(), vec![primary(0xDEAD)], None).unwrap();
+        let b = PatchBlock::from_decompressed(b"bbbb", "blocks\\b.block".into(), vec![primary(0xDEAD)], None).unwrap();
+        let err = validate_blocks(&[a, b]).unwrap_err();
+        assert!(err.contains("0x0000DEAD"), "got: {err}");
+        assert!(err.contains("PRIMARY"), "got: {err}");
+    }
+
+    /// Sub-entry rows (low16 != 0xFFFF) legitimately repeat and must NOT trip the check.
+    #[test]
+    fn duplicate_sub_entry_aset_hash_is_allowed() {
+        let sub = |h: u32| AsetEntry::new(h, 0xFFFF_FFFF, 0x0000_0007, 19); // low16 = 7
+        let a = PatchBlock::from_decompressed(b"aaaa", "blocks\\a.block".into(), vec![sub(0xBEEF)], None).unwrap();
+        let b = PatchBlock::from_decompressed(b"bbbb", "blocks\\b.block".into(), vec![sub(0xBEEF)], None).unwrap();
+        validate_blocks(&[a, b]).expect("sub-entry rows may repeat");
+    }
+
+    /// An under-declared `packed_field` is exactly the heap-overrun bug; catch it.
+    #[test]
+    fn under_declared_packed_field_is_rejected() {
+        let raw = vec![0x7Eu8; 100_000]; // needs 4 pages
+        let mut blk =
+            PatchBlock::from_decompressed(&raw, "blocks\\big.block".into(), vec![], None).unwrap();
+        blk.packed_field = 1; // simulate the PatchBlock::new default
+        let err = validate_blocks(&[blk]).unwrap_err();
+        assert!(err.contains("overrun"), "got: {err}");
+    }
+
+    /// INDX+ASET+PTHS must fit under DATA (0x208000) or PTHS silently lands in DATA.
+    #[test]
+    fn header_region_overflow_is_rejected() {
+        // Each block contributes 12 (INDX) + 16 (ASET) + ~40 (PTHS) bytes. 0x200000
+        // bytes of headroom / ~68 => overflow well before 40k blocks.
+        let blocks: Vec<PatchBlock> = (0..40_000u32)
+            .map(|i| {
+                PatchBlock::from_decompressed(
+                    b"x",
+                    format!("blocks\\modkit\\filler_{i:08}.block"),
+                    vec![primary(i)],
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        let err = validate_blocks(&blocks).unwrap_err();
+        assert!(err.contains("DATA starts at"), "got: {err}");
     }
 
     #[test]
@@ -359,7 +579,7 @@ mod tests {
         );
         let blocks = vec![b0.clone(), b1.clone()];
 
-        let wad = build_patch_wad_multi(&blocks, 0xCAFEBABE, None, &FFCS_CERT_BLOB);
+        let wad = build_patch_wad_multi(&blocks, 0xCAFEBABE, None, &FFCS_CERT_BLOB).expect("build");
 
         // Header structure
         assert_eq!(&wad[0..4], b"FFCS");
@@ -407,7 +627,8 @@ mod tests {
             "blocks\\dlc01\\speedcity\\foo.block".to_string(),
             vec![AsetEntry::new(0x33333333, 0xFFFFFFFF, 0x5678, 0xBB)],
         );
-        let wad = build_patch_wad_multi(&[b0, b1], 0xCAFEBABE, None, &FFCS_CERT_BLOB);
+        let wad =
+            build_patch_wad_multi(&[b0, b1], 0xCAFEBABE, None, &FFCS_CERT_BLOB).expect("build");
         assert_eq!(wad.len(), 2_195_456, "WAD length must match Python");
         assert_eq!(
             crate::crc32::crc32_mercs2(&wad),

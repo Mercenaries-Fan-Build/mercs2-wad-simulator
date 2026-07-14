@@ -138,6 +138,14 @@ pub struct DrawGroup {
     pub specular: Option<u32>,
     /// Normal-map texture asset hash (MTRL slot 2), if any.
     pub normal: Option<u32>,
+    /// **Every** texture slot of this group's material, in authored order (slot 0 = diffuse,
+    /// 1 = specular, 2 = normal, then whatever else the material binds — up to 10).
+    ///
+    /// The three named fields above are a convenience for the renderer, which only samples
+    /// those. They are NOT the whole picture: a tool that asks "which parts of this model use
+    /// texture X" and consults only those three gets the wrong answer for every texture bound
+    /// in a later slot.
+    pub textures: Vec<u32>,
     /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
@@ -180,6 +188,7 @@ impl Default for DrawGroup {
             diffuse: None,
             specular: None,
             normal: None,
+            textures: Vec::new(),
             group_index: 0,
             lod_mask: 0xFF,
             node: -1,
@@ -482,6 +491,11 @@ pub fn build_indexed_rung(
                 diffuse: mat.and_then(|m| m.diffuse()),
                 specular: mat.and_then(|m| m.specular()),
                 normal: mat.and_then(|m| m.textures.get(2).copied()),
+                // Every slot, not just the first three. A material can bind up to 10 textures,
+                // and a tool asking "which parts use texture X" gets the wrong answer if it can
+                // only see slots 0-2 — on retail that alone is the difference between 40% and
+                // 89% of textures being attributable to a surface.
+                textures: mat.map(|m| m.textures.clone()).unwrap_or_default(),
                 group_index: m.group_index,
                 lod_mask: m.state_mask,
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.

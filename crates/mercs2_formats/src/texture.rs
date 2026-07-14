@@ -54,7 +54,9 @@ impl TexFormat {
         }
     }
 
-    fn from_fourcc(fourcc: &[u8]) -> Option<TexFormat> {
+    /// Map a DXT FourCC to a format. Public so a donor swap can re-encode the user's image
+    /// into whatever the donor container already uses.
+    pub fn from_fourcc(fourcc: &[u8]) -> Option<TexFormat> {
         match fourcc {
             b"DXT1" => Some(TexFormat::Bc1),
             b"DXT5" => Some(TexFormat::Bc3),
@@ -337,7 +339,12 @@ pub fn terrain_group_layers(container: &[u8]) -> Vec<Vec<u32>> {
 ///    primary row, only a sub-entry into block 2583). Both cases decompress the
 ///    row's block and select the entry whose `name_hash` (then `type_hash`)
 ///    matches, so a shared block yields the right chunk.
-fn extract_container(
+///
+/// Public because a *donor* swap needs the container's raw bytes, not a parsed view: to
+/// replace a texture safely you re-encode the new image into the donor's own dimensions
+/// and format and splice only its `BODY` ([`replace_body`]), leaving every structural
+/// field of a container the engine already accepts byte-identical.
+pub fn extract_container(
     file: &mut File,
     archive: &FfcsArchive,
     name_hash: u32,
@@ -492,6 +499,174 @@ pub fn parse_texture_container(container: &[u8]) -> Result<TextureData, String> 
         all_mips,
         mip_count,
     })
+}
+
+/// Splice new pixel data into a UCFX texture container's `BODY` leaf, in place, and
+/// recompute the container CSUM. Returns the rebuilt container.
+///
+/// **The new body must be exactly the same length as the old one.** That is the whole
+/// point: a texture swap done as a *donor BODY-swap* — re-encode the user's image to the
+/// donor's own width/height/format, then overwrite only its pixels — keeps every
+/// structural field (INFO dims, fourcc, mip count, residency descriptor, descriptor
+/// offsets) byte-identical to a container the engine already accepts.
+///
+/// This makes the nastiest failure mode *unrepresentable* rather than merely validated:
+/// a fully-resident texture whose BODY is not exactly `linear_mip_chain_size(...)` makes
+/// the engine's streaming worker over-read, returning `STATUS_BUFFER_TOO_SMALL`, and the
+/// page never reaches ready state — a **world-load livelock** (a hang, not a crash).
+/// Because the length cannot change here, that size can never drift.
+///
+/// Same shape as `scripts_block::replace_lua`, which is proven in-game.
+///
+/// Callers doing a swap should also refuse donors that are *not* fully resident
+/// (`texsize::info_is_fully_resident`): for a streamed cell texture the base WAD's own
+/// finer `_P00N` pages can overwrite an override made under the same hash.
+pub fn replace_body(container: &[u8], new_body: &[u8]) -> Result<Vec<u8>, String> {
+    let (bs, be) = {
+        let v = UcfxView::new(container).ok_or("not a UCFX texture container")?;
+        (0..v.n_desc)
+            .find(|&i| v.tag(i) == b"BODY")
+            .and_then(|i| v.resolve(i))
+            .ok_or("no BODY leaf")?
+    };
+
+    if new_body.len() != be - bs {
+        return Err(format!(
+            "new BODY is {} bytes but the container's BODY is {} bytes — a texture swap must \
+             preserve the donor's exact mip-chain size (re-encode to the donor's dimensions \
+             and format)",
+            new_body.len(),
+            be - bs
+        ));
+    }
+
+    let mut out = container.to_vec();
+    out[bs..be].copy_from_slice(new_body);
+
+    // Recompute the trailing CSUM: crc32_mercs2 over everything before the `CSUM` tag.
+    let tag = out
+        .windows(4)
+        .rposition(|w| w == b"CSUM")
+        .ok_or("container has no CSUM trailer")?;
+    if tag + 8 > out.len() {
+        return Err("truncated CSUM trailer".into());
+    }
+    let csum = crate::crc32::crc32_mercs2(&out[..tag]);
+    out[tag + 4..tag + 8].copy_from_slice(&csum.to_le_bytes());
+
+    Ok(out)
+}
+
+/// Build a **fully-resident** `NAME`/`INFO`/`BODY` texture container.
+///
+/// This is the shape a texture *replacement* must take, and it is the one shape proven to
+/// work in-game (it is what the shipped mattias_v5 / Obama skins use, and a faithful port
+/// of `tools/dds_to_ucfx_texture.py`, which produced them).
+///
+/// # Why a replacement must be fully resident
+///
+/// Most of the game's textures are **streamed**: `texsize::info_is_fully_resident` is false
+/// for 9,562 of the 13,339 retail textures, and their inline `BODY` is only a small
+/// resident *tail* — the high mips live in separate streaming blocks. You therefore cannot
+/// reskin one by overwriting its body in place: you'd be painting the 32×32 tail while the
+/// real pixels stream in from elsewhere.
+///
+/// The fix the engine already supports is to publish a *fully resident* container under the
+/// same asset hash: `INFO[26..32] = 0` (+ the `0xFFFF` sentinel at 32) tells it "there is no
+/// streaming, the whole chain is inline", and it reads exactly
+/// [`linear_mip_chain_size`] bytes from `BODY`.
+///
+/// # The invariant that must not be broken
+///
+/// `body` **must** be exactly `linear_mip_chain_size(width, height, fourcc, dxt_mip_count(w,h))`.
+/// The engine reads the full dimension-derived chain regardless of the header's mip field, so
+/// a short body makes the streaming worker over-read → `STATUS_BUFFER_TOO_SMALL` → the page
+/// never becomes ready → the **world load hangs**. This function enforces it rather than
+/// trusting the caller.
+pub fn build_resident_texture(
+    name: &str,
+    width: u32,
+    height: u32,
+    format: TexFormat,
+    body: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mips = dxt_mip_count(width as usize, height as usize);
+    let want = linear_mip_chain_size(width as usize, height as usize, format.fourcc(), mips);
+    if body.len() != want {
+        return Err(format!(
+            "BODY is {} bytes but a fully-resident {width}x{height} {} texture needs exactly \
+             {want} (a short body makes the engine over-read and hang the world load)",
+            body.len(),
+            String::from_utf8_lossy(format.fourcc()),
+        ));
+    }
+
+    // NAME: NUL-terminated, padded to an even length.
+    let mut name_b = name.as_bytes().to_vec();
+    name_b.push(0);
+    if name_b.len() % 2 != 0 {
+        name_b.push(0);
+    }
+
+    // INFO (34 bytes): w, h, 1, mips, 0, 1, 1 as u16s; fourcc @14; total_size @22;
+    // [26..32] = 0 marks fully resident; u16 0xFFFF sentinel @32.
+    let mut info = vec![0u8; 34];
+    for (i, v) in [
+        width as u16,
+        height as u16,
+        1,
+        mips as u16,
+        0,
+        1,
+        1,
+    ]
+    .iter()
+    .enumerate()
+    {
+        info[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    info[14..18].copy_from_slice(format.fourcc());
+    info[22..26].copy_from_slice(&(body.len() as u32).to_le_bytes());
+    info[32..34].copy_from_slice(&0xFFFFu16.to_le_bytes());
+
+    // Leaves are 4-byte aligned within the data area; u2 counts the siblings after it.
+    let rows: [(&[u8; 4], &[u8], u32); 3] = [
+        (b"NAME", &name_b, 2),
+        (b"INFO", &info, 1),
+        (b"BODY", body, 0),
+    ];
+
+    let mut blob: Vec<u8> = Vec::with_capacity(name_b.len() + info.len() + body.len() + 8);
+    let mut placed: Vec<(&[u8; 4], u32, u32, u32)> = Vec::with_capacity(3);
+    for (tag, data, u2) in rows {
+        while blob.len() % 4 != 0 {
+            blob.push(0);
+        }
+        placed.push((tag, blob.len() as u32, data.len() as u32, u2));
+        blob.extend_from_slice(data);
+    }
+
+    let data_off: u32 = 20 + 3 * 20;
+    let mut c: Vec<u8> = Vec::with_capacity(data_off as usize + blob.len() + 8);
+    c.extend_from_slice(b"UCFX");
+    c.extend_from_slice(&data_off.to_le_bytes());
+    c.extend_from_slice(&0u32.to_le_bytes());
+    c.extend_from_slice(&0u32.to_le_bytes());
+    c.extend_from_slice(&3u32.to_le_bytes()); // n_desc
+    for (tag, off, sz, u2) in placed {
+        c.extend_from_slice(tag);
+        c.extend_from_slice(&off.to_le_bytes());
+        c.extend_from_slice(&sz.to_le_bytes());
+        c.extend_from_slice(&u2.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes());
+    }
+    c.extend_from_slice(&blob);
+
+    let csum = crate::crc32::crc32_mercs2(&c);
+    c.extend_from_slice(b"CSUM");
+    c.extend_from_slice(&csum.to_le_bytes());
+
+    Ok(c)
 }
 
 /// Return just the raw BODY leaf bytes of a UCFX texture container. Works for the resident full
@@ -671,6 +846,62 @@ mod tests {
         c.extend_from_slice(&info);
         c.extend_from_slice(&body);
         c
+    }
+
+    /// A container we build must parse back as fully resident, with the complete chain the
+    /// engine will read. If either drifts, the world load hangs — so pin both.
+    #[test]
+    fn build_resident_texture_round_trips() {
+        for (w, h, fmt) in [
+            (256u32, 256u32, TexFormat::Bc1),
+            (512, 512, TexFormat::Bc3),
+            (1024, 512, TexFormat::Bc1),
+        ] {
+            let mips = dxt_mip_count(w as usize, h as usize);
+            let want = linear_mip_chain_size(w as usize, h as usize, fmt.fourcc(), mips);
+            let body = vec![0x5Au8; want];
+
+            let c = build_resident_texture("mod_tex", w, h, fmt, &body).expect("build");
+
+            let t = parse_texture_container(&c).expect("parse back");
+            assert_eq!((t.width, t.height), (w, h));
+            assert_eq!(t.format, fmt);
+            assert_eq!(t.mip_count as usize, mips);
+            assert_eq!(t.all_mips.len(), want, "the full chain must be inline");
+            assert_eq!(texture_name(&c).as_deref(), Some("mod_tex"));
+
+            // The residency descriptor is what tells the engine not to stream.
+            let info = info_of(&c);
+            assert!(
+                crate::texsize::info_is_fully_resident(&info),
+                "must be marked fully resident"
+            );
+
+            // And the CSUM must verify, or the loader rejects the container.
+            let tag = c.windows(4).rposition(|x| x == b"CSUM").expect("CSUM");
+            let stored = u32::from_le_bytes(c[tag + 4..tag + 8].try_into().unwrap());
+            assert_eq!(stored, crate::crc32::crc32_mercs2(&c[..tag]));
+        }
+    }
+
+    /// A body that isn't exactly the dimension-derived chain is the livelock bug. Refuse it.
+    #[test]
+    fn build_resident_texture_rejects_a_short_body() {
+        let err = build_resident_texture("t", 256, 256, TexFormat::Bc1, &[0u8; 100]).unwrap_err();
+        assert!(err.contains("over-read"), "got: {err}");
+    }
+
+    /// Read a container's INFO leaf (test helper).
+    pub(super) fn info_of(container: &[u8]) -> Vec<u8> {
+        let v = UcfxView::new(container).expect("ucfx");
+        for i in 0..v.n_desc {
+            if v.tag(i) == b"INFO" {
+                if let Some((s, e)) = v.resolve(i) {
+                    return container[s..e].to_vec();
+                }
+            }
+        }
+        panic!("no INFO");
     }
 
     #[test]

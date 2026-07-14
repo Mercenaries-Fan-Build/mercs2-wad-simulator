@@ -32,6 +32,9 @@ font8x8 = "0.3"
 fontdue = "0.9"
 # asset layer — the reimplementation consumes the original game's data through this crate.
 mercs2_formats = { workspace = true }
+# Geometry decode, carved out so non-engine tools can use it without wgpu/winit.
+# Re-exported as `mercs2_engine::mesh`.
+mercs2_mesh = { workspace = true }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
 mercs2_core = { workspace = true }
 # Mechanism crates: the engine OWNS and re-exports (`pub use … as <name>`) every gameplay/AV/render

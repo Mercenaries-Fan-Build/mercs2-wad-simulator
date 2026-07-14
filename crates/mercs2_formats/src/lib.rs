@@ -100,6 +100,7 @@ pub mod safe_slice;
 pub mod save;
 pub mod save_write;
 pub mod schema;
+pub mod scripts_block;
 pub mod sges;
 pub mod skeleton;
 pub mod tag_registry;

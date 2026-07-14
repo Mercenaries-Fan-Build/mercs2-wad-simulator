@@ -210,7 +210,7 @@ fn publish(
     let csum_value = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.offset).unwrap_or(0);
     let csum_meta = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.meta);
 
-    let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB);
+    let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;

@@ -14,7 +14,79 @@ fn read_u16_le(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
 }
 
-pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
+/// Exact byte length of the `sges` stream at the start of `block_data`.
+///
+/// A block stored in a WAD is padded with zeroes out to a 32 KB page boundary. Recovering
+/// the block therefore means knowing where its sges stream actually ends — and *guessing*
+/// by trimming trailing zeroes truncates any stream whose final segment legitimately ends
+/// in zero bytes (an all-zero payload compresses to a deflate stream ending in 0x00).
+///
+/// The header records the answer at `+12` (`total_c`, the 16-byte-aligned end of the last
+/// segment). We trust it only when it is corroborated by an independent walk of the
+/// segment table, so a corrupt or hostile header cannot make us over-read: for a stored
+/// segment the walk ends at `data_offset + size`; for a deflate segment it ends wherever
+/// the inflater actually stopped (`total_in`), since the per-segment u16 `compressed_size`
+/// is unreliable for large/incompressible segments.
+pub fn compressed_len(block_data: &[u8]) -> Result<usize, String> {
+    let segments = parse_segment_table(block_data)?;
+    let end = block_data.len();
+    let mut max_end = 16 + segments.len() * 8; // header + segment table
+
+    for (i, seg) in segments.iter().enumerate() {
+        let pos = seg.data_offset;
+        if pos >= end {
+            break;
+        }
+        let consumed = if seg.is_compressed {
+            let next_off = if i + 1 < segments.len() {
+                segments[i + 1].data_offset
+            } else {
+                end
+            };
+            let read_end = next_off.min(pos + 131072).min(end);
+            if read_end <= pos {
+                break;
+            }
+            let mut decompressor = Decompress::new(false);
+            let mut buf = vec![0u8; seg.uncompressed_size];
+            match decompressor.decompress(
+                &block_data[pos..read_end],
+                &mut buf,
+                flate2::FlushDecompress::Finish,
+            ) {
+                Ok(_) => decompressor.total_in() as usize,
+                Err(e) => return Err(format!("sges segment {i}: {e}")),
+            }
+        } else if seg.compressed_size > 0 {
+            seg.compressed_size
+        } else {
+            seg.uncompressed_size
+        };
+        max_end = max_end.max((pos + consumed).min(end));
+    }
+
+    // Segments are laid out on 16-byte boundaries, and the writer rounds the final
+    // segment's end up the same way — so the true stream length is align16 of the walk.
+    let walked = align16(max_end).min(end);
+
+    // `total_c` @ +12 is the writer's own record of that value. Prefer it, but only if it
+    // agrees with the walk (>= it, and in bounds) — never let a bogus header over-read.
+    let declared = read_u32_le(block_data, 12) as usize;
+    if declared >= walked && declared <= end {
+        return Ok(declared);
+    }
+    Ok(walked)
+}
+
+struct Segment {
+    compressed_size: usize,
+    uncompressed_size: usize,
+    data_offset: usize,
+    is_compressed: bool,
+}
+
+/// Parse the `sges` header + segment table (shared by `decompress_sges` / `compressed_len`).
+fn parse_segment_table(block_data: &[u8]) -> Result<Vec<Segment>, String> {
     if block_data.len() < 16 {
         return Err("Block too small for sges header".into());
     }
@@ -26,18 +98,10 @@ pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     let segment_count = read_u16_le(block_data, 6) as usize;
-    let total_uncompressed = read_u32_le(block_data, 8) as usize;
     let table_start = 16usize;
     let table_size = segment_count * 8;
     if block_data.len() < table_start + table_size {
         return Err("Block too small for segment table".into());
-    }
-
-    struct Segment {
-        compressed_size: usize,
-        uncompressed_size: usize,
-        data_offset: usize,
-        is_compressed: bool,
     }
 
     let mut segments = Vec::with_capacity(segment_count);
@@ -51,15 +115,19 @@ pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
             raw_uncomp
         };
         let offset_with_flag = read_u32_le(block_data, base + 4);
-        let is_compressed = (offset_with_flag & 1) != 0;
-        let data_offset = (offset_with_flag & 0xFFFFFFFE) as usize;
         segments.push(Segment {
             compressed_size,
             uncompressed_size,
-            data_offset,
-            is_compressed,
+            data_offset: (offset_with_flag & 0xFFFFFFFE) as usize,
+            is_compressed: (offset_with_flag & 1) != 0,
         });
     }
+    Ok(segments)
+}
+
+pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
+    let segments = parse_segment_table(block_data)?;
+    let total_uncompressed = read_u32_le(block_data, 8) as usize;
 
     // Mirror tools/sges_decompress.py: the per-segment u16 `compressed_size` is
     // unreliable for incompressible/large segments (it can wrap or be 0), so for
@@ -385,6 +453,34 @@ mod tests {
     #[test]
     fn roundtrip_small() {
         roundtrip(b"hello sges world, the quick brown fox jumps over the lazy dog");
+    }
+
+    /// `compressed_len` must report the true end of the sges stream. A block in a WAD is
+    /// zero-padded to a 32 KB page, and the old recovery path guessed the boundary by
+    /// trimming trailing zeroes — which truncates any stream whose final compressed byte
+    /// happens to be 0x00. Simulate the WAD's padding and demand exact recovery.
+    #[test]
+    fn compressed_len_recovers_a_page_padded_block_exactly() {
+        for payload in [
+            vec![0x00u8; 5000],                              // all zeroes
+            (0..9000u32).map(|i| (i % 251) as u8).collect(), // incompressible-ish
+            b"trailing nul bytes follow\0\0\0\0\0\0\0\0".to_vec(),
+        ] {
+            let block = compress_sges(&payload).expect("compress");
+            let exact = compressed_len(&block).expect("compressed_len");
+            assert_eq!(exact, block.len(), "must report the true stream length");
+
+            // Now pad out to a page boundary, as a WAD does, and recover.
+            let mut padded = block.clone();
+            padded.resize(PAGE_SIZE as usize * 2, 0);
+            let recovered = compressed_len(&padded).expect("compressed_len on padded");
+            assert_eq!(recovered, block.len(), "must see through the page padding");
+            assert_eq!(
+                decompress_sges(&padded[..recovered]).expect("decompress"),
+                payload,
+                "the recovered slice must still inflate to the original payload"
+            );
+        }
     }
 
     #[test]
