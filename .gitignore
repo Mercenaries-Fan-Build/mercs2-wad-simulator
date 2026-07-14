@@ -1,3 +1,7 @@
 /target/
 /target_probe/
 Cargo.lock
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
