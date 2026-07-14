@@ -37,6 +37,8 @@
 //! Those bins take a model NAME (hashed with `pandemic_hash_m2`) or a `0xHASH`, and resolve
 //! `vz.wad` from the registry only — they have no `--wad` override.
 
+mod bone_census;
+
 use mercs2_engine::diag;
 use mercs2_engine::wad;
 use mercs2_engine::worldutil::parse_hash;
@@ -53,6 +55,7 @@ fn usage() -> ! {
          \x20 entity-find [0xKEY ...]       comp-probe                    comp-dump [Name]\n\
          \x20 block-grep <needle>           scan-hash <0xH ...>           find-ref <0xH ...>\n\
          \x20 block-probe <index>           placement-names               hier --model H [names.txt] [--csv P]\n\
+         \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
          \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
@@ -85,7 +88,14 @@ fn first_positional(args: &[String]) -> Option<String> {
             skip_next = false;
             continue;
         }
-        if a == "--wad" || a == "--model" || a == "--index" || a == "--clip" || a == "--csv" {
+        if a == "--wad"
+            || a == "--wads"
+            || a == "--model"
+            || a == "--index"
+            || a == "--clip"
+            || a == "--csv"
+            || a == "--skeleton-csv"
+        {
             skip_next = true;
             continue;
         }
@@ -479,6 +489,19 @@ fn main() {
                 std::process::exit(2);
             });
             run(hier_report(&wadpath, mh, first_positional(&args), flag_val(&args, "--csv")));
+        }
+        "bone-census" => {
+            // `--wads a.wad,b.wad` scans a whole stack (base + patch + DLC); default = the one wad.
+            let wads: Vec<String> = match flag_val(&args, "--wads") {
+                Some(list) => list.split(',').map(|s| s.trim().to_string()).collect(),
+                None => vec![wadpath.clone()],
+            };
+            run(bone_census::bone_census(
+                &wads,
+                flag_val(&args, "--csv"),
+                first_positional(&args),
+                flag_val(&args, "--skeleton-csv"),
+            ));
         }
         "overlays" => {
             let prof = first_positional(&args).unwrap_or_else(|| {

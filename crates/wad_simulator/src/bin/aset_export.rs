@@ -146,6 +146,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PathBuf::from("docs/data/aset_block_strings.json"),
             PathBuf::from("docs/data/aset_expanded_names.json"),
             PathBuf::from("docs/data/aset_external_names.json"),
+            // aset_roster_names — model roots named by crossing the game vehicle/weapon roster with
+            // the authored `<faction>_veh_<class>_<name>` grammar (aset_external_mine --roster).
+            PathBuf::from("docs/data/aset_roster_names.json"),
             // aset_variant_names — models that are a DECORATED VARIANT of a named asset
             // (`vz_veh_tank_amx30_base`), found per-model against its own hash (T=1).
             PathBuf::from("docs/data/aset_variant_names.json"),

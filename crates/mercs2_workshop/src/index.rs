@@ -394,6 +394,7 @@ fn discovered_name_fragments() -> Vec<PathBuf> {
         "aset_expanded_names.json",
         "aset_model_names.json",
         "aset_external_names.json",
+        "aset_roster_names.json",
     ]
     .iter()
     .filter_map(|f| {

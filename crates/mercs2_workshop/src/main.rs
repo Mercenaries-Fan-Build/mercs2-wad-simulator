@@ -103,7 +103,7 @@ fn main() {
             .filter(|s| !s.starts_with("--"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("workshop_data"));
-        if let Err(e) = pack_data(&out, names_csv) {
+        if let Err(e) = pack_data(&out, names_csv, &wadpath) {
             eprintln!("--pack-data: {e}");
         }
         return;
@@ -643,20 +643,135 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
     app::run(app::Options { wadpath, overlays, names_csv });
 }
 
+/// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and
+/// HIER node names (bone/hardpoint). The rainbow table names ~972k hashes but only these ~tens-of-k are
+/// ever displayed, so intersecting against this set drops the speculative-candidate bulk. Returns an
+/// EMPTY set if the WAD can't be opened (released binary with no game data) — the caller then skips
+/// trimming rather than writing an empty pack.
+fn referenced_hashes(wadpath: &str) -> std::collections::HashSet<u32> {
+    use mercs2_engine::wad;
+    use std::collections::{BTreeMap, HashSet};
+    let mut set: HashSet<u32> = HashSet::new();
+    let Ok(mut w) = wad::open(wadpath) else {
+        eprintln!("[pack] no WAD at {wadpath} — writing UNTRIMMED names.bin");
+        return set;
+    };
+    for (asset_hash, _type, _prim) in wad::all_asets(&w) {
+        set.insert(asset_hash);
+    }
+    // HIER node hashes: sweep models grouped by block so each block decompresses once.
+    let mut by_block: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+    for (hash, block) in wad::model_list_all(&w) {
+        by_block.entry(block).or_default().push(hash);
+    }
+    for (block, models) in by_block {
+        let Ok(dec) = wad::decompress_block_index(&mut w, block) else { continue };
+        for m in models {
+            // Fast path from the decompressed block; fall back to full extraction for multi-block
+            // models model_span_in can't resolve (e.g. al_veh_boat_destroyer).
+            let mut hier = wad::model_span_in(&dec, m)
+                .map(|c| mercs2_formats::orchestrator::parse_hier(&c))
+                .unwrap_or_default();
+            if hier.is_empty() {
+                if let Ok(c) = wad::extract_container(&mut w, m) {
+                    hier = mercs2_formats::orchestrator::parse_hier(&c);
+                }
+            }
+            for n in hier {
+                set.insert(n.hash);
+            }
+        }
+    }
+    // animgroup clip name-hashes + the per-track BONE hashes (catches anim-only bones like bone_rotor
+    // / bone_yaw_radar that live in no mesh HIER) + any serialized skeleton bones.
+    for blk in wad::animgroup_blocks(&w) {
+        let Ok(dec) = wad::decompress_block_index(&mut w, blk) else { continue };
+        if let Ok(ag) = mercs2_formats::animgroup::parse_animgroup(&dec) {
+            if let Some(sk) = &ag.skeleton {
+                set.extend(sk.bone_name_hashes.iter().copied());
+            }
+            for c in &ag.clips {
+                set.insert(c.name_hash);
+                set.extend(c.binding.track_to_bone_hash.iter().copied());
+            }
+        }
+    }
+    set
+}
+
 /// `--pack-data <dir>`: assemble the reference bundle. Sources are the repo corpora (found by
 /// the same walk-up the app's fallback path uses); output is a portable directory.
-fn pack_data(out: &std::path::Path, names_csv: Option<std::path::PathBuf>) -> Result<(), String> {
+/// The committed production lookup: `data/production_names.json` (curated, hash-verified node/asset
+/// names), found by walking up from the CWD and from the exe. This is the authoritative, bundleable
+/// name source — it lives in THIS repo, so it needs neither the parent-repo rainbow table nor the WAD.
+fn load_production_names() -> Option<std::collections::HashMap<u32, String>> {
+    let mut roots = vec![std::env::current_dir().ok()?];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            roots.push(d.to_path_buf());
+        }
+    }
+    for root in roots {
+        let mut dir = root.as_path();
+        loop {
+            let cand = dir.join("data/production_names.json");
+            if cand.is_file() {
+                let txt = std::fs::read_to_string(&cand).ok()?;
+                let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+                let map = v.get("pandemic_hash_m2")?.as_object()?;
+                let mut out = std::collections::HashMap::with_capacity(map.len());
+                for (k, name) in map {
+                    if let (Ok(h), Some(n)) =
+                        (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str())
+                    {
+                        out.insert(h, n.to_string());
+                    }
+                }
+                return Some(out);
+            }
+            dir = dir.parent()?;
+        }
+    }
+    None
+}
+
+fn pack_data(
+    out: &std::path::Path,
+    names_csv: Option<std::path::PathBuf>,
+    wadpath: &str,
+) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
 
-    // 1. The merged name map (devkit strings + bones + rainbow + registry) → load-fast
-    // names.bin. RAW path on purpose: never read the stale pack we are replacing.
-    eprintln!("[pack] merging name corpora (slow raw parse — one-time cost)…");
-    let names = index::load_all_names_raw(names_csv, |_, _| {});
-    if names.is_empty() {
-        return Err("no name corpora found — run from the repo checkout".into());
-    }
+    // 1. names.bin. PREFERRED source: the committed, curated `data/production_names.json` that ships
+    // IN this repo. When it is present the pack is fully self-contained — no 32 MB parent-repo rainbow
+    // table and no game WAD needed, so any machine can rebuild the bundle. Falls back to the slow raw
+    // corpora + WAD-trim path only when the production file is absent (i.e. when regenerating it).
+    let (mut names, full) = match load_production_names() {
+        Some(p) => {
+            eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
+            let n = p.len();
+            (p, n)
+        }
+        None => {
+            eprintln!("[pack] no production_names.json — merging raw name corpora (slow one-time parse)…");
+            let mut names = index::load_all_names_raw(names_csv, |_, _| {});
+            if names.is_empty() {
+                return Err("no name corpora found — run from the repo checkout".into());
+            }
+            let full = names.len();
+            eprintln!("[pack] scanning WAD for referenced hashes (assets + clips + bone nodes)…");
+            let referenced = referenced_hashes(wadpath);
+            if !referenced.is_empty() {
+                names.retain(|h, _| referenced.contains(h));
+            }
+            (names, full)
+        }
+    };
     index::write_names_pack(&out.join("names.bin"), &names).map_err(|e| e.to_string())?;
-    eprintln!("[pack] names.bin: {} names", names.len());
+    eprintln!(
+        "[pack] names.bin: {} names (source pool {full})",
+        names.len(),
+    );
 
     // 2. Structured reference tables + corpora, copied verbatim for the insight features.
     let repo_file = |rel: &str| -> Option<std::path::PathBuf> {

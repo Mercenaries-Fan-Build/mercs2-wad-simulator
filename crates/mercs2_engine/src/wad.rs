@@ -101,6 +101,23 @@ pub fn model_list(wad: &Wad) -> Vec<(u32, u16)> {
     v
 }
 
+/// Like [`model_list`] but INCLUDES non-primary model ASET entries. Some multi-block models register
+/// only non-primary (e.g. `al_veh_boat_destroyer`), so `model_list` excludes them entirely; a complete
+/// census/pack needs them and reaches them via [`extract_container`] (which itself falls back to
+/// non-primary). One `(name_hash, block_index)` per distinct model, sorted + deduped by hash.
+pub fn model_list_all(wad: &Wad) -> Vec<(u32, u16)> {
+    let mut v: Vec<(u32, u16)> = wad
+        .archive
+        .aset
+        .iter()
+        .filter(|e| e.type_id == MODEL_ASET_TYPE_ID)
+        .map(|e| (e.asset_hash, e.block_index()))
+        .collect();
+    v.sort_unstable();
+    v.dedup_by_key(|(h, _)| *h);
+    v
+}
+
 /// Slice the model container (`type_hash == "model"`) out of a decompressed block.
 /// The model container for `name_hash` inside an already-decompressed block, if that block carries
 /// one. A model's LODs are not all in its primary ASET block (see `extract_texture_hires` for the

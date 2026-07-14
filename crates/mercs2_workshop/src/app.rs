@@ -432,26 +432,31 @@ const VEH_CLASS_ORDER: &[&str] = &[
 ];
 
 /// Group the catalog's vehicle models by class for the workbench inventory.
-/// Resolve HIER node-name hashes to names by hashing every candidate in the bone-name list
-/// (`docs/data/bone_name_candidates.txt`) — the same trick `mercs2_probe hier` uses. We only care
-/// about the `hp_*` INTERACTION points (seat / exhaust / wheel / barrel tip).
+/// Resolve HIER node-name hashes to names. The rainbow table (VERIFIED cracks — the human/vehicle
+/// rigs, `hp_seat_*`, `bone_wheel_*`, `bone_ub`, …) is authoritative and consulted FIRST; the
+/// generated `docs/data/bone_name_candidates.txt` grammar file is only a fallback for hashes the
+/// rainbow table doesn't cover, so an unverified brute-force guess can never shadow a real name.
 fn resolve_node_names(hashes: &[u32]) -> std::collections::HashMap<u32, String> {
     use mercs2_formats::hash::pandemic_hash_m2;
-    let want: std::collections::HashSet<u32> = hashes.iter().copied().collect();
-    let mut out = std::collections::HashMap::new();
-    for root in ["docs/data/bone_name_candidates.txt", "../../docs/data/bone_name_candidates.txt"] {
-        let Ok(txt) = std::fs::read_to_string(root) else { continue };
-        for line in txt.lines() {
-            let c = line.trim();
-            if c.len() < 2 {
-                continue;
+    let want_set: std::collections::BTreeSet<u32> = hashes.iter().copied().collect();
+    // Verified first.
+    let mut out = mercs2_engine::worldutil::rainbow_names(&want_set);
+    // Fill only the gaps from the generated candidate grammar (unverified).
+    if out.len() < want_set.len() {
+        for root in ["docs/data/bone_name_candidates.txt", "../../docs/data/bone_name_candidates.txt"] {
+            let Ok(txt) = std::fs::read_to_string(root) else { continue };
+            for line in txt.lines() {
+                let c = line.trim();
+                if c.len() < 2 {
+                    continue;
+                }
+                let h = pandemic_hash_m2(c);
+                if want_set.contains(&h) {
+                    out.entry(h).or_insert_with(|| c.to_string());
+                }
             }
-            let h = pandemic_hash_m2(c);
-            if want.contains(&h) {
-                out.entry(h).or_insert_with(|| c.to_string());
-            }
+            break;
         }
-        break;
     }
     out
 }
