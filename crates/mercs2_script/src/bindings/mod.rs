@@ -63,6 +63,7 @@ mod report;
 mod socket;
 mod sound;
 mod string_ext;
+mod table_ext;
 mod sys;
 mod sys_module;
 mod timer;
@@ -297,6 +298,7 @@ pub fn install_all(lua: &Lua, host: &SharedHost) -> LuaResult<Vec<NsCoverage>> {
     ns!(ai);
     ns!(socket);
     ns!(string_ext);
+    ns!(table_ext);
     Ok(cov)
 }
 
