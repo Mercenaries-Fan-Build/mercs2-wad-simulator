@@ -613,6 +613,7 @@ pub struct StreamingWorldData {
 pub fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -> Vec<crate::render::GpuLight> {
     placed
         .iter()
+        .filter(|pl| !pl.light.is_spot()) // spots go to `placed_spot_lights_to_gpu`
         .filter_map(|pl| {
             let radius = pl.light.radius();
             let intensity = pl.light.intensity();
@@ -620,6 +621,42 @@ pub fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -
                 return None;
             }
             Some(crate::render::GpuLight::point(pl.pos, pl.light.color, intensity, radius))
+        })
+        .collect()
+}
+
+/// The **spot** half of the same placement inventory → [`SpotLightGpu`](crate::scene::SpotLightGpu),
+/// feeding the `_sl` per-pixel cone path (`Scene::set_spot_lights`).
+///
+/// Data-driven from the pinned `LightObject` layout (see `placement::LightObject::is_spot` /
+/// `PlacedLight::cone_axis`): type 3 = spot, aimed along the placement's local −Y, with
+/// `params[2]` = throw range and `params[4]`/`params[5]` = inner/outer cone half-angles. Before this,
+/// every authored spot was silently dropped (its `params[1]` is 0, and the old `radius()` read that
+/// slot, so the `radius <= 0` guard discarded it).
+pub fn placed_spot_lights_to_gpu(
+    placed: &[mercs2_formats::placement::PlacedLight],
+) -> Vec<crate::scene::SpotLightGpu> {
+    placed
+        .iter()
+        .filter(|pl| pl.light.is_spot())
+        .filter_map(|pl| {
+            let range = pl.light.radius();
+            let intensity = pl.light.intensity();
+            if !range.is_finite() || range <= 0.0 || !intensity.is_finite() {
+                return None;
+            }
+            // Authored inner/outer half-angles; keep inner <= outer so the cone edge fades inward.
+            let outer = pl.light.cone_outer();
+            let inner = pl.light.cone_inner().min(outer);
+            Some(crate::scene::SpotLightGpu::new(
+                pl.pos,
+                pl.cone_axis(),
+                pl.light.color,
+                intensity,
+                range,
+                inner,
+                outer,
+            ))
         })
         .collect()
 }
@@ -652,6 +689,38 @@ pub fn glow_card_for_effect(w: &mut wad::Wad, placement_name: &str, pos: [f32; 3
             a,
         ],
     }
+}
+
+/// Load a full [`EffectTemplate`](mercs2_formats::fxdict::EffectTemplate) from the `effects` block by
+/// effect name-hash, parsing every UCFX child chunk (EFCT/EMTR/EMIT/COLR/FRCE/PTYP/POFF/TRFM/TEXT).
+/// The general form of [`env_shaft_effect_params`] (which only reads TRFM/COLR); feeds
+/// [`EmitterDesc::from_effect_template`](crate::particles::EmitterDesc::from_effect_template) so
+/// authored fire/smoke/steam effects drive the particle sim with real params. `None` if the block or
+/// effect isn't found.
+pub fn load_effect_template(
+    w: &mut wad::Wad,
+    name_hash: u32,
+) -> Option<mercs2_formats::fxdict::EffectTemplate> {
+    use mercs2_formats::types::TYPE_HASH_EFFECT;
+    let paths: Vec<String> = wad::block_paths(w).to_vec();
+    let blk = paths.iter().position(|p| p.to_ascii_lowercase().contains("effect"))? as u16;
+    let dec = wad::decompress_block_index(w, blk).ok()?;
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    let mut pos = 4 + count as usize * 16;
+    for e in &entries {
+        let end = pos + e.chunk_size as usize;
+        if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == name_hash && end <= dec.len() {
+            let c = &dec[pos..end];
+            // (tag, body) pairs; tags owned so they outlive the from_chunks borrow.
+            let owned: Vec<([u8; 4], &[u8])> =
+                ucfx_child_chunks(c).into_iter().map(|(tag, s, en)| (tag, &c[s..en])).collect();
+            return Some(mercs2_formats::fxdict::EffectTemplate::from_chunks(
+                owned.iter().map(|(t, b)| (t, *b)),
+            ));
+        }
+        pos = end;
+    }
+    None
 }
 
 /// Read an environmental light-shaft effect template and recover `(TRFM scale, COLR peak RGB, COLR
