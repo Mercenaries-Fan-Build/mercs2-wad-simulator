@@ -3,8 +3,12 @@
 //!
 //! Conventions: the engine's asset space is right-handed, +Y up, metres (see the handedness note
 //! in `scene.rs`) — glTF matches directly, OBJ is taken verbatim. Imported textures are
-//! BC-compressed on the fly (`texenc`) under synthetic `m2(<file>#<n>)` hashes. Skinning is not
-//! imported (static preview); the weight-transfer path stays with the CJ pipeline for now.
+//! BC-compressed on the fly (`texenc`) under synthetic `m2(<file>#<n>)` hashes.
+//!
+//! The glTF path also reads the SOURCE RIG when the file carries one: the first skin's joint node
+//! names (`skin_joints`) plus per-vertex `JOINTS_0`/`WEIGHTS_0`. This is what the Skeleton workbench
+//! retargets — a ValveBiped/Mixamo/Unreal skin's bones mapped onto a Mercs2 HIER skeleton. Positions
+//! are still baked to the rest pose for the static preview; the joints/weights ride alongside.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,6 +25,10 @@ pub struct Imported {
     pub textures: TexMap,
     pub stats: ModelStats,
     pub skin: SkinData,
+    /// Source-rig joint node names (first glTF skin), in palette order — the input the Skeleton
+    /// workbench's retarget classifier keys on. Empty for OBJ / unrigged glTF. When non-empty, the
+    /// per-vertex `Vertex.joints` index INTO this list.
+    pub skin_joints: Vec<String>,
 }
 
 pub fn import_model(path: &Path) -> Result<Imported, String> {
@@ -48,8 +56,38 @@ fn base_vertex(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2], color: [f32; 3]) -
     }
 }
 
+/// f32 skin weights → u8 quantised, guaranteed to sum to 255 (residue folded into the max weight).
+fn quantise_weights(w: [f32; 4]) -> [u8; 4] {
+    let sum: f32 = w.iter().sum();
+    if sum <= 1e-6 {
+        return [255, 0, 0, 0];
+    }
+    let mut q = [0u8; 4];
+    let mut acc = 0u16;
+    let mut maxi = 0usize;
+    for i in 0..4 {
+        let v = ((w[i] / sum) * 255.0).round().clamp(0.0, 255.0) as u16;
+        q[i] = v as u8;
+        acc += v;
+        if w[i] > w[maxi] {
+            maxi = i;
+        }
+    }
+    // Fold the rounding residue into the dominant weight.
+    let target = 255i32;
+    let delta = target - acc as i32;
+    q[maxi] = (q[maxi] as i32 + delta).clamp(0, 255) as u8;
+    q
+}
+
 /// Bounding box + identity skin for a finished vertex set.
-fn finish(verts: Vec<Vertex>, indices: Vec<u32>, draws: Vec<DrawGroup>, textures: TexMap) -> Imported {
+fn finish(
+    verts: Vec<Vertex>,
+    indices: Vec<u32>,
+    draws: Vec<DrawGroup>,
+    textures: TexMap,
+    skin_joints: Vec<String>,
+) -> Imported {
     let (mut bmin, mut bmax) = ([f32::MAX; 3], [f32::MIN; 3]);
     for v in &verts {
         for k in 0..3 {
@@ -75,7 +113,7 @@ fn finish(verts: Vec<Vertex>, indices: Vec<u32>, draws: Vec<DrawGroup>, textures
     let mut skin = SkinData::identity();
     skin.center = [0.0; 3];
     skin.scale = 1.0;
-    Imported { verts, indices, draws, textures, stats, skin }
+    Imported { verts, indices, draws, textures, stats, skin, skin_joints }
 }
 
 // ───────────────────────────── OBJ ─────────────────────────────
@@ -163,7 +201,7 @@ fn import_obj(path: &Path) -> Result<Imported, String> {
     if verts.is_empty() {
         return Err("OBJ contained no faces".into());
     }
-    Ok(finish(verts, indices, draws, TexMap::new()))
+    Ok(finish(verts, indices, draws, TexMap::new(), Vec::new()))
 }
 
 // ───────────────────────────── glTF ─────────────────────────────
@@ -193,6 +231,18 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
     let mut verts: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut draws: Vec<DrawGroup> = Vec::new();
+
+    // Source skeleton: the first skin's joint node names, in palette order. Per-vertex JOINTS_0
+    // index into THIS list — the retarget classifier keys on the names.
+    let skin_joints: Vec<String> = doc
+        .skins()
+        .next()
+        .map(|sk| {
+            sk.joints()
+                .map(|j| j.name().map(str::to_string).unwrap_or_else(|| format!("joint{}", j.index())))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Node traversal with baked world transforms (column-major 4x4).
     let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or("gltf: no scene")?;
@@ -225,6 +275,25 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
                 let col = colors.get(i).copied().unwrap_or([1.0; 3]);
                 verts.push(base_vertex(wp, nm, uv, col));
             }
+            // Per-vertex skin binding (JOINTS_0 / WEIGHTS_0), when the primitive is rigged. Joints
+            // index into the source skin's palette (== `skin_joints` for single-skin files, the
+            // common character case). Retarget remaps these onto the target HIER skeleton.
+            if let Some(joints) = reader.read_joints(0) {
+                let jv: Vec<[u16; 4]> = joints.into_u16().collect();
+                let wv: Vec<[f32; 4]> = reader
+                    .read_weights(0)
+                    .map(|w| w.into_f32().collect())
+                    .unwrap_or_default();
+                for (i, j) in jv.iter().enumerate() {
+                    let vi = base as usize + i;
+                    if vi < verts.len() {
+                        verts[vi].joints =
+                            [j[0].min(255) as u8, j[1].min(255) as u8, j[2].min(255) as u8, j[3].min(255) as u8];
+                        let w = wv.get(i).copied().unwrap_or([1.0, 0.0, 0.0, 0.0]);
+                        verts[vi].weights = quantise_weights(w);
+                    }
+                }
+            }
             let start = indices.len() as u32;
             match reader.read_indices() {
                 Some(ind) => indices.extend(ind.into_u32().map(|i| base + i)),
@@ -247,7 +316,7 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
     if verts.is_empty() {
         return Err("gltf contained no mesh primitives".into());
     }
-    Ok(finish(verts, indices, draws, textures))
+    Ok(finish(verts, indices, draws, textures, skin_joints))
 }
 
 const IDENT4: [[f32; 4]; 4] =

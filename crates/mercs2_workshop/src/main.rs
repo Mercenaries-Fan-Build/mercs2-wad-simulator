@@ -58,6 +58,7 @@ mod import;
 mod index;
 mod luaview;
 mod publish;
+mod retarget;
 mod texenc;
 mod texpng;
 

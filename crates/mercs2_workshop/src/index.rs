@@ -50,6 +50,70 @@ impl AssetRow {
         let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
         Some(classify_vehicle_token(cls))
     }
+
+    /// The browser's grouping bucket for this asset, derived from the `<faction>_<domain>_…` naming
+    /// convention: vehicles break out by class, then characters / buildings / weapons / props /
+    /// world-state / other. Drives the grouped model navigator. `Unnamed` = hash-only rows.
+    pub fn category(&self) -> &'static str {
+        let Some(name) = self.name.as_ref() else { return "Unnamed" };
+        if let Some(c) = self.vehicle_class() {
+            return vehicle_display(c);
+        }
+        let n = name.to_ascii_lowercase();
+        if n.contains("hum_") || n.contains("_hum") || n.contains("civ_") || n.contains("merc") {
+            "Character"
+        } else if n.contains("_bld") || n.contains("building") || n.contains("_hq") {
+            "Building"
+        } else if n.contains("_wpn") || n.contains("weapon") {
+            "Weapon"
+        } else if n.contains("vz_state") || n.contains("_state_") {
+            "World state"
+        } else if n.contains("_prop")
+            || n.contains("_env")
+            || n.contains("debris")
+            || n.contains("foliage")
+            || n.contains("plant")
+            || n.contains("tree")
+        {
+            "Prop / scenery"
+        } else if n.contains("_veh") {
+            "Vehicle (other)"
+        } else {
+            "Other"
+        }
+    }
+}
+
+/// Display-cased category name for a `vehicle_class()` token.
+fn vehicle_display(c: &str) -> &'static str {
+    match c {
+        "helicopter" => "Helicopter",
+        "tank" => "Tank",
+        "apc" => "APC",
+        "vtol" => "VTOL",
+        "jet" => "Jet",
+        "car" => "Car",
+        "truck" => "Truck",
+        "van" => "Van",
+        "semi" => "Semi",
+        "trailer" => "Trailer",
+        "towed" => "Towed",
+        "motorcycle" => "Motorcycle",
+        "boat" => "Boat",
+        _ => "Vehicle (other)",
+    }
+}
+
+/// The order the model navigator lists its category groups in.
+pub const CATEGORY_ORDER: &[&str] = &[
+    "Helicopter", "Tank", "APC", "VTOL", "Jet", "Car", "Truck", "Van", "Semi", "Trailer", "Towed",
+    "Motorcycle", "Boat", "Vehicle (other)", "Character", "Building", "Weapon", "Prop / scenery",
+    "World state", "Other", "Unnamed",
+];
+
+/// Sort rank for a category (unknown categories sort last).
+pub fn category_order(cat: &str) -> usize {
+    CATEGORY_ORDER.iter().position(|&c| c == cat).unwrap_or(CATEGORY_ORDER.len())
 }
 
 /// Normalise a `_veh_<token>_` class token into the model-structure-map taxonomy.
