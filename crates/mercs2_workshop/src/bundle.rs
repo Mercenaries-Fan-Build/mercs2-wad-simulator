@@ -30,13 +30,14 @@ use mercs2_formats::skeleton::{affine_inverse, transform_dir, transform_point, S
 /// An engine matrix (row-major storage, ROW-vector convention: `p' = p · M`) as the 16 floats glTF
 /// wants (column-major storage, COLUMN-vector convention: `p' = M · p`).
 ///
-/// The two conventions are transposes of each other, so `M_gltf = M_engine^T`, and storing that
-/// column-major is just a column-major flatten of the engine matrix — the same reorder the HIER node
-/// `matrix` emission below has always done.
+/// The two conventions are transposes of each other, so `M_gltf = M_engine^T`. Column-major storage
+/// of `M^T` is byte-identical to row-major storage of `M`, so the engine matrix is emitted VERBATIM,
+/// in its own row-major order. Transposing here instead would land the translation in the bottom row,
+/// which glTF reads as a non-affine matrix (`ACCESSOR_INVALID_IBM` / `NODE_MATRIX_NON_TRS`).
 fn gltf_mat(m: &[[f32; 4]; 4]) -> Vec<f32> {
     let mut o = Vec::with_capacity(16);
-    for c in 0..4 {
-        for r in 0..4 {
+    for r in 0..4 {
+        for c in 0..4 {
             o.push(m[r][c]);
         }
     }
@@ -296,7 +297,17 @@ pub fn export_bundle(
         let mut wgt_off = wgt_off;
         if d.skinned {
             for (_, src) in &order {
-                bin.extend_from_slice(&verts[*src as usize].joints);
+                let v = &verts[*src as usize];
+                // A slot with zero weight contributes nothing, but glTF still requires its joint
+                // index to be 0 — a stale index beside a zero weight is what the engine leaves in
+                // the unused slots, and every such vertex trips ACCESSOR_JOINTS_USED_ZERO_WEIGHT.
+                let mut j = v.joints;
+                for k in 0..4 {
+                    if v.weights[k] == 0 {
+                        j[k] = 0;
+                    }
+                }
+                bin.extend_from_slice(&j);
             }
             wgt_off = bin.len();
             for (_, src) in &order {
@@ -468,14 +479,11 @@ pub fn export_bundle(
                 n["scale"] = serde_json::json!(f32s(&qs.scale));
             }
             // Rigid: keep the matrix form the vehicle path has always used.
-            // glTF matrix is COLUMN-major; HierNode.local is row-major row-vector -> transpose.
+            // glTF stores column-major COLUMN-vector; HierNode.local is row-major ROW-vector. Those
+            // are transposes, and column-major storage of the transpose IS the row-major original —
+            // so `local` goes out verbatim. See `gltf_mat`.
             _ => {
-                n["matrix"] = serde_json::json!(f32s(&[
-                    m[0], m[4], m[8], m[12],
-                    m[1], m[5], m[9], m[13],
-                    m[2], m[6], m[10], m[14],
-                    m[3], m[7], m[11], m[15],
-                ]));
+                n["matrix"] = serde_json::json!(f32s(&m));
             }
         }
         if !kids.is_empty() {
@@ -573,10 +581,26 @@ pub fn export_bundle(
                  (|q: &mercs2_formats::anim::QsTransform| q.scale.to_vec()) as fn(&mercs2_formats::anim::QsTransform) -> Vec<f32>,
                  bind.scale.to_vec()),
             ] {
-                let vals: Vec<Vec<f32>> = sampled
+                let mut vals: Vec<Vec<f32>> = sampled
                     .iter()
                     .map(|fr| fr.get(track).map(&get).unwrap_or_else(|| def.clone()))
                     .collect();
+                // glTF REQUIRES a rotation to be a unit quaternion; a non-unit one is not a rotation
+                // at all and the validator rejects the clip. A few decoded tracks come off the wire
+                // slightly (occasionally badly) off unit — the engine's own `slerp` documents that it
+                // assumes unit inputs, and at an exact keyframe it passes the raw frame straight
+                // through, so nothing upstream ever renormalizes them. Do it here, at the one place
+                // the value has to be legal.
+                if path == "rotation" {
+                    for v in vals.iter_mut() {
+                        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if n > 1e-6 {
+                            for x in v.iter_mut() {
+                                *x /= n;
+                            }
+                        }
+                    }
+                }
                 // Constant and equal to the bind default -> the node already says it.
                 if vals.iter().all(|v| close(v, &def)) {
                     continue;
@@ -749,4 +773,66 @@ pub fn export_bundle(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read 16 emitted floats the way glTF does — column-major — and return `[row][col]`.
+    fn as_gltf(v: &[f32]) -> [[f32; 4]; 4] {
+        let mut m = [[0.0f32; 4]; 4];
+        for (k, x) in v.iter().enumerate() {
+            m[k % 4][k / 4] = *x;
+        }
+        m
+    }
+
+    /// The convention boundary this file sits on: the engine is row-major/ROW-vector, glTF is
+    /// column-major/COLUMN-vector. Those are transposes, so the engine's own row-major bytes are
+    /// ALREADY glTF's column-major bytes and must go out verbatim. Transposing instead lands the
+    /// translation in the bottom row, which is not an affine transform — the Khronos validator
+    /// rejects it (`ACCESSOR_INVALID_IBM`, `NODE_MATRIX_NON_TRS`) and importers either refuse the
+    /// file or silently drop every node offset. `anim_export_parity` guards the TRS/animation path;
+    /// this guards the matrix path (inverse-bind matrices and rigid `node.matrix`).
+    #[test]
+    fn emitted_matrix_is_affine_with_translation_in_the_last_column() {
+        // A row-vector translate-by-(1,2,3): translation occupies the last ROW engine-side.
+        let engine = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [1.0, 2.0, 3.0, 1.0],
+        ];
+        let g = as_gltf(&gltf_mat(&engine));
+
+        // glTF-side it must read as an affine matrix: bottom row exactly [0,0,0,1] ...
+        assert_eq!(g[3], [0.0, 0.0, 0.0, 1.0], "bottom row must be [0,0,0,1]");
+        // ... with the translation moved into the last COLUMN.
+        assert_eq!([g[0][3], g[1][3], g[2][3]], [1.0, 2.0, 3.0], "translation must be the last column");
+    }
+
+    /// The same invariant for a matrix that also rotates: a wrong transpose inverts the rotation
+    /// (R^T = R^-1 for a rotation), which a translation-only fixture cannot see.
+    #[test]
+    fn emitted_matrix_preserves_rotation_handedness() {
+        // Row-vector 90° about +Z, then translate: p' = p · M.
+        let engine = [
+            [0.0, 1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [5.0, 0.0, 0.0, 1.0],
+        ];
+        let g = as_gltf(&gltf_mat(&engine));
+        assert_eq!(g[3], [0.0, 0.0, 0.0, 1.0]);
+
+        // Engine: x-axis (1,0,0) · M = (0,1,0) + translation. glTF must agree via M · p.
+        let p = [1.0f32, 0.0, 0.0, 1.0];
+        let got = [
+            (0..4).map(|k| g[0][k] * p[k]).sum::<f32>(),
+            (0..4).map(|k| g[1][k] * p[k]).sum::<f32>(),
+            (0..4).map(|k| g[2][k] * p[k]).sum::<f32>(),
+        ];
+        assert_eq!(got, [5.0, 1.0, 0.0], "glTF M·p must reproduce the engine's p·M");
+    }
 }
