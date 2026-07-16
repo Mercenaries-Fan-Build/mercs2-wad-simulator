@@ -72,6 +72,15 @@ impl GameplaySystems {
         crate::vehicle::drive_step_system(world, phys, &self.lut, dt);
         // Instance tick (not the static `update`) so the impact channel accumulates for draining.
         self.weapons.tick(world, dt, &mut self.bus, Some(phys));
+        // Integrate death ragdolls (WILDSTAR single-body stand-in): a lethal blast launches a
+        // `Ragdollable` character (in `detonate_explosion`); here it falls + settles against the
+        // terrain height. Replaced by the constrained Havok ragdoll when the physics silo lands.
+        {
+            let hm = self.physics.heightmap();
+            crate::combat::ragdoll::ragdoll_system(world, dt, |p| {
+                hm.and_then(|h| h.sample(p.x, p.z)).unwrap_or(0.0)
+            });
+        }
         self.bus.dispatch_all();
         self.audio.borrow_mut().tick(dt);
     }
