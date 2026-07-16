@@ -1295,6 +1295,22 @@ math.mod = math.mod or math.fmod
 string.gfind = string.gfind or string.gmatch
 _MODULES = _MODULES or {}
 
+-- Engine global (not a Lua stdlib function, and not defined anywhere in the script corpus — the
+-- game Lua just calls it). The task framework leans on it: `MrxTask._ModuleLoaded` asserts the
+-- module resolved, `_AddChild` asserts the child name is unique. Retail is a dev-build assert, so a
+-- failure is a loud log line rather than a hard error — killing the VM here would be *less*
+-- faithful, not more.
+if ASSERT == nil then
+  function ASSERT(v, sMsg)
+    if not v then
+      if Debug and Debug.Printf then
+        Debug.Printf("ASSERT FAILED: " .. tostring(sMsg or "(no message)"))
+      end
+    end
+    return v
+  end
+end
+
 -- Pandemic engine math extension used across the resident scripts (MrxFactionManager, gunships,
 -- airstrikes, island fortress, …): `math.randi(n)` = random integer in [1,n]; `math.randi(a,b)` =
 -- [a,b]. Guarded against an empty interval (n<1 / a>b) so a degenerate call returns the low bound
@@ -1411,6 +1427,15 @@ impl Loader {
         }
     }
 
+    /// `dynamic_remove(name)` — forget a loaded module, so the next `import` re-executes its body.
+    /// Nothing to do if it was never loaded.
+    fn remove(&self, lua: &Lua, name: &str) {
+        let key = name.to_ascii_lowercase();
+        if self.loaded.borrow_mut().remove(&key).is_some() {
+            let _ = lua.globals().raw_remove(name);
+        }
+    }
+
     /// `import(name)` — load `name` once (cached), bind it as a global, return its module table.
     fn import(&self, lua: &Lua, name: &str) -> LuaResult<Table> {
         let key = name.to_ascii_lowercase();
@@ -1429,6 +1454,12 @@ impl Loader {
         let mt = lua.create_table()?;
         mt.set("__index", lua.globals())?;
         let _ = env.set_metatable(Some(mt));
+
+        // `_THIS` = the module's own table. The task framework relies on it to refer to itself without
+        // knowing its own name (`MrxTask.CreateChild` does `_THIS:Create()`; `Cleanup` restores
+        // `setmetatable(self, {__index = _THIS})`), so a module that inherits `MrxTask` is broken
+        // without it.
+        env.set("_THIS", env.clone())?;
 
         // Register BEFORE exec so a cyclic import sees the (partial) table instead of re-loading.
         self.loaded.borrow_mut().insert(key.clone(), env.clone());
@@ -1509,11 +1540,37 @@ impl ScriptHost {
         let import_fn = lua.create_function(move |lua, name: String| imp.import(lua, &name))?;
         lua.globals().set("import", import_fn)?;
 
-        // `dynamic_import` is import-at-runtime; same resolution for our purposes.
+        // `dynamic_import(name [, fCallback [, tArgs]])` — import-at-runtime, with the corpus's
+        // continuation form: the callback is invoked as `fCallback(unpack(tArgs), mModule)` once the
+        // module is up. `MrxTask.Activate` drives the whole task-instantiation chain through it
+        // (`dynamic_import(tConfig.sModuleName, self._ModuleLoaded, {self})` → `_ModuleLoaded(self,
+        // mModule)`), so the arg-then-module order is load-bearing, not cosmetic.
         let dimp = loader.clone();
-        let dyn_import_fn =
-            lua.create_function(move |lua, name: String| dimp.import(lua, &name))?;
+        let dyn_import_fn = lua.create_function(
+            move |lua, (name, cb, args): (String, Option<mlua::Function>, Option<Table>)| {
+                let m = dimp.import(lua, &name)?;
+                if let Some(cb) = cb {
+                    let mut vals: Vec<mlua::Value> = match args {
+                        Some(t) => t.sequence_values::<mlua::Value>().collect::<LuaResult<_>>()?,
+                        None => Vec::new(),
+                    };
+                    vals.push(mlua::Value::Table(m.clone()));
+                    cb.call::<()>(mlua::Variadic::from_iter(vals))?;
+                }
+                Ok(m)
+            },
+        )?;
         lua.globals().set("dynamic_import", dyn_import_fn)?;
+
+        // `dynamic_remove(name)` — drop a dynamically-loaded module so a later `import` re-runs its
+        // body. `MrxTask.Cleanup` calls this on the task's own `sModuleName` when a mission tears down,
+        // which is how a contract's module-level state is reset between plays.
+        let drem = loader.clone();
+        let dyn_remove_fn = lua.create_function(move |lua, name: String| {
+            drem.remove(lua, &name);
+            Ok(())
+        })?;
+        lua.globals().set("dynamic_remove", dyn_remove_fn)?;
 
         let inh = loader.clone();
         let inherit_fn = lua.create_function(move |lua, base: String| inh.inherit(lua, &base))?;
@@ -1588,6 +1645,32 @@ impl ScriptHost {
     /// state reaches that phase.
     pub fn fire_state_change(&self, state: &str, phase: &str) -> LuaResult<()> {
         crate::bindings::event::fire_game_state_change(&self.lua, state, phase)
+    }
+
+    /// Fire the `ObjectHibernation` handlers waiting on `(guid, phase)` — the streaming system calls
+    /// this when an object wakes (`"awake"`) or hibernates (`"asleep"`). This is the condition behind
+    /// the awake-gate that opens nearly every object script:
+    /// `Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})`.
+    pub fn fire_object_hibernation(&self, guid: u64, phase: &str) -> LuaResult<()> {
+        crate::bindings::event::fire_object_hibernation(&self.lua, guid, phase)
+    }
+
+    /// Fire the `ObjectDeath` handlers registered for `guid`.
+    pub fn fire_object_death(&self, guid: u64) -> LuaResult<()> {
+        crate::bindings::event::fire_object_death(&self.lua, guid)
+    }
+
+    /// Advance the `TimerRelative` handlers by `dt` seconds (the engine's per-tick `Event.__pump`).
+    pub fn pump_events(&self, dt: f32) -> LuaResult<()> {
+        let ev: Table = self.lua.globals().get("Event")?;
+        let pump: mlua::Function = ev.get("__pump")?;
+        pump.call::<()>(dt)
+    }
+
+    /// How many event handlers are still registered. Tooling only — a script that re-registers on each
+    /// stream-in without `Event.Delete`ing on stream-out shows up as a count that climbs every cycle.
+    pub fn live_event_handles(&self) -> usize {
+        crate::bindings::event::live_handle_count(&self.lua)
     }
 }
 
@@ -1755,8 +1838,12 @@ mod tests {
     fn coverage_report() {
         // Baseline of the current build. Update as silos land bodies (the Lua-hook TDD pass added the
         // Event system + Player economy/getters + Object health/labels + Sys game-state handshake).
-        const EXPECTED_NAMESPACES: usize = 35;
-        const EXPECTED_REQUIRED: usize = 1086;
+        // +1 namespace / +2 required / +2 real: the `Table` engine global (`Table.Create`,
+        // `Table.InsertI`). Not in the Surface-B trace — recovered from its only call sites, in
+        // `MrxGuiBase:Widget:GetChildren`. Without it that returns nil and every `pairs(GetChildren())`
+        // in the GUI layer throws, which takes down any boot that imports MrxUtil (see table_ext.rs).
+        const EXPECTED_NAMESPACES: usize = 36;
+        const EXPECTED_REQUIRED: usize = 1088;
         // Binding-surface burn-down. ALL 1086 Required cfuncs are installed & callable
         // (tests/binding_smoke.rs enforces that). The split is the HONEST progress metric:
         //   real  = BACKED — wired to a real engine mechanism (`mercs2_ai`/`faction`/`population`/
@@ -1792,7 +1879,7 @@ mod tests {
         // action residue (Hud/Object/Lti/Pg/Camera/Sys/Gui/Ai/Atmosphere/Vo/ObjectFilter/ObjectState
         // animation/menu/spawner/param/marker-category verbs) → recorded command logs (real +231).
         // Remaining unbacked = genuine dev stubs (debug menu, asset dumps) + a few getters/subsystem gaps.
-        const EXPECTED_REAL: usize = 1058;
+        const EXPECTED_REAL: usize = 1060;
         const EXPECTED_STUB: usize = 28;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
