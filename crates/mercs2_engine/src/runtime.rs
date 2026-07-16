@@ -136,7 +136,7 @@ impl GameRuntime {
         }
         self.render_impacts.extend(impacts);
         self.ai.tick(world);
-        self.water.tick(world);
+        self.water.tick(world, dt);
         self.decal.update(dt);
     }
 
