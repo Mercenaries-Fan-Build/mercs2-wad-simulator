@@ -579,13 +579,69 @@ impl LightObject {
     /// On-disk COMP record stride: u32 entity key + reflected payload = 56 bytes.
     pub const RECORD_STRIDE: usize = 4 + Self::PAYLOAD_STRIDE;
 
-    /// Inferred light intensity (`params[0]`; UE `Intensity`).
+    /// `light_type` = point/omni. **Pinned empirically** — see [`is_spot`](Self::is_spot).
+    pub const TYPE_POINT: u32 = 2;
+    /// `light_type` = spot/cone. **Pinned empirically** — see [`is_spot`](Self::is_spot).
+    pub const TYPE_SPOT: u32 = 3;
+
+    /// Is this a spot/cone light (vs a point/omni)?
+    ///
+    /// **Pinned empirically** by `mercs2_probe --bin light_type_probe` over all **1406 authored lights**
+    /// in `vz.wad`: exactly two `light_type` values exist — `2` (1392 lights) and `3` (14 lights). Type 3
+    /// is the spot type, on two independent witnesses: (a) every type-3 light is *named* `Light_spot_*`
+    /// (e.g. `Light_spot_large_yellow`), and (b) only type 3 **varies** `params[4]`/`params[5]`, which
+    /// type 2 freezes at the constants `0.524`/`0.785` rad (= 30°/45°) — i.e. the unused cone defaults.
+    /// The parameter set matches WildStar's `WSLight` (`ConeLength`/`ConeFallOffMin`/`ConeFallOffMax`,
+    /// `docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`).
+    pub fn is_spot(&self) -> bool {
+        self.light_type == Self::TYPE_SPOT
+    }
+
+    /// Inferred light intensity (`params[0]`; UE `Intensity`). Ranges 0.4–8 (point) / 5–20 (spot).
     pub fn intensity(&self) -> f32 {
         self.params[0]
     }
-    /// Inferred attenuation radius in native game metres (`params[1]`; UE `AttenuationRadius`).
+
+    /// Attenuation radius / cone length in native game metres (`params[2]`) — WildStar's `ConeLength`.
+    ///
+    /// **Re-pinned** from `params[1]` by the census: `params[2]` is metre-scale and varies per light
+    /// (a 9 m lamp, a 45 m spot throw; range 1.5–55), while `params[1]` sits at ~1.0 (range 0.01–5) and
+    /// is **0 on spots** — reading it as the radius gave every light a ~1 m reach and discarded every
+    /// spot as `radius <= 0`. `params[1]`'s true role (falloff exponent / source size) is still open.
     pub fn radius(&self) -> f32 {
-        self.params[1]
+        self.params[2]
+    }
+
+    /// Inner cone half-angle in radians (`params[4]`) — WildStar `ConeFallOffMin`; the fully-lit core.
+    /// Meaningless on a point light (frozen at 0.524 = 30°).
+    pub fn cone_inner(&self) -> f32 {
+        self.params[4]
+    }
+
+    /// Outer cone half-angle in radians (`params[5]`) — WildStar `ConeFallOffMax`; the cone edge.
+    /// Meaningless on a point light (frozen at 0.785 = 45°).
+    pub fn cone_outer(&self) -> f32 {
+        self.params[5]
+    }
+}
+
+impl PlacedLight {
+    /// The spot cone axis: the placement's local **−Y (down)** rotated by [`quat`](Self::quat).
+    ///
+    /// **Pinned empirically** (`light_type_probe`): rotating each candidate local axis by the 14 authored
+    /// spot quats, **−Y points downward for 14/14** (y ∈ [−0.95, −0.37]) — the ceiling/pole-mounted aim
+    /// you'd expect — while +Z scatters up and down (no convention) and +X stays horizontal (it's the
+    /// right axis). Meaningless for point lights.
+    pub fn cone_axis(&self) -> [f32; 3] {
+        let q = self.quat;
+        let (u, w) = ([q[0], q[1], q[2]], q[3]);
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+        };
+        let v = [0.0f32, -1.0, 0.0]; // local down
+        let c1 = cross(u, v);
+        let t = cross(u, [c1[0] + w * v[0], c1[1] + w * v[1], c1[2] + w * v[2]]);
+        [v[0] + 2.0 * t[0], v[1] + 2.0 * t[1], v[2] + 2.0 * t[2]]
     }
 }
 
@@ -626,6 +682,9 @@ pub struct PlacedLight {
     pub key: u32,
     pub name: Option<String>,
     pub pos: [f32; 3],
+    /// Placement rotation (xyzw). A **spot** light ([`LightObject::is_spot`]) aims its cone along this
+    /// rotation; point/omni lights ignore it.
+    pub quat: [f32; 4],
     pub light: LightObject,
     pub sub_block: u16,
 }
@@ -652,15 +711,17 @@ pub fn light_inventory(block: &[u8]) -> Vec<PlacedLight> {
         };
         let comps = walk_sub_block_comps(block, ucfx_pos, block_end);
 
-        let mut transforms: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
+        // Keep the rotation too: a spot light aims its cone along the placement quat.
+        let mut transforms: std::collections::HashMap<u32, ([f32; 3], [f32; 4])> =
+            std::collections::HashMap::new();
         let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
         let mut lights: Vec<(u32, LightObject)> = Vec::new();
         for c in &comps {
             let Some((off, size)) = c.data else { continue };
             match c.info_name.as_deref() {
                 Some("Transform") => {
-                    for (k, p, _q) in parse_transform_records(block, off, size) {
-                        transforms.entry(k).or_insert(p);
+                    for (k, p, q) in parse_transform_records(block, off, size) {
+                        transforms.entry(k).or_insert((p, q));
                     }
                 }
                 Some("Name") => {
@@ -676,11 +737,12 @@ pub fn light_inventory(block: &[u8]) -> Vec<PlacedLight> {
         }
 
         for (key, light) in lights {
-            let Some(&pos) = transforms.get(&key) else { continue };
+            let Some(&(pos, quat)) = transforms.get(&key) else { continue };
             out.push(PlacedLight {
                 key,
                 name: names.get(&key).cloned(),
                 pos,
+                quat,
                 light,
                 sub_block: si as u16,
             });
@@ -879,7 +941,10 @@ mod tests {
         d[12..16].copy_from_slice(&0.5f32.to_le_bytes()); // g
         d[16..20].copy_from_slice(&0.25f32.to_le_bytes()); // b
         d[20..24].copy_from_slice(&8.0f32.to_le_bytes()); // params[0] = intensity
-        d[24..28].copy_from_slice(&12.5f32.to_le_bytes()); // params[1] = radius
+        d[24..28].copy_from_slice(&1.0f32.to_le_bytes()); // params[1] (role open; ~1.0 in real data)
+        d[28..32].copy_from_slice(&12.5f32.to_le_bytes()); // params[2] = radius / cone length (pinned)
+        d[36..40].copy_from_slice(&0.262f32.to_le_bytes()); // params[4] = inner cone half-angle (rad)
+        d[40..44].copy_from_slice(&0.524f32.to_le_bytes()); // params[5] = outer cone half-angle (rad)
         d[52..56].copy_from_slice(&0.75f32.to_le_bytes()); // params[8] (last float, at +32)
         // rec1 key must be read exactly at +56.
         d[56..60].copy_from_slice(&0x0009_5c11u32.to_le_bytes());
@@ -892,7 +957,12 @@ mod tests {
         assert_eq!(l0.light_type, 1);
         assert_eq!(l0.color, [1.0, 0.5, 0.25]);
         assert_eq!(l0.intensity(), 8.0);
+        // Pinned layout: radius/cone-length is params[2], cone half-angles are params[4]/params[5]
+        // (see `LightObject::is_spot` — pinned empirically over all 1406 authored lights).
         assert_eq!(l0.radius(), 12.5);
+        assert_eq!(l0.cone_inner(), 0.262);
+        assert_eq!(l0.cone_outer(), 0.524);
+        assert!(!l0.is_spot()); // light_type 1 here is neither the point (2) nor spot (3) value
         assert_eq!(l0.params[8], 0.75);
         assert_eq!(recs[1].0, 0x0009_5c11);
         assert_eq!(recs[1].1.light_type, 2);
