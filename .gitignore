@@ -5,3 +5,8 @@ Cargo.lock
 # Python bytecode from tools/
 __pycache__/
 *.pyc
+
+# mercs2_workshop local output: regenerable asset exports (OBJ/MTL/PNG) and the
+# scratch sandbox scene written by the workbench's "Save scene" button.
+/workshop_export/
+/workshop_scene.json
