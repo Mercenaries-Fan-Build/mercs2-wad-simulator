@@ -138,11 +138,14 @@ pub struct WorldData {
     /// Dynamic `LightObject` point lights harvested from layers_static + the interior state blocks
     /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
     lights: Vec<mercs2_engine::render::GpuLight>,
+    /// Dynamic `LightObject` **spot** lights (`light_type` 3) from the same inventory, aimed along
+    /// their placement's local −Y. Fed to `Scene::set_spot_lights` (the `_sl` per-pixel cone path).
+    spot_lights: Vec<mercs2_engine::scene::SpotLightGpu>,
     /// Authored `global_particle_*` FX placements (effect name + world position) — each starts an
     /// emitter (classified by name). The faithful producer for environmental particle effects
     /// (fire/smoke/steam). Static environmental *glows* (god-ray light shafts) are split out into
     /// `glow_cards` at load, where the WAD is open to read their effect template.
-    particle_fx: Vec<(String, [f32; 3])>,
+    particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])>,
     /// Static additive glow cards for the environmental light-shaft FX (`global_particle_env_godray2`
     /// — the PMC hall god rays descending from the dome). Position/size/tint are data-driven from the
     /// placement + the effect's `TRFM`/`COLR` (see `mercs2_engine::game_world::glow_card_for_effect`).
@@ -549,20 +552,21 @@ pub(crate) fn load_world_data(
     // Dynamic point lights: harvest `LightObject` COMPs (world-space) from layers_static (exterior) +
     // the interior state block (the villa's `Light_small_*`). The block cache makes the re-decompress
     // of the interior block a hit. Fed to Scene::set_lights so the shell/props are actually lit.
-    let mut lights = mercs2_engine::game_world::placed_lights_to_gpu(
-        &mercs2_formats::placement::light_inventory(&ls),
-    );
+    let ls_lights = mercs2_formats::placement::light_inventory(&ls);
+    let mut lights = mercs2_engine::game_world::placed_lights_to_gpu(&ls_lights);
+    // The spot half of the same inventory (light_type 3) — aimed along each placement's local -Y.
+    let mut spot_lights = mercs2_engine::game_world::placed_spot_lights_to_gpu(&ls_lights);
     // Environmental FX placements (Name-keyed `global_particle_*` Transforms) in the interior. These
     // split by kind: static environmental light-shaft glows (god rays) become additive glow cards
     // resolved against their effect template here (WAD open); fire/smoke/steam stay as particle
     // emitters classified by name at render-thread start.
-    let mut particle_fx: Vec<(String, [f32; 3])> = Vec::new();
+    let mut particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])> = Vec::new();
     let mut glow_cards: Vec<mercs2_engine::particles::GlowCard> = Vec::new();
     if spawn_interior {
         if let Ok(dec) = wad::decompress_block_index(assets.base_mut(), PMC_INTERIOR_STATE_BLOCK) {
-            lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(
-                &mercs2_formats::placement::light_inventory(&dec),
-            ));
+            let int_lights = mercs2_formats::placement::light_inventory(&dec);
+            lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(&int_lights));
+            spot_lights.extend(mercs2_engine::game_world::placed_spot_lights_to_gpu(&int_lights));
             for p in mercs2_formats::placement::load_placements(&dec).unwrap_or_default() {
                 let raw = p.name.as_deref().unwrap_or("");
                 let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
@@ -577,15 +581,22 @@ pub(crate) fn load_world_data(
                 }
                 if is_light_shaft_fx(name) {
                     glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos));
-                } else {
-                    particle_fx.push((name.to_string(), p.pos));
+                } else if let Some(base) = classify_particle(name) {
+                    // Real authored effect params (COLR/FRCE/PTYP) if the template resolves; else the
+                    // name-heuristic base shape. Resolved here where the WAD is open, once at load.
+                    let hash = mercs2_formats::hash::pandemic_hash_m2(&name.replace("particle_", ""));
+                    let desc = match mercs2_engine::game_world::load_effect_template(assets.base_mut(), hash) {
+                        Some(t) => mercs2_engine::particles::EmitterDesc::from_effect_template(&t, base),
+                        None => base,
+                    };
+                    particle_fx.push((desc, p.pos));
                 }
             }
         }
     }
     println!(
-        "[world] dynamic lights harvested: {}; particle placements: {}; light-shaft glows: {}",
-        lights.len(), particle_fx.len(), glow_cards.len()
+        "[world] dynamic lights harvested: {} point + {} spot; particle placements: {}; light-shaft glows: {}",
+        lights.len(), spot_lights.len(), particle_fx.len(), glow_cards.len()
     );
     // The lights/FX harvest above (incl. the interior state-block decompress) is real load work that
     // used to run AFTER the bar hit 100% — count it as the final stage so the progress reflects reality.
@@ -621,7 +632,7 @@ pub(crate) fn load_world_data(
     };
     progress.step("hero spawn");
 
-    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies })
+    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies })
 }
 
 /// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
@@ -1679,20 +1690,21 @@ impl mercs2_engine::app::Game for Mercs2Game {
             self.runtime.set_heightmap(Some(phm));
         }
         scene.set_lights(std::mem::take(&mut data.lights));
+        scene.set_spot_lights(std::mem::take(&mut data.spot_lights));
         // Environmental FX: glow cards (god rays) + particle emitters (fire/smoke/steam).
         {
             let cards = std::mem::take(&mut data.glow_cards);
             let glows = cards.len();
             scene.set_glow_cards(&cards);
-            let (mut started, mut skipped) = (0usize, 0usize);
-            for (name, pos) in std::mem::take(&mut data.particle_fx) {
-                match classify_particle(&name) {
-                    Some(desc) => { scene.fx_start_desc(desc, pos); started += 1; }
-                    None => skipped += 1,
-                }
+            let mut started = 0usize;
+            // Emitters were resolved to real (or heuristic-base) descriptors at load (WAD open); just
+            // start each at its placement here on the render thread.
+            for (desc, pos) in std::mem::take(&mut data.particle_fx) {
+                scene.fx_start_desc(desc, pos);
+                started += 1;
             }
-            if started + skipped + glows > 0 {
-                println!("[world] particle FX: {started} emitters + {glows} light-shaft glows started, {skipped} unsupported skipped");
+            if started + glows > 0 {
+                println!("[world] particle FX: {started} emitters + {glows} light-shaft glows started");
             }
         }
         if self.start_tps && self.player.entity.is_some() {
