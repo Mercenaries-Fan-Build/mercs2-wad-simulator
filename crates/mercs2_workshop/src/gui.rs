@@ -256,6 +256,10 @@ pub mod theme {
     pub const HAZARD: Color32 = Color32::from_rgb(0xe8, 0x76, 0x3a); // irreversible only
     pub const HAZARD_SOFT: Color32 = Color32::from_rgb(0x34, 0x24, 0x1a);
     pub const GOOD: Color32 = Color32::from_rgb(0x8f, 0xbf, 0x4f);
+    // Unreal-style vector-field axis strips.
+    pub const AXIS_X: Color32 = Color32::from_rgb(0xc8, 0x55, 0x4e);
+    pub const AXIS_Y: Color32 = Color32::from_rgb(0x7c, 0xaa, 0x46);
+    pub const AXIS_Z: Color32 = Color32::from_rgb(0x4f, 0x86, 0xc6);
     pub const GOOD_SOFT: Color32 = Color32::from_rgb(0x20, 0x2a, 0x17); // green @ ~12% over the ground
     pub const GOOD_DK: Color32 = Color32::from_rgb(0x53, 0x73, 0x2c);
     pub const BAD: Color32 = Color32::from_rgb(0xd5, 0x60, 0x4c);
@@ -545,6 +549,164 @@ pub mod theme {
             txt,
         );
         resp.clicked()
+    }
+
+    /// A single Unreal-style scrub cell: a flat inset field with a coloured axis strip on the left
+    /// edge, drag-to-scrub anywhere on it, click-to-type. `strip` = the axis colour (X/Y/Z), or
+    /// `FAINT` for a plain scalar. Returns the `DragValue` response so callers can test `.changed()`.
+    /// `total_w` is the WHOLE cell footprint; the inner drag value is sized to fill what's left after
+    /// the axis strip + margins, so callers pass a stretched width and the field fills it.
+    fn scrub_cell(
+        ui: &mut egui::Ui,
+        strip: Color32,
+        value: &mut f32,
+        speed: f32,
+        total_w: f32,
+    ) -> egui::Response {
+        // A fixed-width cell painted by hand so the value can be LEFT-aligned in tabular monospace
+        // (UE style) — every column's digits then start at the same x. add_sized would centre them.
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(total_w, 22.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect(rect, egui::Rounding::same(3.0), G0, egui::Stroke::new(1.0, LINE));
+        p.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(rect.left(), rect.top() + 2.0),
+                egui::vec2(3.0, rect.height() - 4.0),
+            ),
+            egui::Rounding { nw: 2.0, sw: 2.0, ne: 0.0, se: 0.0 },
+            strip,
+        );
+        let inner = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 9.0, rect.top()),
+            egui::pos2(rect.right() - 4.0, rect.bottom()),
+        );
+        ui.allocate_ui_at_rect(inner, |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // Flatten the DragValue chrome so it reads as a field, not a button.
+                let w = ui.visuals_mut();
+                w.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                w.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                w.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
+                w.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                w.widgets.active.weak_bg_fill = Color32::TRANSPARENT;
+                w.widgets.active.bg_stroke = egui::Stroke::NONE;
+                ui.style_mut().override_font_id = Some(egui::FontId::monospace(11.0));
+                ui.add(
+                    egui::DragValue::new(value)
+                        .speed(speed)
+                        // Fixed 3 decimals + a leading space for non-negatives, so in monospace the
+                        // sign column and decimal points line up down every column (no ragged X).
+                        .custom_formatter(|n, _| {
+                            if n < 0.0 {
+                                format!("{n:.3}")
+                            } else {
+                                format!(" {n:.3}")
+                            }
+                        })
+                        .custom_parser(|s| s.trim().parse::<f64>().ok()),
+                )
+            })
+            .inner
+        })
+        .inner
+    }
+
+    /// The shared label-column width (a UE-style splitter): the caption takes the left HALF of the
+    /// row, the value fields share the right half, so all fields start at the same x panel-wide.
+    pub fn field_label_w(avail: f32) -> f32 {
+        (avail * 0.5).max(60.0)
+    }
+
+    /// A left-aligned caption cell of the shared width; truncates long text (full text on hover).
+    fn field_label(ui: &mut egui::Ui, label: &str) {
+        let lw = field_label_w(ui.available_width());
+        ui.allocate_ui_with_layout(
+            egui::vec2(lw, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                // Force the column to the full splitter width even for short captions, so every
+                // row's value fields line up (allocate_ui advances by content size otherwise).
+                ui.set_min_width(lw);
+                ui.add(
+                    egui::Label::new(disp_text(label.to_uppercase(), 9.5, DIM))
+                        .truncate()
+                        .selectable(false),
+                )
+                .on_hover_text(label);
+            },
+        );
+    }
+
+    /// An Unreal Details-panel vector row: a left-aligned caption in the shared column, then X/Y/Z
+    /// scrub cells (red/green/blue) that STRETCH to fill the value column. Empty label = cells only.
+    pub fn vec3_field(ui: &mut egui::Ui, label: &str, v: &mut [f32; 3], speed: f32) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if !label.is_empty() {
+                field_label(ui, label);
+            }
+            let cell = ((ui.available_width() - 12.0) / 3.0).max(30.0);
+            changed |= scrub_cell(ui, AXIS_X, &mut v[0], speed, cell).changed();
+            changed |= scrub_cell(ui, AXIS_Y, &mut v[1], speed, cell).changed();
+            changed |= scrub_cell(ui, AXIS_Z, &mut v[2], speed, cell).changed();
+        });
+        changed
+    }
+
+    /// A column-header row matching `vec3_field`'s geometry: a caption in the splitter column, then
+    /// X / Y / Z headers centred over the three value columns, axis-coloured. Pair with striped
+    /// rows to read as a table.
+    pub fn vec3_header(ui: &mut egui::Ui, label: &str) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let lw = field_label_w(ui.available_width());
+            ui.allocate_ui_with_layout(
+                egui::vec2(lw, 14.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(lw);
+                    ui.label(disp_text(label.to_uppercase(), 8.5, FAINT));
+                },
+            );
+            let cell = ((ui.available_width() - 12.0) / 3.0).max(30.0);
+            for (t, c) in [("X", AXIS_X), ("Y", AXIS_Y), ("Z", AXIS_Z)] {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(cell, 14.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(cell);
+                        // Match the value's left inset (strip + gap) so the header sits over the digits.
+                        ui.add_space(9.0);
+                        ui.label(disp_text(t, 9.0, c));
+                    },
+                );
+            }
+        });
+    }
+
+    /// Subtle band fill for alternating table rows (zebra striping). `odd` rows get the band.
+    pub fn row_stripe(odd: bool) -> Color32 {
+        if odd {
+            Color32::from_rgb(0x1b, 0x1d, 0x22)
+        } else {
+            Color32::TRANSPARENT
+        }
+    }
+
+    /// A single-value Details row (scale, angle, …): caption + one neutral field that fills the
+    /// value column.
+    pub fn scalar_field(ui: &mut egui::Ui, label: &str, value: &mut f32, speed: f32) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if !label.is_empty() {
+                field_label(ui, label);
+            }
+            let cell = (ui.available_width() - 4.0).max(40.0);
+            changed = scrub_cell(ui, FAINT, value, speed, cell).changed();
+        });
+        changed
     }
 
     /// A filled brass "go" button (Place / Merge / Apply). Dimmed when disabled.
