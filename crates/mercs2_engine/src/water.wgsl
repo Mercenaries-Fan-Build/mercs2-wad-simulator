@@ -37,9 +37,15 @@ fn fs_water(in: VsOut) -> @location(0) vec4<f32> {
     let ndotv = clamp(view_dir.y, 0.0, 1.0);
     let fresnel = pow(1.0 - ndotv, 4.0);
 
-    // Two cheap animated wave bands ripple the surface tone so it is not a dead flat colour.
+    // The wave field — MUST stay in lockstep with `mercs2_water::WaveModel::default()` (WILDSTAR
+    // `WSWater::CalcWaveOffsets` shape: two summed, time-animated sinusoids). Sampling the SAME field
+    // the swim/buoyancy query uses means the crests drawn here are the crests a swimmer bobs on.
+    // The surface mesh is one quad per 32 m watermap cell — far too coarse to displace geometry, so
+    // the field modulates surface tone instead (true displacement needs the deferred `OWater::LOD`
+    // tessellation, water code map §1–§3).
     let t = U.params.y;
-    let ripple = 0.5 + 0.5 * sin(in.world.x * 0.15 + t * 1.3) * sin(in.world.z * 0.13 - t * 1.1);
+    let wave = 0.13 * sin(in.world.x * 0.15 + t * 1.3) + 0.07 * sin(in.world.z * 0.31 - t * 1.1);
+    let ripple = 0.5 + 0.5 * (wave / 0.20); // /max_amplitude (0.13+0.07) → 0..1
 
     var color = mix(U.shallow.rgb, U.deep.rgb, fresnel);
     color = color * (0.85 + 0.15 * ripple);
