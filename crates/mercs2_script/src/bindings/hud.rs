@@ -352,7 +352,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     })?)?;
 
     // --- image widget ---
-    wset!("SetImageTexture", String, |w, v| { if let Some(i) = w.image.as_mut() { i.texture = v; } });
+    // Texture name is nil-able: `ImageWidget:SetTexture(TextureName)` (MrxGuiBase) forwards whatever
+    // the layout data held, and a layout widget with no texture passes nil. Typing this as a bare
+    // `String` made a legitimate "no texture" a hard Lua error and killed the GUI bootstrap that
+    // every `MrxUtil` importer drags in — i.e. the whole task framework.
+    wset!("SetImageTexture", Option<String>, |w, v| {
+        if let Some(i) = w.image.as_mut() { i.texture = v.unwrap_or_default(); }
+    });
     wset!("SetImageRotation", f32, |w, v| { if let Some(i) = w.image.as_mut() { i.rotation = v; } });
     wset!("SetImageTiling", bool, |w, v| { if let Some(i) = w.image.as_mut() { i.tiling = v; } });
     let hh = host.clone();
@@ -365,7 +371,24 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wset!("SetTextText", String, |w, v| { if let Some(x) = w.text.as_mut() { x.text = v; } });
     wset!("SetTextFont", String, |w, v| { if let Some(x) = w.text.as_mut() { x.font = v; } });
     wset!("SetTextWrapping", bool, |w, v| { if let Some(x) = w.text.as_mut() { x.wrapping = v; } });
-    wset!("SetTextJustification", i64, |w, v| { if let Some(x) = w.text.as_mut() { x.justification = v as u8; } });
+    // Justification arrives as a STRING from the layout data — `TextWidget:SetJustification`
+    // (MrxGuiBase) names its parameter `sJustification`, and the Hungarian `s` is the engine telling
+    // us the type. Typing it `i64` hard-errored on every text widget in a layout file. Accept either:
+    // a number passes straight through, a name maps to its slot.
+    wset!("SetTextJustification", mlua::Value, |w, v| {
+        if let Some(x) = w.text.as_mut() {
+            x.justification = match &v {
+                mlua::Value::Integer(n) => *n as u8,
+                mlua::Value::Number(n) => *n as u8,
+                mlua::Value::String(s) => match s.to_string_lossy().to_ascii_lowercase().as_str() {
+                    "center" | "centre" | "middle" => 1,
+                    "right" => 2,
+                    _ => 0, // "left" and anything unrecognised
+                },
+                _ => 0,
+            };
+        }
+    });
     wset!("SetTextScale", f32, |w, v| { if let Some(x) = w.text.as_mut() { x.scale = v; } });
 
     // --- sprite widget ---
