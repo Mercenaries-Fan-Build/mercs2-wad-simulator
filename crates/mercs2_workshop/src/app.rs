@@ -1316,11 +1316,20 @@ pub fn run(opts: Options) {
                                         }
                                     }
                                     Workbench::Sandbox => {
-                                        if theme::primary_button(ui, "Merge to model  F7", has_placed).clicked() {
-                                            actions.push(Act::Merge);
-                                        }
-                                        if ui.add_enabled(has_preview, egui::Button::new("Place  F6")).clicked() {
+                                        let has_sel = sel_placed.is_some_and(|i| i < placed.len());
+                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
                                             actions.push(Act::Place);
+                                        }
+                                        if ui.add_enabled(has_sel, egui::Button::new("Duplicate")).clicked() {
+                                            actions.push(Act::DuplicatePlaced(sel_placed.unwrap()));
+                                        }
+                                        if ui.add_enabled(has_sel, egui::Button::new("Delete")).clicked() {
+                                            actions.push(Act::RemovePlaced(sel_placed.unwrap()));
+                                            sel_placed = None;
+                                        }
+                                        ui.separator();
+                                        if ui.add_enabled(has_placed, egui::Button::new("Merge  F7")).clicked() {
+                                            actions.push(Act::Merge);
                                         }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if theme::danger_button(ui, "Clear", has_placed).clicked() {
@@ -1369,7 +1378,7 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                           match wb {
-                            Workbench::Inspect | Workbench::Sandbox => {
+                            Workbench::Inspect => {
                             let before = (kind, filter.clone());
                             ui.label(theme::disp_text("ASSETS", 15.0, theme::TX));
                             ui.add_space(8.0);
@@ -1603,7 +1612,127 @@ pub fn run(opts: Options) {
                                     }
                                 },
                             );
-                            } // ── end Inspect|Sandbox navigator (asset browser) ──
+                            } // ── end Inspect navigator (asset browser) ──
+                            Workbench::Sandbox => {
+                                // Scene OUTLINER: the placed instances, plus a place-from-library
+                                // search — the Sandbox is about arranging many objects, so this is
+                                // its own list, not the asset browser.
+                                ui.label(theme::disp_text("SCENE", 15.0, theme::TX));
+                                ui.weak("Objects placed in this scene. Select to transform.");
+                                ui.add_space(8.0);
+                                egui::Frame::none()
+                                    .fill(theme::G0)
+                                    .stroke(egui::Stroke::new(1.0, theme::LINE))
+                                    .rounding(egui::Rounding::same(6.0))
+                                    .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let (r, _) = ui.allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
+                                            let c = r.center();
+                                            let plus_col = if filter.is_empty() { theme::FAINT } else { theme::BRASS_DK };
+                                            let s = egui::Stroke::new(1.6, plus_col);
+                                            ui.painter().line_segment([c + egui::vec2(-4.0, 0.0), c + egui::vec2(4.0, 0.0)], s);
+                                            ui.painter().line_segment([c + egui::vec2(0.0, -4.0), c + egui::vec2(0.0, 4.0)], s);
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut filter)
+                                                    .hint_text("place from library…")
+                                                    .frame(false)
+                                                    .desired_width(f32::INFINITY),
+                                            );
+                                        });
+                                    });
+                                let f = filter.to_ascii_lowercase();
+                                if !f.is_empty() {
+                                    ui.add_space(4.0);
+                                    egui::Frame::none()
+                                        .fill(theme::G0)
+                                        .stroke(egui::Stroke::new(1.0, theme::LINE))
+                                        .rounding(egui::Rounding::same(6.0))
+                                        .inner_margin(egui::Margin::same(4.0))
+                                        .show(ui, |ui| {
+                                            let mut shown = 0usize;
+                                            for r in index.models.iter() {
+                                                if shown >= 10 {
+                                                    ui.weak("…refine the search");
+                                                    break;
+                                                }
+                                                let label = r.label();
+                                                if !label.to_ascii_lowercase().contains(&f) {
+                                                    continue;
+                                                }
+                                                shown += 1;
+                                                let clicked = ui
+                                                    .horizontal(|ui| {
+                                                        row_icon(ui, r.category(), 14.0);
+                                                        ui.add_space(4.0);
+                                                        ui.selectable_label(false, label.clone()).clicked()
+                                                    })
+                                                    .inner;
+                                                if clicked {
+                                                    actions.push(Act::PlaceHash(r.hash, label.clone()));
+                                                }
+                                            }
+                                            if shown == 0 {
+                                                ui.weak("no model matches");
+                                            }
+                                        });
+                                }
+                                ui.add_space(6.0);
+                                theme::eyebrow(ui, &format!("Objects · {}", placed.len()));
+                                ui.add_space(5.0);
+                                if placed.is_empty() {
+                                    ui.weak("Nothing placed yet — search above to add one.");
+                                }
+                                for i in 0..placed.len() {
+                                    let (phash, plabel) = (placed[i].hash, placed[i].label.clone());
+                                    let cat = index
+                                        .models
+                                        .iter()
+                                        .find(|r| r.hash == phash)
+                                        .map(|r| r.category())
+                                        .unwrap_or("Other");
+                                    let sel = sel_placed == Some(i);
+                                    let row = ui
+                                        .horizontal(|ui| {
+                                            row_icon(ui, cat, 14.0);
+                                            ui.add_space(4.0);
+                                            let r = ui.selectable_label(
+                                                sel,
+                                                egui::RichText::new(&plabel).size(12.5),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(egui::RichText::new(format!("n{i}")).monospace().size(9.5).color(theme::FAINT));
+                                                },
+                                            );
+                                            r
+                                        })
+                                        .inner;
+                                    if row.clicked() {
+                                        sel_placed = Some(i);
+                                    }
+                                    row.context_menu(|ui| {
+                                        if ui.button("Snap to camera target").clicked() {
+                                            actions.push(Act::SnapPlaced(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Duplicate").clicked() {
+                                            actions.push(Act::DuplicatePlaced(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove").clicked() {
+                                            actions.push(Act::RemovePlaced(i));
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button(format!("Copy hash 0x{phash:08X}")).clicked() {
+                                            ui.ctx().copy_text(format!("0x{phash:08X}"));
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                            }
                             Workbench::Mods => {
                                 ui.label(theme::disp_text("Donor templates", 15.0, theme::TX));
                                 ui.weak("Pick a vehicle template — it becomes the conform donor its \
@@ -2433,79 +2562,77 @@ pub fn run(opts: Options) {
                                 }
                               } // ── end Inspect inspector ──
                               if matches!(wb, Workbench::Sandbox) {
-                                egui::CollapsingHeader::new(theme::disp_text(
-                                    format!("Sandbox ({})", placed.len()),
-                                    12.0,
-                                    theme::DIM,
-                                ))
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        for i in 0..placed.len() {
+                                // The SELECTED instance's transform, then scene-wide actions.
+                                match sel_placed.and_then(|i| placed.get(i).map(|p| (i, p.label.clone()))) {
+                                    Some((i, plabel)) => {
+                                        ui.label(theme::disp_text(format!("Instance n{i} · selected"), 9.5, theme::BRASS_DK));
+                                        ui.label(theme::disp_text(plabel.to_uppercase(), 18.0, theme::TX));
+                                        ui.add_space(10.0);
+                                        theme::card(ui, "Transform", None, |ui| {
                                             let mut changed = false;
-                                            ui.horizontal(|ui| {
-                                                let (phash, plabel) =
-                                                    (placed[i].hash, placed[i].label.clone());
-                                                let row = ui.selectable_label(
-                                                    sel_placed == Some(i),
-                                                    plabel.as_str(),
-                                                );
-                                                if row.clicked() {
-                                                    sel_placed = Some(i);
-                                                }
-                                                row.context_menu(|ui| {
-                                                    if ui.button("Snap to camera target").clicked() {
-                                                        actions.push(Act::SnapPlaced(i));
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Duplicate").clicked() {
-                                                        actions.push(Act::DuplicatePlaced(i));
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Remove").clicked() {
-                                                        actions.push(Act::RemovePlaced(i));
-                                                        ui.close_menu();
-                                                    }
-                                                    ui.separator();
-                                                    if ui.button("Copy name").clicked() {
-                                                        ui.ctx().copy_text(plabel.clone());
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui
-                                                        .button(format!("Copy hash 0x{phash:08X}"))
-                                                        .clicked()
-                                                    {
-                                                        ui.ctx().copy_text(format!("0x{phash:08X}"));
-                                                        ui.close_menu();
-                                                    }
-                                                });
-                                                if ui.small_button("✖").clicked() {
-                                                    actions.push(Act::RemovePlaced(i));
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
+                                            {
                                                 let pl = &mut placed[i];
-                                                changed |= ui
-                                                    .add(egui::DragValue::new(&mut pl.pos.x).speed(0.05).prefix("x "))
-                                                    .changed();
-                                                changed |= ui
-                                                    .add(egui::DragValue::new(&mut pl.pos.y).speed(0.05).prefix("y "))
-                                                    .changed();
-                                                changed |= ui
-                                                    .add(egui::DragValue::new(&mut pl.pos.z).speed(0.05).prefix("z "))
-                                                    .changed();
-                                                changed |= ui
-                                                    .add(egui::DragValue::new(&mut pl.yaw).speed(0.01).prefix("yaw "))
-                                                    .changed();
-                                                changed |= ui
-                                                    .add(egui::DragValue::new(&mut pl.scale).speed(0.01).prefix("s "))
-                                                    .changed();
-                                            });
+                                                let mut pos = [pl.pos.x, pl.pos.y, pl.pos.z];
+                                                if theme::vec3_field(ui, "Location", &mut pos, 0.05) {
+                                                    pl.pos = Vec3::new(pos[0], pos[1], pos[2]);
+                                                    changed = true;
+                                                }
+                                                changed |= theme::scalar_field(ui, "Yaw", &mut pl.yaw, 0.01);
+                                                let mut scale = pl.scale;
+                                                if theme::scalar_field(ui, "Scale", &mut scale, 0.01) {
+                                                    pl.scale = scale.clamp(0.01, 1000.0);
+                                                    changed = true;
+                                                }
+                                            }
                                             if changed {
                                                 actions.push(Act::SyncPlaced(i));
                                             }
-                                            ui.separator();
+                                            ui.add_space(7.0);
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Duplicate").clicked() {
+                                                    actions.push(Act::DuplicatePlaced(i));
+                                                }
+                                                if ui.button("Snap to camera").clicked() {
+                                                    actions.push(Act::SnapPlaced(i));
+                                                }
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if theme::danger_button(ui, "Delete", true).clicked() {
+                                                        actions.push(Act::RemovePlaced(i));
+                                                        sel_placed = None;
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    }
+                                    None => {
+                                        ui.label(theme::disp_text("Sandbox", 18.0, theme::TX));
+                                        ui.add_space(6.0);
+                                        ui.weak("Select an object in the Scene list at left to move / rotate / scale it.");
+                                        ui.add_space(10.0);
+                                    }
+                                }
+                                let sbadge = format!("{} placed", placed.len());
+                                theme::card(ui, "Scene", Some(&sbadge), |ui| {
+                                    if theme::primary_button(ui, "Merge to one model", !placed.is_empty()).clicked() {
+                                        actions.push(Act::Merge);
+                                    }
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Save scene").clicked() {
+                                            actions.push(Act::SaveScene);
                                         }
+                                        if ui.button("Load scene").clicked() {
+                                            actions.push(Act::LoadScene);
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if theme::danger_button(ui, "Clear", !placed.is_empty()).clicked() {
+                                                actions.push(Act::ClearSandbox);
+                                            }
+                                        });
                                     });
+                                    ui.add_space(4.0);
+                                    ui.weak("Merging bakes every placed instance into one model you can export or add to a mod.");
+                                });
                               } // ── end Sandbox inspector ──
                               if matches!(wb, Workbench::Mods) {
                                 // ── Interaction hardpoints: a vehicle's `hp_*` HIER nodes (seat you
@@ -2513,9 +2640,7 @@ pub fn run(opts: Options) {
                                 // these stay where the DONOR's were — the seat floats off the model —
                                 // so re-place them HERE, on the model, then copy the --node-at args. ──
                                 if let Some(p) = &preview {
-                                    egui::CollapsingHeader::new(theme::disp_text("Interaction hardpoints", 13.0, theme::DIM))
-                                        .default_open(true)
-                                        .show(ui, |ui| {
+                                    theme::section(ui, "Interaction hardpoints", None, true, |ui| {
                                             ui.checkbox(&mut show_hardpoints, "show markers in viewport");
                                             ui.checkbox(&mut show_nodes, "show ALL node markers")
                                                 .on_hover_text("green = positioned attach node (rotor/skid/seat/tail/hardpoint) · grey = structural");
@@ -2537,33 +2662,71 @@ pub fn run(opts: Options) {
                                                 ui.weak("no hp_* nodes resolved for this model");
                                             } else {
                                                 ui.weak(format!("{} hardpoints — the SEAT is where the player enters", hps.len()));
-                                                egui::ScrollArea::vertical()
-                                                    .max_height(180.0)
-                                                    .id_source("hp_list")
-                                                    .show(ui, |ui| {
-                                                        for (idx, name, pos) in &hps {
-                                                            let selrow = hp_selected == Some(*idx);
-                                                            ui.horizontal(|ui| {
-                                                                if ui.selectable_label(selrow, name.as_str()).clicked() {
-                                                                    hp_selected = if selrow { None } else { Some(*idx) };
-                                                                }
-                                                                ui.weak(format!("n{idx}"));
-                                                            });
-                                                            let mut v = *pos;
-                                                            let mut changed = false;
-                                                            ui.horizontal(|ui| {
-                                                                for (k, ax) in ["x", "y", "z"].iter().enumerate() {
-                                                                    changed |= ui
-                                                                        .add(egui::DragValue::new(&mut v[k]).speed(0.02).prefix(format!("{ax} ")))
-                                                                        .changed();
-                                                                }
-                                                            });
-                                                            if changed {
-                                                                hp_edits.insert(*idx, v);
-                                                                hp_selected = Some(*idx);
-                                                            }
+                                                ui.add_space(4.0);
+                                                // A table: X/Y/Z column headers, then striped rows —
+                                                // contiguous bands (zero inter-row spacing), each a
+                                                // fixed 26px tall so the name and cells share one
+                                                // centred line. No inner scroll — the panel scrolls.
+                                                theme::vec3_header(ui, "hardpoint");
+                                                ui.add_space(2.0);
+                                                let mut hp_click: Option<usize> = None;
+                                                let mut hp_edit: Option<(usize, [f32; 3])> = None;
+                                                ui.vertical(|ui| {
+                                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                                    for (ri, (idx, name, pos)) in hps.iter().enumerate() {
+                                                    let selrow = hp_selected == Some(*idx);
+                                                    let mut v = *pos;
+                                                    let band = if selrow {
+                                                        theme::BRASS_SOFT
+                                                    } else {
+                                                        theme::row_stripe(ri % 2 == 1)
+                                                    };
+                                                    egui::Frame::none()
+                                                        .fill(band)
+                                                        .inner_margin(egui::Margin { left: 0.0, right: 0.0, top: 2.0, bottom: 2.0 })
+                                                        .show(ui, |ui| {
+                                                        ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = 4.0;
+                                                        let col = if selrow { theme::BRASS } else { theme::TX };
+                                                        // Left-aligned name in the shared splitter
+                                                        // column, same 22px height as the cells so it
+                                                        // centres on the same line.
+                                                        let lw = theme::field_label_w(ui.available_width());
+                                                        let clicked = ui
+                                                            .allocate_ui_with_layout(
+                                                                egui::vec2(lw, 22.0),
+                                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                                |ui| {
+                                                                    ui.set_min_width(lw);
+                                                                    ui.set_min_height(22.0);
+                                                                    ui.add(
+                                                                        egui::Label::new(theme::disp_text(name, 10.5, col))
+                                                                            .truncate()
+                                                                            .sense(egui::Sense::click()),
+                                                                    )
+                                                                    .on_hover_text(name.as_str())
+                                                                    .clicked()
+                                                                },
+                                                            )
+                                                            .inner;
+                                                        if clicked {
+                                                            hp_click = Some(*idx);
                                                         }
+                                                        if theme::vec3_field(ui, "", &mut v, 0.02) {
+                                                            hp_edit = Some((*idx, v));
+                                                        }
+                                                        });
                                                     });
+                                                    }
+                                                });
+                                                if let Some(idx) = hp_click {
+                                                    hp_selected = if hp_selected == Some(idx) { None } else { Some(idx) };
+                                                }
+                                                if let Some((idx, v)) = hp_edit {
+                                                    hp_edits.insert(idx, v);
+                                                    hp_selected = Some(idx);
+                                                }
+                                                ui.add_space(4.0);
                                                 ui.horizontal(|ui| {
                                                     if ui.button("reset").clicked() {
                                                         hp_edits.clear();
@@ -2589,11 +2752,7 @@ pub fn run(opts: Options) {
                                 // as a patch WAD (docs/modernization/workshop_publish_pipeline.md
                                 // M3). Flow: preview/select the donor model → drag-drop the
                                 // import → name it → Add → Publish. ──
-                                egui::CollapsingHeader::new(theme::disp_text(format!(
-                                    "Mod project ({})",
-                                    mod_items.len()
-                                ), 12.0, theme::DIM))
-                                .show(ui, |ui| {
+                                theme::section(ui, "Mod project", Some(&format!("{} queued", mod_items.len())), false, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label("donor:");
                                         match &mod_donor {
@@ -2650,26 +2809,17 @@ pub fn run(opts: Options) {
                                         }
                                     });
                                     ui.horizontal(|ui| {
-                                        ui.label("scale");
-                                        ui.add(egui::DragValue::new(&mut conform_scale).speed(0.005).range(0.0001..=1000.0));
+                                        if theme::scalar_field(ui, "Scale", &mut conform_scale, 0.005) {
+                                            conform_scale = conform_scale.clamp(0.0001, 1000.0);
+                                        }
                                         if ui.small_button("reset").clicked() {
                                             conform_scale = 1.0;
                                             conform_t = [0.0; 3];
                                             conform_r = [0.0; 3];
                                         }
                                     });
-                                    ui.horizontal(|ui| {
-                                        ui.label("pos");
-                                        ui.add(egui::DragValue::new(&mut conform_t[0]).speed(0.02).prefix("x "));
-                                        ui.add(egui::DragValue::new(&mut conform_t[1]).speed(0.02).prefix("y "));
-                                        ui.add(egui::DragValue::new(&mut conform_t[2]).speed(0.02).prefix("z "));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("rot°");
-                                        ui.add(egui::DragValue::new(&mut conform_r[0]).speed(1.0).prefix("x "));
-                                        ui.add(egui::DragValue::new(&mut conform_r[1]).speed(1.0).prefix("y "));
-                                        ui.add(egui::DragValue::new(&mut conform_r[2]).speed(1.0).prefix("z "));
-                                    });
+                                    theme::vec3_field(ui, "Location", &mut conform_t, 0.02);
+                                    theme::vec3_field(ui, "Rotation", &mut conform_r, 1.0);
                                     ui.checkbox(&mut conform_flip, "flip winding on export (fix inside-out faces)");
                                     ui.separator();
                                     ui.horizontal(|ui| {
@@ -2835,7 +2985,12 @@ pub fn run(opts: Options) {
                             .show(ctx, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::chip(ui, "Orbit", true, Some(theme::BRASS));
-                                    if let Some(p) = &preview {
+                                    if wb == Workbench::Sandbox {
+                                        theme::chip(ui, &format!("{} objects", placed.len()), false, None);
+                                        if let Some(i) = sel_placed.filter(|&i| i < placed.len()) {
+                                            theme::chip(ui, &format!("n{i} selected"), true, Some(theme::BRASS));
+                                        }
+                                    } else if let Some(p) = &preview {
                                         // Clip position — name (or bind pose) + n/total + play state.
                                         let n = p.clip_catalog.len();
                                         let clip = if n == 0 {
@@ -3890,6 +4045,20 @@ pub fn run(opts: Options) {
                         scene.set_glow_cards(&cards);
                     }
 
+                    // The Inspect preview is a persistent world entity — HIDE it in the Sandbox
+                    // (drop its ModelRef so the draw query skips it) so only PLACED objects render
+                    // there; otherwise it sits in the scene un-movable. Mods/Skeleton keep the
+                    // preview (it is their working model), so restore its ModelRef when we leave.
+                    if let Some(p) = &preview {
+                        let show = wb != Workbench::Sandbox;
+                        let has_ref = world.get::<&ModelRef>(p.entity).is_ok();
+                        if show && !has_ref {
+                            let _ = world.insert_one(p.entity, ModelRef { model: p.hash });
+                        } else if !show && has_ref {
+                            let _ = world.remove_one::<ModelRef>(p.entity);
+                        }
+                    }
+
                     // ── Render: plate view + empty viewport go through the menu path (shell
                     // plate backdrop); anything loaded renders the world. The GUI paints through
                     // the engine's overlay hook either way. ──
@@ -3900,7 +4069,8 @@ pub fn run(opts: Options) {
                                        s: [u32; 2]| {
                         gui.paint(d, q, e, v, s);
                     };
-                    let r = if tex_view.is_some() || (preview.is_none() && placed.is_empty()) {
+                    let show_preview = preview.is_some() && wb != Workbench::Sandbox;
+                    let r = if tex_view.is_some() || (!show_preview && placed.is_empty()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
                         let fwd = dir_from(cam_yaw, cam_pitch);
