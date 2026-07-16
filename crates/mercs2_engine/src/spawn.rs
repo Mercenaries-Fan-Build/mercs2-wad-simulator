@@ -127,6 +127,9 @@ pub fn spawn_character(world: &mut World, template_hash: u32, transform: Transfo
         AiFaction(0), // neutral until the caller maps the spawn's faction (see set_faction)
         // combat
         Health::new(100.0),
+        // A human body: on a lethal blast it launches a death ragdoll (WILDSTAR stand-in) rather than
+        // freezing mid-animation. Props/vehicles omit this (they use the destruction FSM).
+        crate::combat::Ragdollable,
         // animation
         HumanAnimationSet::new(template_hash),
         AnimController::default(),
