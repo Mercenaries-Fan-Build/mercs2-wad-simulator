@@ -179,6 +179,8 @@ pub fn update_swim_state(
     world: &mut World,
     watermap: &crate::watermap::Watermap,
     cfg: &SwimConfig,
+    wave: &crate::wave::WaveModel,
+    time: f32,
 ) -> usize {
     use mercs2_core::Transform;
     let mut n = 0;
@@ -187,7 +189,12 @@ pub fn update_swim_state(
         let sample = watermap.sample(p.x, p.z);
         let feet_y = p.y + sw.feet_offset;
         // Only water columns contribute depth; over land (or outside the grid) depth is negative.
-        sw.depth = if sample.is_water { sample.surface_height - feet_y } else { -1.0 };
+        // Depth is measured against the WAVE-DISPLACED surface, so a swimmer bobs with the swell.
+        sw.depth = if sample.is_water {
+            sample.surface_height + wave.height_offset(p.x, p.z, time) - feet_y
+        } else {
+            -1.0
+        };
         sw.state = cfg.advance(sw.state, sw.depth);
         n += 1;
     }
@@ -258,7 +265,8 @@ mod tests {
             Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
         ));
         let cfg = SwimConfig::default();
-        let updated = update_swim_state(&mut world, &wm, &cfg);
+        // Flat wave field: these exercise the depth FSM in isolation, not the swell.
+        let updated = update_swim_state(&mut world, &wm, &cfg, &crate::wave::WaveModel::flat(), 0.0);
         assert_eq!(updated, 2);
         assert_eq!(world.get::<&Swimmer>(deep).unwrap().state, SwimState::Submerged);
         assert_eq!(world.get::<&Swimmer>(dry).unwrap().state, SwimState::OnLand);
@@ -273,7 +281,7 @@ mod tests {
             Swimmer::new(),
             Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
         ));
-        update_swim_state(&mut world, &wm, &SwimConfig::default());
+        update_swim_state(&mut world, &wm, &SwimConfig::default(), &crate::wave::WaveModel::flat(), 0.0);
         assert_eq!(world.get::<&Swimmer>(e).unwrap().state, SwimState::OnLand);
     }
 }
