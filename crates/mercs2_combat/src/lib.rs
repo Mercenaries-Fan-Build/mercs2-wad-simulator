@@ -56,6 +56,7 @@ pub mod homing;
 pub mod impact;
 pub mod lua_surface;
 pub mod projectile;
+pub mod ragdoll;
 pub mod stats;
 
 pub use components::{
@@ -64,6 +65,7 @@ pub use components::{
 };
 pub use damage::{DamageKey, ExplosionSize};
 pub use impact::{Impact, ImpactKind};
+pub use ragdoll::{Ragdoll, Ragdollable, RagdollState};
 pub use stats::{ExplosiveStats, FireType, HomingStats, WeaponDefBlob, WeaponStats, WeaponSubObject};
 
 /// The weapon-system per-frame driver — the reimpl of `FUN_0051cff0` (code map §2), an entry in the
