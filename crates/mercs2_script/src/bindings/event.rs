@@ -122,6 +122,8 @@ struct EventReg {
     timer_period: Option<f32>,
     // Condition kinds (ObjectDeath/…): the subject GUID the engine fires against.
     subject: Option<u64>,
+    // ObjectHibernation: the phase on `subject` this handler waits for (`"awake"` / `"asleep"`).
+    phase: Option<String>,
     // GameStateChange: the `(stateName, phase)` this handler waits for (e.g. `("WaitForStreaming",
     // "exit")`), fired by the engine's state machine via `fire_game_state_change`.
     state_match: Option<(String, String)>,
@@ -155,31 +157,38 @@ fn make(
     persistent: bool,
 ) -> LuaResult<i64> {
     let cbargs = seq_values(&cbargs)?;
-    let (script_name, filter, timer_remaining, timer_period, subject, state_match) = if kind == KIND_SCRIPT_EVENT {
+    let (script_name, filter, timer_remaining, timer_period, subject, phase, state_match) = if kind == KIND_SCRIPT_EVENT {
         // params = { name, [filter_fn] }
-        (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None, None)
+        (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None, None, None)
     } else if kind == KIND_TIMER_RELATIVE {
         // params = { seconds }
         let secs: f32 = params.get(1).unwrap_or(0.0);
-        (None, None, Some(secs), Some(secs), None, None)
+        (None, None, Some(secs), Some(secs), None, None, None)
     } else if kind == KIND_OBJECT_DEATH {
         // params = { guid } — fired by the engine when that object dies (Object.Kill / damage).
         let g: Option<i64> = params.get(1).ok();
-        (None, None, None, None, g.map(|x| x as u64), None)
+        (None, None, None, None, g.map(|x| x as u64), None, None)
+    } else if kind == KIND_OBJECT_HIBERNATION {
+        // params = { guid, phase } — fired by the streaming system when that object wakes/sleeps.
+        // The awake-gate every real object script opens with:
+        //   Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})
+        let g: Option<i64> = params.get(1).ok();
+        let ph = params.get::<String>(2).ok();
+        (None, None, None, None, g.map(|x| x as u64), ph, None)
     } else if kind == KIND_GAME_STATE_CHANGE {
         // params = { stateName, phase } — fired by the engine's state machine (e.g. {"WaitForStreaming","exit"}).
         let st = params.get::<String>(1).ok();
         let ph = params.get::<String>(2).ok();
-        (None, None, None, None, None, st.map(|s| (s, ph.unwrap_or_default())))
+        (None, None, None, None, None, None, st.map(|s| (s, ph.unwrap_or_default())))
     } else {
-        (None, None, None, None, None, None)
+        (None, None, None, None, None, None, None)
     };
     let mut m = mgr.borrow_mut();
     m.next += 1;
     let h = m.next;
     m.regs.insert(
         h,
-        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, state_match },
+        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, phase, state_match },
     );
     Ok(h)
 }
@@ -358,4 +367,45 @@ pub fn fire_object_death(lua: &Lua, guid: u64) -> LuaResult<()> {
         }
     }
     Ok(())
+}
+
+/// Fire every `ObjectHibernation` handler registered for `(guid, phase)` — the streaming system calls
+/// this when an object wakes (`"awake"`) or hibernates (`"asleep"`). This is the condition behind the
+/// awake-gate that opens essentially every object script in the corpus:
+/// `Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})` — `OnActivate` runs
+/// while the object is still asleep, so real setup has to wait for this.
+pub fn fire_object_hibernation(lua: &Lua, guid: u64, phase: &str) -> LuaResult<()> {
+    let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
+        Some(m) => (*m).clone(),
+        None => return Ok(()),
+    };
+    let fired: Vec<(i64, Function, Vec<Value>, bool)> = {
+        let m = mgr.borrow();
+        m.regs
+            .iter()
+            .filter(|(_, r)| {
+                r.kind == KIND_OBJECT_HIBERNATION
+                    && r.subject == Some(guid)
+                    && r.phase.as_deref() == Some(phase)
+            })
+            .map(|(h, r)| (*h, r.callback.clone(), r.cbargs.clone(), r.persistent))
+            .collect()
+    };
+    for (h, callback, cbargs, persistent) in fired {
+        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        if !persistent {
+            mgr.borrow_mut().regs.remove(&h);
+        }
+    }
+    Ok(())
+}
+
+/// Number of event handlers still registered. The engine doesn't need this; tooling does — a script
+/// that re-registers on every stream-in without `Event.Delete`ing on stream-out shows up here as a
+/// count that climbs each cycle (the duplicate-handler leak).
+pub fn live_handle_count(lua: &Lua) -> usize {
+    match lua.app_data_ref::<Mgr>() {
+        Some(m) => m.borrow().regs.len(),
+        None => 0,
+    }
 }
