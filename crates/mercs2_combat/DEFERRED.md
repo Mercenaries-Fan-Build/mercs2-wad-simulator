@@ -2,9 +2,10 @@
 
 Non-blocking improvements intentionally left for a later pass. Each is tagged `[faithful-blocker: no]`
 — omitting it does NOT make the current behaviour less faithful to the exe oracle; it is scope/quality,
-not correctness. True faithful blockers (the exe's exact per-hit ballistic/explosion solver math) are
-the documented **confirm-live** gap and live in `docs/reverse_engineer/weapons_combat_code_map.md` §5/§8,
-not here.
+not correctness. The exe's per-hit ballistic/explosion solver math — long the documented **wall** — is
+now **recovered from the sibling "WildStar" engine** (`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`);
+what remains is confirming its constants against the Mercs2 prototype body (see the Damage/explosion
+section below), not a blind live capture.
 
 ## wpn_* stat data
 
@@ -27,12 +28,24 @@ not here.
 
 ## Damage / explosion
 
-- **The exe's exact ballistic/explosion solver math** `[faithful-blocker: CONFIRM-LIVE]` — see the code
-  map §5. `ApplyDamage*` / `UpdateExplosions` / `PhysicsCreateExplosion` / `ApplyExplosionToBodies` are
-  string-only on both builds. `damage::apply_hit` / `damage::detonate_explosion` here are a faithful,
-  clearly-marked modern **stand-in** (radius overlap + linear/quadratic distance falloff + the DamageKey
-  taxonomy) that consumes the authored dropoff/radius fields; the exe's exact curve + mitigation is
-  unread and is NOT claimed. Recover via a HW write-BP on the player's `RuntimeHealth.cur` (§8).
+- **The exe's exact ballistic/explosion solver math** `[faithful-blocker: WILDSTAR-recovered, verify vs Mercs2]`
+  — no longer a wall. Recovered from the sibling engine (The Saboteur / "WildStar" Xbox 360 devkit):
+  `WSDamageable::ApplyDamage` = `health -= amount * damageScale`; `WSExplosion::CreateExplosion` falloff =
+  linear `(radius - dist)/radius` to the nearest box point, point-blank = 1.0; deferred + staggered apply
+  (`dist × 1/30`, 1.5 s lifetime); force floor 200; 7-bone ragdoll spread
+  (`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`). `damage::apply_hit` /
+  `detonate_explosion` now implement that shape (`// WILDSTAR:` comments); the falloff, `DamageKey`
+  taxonomy, and event contract are faithful. **Residual (verify vs Mercs2):** the exact numeric constants
+  are WildStar's — confirm against the Mercs2 Jul-08 prototype body (`ApplyExplosionToBodies` /
+  `ApplyDamageToNodeHealth`, decompilable, no SecuROM) via the Havok-AABB-phantom anchor, and pin the
+  Mercs2 two-tier Primary/Node health split.
+
+- **Deferred + staggered blast application** `[faithful-blocker: no]` — the WildStar blast is not
+  instantaneous: `WSExplosion::Update` runs the victim list over `wildstar::LIFETIME_SECS` (1.5 s),
+  applying each victim at `dist × wildstar::STAGGER_SECS_PER_METER` (blast travels 30 u/s) and applying
+  force (`ApplyHitForce` impulse / ragdoll spread) before damage. `detonate_explosion` applies the same
+  *total* damage immediately; the timing + impulse are the physics-silo follow-up. Constants are named in
+  `damage::wildstar` so the deferred system can consume them directly.
 
 - **Explosion body-set query** `[faithful-blocker: no]` — `detonate_explosion` finds targets by an ECS
   spatial sweep over entities carrying a `Health` (the local `RuntimeHealth` analog) within the blast
