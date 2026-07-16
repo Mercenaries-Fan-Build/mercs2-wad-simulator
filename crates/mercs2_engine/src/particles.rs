@@ -193,6 +193,52 @@ impl EmitterDesc {
             ..Self::demo_fire()
         }
     }
+
+    /// Build an [`EmitterDesc`] from a parsed [`EffectTemplate`](mercs2_formats::fxdict::EffectTemplate)
+    /// — the authored-effect → runtime wire that replaces the name-heuristic `demo_*` presets
+    /// (`docs/modernization/rendering_fx_lighting_gap.md` §E; `mercs2_game::world` flagged this as the
+    /// pending decode). Uses only the **reliably-parsed** chunks; unpinned data is left at the base
+    /// default it starts from (so a partial template degrades gracefully, never fabricates).
+    ///
+    /// - `COLR` gradient → colour/alpha over life (verified chunk).
+    /// - `FRCE` forces → `Gravity`/`Wind` sum into the constant accel; `Drag` → linear damping
+    ///   (`// WILDSTAR/FRCE:` the force *kind* classification is the FRCE hypothesis; `Vortex` isn't
+    ///   modelled by the billboard sim).
+    /// - `PTYP` bit0 → additive (glow) vs alpha blend (hypothesis, per the `fxdict` note).
+    /// - `POFF` → spawn offset, applied by the caller at start (not stored on the desc).
+    /// - `EMIT` timing floats have an **unpinned** positional order → NOT decoded into
+    ///   lifetime/spawn_rate here (same honesty boundary as the weapon-stat offsets); timing stays at
+    ///   `base`'s values until a live capture pins the float order.
+    pub fn from_effect_template(t: &mercs2_formats::fxdict::EffectTemplate, base: EmitterDesc) -> Self {
+        use mercs2_formats::fxdict::ForceKind;
+        let mut d = base;
+        if let Some(g) = t.gradient {
+            d.gradient = g;
+        }
+        let mut accel = Vec3::ZERO;
+        let mut saw_force = false;
+        for f in &t.forces {
+            match f.kind {
+                ForceKind::Gravity | ForceKind::Wind => {
+                    accel += Vec3::new(f.params[0], f.params[1], f.params[2]);
+                    saw_force = true;
+                }
+                ForceKind::Drag => {
+                    d.drag = f.params[0].max(0.0);
+                    saw_force = true;
+                }
+                // Vortex/Unknown: retained in the parse, but the CPU billboard sim has no operator.
+                ForceKind::Vortex | ForceKind::Unknown => {}
+            }
+        }
+        if saw_force && accel != Vec3::ZERO {
+            d.gravity = accel;
+        }
+        if let Some(pt) = t.ptype {
+            d.blend = if pt.bit0() { BlendMode::Additive } else { BlendMode::Alpha };
+        }
+        d
+    }
 }
 
 /// A static, persistent additive glow billboard — the faithful cheap rendering of an authored
@@ -779,5 +825,34 @@ mod tests {
         assert_eq!(s.blend, BlendMode::Alpha);
         let f = EmitterDesc::demo_fire();
         assert_eq!(f.blend, BlendMode::Additive);
+    }
+
+    #[test]
+    fn effect_template_overrides_base_with_authored_data() {
+        use mercs2_formats::fxdict::{
+            ColorGradient, EffectTemplate, Force, ForceKind, ParticleType, COLR_STOPS,
+        };
+        let f = |kind, params| Force { inner_hash: 0, kind, params, param_count: 4 };
+        let t = EffectTemplate {
+            gradient: Some(ColorGradient { stops: [[255, 0, 0, 255]; COLR_STOPS] }),
+            forces: vec![
+                f(ForceKind::Gravity, [0.0, -9.8, 0.0, 0.0]),
+                f(ForceKind::Drag, [0.5, 0.0, 0.0, 0.0]),
+            ],
+            ptype: Some(ParticleType { flags: 0x01 }), // bit0 → additive
+            ..Default::default()
+        };
+        // Base = smoke (alpha, grey). The template must override with the authored values.
+        let d = EmitterDesc::from_effect_template(&t, EmitterDesc::demo_smoke());
+        assert_eq!(d.gravity, Vec3::new(0.0, -9.8, 0.0), "FRCE Gravity → accel");
+        assert!((d.drag - 0.5).abs() < 1e-6, "FRCE Drag → damping");
+        assert_eq!(d.blend, BlendMode::Additive, "PTYP bit0 → additive");
+        assert_eq!(d.gradient.sample(0.0)[0], 1.0, "COLR red overrode the smoke grey");
+        assert_eq!(d.gradient.sample(0.0)[1], 0.0);
+        // A wholly-empty template must leave the base untouched (graceful degrade, no fabrication).
+        let base = EmitterDesc::demo_fire();
+        let d2 = EmitterDesc::from_effect_template(&EffectTemplate::default(), base.clone());
+        assert_eq!(d2.blend, base.blend);
+        assert_eq!(d2.gravity, base.gravity);
     }
 }
