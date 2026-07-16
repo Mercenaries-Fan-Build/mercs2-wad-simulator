@@ -41,12 +41,14 @@
 pub mod buoyancy;
 pub mod swim;
 pub mod watermap;
+pub mod wave;
 pub mod zone;
 
 pub use buoyancy::{
     submersion_fraction, Buoyancy, WaterDragTunables, BUOYANCY_HASH, BUOYANCY_STRIDE,
 };
 pub use swim::{update_swim_state, SwimConfig, SwimState, Swimmer};
+pub use wave::{WaveComponent, WaveModel};
 pub use watermap::{
     Watermap, WaterSample, WatermapError, CELL_SIZE_M, GRID_DIM, HEIGHT_MIN_M, OPEN_WATER_SURFACE_M,
     WATERMAP_HASH,
@@ -68,6 +70,13 @@ pub struct WaterWorld {
     pub watermap: Option<Watermap>,
     /// Swim-FSM thresholds (gameplay-derived defaults; see [`swim`]).
     pub swim_config: SwimConfig,
+    /// Animated surface waves ([`WaveModel`], WILDSTAR `CalcWaveOffsets` shape) — the displacement on
+    /// top of the static watermap level. Shared with the water render so the drawn surface and the
+    /// simulated one agree (swimmers bob on the waves the player sees).
+    pub wave: WaveModel,
+    /// Accumulated water time (s) driving the wave phase. Advanced by [`tick`](Self::tick); read by
+    /// the render via [`time`](Self::time) so both sample the same field.
+    time: f32,
 }
 
 impl WaterWorld {
@@ -80,10 +89,23 @@ impl WaterWorld {
         self.watermap = Some(watermap);
     }
 
+    /// Water time (s) driving the wave phase — the render passes this to the surface shader so the
+    /// drawn wave matches the one [`sample`](Self::sample) reports.
+    pub fn time(&self) -> f32 {
+        self.time
+    }
+
     /// The full water query at a world XZ — `None` until a watermap is loaded, else the wet/height
-    /// sample (the engine-owned half of `FUN_00480440`).
+    /// sample (the engine-owned half of `FUN_00480440`), with the animated wave displacement applied.
     pub fn sample(&self, x: f32, z: f32) -> Option<WaterSample> {
-        self.watermap.as_ref().map(|w| w.sample(x, z))
+        self.watermap.as_ref().map(|w| {
+            let mut s = w.sample(x, z);
+            // Wave displacement applies to real water columns only; a dry cell keeps its sentinel.
+            if s.is_water {
+                s.surface_height += self.wave.height_offset(x, z, self.time);
+            }
+            s
+        })
     }
 
     /// Is this world XZ over water? (`false` with no watermap.)
@@ -91,18 +113,21 @@ impl WaterWorld {
         self.watermap.as_ref().is_some_and(|w| w.is_water(x, z))
     }
 
-    /// Water-surface height at this XZ where it is water (`None` over land / no watermap).
+    /// Water-surface height at this XZ where it is water (`None` over land / no watermap). Includes
+    /// the animated [`WaveModel`] displacement, so this is the surface the player actually sees.
     pub fn water_surface_height(&self, x: f32, z: f32) -> Option<f32> {
-        self.watermap.as_ref().and_then(|w| w.water_surface_height(x, z))
+        self.sample(x, z).filter(|s| s.is_water).map(|s| s.surface_height)
     }
 
-    /// Per-fixed-step water update: advance every [`Swimmer`]'s FSM against the watermap. No-op until a
-    /// watermap is loaded. Returns the number of swimmers updated. Buoyancy/drag are applied by the
-    /// physics silo using [`Buoyancy`]/[`WaterDragTunables`] against [`sample`](Self::sample); they are
-    /// pure math, not a per-frame system here.
-    pub fn tick(&self, world: &mut World) -> usize {
+    /// Per-fixed-step water update: advance the wave phase by `dt`, then advance every [`Swimmer`]'s
+    /// FSM against the **wave-displaced** surface. No-op (beyond the clock) until a watermap is loaded.
+    /// Returns the number of swimmers updated. Buoyancy/drag are applied by the physics silo using
+    /// [`Buoyancy`]/[`WaterDragTunables`] against [`sample`](Self::sample); they are pure math, not a
+    /// per-frame system here.
+    pub fn tick(&mut self, world: &mut World, dt: f32) -> usize {
+        self.time += dt;
         match &self.watermap {
-            Some(wm) => update_swim_state(world, wm, &self.swim_config),
+            Some(wm) => update_swim_state(world, wm, &self.swim_config, &self.wave, self.time),
             None => 0,
         }
     }
@@ -119,11 +144,11 @@ mod tests {
     fn idles_without_a_watermap() {
         let mut world = World::new();
         let e = world.spawn((Swimmer::new(), Transform::from_translation(Vec3::new(0.0, -5.0, 0.0))));
-        let ww = WaterWorld::new();
+        let mut ww = WaterWorld::new();
         assert!(!ww.is_water(0.0, 0.0));
         assert_eq!(ww.sample(0.0, 0.0), None);
         assert_eq!(ww.water_surface_height(0.0, 0.0), None);
-        assert_eq!(ww.tick(&mut world), 0);
+        assert_eq!(ww.tick(&mut world, 0.0), 0);
         assert_eq!(world.get::<&Swimmer>(e).unwrap().state, SwimState::OnLand);
     }
 
@@ -140,7 +165,7 @@ mod tests {
         ww.set_watermap(Watermap::uniform(GRID_DIM, CELL_SIZE_M, OPEN_WATER_SURFACE_M, true));
 
         // The character's feet at -50 sit 14 m under the -36 m open-water surface → deeply submerged.
-        assert_eq!(ww.tick(&mut world), 1);
+        assert_eq!(ww.tick(&mut world, 0.0), 1);
         assert_eq!(world.get::<&Swimmer>(e).unwrap().state, SwimState::Submerged);
         assert!(ww.is_water(0.0, 0.0));
         assert_eq!(ww.water_surface_height(0.0, 0.0), Some(OPEN_WATER_SURFACE_M));
