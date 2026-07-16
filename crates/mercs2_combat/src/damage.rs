@@ -1,19 +1,20 @@
-//! Damage / explosion applier — **the confirm-live stand-in** (code map §5).
+//! Damage / explosion applier — **WILDSTAR-sourced** (sibling-engine recovery; code map §5).
 //!
-//! # Honesty boundary (read this)
-//! The exe's exact per-hit ballistic/explosion solver is the one documented **wall**:
-//! `ApplyDamageToPrimaryHealth` / `ApplyDamageToNodeHealth` / `UpdateExplosions` /
-//! `PhysicsCreateExplosion` / `ApplyExplosionToBodies` are string-only on both builds and route through
-//! SecuROM thunks — no readable code literal (code map §5.3B / §8.5). `DamagePerson FUN_005e0720` is
-//! the **faction mood-report bridge, NOT the applier** (§5.2). So the exact damage curve and mitigation
-//! math are **unread**, and this module does **not** claim them.
+//! # Provenance & honesty boundary (read this)
+//! The Mercs2 per-hit damage/explosion solver (`ApplyDamageToPrimaryHealth` / `ApplyDamageToNodeHealth`
+//! / `ApplyExplosionToBodies` / `PhysicsCreateExplosion`) is SecuROM-thunked / string-only in retail, so
+//! it was long the documented **wall**. It is now recovered from the **sibling engine** — The Saboteur /
+//! Pandemic "WildStar" Xbox 360 devkit, whose `WSDamageable::ApplyDamage` and `WSExplosion::AddVictim` /
+//! `Update` / `CreateExplosion` decompile cleanly
+//! (`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`). The Mercs2 Jul-08 prototype
+//! independently confirms the *same* pipeline by name, adding a two-tier Primary/Node health split and a
+//! `DamageShadow` occlusion cast.
 //!
-//! What this module *is*: a faithful, clearly-marked **modern stand-in** built from the *authored*
-//! inputs that ARE in the clear — the `Explosive`/`ProjectilePhysics` dropoff/radius/damage fields
-//! (ecs-01) — using conventional radius falloff and the recovered `DamageKey` taxonomy. Its **outputs**
-//! are the ones the exe's output is known to produce: it lowers a target's health and posts `DamageMsg
-//! 0xC6507EE1` / `DestroyMsg 0x1ED7AD78` into the destruction FSM (§5.3A). Every `// CONFIRM-LIVE:`
-//! comment marks a number/shape that is a modern choice pending a live capture.
+//! `// WILDSTAR:` marks a shape or number taken from that recovery. WildStar is a **sibling** fork
+//! (WS↔Pg engines, Havok 6.5 vs 4.5): the algorithm *shape* is faithful, but the exact *constants* are
+//! WildStar's and keep a **verify-vs-Mercs2** caveat until read from the Mercs2 prototype body. Outputs
+//! are the ones the exe is known to produce: it lowers health and posts `DamageMsg 0xC6507EE1` /
+//! `DestroyMsg 0x1ED7AD78` into the destruction FSM (§5.3A).
 
 use glam::Vec3;
 use hecs::{Entity, World};
@@ -87,6 +88,22 @@ impl ExplosionSize {
     }
 }
 
+/// Recovered explosion timing / force constants (`// WILDSTAR:` `WSExplosion::Update`/`AddVictim`,
+/// resolved from `.rdata`; verify vs Mercs2). Named here so the deferred-staggered blast system (a
+/// documented follow-up — see `DEFERRED.md`) can consume them; `detonate_explosion` below applies the
+/// same total damage immediately.
+pub mod wildstar {
+    /// Per-victim apply delay = `dist * STAGGER_SECS_PER_METER`: the blast "travels" at 30 u/s, so
+    /// nearer victims are hit first (`WSExplosion::Update` counts this per-victim delay down to 0).
+    pub const STAGGER_SECS_PER_METER: f32 = 1.0 / 30.0;
+    /// Explosion lifetime / defer window — it processes its victim list for this long, then frees itself.
+    pub const LIFETIME_SECS: f32 = 1.5;
+    /// Ragdoll impulse magnitude floor: `mag = max(damage_amount, FORCE_FLOOR)` before the 7-bone spread.
+    pub const FORCE_FLOOR: f32 = 200.0;
+    /// Max victims one explosion tracks at once (`MAX_VICTIM`).
+    pub const MAX_VICTIMS: usize = 32;
+}
+
 /// Post `DamageMsg`/`DestroyMsg` for a health change on `victim`. Args: victim handle, instigator
 /// handle, damage amount, damage-key ordinal — the shape the destruction FSM consumes (§5.3A). Emits
 /// `DestroyMsg` additionally when the hit takes the target to zero.
@@ -119,8 +136,11 @@ fn post_damage_events(
 /// damage/destroy events. Returns the damage actually applied (0 if the victim has no `Health` or is
 /// already dead). This is the point-hit path (a bullet/rocket direct impact).
 ///
-/// `// CONFIRM-LIVE:` the exe may apply per-key mitigation / armour before subtracting; unread. Here the
-/// authored `amount` is subtracted directly.
+/// `// WILDSTAR:` `WSDamageable::ApplyDamage` computes `health -= desc.amount * blueprint.damageScale`
+/// (a per-target vulnerability multiplier), gated by `AcceptsDamageOfThisType`, and calls `Die()` at
+/// `<= 0`. Here `amount` arrives already-scaled (the caller applies the target's vulnerability); the
+/// Mercs2 prototype additionally splits Primary vs per-node health (`ApplyDamageTo{Primary,Node}Health`)
+/// — modelled as one `Health` pool until the node-health silo lands.
 pub fn apply_hit(
     world: &mut World,
     bus: &mut EventBus,
@@ -146,12 +166,13 @@ pub fn apply_hit(
     applied
 }
 
-/// Distance falloff for a blast: full `damage` at the centre, tapering to 0 at `radius`. `min_falloff`
-/// biases the curve — `0` = linear, `>0` holds more damage toward the edge (a rough analog of the
-/// authored `MinForceFalloff`).
+/// Distance falloff for a blast — the **recovered WildStar curve**: linear `(radius - dist) / radius`,
+/// full (`1.0`) at/inside the target, zero at the edge (`WSExplosion::CreateExplosion`). `min_falloff`
+/// biases toward the edge; `0` (the `ExplosiveStats` default) is the exact recovered linear curve.
 ///
-/// `// CONFIRM-LIVE:` the exe's exact falloff curve is unread; this is a conventional
-/// `(1 - d/r)` linear taper, softened toward the edge by `min_falloff`.
+/// `// WILDSTAR:` the exe measures `dist` to the **nearest point of the target's bounding box** (not its
+/// centre) and returns `1.0` when the blast centre is inside that box; this takes `dist` centre-to-centre
+/// from the caller — the residual approximation (see `DEFERRED.md`).
 pub fn radius_falloff(dist: f32, radius: f32, damage: f32, min_falloff: f32) -> f32 {
     if radius <= 0.0 || dist >= radius {
         return 0.0;
@@ -166,9 +187,13 @@ pub fn radius_falloff(dist: f32, radius: f32, damage: f32, min_falloff: f32) -> 
 /// damage/destroy events. Returns the list of `(victim, damage_applied)`.
 ///
 /// The target set is an **ECS spatial sweep** over entities with a [`Transform`] + [`Health`] within
-/// the radius. `// CONFIRM-LIVE:` the exe's `PhysicsCreateExplosion`/`ApplyExplosionToBodies` queries
-/// the Havok broadphase for `hkpRigidBody` overlap and applies an impulse; that body-set + impulse land
-/// with the physics silo (`DEFERRED.md`). The gameplay-damage overlap here is faithful.
+/// the radius. `// WILDSTAR:` `WSExplosion::CreateExplosion` gathers victims via a Havok AABB-phantom
+/// overlap query (here an ECS sweep), caches a per-victim LOS / `DamageShadow` shield (the raycast
+/// below), then applies **deferred + staggered by distance** (`dist * wildstar::STAGGER_SECS_PER_METER`
+/// over `wildstar::LIFETIME_SECS`): force via `ApplyHitForce` (impulse to dynamic bodies, or a 7-bone
+/// ragdoll spread floored at `wildstar::FORCE_FLOOR`) then `ApplyHitDamage`. This applies immediately —
+/// the *total* damage is identical; the stagger timing + impulse land with the physics silo
+/// (`DEFERRED.md`).
 pub fn detonate_explosion(
     world: &mut World,
     bus: &mut EventBus,
@@ -179,7 +204,8 @@ pub fn detonate_explosion(
     key: DamageKey,
 ) -> Vec<(Entity, f32)> {
     // 1) Gather candidate victims (Transform + Health) inside the radius, with LOS if physics given.
-    let mut hits: Vec<(Entity, f32)> = Vec::new();
+    //    Carry each victim's world position so a lethal hit can launch a ragdoll along the blast dir.
+    let mut hits: Vec<(Entity, f32, Vec3)> = Vec::new();
     {
         for (e, (tf, h)) in world.query::<(&Transform, &Health)>().iter() {
             if h.is_dead() {
@@ -205,15 +231,22 @@ pub fn detonate_explosion(
             }
             let dmg = radius_falloff(dist, stats.radius, stats.damage, stats.min_force_falloff);
             if dmg > 0.0 {
-                hits.push((e, dmg));
+                hits.push((e, dmg, tf.translation));
             }
         }
     }
-    // 2) Apply (mutable pass, after the immutable query is dropped).
+    // 2) Apply (mutable pass, after the immutable query is dropped). A hit that takes a `Ragdollable`
+    //    character to zero launches its death ragdoll along the blast direction (`// WILDSTAR:`
+    //    `WSExplosion` applies the ragdoll impulse on the lethal frame — code map / crossval doc).
     let mut applied = Vec::with_capacity(hits.len());
-    for (e, dmg) in hits {
+    for (e, dmg, pos) in hits {
         let got = apply_hit(world, bus, e, instigator, dmg, key);
         if got > 0.0 {
+            let now_dead = world.get::<&Health>(e).map(|h| h.is_dead()).unwrap_or(false);
+            if now_dead {
+                let impulse = crate::ragdoll::blast_impulse(center, pos, got);
+                crate::ragdoll::trigger_ragdoll(world, e, impulse);
+            }
             applied.push((e, got));
         }
     }
