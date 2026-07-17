@@ -402,7 +402,42 @@ pub fn export_bundle(
     // hang off the HIER tree (glTF ignores a skinned mesh node's own transform, and parenting it to
     // an animated joint reads as a double transform in some importers). Those sit at the scene root,
     // grouped by rung. Rigid groups keep the per-node LOD parents.
-    let node_base = hier.len();
+    // ONE glTF SCENE PER RUNG — the rungs become editable LAYERS.
+    //
+    // Blender imports each glTF scene as its own COLLECTION, which is what makes a rung something a
+    // modder can isolate, hide, and edit; with everything in one scene the rungs import as a single
+    // pile of co-located geometry (their bounding boxes overlap ~100% — they are alternates, not
+    // parts) and read as one welded object. A glTF node has exactly one parent and lives in one
+    // scene, so a rung-scene needs its OWN copy of the HIER tree: copy `ri` occupies
+    // `nodes[ri*hier.len() .. ri*hier.len()+hier.len()]`. Only the tiny node JSON is duplicated —
+    // meshes, accessors and the buffer are shared, and each mesh node still belongs to exactly one
+    // rung, so no geometry is duplicated.
+    //
+    // Copy 0 keeps the `nodes[0..hier.len()] == HIER index N` alignment the re-import contract needs.
+    //
+    // NOTE a rung is NOT a display LOD level: the engine gates drawing on `lod_mask` TIER bits, and a
+    // tier draws from several rungs at once (a mask-0x7F group in the resident block is visible at
+    // every distance). A rung is the CONTAINER a group must be written back to, which is what an
+    // editing layer has to line up with — see `preservation.lod_rungs` in the manifest.
+    let mut rungs: Vec<u8> = mesh_of_group.iter().map(|(_, _, r, _)| *r).collect();
+    rungs.sort_unstable();
+    rungs.dedup();
+    if rungs.is_empty() {
+        rungs.push(0);
+    }
+    let h_len = hier.len();
+    let rung_slot = |r: u8| rungs.iter().position(|x| *x == r).unwrap_or(0);
+    // A skin binds joints by node index, so each rung copy needs its own skin over its own joints.
+    let skinned_rungs: Vec<u8> = {
+        let mut v: Vec<u8> =
+            mesh_of_group.iter().filter(|(_, _, _, s)| *s).map(|(_, _, r, _)| *r).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let skin_slot = |r: u8| skinned_rungs.iter().position(|x| *x == r);
+
+    let node_base = rungs.len() * h_len;
     let mut mesh_nodes: Vec<serde_json::Value> = Vec::new();
     let mut by_node_rung: BTreeMap<(usize, u8), Vec<usize>> = BTreeMap::new();
     let mut skinned_by_rung: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
@@ -414,7 +449,9 @@ pub fn export_bundle(
             "extras": { "lod_rung": rung, "deforming": is_skinned }
         });
         if *is_skinned {
-            mn["skin"] = serde_json::json!(0);
+            if let Some(s) = skin_slot(*rung) {
+                mn["skin"] = serde_json::json!(s);
+            }
         }
         mesh_nodes.push(mn);
         if *is_skinned {
@@ -428,17 +465,19 @@ pub fn export_bundle(
 
     // LOD group nodes are appended AFTER the mesh nodes, so `nodes[0..hier.len()]` stays aligned with
     // the HIER index — a re-import keeps reading node N as HIER node N.
+    // A LOD group hangs off its OWN rung's HIER copy, and the skinned/unbound groups become extra
+    // roots of that rung's scene — so every node a scene reaches belongs to that rung alone.
     let group_base = node_base + mesh_nodes.len();
     let mut lod_groups: Vec<serde_json::Value> = Vec::new();
-    let mut extra_roots: Vec<usize> = Vec::new();
-    let mut mesh_children: Vec<Vec<usize>> = vec![Vec::new(); hier.len()];
+    let mut extra_roots: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    let mut mesh_children: BTreeMap<(u8, usize), Vec<usize>> = BTreeMap::new();
     for ((node, rung), kids) in &by_node_rung {
         let gi = group_base + lod_groups.len();
         lod_groups.push(serde_json::json!({
             "name": format!("node{node}_LOD{rung}"), "children": kids,
             "extras": { "lod_rung": rung, "hier_index": node, "lod_group": true }
         }));
-        mesh_children[*node].push(gi);
+        mesh_children.entry((*rung, *node)).or_default().push(gi);
     }
     for (rung, kids) in &skinned_by_rung {
         let gi = group_base + lod_groups.len();
@@ -446,7 +485,7 @@ pub fn export_bundle(
             "name": format!("skin_LOD{rung}"), "children": kids,
             "extras": { "lod_rung": rung, "lod_group": true, "deforming": true }
         }));
-        extra_roots.push(gi);
+        extra_roots.entry(*rung).or_default().push(gi);
     }
     for (rung, kids) in &unbound_by_rung {
         let gi = group_base + lod_groups.len();
@@ -454,7 +493,7 @@ pub fn export_bundle(
             "name": format!("unbound_LOD{rung}"), "children": kids,
             "extras": { "lod_rung": rung, "lod_group": true }
         }));
-        extra_roots.push(gi);
+        extra_roots.entry(*rung).or_default().push(gi);
     }
 
     // The bind-pose LOCAL transform of each bone, as TRS. An animated node MUST use TRS — glTF
@@ -463,38 +502,59 @@ pub fn export_bundle(
     let bind_trs: Vec<mercs2_formats::anim::QsTransform> =
         rig.iter().map(|b| mercs2_engine::pose::mat_to_qs(&b.local_bind)).collect();
 
-    for h in hier {
-        let mut kids: Vec<usize> = children[h.index].clone();
-        kids.extend(mesh_children[h.index].iter().copied());
-        let m = h.local;
-        let mut n = serde_json::json!({
-            "name": format!("node{}_0x{:08X}", h.index, h.hash),
-            "extras": { "hier_index": h.index, "hier_hash": format!("0x{:08X}", h.hash) }
-        });
-        match bind_trs.get(h.index) {
-            // Skinned: TRS, so animation channels can target this joint.
-            Some(qs) if use_trs => {
-                n["translation"] = serde_json::json!(f32s(&qs.translation));
-                n["rotation"] = serde_json::json!(f32s(&qs.rotation));
-                n["scale"] = serde_json::json!(f32s(&qs.scale));
+    // One HIER copy per rung. Identical geometry-free node JSON; only the LOD groups differ, so each
+    // copy carries exactly the meshes of its own rung.
+    for (ri, rung) in rungs.iter().enumerate() {
+        let off = ri * h_len;
+        for h in hier {
+            let mut kids: Vec<usize> = children[h.index].iter().map(|c| c + off).collect();
+            kids.extend(
+                mesh_children.get(&(*rung, h.index)).into_iter().flatten().copied(),
+            );
+            let m = h.local;
+            let mut n = serde_json::json!({
+                "name": format!("node{}_LOD{rung}_0x{:08X}", h.index, h.hash),
+                "extras": {
+                    "hier_index": h.index, "hier_hash": format!("0x{:08X}", h.hash),
+                    "lod_rung": rung
+                }
+            });
+            match bind_trs.get(h.index) {
+                // Skinned: TRS, so animation channels can target this joint.
+                Some(qs) if use_trs => {
+                    n["translation"] = serde_json::json!(f32s(&qs.translation));
+                    n["rotation"] = serde_json::json!(f32s(&qs.rotation));
+                    n["scale"] = serde_json::json!(f32s(&qs.scale));
+                }
+                // Rigid: keep the matrix form the vehicle path has always used.
+                // glTF stores column-major COLUMN-vector; HierNode.local is row-major ROW-vector. Those
+                // are transposes, and column-major storage of the transpose IS the row-major original —
+                // so `local` goes out verbatim. See `gltf_mat`.
+                _ => {
+                    n["matrix"] = serde_json::json!(f32s(&m));
+                }
             }
-            // Rigid: keep the matrix form the vehicle path has always used.
-            // glTF stores column-major COLUMN-vector; HierNode.local is row-major ROW-vector. Those
-            // are transposes, and column-major storage of the transpose IS the row-major original —
-            // so `local` goes out verbatim. See `gltf_mat`.
-            _ => {
-                n["matrix"] = serde_json::json!(f32s(&m));
+            if !kids.is_empty() {
+                n["children"] = serde_json::json!(kids);
             }
+            nodes.push(n);
         }
-        if !kids.is_empty() {
-            n["children"] = serde_json::json!(kids);
-        }
-        nodes.push(n);
     }
     nodes.extend(mesh_nodes);
     nodes.extend(lod_groups);
-    let mut scene_roots = roots.clone();
-    scene_roots.extend(extra_roots);
+    // scene `ri` = rung `rungs[ri]`: that copy's HIER roots plus its own skinned/unbound groups.
+    let scenes_json: Vec<serde_json::Value> = rungs
+        .iter()
+        .enumerate()
+        .map(|(ri, rung)| {
+            let mut r: Vec<usize> = roots.iter().map(|x| x + ri * h_len).collect();
+            r.extend(extra_roots.get(rung).into_iter().flatten().copied());
+            serde_json::json!({
+                "name": format!("LOD{rung}"), "nodes": r,
+                "extras": { "lod_rung": rung }
+            })
+        })
+        .collect();
 
     // ---- 3b. Skin: the inverse-bind matrices that turn the HIER into a deformer. ----
     let mut skins_json: Vec<serde_json::Value> = Vec::new();
@@ -513,14 +573,20 @@ pub fn export_bundle(
         accessors.push(serde_json::json!({
             "bufferView": vb, "componentType": 5126, "count": rig.len(), "type": "MAT4"
         }));
-        skins_json.push(serde_json::json!({
-            "name": format!("{label}_skin"),
-            // Joint j of the skin is HIER node j — BLENDINDICES index the HIER directly, so the
-            // joint list is the identity mapping and JOINTS_0 needs no remap.
-            "joints": (0..rig.len()).collect::<Vec<_>>(),
-            "inverseBindMatrices": ab,
-            "skeleton": roots.first().copied().unwrap_or(0),
-        }));
+        // One skin per rung that actually deforms — a skin binds joints by NODE index, so it must
+        // point at the joints of its own rung's HIER copy. The inverse-bind accessor is shared:
+        // every copy has the same bind pose.
+        for r in &skinned_rungs {
+            let off = rung_slot(*r) * h_len;
+            skins_json.push(serde_json::json!({
+                "name": format!("{label}_skin_LOD{r}"),
+                // Joint j of the skin is HIER node j — BLENDINDICES index the HIER directly, so the
+                // joint list is the identity mapping and JOINTS_0 needs no remap.
+                "joints": (0..rig.len()).map(|j| j + off).collect::<Vec<_>>(),
+                "inverseBindMatrices": ab,
+                "skeleton": roots.first().copied().unwrap_or(0) + off,
+            }));
+        }
     }
 
     // ---- 3c. Animations: one glTF animation per clip that binds to this rig. ----
@@ -624,9 +690,14 @@ pub fn export_bundle(
                 samplers.push(serde_json::json!({
                     "input": ta, "output": av, "interpolation": "LINEAR"
                 }));
-                channels.push(serde_json::json!({
-                    "sampler": si, "target": { "node": bone, "path": path }
-                }));
+                // Every rung copy of this bone gets a channel off the SAME sampler — the copies are
+                // one skeleton shown at different detail levels, so they must pose identically. Only
+                // the channel JSON repeats; the keyframe data is shared.
+                for ri in 0..rungs.len() {
+                    channels.push(serde_json::json!({
+                        "sampler": si, "target": { "node": bone + ri * h_len, "path": path }
+                    }));
+                }
                 driven = true;
             }
             if driven {
@@ -691,10 +762,14 @@ pub fn export_bundle(
     }
 
     std::fs::write(outdir.join("model.bin"), &bin).map_err(|e| e.to_string())?;
+    // Default scene = the FINEST rung. A viewer that only reads the default scene (most non-Blender
+    // tools) then shows the near-detail model rather than every rung stacked on top of itself, which
+    // is what it used to do. Blender reads them all and gives one collection per rung.
+    let default_scene = scenes_json.len().saturating_sub(1);
     let mut gltf = serde_json::json!({
         "asset": {"version":"2.0","generator":format!("mercs2_workshop export_bundle ({label})")},
-        "scene": 0,
-        "scenes": [{"nodes": scene_roots}],
+        "scene": default_scene,
+        "scenes": scenes_json,
         "nodes": nodes,
         "meshes": meshes,
         "materials": materials,
