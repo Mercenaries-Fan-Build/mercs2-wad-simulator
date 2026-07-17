@@ -614,6 +614,10 @@ pub fn run(opts: Options) {
     let mut filter = String::new();
     let mut filtered: Vec<usize> = (0..index.rows(kind).len()).collect();
     let mut sel: usize = 0;
+    // Category headers the user has collapsed in the model list — click a header to fold its rows
+    // away so only the category line remains. Persists across frames; keyed by the static category
+    // name so it survives refilter/re-sort. Empty = everything expanded (the default).
+    let mut collapsed_cats: HashSet<&'static str> = HashSet::new();
     let mut list_visible = true; // Tab: browse (list + filter typing) <-> edit (letter controls)
 
     // Viewport state.
@@ -1498,7 +1502,10 @@ pub fn run(opts: Options) {
                                         display.push(Disp::Header(cat, counts[cat]));
                                         last = cat;
                                     }
-                                    display.push(Disp::Row(vi));
+                                    // A collapsed category keeps its header but drops its rows.
+                                    if !collapsed_cats.contains(cat) {
+                                        display.push(Disp::Row(vi));
+                                    }
                                 }
                             } else {
                                 for vi in 0..filtered.len() {
@@ -1514,18 +1521,32 @@ pub fn run(opts: Options) {
                                     for di in range {
                                         let vi = match display[di] {
                                             Disp::Header(cat, n) => {
-                                                ui.horizontal(|ui| {
+                                                let is_collapsed = collapsed_cats.contains(cat);
+                                                // Lay the header out, filling the row so the WHOLE
+                                                // line is the click target, then sense a click on its
+                                                // rect to toggle the fold.
+                                                let ir = ui.horizontal(|ui| {
                                                     let (r, _) = ui.allocate_exact_size(
-                                                        egui::vec2(5.0, 5.0),
+                                                        egui::vec2(7.0, 7.0),
                                                         egui::Sense::hover(),
                                                     );
-                                                    ui.painter().add(egui::Shape::convex_polygon(
+                                                    let c = r.center();
+                                                    // ▶ when collapsed, ▼ when expanded.
+                                                    let tri = if is_collapsed {
                                                         vec![
-                                                            r.center_top(),
-                                                            r.right_center(),
-                                                            r.center_bottom(),
-                                                            r.left_center(),
-                                                        ],
+                                                            c + egui::vec2(-2.5, -3.5),
+                                                            c + egui::vec2(3.0, 0.0),
+                                                            c + egui::vec2(-2.5, 3.5),
+                                                        ]
+                                                    } else {
+                                                        vec![
+                                                            c + egui::vec2(-3.5, -2.5),
+                                                            c + egui::vec2(3.5, -2.5),
+                                                            c + egui::vec2(0.0, 3.0),
+                                                        ]
+                                                    };
+                                                    ui.painter().add(egui::Shape::convex_polygon(
+                                                        tri,
                                                         theme::BRASS_DK,
                                                         egui::Stroke::NONE,
                                                     ));
@@ -1540,7 +1561,29 @@ pub fn run(opts: Options) {
                                                             .size(9.5)
                                                             .color(theme::FAINT),
                                                     );
+                                                    // Claim the rest of the row so the click target
+                                                    // (and any hover fill) spans the full width.
+                                                    ui.allocate_space(egui::vec2(
+                                                        ui.available_width(),
+                                                        1.0,
+                                                    ));
                                                 });
+                                                let resp = ui
+                                                    .interact(
+                                                        ir.response.rect,
+                                                        egui::Id::new(("asset_cat_hdr", cat)),
+                                                        egui::Sense::click(),
+                                                    )
+                                                    .on_hover_cursor(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                if resp.clicked() {
+                                                    if is_collapsed {
+                                                        collapsed_cats.remove(cat);
+                                                    } else {
+                                                        collapsed_cats.insert(cat);
+                                                    }
+                                                }
                                                 continue;
                                             }
                                             Disp::Row(vi) => vi,
