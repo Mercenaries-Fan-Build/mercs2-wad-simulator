@@ -104,9 +104,62 @@ fn main() {
             .filter(|s| !s.starts_with("--"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("workshop_data"));
-        if let Err(e) = pack_data(&out, names_csv, &wadpath) {
+        if let Err(e) = pack_data(&out, names_csv, &wadpath, &overlays) {
             eprintln!("--pack-data: {e}");
         }
+        return;
+    }
+
+    // Headless: one TSV row per model, in ONE wad open:
+    //   `hash <TAB> resolves <TAB> bones <TAB> skinned_groups <TAB> verts <TAB> tris <TAB> tex,tex,...`
+    //
+    // For NAME RECOVERY. A model's hash is all we have when its name was never recovered, but the
+    // TEXTURES it binds are frequently named, and a texture name carries the model's own stem
+    // (`pmc_veh_motorcycle_r71_dm` -> `pmc_veh_motorcycle_r71`). That turns naming an unknown model
+    // from a blind 32-bit search into a handful of candidates checked against ONE hash, which is the
+    // difference between a result and a pile of collisions. `--check` already computes this set per
+    // model; this is the same thing for the whole catalog without re-opening the 2.5 GB wad 900 times.
+    //
+    // A model that does not resolve is REPORTED (`resolves=0`) rather than skipped: "no geometry in
+    // any open wad" is itself the finding for a name hunt — such an asset binds no textures, so it
+    // has no prior to work from and no amount of candidate generation will reach it.
+    if args.iter().any(|a| a == "--dump-bindings") {
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let hashes: Vec<u32> = {
+            let idx = index::AssetIndex::build(&w.wads, index::load_all_names(names_csv.clone()));
+            idx.models.iter().map(|r| r.hash).collect()
+        };
+        println!("hash\tresolves\tbones\tskinned_groups\tverts\ttris\ttextures");
+        let (mut ok, mut failed) = (0usize, 0usize);
+        for h in hashes {
+            let Ok(md) = app::load_model_data(&mut w, h) else {
+                println!("0x{h:08X}\t0\t0\t0\t0\t0\t");
+                failed += 1;
+                continue;
+            };
+            let mut tex: Vec<u32> = md
+                .draws
+                .iter()
+                .flat_map(|d| [d.diffuse, d.normal, d.specular])
+                .flatten()
+                .collect();
+            tex.sort_unstable();
+            tex.dedup();
+            let list: Vec<String> = tex.iter().map(|t| format!("0x{t:08X}")).collect();
+            let skinned = md.draws.iter().filter(|d| d.skinned).count();
+            println!(
+                "0x{h:08X}\t1\t{}\t{skinned}\t{}\t{}\t{}",
+                md.skin.rig.len(),
+                md.verts.len(),
+                md.indices.len() / 3,
+                list.join(",")
+            );
+            ok += 1;
+        }
+        eprintln!("--dump-bindings: {ok} models dumped, {failed} unresolvable");
         return;
     }
 
@@ -649,7 +702,22 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
 /// ever displayed, so intersecting against this set drops the speculative-candidate bulk. Returns an
 /// EMPTY set if the WAD can't be opened (released binary with no game data) — the caller then skips
 /// trimming rather than writing an empty pack.
-fn referenced_hashes(wadpath: &str) -> std::collections::HashSet<u32> {
+fn referenced_hashes(wadpath: &str, overlays: &[String]) -> std::collections::HashSet<u32> {
+    use std::collections::HashSet;
+    // Scan the WHOLE open stack, not just the base. A patch WAD carries its own assets (260 models /
+    // 1,259 textures in the retail vz-patch), and a hash that lives ONLY there was previously absent
+    // from `referenced`, so the trim below silently deleted its name — the workshop could never show
+    // a name for any patch/DLC-only asset no matter how many were recovered, and it failed quietly:
+    // the name was in the corpus, hash-verified, and just never appeared.
+    let mut set: HashSet<u32> = HashSet::new();
+    for p in std::iter::once(wadpath).chain(overlays.iter().map(|s| s.as_str())) {
+        set.extend(referenced_hashes_one(p));
+    }
+    set
+}
+
+/// The per-WAD scan behind [`referenced_hashes`].
+fn referenced_hashes_one(wadpath: &str) -> std::collections::HashSet<u32> {
     use mercs2_engine::wad;
     use std::collections::{BTreeMap, HashSet};
     let mut set: HashSet<u32> = HashSet::new();
@@ -740,6 +808,9 @@ fn pack_data(
     out: &std::path::Path,
     names_csv: Option<std::path::PathBuf>,
     wadpath: &str,
+    // The patch/DLC overlays opened on top of the base — their assets must be scanned too, or the
+    // trim drops every patch-only name. See `referenced_hashes`.
+    overlays: &[String],
 ) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
 
@@ -760,8 +831,11 @@ fn pack_data(
                 return Err("no name corpora found — run from the repo checkout".into());
             }
             let full = names.len();
-            eprintln!("[pack] scanning WAD for referenced hashes (assets + clips + bone nodes)…");
-            let referenced = referenced_hashes(wadpath);
+            eprintln!(
+                "[pack] scanning WAD + {} overlay(s) for referenced hashes (assets + clips + bone nodes)…",
+                overlays.len()
+            );
+            let referenced = referenced_hashes(wadpath, overlays);
             if !referenced.is_empty() {
                 names.retain(|h, _| referenced.contains(h));
             }
