@@ -3423,7 +3423,7 @@ pub fn run(opts: Options) {
                             }
                             Act::Export => {
                                 if let Some(p) = &preview {
-                                    status = match export_preview(&mut w, &imported, p) {
+                                    status = match export_preview(&mut w, &opts.wadpath, &opts.overlays, &imported, &index, p) {
                                         Ok(dir) => format!("exported {} -> {dir}", p.label),
                                         Err(e) => format!("EXPORT FAILED: {e}"),
                                     };
@@ -5045,18 +5045,29 @@ fn merge_placed(
     })
 }
 
-/// Export the preview's geometry + textures (via [`export_model_data`]).
+/// F10 export. For a WAD asset this writes the LOSSLESS RIGGED bundle — skeleton, joints, skin
+/// weights, inverse-bind matrices, and the character's full clip set as glTF animations (via
+/// [`export_bundle_by_hash`]) — so a re-import lands with its rig intact, not stripped to static
+/// geometry. Imports and merge results have no LOD-rung container to bundle, so they fall back to
+/// the OBJ + textures writer ([`export_model_data`]).
 fn export_preview(
     w: &mut WadStack,
+    base: &str,
+    overlays: &[String],
     imported: &HashMap<u32, ModelData>,
+    index: &AssetIndex,
     p: &Preview,
 ) -> Result<String, String> {
-    let md = source_model_data(w, imported, p.hash)?;
-    export_model_data(&md, &p.label)
+    // No raw rung bytes for an import/merge — the bundle path can't run, so OBJ it is.
+    if imported.contains_key(&p.hash) {
+        let md = source_model_data(w, imported, p.hash)?;
+        return export_model_data(&md, &p.label);
+    }
+    export_bundle_by_hash(base, overlays, p.hash, &p.label, index, std::path::Path::new("workshop_export"))
 }
 
-/// Headless export entry (`--export <name|0xHASH>`): resolve the model through a fresh stack
-/// and write it out — same code path as the in-app F10.
+/// Headless OBJ export (`--export <name|0xHASH>`): resolve the model through a fresh stack and
+/// write it out as OBJ + textures. The rigged sibling is `--export-bundle` (and the in-app F10).
 pub(crate) fn export_by_hash(
     base: &str,
     overlays: &[String],
