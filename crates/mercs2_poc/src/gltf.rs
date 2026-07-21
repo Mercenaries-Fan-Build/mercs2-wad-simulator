@@ -273,28 +273,63 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
     }
     let node_world = compute_node_world_mats(&json);
 
-    // skin 0: joints + inverse-bind matrices
-    let skin0 = json["skins"]
-        .get(0)
-        .ok_or("glb has no skin — not a rigged model")?;
-    let joint_nodes: Vec<usize> = skin0["joints"]
-        .as_array()
-        .ok_or("skin has no joints")?
-        .iter()
-        .map(|j| j.as_u64().unwrap() as usize)
-        .collect();
-    let mut ibm: Vec<Option<[f64; 16]>> = vec![None; joint_nodes.len()];
-    if let Some(ibm_idx) = skin0["inverseBindMatrices"].as_u64() {
-        let a = accessor(&json, &bin, ibm_idx as usize)?;
-        for (j, slot) in ibm.iter_mut().enumerate() {
+    // EVERY skin, unified. A file may ship more than one: the CoD/Valve "Roze" rip binds its body
+    // to a 103-joint CoD rig (skin0) and its face+hair to an 11-joint ValveBiped rig (skin1).
+    // JOINTS_0 is an index into the PRIMITIVE'S OWN skin, so reading skin0 and concatenating every
+    // primitive silently rebinds skin1's head onto skin0's joints 0..10 (root/spine) — 35% of that
+    // model, wrong, with no error. Build one joint list across all skins and remap per primitive.
+    let skins = json["skins"].as_array().cloned().unwrap_or_default();
+    if skins.is_empty() {
+        return Err("glb has no skin — not a rigged model".into());
+    }
+    let mut joint_nodes: Vec<usize> = Vec::new();
+    let mut node_to_joint: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    // per-skin: local joint index -> unified joint index
+    let mut skin_local_to_unified: Vec<Vec<usize>> = Vec::with_capacity(skins.len());
+    let mut ibm: Vec<Option<[f64; 16]>> = Vec::new();
+    for skin in &skins {
+        let locals: Vec<usize> = skin["joints"]
+            .as_array()
+            .ok_or("skin has no joints")?
+            .iter()
+            .map(|j| j.as_u64().unwrap() as usize)
+            .collect();
+        let ibm_acc = match skin["inverseBindMatrices"].as_u64() {
+            Some(i) => Some(accessor(&json, &bin, i as usize)?),
+            None => None,
+        };
+        let mut map = Vec::with_capacity(locals.len());
+        for (local, &node) in locals.iter().enumerate() {
+            let uni = *node_to_joint.entry(node).or_insert_with(|| {
+                joint_nodes.push(node);
+                ibm.push(None);
+                joint_nodes.len() - 1
+            });
             // glTF MAT4 is COLUMN-major; convert to ROW-major (rm[r*4+c] = raw[c*4+r]).
-            let mut rm = [0.0f64; 16];
-            for c in 0..4 {
-                for r in 0..4 {
-                    rm[r * 4 + c] = read_comp_f32(&a, j, c * 4 + r) as f64;
+            // First skin to define a joint's inverse-bind wins; later skins sharing that node
+            // keep it rather than overwrite.
+            if ibm[uni].is_none() {
+                if let Some(a) = &ibm_acc {
+                    let mut rm = [0.0f64; 16];
+                    for c in 0..4 {
+                        for r in 0..4 {
+                            rm[r * 4 + c] = read_comp_f32(a, local, c * 4 + r) as f64;
+                        }
+                    }
+                    ibm[uni] = Some(rm);
                 }
             }
-            *slot = Some(rm);
+            map.push(uni);
+        }
+        skin_local_to_unified.push(map);
+    }
+
+    // mesh index -> the skin its node uses (a mesh drawn by a skinned node). Meshes with no
+    // skinned node fall back to skin 0, matching the previous single-skin behaviour.
+    let mut mesh_skin: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for node in &nodes {
+        if let (Some(m), Some(s)) = (node["mesh"].as_u64(), node["skin"].as_u64()) {
+            mesh_skin.insert(m as usize, s as usize);
         }
     }
 
@@ -309,7 +344,8 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
     let mut vweights: Vec<[f64; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let empty = Vec::new();
-    for mesh in json["meshes"].as_array().unwrap_or(&empty) {
+    for (mesh_ix, mesh) in json["meshes"].as_array().unwrap_or(&empty).iter().enumerate() {
+        let remap = &skin_local_to_unified[*mesh_skin.get(&mesh_ix).unwrap_or(&0)];
         for prim in mesh["primitives"].as_array().unwrap_or(&empty) {
             let attrs = &prim["attributes"];
             let (Some(pi), Some(ji), Some(wi)) = (
@@ -340,12 +376,12 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
                     Some(a) => [read_comp_f32(a, e, 0), read_comp_f32(a, e, 1)],
                     None => [0.0, 0.0],
                 });
-                vjoints.push([
-                    read_comp_u16(&ja, e, 0),
-                    read_comp_u16(&ja, e, 1),
-                    read_comp_u16(&ja, e, 2),
-                    read_comp_u16(&ja, e, 3),
-                ]);
+                // JOINTS_0 is skin-local; lift it into the unified joint list.
+                let lift = |k: usize| -> u16 {
+                    let local = read_comp_u16(&ja, e, k) as usize;
+                    remap.get(local).copied().unwrap_or(0) as u16
+                };
+                vjoints.push([lift(0), lift(1), lift(2), lift(3)]);
                 vweights.push([
                     read_comp_f32(&wa, e, 0) as f64,
                     read_comp_f32(&wa, e, 1) as f64,

@@ -411,6 +411,56 @@ pub fn extract_model(
     extract_container(file, archive, name_hash, TYPE_ID_MODEL, TYPE_HASH_MODEL)
 }
 
+/// Build a texture UCFX container (`INFO` + `BODY`) from encoded DXT data, wrapped as a single-entry
+/// block ready for `compress_sges` + a `type_id 27` ASET row — the inverse of [`parse_texture_container`].
+/// `all_mips` MUST be the full dimension-derived linear mip chain (a short body livelocks the game
+/// streamer). INFO is the 34-byte header the retail loader reads: `u16 width@0, u16 height@2,
+/// u16 mip_count@6, fourcc@14, u32 total_size@22, residency@26/30 = 0` (fully resident).
+pub fn build_texture_block(name_hash: u32, td: &TextureData) -> Vec<u8> {
+    let mut info = vec![0u8; 34];
+    info[0..2].copy_from_slice(&(td.width as u16).to_le_bytes());
+    info[2..4].copy_from_slice(&(td.height as u16).to_le_bytes());
+    info[6..8].copy_from_slice(&(td.mip_count as u16).to_le_bytes());
+    info[14..18].copy_from_slice(td.format.fourcc());
+    info[22..26].copy_from_slice(&(td.all_mips.len() as u32).to_le_bytes());
+    // @26/@30 residency descriptor left 0 = fully resident (no streamed tail).
+    let body = &td.all_mips;
+
+    // UCFX with two leaves (INFO, BODY): 20-byte header + 2×20 descriptors + data + CSUM.
+    let ndesc = 2u32;
+    let data_off = 20 + ndesc * 20;
+    let mut ucfx = Vec::new();
+    ucfx.extend_from_slice(b"UCFX");
+    ucfx.extend_from_slice(&data_off.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&ndesc.to_le_bytes());
+    // INFO leaf @0, BODY leaf @info.len()
+    for (tag, off, len) in
+        [(b"INFO", 0u32, info.len() as u32), (b"BODY", info.len() as u32, body.len() as u32)]
+    {
+        ucfx.extend_from_slice(tag);
+        ucfx.extend_from_slice(&off.to_le_bytes());
+        ucfx.extend_from_slice(&len.to_le_bytes());
+        ucfx.extend_from_slice(&0u32.to_le_bytes());
+        ucfx.extend_from_slice(&0u32.to_le_bytes());
+    }
+    ucfx.extend_from_slice(&info);
+    ucfx.extend_from_slice(body);
+    let csum = crate::crc32::crc32_mercs2(&ucfx);
+    ucfx.extend_from_slice(b"CSUM");
+    ucfx.extend_from_slice(&csum.to_le_bytes());
+
+    let mut block = Vec::with_capacity(20 + ucfx.len());
+    block.extend_from_slice(&1u32.to_le_bytes());
+    block.extend_from_slice(&name_hash.to_le_bytes());
+    block.extend_from_slice(&TYPE_HASH_TEXTURE.to_le_bytes());
+    block.extend_from_slice(&0u32.to_le_bytes());
+    block.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
+    block.extend_from_slice(&ucfx);
+    block
+}
+
 /// Resolve a texture asset (`type_id 27`) to its ready-to-upload DXT/BC data.
 ///
 /// Pulls the primary texture ASET → decompresses its block → finds the texture

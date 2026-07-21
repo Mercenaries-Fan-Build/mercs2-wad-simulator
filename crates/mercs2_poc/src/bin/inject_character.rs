@@ -26,7 +26,7 @@ use std::collections::HashMap;
 struct Args {
     glb: String,
     donor: String,
-    group: usize,
+    groups: Vec<usize>,
     out: String,
     name: u32,
     repoints: Vec<MtrlRepoint>,
@@ -36,7 +36,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut glb = None;
     let mut donor = None;
-    let mut group = None;
+    let mut groups: Vec<usize> = Vec::new();
     let mut out = None;
     let mut name = 0u32;
     let mut repoints = Vec::new();
@@ -46,7 +46,12 @@ fn parse_args() -> Result<Args, String> {
         match a.as_str() {
             "--glb" => glb = it.next(),
             "--donor" => donor = it.next(),
-            "--group" => group = it.next().and_then(|s| s.parse().ok()),
+            "--group" => {
+                let v = it.next().ok_or("--group needs a value")?;
+                for part in v.split(',') {
+                    groups.push(part.trim().parse().map_err(|_| "--group wants ordinals")?);
+                }
+            }
             "--out" => out = it.next(),
             "--name" => {
                 let s = it.next().ok_or("--name needs a value")?;
@@ -62,14 +67,19 @@ fn parse_args() -> Result<Args, String> {
                 });
             }
             "--container-verts" => container_verts = it.next(),
-            "-h" | "--help" => return Err("usage: inject_character --glb <m.glb> --donor <block.bin> --group <n> --out <out.bin> [--name <hex>] [--repoint <hex>:<hex>] [--container-verts <tsv>]".into()),
+            "-h" | "--help" => return Err("usage: inject_character --glb <m.glb> --donor <block.bin> --group <n[,n2,...]> --out <out.bin> [--name <hex>] [--repoint <hex>:<hex>] [--container-verts <tsv>]".into()),
             other => return Err(format!("unknown arg {other}")),
         }
     }
     Ok(Args {
         glb: glb.ok_or("--glb required")?,
         donor: donor.ok_or("--donor required")?,
-        group: group.ok_or("--group required")?,
+        groups: {
+            if groups.is_empty() {
+                return Err("--group required".into());
+            }
+            groups
+        },
         out: out.ok_or("--out required")?,
         name,
         repoints,
@@ -178,14 +188,38 @@ fn run() -> Result<(), String> {
             })
             .collect(),
     };
-    let (block, stats) = inject_character_into_donor_block(
-        &donor_block,
-        &mesh,
-        &cs.ranges,
-        args.group,
-        &args.repoints,
-        args.name,
-    )?;
+    let (block, stats) = if args.groups.len() == 1 {
+        inject_character_into_donor_block(
+            &donor_block,
+            &mesh,
+            &cs.ranges,
+            args.groups[0],
+            &args.repoints,
+            args.name,
+        )?
+    } else {
+        // MULTI-GROUP. Each host group gets its OWN palette + INFO(56) table, computed inside
+        // the injector from the bones that group actually uses — so `mesh.joints` must carry
+        // GLOBAL donor HIER indices here, not the whole-model palette slots the single-group
+        // path wants. Expand the slots back through the model palette to recover them.
+        let palette = mercs2_formats::char_skin::expand_ranges(&cs.ranges);
+        let mut gmesh = mesh;
+        for (vi, j) in gmesh.joints.iter_mut().enumerate() {
+            for k in 0..4 {
+                let slot = cs.skin_bytes[vi * 8 + k] as usize;
+                *j.get_mut(k).unwrap() = palette.get(slot).copied().unwrap_or(0) as u8;
+            }
+        }
+        let (b, _audits, s) = mercs2_formats::model_inject::inject_character_multi_into_donor_block(
+            &donor_block,
+            &gmesh,
+            &args.groups,
+            &args.repoints,
+            args.name,
+            true, // grow: the import is denser than the donor; packager recomputes page_count
+        )?;
+        (b, s)
+    };
     std::fs::write(&args.out, &block).map_err(|e| format!("write {}: {e}", args.out))?;
     println!(
         "wrote {} ({} bytes): group {} <- {} verts / {} strip idx, emptied {:?}",

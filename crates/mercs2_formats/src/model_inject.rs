@@ -1281,6 +1281,52 @@ pub fn inject_multi_into_donor_block(
     repoints: &[MtrlRepoint],
     new_name_hash: u32,
 ) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
+    inject_multi_into_donor_block_ex(
+        container_block,
+        mesh,
+        target_group_ordinals,
+        repoints,
+        new_name_hash,
+        false,
+        false,
+    )
+}
+
+/// Faithful CHARACTER variant of [`inject_multi_into_donor_block`]: writes each host group's own
+/// palette-relative BLENDINDICES + `INFO(56)` range table, the way shipped characters store
+/// skinning. Use this for a dense character that cannot fit one draw group — a single whole-model
+/// palette would blow the 46-slot cap, whereas each group's own palette covers only its bones.
+pub fn inject_character_multi_into_donor_block(
+    container_block: &[u8],
+    mesh: &ExternalMesh,
+    target_group_ordinals: &[usize],
+    repoints: &[MtrlRepoint],
+    new_name_hash: u32,
+    grow: bool,
+) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
+    inject_multi_into_donor_block_ex(
+        container_block,
+        mesh,
+        target_group_ordinals,
+        repoints,
+        new_name_hash,
+        true,
+        grow,
+    )
+}
+
+fn inject_multi_into_donor_block_ex(
+    container_block: &[u8],
+    mesh: &ExternalMesh,
+    target_group_ordinals: &[usize],
+    repoints: &[MtrlRepoint],
+    new_name_hash: u32,
+    skin_palette_per_group: bool,
+    // Let a host group's STRM/IBUF exceed the DONOR's original vertex/index counts, bounded only
+    // by the u16 ceiling. Needed when the imported character is denser than the donor it conforms
+    // to; the block grows, so the packager MUST recompute page_count/packed_field afterwards.
+    grow: bool,
+) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
     if container_block.len() < 20 {
         return Err("block too small".into());
     }
@@ -1303,6 +1349,7 @@ pub fn inject_multi_into_donor_block(
             return Err(format!("group {ord} is not a donor drawing group; drawing={drawing:?}"));
         }
         let (vc, ic) = donor_group_caps(ucfx, data_off, &rows, &groups[ord]);
+        let (vc, ic) = if grow { (65534u32, 65534u32) } else { (vc, ic) };
         targets.push((ord, vc, ic));
     }
 
@@ -1435,6 +1482,47 @@ pub fn inject_multi_into_donor_block(
         }
         for t in &chunk.tris {
             lm.tris.push([chunk.remap[&t[0]], chunk.remap[&t[1]], chunk.remap[&t[2]]]);
+        }
+
+        // PER-GROUP palette. A palette belongs to a DRAW GROUP, not to a model: each group's
+        // INFO(56) leaf carries its own `{u16 hier_base, u16 count}` runs and its BLENDINDICES
+        // are relative to those. `mesh.joints` arrives as GLOBAL donor HIER indices, so rewrite
+        // them to THIS group's slots. Splitting is what keeps a dense character legal — one
+        // whole-model palette overflows the 46-slot cap, three per-group palettes do not.
+        if skin_palette_per_group && has_skin {
+            let mut seen = std::collections::HashSet::new();
+            let mut used: Vec<u32> = Vec::new();
+            for (j, w) in lm.joints.iter().zip(lm.weights.iter()) {
+                for k in 0..4 {
+                    if w[k] > 0 && seen.insert(j[k] as u32) {
+                        used.push(j[k] as u32);
+                    }
+                }
+            }
+            used.sort_unstable();
+            let (ranges32, slot_of, slots) = crate::char_skin::build::build_palette_ranges(&used);
+            if slots > crate::char_skin::build::PALETTE_CAP {
+                return Err(format!(
+                    "group {gi}: palette is {slots} slots over {} bones, above the {} the game \
+                     ships; split across more groups",
+                    used.len(),
+                    crate::char_skin::build::PALETTE_CAP
+                ));
+            }
+            for j in lm.joints.iter_mut() {
+                for k in 0..4 {
+                    j[k] = slot_of.get(&(j[k] as u32)).copied().unwrap_or(0);
+                }
+            }
+            let ranges: Vec<(u16, u16)> =
+                ranges32.iter().map(|&(b, c)| (b as u16, c as u16)).collect();
+            let info_row = (0..g.strm_info)
+                .rev()
+                .find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+                .ok_or_else(|| format!("group {gi}: no INFO(56) leaf before strm_info"))?;
+            let mut info = leaf(ucfx, data_off, &rows[info_row]).to_vec();
+            crate::char_skin::patch_skin_info56(&mut info, &ranges)?;
+            new_bodies.insert(info_row, info);
         }
 
         let strip = to_strip_connected(&lm.tris);

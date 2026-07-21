@@ -12,6 +12,55 @@ use super::mat::*;
 use std::collections::HashMap;
 
 pub const PALETTE_CAP: usize = 46; // largest palette the shipped game uses
+
+/// Run-length encode a SORTED, deduplicated bone-index list into at most [`MAX_RANGES`] runs,
+/// returning `(ranges, bone -> palette slot, slot count)`.
+///
+/// A palette is per DRAW GROUP, not per model: the shipped format stores each group's runs in
+/// its own `INFO(56)` leaf. This is shared by the whole-model palette and by the per-group
+/// palettes the multi-group injector writes, so both emit byte-identical tables — a dense model
+/// split across three groups gets three small palettes rather than one that overflows the cap.
+pub fn build_palette_ranges(used: &[u32]) -> (Vec<(u32, u32)>, HashMap<u32, u8>, usize) {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    if !used.is_empty() {
+        let mut run = (used[0], 1u32);
+        for &h in &used[1..] {
+            if h == run.0 + run.1 {
+                run.1 += 1;
+            } else {
+                ranges.push(run);
+                run = (h, 1);
+            }
+        }
+        ranges.push(run);
+    }
+    while ranges.len() > MAX_RANGES {
+        // merge the closest neighbours; ties resolve to the LOWEST index (strict `<`).
+        let mut best = 0usize;
+        let mut best_gap = i64::MAX;
+        for i in 0..ranges.len() - 1 {
+            let gap = ranges[i + 1].0 as i64 - (ranges[i].0 as i64 + ranges[i].1 as i64);
+            if gap < best_gap {
+                best_gap = gap;
+                best = i;
+            }
+        }
+        let merged = (
+            ranges[best].0,
+            ranges[best + 1].0 + ranges[best + 1].1 - ranges[best].0,
+        );
+        ranges.splice(best..best + 2, [merged]);
+    }
+    let mut slot_of: HashMap<u32, u8> = HashMap::new();
+    let mut s = 0u32;
+    for &(base, count) in &ranges {
+        for h in base..base + count {
+            slot_of.insert(h, s as u8);
+            s += 1;
+        }
+    }
+    (ranges, slot_of, s as usize)
+}
 pub const MAX_RANGES: usize = 8; // range_count field in the group's INFO leaf
 
 /// Which model→container transform was used.
@@ -411,46 +460,7 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
 
     // ---- 3. palette (donor HIER indices; fingers already collapsed in NPC-84 space) ----
     let used = collect(&full, false);
-    // run-length encode into ranges
-    let mut ranges: Vec<(u32, u32)> = Vec::new();
-    if !used.is_empty() {
-        let mut run = (used[0], 1u32);
-        for &h in &used[1..] {
-            if h == run.0 + run.1 {
-                run.1 += 1;
-            } else {
-                ranges.push(run);
-                run = (h, 1);
-            }
-        }
-        ranges.push(run);
-    }
-    while ranges.len() > MAX_RANGES {
-        // merge the closest neighbours; ties resolve to the LOWEST index (strict `<`).
-        let mut best = 0usize;
-        let mut best_gap = i64::MAX;
-        for i in 0..ranges.len() - 1 {
-            let gap = ranges[i + 1].0 as i64 - (ranges[i].0 as i64 + ranges[i].1 as i64);
-            if gap < best_gap {
-                best_gap = gap;
-                best = i;
-            }
-        }
-        let merged = (
-            ranges[best].0,
-            ranges[best + 1].0 + ranges[best + 1].1 - ranges[best].0,
-        );
-        ranges.splice(best..best + 2, [merged]);
-    }
-    let mut slot_of: HashMap<u32, u8> = HashMap::new();
-    let mut s = 0u32;
-    for &(base, count) in &ranges {
-        for h in base..base + count {
-            slot_of.insert(h, s as u8);
-            s += 1;
-        }
-    }
-    let palette_slots = s as usize;
+    let (ranges, slot_of, palette_slots) = build_palette_ranges(&used);
     if palette_slots > PALETTE_CAP {
         warn.push(format!(
             "palette is {palette_slots} slots, above the {PALETTE_CAP} the game ships. The \
