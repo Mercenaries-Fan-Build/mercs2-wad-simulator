@@ -158,11 +158,21 @@ pub fn validate_blocks(blocks: &[PatchBlock]) -> Result<(), String> {
                 continue; // sub-entry row — repeats are legal
             }
             if let Some(prev) = primary_owner.insert(entry.asset_hash, bi) {
-                return Err(format!(
-                    "asset 0x{:08X} is claimed as PRIMARY by two blocks: [{prev}] {} and [{bi}] {} \
-                     — the engine's winner would be undefined",
-                    entry.asset_hash, blocks[prev].path_string, blk.path_string
-                ));
+                // NOT fatal. Two claims are resolvable, not undefined: the runtime registry keeps
+                // the FIRST block to register a hash and creates nothing on an occupied slot, so
+                // the winner is deterministic (lowest block index). Retail `vz-patch.wad` ships
+                // with both shapes — a block listing one hash twice (dlc01 human blocks) and two
+                // c3 blocks claiming one hash (c30185/c30186) — and the game loads it. Failing
+                // here made the builder refuse to edit a WAD the engine itself accepts. Warn so a
+                // duplicate a MOD introduces is still visible, and keep the first claimant.
+                if prev != bi {
+                    eprintln!(
+                        "  warning: asset 0x{:08X} claimed PRIMARY by [{prev}] {} and [{bi}] {}; \
+                         engine takes the first (block {prev})",
+                        entry.asset_hash, blocks[prev].path_string, blk.path_string
+                    );
+                    primary_owner.insert(entry.asset_hash, prev);
+                }
             }
         }
     }
