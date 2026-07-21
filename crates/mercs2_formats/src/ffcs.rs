@@ -208,7 +208,14 @@ pub fn parse_aset_entries(file: &mut File, row: &ChunkRow, e: Endian) -> io::Res
             asset_hash: e.u32(&buf, base),
             secondary_ref: e.u32(&buf, base + 4),
             packed_block_ref: e.u32(&buf, base + 8),
-            type_id: e.u32(&buf, base + 12),
+            // An ASET row in a console (SCFF) bake is MIXED-ENDIAN. `asset_hash` and both block-ref
+            // words are big-endian — the hash matches its PC counterpart exactly and the u16 block
+            // indices land in range — but `type_id` is stored little-endian. Reading the whole row
+            // big-endian yields `0x13000000` instead of `19`, and measured on `xbox-vz.wad` that is
+            // 30,552 of 30,553 rows: every one of them shaped `<byte> 00 00 00`. The practical harm
+            // is silent — a filter on `type_id == 19` simply matches nothing on a 360 WAD, which
+            // reads as "this asset class is absent" rather than "you parsed it wrong".
+            type_id: read_u32_le(&buf, base + 12),
         });
     }
     Ok(entries)

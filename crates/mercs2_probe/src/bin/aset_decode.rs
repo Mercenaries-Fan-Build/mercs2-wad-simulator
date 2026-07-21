@@ -66,7 +66,20 @@ fn main() {
     // Sanity gate: type_id is a small discriminator (0..35). If the rows come through with values
     // like 0x13000000 the archive was parsed with the wrong endianness, and EVERY conclusion below
     // would be drawn from byte-swapped garbage. Say so loudly rather than reporting zeros.
+    // Characterise HOW a bad type_id is bad, so the fix is chosen from evidence rather than a
+    // guess: if every bogus value is `<small byte> 00 00 00` when read big-endian, the field is
+    // stored little-endian (or as a lone byte) inside an otherwise big-endian row.
+    let le_shaped = ar
+        .aset
+        .iter()
+        .filter(|e| e.type_id > 64)
+        .filter(|e| (e.type_id & 0x00FF_FFFF) == 0 && (e.type_id >> 24) <= 35)
+        .count();
     let bogus = ar.aset.iter().filter(|e| e.type_id > 64).count();
+    if bogus > 0 {
+        println!("   type_id shape: {bogus} out-of-range, of which {le_shaped} are `<byte> 00 00 00` \
+                  (i.e. little-endian in a big-endian row)");
+    }
     if bogus > ar.aset.len() / 2 {
         println!(
             "   !! {bogus}/{} rows have type_id > 64 (e.g. 0x{:08X}) — these rows are byte-swapped.\n\
