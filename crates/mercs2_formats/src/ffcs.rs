@@ -43,12 +43,43 @@ impl AsetEntry {
         (self.packed_block_ref >> 16) as u16
     }
 
+    /// Raw low half of `packed_block_ref`.
+    ///
+    /// **This is NOT a sub-entry ordinal**, despite the name and despite `docs/aset_format.md`
+    /// having said so (marked "Verified: Yes") until 2026-07-21. It is the asset's `_P001` LOD
+    /// **block index**. Measured over 10,798 non-sentinel model+texture rows: 100% name a `_P001`
+    /// block inside the primary's own cell subtree, exactly one LOD level finer, 0 out of range.
+    /// Kept under the old name so existing callers still compile; prefer [`Self::lod_chain`].
     pub fn sub_entry(&self) -> u16 {
         (self.packed_block_ref & 0xFFFF) as u16
     }
 
+    /// True when this row is the asset's own primary registration rather than a finer rung.
     pub fn is_primary(&self) -> bool {
         self.sub_entry() == 0xFFFF
+    }
+
+    /// The asset's full LOD chain, coarsest first: `_P000` (always) then `_P001`/`_P002`/`_P003`
+    /// where present. The two u32s each pack two block indices as `[hi16][lo16]`.
+    pub fn lod_chain(&self) -> Vec<u16> {
+        let mut out = vec![(self.packed_block_ref >> 16) as u16];
+        for half in [
+            (self.packed_block_ref & 0xFFFF) as u16,          // _P001
+            (self.secondary_ref >> 16) as u16,                // _P002
+            (self.secondary_ref & 0xFFFF) as u16,             // _P003
+        ] {
+            if half != 0xFFFF {
+                out.push(half);
+            }
+        }
+        out
+    }
+
+    /// Is every byte of this asset in ONE block? Only then is it safe to clone by copying the
+    /// primary block: a multi-rung asset cloned that way ships its coarsest tier with nothing
+    /// behind it. Both words must be sentinel — checking `is_primary()` alone misses `_P002`/`_P003`.
+    pub fn is_single_block(&self) -> bool {
+        self.sub_entry() == 0xFFFF && self.secondary_ref == 0xFFFF_FFFF
     }
 }
 
