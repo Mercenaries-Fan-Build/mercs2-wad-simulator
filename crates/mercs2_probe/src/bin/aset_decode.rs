@@ -62,7 +62,20 @@ fn main() {
     let ar = load_ffcs_archive(&mut f, size).unwrap_or_else(|e| panic!("parse {wad}: {e}"));
     let path_of = |i: usize| ar.paths.get(i).map(|s| s.as_str()).unwrap_or("<none>");
 
-    println!("== {wad}: {} aset rows, {} paths\n", ar.aset.len(), ar.paths.len());
+    println!("== {wad}: {} aset rows, {} paths, endian {:?}", ar.aset.len(), ar.paths.len(), ar.endian);
+    // Sanity gate: type_id is a small discriminator (0..35). If the rows come through with values
+    // like 0x13000000 the archive was parsed with the wrong endianness, and EVERY conclusion below
+    // would be drawn from byte-swapped garbage. Say so loudly rather than reporting zeros.
+    let bogus = ar.aset.iter().filter(|e| e.type_id > 64).count();
+    if bogus > ar.aset.len() / 2 {
+        println!(
+            "   !! {bogus}/{} rows have type_id > 64 (e.g. 0x{:08X}) — these rows are byte-swapped.\n\
+             \x20     Endianness detection failed for this WAD; the measurements below are MEANINGLESS.",
+            ar.aset.len(),
+            ar.aset.iter().find(|e| e.type_id > 64).map(|e| e.type_id).unwrap_or(0),
+        );
+    }
+    println!();
 
     // ---- 1. named ground truth -------------------------------------------------------------
     for n in &names {
