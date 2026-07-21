@@ -10,7 +10,26 @@ use std::collections::HashMap;
 
 /// Shipped-Mercs2 baseline for the bone-distance check.
 pub const SHIPPED_BONE_DISTANCE: (f64, f64, f64) = (0.136, 0.124, 0.328); // mean, median, p95
-pub const STRIP_TRI_CAP: usize = 10900; // model_inject::to_strip costs 6.0 indices/triangle
+/// Hard format ceiling: IBUF indices are u16 (`model_inject.rs:813`), so no single draw group
+/// may exceed this many indices — and no mesh more than this many vertices.
+pub const U16_INDEX_CEILING: usize = 65535;
+
+/// Stale: 65535/6, i.e. the u16 ceiling divided by the flat 6.0 idx/tri the NAIVE
+/// `model_inject::to_strip` costs. It is not a game limit and not a per-model limit. Kept only
+/// so external callers still resolve; the `tris` check now measures the real encoder cost.
+#[deprecated(note = "measure strip_index_cost() instead - the cap is per-group and encoder-dependent")]
+pub const STRIP_TRI_CAP: usize = 10900;
+
+/// Index cost of this triangle set under the adjacency strip encoder actually used to write
+/// dense meshes (`to_strip_connected`), which chains shared-edge runs at ~1 idx/tri inside a run
+/// and measures ~2.8 idx/tri over a whole character.
+pub fn strip_index_cost(indices: &[u32]) -> usize {
+    let tris: Vec<[u32; 3]> = indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    if tris.is_empty() {
+        return 0;
+    }
+    crate::model_inject::to_strip_connected(&tris).len()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -439,8 +458,29 @@ pub fn validate(
         Limit {
             id: "tris",
             title: "Triangles",
-            ok: cs.stats.tris <= STRIP_TRI_CAP,
-            text: format!("{} / {}", cs.stats.tris, STRIP_TRI_CAP),
+            // The real ceiling is the u16 INDEX buffer (65535), not a triangle count. What a
+            // model costs depends entirely on which encoder writes it: the naive per-triangle
+            // `to_strip` burns a flat 6.0 idx/tri, while the adjacency `to_strip_connected`
+            // measures ~2.8 on real characters. Measure this mesh rather than assume either.
+            // Over-budget is not fatal: `inject_parts_into_donor_block` partitions a dense mesh
+            // across several host groups, so this ceiling is PER GROUP, not per model.
+            ok: strip_index_cost(indices) <= U16_INDEX_CEILING,
+            text: {
+                let ic = strip_index_cost(indices);
+                let per = ic as f64 / cs.stats.tris.max(1) as f64;
+                format!(
+                    "{} tris -> {} idx ({:.2}/tri) / {} u16 ceiling{}",
+                    cs.stats.tris,
+                    ic,
+                    per,
+                    U16_INDEX_CEILING,
+                    if ic > U16_INDEX_CEILING {
+                        format!(" - needs {} groups", ic.div_ceil(U16_INDEX_CEILING))
+                    } else {
+                        String::new()
+                    }
+                )
+            },
         },
         Limit {
             id: "influence",

@@ -55,7 +55,11 @@ pub struct ExternalMesh {
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
     pub tris: Vec<[u32; 3]>,
-    /// Per-vertex BLENDINDICES (global bone indices). Empty => rigid bone-0 fallback.
+    /// Per-vertex BLENDINDICES. Empty => rigid bone-0 fallback. For a rigid prop these are
+    /// GLOBAL bone indices; for a faithful CHARACTER they must be PER-GROUP PALETTE-RELATIVE
+    /// slots produced by [`crate::char_skin`] and injected via
+    /// [`inject_character_into_donor_block`] (which also writes the matching `INFO(56)` range
+    /// table). Do NOT hand-author global indices for a character group.
     pub joints: Vec<[u8; 4]>,
     /// Per-vertex BLENDWEIGHT (u8x4n, 0xFF=1.0). Empty => rigid [0xff,0,0,0] fallback.
     pub weights: Vec<[u8; 4]>,
@@ -824,88 +828,6 @@ pub fn extract_group_mesh(
     Ok(m)
 }
 
-/// CROSS-SKELETON INVERSE-BIND RE-POSE (the reusable kitbash deformation fix).
-///
-/// A borrowed part's vertices are stored in the SOURCE skeleton's bind/model
-/// space and are bound to SOURCE bones. If we simply remap the bone INDICES to the
-/// donor (mattias) and inject, the engine skins those verts with the donor bones'
-/// `InvBind_M · BoneAnim_M` — but the verts live in the SOURCE bind frame, so the
-/// `InvBind_M` factor is wrong and the part COLLAPSES the moment a bone moves off
-/// bind. This driver re-poses every vertex into the DONOR bind frame so that
-/// donor-rig skinning reproduces the part's intended shape and deforms rigidly:
-///
-/// ```text
-///   v' = Σ_b  w_b · ( World_M[map(b)] · InvBind_S[b] ) · v
-///   n' = normalize( Σ_b  w_b · R3x3( World_M[map(b)] · InvBind_S[b] ) · n )
-/// ```
-///
-/// where `World_M[map(b)]` is the donor bone's world-bind, `InvBind_S[b]` the
-/// inverse of the SOURCE bone's world-bind, and `map()` the SAME bone-hash match
-/// (with parent fallback) used to remap the indices afterwards. `mesh.joints` MUST
-/// still carry SOURCE bone indices when this is called (run BEFORE the index
-/// remap). Weights are untouched. Per-influence matrices are weight-blended per
-/// vertex (linear blend skinning), exactly mirroring the engine.
-///
-/// `map[b]` is the donor bone index for source bone `b` (length = source bone
-/// count). Returns the part bbox after re-pose. GENERALISES to any known-good part
-/// on any donor: supply the source/donor skeletons and the index map.
-pub fn repose_part_cross_skeleton(
-    mesh: &mut ExternalMesh,
-    src: &crate::skeleton::Skeleton,
-    dst: &crate::skeleton::Skeleton,
-    map: &[usize],
-) -> ([f32; 3], [f32; 3]) {
-    use crate::skeleton::{affine_inverse, mat4_mul, transform_dir, transform_point};
-    // Per-source-bone re-pose matrix M[b] = World_M[map(b)] · InvBind_S[b]
-    // (row-vector convention: p' = p @ InvBind_S @ World_M).
-    let n_src = src.bones.len();
-    let mut rep: Vec<[[f32; 4]; 4]> = Vec::with_capacity(n_src);
-    for b in 0..n_src {
-        let inv_s = affine_inverse(&src.bones[b].world);
-        let world_m = dst.bones[map[b.min(map.len() - 1)]].world;
-        rep.push(mat4_mul(&inv_s, &world_m));
-    }
-    let mut bmin = [f32::INFINITY; 3];
-    let mut bmax = [f32::NEG_INFINITY; 3];
-    for i in 0..mesh.positions.len() {
-        let p = mesh.positions[i];
-        let (joints, weights) = if mesh.joints.is_empty() {
-            ([0u8; 4], [255u8, 0, 0, 0])
-        } else {
-            (mesh.joints[i], mesh.weights[i])
-        };
-        let wsum: u32 = weights.iter().map(|&w| w as u32).sum();
-        let wsum = if wsum == 0 { 255 } else { wsum } as f32;
-        let mut acc = [0.0f32; 3];
-        let mut nacc = [0.0f32; 3];
-        let nrm = mesh.normals[i];
-        for k in 0..4 {
-            if weights[k] == 0 {
-                continue;
-            }
-            let w = weights[k] as f32 / wsum;
-            let b = joints[k] as usize;
-            let m = &rep[b.min(n_src - 1)];
-            let pp = transform_point(m, p);
-            let nn = transform_dir(m, nrm);
-            for j in 0..3 {
-                acc[j] += w * pp[j];
-                nacc[j] += w * nn[j];
-            }
-        }
-        mesh.positions[i] = acc;
-        let l = (nacc[0] * nacc[0] + nacc[1] * nacc[1] + nacc[2] * nacc[2])
-            .sqrt()
-            .max(1e-8);
-        mesh.normals[i] = [nacc[0] / l, nacc[1] / l, nacc[2] / l];
-        for j in 0..3 {
-            bmin[j] = bmin[j].min(acc[j]);
-            bmax[j] = bmax[j].max(acc[j]);
-        }
-    }
-    (bmin, bmax)
-}
-
 /// Cost (in strip indices) of a degenerate-stitched strip over `n` triangles.
 #[allow(dead_code)]
 fn strip_index_cost(n: usize) -> usize {
@@ -962,11 +884,65 @@ pub struct InjectPart<'a> {
 ///   * `false` (WHOLE-MODEL-REPLACE mode): neutralise every non-host drawing group
 ///     (zero its PRMT draw-count) — the legacy cesium/mannequin behaviour where the
 ///     injected mesh legitimately REPLACES the entire model.
+/// The ordinals of the donor's DRAWING groups (those that actually render), in PRMG descriptor
+/// order — the valid `hosts` for [`inject_parts_into_donor_block`]. Same indexing as
+/// [`crate::texture::group_material_indices`], so `gmi[ord]` is host `ord`'s material. Empty on a
+/// non-UCFX block.
+pub fn drawing_group_ordinals(container_block: &[u8]) -> Vec<usize> {
+    if container_block.len() < 20 {
+        return Vec::new();
+    }
+    let ucfx_len = read_u32_le(container_block, 16) as usize;
+    if 20 + ucfx_len > container_block.len() {
+        return Vec::new();
+    }
+    let ucfx = &container_block[20..20 + ucfx_len];
+    if ucfx.len() < 4 || &ucfx[0..4] != b"UCFX" {
+        return Vec::new();
+    }
+    let (data_off, _ndesc, rows) = parse_rows(ucfx);
+    let groups = find_groups(&rows);
+    (0..groups.len())
+        .filter(|&gi| group_draws(ucfx, data_off, &rows, &groups[gi]))
+        .collect()
+}
+
+/// Per drawing group: `(ordinal, vertex_capacity, triangle_capacity)`. Triangle capacity =
+/// index-buffer length / 3 — the hard cap `inject_parts_into_donor_block` enforces per host. Same
+/// ordinal space as [`drawing_group_ordinals`] / [`crate::texture::group_material_indices`].
+pub fn drawing_group_caps(container_block: &[u8]) -> Vec<(usize, u32, u32)> {
+    if container_block.len() < 20 {
+        return Vec::new();
+    }
+    let ucfx_len = read_u32_le(container_block, 16) as usize;
+    if 20 + ucfx_len > container_block.len() {
+        return Vec::new();
+    }
+    let ucfx = &container_block[20..20 + ucfx_len];
+    if ucfx.len() < 4 || &ucfx[0..4] != b"UCFX" {
+        return Vec::new();
+    }
+    let (data_off, _ndesc, rows) = parse_rows(ucfx);
+    let groups = find_groups(&rows);
+    (0..groups.len())
+        .filter(|&gi| group_draws(ucfx, data_off, &rows, &groups[gi]))
+        .map(|gi| {
+            let (vc, ic) = donor_group_caps(ucfx, data_off, &rows, &groups[gi]);
+            (gi, vc, ic / 3)
+        })
+        .collect()
+}
+
 pub fn inject_parts_into_donor_block(
     container_block: &[u8],
     parts: &[InjectPart],
     new_name_hash: u32,
     preserve_native_non_host: bool,
+    grow: bool,
+    // SEGM record indices (INDX[group]) whose `state_mask` should get bit 0x01 OR-ed in, so the
+    // group draws at the default LOD/view-state (else geometry injected into a non-LOD0 tier is
+    // gated out at load). Empty = leave SEGM alone.
+    promote_segm: &[usize],
 ) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
     if container_block.len() < 20 {
         return Err("block too small".into());
@@ -1035,7 +1011,7 @@ pub fn inject_parts_into_donor_block(
                 let new_verts = t.iter().filter(|v| !c.remap.contains_key(v)).count();
                 let next_vc = c.remap.len() + new_verts;
                 let next_ic_lb = strip_index_cost_connected(c.tris.len() + 1);
-                if next_vc as u32 > donor_vc || next_ic_lb as u32 > donor_ic {
+                if !grow && (next_vc as u32 > donor_vc || next_ic_lb as u32 > donor_ic) {
                     break;
                 }
                 for &v in &t {
@@ -1115,7 +1091,7 @@ pub fn inject_parts_into_donor_block(
             let vb = encode_strm(&lm, &tans);
             let vc = local_n as u32;
             let ic = strip.len() as u32;
-            if vc > *donor_vc || ic > *donor_ic {
+            if !grow && (vc > *donor_vc || ic > *donor_ic) {
                 return Err(format!("host {gi} budget violated: vc {vc}>{donor_vc} or ic {ic}>{donor_ic}"));
             }
             let mut ib = Vec::with_capacity(strip.len() * 2);
@@ -1132,9 +1108,13 @@ pub fn inject_parts_into_donor_block(
             new_bodies.insert(g.strm_data, vb);
             new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
             new_bodies.insert(g.ibuf_data, ib);
-            let nrec = leaf(ucfx, data_off, &rows[g.prmt]).len() / 16;
+            let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
+            let nrec = (prmt_old.len() / 16).max(1);
+            // PRESERVE the donor group's PRMT field0 (material/group tag) — hardcoding it (was `6`)
+            // mis-tags the grown group so the reader skips it as an accessory (the 138-vert bug).
+            let field0 = if prmt_old.len() >= 4 { read_u32_le(prmt_old, 0) } else { 6 };
             let mut rec = Vec::with_capacity(16);
-            rec.extend_from_slice(&6u32.to_le_bytes());
+            rec.extend_from_slice(&field0.to_le_bytes());
             rec.extend_from_slice(&0u32.to_le_bytes());
             rec.extend_from_slice(&(ic - 2).to_le_bytes());
             rec.extend_from_slice(&((vc - 1) as u16).to_le_bytes());
@@ -1144,6 +1124,38 @@ pub fn inject_parts_into_donor_block(
                 prmt_body.extend_from_slice(&rec);
             }
             new_bodies.insert(g.prmt, prmt_body);
+            // This group's PRMG INFO cull bounds -> fit the (possibly grown) injected geometry.
+            // Without this the donor's tiny original bounds cull our higher-poly mesh at load
+            // (the grow-mode 138-vert bug). Mirrors inject_static_into_donor_block.
+            {
+                let mut gbmin = [f32::INFINITY; 3];
+                let mut gbmax = [f32::NEG_INFINITY; 3];
+                for p in &lm.positions {
+                    for k in 0..3 {
+                        gbmin[k] = gbmin[k].min(p[k]);
+                        gbmax[k] = gbmax[k].max(p[k]);
+                    }
+                }
+                let gcen = [(gbmin[0] + gbmax[0]) * 0.5, (gbmin[1] + gbmax[1]) * 0.5, (gbmin[2] + gbmax[2]) * 0.5];
+                let grad = {
+                    let (dx, dy, dz) = ((gbmax[0] - gbmin[0]) * 0.5, (gbmax[1] - gbmin[1]) * 0.5, (gbmax[2] - gbmin[2]) * 0.5);
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                };
+                if let Some(pir) =
+                    (0..g.strm_info).rev().find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+                {
+                    let mut pi = leaf(ucfx, data_off, &rows[pir]).to_vec();
+                    if pi.len() >= 52 {
+                        for k in 0..3 {
+                            pi[20 + k * 4..24 + k * 4].copy_from_slice(&gcen[k].to_le_bytes());
+                            pi[36 + k * 4..40 + k * 4].copy_from_slice(&gbmin[k].to_le_bytes());
+                            pi[48 + k * 4..52 + k * 4].copy_from_slice(&gbmax[k].to_le_bytes());
+                        }
+                        pi[32..36].copy_from_slice(&grad.to_le_bytes());
+                        new_bodies.insert(pir, pi);
+                    }
+                }
+            }
             audits.push(GroupBudgetAudit { group: *gi, injected_vc: vc, donor_vc: *donor_vc, injected_ic: ic, donor_ic: *donor_ic, triangles: chunk.tris.len() });
             for p in &lm.positions {
                 for k in 0..3 {
@@ -1231,6 +1243,25 @@ pub fn inject_parts_into_donor_block(
     stats.vertex_count = tot_v;
     stats.avg_normal_len = (tot_nl / tot_v.max(1) as f64) as f32;
     stats.avg_tangent_len = (tot_tl / tot_v.max(1) as f64) as f32;
+
+    // SEGM LOD-promotion: OR bit 0x01 into the state_mask of each named SEGM record so the injected
+    // host groups draw at the default view-state. SEGM records are 4 bytes {u16 bone, u8 seg_id, u8
+    // state_mask}; the mask is byte +3. Draw gate = ANY-bit overlap of state_mask with view_state.
+    if !promote_segm.is_empty() {
+        if let Some(segm_row) = rows.iter().position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF) {
+            let mut segm = new_bodies
+                .get(&segm_row)
+                .cloned()
+                .unwrap_or_else(|| leaf(ucfx, data_off, &rows[segm_row]).to_vec());
+            for &si in promote_segm {
+                let o = si * 4 + 3;
+                if o < segm.len() {
+                    segm[o] |= 0x01;
+                }
+            }
+            new_bodies.insert(segm_row, segm);
+        }
+    }
 
     let block = reassemble(ucfx, &mut rows, ndesc, data_off, &new_bodies, model_type, new_name_hash);
     assert_no_empty_drawing_group(&block)
@@ -1790,6 +1821,48 @@ pub fn inject_into_donor_block(
     repoints: &[MtrlRepoint],
     new_name_hash: u32,
 ) -> Result<(Vec<u8>, InjectStats), String> {
+    inject_into_donor_block_impl(
+        container_block,
+        mesh,
+        target_group_ordinal,
+        repoints,
+        new_name_hash,
+        None,
+    )
+}
+
+/// Faithful CHARACTER injection: like [`inject_into_donor_block`], but the target group is
+/// authored as a SKIN group — `mesh.joints` carry **palette-relative** BLENDINDICES and the
+/// group's `INFO(56)` leaf is rewritten with the `ranges` palette table (`{u16 base, u16
+/// count}`), the exact inverse of the expand in [`crate::model_cubeize`]. Produce `mesh` +
+/// `ranges` with [`crate::char_skin::build_character`] (positions already re-posed, joints =
+/// its palette slots, weights = its 255-normalised BLENDWEIGHT).
+pub fn inject_character_into_donor_block(
+    container_block: &[u8],
+    mesh: &ExternalMesh,
+    ranges: &[(u16, u16)],
+    target_group_ordinal: usize,
+    repoints: &[MtrlRepoint],
+    new_name_hash: u32,
+) -> Result<(Vec<u8>, InjectStats), String> {
+    inject_into_donor_block_impl(
+        container_block,
+        mesh,
+        target_group_ordinal,
+        repoints,
+        new_name_hash,
+        Some(ranges),
+    )
+}
+
+fn inject_into_donor_block_impl(
+    container_block: &[u8],
+    mesh: &ExternalMesh,
+    target_group_ordinal: usize,
+    repoints: &[MtrlRepoint],
+    new_name_hash: u32,
+    skin_palette: Option<&[(u16, u16)]>,
+) -> Result<(Vec<u8>, InjectStats), String> {
     // ---- unwrap the 20-byte WAD block wrapper ----
     if container_block.len() < 20 {
         return Err("block too small".into());
@@ -1826,9 +1899,23 @@ pub fn inject_into_donor_block(
     if mesh.positions.len() > 65534 {
         return Err(format!("vertex count {} exceeds u16", mesh.positions.len()));
     }
-    let strip = to_strip(&mesh.tris);
+    // The naive per-triangle strip costs a flat 6.0 indices/triangle, which overflows the u16
+    // IBUF at ~10.9k triangles. That is an encoder artifact, not a format limit: the adjacency
+    // strip chains shared-edge runs (~1 idx/tri inside a run, ~2.8 measured over a whole
+    // character) and reproduces the identical triangle set. Only reach for it when the naive
+    // encoding would not fit, so every mesh that already injected keeps its exact bytes.
+    let mut strip = to_strip(&mesh.tris);
     if strip.len() > 65534 {
-        return Err(format!("strip length {} exceeds u16", strip.len()));
+        strip = to_strip_connected(&mesh.tris);
+    }
+    if strip.len() > 65534 {
+        return Err(format!(
+            "strip length {} exceeds u16 even adjacency-stripped ({} tris); split across \
+             {} groups via inject_parts_into_donor_block",
+            strip.len(),
+            mesh.tris.len(),
+            strip.len().div_ceil(65534)
+        ));
     }
     // self-verify the strip reproduces the triangle set
     {
@@ -1896,6 +1983,21 @@ pub fn inject_into_donor_block(
         prmt_body.extend_from_slice(&rec);
     }
     new_bodies.insert(g.prmt, prmt_body);
+
+    // ---- SKIN palette: author the group's INFO(56) range table ----
+    // For a faithful character the BLENDINDICES in `mesh.joints` are PALETTE-RELATIVE; the
+    // group's INFO(56) leaf must carry the `{u16 hier_base, u16 count}` table the reader
+    // (model_cubeize) expands. The leaf is the nearest INFO before this group's strm_info
+    // (same locate rule inject_parts uses). Preserve its header (+0..20), rewrite +20/+24.
+    if let Some(ranges) = skin_palette {
+        let info_row = (0..g.strm_info)
+            .rev()
+            .find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+            .ok_or("SKIN inject: group has no INFO(56) leaf before strm_info")?;
+        let mut info = leaf(ucfx, data_off, &rows[info_row]).to_vec();
+        crate::char_skin::patch_skin_info56(&mut info, ranges)?;
+        new_bodies.insert(info_row, info);
+    }
 
     // ---- neutralise every OTHER drawing group (zero PRMT draw counts) ----
     for &gi in &drawing {
@@ -2516,6 +2618,120 @@ pub fn inject_static_into_donor_block(
 mod tests {
     use super::*;
 
+    /// Minimal UCFX with an INFO header (node count @0x20) + a HIER chunk of `positions.len()`
+    /// nodes, node i parent = `parents[i]` (0xFFFF root), identity-rotation world at `positions[i]`.
+    fn build_hier_donor(positions: &[[f32; 3]], parents: &[i32]) -> Vec<u8> {
+        let stride = crate::skeleton::HIER_NODE_STRIDE;
+        let n = positions.len();
+        let mut top = vec![0u8; 72];
+        top[0x20..0x24].copy_from_slice(&(n as u32).to_le_bytes());
+        // world = local·parent, so LOCAL = translation relative to parent's world position.
+        let mut hier = vec![0u8; n * stride];
+        for i in 0..n {
+            let o = i * stride;
+            hier[o..o + 4].copy_from_slice(&(0x1000_0000u32 + i as u32).to_le_bytes());
+            hier[o + 4..o + 8].copy_from_slice(&((0xFFFFu32 << 16) | 1).to_le_bytes());
+            let p = parents[i];
+            hier[o + 8..o + 10]
+                .copy_from_slice(&(if p < 0 { 0xFFFFu16 } else { p as u16 }).to_le_bytes());
+            hier[o + 10..o + 12].copy_from_slice(&0xFFFFu16.to_le_bytes());
+            let ppos = if p < 0 { [0.0; 3] } else { positions[p as usize] };
+            let mut m = [[0.0f32; 4]; 4];
+            for d in 0..4 {
+                m[d][d] = 1.0;
+            }
+            for d in 0..3 {
+                m[3][d] = positions[i][d] - ppos[d];
+            }
+            for r in 0..4 {
+                for c in 0..4 {
+                    let off = o + 16 + (r * 4 + c) * 4;
+                    hier[off..off + 4].copy_from_slice(&m[r][c].to_le_bytes());
+                }
+            }
+        }
+        // emit UCFX with two chunks: INFO(row0), HIER
+        let ndesc = 2usize;
+        let data_off = 20 + ndesc * 20;
+        let mut data = Vec::new();
+        let info_off = data.len() as u32;
+        data.extend_from_slice(&top);
+        let hier_off = data.len() as u32;
+        data.extend_from_slice(&hier);
+        let mut out = Vec::new();
+        out.extend_from_slice(b"UCFX");
+        out.extend_from_slice(&(data_off as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(ndesc as u32).to_le_bytes());
+        for (tag, off, sz) in
+            [(b"INFO", info_off, top.len() as u32), (b"HIER", hier_off, hier.len() as u32)]
+        {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&off.to_le_bytes());
+            out.extend_from_slice(&sz.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+        }
+        out.extend_from_slice(&data);
+        let csum = crc32_mercs2(&out);
+        out.extend_from_slice(b"CSUM");
+        out.extend_from_slice(&csum.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn append_new_bones_grows_hier_and_links() {
+        // root(0) -> body(1) at (0,0,0); rotor(2) at (0,8,0)
+        let donor =
+            build_hier_donor(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 8.0, 0.0]], &[-1, 0, 0]);
+        let base = crate::skeleton::Skeleton::from_block(&wrap_block(&donor, 0)).unwrap();
+        assert_eq!(base.bones.len(), 3);
+
+        // add a static bone under body(1) at (1,2,3) and a rotor-child bone under rotor(2) at (0,9,0)
+        let bones = [
+            NewBone {
+                name_hash: 0xAAAA_0001,
+                parent: 1,
+                world_pos: [1.0, 2.0, 3.0],
+                local_aabb: ([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]),
+            },
+            NewBone {
+                name_hash: 0xAAAA_0002,
+                parent: 2,
+                world_pos: [0.0, 9.0, 0.0],
+                local_aabb: ([-1.0, 0.0, -1.0], [1.0, 1.0, 1.0]),
+            },
+        ];
+        let (out, idx) = append_new_bones(&donor, &bones).unwrap();
+        assert_eq!(idx, vec![3, 4]);
+
+        // header node count bumped
+        let (data_off, _n, rows) = parse_rows(&out);
+        let top = leaf(&out, data_off, &rows[0]);
+        assert_eq!(read_u32_le(top, 0x20), 5);
+
+        // re-parse: new bones exist at the requested WORLD positions with the right parents
+        let sk = crate::skeleton::Skeleton::from_block(&wrap_block(&out, 0)).unwrap();
+        assert_eq!(sk.bones.len(), 5);
+        assert_eq!(sk.bones[3].parent, 1);
+        assert_eq!(sk.bones[4].parent, 2);
+        let wp3 = sk.bones[3].world_pos();
+        let wp4 = sk.bones[4].world_pos();
+        assert!((wp3[0] - 1.0).abs() < 1e-4 && (wp3[1] - 2.0).abs() < 1e-4 && (wp3[2] - 3.0).abs() < 1e-4, "bone3 {wp3:?}");
+        assert!((wp4[1] - 9.0).abs() < 1e-4, "bone4 {wp4:?}");
+        assert_eq!(sk.bones[3].name_hash, 0xAAAA_0001);
+
+        // parent's first-child link now points at the prepended new bone
+        let stride = crate::skeleton::HIER_NODE_STRIDE;
+        let hier = rows.iter().position(|r| &r.tag == b"HIER" && r.u0 != 0xFFFF_FFFF).unwrap();
+        let hbody = leaf(&out, data_off, &rows[hier]);
+        let body_first_child = u16::from_le_bytes([hbody[1 * stride + 6], hbody[1 * stride + 7]]);
+        assert_eq!(body_first_child, 3, "body(1) first-child should be new bone 3");
+        let new_sibling = u16::from_le_bytes([hbody[3 * stride + 10], hbody[3 * stride + 11]]);
+        assert_eq!(new_sibling, 0xFFFF, "bone3 next-sibling = body's old (none)");
+    }
+
     #[test]
     fn f16_roundtrip() {
         for v in [-1.834f32, 0.0, 0.5, 1.0, 1.2176, -0.131] {
@@ -2643,6 +2859,61 @@ mod tests {
         assert_eq!(rows[groups[0].strm_decl].size, 64);
         let si = leaf(ucfx, data_off, &rows[groups[0].strm_info]);
         assert_eq!(read_u32_le(si, 4), 40);
+    }
+
+    /// Full byte round-trip for the faithful character path: inject PALETTE-RELATIVE
+    /// BLENDINDICES + a SKIN `INFO(56)` range table, read the block back with
+    /// `model_cubeize` (the proven reader), and assert the decoded GLOBAL joints equal the
+    /// palette expansion. Writer = the exact inverse of the reader, proven end-to-end
+    /// through real bytes (not just the algorithm).
+    #[test]
+    fn inject_character_palette_roundtrips_through_reader() {
+        let block = build_synthetic_donor();
+        // palette range table: two runs → global HIER {3} and {20,21,22}. slots: 3→0,
+        // 20→1, 21→2, 22→3.
+        let ranges: Vec<(u16, u16)> = vec![(3, 1), (20, 3)];
+        let palette = crate::char_skin::expand_ranges(&ranges); // [3,20,21,22]
+        // three verts, each single-influence on a distinct palette SLOT.
+        let vjoint_slots = [[0u8, 0, 0, 0], [2, 0, 0, 0], [3, 0, 0, 0]];
+        let mesh = ExternalMesh {
+            positions: vec![[0.0, 0.0, 0.0], [0.5, 1.0, 0.1], [-0.5, 0.8, -0.1]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]],
+            tris: vec![[0, 1, 2]],
+            joints: vjoint_slots.to_vec(),
+            weights: vec![[0xff, 0, 0, 0]; 3],
+        };
+        let (out, _stats) = inject_character_into_donor_block(
+            &block,
+            &mesh,
+            &ranges,
+            0,
+            &[],
+            0xC15489A1,
+        )
+        .expect("character inject");
+
+        let ulen = read_u32_le(&out, 16) as usize;
+        let ucfx = &out[20..20 + ulen];
+        // CSUM must still verify after the INFO(56) rewrite
+        let body = &ucfx[..ucfx.len() - 8];
+        assert_eq!(crc32_mercs2(body), read_u32_le(ucfx, ucfx.len() - 4), "CSUM");
+
+        // The reader expands the INFO(56) palette and returns GLOBAL joints.
+        let meshes = crate::model_cubeize::read_model_meshes(ucfx).expect("read back");
+        let g0 = meshes
+            .iter()
+            .find(|m| m.group_index == 0)
+            .expect("group 0 in readback");
+        assert_eq!(g0.joints.len(), 3, "vertex count");
+        for (vi, slots) in vjoint_slots.iter().enumerate() {
+            let expected_global = palette[slots[0] as usize];
+            assert_eq!(
+                g0.joints[vi][0] as u16, expected_global,
+                "vertex {vi}: reader decoded slot {} to {} (expected global {expected_global})",
+                slots[0], g0.joints[vi][0]
+            );
+        }
     }
 
     /// Multi-group split: a mesh too big for one synthetic group is partitioned
@@ -3481,9 +3752,12 @@ pub fn inject_parts_into_template(
                 if !(1..=10).contains(&texc) {
                     break;
                 }
-                // ★slot 0 = diffuse, slot 1 = NORMAL map, slot 2 = specular (the `_dm`/`_nm`/`_sm`
-                // naming convention). Writing only the diffuse leaves the DONOR's normal map bound,
-                // and the shader then samples the donor's normals through OUR UV layout -> garbage
+                // ★slot 0 = diffuse (`_dm`), slot 1 = specular (`_sm`), slot 2 = normal (`_nm`,
+                // DXT5nm) — verified 2026-07-19 by decoding a donor MTRL and hash-matching its slot
+                // hashes to `<name>_sm`/`<name>_nm` (matches MtrlMaterial::specular; the earlier
+                // "slot 1 = normal" note here was wrong). Writing only the diffuse leaves the DONOR's
+                // normal map bound, and the shader then samples its normals through OUR UV layout ->
+                // garbage
                 // per-pixel normals -> flat armour renders as CRUMPLED, creased, blotchy metal.
                 // Every slot a part uses must be repointed, not just slot 0.
                 for &(i, slot, tex) in mtrl_sets.iter().filter(|(i, _, _)| *i == idx) {
@@ -3570,6 +3844,593 @@ pub fn inject_parts_into_template(
     assert_no_empty_drawing_group(&wrap_block(&out, new_name_hash))
         .map_err(|e| format!("post-build drawing-group gate FAILED: {e}"))?;
     Ok((out, stats))
+}
+
+/// A novel leaf HIER node to author into a donor container (see `append_new_bones`).
+pub struct NewBone {
+    /// `pandemic_hash_m2(bone_name)` — name the machine/spin binds to (e.g. `bone_rotor`), or a
+    /// fresh unique hash for a purely structural attachment node.
+    pub name_hash: u32,
+    /// Parent HIER node index. May be an existing donor node OR an earlier bone in this same call
+    /// (its index = old_node_count + its position in the slice), so a small novel sub-tree is legal.
+    pub parent: usize,
+    /// World-rest position (identity rotation). The bone attaches its part here; a part bound to it
+    /// draws in this node's LOCAL space and rides the node's motion (parent it under the donor's
+    /// engine-spun rotor node and it spins).
+    pub world_pos: [f32; 3],
+    /// The bound part's AABB in this node's LOCAL space (min, max) — written into the node's cull
+    /// box (@0x90/@0xA0). Leave a real box or the engine may cull the part. `([0;3],[0;3])` = a
+    /// degenerate box (safe only for a node that hosts no geometry).
+    pub local_aabb: ([f32; 3], [f32; 3]),
+}
+
+/// Author novel **leaf** HIER nodes into a raw UCFX model container — the primitive behind a
+/// "fresh skeleton" import (novel bones at each part's position) that does NOT overwrite an existing
+/// vehicle. Each new node is APPENDED (so every existing node index — and the hash-addressed
+/// destruction/spin machine that binds to it — stays valid) and PREPENDED into its parent's
+/// first-child / next-sibling list (so subtree traversal, SHOW/HIDE and culling still reach it).
+///
+/// Record layout authored (176-byte stride, verified against the retail Mi-26 container):
+/// `@0` name hash · `@4` `first_child<<16 | 1` (0xFFFF = leaf) · `@8` parent u16 · `@10` next
+/// sibling u16 · `@16` LOCAL 4×4 (row-major, translation row 3) · `@80` inverse-bind (= inv(world))
+/// · `@144` min+1.0 · `@160` max+1.0. The header INFO node count (`@0x20`) is bumped.
+///
+/// Returns the new raw UCFX (`UCFX`..`CSUM`, same form `inject_parts_into_template` consumes) and
+/// the assigned node indices (aligned to `bones`). Bones parent-before-child is the caller's job
+/// (a bone may only parent an EARLIER slice entry).
+pub fn append_new_bones(ucfx: &[u8], bones: &[NewBone]) -> Result<(Vec<u8>, Vec<usize>), String> {
+    if ucfx.len() < 20 || &ucfx[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
+    }
+    if bones.is_empty() {
+        return Ok((ucfx.to_vec(), Vec::new()));
+    }
+    let (data_off, ndesc, mut rows) = parse_rows(ucfx);
+    let hi = rows
+        .iter()
+        .position(|r| &r.tag == b"HIER" && r.u0 != 0xFFFF_FFFF)
+        .ok_or("no HIER chunk")?;
+    let stride = crate::skeleton::HIER_NODE_STRIDE; // 176
+    let mut hier = leaf(ucfx, data_off, &rows[hi]).to_vec();
+    let old_n = hier.len() / stride;
+
+    // World-rest matrices of the EXISTING nodes (needed to derive each new node's LOCAL from its
+    // parent's world). New nodes' worlds are identity-rotation translations we set below.
+    let skel = crate::skeleton::Skeleton::from_block(&wrap_block(ucfx, 0))
+        .map_err(|e| format!("HIER did not parse for world-rest derivation: {e}"))?;
+    let mut worlds: Vec<[[f32; 4]; 4]> = skel.bones.iter().map(|b| b.world).collect();
+    if worlds.len() != old_n {
+        return Err(format!("HIER node count mismatch: {} bytes vs {} parsed", old_n, worlds.len()));
+    }
+
+    let write_mat = |buf: &mut [u8], o: usize, m: &[[f32; 4]; 4]| {
+        for r in 0..4 {
+            for c in 0..4 {
+                let off = o + (r * 4 + c) * 4;
+                buf[off..off + 4].copy_from_slice(&m[r][c].to_le_bytes());
+            }
+        }
+    };
+
+    let mut indices = Vec::with_capacity(bones.len());
+    for (k, nb) in bones.iter().enumerate() {
+        let ni = old_n + k;
+        if nb.parent >= ni {
+            return Err(format!(
+                "new bone {k} parent {} must be an existing node or an earlier new bone (< {ni})",
+                nb.parent
+            ));
+        }
+        // world (identity rotation, translation = world_pos)
+        let mut wm = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            wm[i][i] = 1.0;
+        }
+        wm[3][0] = nb.world_pos[0];
+        wm[3][1] = nb.world_pos[1];
+        wm[3][2] = nb.world_pos[2];
+        worlds.push(wm);
+        let pw = worlds[nb.parent];
+        let local = crate::skeleton::mat4_mul(&wm, &crate::skeleton::affine_inverse(&pw));
+        let inv_bind = crate::skeleton::affine_inverse(&wm);
+
+        // append a fresh record
+        let base = hier.len();
+        hier.extend(std::iter::repeat(0u8).take(stride));
+        let rec = &mut hier[base..base + stride];
+        rec[0..4].copy_from_slice(&nb.name_hash.to_le_bytes());
+        // @4: first_child = none (leaf) | flag 1
+        rec[4..8].copy_from_slice(&((0xFFFFu32 << 16) | 0x0001).to_le_bytes());
+        rec[8..10].copy_from_slice(&(nb.parent as u16).to_le_bytes());
+        // @10 next_sibling is set below (prepend into parent's child list); @12/@14 stay 0.
+        rec[10..12].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        write_mat(rec, 16, &local);
+        write_mat(rec, 80, &inv_bind);
+        let (mn, mx) = nb.local_aabb;
+        for j in 0..3 {
+            rec[144 + j * 4..148 + j * 4].copy_from_slice(&mn[j].to_le_bytes());
+            rec[160 + j * 4..164 + j * 4].copy_from_slice(&mx[j].to_le_bytes());
+        }
+        rec[156..160].copy_from_slice(&1.0f32.to_le_bytes());
+        rec[172..176].copy_from_slice(&1.0f32.to_le_bytes());
+
+        // Prepend into parent's first-child / next-sibling list.
+        let po = nb.parent * stride;
+        let parent_first_child = u16::from_le_bytes([hier[po + 6], hier[po + 7]]);
+        hier[base + 10..base + 12].copy_from_slice(&parent_first_child.to_le_bytes());
+        hier[po + 6..po + 8].copy_from_slice(&(ni as u16).to_le_bytes());
+
+        indices.push(ni);
+    }
+
+    // Bump header INFO node count (@0x20).
+    let mut top = leaf(ucfx, data_off, &rows[0]).to_vec();
+    if top.len() < 0x24 {
+        return Err("header INFO too small for node count".into());
+    }
+    top[0x20..0x24].copy_from_slice(&((old_n + bones.len()) as u32).to_le_bytes());
+
+    // Reassemble raw UCFX (reflow offsets + CSUM), same emission as inject_parts_into_template.
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    new_bodies.insert(hi, hier);
+    new_bodies.insert(0, top);
+    let mut new_data: Vec<u8> = Vec::new();
+    for (idx, r) in rows.iter_mut().enumerate() {
+        if r.u0 == 0xFFFF_FFFF {
+            continue;
+        }
+        let body = match new_bodies.get(&idx) {
+            Some(b) => b.clone(),
+            None => leaf(ucfx, data_off, r).to_vec(),
+        };
+        r.u0 = new_data.len() as u32;
+        r.size = body.len() as u32;
+        new_data.extend_from_slice(&body);
+    }
+    let new_data_off = (20 + ndesc * 20) as u32;
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"UCFX");
+    out.extend_from_slice(&new_data_off.to_le_bytes());
+    out.extend_from_slice(&ucfx[8..16]);
+    out.extend_from_slice(&(ndesc as u32).to_le_bytes());
+    for r in &rows {
+        out.extend_from_slice(&r.tag);
+        out.extend_from_slice(&r.u0.to_le_bytes());
+        out.extend_from_slice(&r.size.to_le_bytes());
+        out.extend_from_slice(&r.u2.to_le_bytes());
+        out.extend_from_slice(&r.u3.to_le_bytes());
+    }
+    out.extend_from_slice(&new_data);
+    let csum = crc32_mercs2(&out);
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&csum.to_le_bytes());
+    Ok((out, indices))
+}
+
+/// Author `n` extra drawing groups into a model container by CLONING the first `MESH` sub-object
+/// under `GEOM`, so a fresh-skeleton import can give MORE parts their own bone than the donor's
+/// resident block happens to ship (each group binds exactly one SEGM row → one bone). The clones are
+/// appended at the end of `GEOM`'s subtree (GEOM is the last top-level chunk), `GEOM`'s subtree
+/// row-count (`x3`) and sub-object count (its `INFO` leaf) are bumped, and one fresh `INDX` entry
+/// (a spare `seg_id`, `SEGM[i].seg_id==i`) is appended per clone. The clones carry the donor mesh's
+/// geometry as a valid placeholder — `inject_parts_into_template` overwrites each with a real part.
+///
+/// Descriptor layout (verified on the Mi-26 resident): `GEOM(marker,x3)[ INFO(count), INDX(u16×k),
+/// MESH(marker,x3=14)[ INFO(1), PRMG(marker,x3=12)[ INFO, STRM{info,decl,data}, AREA{info,data},
+/// IBUF{info,data}, PRMT ] ]… ]`. Container markers carry `u0=0xFFFFFFFF` and `u3 = subtree row
+/// count`; only `GEOM`'s `x3` changes (its children's are byte-identical clones).
+///
+/// Returns the grown raw UCFX and the ordinals of the new drawing groups (in `find_groups` order,
+/// which is `old_group_count .. old_group_count+n`).
+pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>), String> {
+    if ucfx.len() < 20 || &ucfx[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
+    }
+    if n == 0 {
+        let g = find_groups(&parse_rows(ucfx).2).len();
+        return Ok((ucfx.to_vec(), (0..0).map(|_: usize| g).collect()));
+    }
+    let (data_off, ndesc, rows) = parse_rows(ucfx);
+    let is_marker = |r: &Row| r.u0 == 0xFFFF_FFFF;
+
+    // Locate GEOM (top-level marker) and, inside it, its INFO (sub-object count) + INDX + first MESH.
+    let geom = (0..ndesc)
+        .find(|&i| &rows[i].tag == b"GEOM" && is_marker(&rows[i]))
+        .ok_or("no GEOM chunk")?;
+    let geom_end = (geom + 1 + rows[geom].u3 as usize).min(ndesc);
+    let mut geom_info: Option<usize> = None;
+    let mut indx: Option<usize> = None;
+    let mut mesh_start: Option<usize> = None;
+    {
+        // Walk GEOM's DIRECT children (skip nested subtrees via x3).
+        let mut r = geom + 1;
+        while r < geom_end {
+            let row = &rows[r];
+            if is_marker(row) {
+                if &row.tag == b"MESH" && mesh_start.is_none() {
+                    mesh_start = Some(r);
+                }
+                r = (r + 1 + row.u3 as usize).min(geom_end);
+            } else {
+                if &row.tag == b"INFO" && geom_info.is_none() {
+                    geom_info = Some(r);
+                } else if &row.tag == b"INDX" && indx.is_none() {
+                    indx = Some(r);
+                }
+                r += 1;
+            }
+        }
+    }
+    let geom_info = geom_info.ok_or("GEOM has no INFO (sub-object count)")?;
+    let indx = indx.ok_or("GEOM has no INDX")?;
+    let mesh_start = mesh_start.ok_or("GEOM has no MESH sub-object to clone")?;
+    let mesh_len = 1 + rows[mesh_start].u3 as usize; // MESH marker + its subtree
+    if mesh_start + mesh_len > geom_end {
+        return Err("MESH subtree overruns GEOM".into());
+    }
+
+    // Free seg_ids: SEGM[i].seg_id==i, so any index not already named by INDX is a spare row we can
+    // bind. (inject_parts_into_template rebinds SEGM[seg_id].bone for each hosted group.)
+    let segm_row = rows
+        .iter()
+        .position(|r| &r.tag == b"SEGM" && !is_marker(r))
+        .ok_or("no SEGM chunk")?;
+    let segm = leaf(ucfx, data_off, &rows[segm_row]);
+    let seg_count = segm.len() / 4;
+    let old_indx = leaf(ucfx, data_off, &rows[indx]);
+    let used: std::collections::HashSet<u16> =
+        old_indx.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let mut free: Vec<u16> =
+        (0..seg_count as u16).filter(|s| !used.contains(s)).collect();
+    if free.len() < n {
+        return Err(format!("only {} free SEGM rows, need {n}", free.len()));
+    }
+    let new_segs: Vec<u16> = free.drain(..n).collect();
+
+    // ---- Build the output descriptor list (original rows + n cloned MESH subtrees appended at the
+    // end of GEOM's subtree). Bodies: leaves copied from the donor (offsets reflow on emit). ----
+    struct Out {
+        tag: [u8; 4],
+        marker: bool,
+        size: u32,
+        u2: u32,
+        u3: u32,
+        body: Option<Vec<u8>>,
+    }
+    let body_of = |i: usize| leaf(ucfx, data_off, &rows[i]).to_vec();
+    let mut out: Vec<Out> = Vec::with_capacity(ndesc + n * mesh_len);
+
+    // GEOM subtree ends at the tail of the descriptor table (GEOM is the last top-level chunk); we
+    // append the clones right before geom_end. Emit rows [0, geom_end), then clones, then the tail.
+    for i in 0..geom_end {
+        let r = &rows[i];
+        let marker = is_marker(r);
+        let (mut u3, mut body) = (r.u3, if marker { None } else { Some(body_of(i)) });
+        if i == geom {
+            u3 = r.u3 + (n * mesh_len) as u32; // GEOM gains the cloned subtrees
+        } else if i == geom_info {
+            // sub-object count += n
+            let old = read_u32_le(&body_of(i), 0);
+            body = Some((old + n as u32).to_le_bytes().to_vec());
+        } else if i == indx {
+            let mut v = body_of(i);
+            for &s in &new_segs {
+                v.extend_from_slice(&s.to_le_bytes());
+            }
+            body = Some(v);
+        }
+        out.push(Out { tag: r.tag, marker, size: r.size, u2: r.u2, u3, body });
+    }
+    // n cloned MESH subtrees (byte-identical descriptors + donor geometry placeholder).
+    for _ in 0..n {
+        for j in mesh_start..(mesh_start + mesh_len) {
+            let r = &rows[j];
+            let marker = is_marker(r);
+            out.push(Out {
+                tag: r.tag,
+                marker,
+                size: r.size,
+                u2: r.u2,
+                u3: r.u3,
+                body: if marker { None } else { Some(body_of(j)) },
+            });
+        }
+    }
+    // tail: rows after GEOM's subtree (usually none — GEOM is last).
+    for i in geom_end..ndesc {
+        let r = &rows[i];
+        let marker = is_marker(r);
+        out.push(Out {
+            tag: r.tag,
+            marker,
+            size: r.size,
+            u2: r.u2,
+            u3: r.u3,
+            body: if marker { None } else { Some(body_of(i)) },
+        });
+    }
+
+    // ---- Emit ----
+    let new_ndesc = out.len();
+    let new_data_off = (20 + new_ndesc * 20) as u32;
+    let mut data: Vec<u8> = Vec::new();
+    let mut descs: Vec<(([u8; 4]), u32, u32, u32, u32)> = Vec::with_capacity(new_ndesc);
+    for o in &out {
+        if let Some(b) = &o.body {
+            let off = data.len() as u32;
+            descs.push((o.tag, off, b.len() as u32, o.u2, o.u3));
+            data.extend_from_slice(b);
+        } else {
+            descs.push((o.tag, 0xFFFF_FFFF, o.size, o.u2, o.u3));
+        }
+    }
+    let mut res = Vec::with_capacity(20 + new_ndesc * 20 + data.len() + 8);
+    res.extend_from_slice(b"UCFX");
+    res.extend_from_slice(&new_data_off.to_le_bytes());
+    res.extend_from_slice(&ucfx[8..16]);
+    res.extend_from_slice(&(new_ndesc as u32).to_le_bytes());
+    for (tag, u0, size, u2, u3) in &descs {
+        res.extend_from_slice(tag);
+        res.extend_from_slice(&u0.to_le_bytes());
+        res.extend_from_slice(&size.to_le_bytes());
+        res.extend_from_slice(&u2.to_le_bytes());
+        res.extend_from_slice(&u3.to_le_bytes());
+    }
+    res.extend_from_slice(&data);
+    let csum = crc32_mercs2(&res);
+    res.extend_from_slice(b"CSUM");
+    res.extend_from_slice(&csum.to_le_bytes());
+
+    let base_groups = find_groups(&rows).len();
+    let new_ords: Vec<usize> = (base_groups..base_groups + n).collect();
+    Ok((res, new_ords))
+}
+
+/// One logical part of a novel model to conform onto its OWN new bone (see `inject_fresh_skeleton`).
+pub struct SkelPart {
+    pub label: String,
+    /// WORLD-space (pre-fit) geometry, exactly as authored in the source file.
+    pub mesh: ExternalMesh,
+    /// Bone name hash for this part's novel node. Use `pandemic_hash_m2("bone_rotor")` for the main
+    /// rotor so the donor's spin command binds to it; a fresh unique hash for a plain attach node.
+    pub bone_name_hash: u32,
+    /// Existing donor HIER node this part's novel bone is parented UNDER — the "spin wiring". Parent
+    /// a rotor part under the donor's engine-spun rotor node and it rides the spin; parent a static
+    /// part under the intact-body node (`0x255EAB53`, index resolved by the caller) so destruction
+    /// hides it with the body.
+    pub parent_node: usize,
+    /// MTRL record index this part draws with.
+    pub material_index: u32,
+}
+
+/// Greedy triangle chunker: split a mesh into sub-meshes each safely under the u16 strip/vertex
+/// limit, with a compact local vertex remap per chunk. `tri_cap` bounds triangles per chunk (a
+/// conservative worst-case-strip bound); vertices are also capped at 60000.
+fn split_mesh_u16(mesh: &ExternalMesh, tri_cap: usize) -> Vec<ExternalMesh> {
+    let mut out = Vec::new();
+    let mut ti = 0usize;
+    while ti < mesh.tris.len() {
+        let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut uvs = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        while ti < mesh.tris.len() && tris.len() < tri_cap && remap.len() < 60000 {
+            let t = mesh.tris[ti];
+            // If adding this triangle would blow the vertex cap, flush first.
+            let new_v = t.iter().filter(|v| !remap.contains_key(v)).count();
+            if remap.len() + new_v > 60000 && !tris.is_empty() {
+                break;
+            }
+            let mut lt = [0u32; 3];
+            for (j, &v) in t.iter().enumerate() {
+                let idx = *remap.entry(v).or_insert_with(|| {
+                    let n = positions.len() as u32;
+                    positions.push(mesh.positions[v as usize]);
+                    normals.push(mesh.normals[v as usize]);
+                    uvs.push(mesh.uvs.get(v as usize).copied().unwrap_or([0.0, 0.0]));
+                    n
+                });
+                lt[j] = idx;
+            }
+            tris.push(lt);
+            ti += 1;
+        }
+        out.push(ExternalMesh { positions, normals, uvs, tris, joints: Vec::new(), weights: Vec::new() });
+    }
+    out
+}
+
+/// Conform a **novel multi-part model onto a FRESH SKELETON of novel bones** into a donor vehicle
+/// container, minted under a NEW hash (does NOT overwrite the donor). Each `SkelPart` gets its own
+/// authored HIER node at that part's fitted position (`append_new_bones`), parented under a donor
+/// node for its articulation ("spin wiring"); large parts are auto-split across as many donor
+/// drawing groups as needed to respect the u16 strip limit; every donor drawing group not hosting a
+/// part is neutralised. Because the result ships under a new hash as a single block, it has no
+/// streamed finer LOD rungs of its own — so nothing supersedes our geometry up close.
+///
+/// `donor_block` is the wrapped single-entry block. Returns `(new wrapped block, report)`.
+pub fn inject_fresh_skeleton(
+    donor_block: &[u8],
+    parts: &[SkelPart],
+    // Point a donor MTRL record's texture slot at a hash: `(record, slot, tex_hash)`, slot 0=diffuse.
+    // This is how each part gets its OWN skin (its `material_index` selects the record edited here).
+    mtrl_sets: &[(usize, usize, u32)],
+    new_name_hash: u32,
+    scale_mult: f32,
+    y_offset: f32,
+    flip_winding: bool,
+    fit_percentile: f32,
+) -> Result<(Vec<u8>, String), String> {
+    if donor_block.len() < 20 {
+        return Err("donor block too small".into());
+    }
+    let ucfx_len = read_u32_le(donor_block, 16) as usize;
+    let model_type = read_u32_le(donor_block, 8);
+    if 20 + ucfx_len > donor_block.len() {
+        return Err("donor block truncated".into());
+    }
+    let ucfx = &donor_block[20..20 + ucfx_len];
+    if &ucfx[0..4] != b"UCFX" {
+        return Err("donor payload is not UCFX".into());
+    }
+    if parts.is_empty() {
+        return Err("no parts".into());
+    }
+
+    // ---- ONE global fit: union bbox of every part -> template model-space AABB (header @4/@16),
+    // X/Z centred, Y bottom-aligned. MUST match inject_parts_into_template's fit exactly so the
+    // bones we place agree with the geometry it will place. ----
+    let (data_off, _ndesc, rows) = parse_rows(ucfx);
+    let hdr = leaf(ucfx, data_off, &rows[0]);
+    if hdr.len() < 28 {
+        return Err("template header INFO too small".into());
+    }
+    let rf = |o: usize| f32::from_bits(read_u32_le(hdr, o));
+    let (tmin, tmax) = ([rf(4), rf(8), rf(12)], [rf(16), rf(20), rf(24)]);
+    let (mut umin, mut umax) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in parts {
+        for v in &p.mesh.positions {
+            for k in 0..3 {
+                umin[k] = umin[k].min(v[k]);
+                umax[k] = umax[k].max(v[k]);
+            }
+        }
+    }
+    if umin[0] > umax[0] {
+        return Err("parts have no geometry".into());
+    }
+    let (mut smin, mut smax) = (umin, umax);
+    if fit_percentile < 100.0 {
+        let q = (fit_percentile.clamp(50.0, 100.0) / 100.0) as f64;
+        for k in 0..3 {
+            let mut vals: Vec<f32> =
+                parts.iter().flat_map(|p| p.mesh.positions.iter().map(move |v| v[k])).collect();
+            if vals.len() < 8 {
+                continue;
+            }
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = vals.len() as f64;
+            smin[k] = vals[(((1.0 - q) * n) as usize).min(vals.len() - 1)];
+            smax[k] = vals[((q * n) as usize).min(vals.len() - 1)];
+        }
+    }
+    let mut s = f32::MAX;
+    for k in 0..3 {
+        let d = smax[k] - smin[k];
+        if d > 1e-4 {
+            s = s.min((tmax[k] - tmin[k]).abs() / d);
+        }
+    }
+    if !s.is_finite() || s <= 0.0 {
+        s = 1.0;
+    }
+    s *= if scale_mult > 0.0 { scale_mult } else { 1.0 };
+    let ucen = [(umin[0] + umax[0]) * 0.5, umin[1], (umin[2] + umax[2]) * 0.5];
+    let fit = |p: [f32; 3]| {
+        [(p[0] - ucen[0]) * s, (p[1] - ucen[1]) * s + y_offset, (p[2] - ucen[2]) * s]
+    };
+
+    // ---- author one novel bone per part at its fitted centroid ----
+    let mut bones: Vec<NewBone> = Vec::with_capacity(parts.len());
+    for p in parts {
+        let (mut pmn, mut pmx) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &p.mesh.positions {
+            let w = fit(*v);
+            for k in 0..3 {
+                pmn[k] = pmn[k].min(w[k]);
+                pmx[k] = pmx[k].max(w[k]);
+            }
+        }
+        let wp = [(pmn[0] + pmx[0]) * 0.5, (pmn[1] + pmx[1]) * 0.5, (pmn[2] + pmx[2]) * 0.5];
+        // local AABB relative to the bone origin (identity rotation).
+        let laabb = (
+            [pmn[0] - wp[0], pmn[1] - wp[1], pmn[2] - wp[2]],
+            [pmx[0] - wp[0], pmx[1] - wp[1], pmx[2] - wp[2]],
+        );
+        bones.push(NewBone {
+            name_hash: p.bone_name_hash,
+            parent: p.parent_node,
+            world_pos: wp,
+            local_aabb: laabb,
+        });
+    }
+    // ---- split each part to u16 FIRST so we know how many host groups we need ----
+    let part_subs: Vec<Vec<ExternalMesh>> =
+        parts.iter().map(|p| split_mesh_u16(&p.mesh, 8000)).collect();
+    let needed: usize = part_subs.iter().map(|s| s.len()).sum();
+
+    // ---- grow the donor's draw-group pool if it can't host one group per sub-part (each group
+    // binds exactly one bone, so per-part bones need one group per sub-part) ----
+    let base_drawing = {
+        let g = find_groups(&rows);
+        (0..g.len()).filter(|&gi| group_draws(ucfx, data_off, &rows, &g[gi])).count()
+    };
+    let mut ucfx_g = std::borrow::Cow::Borrowed(ucfx);
+    if needed > base_drawing {
+        let (grown, _) = append_draw_groups(ucfx, needed - base_drawing)?;
+        ucfx_g = std::borrow::Cow::Owned(grown);
+    }
+
+    // ---- author one novel bone per part, then enumerate the (grown) drawing-group pool ----
+    let (grown_ucfx, bone_indices) = append_new_bones(&ucfx_g, &bones)?;
+    let (gdata_off, _gn, grows) = parse_rows(&grown_ucfx);
+    let ggroups = find_groups(&grows);
+    let drawing: Vec<usize> = (0..ggroups.len())
+        .filter(|&gi| group_draws(&grown_ucfx, gdata_off, &grows, &ggroups[gi]))
+        .collect();
+
+    // ---- assign a distinct drawing group per sub-part; all sub-parts of a part share its bone ----
+    let mut specs: Vec<PartSpec> = Vec::new();
+    let mut next_host = 0usize;
+    let mut report = String::new();
+    for (pi, p) in parts.iter().enumerate() {
+        for (si, sub) in part_subs[pi].iter().enumerate() {
+            if next_host >= drawing.len() {
+                return Err(format!(
+                    "out of drawing groups after grow: need {needed}, have {}",
+                    drawing.len()
+                ));
+            }
+            let group = drawing[next_host];
+            next_host += 1;
+            report.push_str(&format!(
+                "  {}[{}] -> group {} node {} mat {} ({} tris)\n",
+                p.label, si, group, bone_indices[pi], p.material_index, sub.tris.len()
+            ));
+            specs.push(PartSpec {
+                label: format!("{}[{}]", p.label, si),
+                mesh: sub.clone(),
+                group,
+                node: bone_indices[pi] as i32,
+                material_index: p.material_index,
+                recenter_xz: false,
+            });
+        }
+    }
+
+    // ---- conform (the appended template re-fits geometry identically; parts bind to new bones) ----
+    let (out_ucfx, stats) = inject_parts_into_template(
+        &grown_ucfx, &specs, &[], mtrl_sets, &[], &[], &[], new_name_hash, scale_mult, flip_winding,
+        y_offset, fit_percentile,
+    )?;
+
+    let block = {
+        let mut b = Vec::with_capacity(20 + out_ucfx.len());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&new_name_hash.to_le_bytes());
+        b.extend_from_slice(&model_type.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&(out_ucfx.len() as u32).to_le_bytes());
+        b.extend_from_slice(&out_ucfx);
+        b
+    };
+    let summary = format!(
+        "fresh skeleton: {} parts -> {} novel bones, {} host groups, {} emptied; fit scale {:.4}, bbox {:?}..{:?}\n{}",
+        parts.len(), bones.len(), specs.len(), stats.emptied_groups.len(),
+        stats.fit_scale, stats.bbox_min, stats.bbox_max, report
+    );
+    Ok((block, summary))
 }
 
 /// Wrap a raw UCFX container in the 20-byte single-entry block header Skeleton::from_block wants.

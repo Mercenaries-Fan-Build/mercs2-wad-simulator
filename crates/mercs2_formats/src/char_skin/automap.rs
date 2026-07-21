@@ -466,13 +466,44 @@ impl<'a> Rig<'a> {
 }
 
 /// Map a source rig onto the 84-bone Mercs2 skeleton. Faithful port of `automap()`.
+/// Does this joint set use the Call of Duty naming dialect? Keyed on its two signature roots,
+/// which no other rig we map ships: the `tag_origin` export tag and the `j_mainroot` pelvis.
+pub fn is_cod_rig(names: &[String]) -> bool {
+    names.iter().any(|n| {
+        let l = n.to_ascii_lowercase();
+        l == "tag_origin" || l == "j_mainroot"
+    })
+}
+
+/// Rewrite the CoD side tokens `le`/`ri` to the `l`/`r` that [`side_of`] already understands,
+/// underscore-token-wise so `j_clavicle_le` -> `j_clavicle_l` but `j_spinelower` is untouched.
+pub fn normalize_cod_sides(name: &str) -> String {
+    name.split('_')
+        .map(|t| match t.to_ascii_lowercase().as_str() {
+            "le" => "l",
+            "ri" => "r",
+            _ => t,
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 pub fn automap(rig: &Rig) -> AutoMap {
     let joints = rig.joint_nodes;
     let names: Vec<String> = joints.iter().map(|&n| rig.name_of(n)).collect();
     // node → joint index
     let jidx: HashMap<usize, usize> = joints.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
-    let raw: Vec<(Cls, String)> = names.iter().map(|nm| classify(nm)).collect();
+    // Dialect pre-pass. `side_of` recognises l/left/lf and r/right/rt; the Call of Duty rig
+    // instead sides its joints `_le`/`_ri` (j_clavicle_le, j_hip_ri). Widening `side_of` to
+    // accept those globally is NOT safe -- it re-sides joints on the crosby and vietnam parity
+    // fixtures and breaks their pinned output. So detect the dialect from the rig as a whole and
+    // rewrite only its side tokens, leaving every other rig's classification byte-identical.
+    let cod = is_cod_rig(&names);
+    let raw: Vec<(Cls, String)> = names
+        .iter()
+        .map(|nm| classify(&if cod { normalize_cod_sides(nm) } else { nm.clone() }))
+        .collect();
     let mut mapped: HashMap<usize, u32> = HashMap::new();
     let mut why: HashMap<usize, String> = HashMap::new();
 
