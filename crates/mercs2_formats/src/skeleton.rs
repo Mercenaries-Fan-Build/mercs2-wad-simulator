@@ -32,14 +32,36 @@ pub struct Bone {
     pub index: usize,
     pub name_hash: u32,
     pub parent: i32, // -1 = root
-    /// World-rest 4x4 (row-major, translation in row 3).
+    /// World-rest 4x4 (row-major, translation in row 3), resolved by chaining the HIER records'
+    /// LOCAL matrices (`+16`). This is the model's DEFAULT pose, which is not always its BIND pose.
     pub world: [[f32; 4]; 4],
+    /// The BIND pose: inverse of the inverse-bind matrix the HIER record stores at `+80`, when that
+    /// matrix is present and invertible. `None` falls back to [`Bone::world`].
+    ///
+    /// The two agree on most models and the distinction was missed for a long time, but they are
+    /// NOT the same thing and shipped characters prove it. `pmc_hum_mattias_v2` matches on all 95
+    /// nodes; `pmc_hum_jen` disagrees on 15 of 92; `pmc_hum_chris` on **54 of 94** — Chris's HIER
+    /// locals hold a weapon-carry pose with the elbows bent 76 deg, while `+80` holds the ordinary
+    /// hero bind (12.3 deg, hand at [0.435, 0.989, 0.020], identical to Mattias's).
+    ///
+    /// The mesh settles it: the distance from each bone to the centroid of the vertices it
+    /// dominates has median 0.024 (mattias) / 0.025 (jen) / **0.123 (chris)** against `world`, and
+    /// 0.024 / 0.025 / **0.027** against this field. Skinning maths is `Skin[b] = InvBind[b] *
+    /// Pose[b]`, so `+80` is by definition the matrix the vertices were authored against — anything
+    /// that binds geometry to bones (retarget, skin authoring, bundle export) must use THIS.
+    pub bind_world: Option<[[f32; 4]; 4]>,
 }
 
 impl Bone {
-    /// World-rest translation (the bone's position).
+    /// World-rest (default-pose) translation.
     pub fn world_pos(&self) -> [f32; 3] {
         [self.world[3][0], self.world[3][1], self.world[3][2]]
+    }
+    /// BIND-pose translation — [`Bone::bind_world`] when the HIER carried one, else
+    /// [`Bone::world_pos`]. Use this for anything that relates GEOMETRY to bones.
+    pub fn bind_pos(&self) -> [f32; 3] {
+        let m = self.bind_world.as_ref().unwrap_or(&self.world);
+        [m[3][0], m[3][1], m[3][2]]
     }
 }
 
@@ -80,6 +102,14 @@ pub fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
         }
     }
     r
+}
+
+/// Determinant of the upper-left 3x3 of a row-major 4x4 — the invertibility test for a HIER
+/// record's stored inverse-bind matrix.
+pub fn mat3_det(m: &[[f32; 4]; 4]) -> f32 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
 }
 
 /// Affine inverse of a row-major / row-vector 4x4 (the upper-left 3x3 linear part
@@ -195,12 +225,22 @@ impl Skeleton {
         let mut name_hash = vec![0u32; n];
         let mut parent = vec![-1i32; n];
         let mut local = vec![[[0.0f32; 4]; 4]; n];
+        let mut inv_bind: Vec<Option<[[f32; 4]; 4]>> = vec![None; n];
         for r in 0..n {
             let o = base + r * HIER_NODE_STRIDE;
             name_hash[r] = read_u32_le(ucfx, o);
             let p = u16::from_le_bytes([ucfx[o + 8], ucfx[o + 9]]);
             parent[r] = if p == 0xFFFF { -1 } else { p as i32 };
             local[r] = mat4_row_major(ucfx, o + 16);
+            // `+80` is the record's INVERSE-BIND matrix (see `model_inject::append_hier_bones`,
+            // which writes it there). Invert it back to a bind-pose world transform; skip anything
+            // singular (a record that never carried one).
+            let ib = mat4_row_major(ucfx, o + 80);
+            inv_bind[r] = if mat3_det(&ib).abs() > 1e-12 {
+                Some(affine_inverse(&ib))
+            } else {
+                None
+            };
         }
 
         let mut world = vec![[[0.0f32; 4]; 4]; n];
@@ -219,6 +259,7 @@ impl Skeleton {
                 name_hash: name_hash[r],
                 parent: parent[r],
                 world: world[r],
+                bind_world: inv_bind[r],
             })
             .collect();
         Ok(Skeleton { bones })
