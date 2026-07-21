@@ -70,6 +70,12 @@ pub struct Skeleton {
     pub bones: Vec<Bone>,
 }
 
+/// Distance between two row-major 4x4s' translation rows.
+fn dist3(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> f32 {
+    let (dx, dy, dz) = (a[3][0] - b[3][0], a[3][1] - b[3][1], a[3][2] - b[3][2]);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 fn read_f32(d: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
 }
@@ -251,6 +257,34 @@ impl Skeleton {
             } else {
                 matmul(&local[r], &world[p as usize])
             };
+        }
+
+        // Reject STALE `+80` records. Not every node carries its own inverse-bind: some hold an
+        // ANCESTOR's matrix, which inverts to a bind that puts the bone exactly on its parent —
+        // a zero-length bone. `pmc_hum_mattias` has 8 such nodes (the spine root, both clavicles,
+        // the neck cluster). Trusting them conforms geometry as if those joints coincide: it
+        // survives the rest pose and tears the mesh apart the moment animation separates them.
+        //
+        // The test is collapse-onto-parent, NOT difference-from-default — a genuinely posed bind
+        // differs from the default pose legitimately (both of this model's hand bones do, and
+        // Chris's whole arm chain does). Only a bone landing ON its parent while the default pose
+        // gives it real length is impossible.
+        //
+        // Parents precede children in HIER order, so one forward pass resolves each bone against
+        // its parent's ALREADY-VALIDATED bind.
+        const COLLAPSE_EPS: f32 = 1e-3;
+        for r in 0..n {
+            let p = parent[r];
+            if p < 0 || p as usize >= n {
+                continue;
+            }
+            let Some(ib) = inv_bind[r] else { continue };
+            let pb = inv_bind[p as usize].unwrap_or(world[p as usize]);
+            let d_bind = dist3(&ib, &pb);
+            let d_default = dist3(&world[r], &world[p as usize]);
+            if d_bind < COLLAPSE_EPS && d_default > COLLAPSE_EPS {
+                inv_bind[r] = None; // stale — fall back to the chained default pose
+            }
         }
 
         let bones = (0..n)
