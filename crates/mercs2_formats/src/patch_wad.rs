@@ -523,14 +523,30 @@ mod tests {
         assert_eq!(blk.packed_field >> 24, 0x7F, "tier byte carried forward");
     }
 
-    /// Two primary ASET rows for one hash leave the engine's winner undefined.
+    /// Two primary ASET rows for one hash do NOT fail validation. This once errored on the
+    /// premise that the winner was undefined; it is not — the runtime registry keeps the FIRST
+    /// block to register a hash, so resolution is deterministic by lowest block index. Retail
+    /// `vz-patch.wad` ships five such cross-block pairs (c30185/c30186, c30236/c30265, …) and
+    /// the game loads it, so erroring here made the builder unable to edit shipped data.
+    /// The condition is still reported as a warning.
     #[test]
-    fn duplicate_primary_aset_hash_is_rejected() {
+    fn duplicate_primary_aset_hash_is_allowed_first_wins() {
         let a = PatchBlock::from_decompressed(b"aaaa", "blocks\\a.block".into(), vec![primary(0xDEAD)], None).unwrap();
         let b = PatchBlock::from_decompressed(b"bbbb", "blocks\\b.block".into(), vec![primary(0xDEAD)], None).unwrap();
-        let err = validate_blocks(&[a, b]).unwrap_err();
-        assert!(err.contains("0x0000DEAD"), "got: {err}");
-        assert!(err.contains("PRIMARY"), "got: {err}");
+        validate_blocks(&[a, b]).expect("duplicate primary must not be fatal — engine takes the first");
+    }
+
+    /// A single block listing one hash twice is likewise fine: it resolves to itself either way.
+    #[test]
+    fn duplicate_primary_within_one_block_is_allowed() {
+        let a = PatchBlock::from_decompressed(
+            b"aaaa",
+            "blocks\\a.block".into(),
+            vec![primary(0xDEAD), primary(0xDEAD)],
+            None,
+        )
+        .unwrap();
+        validate_blocks(&[a]).expect("same-block duplicate resolves to that block either way");
     }
 
     /// Sub-entry rows (low16 != 0xFFFF) legitimately repeat and must NOT trip the check.
