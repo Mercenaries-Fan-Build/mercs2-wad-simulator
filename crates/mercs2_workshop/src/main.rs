@@ -59,6 +59,7 @@ mod index;
 mod luaview;
 mod publish;
 mod retarget;
+mod shot;
 mod texenc;
 mod texpng;
 
@@ -69,6 +70,27 @@ fn main() {
     let get = |flag: &str| {
         args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
     };
+
+    // Probe: can wgpu get ANY adapter here (real GPU or software fallback)? Decides whether an
+    // offscreen render can run in this environment at all.
+    if args.iter().any(|a| a == "--gpu-check") {
+        let instance = wgpu::Instance::default();
+        for fb in [false, true] {
+            let a = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: fb,
+            }));
+            match a {
+                Some(a) => {
+                    let i = a.get_info();
+                    println!("adapter(fallback={fb}): {} type={:?} backend={:?}", i.name, i.device_type, i.backend);
+                }
+                None => println!("adapter(fallback={fb}): NONE"),
+            }
+        }
+        return;
+    }
 
     let wadpath = match get("--wad").or_else(wad::registry_vz_wad) {
         Some(p) => p,
@@ -231,33 +253,22 @@ fn main() {
                 .map(|d| d.join("vz-mod.wad"))
                 .unwrap_or_else(|| std::path::PathBuf::from("vz-mod.wad"))
         });
-        let imp = match import::import_model(std::path::Path::new(mesh_path)) {
-            Ok(m) => m,
-            Err(e) => return eprintln!("--mod-new: import {mesh_path}: {e}"),
-        };
-        let mesh = mercs2_formats::model_inject::ExternalMesh {
-            positions: imp.verts.iter().map(|v| v.pos).collect(),
-            normals: imp.verts.iter().map(|v| v.normal).collect(),
-            uvs: imp.verts.iter().map(|v| v.uv).collect(),
-            tris: imp.indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
-            joints: Vec::new(),
-            weights: Vec::new(),
-        };
+        // Conformant path: keep the donor's REAL skeleton, route each imported material to its own
+        // donor drawing group, and repoint that group's MTRL slots at the material's OWN textures
+        // (diffuse/specular/normal-DXT5nm). So glass/lights/body each keep their distinct skin.
+        let (parts, mat_images, spec_images, normal_images) =
+            match extract_skel_parts(std::path::Path::new(mesh_path)) {
+                Ok(p) => p,
+                Err(e) => return eprintln!("--mod-new: import {mesh_path}: {e}"),
+            };
+        let _ = group;
         let hash = mercs2_formats::hash::pandemic_hash_m2(name);
-        let item = publish::NewModelItem {
-            name: name.clone(),
-            hash,
-            donor,
-            donor_label: donor_arg.clone(),
-            target_group: group,
-            flip: false,
-            mesh,
-        };
         let mut paths = vec![wadpath.clone()];
         paths.extend(overlays.iter().cloned());
-        let publisher = publish::publish_in_background(paths, vec![item], out);
-        match publisher.rx.recv() {
-            Ok(Ok(r)) => {
+        match publish::publish_conformant(
+            &paths, donor, donor_arg, name, parts, mat_images, spec_images, normal_images, &out,
+        ) {
+            Ok(r) => {
                 println!("wrote {} ({} bytes)\nsha256 {}", r.path.display(), r.bytes, r.sha256);
                 for (n, res) in &r.results {
                     match res {
@@ -266,8 +277,53 @@ fn main() {
                     }
                 }
             }
-            Ok(Err(e)) => eprintln!("--mod-new: {e}"),
-            Err(_) => eprintln!("--mod-new: worker died"),
+            Err(e) => eprintln!("--mod-new: {e}"),
+        }
+        return;
+    }
+
+    // --mod-skel <name> <donor|0xHASH> <mesh.glb> [--mod-out path]
+    // Conform a NOVEL multi-part model onto a FRESH SKELETON of novel bones (one authored HIER node
+    // per part) minted under a NEW hash — does NOT overwrite the donor. Large parts auto-split
+    // across donor draw groups (u16). Rotor parts ride the donor's engine-spun rotor node.
+    if let Some(i) = args.iter().position(|a| a == "--mod-skel") {
+        let (Some(name), Some(donor_arg), Some(mesh_path)) =
+            (args.get(i + 1), args.get(i + 2), args.get(i + 3))
+        else {
+            eprintln!("--mod-skel <name> <donor name|0xHASH> <mesh.glb>");
+            return;
+        };
+        let donor = donor_arg
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(donor_arg));
+        let out = get("--mod-out").map(std::path::PathBuf::from).unwrap_or_else(|| {
+            std::path::Path::new(&wadpath)
+                .parent()
+                .map(|d| d.join("vz-mod-skel.wad"))
+                .unwrap_or_else(|| std::path::PathBuf::from("vz-mod-skel.wad"))
+        });
+        let (parts, mat_images, spec_images, normal_images) =
+            match extract_skel_parts(std::path::Path::new(mesh_path)) {
+                Ok(p) => p,
+                Err(e) => return eprintln!("--mod-skel: import {mesh_path}: {e}"),
+            };
+        println!("[mod-skel] {} parts, {} materials from {mesh_path}", parts.len(), mat_images.len());
+        let mut paths = vec![wadpath.clone()];
+        paths.extend(overlays.iter().cloned());
+        match publish::publish_skel(
+            &paths, donor, donor_arg, name, parts, mat_images, spec_images, normal_images, &out,
+        ) {
+            Ok(r) => {
+                println!("wrote {} ({} bytes)\nsha256 {}", r.path.display(), r.bytes, r.sha256);
+                for (n, res) in &r.results {
+                    match res {
+                        Ok(s) => println!("self-test {n}: {s}"),
+                        Err(e) => println!("self-test {n}: FAIL {e}"),
+                    }
+                }
+            }
+            Err(e) => eprintln!("--mod-skel: {e}"),
         }
         return;
     }
@@ -331,6 +387,41 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
     if let Some(i) = args.iter().position(|a| a == "--hash") {
         for a in &args[i + 1..] {
             println!("0x{:08X}  {a}", mercs2_formats::hash::pandemic_hash_m2(a));
+        }
+        return;
+    }
+
+    // Read-only diagnostic: dump a donor container's MTRL records (per-slot texture hashes) so the
+    // authored slot order (diffuse/normal/specular) can be confirmed by hash-matching _dm/_nm/_sm.
+    if let Some(i) = args.iter().position(|a| a == "--dump-mtrl") {
+        let Some(donor_arg) = args.get(i + 1) else {
+            eprintln!("--dump-mtrl <donor name|0xHASH>");
+            return;
+        };
+        let donor = donor_arg
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(donor_arg));
+        let mut paths = vec![wadpath.clone()];
+        paths.extend(overlays.iter().cloned());
+        match publish::donor_block(&paths, donor) {
+            Ok(block) => {
+                let magic = String::from_utf8_lossy(&block[0..4.min(block.len())]).to_string();
+                let has_ucfx = block.windows(4).position(|w| w == b"UCFX");
+                let has_mtrl = block.windows(4).position(|w| w == b"MTRL");
+                println!("donor {donor_arg} (0x{donor:08X}): {} bytes, magic {:?}, UCFX@{:?}, MTRL@{:?}",
+                    block.len(), magic, has_ucfx, has_mtrl);
+                // parse from the UCFX start (block may carry a leading header)
+                let ucfx_start = has_ucfx.unwrap_or(0);
+                let mats = mercs2_formats::texture::parse_mtrl(&block[ucfx_start..]);
+                println!("donor {donor_arg} (0x{donor:08X}): {} MTRL records", mats.len());
+                for (mi, m) in mats.iter().enumerate() {
+                    let slots: Vec<String> = m.textures.iter().enumerate()
+                        .map(|(s, h)| format!("slot{s}=0x{h:08X}")).collect();
+                    println!("  MTRL {mi}: flags=0x{:04X} texc={} [{}]", m.flags, m.textures.len(), slots.join(" "));
+                }
+            }
+            Err(e) => eprintln!("--dump-mtrl: {e}"),
         }
         return;
     }
@@ -439,15 +530,36 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
     // Headless: parse a foreign model (.obj/.gltf/.glb) and print what would import.
     if let Some(file) = get("--import-check") {
         match import::import_model(std::path::Path::new(&file)) {
-            Ok(im) => println!(
-                "{file}: {} verts, {} tris, {} draw groups, {} textures, bbox {:?}..{:?}",
-                im.verts.len(),
-                im.indices.len() / 3,
-                im.draws.len(),
-                im.textures.len(),
-                im.stats.bbox_min,
-                im.stats.bbox_max
-            ),
+            Ok(im) => {
+                println!(
+                    "{file}: {} verts, {} tris, {} draw groups, {} textures, bbox {:?}..{:?}",
+                    im.verts.len(),
+                    im.indices.len() / 3,
+                    im.draws.len(),
+                    im.textures.len(),
+                    im.stats.bbox_min,
+                    im.stats.bbox_max
+                );
+                // Report the source rig: an unrigged import (empty skin_joints) is the
+                // failure mode that silently sinks a character — the Skeleton workbench
+                // has nothing to retarget. Name it here so it is caught before injection.
+                if im.skin_joints.is_empty() {
+                    println!("  rig: NONE (unrigged) — the Skeleton/Retarget workbench needs a skinned source");
+                } else {
+                    let rig = crate::retarget::SourceRig::detect(&im.skin_joints);
+                    println!(
+                        "  rig: {} — {} source joints (e.g. {})",
+                        rig.label(),
+                        im.skin_joints.len(),
+                        im.skin_joints
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
             Err(e) => eprintln!("--import-check {file}: {e}"),
         }
         return;
@@ -585,6 +697,649 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
 
     // Headless: load one model end-to-end (geometry + textures + clips) and print its stats.
     // Overlay-aware: resolves through the full stack, like the window does.
+    // Headless OFFSCREEN RENDER of a retargeted import to PNGs (front/side/3q) — a visual check.
+    // Usage: --shot <file.glb> [--rebind-target <name>] [--shot-out <prefix>] [--shot-clip 0x..]
+    if let Some(glb) = get("--shot") {
+        const IDENT: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let target = get("--rebind-target").unwrap_or_else(|| "pmc_hum_jen_v2".into());
+        let out = get("--shot-out").unwrap_or_else(|| "shot".into());
+        let im = match import::import_model(std::path::Path::new(&glb)) {
+            Ok(i) => i,
+            Err(e) => return eprintln!("--shot: {e}"),
+        };
+        let thash = mercs2_formats::hash::pandemic_hash_m2(target.trim_start_matches('_'));
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: {e}"),
+        };
+        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash);
+        let tmd = match app::load_model_data(&mut w, thash) {
+            Ok(m) => m,
+            Err(e) => return eprintln!("--shot target {target}: {e}"),
+        };
+        // NON-DESTRUCTIVE retarget: keep the imported mesh + its own skeleton (bind pose, proportions,
+        // gear) untouched; only RELABEL the imported bones with the target's bone-name hashes so the
+        // target's clips bind, then transfer the clip's ROTATIONS onto the imported skeleton.
+        let r = crate::retarget::Retarget::build_full(
+            im.skin_joints.clone(), im.skin_joint_pos.clone(), im.skin_ibm.clone(), im.skin_parents.clone(),
+            tnames.clone(), tpos.clone(), tparents,
+        );
+        let table = r.joint_table(tnames.len().max(1));
+        let target_hashes: Vec<u32> = tmd.skin.rig.iter().map(|b| b.name_hash).collect();
+        let rig = r.animation_rig(&table, &target_hashes);
+        if rig.is_empty() {
+            return eprintln!("--shot: import carried no skeleton (need a rigged glTF/glb)");
+        }
+        // Mesh vertices are used AS AUTHORED; joints keep indexing the import's own bones.
+        let mut sv = Vec::with_capacity(im.verts.len());
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for v in &im.verts {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v.pos[k]);
+                hi[k] = hi[k].max(v.pos[k]);
+            }
+            sv.push(shot::SV {
+                pos: v.pos,
+                _p0: 0.0,
+                normal: v.normal,
+                _p1: 0.0,
+                uv: v.uv,
+                _p2: [0.0, 0.0],
+                joints: [v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32],
+                weights: [
+                    v.weights[0] as f32 / 255.0, v.weights[1] as f32 / 255.0,
+                    v.weights[2] as f32 / 255.0, v.weights[3] as f32 / 255.0,
+                ],
+            });
+        }
+        // Palette indexed by the IMPORT's own bones. Bind pose (no clip) = identity. With a clip, drive
+        // the import's skeleton via CROSS-SKELETON retarget: the clip binds to JEN's rig (source), and
+        // its per-bone world rotation deltas are transferred onto the import's bind pose.
+        let bone_count = rig.len();
+        let jen_hashes: Vec<u32> = tmd.skin.rig.iter().map(|b| b.name_hash).collect();
+        let palette: Vec<[[f32; 4]; 4]> = match get("--shot-clip")
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        {
+            Some(ch) => match w.clip_for_rig(&jen_hashes, ch) {
+                Some(ca) => {
+                    let sample = ca.clip.sample_local(ca.clip.duration * 0.35);
+                    mercs2_engine::pose::havok_palette_retarget_cross(
+                        &rig, &tmd.skin.rig, &table, &sample, &ca.track_to_hier, ca.num_transform_tracks,
+                    )
+                }
+                None => {
+                    eprintln!("--shot: clip 0x{ch:08X} does not bind the target rig; rendering bind pose");
+                    vec![IDENT; bone_count]
+                }
+            },
+            None => vec![IDENT; bone_count],
+        };
+        // One untextured range: --shot previews a raw glTF import, which carries no WAD material.
+        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None }];
+        shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
+        return;
+    }
+
+    // Headless: render a WAD ASSET (by name/hash, overlay-aware) to PNGs on the engine renderer.
+    // Loads the full LOD-block chain (same path as --check/preview), then offscreen-renders it static
+    // (identity palette — model-space bake). Writes `<out>_front/_side/_threeq.png`.
+    // Usage: --render <name|0xHASH> [--render-out prefix]
+    if let Some(arg) = get("--render") {
+        let hash = arg
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
+        let out = get("--render-out").unwrap_or_else(|| "render".into());
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let md = match app::load_model_data(&mut w, hash) {
+            Ok(md) => md,
+            Err(e) => return eprintln!("--render '{arg}' (0x{hash:08X}): {e}"),
+        };
+        let hier: Vec<u32> = md.skin.rig.iter().map(|b| b.name_hash).collect();
+
+        // List the clips this model's rig can bind, so a clip can be chosen by name rather than
+        // guessed at. Names come from the same index the GUI uses.
+        if args.iter().any(|a| a == "--render-clips") {
+            let idx = index::AssetIndex::build(&w.wads, index::load_all_names(names_csv.clone()));
+            let (clips, names) = app::clips_for_export(&mut w, &arg, &md.skin.rig, &idx);
+            println!("--render-clips 0x{hash:08X}: {} clip(s) bind this rig", clips.len());
+            for c in &clips {
+                let bound = c.track_to_hier.iter().filter(|t| t.is_some()).count();
+                println!(
+                    "  0x{:08X}  {:<40} {:>3}/{:<3} tracks bound  {:.2}s",
+                    c.name_hash,
+                    names.get(&c.name_hash).cloned().unwrap_or_default(),
+                    bound,
+                    c.num_transform_tracks,
+                    c.clip.duration
+                );
+            }
+            return;
+        }
+
+        // Real skinning: the model's own BLENDINDICES/BLENDWEIGHT, not a single identity bone.
+        // Without this the render cannot show a skinning defect at all, which is the whole point.
+        let sv: Vec<shot::SV> = md
+            .verts
+            .iter()
+            .map(|v| shot::SV {
+                pos: v.pos,
+                _p0: 0.0,
+                normal: v.normal,
+                _p1: 0.0,
+                uv: v.uv,
+                _p2: [0.0, 0.0],
+                joints: [v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32],
+                weights: [
+                    v.weights[0] as f32 / 255.0,
+                    v.weights[1] as f32 / 255.0,
+                    v.weights[2] as f32 / 255.0,
+                    v.weights[3] as f32 / 255.0,
+                ],
+            })
+            .collect();
+
+        // IN-PLACE posing, the same call app.rs uses for a WAD model. Correct here because this
+        // geometry already lives in its own rig's bind space -- unlike --shot, which previews a
+        // foreign import and must retarget across skeletons. No clip = bind pose (identity palette),
+        // which is the "before animation" view.
+        const IDENT: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let t_frac: f32 = get("--render-t").and_then(|s| s.parse().ok()).unwrap_or(0.35);
+        let palette: Vec<[[f32; 4]; 4]> = match get("--render-clip")
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        {
+            Some(ch) => match w.clip_for_rig(&hier, ch) {
+                Some(ca) => {
+                    let bound = ca.track_to_hier.iter().filter(|t| t.is_some()).count();
+                    println!(
+                        "  clip 0x{ch:08X}: {bound}/{} tracks bound, {:.2}s, sampling t={t_frac}",
+                        ca.num_transform_tracks, ca.clip.duration
+                    );
+                    if bound == 0 {
+                        eprintln!("  WARNING: clip binds NO tracks on this rig -- this is a bind pose, not an animation");
+                    }
+                    let sample = ca.clip.sample_local(ca.clip.duration * t_frac);
+                    mercs2_engine::pose::havok_palette_in_place(
+                        &md.skin.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks,
+                    )
+                }
+                None => {
+                    eprintln!("--render: clip 0x{ch:08X} not found for this rig; rendering bind pose");
+                    vec![IDENT; md.skin.rig.len().max(1)]
+                }
+            },
+            None => vec![IDENT; md.skin.rig.len().max(1)],
+        };
+
+        // THE ENGINE'S DRAW GATE. The mesh builder emits a range for every PRMG group it can
+        // de-stripe, but the engine only draws a group whose PRMT draw count (+8) is non-zero --
+        // and that is exactly the field injection zeroes to neutralise the groups it did not fill.
+        // Without this filter the preview renders the DONOR's leftover head, hair and gear inside
+        // the import and disagrees with the game, which makes it worse than useless: it would show
+        // a defect that is not there and hide one that is.
+        let gate: std::collections::HashSet<usize> = match w.extract_container(hash) {
+            Ok(c) => match mercs2_formats::model_inject::group_draw_report(&c) {
+                Ok(rep) => rep.iter().filter(|r| r.1 > 0 && r.2 > 0).map(|r| r.0).collect(),
+                Err(e) => {
+                    eprintln!("--render: draw report failed ({e}); rendering every group");
+                    md.draws.iter().map(|d| d.group_index).collect()
+                }
+            },
+            Err(e) => {
+                eprintln!("--render: container unavailable ({e}); rendering every group");
+                md.draws.iter().map(|d| d.group_index).collect()
+            }
+        };
+
+        // One range per draw group, each binding its own diffuse. Decoding here (not in `shot`)
+        // reuses texpng::decode_bc, which already resolves a streamed texture's resident mip tail.
+        let draws: Vec<shot::DrawTex> = md
+            .draws
+            .iter()
+            .filter(|d| gate.contains(&d.group_index))
+            .map(|d| shot::DrawTex {
+                index_start: d.index_start,
+                index_count: d.index_count,
+                diffuse: d
+                    .diffuse
+                    .and_then(|h| md.textures.get(&h))
+                    .map(|td| texpng::decode_bc(td)),
+            })
+            .collect();
+        let untextured = draws.iter().filter(|d| d.diffuse.is_none()).count();
+        println!(
+            "--render 0x{hash:08X}: {} verts / {} tris / {} draws ({untextured} untextured), {} bones, bbox {:?}..{:?}",
+            md.verts.len(),
+            md.indices.len() / 3,
+            md.draws.len(),
+            md.skin.rig.len(),
+            md.stats.bbox_min,
+            md.stats.bbox_max
+        );
+        // Ranges with a zero index count are the injector's NEUTRALISED groups. Reporting them
+        // separately is what proves this preview draws what the engine draws: if the neutralised
+        // geometry were rendered here, the picture would show the donor's leftovers and quietly
+        // disagree with the game.
+        let live: u32 = draws.iter().map(|d| d.index_count).sum();
+        println!(
+            "    drawing {} of {} groups (PRMT gate), {live} of {} indices",
+            draws.len(),
+            md.draws.len(),
+            md.indices.len()
+        );
+        for d in md.draws.iter().filter(|d| gate.contains(&d.group_index) && d.index_count > 0) {
+            println!(
+                "    group {:>2}  {:>6} idx  diffuse {}  {}",
+                d.group_index,
+                d.index_count,
+                d.diffuse.map(|h| format!("0x{h:08X}")).unwrap_or_else(|| "-".into()),
+                match d.diffuse {
+                    Some(h) if md.textures.contains_key(&h) => "loaded",
+                    Some(_) => "MISSING from block",
+                    None => "untextured",
+                }
+            );
+        }
+        shot::render(&sv, &md.indices, &palette, (md.stats.bbox_min, md.stats.bbox_max), &out, &draws);
+        return;
+    }
+
+    // Headless: numerically diagnose the retarget REBIND. Rebinds the import onto the target both ways
+    // (world_bind as-is vs transposed) and reports, per key body part, where its verts LAND vs where
+    // the target bone actually is — so we can see which convention is correct instead of eyeballing.
+    // Usage: --rebind-check <file.glb> [--rebind-target <name>]
+    if let Some(file) = get("--rebind-check") {
+        let target = get("--rebind-target").unwrap_or_else(|| "pmc_hum_jen_v2".into());
+        let im = match import::import_model(std::path::Path::new(&file)) {
+            Ok(i) => i,
+            Err(e) => return eprintln!("--rebind-check: {e}"),
+        };
+        let thash = mercs2_formats::hash::pandemic_hash_m2(target.trim_start_matches('_'));
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash);
+        let tmd = match app::load_model_data(&mut w, thash) {
+            Ok(m) => m,
+            Err(e) => return eprintln!("--rebind-check target {target}: {e}"),
+        };
+        let world_bind: Vec<[[f32; 4]; 4]> = tmd.skin.rig.iter().map(|b| b.world_bind).collect();
+        let r = crate::retarget::Retarget::build_full(
+            im.skin_joints.clone(),
+            im.skin_joint_pos.clone(),
+            im.skin_ibm.clone(),
+            im.skin_parents.clone(),
+            tnames.clone(),
+            tpos.clone(),
+            tparents,
+        );
+        let table = r.joint_table(tnames.len().max(1));
+        // Unit scale source→target from the bind-pose Y extents (inches→metres for a CoD import).
+        let yext = |ps: &[[f32; 3]]| {
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for p in ps {
+                lo = lo.min(p[1]);
+                hi = hi.max(p[1]);
+            }
+            (hi - lo).max(1e-3)
+        };
+        let uscale = yext(&tpos) / yext(&im.skin_joint_pos);
+        println!("source→target unit scale = {uscale:.5}");
+        // Dump the mapping for every hip/pelvis/leg/gear source bone WITH the source and target X sign
+        // (side): a mismatch (src +X → tgt −X) is a left/right swap for that bone.
+        println!("--- hip/pelvis/gear region mapping (src.x sign vs tgt.x sign) ---");
+        for (si, name) in im.skin_joints.iter().enumerate() {
+            let ln = name.to_ascii_lowercase();
+            if !(ln.contains("hip") || ln.contains("mainroot") || ln.contains("origin")
+                || ln.contains("sling") || ln.contains("cosmetic") || ln.contains("holster")
+                || ln.contains("knee") || ln.contains("ball"))
+            {
+                continue;
+            }
+            let ti = table.get(si).copied().unwrap_or(0);
+            let sz = im.skin_joint_pos.get(si).map(|p| p[2]).unwrap_or(0.0); // source side = Z (left=-Z)
+            let tx = tpos.get(ti).map(|p| p[0]).unwrap_or(0.0); // target side = X (left=+X)
+            let ssrc = if sz < -0.5 { "L" } else if sz > 0.5 { "R" } else { "mid" };
+            let stgt = if tx > 0.03 { "L" } else if tx < -0.03 { "R" } else { "mid" };
+            let swap = ssrc != stgt && ssrc != "mid" && stgt != "mid";
+            println!(
+                "  {name:26} src.z={sz:+.2} src-side={ssrc} -> {:20} tgt.x={tx:+.2} tgt-side={stgt} {}",
+                tnames.get(ti).cloned().unwrap_or_default(),
+                if swap { "*** SIDE SWAP ***" } else { "" }
+            );
+        }
+        // Key source bones and the region they represent — BOTH sides, to catch a left/right swap.
+        let probes = [
+            "j_mainroot", "j_hip_le", "j_hip_ri", "j_knee_le", "j_knee_ri", "j_wrist_le",
+            "j_wrist_ri", "j_shoulder_le", "j_shoulder_ri", "j_hipholster_ri", "j_ankle_le",
+            "j_ankle_ri",
+        ];
+        // Variant A = the world-space rebind the workshop now ships (`Retarget::rebind_matrices`,
+        // position snap + shortest-arc direction). Variant B = the legacy `TargetBind·SourceInvBind`
+        // form, kept side-by-side so the OFF→MATCH and TWIST collapse between them is visible.
+        let tgt_bind_asis: Vec<glam::Mat4> = world_bind.iter().map(glam::Mat4::from_cols_array_2d).collect();
+        for (label, legacy) in
+            [("A: world-space (new)", false), ("B: legacy TargetBind\u{00B7}SourceInvBind", true)]
+        {
+            let scale_m = glam::Mat4::from_scale(glam::Vec3::splat(uscale));
+            let rebind: Vec<glam::Mat4> = if legacy {
+                (0..im.skin_ibm.len())
+                    .map(|s| {
+                        let t = table.get(s).copied().unwrap_or(0).min(tgt_bind_asis.len().saturating_sub(1));
+                        tgt_bind_asis.get(t).copied().unwrap_or(glam::Mat4::IDENTITY)
+                            * scale_m
+                            * glam::Mat4::from_cols_array_2d(&im.skin_ibm[s])
+                    })
+                    .collect()
+            } else {
+                r.rebind_matrices(&table, &tgt_bind_asis)
+            };
+            let reb = |v: &mesh::Vertex| -> glam::Vec3 {
+                let (mut np, mut wsum) = (glam::Vec3::ZERO, 0.0f32);
+                for k in 0..4 {
+                    let wt = v.weights[k] as f32 / 255.0;
+                    if wt <= 0.0 {
+                        continue;
+                    }
+                    let rb = rebind.get(v.joints[k] as usize).copied().unwrap_or(glam::Mat4::IDENTITY);
+                    np += wt * rb.transform_point3(glam::Vec3::from(v.pos));
+                    wsum += wt;
+                }
+                if wsum > 1e-6 {
+                    np / wsum
+                } else {
+                    glam::Vec3::from(v.pos)
+                }
+            };
+            // Centroid of the verts whose DOMINANT bone is source joint `si`, in rebound space.
+            let src_centroid = |si: usize| -> Option<glam::Vec3> {
+                let (mut c, mut n) = (glam::Vec3::ZERO, 0.0f32);
+                for v in &im.verts {
+                    let dom = (0..4).max_by_key(|&k| v.weights[k]).unwrap();
+                    if v.joints[dom] as usize == si && v.weights[dom] > 0 {
+                        c += reb(v);
+                        n += 1.0;
+                    }
+                }
+                (n > 0.0).then(|| c / n)
+            };
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for v in &im.verts {
+                let p = reb(v);
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+            // Determinant sign of a representative rebind matrix — negative = a reflection (mirror),
+            // which flips facing (Z) and inverts normals (parts render as invisible backfaces).
+            let det = rebind.get(1).map(|m| m.determinant()).unwrap_or(0.0);
+            println!(
+                "\n[{label}] rebound bbox y {:.2}..{:.2} (height {:.2} m)  rebind det={:.4} {}",
+                lo[1], hi[1], hi[1] - lo[1], det,
+                if det < 0.0 { "*** REFLECTION (mirror/flip) ***" } else { "" }
+            );
+            for pname in probes {
+                let Some(si) = im.skin_joints.iter().position(|n| n == pname) else { continue };
+                let ti = table.get(si).copied().unwrap_or(0);
+                let tp = tpos.get(ti).copied().unwrap_or([0.0; 3]);
+                let Some(c) = src_centroid(si) else { continue };
+                let ok = |a: f32, b: f32| (a - b).abs() < 0.20;
+                // TWIST: the position check above can MATCH while the limb is rotationally twisted. Compare
+                // the rebound limb direction (this bone's centroid → its mapped child's centroid) against
+                // the target bone's bind direction (bone → its target child). A large angle = a twist the
+                // position probe can't see — the crumpled-hand failure mode.
+                let child_src = r
+                    .source_parents
+                    .iter()
+                    .enumerate()
+                    .find(|&(c, &p)| p == si as i32 && table.get(c).copied() != Some(ti))
+                    .map(|(c, _)| c);
+                let twist = child_src.and_then(|cs| {
+                    let cc = src_centroid(cs)?;
+                    let tc = table.get(cs).copied().unwrap_or(ti);
+                    let limb = (cc - c).normalize_or_zero();
+                    let bone = (glam::Vec3::from(tpos.get(tc).copied().unwrap_or(tp)) - glam::Vec3::from(tp))
+                        .normalize_or_zero();
+                    if limb.length_squared() > 0.0 && bone.length_squared() > 0.0 {
+                        Some(limb.dot(bone).clamp(-1.0, 1.0).acos().to_degrees())
+                    } else {
+                        None
+                    }
+                });
+                println!(
+                    "  {pname:14} -> {:18} land ({:+.2},{:+.2},{:+.2}) bone ({:+.2},{:+.2},{:+.2}) {} {}",
+                    tnames.get(ti).cloned().unwrap_or_default(),
+                    c.x, c.y, c.z, tp[0], tp[1], tp[2],
+                    if ok(c.x, tp[0]) && ok(c.y, tp[1]) && ok(c.z, tp[2]) { "MATCH" } else { "OFF" },
+                    match twist {
+                        Some(a) => format!("TWIST {a:5.1}\u{00B0}{}", if a > 30.0 { " ***" } else { "" }),
+                        None => String::new(),
+                    }
+                );
+            }
+        }
+
+        // ── POSED-FRAME CHECK ── apply a real clip to the shipping (world-space) rebound mesh and see
+        // whether each body part still tracks its (posed) bone. Detects the animation-time bug the
+        // static bind check can't: if a limb's verts drift far from its posed bone, the deformation is wrong.
+        let tgt_bind: Vec<glam::Mat4> = world_bind.iter().map(glam::Mat4::from_cols_array_2d).collect();
+        let rebind = r.rebind_matrices(&table, &tgt_bind);
+        let rebound: Vec<glam::Vec3> = im
+            .verts
+            .iter()
+            .map(|v| {
+                let (mut np, mut wsum) = (glam::Vec3::ZERO, 0.0f32);
+                for k in 0..4 {
+                    let wt = v.weights[k] as f32 / 255.0;
+                    if wt <= 0.0 {
+                        continue;
+                    }
+                    np += wt
+                        * rebind
+                            .get(v.joints[k] as usize)
+                            .copied()
+                            .unwrap_or(glam::Mat4::IDENTITY)
+                            .transform_point3(glam::Vec3::from(v.pos));
+                    wsum += wt;
+                }
+                if wsum > 1e-6 {
+                    np / wsum
+                } else {
+                    glam::Vec3::from(v.pos)
+                }
+            })
+            .collect();
+        // Optionally test a SPECIFIC clip by hash (--rebind-clip 0x...) loaded via the CHARACTER path
+        // (clip_for_rig) — that's where the workshop's jennifer/pistol clips come from — else a normal
+        // generic full-body clip.
+        let want_clip = get("--rebind-clip")
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+        let hier: Vec<u32> = tmd.skin.rig.iter().map(|b| b.name_hash).collect();
+        let owned = want_clip.and_then(|h| w.clip_for_rig(&hier, h));
+        let clips = w.clips_for_model(&tmd.skin.rig);
+        let Some(ca) = owned.as_ref().or_else(|| {
+            clips
+                .iter()
+                .filter(|c| c.num_transform_tracks >= 20 && c.num_transform_tracks <= 70)
+                .max_by_key(|c| c.num_transform_tracks)
+                .or_else(|| clips.iter().max_by_key(|c| c.num_transform_tracks))
+        }) else {
+            println!("\n(no clips bind to this rig — can't run posed check)");
+            return;
+        };
+        let sample = ca.clip.sample_local(ca.clip.duration * 0.35);
+        let palette = mercs2_engine::pose::havok_palette(
+            &tmd.skin.rig,
+            &sample,
+            &ca.track_to_hier,
+            ca.num_transform_tracks,
+        );
+        let skin_of = |t: usize| glam::Mat4::from_cols_array_2d(&palette[t.min(palette.len() - 1)]);
+        // Posed bone position = the bone origin pushed through its skin matrix.
+        let posed_bone = |t: usize| skin_of(t).transform_point3(glam::Vec3::from(tpos[t.min(tpos.len() - 1)]));
+        let skinned = |i: usize| -> glam::Vec3 {
+            let v = &im.verts[i];
+            let (mut acc, mut wsum) = (glam::Vec3::ZERO, 0.0f32);
+            for k in 0..4 {
+                let wt = v.weights[k] as f32 / 255.0;
+                if wt <= 0.0 {
+                    continue;
+                }
+                let t = table.get(v.joints[k] as usize).copied().unwrap_or(0);
+                acc += wt * skin_of(t).transform_point3(rebound[i]);
+                wsum += wt;
+            }
+            if wsum > 1e-6 {
+                acc / wsum
+            } else {
+                rebound[i]
+            }
+        };
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for i in 0..im.verts.len() {
+            let p = skinned(i);
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        println!(
+            "\n== POSED FRAME (clip 0x{:08X}, {} tracks, t={:.2}s) ==",
+            ca.name_hash,
+            ca.num_transform_tracks,
+            ca.clip.duration * 0.35
+        );
+        println!(
+            "posed skinned bbox x {:.2}..{:.2} y {:.2}..{:.2} z {:.2}..{:.2}",
+            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]
+        );
+        for pname in probes {
+            let Some(si) = im.skin_joints.iter().position(|n| n == pname) else { continue };
+            let ti = table.get(si).copied().unwrap_or(0);
+            // Dominant verts of this source bone.
+            let idxs: Vec<usize> = (0..im.verts.len())
+                .filter(|&i| {
+                    let v = &im.verts[i];
+                    let dom = (0..4).max_by_key(|&k| v.weights[k]).unwrap();
+                    v.joints[dom] as usize == si && v.weights[dom] > 0
+                })
+                .collect();
+            if idxs.is_empty() {
+                continue;
+            }
+            // Spread (RMS distance from centroid) at BIND (rebound) vs POSED (skinned). A rigid limb
+            // keeps its spread → ratio≈1; a twist/collapse/balloon shows ratio far from 1 even when the
+            // CENTROID still tracks the bone. This is the distortion the position-only check missed.
+            let mean = |f: &dyn Fn(usize) -> glam::Vec3| {
+                let s: glam::Vec3 = idxs.iter().map(|&i| f(i)).sum();
+                s / idxs.len() as f32
+            };
+            let rms = |f: &dyn Fn(usize) -> glam::Vec3, c: glam::Vec3| {
+                (idxs.iter().map(|&i| (f(i) - c).length_squared()).sum::<f32>() / idxs.len() as f32).sqrt()
+            };
+            let bind_f: &dyn Fn(usize) -> glam::Vec3 = &|i| rebound[i];
+            let pose_f: &dyn Fn(usize) -> glam::Vec3 = &|i| skinned(i);
+            let bc = mean(bind_f);
+            let pc = mean(pose_f);
+            let brms = rms(bind_f, bc);
+            let prms = rms(pose_f, pc);
+            let ratio = if brms > 1e-4 { prms / brms } else { 0.0 };
+            let b = posed_bone(ti);
+            let d = (pc - b).length();
+            println!(
+                "  {pname:14} posed@({:+.2},{:+.2},{:+.2}) dist={:.2} {}  spread {:.3}->{:.3} ratio={:.2} {}",
+                pc.x, pc.y, pc.z,
+                d,
+                if d < 0.25 { "tracks" } else { "DRIFT" },
+                brms,
+                prms,
+                ratio,
+                if ratio > 1.6 || ratio < 0.6 { "*** DISTORTED ***" } else { "rigid-ok" }
+            );
+        }
+
+        // ── JEN NATIVE CONTROL ── pose Jen's OWN mesh with the SAME clip and same metric. If Jen's
+        // spread ratios match Roze's, the retarget deforms identically to native (→ any mangling is the
+        // clip, not the retarget). If Jen stays rigid where Roze distorts, the retarget is the culprit.
+        println!("-- JEN NATIVE (control, same clip) --");
+        let jskin = |i: usize| -> glam::Vec3 {
+            let v = &tmd.verts[i];
+            let (mut acc, mut wsum) = (glam::Vec3::ZERO, 0.0f32);
+            for k in 0..4 {
+                let wt = v.weights[k] as f32 / 255.0;
+                if wt <= 0.0 {
+                    continue;
+                }
+                acc += wt * skin_of(v.joints[k] as usize).transform_point3(glam::Vec3::from(v.pos));
+                wsum += wt;
+            }
+            if wsum > 1e-6 {
+                acc / wsum
+            } else {
+                glam::Vec3::from(v.pos)
+            }
+        };
+        for pname in probes {
+            let Some(si) = im.skin_joints.iter().position(|n| n == pname) else { continue };
+            let ti = table.get(si).copied().unwrap_or(0);
+            let idxs: Vec<usize> = (0..tmd.verts.len())
+                .filter(|&i| {
+                    let v = &tmd.verts[i];
+                    let dom = (0..4).max_by_key(|&k| v.weights[k]).unwrap();
+                    v.joints[dom] as usize == ti && v.weights[dom] > 0
+                })
+                .collect();
+            if idxs.is_empty() {
+                continue;
+            }
+            let mean = |f: &dyn Fn(usize) -> glam::Vec3| {
+                idxs.iter().map(|&i| f(i)).sum::<glam::Vec3>() / idxs.len() as f32
+            };
+            let rms = |f: &dyn Fn(usize) -> glam::Vec3, c: glam::Vec3| {
+                (idxs.iter().map(|&i| (f(i) - c).length_squared()).sum::<f32>() / idxs.len() as f32).sqrt()
+            };
+            let bind_f: &dyn Fn(usize) -> glam::Vec3 = &|i| glam::Vec3::from(tmd.verts[i].pos);
+            let pose_f: &dyn Fn(usize) -> glam::Vec3 = &jskin;
+            let brms = rms(bind_f, mean(bind_f));
+            let prms = rms(pose_f, mean(pose_f));
+            let ratio = if brms > 1e-4 { prms / brms } else { 0.0 };
+            println!(
+                "  {:18} spread bind={:.3} posed={:.3} ratio={:.2} {}",
+                tnames.get(ti).cloned().unwrap_or_default(),
+                brms,
+                prms,
+                ratio,
+                if ratio > 1.6 || ratio < 0.6 { "*** DISTORTED ***" } else { "rigid-ok" }
+            );
+        }
+        return;
+    }
+
+    // Headless: dump a model's HIER bone names in index order (the strings the retarget maps onto).
+    if let Some(arg) = get("--bones") {
+        let hash = arg
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
+        };
+        let (names, pos, _parents) = app::target_bone_info(&mut w, hash);
+        println!("{arg} (0x{hash:08X}): {} bones", names.len());
+        for (i, (n, p)) in names.iter().zip(pos.iter()).enumerate() {
+            println!("{i:3} {n}  [{:.3}, {:.3}, {:.3}]", p[0], p[1], p[2]);
+        }
+        return;
+    }
+
     if let Some(arg) = get("--check") {
         let hash = arg
             .strip_prefix("0x")
@@ -698,6 +1453,155 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
 }
 
 /// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and
+/// Extract a GLB into per-primitive parts (world-space geometry baked from the node transforms) for
+/// a fresh-skeleton inject. Each primitive → one `SkelRawPart`; a primitive whose material name (or
+/// its owning node's name) contains "rotor" is flagged to ride the donor's engine-spun rotor node.
+/// Materials all point at donor slot 0 for now (real skins are a later pass).
+fn extract_skel_parts(
+    path: &std::path::Path,
+) -> Result<
+    (
+        Vec<publish::SkelRawPart>,
+        Vec<Option<(u32, u32, Vec<u8>)>>, // diffuse (slot 0)
+        Vec<Option<(u32, u32, Vec<u8>)>>, // specular (slot 1)
+        Vec<Option<(u32, u32, Vec<u8>)>>, // normal (slot 2)
+    ),
+    String,
+> {
+    use mercs2_formats::model_inject::ExternalMesh;
+    let (doc, buffers, images) =
+        gltf::import(path).map_err(|e| format!("gltf import: {e}"))?;
+    let buf = |b: gltf::Buffer| buffers.get(b.index()).map(|d| &d.0[..]);
+
+    // Per-material base-colour image as straight RGBA8 (index by glTF material index). None = the
+    // material carries no diffuse texture (keep the donor's skin for parts using it).
+    let to_rgba = |img: &gltf::image::Data| -> Option<(u32, u32, Vec<u8>)> {
+        use gltf::image::Format::*;
+        let (w, h, p) = (img.width, img.height, &img.pixels);
+        let rgba: Vec<u8> = match img.format {
+            R8G8B8A8 => p.clone(),
+            R8G8B8 => p.chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+            R8 => p.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+            R8G8 => p.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+            _ => return None, // 16-bit / float formats: skip (rare for game skins)
+        };
+        Some((w, h, rgba))
+    };
+    let mat_count = doc.materials().len().max(1);
+    // slot 0 = diffuse (baseColor), slot 1 = specular (metallicRoughness / JC2 _mpm),
+    // slot 2 = normal (normalTexture / JC2 _nrm). Empirically-confirmed MTRL slot order.
+    let mut mat_images: Vec<Option<(u32, u32, Vec<u8>)>> = vec![None; mat_count];
+    let mut spec_images: Vec<Option<(u32, u32, Vec<u8>)>> = vec![None; mat_count];
+    let mut normal_images: Vec<Option<(u32, u32, Vec<u8>)>> = vec![None; mat_count];
+    for m in doc.materials() {
+        let Some(idx) = m.index() else { continue };
+        if let Some(t) = m.pbr_metallic_roughness().base_color_texture() {
+            if let Some(img) = images.get(t.texture().source().index()) {
+                mat_images[idx] = to_rgba(img);
+            }
+        }
+        if let Some(t) = m.pbr_metallic_roughness().metallic_roughness_texture() {
+            if let Some(img) = images.get(t.texture().source().index()) {
+                spec_images[idx] = to_rgba(img);
+            }
+        }
+        if let Some(t) = m.normal_texture() {
+            if let Some(img) = images.get(t.texture().source().index()) {
+                normal_images[idx] = to_rgba(img);
+            }
+        }
+    }
+
+    // column-major 4x4 multiply (glTF), point/dir transforms.
+    fn mm(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+        let mut o = [[0f32; 4]; 4];
+        for c in 0..4 {
+            for r in 0..4 {
+                for k in 0..4 {
+                    o[c][r] += a[k][r] * b[c][k];
+                }
+            }
+        }
+        o
+    }
+    fn mp(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
+        [
+            m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
+            m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
+            m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+        ]
+    }
+    fn md(m: &[[f32; 4]; 4], v: [f32; 3]) -> [f32; 3] {
+        let o = [
+            m[0][0] * v[0] + m[1][0] * v[1] + m[2][0] * v[2],
+            m[0][1] * v[0] + m[1][1] * v[1] + m[2][1] * v[2],
+            m[0][2] * v[0] + m[1][2] * v[1] + m[2][2] * v[2],
+        ];
+        let l = (o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt().max(1e-8);
+        [o[0] / l, o[1] / l, o[2] / l]
+    }
+    const IDENT: [[f32; 4]; 4] =
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+
+    let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or("no scene")?;
+    let mut parts = Vec::new();
+    let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> =
+        scene.nodes().map(|n| (n, IDENT)).collect();
+    while let Some((node, parent)) = stack.pop() {
+        let world = mm(&parent, &node.transform().matrix());
+        for c in node.children() {
+            stack.push((c, world));
+        }
+        let node_name = node.name().unwrap_or("").to_ascii_lowercase();
+        let Some(mesh) = node.mesh() else { continue };
+        for prim in mesh.primitives() {
+            let reader = prim.reader(buf);
+            let Some(pos) = reader.read_positions() else { continue };
+            let positions: Vec<[f32; 3]> = pos.map(|p| mp(&world, p)).collect();
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
+                .map(|it| it.map(|n| md(&world, n)).collect())
+                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+            let uvs: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
+                .map(|tc| tc.into_f32().collect())
+                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let idx: Vec<u32> = match reader.read_indices() {
+                Some(ind) => ind.into_u32().collect(),
+                None => (0..positions.len() as u32).collect(),
+            };
+            let tris: Vec<[u32; 3]> = idx.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            if positions.is_empty() || tris.is_empty() {
+                continue;
+            }
+            let mat = prim.material();
+            let mat_name = mat.name().unwrap_or("").to_ascii_lowercase();
+            let is_rotor = mat_name.contains("rotor") || node_name.contains("rotor");
+            let label = node
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("mat{}", mat.index().unwrap_or(0)));
+            parts.push(publish::SkelRawPart {
+                label,
+                mesh: ExternalMesh {
+                    positions,
+                    normals,
+                    uvs,
+                    tris,
+                    joints: Vec::new(),
+                    weights: Vec::new(),
+                },
+                is_rotor,
+                material_index: mat.index().unwrap_or(0) as u32,
+            });
+        }
+    }
+    if parts.is_empty() {
+        return Err("no mesh primitives in GLB".into());
+    }
+    Ok((parts, mat_images, spec_images, normal_images))
+}
+
 /// HIER node names (bone/hardpoint). The rainbow table names ~972k hashes but only these ~tens-of-k are
 /// ever displayed, so intersecting against this set drops the speculative-candidate bulk. Returns an
 /// EMPTY set if the WAD can't be opened (released binary with no game data) — the caller then skips
