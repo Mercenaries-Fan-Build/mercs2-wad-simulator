@@ -159,9 +159,15 @@ pub fn clamp_to_donor_reach(
     }
 
     let mut clamped = 0usize;
+    let mut dominant_hits = 0usize;
     for (vi, infl) in per_vertex.iter_mut().enumerate() {
         let Some(t) = targets.get(vi) else { continue };
         let before = infl.len();
+        // Which bone carries this vertex? Losing it is categorically different from losing a crumb.
+        let dom = infl
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|x| x.0);
         let keep: Vec<(u32, f64)> = infl
             .iter()
             .copied()
@@ -173,6 +179,11 @@ pub fn clamp_to_donor_reach(
                 d <= *r
             })
             .collect();
+        if let Some(d) = dom {
+            if !keep.iter().any(|&(b, _)| b == d) {
+                dominant_hits += 1;
+            }
+        }
         // Never strip a vertex bare: an unweighted vertex collapses to the origin under skinning,
         // which is far worse than an over-long lever arm. Keep the original in that case.
         if keep.is_empty() {
@@ -188,6 +199,11 @@ pub fn clamp_to_donor_reach(
                 x.1 /= s;
             }
         }
+    }
+    if dominant_hits > 0 {
+        eprintln!(
+            "  clamp WARNING: {dominant_hits} vertices lost their DOMINANT bone              (gross motion, not a crumb)"
+        );
     }
     clamped
 }
