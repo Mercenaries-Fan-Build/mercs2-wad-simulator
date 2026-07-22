@@ -23,7 +23,7 @@ pub mod transfer;
 pub mod validate;
 
 pub use build::{
-    build_character, BuildInput, CharGlbData, CharSkin, Mode, TargetBone, TargetSkeleton,
+    build_character, BuildInput, CharGlbData, CharSkin, MeshPart, Mode, TargetBone, TargetSkeleton,
 };
 
 use crate::skeleton::Skeleton;

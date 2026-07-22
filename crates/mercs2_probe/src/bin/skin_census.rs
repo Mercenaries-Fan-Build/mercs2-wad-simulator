@@ -88,11 +88,20 @@ fn main() {
             println!("{:<34} {:>6} {:>7}  (no skinned groups)", short(path), 0, 0);
             continue;
         }
+        // What would OUR palette packer need for this exact bone set? If retail's own groups
+        // require more slots than our cap allows, the cap is comparing the wrong quantities:
+        // PALETTE_CAP was measured as retail's BONE count, but the check gates on SLOTS, and the
+        // RLE merge down to 8 runs bridges gaps so slots > bones.
+        let mut bl: Vec<u32> = bones.iter().map(|&b| b as u32).collect();
+        bl.sort_unstable();
+        let (rr, _, slots) = mercs2_formats::char_skin::build::build_palette_ranges(&bl);
         let pct = |a: usize| 100.0 * a as f64 / verts as f64;
         println!(
             "{:<34} {:>6} {:>7} {:>6} {:>6.1}% {:>6.1}% {:>6.1}%",
             short(path), bones.len(), verts, skinned_groups, pct(rigid), pct(multi), pct(four)
         );
+        println!("        -> our packer would need {slots} slots over {} runs for those {} bones",
+            rr.len(), bones.len());
     }
     println!("\nrigid% = vertices bound to exactly ONE bone. High rigid% with few bones is the shape\nthat survives bind pose and tears when a joint bends.");
 }

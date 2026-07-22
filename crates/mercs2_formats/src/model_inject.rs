@@ -1289,6 +1289,7 @@ pub fn inject_multi_into_donor_block(
         new_name_hash,
         false,
         false,
+        None,
     )
 }
 
@@ -1303,6 +1304,7 @@ pub fn inject_character_multi_into_donor_block(
     repoints: &[MtrlRepoint],
     new_name_hash: u32,
     grow: bool,
+    tri_group: Option<&[usize]>,
 ) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
     inject_multi_into_donor_block_ex(
         container_block,
@@ -1312,6 +1314,7 @@ pub fn inject_character_multi_into_donor_block(
         new_name_hash,
         true,
         grow,
+        tri_group,
     )
 }
 
@@ -1326,6 +1329,14 @@ fn inject_multi_into_donor_block_ex(
     // by the u16 ceiling. Needed when the imported character is denser than the donor it conforms
     // to; the block grows, so the packager MUST recompute page_count/packed_field afterwards.
     grow: bool,
+    // Explicit triangle -> host-slot assignment (index into `target_group_ordinals`), replacing the
+    // balanced split. The game authors a character as many SUB-OBJECT groups (shipped mattias: 22,
+    // bone counts 2/9/2/48/27/6/...), one per authored piece with its own palette and material.
+    // Splitting by triangle COUNT instead spreads every body part across every group, so each
+    // group's palette must cover nearly the whole skeleton -- measured 46-47 bones per group no
+    // matter how many groups were used. Passing the source's own primitive partition reproduces
+    // the retail shape instead.
+    tri_group: Option<&[usize]>,
 ) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
     if container_block.len() < 20 {
         return Err("block too small".into());
@@ -1364,10 +1375,38 @@ fn inject_multi_into_donor_block_ex(
         remap: std::collections::HashMap<u32, u32>,
     }
     let n_targets = targets.len().max(1);
+    // An explicit partition wins when supplied: assign each triangle to its declared host slot,
+    // reproducing how retail authors a character (one group per sub-object) instead of slicing
+    // by triangle count.
+    let explicit: Option<Vec<Chunk>> = tri_group.map(|map| {
+        let mut cs: Vec<Chunk> = (0..n_targets)
+            .map(|_| Chunk { tris: Vec::new(), remap: std::collections::HashMap::new() })
+            .collect();
+        for (i, t) in mesh.tris.iter().enumerate() {
+            let slot = map.get(i).copied().unwrap_or(0).min(n_targets - 1);
+            let c = &mut cs[slot];
+            for &v in t {
+                let n = c.remap.len() as u32;
+                c.remap.entry(v).or_insert(n);
+            }
+            c.tris.push([t[0], t[1], t[2]]);
+        }
+        cs
+    });
     let balanced_cap = (mesh.tris.len() + n_targets - 1) / n_targets;
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut ti = 0usize;
+    // An explicit partition places every triangle by declaration, so the balanced fill below (and
+    // its "insufficient capacity" bail) do not apply. Capacity is still enforced afterwards by the
+    // per-chunk vc/ic budget guard, which is the check that actually matters.
+    if let Some(e) = explicit {
+        chunks = e;
+        ti = mesh.tris.len();
+    }
     for (idx, &(_gi, donor_vc, donor_ic)) in targets.iter().enumerate() {
+        if ti >= mesh.tris.len() && !chunks.is_empty() {
+            break;
+        }
         let mut c = Chunk {
             tris: Vec::new(),
             remap: std::collections::HashMap::new(),

@@ -165,6 +165,30 @@ pub struct CharGlbData {
     pub node_children: Vec<Vec<usize>>,
     pub node_world: Vec<[f64; 16]>,
     pub ibm: Vec<Option<[f64; 16]>>,
+    /// The source model's own sub-object partition, one entry per glTF primitive, in `tris` order.
+    ///
+    /// This is the authoring unit, and it matters because it is how the GAME partitions a
+    /// character too. Shipped `pmc_hum_mattias` is 22 skinned draw groups whose bone counts run
+    /// 2, 9, 2, 48, 27, 6, 2, 4, 13, 48, ... — i.e. a couple of big body groups around 48 bones
+    /// plus many small authored pieces (straps, pouches, a collar), one of which is 1 bone and
+    /// 100% rigid. A character is NOT one group split under duress; it is a set of sub-objects,
+    /// each with its own palette and its own material.
+    ///
+    /// Keeping this partition lets an import be authored the same way: primitive -> draw group,
+    /// 1:1, so each group's palette covers only its region's bones and each group carries exactly
+    /// one material (which is what MTRL repointing needs).
+    pub parts: Vec<MeshPart>,
+}
+
+/// One source sub-object: a contiguous run of `CharGlbData::tris`, with its material.
+#[derive(Clone, Debug)]
+pub struct MeshPart {
+    pub name: String,
+    /// Index into `tris` of the first triangle.
+    pub tri_start: usize,
+    pub tri_count: usize,
+    /// glTF material index, if the primitive declared one.
+    pub material: Option<usize>,
 }
 
 impl CharGlbData {

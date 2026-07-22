@@ -13,7 +13,9 @@ use mercs2_formats::char_skin::build::build_palette_ranges;
 use mercs2_formats::char_skin::transfer::{transfer_weights, DonorSample};
 use mercs2_formats::char_skin::{build_character, TargetSkeleton};
 use mercs2_formats::model_cubeize::read_model_meshes;
-use mercs2_formats::model_inject::{inject_character_into_donor_block, ExternalMesh};
+use mercs2_formats::model_inject::{
+    inject_character_into_donor_block, inject_character_multi_into_donor_block, ExternalMesh,
+};
 use mercs2_formats::skeleton::Skeleton;
 use std::collections::HashMap;
 
@@ -31,7 +33,14 @@ fn main() {
     let name = flag(&a, "--name")
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0xDFDF_5B5D);
-    let group: usize = flag(&a, "--group").and_then(|s| s.parse().ok()).unwrap_or(3);
+    // Comma-separated ordinals route through the MULTI-group path, which gives each host group its
+    // OWN INFO(56) palette. That is what keeps a 70-bone transfer inside the format: one whole-model
+    // palette needs 76 slots (retail max measured 48), three per-group palettes need far fewer each.
+    let groups: Vec<usize> = flag(&a, "--group")
+        .unwrap_or("3")
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
     let k: usize = flag(&a, "-k").and_then(|s| s.parse().ok()).unwrap_or(4);
 
     let glb = gltf::load_char_glb(glb_path).expect("glb");
@@ -120,16 +129,108 @@ fn main() {
     cs.skin_bytes = skin;
     cs.ranges = ranges32.iter().map(|&(b, c)| (b as u16, c as u16)).collect();
 
-    let mesh = ExternalMesh {
+    // For the MULTI path `joints` must be GLOBAL bone indices: the injector derives each group's
+    // palette from the bones that group actually uses. For the single path it must be palette
+    // SLOTS, because the whole-model palette is supplied alongside. Same bytes, different meaning.
+    let global_joints: Vec<[u8; 4]> = t
+        .per_vertex
+        .iter()
+        .map(|infl| {
+            let mut o = [0u8; 4];
+            for (i, (b, _)) in infl.iter().take(4).enumerate() {
+                o[i] = *b as u8;
+            }
+            o
+        })
+        .collect();
+    let weights: Vec<[u8; 4]> = (0..nv)
+        .map(|i| {
+            [
+                cs.skin_bytes[i * 8 + 4],
+                cs.skin_bytes[i * 8 + 5],
+                cs.skin_bytes[i * 8 + 6],
+                cs.skin_bytes[i * 8 + 7],
+            ]
+        })
+        .collect();
+    let slot_joints: Vec<[u8; 4]> = (0..nv)
+        .map(|i| {
+            [
+                cs.skin_bytes[i * 8],
+                cs.skin_bytes[i * 8 + 1],
+                cs.skin_bytes[i * 8 + 2],
+                cs.skin_bytes[i * 8 + 3],
+            ]
+        })
+        .collect();
+
+    // FAITHFUL PARTITION: sub-object first, then contiguous bone span.
+    //
+    // Retail authors a character as many small draw groups (shipped mattias: 22, bone counts
+    // 2/9/2/48/27/6/2/4/13/48/...). Crucially their bone sets are near-CONTIGUOUS in HIER index:
+    // group 3 packs 48 bones into 48 slots over 5 runs, chris 45 into 45 over 7 — zero gap
+    // bridging. A group is a body REGION, and HIER indices are hierarchical, so a region is an
+    // index range.
+    //
+    // Partitioning only by source primitive is too coarse: 50 Cent's "body" is one primitive
+    // spanning the whole body, needing 47 scattered bones -> 8 runs -> 51 slots (+4 bridged).
+    // So order triangles by (part, dominant bone) and cut into groups along that order: each
+    // group then covers one part and a contiguous bone span, which is the retail shape.
+    let dom_of = |tri: &[u32; 3]| -> u32 {
+        let mut best = (0u8, u32::MAX);
+        for &v in tri {
+            let vi = v as usize;
+            for c in 0..4 {
+                let w = cs.skin_bytes[vi * 8 + 4 + c];
+                if w > best.0 {
+                    best = (w, global_joints[vi][c] as u32);
+                }
+            }
+        }
+        best.1
+    };
+    let mut part_of = vec![0usize; glb.tris.len()];
+    for (pi, part) in glb.parts.iter().enumerate() {
+        for t in part.tri_start..(part.tri_start + part.tri_count).min(part_of.len()) {
+            part_of[t] = pi;
+        }
+    }
+    let mut order: Vec<usize> = (0..glb.tris.len()).collect();
+    order.sort_by_key(|&i| (part_of[i], dom_of(&glb.tris[i])));
+    let tris: Vec<[u32; 3]> = order.iter().map(|&i| glb.tris[i]).collect();
+    let per = (tris.len() + groups.len() - 1) / groups.len().max(1);
+    let tri_group: Vec<usize> = (0..tris.len()).map(|i| (i / per).min(groups.len() - 1)).collect();
+    if groups.len() > 1 {
+        println!("partition: {} source parts, ordered by (part, dominant bone) -> {} groups",
+            glb.parts.len(), groups.len());
+    }
+
+    let mut mesh = ExternalMesh {
         positions: cs.pos.clone(),
         normals: glb.normals.clone(),
         uvs: glb.uvs.clone(),
-        tris: glb.tris.clone(),
-        joints: (0..nv).map(|i| [cs.skin_bytes[i * 8], cs.skin_bytes[i * 8 + 1], cs.skin_bytes[i * 8 + 2], cs.skin_bytes[i * 8 + 3]]).collect(),
-        weights: (0..nv).map(|i| [cs.skin_bytes[i * 8 + 4], cs.skin_bytes[i * 8 + 5], cs.skin_bytes[i * 8 + 6], cs.skin_bytes[i * 8 + 7]]).collect(),
+        tris,
+        joints: slot_joints,
+        weights,
     };
-    let (block, stats) = inject_character_into_donor_block(&donor_block, &mesh, &cs.ranges, group, &[], name)
+
+    let (block, target_group, vcount) = if groups.len() == 1 {
+        let (b, st) = inject_character_into_donor_block(
+            &donor_block, &mesh, &cs.ranges, groups[0], &[], name,
+        )
         .expect("inject");
+        (b, st.target_group, st.vertex_count)
+    } else {
+        mesh.joints = global_joints;
+        let (b, _audits, st) = inject_character_multi_into_donor_block(
+            &donor_block, &mesh, &groups, &[], name, true, Some(&tri_group),
+        )
+        .expect("inject multi");
+        (b, st.target_group, st.vertex_count)
+    };
     std::fs::write(out_path, &block).expect("write");
-    println!("wrote {out_path} ({} bytes): group {} <- {} verts", block.len(), stats.target_group, stats.vertex_count);
+    println!(
+        "wrote {out_path} ({} bytes): groups {:?} <- {} verts (stats group {}, {} verts)",
+        block.len(), groups, nv, target_group, vcount
+    );
 }

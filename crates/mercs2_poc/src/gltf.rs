@@ -343,6 +343,11 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
     let mut vjoints: Vec<[u16; 4]> = Vec::new();
     let mut vweights: Vec<[f64; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    // Per-primitive spans, so the source's own sub-object partition survives the merge. The game
+    // authors a character as many small draw groups (shipped mattias: 22), one per sub-object with
+    // its own palette and material — keeping this lets an import be authored the same way instead
+    // of being crammed into one group and split arbitrarily when it overflows.
+    let mut parts: Vec<mercs2_formats::char_skin::MeshPart> = Vec::new();
     let empty = Vec::new();
     for (mesh_ix, mesh) in json["meshes"].as_array().unwrap_or(&empty).iter().enumerate() {
         let remap = &skin_local_to_unified[*mesh_skin.get(&mesh_ix).unwrap_or(&0)];
@@ -389,6 +394,7 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
                     read_comp_f32(&wa, e, 3) as f64,
                 ]);
             }
+            let tri_start = indices.len() / 3;
             match prim["indices"].as_u64() {
                 Some(ii) => {
                     let ia = accessor(&json, &bin, ii as usize)?;
@@ -398,6 +404,12 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
                 }
                 None => indices.extend(base..base + n as u32),
             }
+            parts.push(mercs2_formats::char_skin::MeshPart {
+                name: mesh["name"].as_str().unwrap_or("").to_string(),
+                tri_start,
+                tri_count: indices.len() / 3 - tri_start,
+                material: prim["material"].as_u64().map(|m| m as usize),
+            });
         }
     }
     if positions.is_empty() {
@@ -419,5 +431,6 @@ pub fn load_char_glb(path: &str) -> Result<CharGlbData, String> {
         node_children,
         node_world,
         ibm,
+        parts,
     })
 }
