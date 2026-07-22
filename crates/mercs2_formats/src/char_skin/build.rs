@@ -11,7 +11,20 @@ use super::automap::{automap, Origin, Rig};
 use super::mat::*;
 use std::collections::HashMap;
 
-pub const PALETTE_CAP: usize = 46; // largest palette the shipped game uses
+/// Largest palette a single draw group may carry.
+///
+/// Was 46, described as "largest palette the shipped game uses". Measured otherwise:
+/// `mercs2_probe --bin skin_census --group 3` reports **48** distinct bones in shipped
+/// pmc_hum_mattias group 3 (chris 45). So 46 was below retail and fired the finger-collapse
+/// unnecessarily -- on 50 Cent it destroyed 30 mapped bones (both finger ranges), taking the
+/// palette from 58 mapped down to 28. Set to the measured retail maximum, not to an invented
+/// number and not to the structural ceiling (BLENDINDICES is u8, so 255 slots would fit, but
+/// nothing shipped comes close and an unproven jump is not worth the risk).
+///
+/// Raising 46 -> 64 lifted multi-influence 14.6% -> 19.4%, which is real but small: the cap was
+/// never the main cause of coarse skinning. That is source detail the target rig cannot represent
+/// (muscle/twist/face helper joints with no counterpart), and no palette size fixes it.
+pub const PALETTE_CAP: usize = 48;
 
 /// Run-length encode a SORTED, deduplicated bone-index list into at most [`MAX_RANGES`] runs,
 /// returning `(ranges, bone -> palette slot, slot count)`.

@@ -453,8 +453,8 @@ pub fn validate(
         Limit {
             id: "palette",
             title: "Palette slots",
-            ok: cs.stats.palette_slots <= 46,
-            text: format!("{} / 46", cs.stats.palette_slots),
+            ok: cs.stats.palette_slots <= super::build::PALETTE_CAP,
+            text: format!("{} / {}", cs.stats.palette_slots, super::build::PALETTE_CAP),
         },
         Limit {
             id: "ranges",
