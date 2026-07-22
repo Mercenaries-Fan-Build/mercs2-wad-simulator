@@ -19,6 +19,7 @@
 pub mod automap;
 pub mod build;
 pub mod mat;
+pub mod transfer;
 pub mod validate;
 
 pub use build::{
