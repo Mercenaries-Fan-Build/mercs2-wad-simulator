@@ -14,6 +14,13 @@ pub const SHIPPED_BONE_DISTANCE: (f64, f64, f64) = (0.136, 0.124, 0.328); // mea
 /// may exceed this many indices — and no mesh more than this many vertices.
 pub const U16_INDEX_CEILING: usize = 65535;
 
+/// Minimum share of vertices carrying 2+ bone influences, taken from shipped characters rather
+/// than from how much of the source survived. Retail group-3 measurements (`mercs2_probe --bin
+/// skin_census --group 3`): pmc_hum_mattias 82.8% multi / 17.2% rigid, pmc_hum_chris 93.3% / 6.7%,
+/// both with ~20% of vertices at a full 4 influences. The floor sits below the lower observation,
+/// not at it, so a legitimately blockier character is not failed for being blocky.
+pub const SHIPPED_MULTI_INFLUENCE_MIN: f64 = 0.60;
+
 /// Stale: 65535/6, i.e. the u16 ceiling divided by the flat 6.0 idx/tri the NAIVE
 /// `model_inject::to_strip` costs. It is not a game limit and not a per-model limit. Kept only
 /// so external callers still resolve; the `tris` check now measures the real encoder cost.
@@ -485,11 +492,22 @@ pub fn validate(
         Limit {
             id: "influence",
             title: "Multi-bone influence",
-            ok: cs.stats.influence_retained > 0.5,
+            // Gate on the SHIPPED distribution, not on how much of the source survived. Retention
+            // answers "did we lose weights in translation"; it cannot answer "is this riggable",
+            // and it passed a build that was unusable. Measured on retail group 3 (skin_census):
+            // mattias 82.8% multi / 17.2% rigid, chris 93.3% / 6.7%, and ~20% of vertices carry a
+            // full 4 influences. An import at 14.6% multi / 85.4% rigid / 0.0% four-influence is
+            // FAITHFUL but far too coarse — rigid chunks that survive bind pose and split the
+            // moment a joint bends. That is the animation tearing, and the old check called it Ok.
+            ok: SHIPPED_MULTI_INFLUENCE_MIN <= (cs.stats.multi_influence as f64 / cs.stats.verts.max(1) as f64),
             text: format!(
-                "{} of {} verts ({:.0}% of source)",
+                "{:.1}% of verts have 2+ bones ({} of {}); shipped is {:.0}-{:.0}%. \
+                 Retained {:.0}% of the source's multi-influence verts.",
+                100.0 * cs.stats.multi_influence as f64 / cs.stats.verts.max(1) as f64,
                 cs.stats.multi_influence,
                 cs.stats.verts,
+                100.0 * SHIPPED_MULTI_INFLUENCE_MIN,
+                93.3,
                 100.0 * cs.stats.influence_retained
             ),
         },
