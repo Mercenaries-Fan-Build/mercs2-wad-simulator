@@ -169,12 +169,18 @@ fn main() {
     let skel = Skeleton::from_block(&donor).expect("skeleton");
     let b = &skel.bones[bone];
     let c = b.bind_pos();
-    let radius = if b.parent >= 0 {
-        let p = skel.bones[b.parent as usize].bind_pos();
-        ((c[0] - p[0]).powi(2) + (c[1] - p[1]).powi(2) + (c[2] - p[2]).powi(2)).sqrt() * 2.5
-    } else {
-        0.2
-    };
+    // 2.5x the distance to the parent is a reasonable default for a compact joint, but it is far
+    // too wide for a long bone: on an elbow whose parent is a shoulder it produces a 0.7 m sphere
+    // that swallows the whole torso, and every table then reads as "bone 26 dominates". Override it
+    // when isolating a limb.
+    let radius = flag(&a, "--radius").and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+        if b.parent >= 0 {
+            let p = skel.bones[b.parent as usize].bind_pos();
+            ((c[0] - p[0]).powi(2) + (c[1] - p[1]).powi(2) + (c[2] - p[2]).powi(2)).sqrt() * 2.5
+        } else {
+            0.2
+        }
+    });
     println!(
         "region: bone {bone} at [{:.3}, {:.3}, {:.3}], {}",
         c[0], c[1], c[2],
