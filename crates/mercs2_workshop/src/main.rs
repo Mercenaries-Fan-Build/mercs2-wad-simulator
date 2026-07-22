@@ -901,7 +901,12 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         let draws: Vec<shot::DrawTex> = md
             .draws
             .iter()
-            .filter(|d| gate.contains(&d.group_index))
+            // Clause 2 as well as clause 1. The engine tests lod_mask against the object's
+            // view_state with an ANY-BIT overlap, and load_model_data asks for tier 0x01, so a host
+            // group in the 0x02/0x04/0x08 tier is simply never drawn. Missing this shipped a build
+            // whose torso and arms were invisible in game while rendering perfectly here: the host
+            // group had been chosen for its material, and nothing checked its tier.
+            .filter(|d| gate.contains(&d.group_index) && (d.lod_mask & 0x01) != 0)
             .map(|d| shot::DrawTex {
                 index_start: d.index_start,
                 index_count: d.index_count,
@@ -933,10 +938,24 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             md.indices.len()
         );
         for d in md.draws.iter().filter(|d| gate.contains(&d.group_index) && d.index_count > 0) {
+            if d.lod_mask & 0x01 == 0 {
+                println!(
+                    "    group {:>2}  {:>6} idx  lod 0x{:02X}  <-- NOT IN TIER 0x01, invisible in game",
+                    d.group_index, d.index_count, d.lod_mask
+                );
+                continue;
+            }
+            // lod_mask and node are draw-gate clauses 2 and 3: the engine tests lod_mask against
+            // the object's view_state (ANY-bit overlap) and `node` against its node-enable table
+            // (negative = no node = always visible). A host group that fails either is invisible in
+            // game while rendering fine here, which is precisely how a costume can lose its torso.
             println!(
-                "    group {:>2}  {:>6} idx  diffuse {}  {}",
+                "    group {:>2}  {:>6} idx  lod 0x{:02X}  node {:>4}  seg {:>2}  diffuse {}  {}",
                 d.group_index,
                 d.index_count,
+                d.lod_mask,
+                d.node,
+                d.seg_id,
                 d.diffuse.map(|h| format!("0x{h:08X}")).unwrap_or_else(|| "-".into()),
                 match d.diffuse {
                     Some(h) if md.textures.contains_key(&h) => "loaded",
