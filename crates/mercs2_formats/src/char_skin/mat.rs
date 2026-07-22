@@ -492,3 +492,30 @@ pub fn allclose(a: &[f64], b: &[f64], atol: f64) -> bool {
         .zip(b.iter())
         .all(|(&v, &w)| (v - w).abs() <= atol + 1e-5 * w.abs())
 }
+
+/// Inverse of a row-major 3×3 by adjugate/determinant. `None` when singular.
+///
+/// Needed for normals: the source→container fit is a general affine, and a normal transforms by the
+/// inverse-transpose of the point map, not by the map itself. Skipping that is only harmless when
+/// the map is a similarity — and this one is measurably not (3.0× anisotropy on 50 Cent → mattias).
+pub fn inv3(m: &[f64; 9]) -> Option<[f64; 9]> {
+    let (a, b, c) = (m[0], m[1], m[2]);
+    let (d, e, f) = (m[3], m[4], m[5]);
+    let (g, h, i) = (m[6], m[7], m[8]);
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if det.abs() < 1e-18 {
+        return None;
+    }
+    let r = 1.0 / det;
+    Some([
+        (e * i - f * h) * r,
+        (c * h - b * i) * r,
+        (b * f - c * e) * r,
+        (f * g - d * i) * r,
+        (a * i - c * g) * r,
+        (c * d - a * f) * r,
+        (d * h - e * g) * r,
+        (b * g - a * h) * r,
+        (a * e - b * d) * r,
+    ])
+}

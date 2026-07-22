@@ -267,8 +267,16 @@ struct Preview {
     character_set: Option<String>,
     /// clip hash → clip decoded + bound to THIS rig (`None` = tried, not bindable).
     clip_cache: HashMap<u32, Option<ClipAnim>>,
-    /// HIER bone name-hashes (clip binding input).
+    /// HIER bone name-hashes (clip binding input). For a retargeted import this is the TARGET
+    /// (source-of-animation) skeleton's hashes IN TARGET ORDER, so a clip binds `track_to_hier`
+    /// against the target rig that `retarget_source` carries.
     hier: Vec<u32>,
+    /// Present only for a retargeted foreign import: `(source_rig, target_to_source)` where
+    /// `source_rig` is the game skeleton the clips are authored for (e.g. Jen) and
+    /// `target_to_source[j]` maps this preview's own bone `j` → the source-rig bone that drives it.
+    /// When set, the per-frame sampler uses the CROSS-SKELETON retarget (`havok_palette_retarget_cross`)
+    /// so the imported mesh animates without being deformed. `None` for native models.
+    retarget_source: Option<(Vec<BoneRig>, Vec<usize>)>,
     /// SEGM state/LOD tiers the container carries + the built one (F11 cycles).
     tiers: Vec<u8>,
     tier: u8,
@@ -422,6 +430,20 @@ enum Act {
     /// Skeleton workbench: apply the retarget — remap the import's per-vertex joints/weights onto the
     /// target HIER skeleton and rebuild the preview with the conformed skinning.
     RetargetApply,
+    /// Skeleton workbench: user override — map source bone `.0` onto target bone `.1` (`None` = clear).
+    RetargetManual(usize, Option<usize>),
+    /// Skeleton workbench: fill the still-unmapped source bones by nearest target bone in 3D space.
+    RetargetAlignPos,
+    /// Open a native file picker and import the chosen .obj/.gltf/.glb (same path as drag-drop).
+    ImportModel,
+    /// Skeleton workbench: FAITHFUL export — re-pose the imported rig onto the target skeleton with
+    /// shipped-format skinning (palette-relative BLENDINDICES + INFO(56) range table, via
+    /// `mercs2_formats::char_skin`) and inject into the target donor block. Prompts for an output file.
+    ExportFaithfulCharacter,
+    /// Skeleton workbench: unload the current import from the GPU + the `imported` store and reset
+    /// all retarget state (map / target / source path / selection), so a fresh model can be imported
+    /// from a clean slate without restarting the app.
+    ClearImport,
 }
 
 /// The workbench the tool is focused on. One persistent workspace: the activity rail switches which
@@ -679,11 +701,21 @@ pub fn run(opts: Options) {
     let mut inspector_width = 372.0f32;
     let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_vehicle_inventory(&index);
     let mut inventory_dirty = false;
+    // After a retarget auto-play, many character clips (weapon/pistol variants) won't bind to the rig;
+    // this counts down auto-advances to the NEXT clip until one binds, so the pedestal shows a real
+    // (full-body) animation instead of stalling on a non-binding default. 0 = not seeking.
+    let mut clip_seek: i32 = 0;
     // ── Skeleton workbench: retarget a Source-rigged import onto a Mercs2 HIER skeleton. ──
     // The detected source rig convention of the current import, the chosen target character skeleton
     // (name + hash), and the computed bone map (source bone → HIER bone + confidence). See retarget.rs.
     let mut retarget: Option<crate::retarget::Retarget> = None;
     let mut retarget_target: Option<(u32, String)> = None;
+    // Source .glb path of the current rigged import — re-loaded at faithful-export time so the
+    // exported skinning uses the RAW f32 weights + true node graph (not the preview-quantised copy).
+    let mut retarget_src_path: Option<std::path::PathBuf> = None;
+    // Skeleton navigator: once a target is picked the panel shows the donor/imported bone TREES; this
+    // flips back to the character picker to choose a different target.
+    let mut show_target_picker = false;
     let mut status = String::from("Enter loads the selected asset. Tab = edit mode. Esc quits.");
 
     // Orbit camera.
@@ -737,53 +769,12 @@ pub fn run(opts: Options) {
                     if names_pending {
                         return;
                     }
-                    match crate::import::import_model(&path) {
-                        Ok(im) => {
-                            let stem = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("import")
-                                .to_string();
-                            let label = format!("import_{stem}");
-                            let hash = mercs2_formats::hash::pandemic_hash_m2(&label);
-                            // A rigged import feeds the Skeleton workbench: detect the source rig and
-                            // (re)build the bone map against the current target, if one is chosen.
-                            let src_joints = im.skin_joints.clone();
-                            let md: ModelData = im.into();
-                            imported.insert(hash, md.clone());
-                            scene.unload_model(hash); // re-drop of the same file replaces it
-                            let p = build_preview(
-                                &mut w, &mut scene, &mut world, hash, label, md, &preview,
-                                &placed, &index, &anim_sel, &lua_corpus,
-                            );
-                            cam_target = p.center;
-                            cam_dist = (p.radius * 2.4).clamp(0.5, 15000.0);
-                            if src_joints.is_empty() {
-                                retarget = None;
-                                status = format!(
-                                    "imported {} — {} verts, {} groups, {} textures (F6 place, F10 export)",
-                                    p.label, p.verts, p.draws.len(), p.tex_hashes.len()
-                                );
-                            } else {
-                                let target_names = retarget_target
-                                    .as_ref()
-                                    .map(|(h, _)| target_bone_names(&mut w, *h))
-                                    .unwrap_or_default();
-                                let r = crate::retarget::Retarget::build(src_joints, &target_names);
-                                status = format!(
-                                    "imported RIGGED {} — {} source bones ({}); Skeleton workbench → retarget",
-                                    p.label,
-                                    r.source_bones.len(),
-                                    r.convention.label()
-                                );
-                                retarget = Some(r);
-                                wb = Workbench::Skeleton;
-                            }
-                            sel_bone = None;
-                            preview = Some(p);
-                        }
-                        Err(e) => status = format!("IMPORT FAILED: {e}"),
-                    }
+                    status = import_file(
+                        &path, &mut w, &mut scene, &mut world, &mut imported, &mut preview,
+                        &mut cam_target, &mut cam_dist, &mut retarget, &retarget_target,
+                        &mut retarget_src_path, &mut wb,
+                        &mut sel_bone, &placed, &index, &anim_sel, &lua_corpus,
+                    );
                 }
                 // GUI captured this input (pointer over a panel / text into a widget): the camera
                 // and app shortcuts stand down — but never leave an orbit drag stuck on.
@@ -1038,11 +1029,26 @@ pub fn run(opts: Options) {
                         if let Some(p) = &mut preview {
                             if p.hash == done.preview {
                                 let bound = done.clip.is_some();
+                                // A "good" auto-play clip is a NORMAL full-body one: it binds and has a
+                                // sane transform-track count. The ~105-track clip is the engine's SPECIAL
+                                // reference pose (game_world excludes it) and contorts the skeleton; very
+                                // low counts are partial/weapon poses. Auto-seek skips both.
+                                let tracks = done.clip.as_ref().map(|c| c.num_transform_tracks).unwrap_or(0);
+                                let good = bound && (20..=90).contains(&tracks);
+                                let is_cur = p.cur_clip.map(|ci| p.clip_catalog[ci].hash) == Some(done.hash);
                                 p.clip_cache.insert(done.hash, done.clip);
-                                if !bound
-                                    && p.cur_clip.map(|ci| p.clip_catalog[ci].hash)
-                                        == Some(done.hash)
-                                {
+                                if good && is_cur {
+                                    clip_seek = 0; // found a real full-body clip — stop seeking
+                                } else if !good && is_cur && clip_seek > 0 && !p.clip_catalog.is_empty() {
+                                    // Auto-advance past non-binding / special / partial clips.
+                                    clip_seek -= 1;
+                                    let n = p.clip_catalog.len();
+                                    let next = (p.cur_clip.unwrap_or(0) + 1) % n;
+                                    p.cur_clip = Some(next);
+                                    p.anim_time = 0.0;
+                                    let h = p.clip_catalog[next].hash;
+                                    clip_loader.request(p.hash, &p.hier, h);
+                                } else if !bound && is_cur {
                                     let label = p
                                         .clip_catalog
                                         .iter()
@@ -1164,12 +1170,26 @@ pub fn run(opts: Options) {
                                     p.anim_time = (p.anim_time + dt) % dur;
                                 }
                                 let sample = ca.clip.sample_local(p.anim_time);
-                                let mats = pose::havok_palette_in_place(
-                                    &p.rig,
-                                    &sample,
-                                    &ca.track_to_hier,
-                                    ca.num_transform_tracks,
-                                );
+                                let mats = match &p.retarget_source {
+                                    // Retargeted import: drive its OWN (undeformed) skeleton with the
+                                    // source skeleton's per-bone world rotation deltas.
+                                    Some((source_rig, target_to_source)) => {
+                                        pose::havok_palette_retarget_cross(
+                                            &p.rig,
+                                            source_rig,
+                                            target_to_source,
+                                            &sample,
+                                            &ca.track_to_hier,
+                                            ca.num_transform_tracks,
+                                        )
+                                    }
+                                    None => pose::havok_palette_in_place(
+                                        &p.rig,
+                                        &sample,
+                                        &ca.track_to_hier,
+                                        ca.num_transform_tracks,
+                                    ),
+                                };
                                 let _ = world.insert_one(p.entity, SkinPalette { mats });
                             }
                         }
@@ -1178,6 +1198,9 @@ pub fn run(opts: Options) {
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
                     let mut hovered_bone: Option<usize> = None;
+                    // Skeleton workbench hover: (bone index, is_source_tree). Resolved to a viewer
+                    // highlight in the PREVIEW's current space (source before Apply, target after).
+                    let mut hover_skel: Option<(usize, bool)> = None;
                     if inventory_dirty {
                         vehicle_inventory = build_vehicle_inventory(&index);
                         inventory_dirty = false;
@@ -1218,11 +1241,10 @@ pub fn run(opts: Options) {
                                             actions.push(Act::SaveScene);
                                         }
                                         theme::eyebrow(ui, "Scene");
-                                        ui.separator();
                                         if names_pending {
+                                            ui.separator();
                                             ui.add(egui::Spinner::new().size(13.0));
                                         }
-                                        ui.weak("drop .obj/.gltf/.glb to import");
                                     },
                                 );
                             });
@@ -1361,6 +1383,31 @@ pub fn run(opts: Options) {
                                             && retarget_target.is_some();
                                         if ui.add_enabled(retarget.is_some(), egui::Button::new("Auto-map bones")).clicked() {
                                             actions.push(Act::RetargetRemap);
+                                        }
+                                        if ui
+                                            .add_enabled(preview.is_some(), egui::Button::new("Clear import"))
+                                            .on_hover_text("Unload the current import and reset the retarget — start over with a fresh model")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ClearImport);
+                                        }
+                                        let can_align = retarget.as_ref().is_some_and(|r| {
+                                            !r.source_pos.is_empty() && !r.target_pos.is_empty()
+                                        });
+                                        if ui
+                                            .add_enabled(can_align, egui::Button::new("Align by position"))
+                                            .on_hover_text("Fill the still-unmapped bones by nearest target bone in 3D space")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::RetargetAlignPos);
+                                        }
+                                        let can_export = ready && retarget_src_path.is_some();
+                                        if ui
+                                            .add_enabled(can_export, egui::Button::new("Export faithful character"))
+                                            .on_hover_text("Re-pose onto the target skeleton with shipped-format skinning (palette-relative BLENDINDICES + INFO(56) range table) and inject into the target donor block")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ExportFaithfulCharacter);
                                         }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if theme::primary_button(ui, "Apply retarget", ready).clicked() {
@@ -1804,56 +1851,82 @@ pub fn run(opts: Options) {
                                 });
                             }
                             Workbench::Skeleton => {
-                                ui.label(theme::disp_text("Skeleton source", 15.0, theme::TX));
-                                ui.weak("Drop a rigged .gltf/.glb, then retarget its bones onto a \
-                                         Mercs2 skeleton.");
-                                ui.separator();
-                                match &retarget {
-                                    Some(r) => {
+                                let have_target = retarget_target.is_some();
+                                // TWIN-TREE view once a target skeleton is chosen: donor (Mercs2) on top,
+                                // imported (foreign) on the bottom. Hovering any bone highlights it (and the
+                                // mesh it drives) in the viewer. The picker returns via "change target".
+                                if have_target && !show_target_picker {
+                                    if let (Some(r), Some((_, tl))) = (&retarget, &retarget_target) {
                                         ui.horizontal(|ui| {
-                                            ui.label("source:");
-                                            ui.colored_label(theme::BRASS, r.convention.label());
+                                            ui.label(theme::disp_text("Skeletons", 15.0, theme::TX));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if ui.small_button("change target").clicked() {
+                                                    show_target_picker = true;
+                                                }
+                                            });
                                         });
                                         ui.weak(format!(
-                                            "{} source bones · {} mapped",
-                                            r.source_bones.len(),
-                                            r.mapped_count()
+                                            "hover a bone to locate it · {} / {} mapped",
+                                            r.mapped_count(),
+                                            r.source_bones.len()
                                         ));
+                                        ui.separator();
+                                        // Split the height between the two trees.
+                                        let half = (ui.available_height() - 30.0) * 0.5;
+                                        theme::eyebrow(ui, &format!("Donor \u{2014} {tl}"));
+                                        egui::ScrollArea::vertical().id_source("donor_tree").max_height(half).auto_shrink([false, false]).show(ui, |ui| {
+                                            if let Some(h) = bone_tree(ui, &r.target_bones, &r.target_parents, "donor") {
+                                                hover_skel = Some((h, false)); // false = donor/target tree
+                                            }
+                                        });
+                                        ui.separator();
+                                        theme::eyebrow(ui, &format!("Imported \u{2014} {}", r.convention.label()));
+                                        egui::ScrollArea::vertical().id_source("import_tree").auto_shrink([false, false]).show(ui, |ui| {
+                                            if let Some(h) = bone_tree(ui, &r.source_bones, &r.source_parents, "imported") {
+                                                hover_skel = Some((h, true)); // true = imported/source tree
+                                            }
+                                        });
                                     }
-                                    None => {
-                                        ui.weak("no rigged import — drag-drop a .gltf/.glb that \
-                                                 carries a skeleton (JOINTS/WEIGHTS)");
+                                } else {
+                                    ui.label(theme::disp_text("Skeleton source", 15.0, theme::TX));
+                                    ui.separator();
+                                    match &retarget {
+                                        Some(r) => {
+                                            ui.horizontal(|ui| {
+                                                ui.label("source:");
+                                                ui.colored_label(theme::BRASS, r.convention.label());
+                                            });
+                                            ui.weak(format!("{} source bones", r.source_bones.len()));
+                                        }
+                                        None => {
+                                            ui.weak("no rigged import loaded");
+                                        }
                                     }
+                                    ui.separator();
+                                    theme::eyebrow(ui, "Target skeleton");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut filter)
+                                            .hint_text("filter characters…")
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    let f = filter.to_ascii_lowercase();
+                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                        for r in index.models.iter() {
+                                            let label = r.label();
+                                            let ll = label.to_ascii_lowercase();
+                                            let humanoid = ll.contains("hum") || ll.contains("merc")
+                                                || ll.contains("char") || ll.contains("ped") || ll.contains("bip");
+                                            if !humanoid || (!f.is_empty() && !ll.contains(&f)) {
+                                                continue;
+                                            }
+                                            let on = retarget_target.as_ref().is_some_and(|(h, _)| *h == r.hash);
+                                            if ui.selectable_label(on, label.clone()).clicked() {
+                                                show_target_picker = false;
+                                                actions.push(Act::RetargetSetTarget(r.hash, label.clone()));
+                                            }
+                                        }
+                                    });
                                 }
-                                ui.separator();
-                                theme::eyebrow(ui, "Target skeleton");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut filter)
-                                        .hint_text("filter characters…")
-                                        .desired_width(f32::INFINITY),
-                                );
-                                let f = filter.to_ascii_lowercase();
-                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                                    for r in index.models.iter() {
-                                        let label = r.label();
-                                        let ll = label.to_ascii_lowercase();
-                                        let humanoid = ll.contains("hum")
-                                            || ll.contains("merc")
-                                            || ll.contains("char")
-                                            || ll.contains("ped")
-                                            || ll.contains("bip");
-                                        if !humanoid {
-                                            continue;
-                                        }
-                                        if !f.is_empty() && !ll.contains(&f) {
-                                            continue;
-                                        }
-                                        let on = retarget_target.as_ref().is_some_and(|(h, _)| *h == r.hash);
-                                        if ui.selectable_label(on, label.clone()).clicked() {
-                                            actions.push(Act::RetargetSetTarget(r.hash, label.clone()));
-                                        }
-                                    }
-                                });
                             }
                           } // ── end match wb (navigator) ──
                         });
@@ -2382,7 +2455,7 @@ pub fn run(opts: Options) {
                                             .map(|c| format!("character:{c}"))
                                             .unwrap_or_else(|| "generic".into());
                                         let anim_badge = format!("{} clips · {src}", p.clip_catalog.len());
-                                        theme::section(ui, "Animation", Some(&anim_badge), false, |ui| {
+                                        theme::section(ui, "Animation", Some(&anim_badge), true, |ui| {
                                             if let Some(ci) = p.cur_clip {
                                                 let hash = p.clip_catalog[ci].hash;
                                                 if let Some(Some(c)) = p.clip_cache.get(&hash) {
@@ -2942,13 +3015,19 @@ pub fn run(opts: Options) {
                                 match &retarget {
                                     None => {
                                         ui.add_space(4.0);
+                                        if ui
+                                            .add_enabled(!names_pending, egui::Button::new("Import rigged model…"))
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ImportModel);
+                                        }
+                                        ui.add_space(4.0);
                                         ui.weak(
-                                            "No rigged import loaded.\n\nDrag-drop a .gltf/.glb that \
-                                             carries a skeleton (ValveBiped / Mixamo / Unreal). The \
-                                             workshop reads its joints + weights, detects the rig \
-                                             convention, auto-maps each source bone onto the target \
-                                             Mercs2 HIER skeleton, fixes up-axis + scale, and writes a \
-                                             conformed skin palette so the mesh animates on Mercs2 clips.",
+                                            "Load a rigged model (ValveBiped / Mixamo / Unreal / Call of \
+                                             Duty). The workshop reads its joints + weights, detects the \
+                                             rig, auto-maps each bone onto the target Mercs2 HIER skeleton, \
+                                             and writes a conformed skin palette so the mesh animates on \
+                                             Mercs2 clips.",
                                         );
                                     }
                                     Some(r) => {
@@ -2980,15 +3059,40 @@ pub fn run(opts: Options) {
                                                     .striped(true)
                                                     .show(ui, |ui| {
                                                         for m in &r.map {
-                                                            ui.monospace(m.source.as_str());
-                                                            match &m.target_name {
-                                                                Some(n) => {
-                                                                    ui.monospace(n.as_str());
-                                                                }
-                                                                None => {
-                                                                    ui.colored_label(theme::FAINT, "— none —");
-                                                                }
+                                                            // Hovering a mapping row ghosts the mesh + highlights
+                                                            // this (source) bone in the viewer.
+                                                            if ui.monospace(m.source.as_str()).hovered() {
+                                                                hover_skel = Some((m.source_index, true));
                                                             }
+                                                            // Target cell = manual-override dropdown: pick any
+                                                            // target bone, or clear to none. Pushes RetargetManual.
+                                                            let cur = m
+                                                                .target_name
+                                                                .clone()
+                                                                .unwrap_or_else(|| "— none —".into());
+                                                            egui::ComboBox::from_id_source(("tmap", m.source_index))
+                                                                .selected_text(cur)
+                                                                .width(160.0)
+                                                                .show_ui(ui, |ui| {
+                                                                    egui::ScrollArea::vertical()
+                                                                        .max_height(260.0)
+                                                                        .show(ui, |ui| {
+                                                                            if ui
+                                                                                .selectable_label(m.target_index.is_none(), "— none —")
+                                                                                .clicked()
+                                                                            {
+                                                                                actions.push(Act::RetargetManual(m.source_index, None));
+                                                                            }
+                                                                            for (ti, tn) in r.target_bones.iter().enumerate() {
+                                                                                if ui
+                                                                                    .selectable_label(m.target_index == Some(ti), tn.as_str())
+                                                                                    .clicked()
+                                                                                {
+                                                                                    actions.push(Act::RetargetManual(m.source_index, Some(ti)));
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                });
                                                             let (ct, col) = match m.confidence {
                                                                 crate::retarget::Confidence::Auto => ("auto", theme::GOOD),
                                                                 crate::retarget::Confidence::Fuzzy => ("fuzzy", theme::BRASS),
@@ -3010,6 +3114,13 @@ pub fn run(opts: Options) {
                                             ui.monospace(format!("{:.4}", r.scale));
                                             ui.end_row();
                                         });
+                                        // Animation list + transport, right here on the Skeleton page —
+                                        // populated after Apply retarget grafts the target's rig + clips.
+                                        if let Some(p) = &preview {
+                                            ui.separator();
+                                            theme::eyebrow(ui, &format!("Animation \u{2014} {} clips", p.clip_catalog.len()));
+                                            clip_player_compact(ui, p, &mut actions);
+                                        }
                                     }
                                 }
                               } // ── end Skeleton inspector ──
@@ -3170,8 +3281,11 @@ pub fn run(opts: Options) {
                             Act::RetargetSetTarget(hash, label) => {
                                 retarget_target = Some((hash, label.clone()));
                                 if let Some(r) = &retarget {
-                                    let names = target_bone_names(&mut w, hash);
-                                    let nr = crate::retarget::Retarget::build(r.source_bones.clone(), &names);
+                                    let (names, pos, parents) = target_bone_info(&mut w, hash);
+                                    let nr = crate::retarget::Retarget::build_full(
+                                        r.source_bones.clone(), r.source_pos.clone(),
+                                        r.source_ibm.clone(), r.source_parents.clone(), names, pos, parents,
+                                    );
                                     status = format!(
                                         "target {label}: {}/{} source bones mapped",
                                         nr.mapped_count(),
@@ -3179,13 +3293,16 @@ pub fn run(opts: Options) {
                                     );
                                     retarget = Some(nr);
                                 } else {
-                                    status = "no rigged import — drop a .gltf/.glb with a skeleton first".into();
+                                    status = "no rigged import — use Import rigged model… first".into();
                                 }
                             }
                             Act::RetargetRemap => match (&retarget, &retarget_target) {
                                 (Some(r), Some((hash, _))) => {
-                                    let names = target_bone_names(&mut w, *hash);
-                                    let nr = crate::retarget::Retarget::build(r.source_bones.clone(), &names);
+                                    let (names, pos, parents) = target_bone_info(&mut w, *hash);
+                                    let nr = crate::retarget::Retarget::build_full(
+                                        r.source_bones.clone(), r.source_pos.clone(),
+                                        r.source_ibm.clone(), r.source_parents.clone(), names, pos, parents,
+                                    );
                                     status = format!(
                                         "remapped: {}/{} bones",
                                         nr.mapped_count(),
@@ -3196,41 +3313,245 @@ pub fn run(opts: Options) {
                                 _ => status = "need a rigged import AND a target skeleton".into(),
                             },
                             Act::RetargetApply => {
-                                let ready = matches!((&retarget, &retarget_target), (Some(_), Some(_)));
+                                // RENDER-ACCURATE retarget: build the preview through the FAITHFUL
+                                // char_skin path so the pedestal shows EXACTLY what the injected /
+                                // shipped character looks like — re-posed onto the target skeleton
+                                // with palette-relative skinning (expanded to global for the GPU).
+                                // Preview == Export == in-game. The mesh is conformed into the target's
+                                // bind space, so the target's own clips drive it directly (no cross
+                                // retarget). The UI bone map is authoritative (fed to char_skin as
+                                // overrides via `faithful_char_skin`).
                                 let phash = preview.as_ref().map(|p| p.hash);
-                                match (ready, phash) {
-                                    (true, Some(phash)) if imported.contains_key(&phash) => {
+                                let ready = matches!(
+                                    (&retarget, &retarget_target, &retarget_src_path),
+                                    (Some(_), Some(_), Some(_))
+                                );
+                                let built = if let (true, Some(_)) = (ready, phash) {
+                                    (|| -> Result<(mercs2_formats::char_skin::CharSkin, ModelData, String), String> {
+                                        let src_path = retarget_src_path.clone().unwrap();
                                         let (thash, tl) = retarget_target.clone().unwrap();
-                                        let tcount = target_bone_names(&mut w, thash).len().max(1);
-                                        let table = retarget.as_ref().unwrap().joint_table(tcount);
-                                        let mut moved = 0usize;
-                                        if let Some(md) = imported.get_mut(&phash) {
-                                            for v in md.verts.iter_mut() {
-                                                for k in 0..4 {
-                                                    let si = v.joints[k] as usize;
-                                                    if let Some(&ti) = table.get(si) {
-                                                        v.joints[k] = ti.min(255) as u8;
-                                                        moved += 1;
-                                                    }
+                                        let rt = retarget.as_ref().unwrap();
+                                        let mut paths = vec![opts.wadpath.clone()];
+                                        paths.extend(opts.overlays.iter().cloned());
+                                        let (cs, glb, _donor) =
+                                            faithful_char_skin(&paths, thash, rt, &src_path)?;
+                                        let target_rig = load_model_data(&mut w, thash)
+                                            .map(|m| m.skin.rig)
+                                            .unwrap_or_default();
+                                        if target_rig.is_empty() {
+                                            return Err(format!("target {tl} carries no skeleton"));
+                                        }
+                                        let mut md: ModelData =
+                                            crate::import::char_skin_to_imported(&cs, &glb, target_rig)
+                                                .into();
+                                        // Texture the conformed mesh from the SOURCE file: it is the same
+                                        // merged primitive stream, so its per-material draw groups + textures
+                                        // + UVs map onto the re-posed verts. Re-imported (not read from the
+                                        // in-app store, which a prior Apply overwrote with a bald mesh).
+                                        if let Ok(src) = crate::import::import_model(&src_path) {
+                                            let src: ModelData = src.into();
+                                            if src.verts.len() == md.verts.len() && src.indices == md.indices {
+                                                for (v, iv) in md.verts.iter_mut().zip(src.verts.iter()) {
+                                                    v.uv = iv.uv;
                                                 }
+                                                md.draws = src.draws;
+                                                md.textures = src.textures;
                                             }
                                         }
-                                        let md2 = imported.get(&phash).cloned().unwrap();
-                                        let label =
-                                            preview.as_ref().map(|p| p.label.clone()).unwrap_or_default();
-                                        let p = build_preview(
-                                            &mut w, &mut scene, &mut world, phash, label, md2, &preview,
+                                        Ok((cs, md, tl))
+                                    })()
+                                } else {
+                                    Err("Apply needs a rigged import on the pedestal + a target skeleton".into())
+                                };
+                                match built {
+                                    Ok((cs, md, tl)) => {
+                                        let phash = phash.unwrap();
+                                        let base = preview.as_ref().map(|p| p.label.clone()).unwrap_or_default();
+                                        let base = base.split(" \u{25B8} ").next().unwrap_or(&base).to_string();
+                                        let label = format!("{base} \u{25B8} {tl}");
+                                        imported.insert(phash, md.clone());
+                                        // Re-upload: the faithful mesh replaces the import's vertex buffer + bone count.
+                                        scene.unload_model(phash);
+                                        let mut p = build_preview(
+                                            &mut w, &mut scene, &mut world, phash, label, md, &preview,
                                             &placed, &index, &anim_sel, &lua_corpus,
                                         );
+                                        // The mesh is now in the TARGET skeleton's bind space, so the
+                                        // target's clips drive it directly — clear any cross-retarget.
+                                        p.retarget_source = None;
+                                        cam_target = p.center;
+                                        cam_dist = (p.radius * 2.4).clamp(0.5, 15000.0);
+                                        // Prepend the validated full-body locomotion clips (idle/walk/run).
+                                        const GOOD: [(u32, &str); 3] =
+                                            [(0x24F8C8E6, "idle"), (0x53682784, "walk"), (0x867B166D, "run")];
+                                        for (h, name) in GOOD.iter().rev() {
+                                            if !p.clip_catalog.iter().any(|e| e.hash == *h) {
+                                                p.clip_catalog.insert(
+                                                    0,
+                                                    ClipEntry {
+                                                        hash: *h,
+                                                        handles: Vec::new(),
+                                                        label: (*name).into(),
+                                                        name: Some((*name).into()),
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        // Auto-play ONLY the exact-transform path (container-dump proven).
+                                        // The ESTIMATED transform nails the BIND pose (validated) but does
+                                        // not capture the target bones' bind ROTATIONS, so LBS drifts under
+                                        // animation — worst on complex rigs. Show the conformed BIND there;
+                                        // the clip catalog stays so the user can still scrub if they want.
+                                        let exact = cs.mode == mercs2_formats::char_skin::Mode::Exact;
+                                        if exact {
+                                            if let Some(ci) = p.clip_catalog.iter().position(|e| e.hash == 0x24F8C8E6) {
+                                                p.cur_clip = Some(ci);
+                                                p.anim_time = 0.0;
+                                                p.playing = true;
+                                                clip_loader.request(p.hash, &p.hier, p.clip_catalog[ci].hash);
+                                                clip_seek = 0;
+                                            }
+                                        } else {
+                                            p.playing = false;
+                                            p.cur_clip = None;
+                                        }
                                         preview = Some(p);
                                         status = format!(
-                                            "retargeted onto {tl}: {moved} vertex bindings remapped onto the HIER skeleton"
+                                            "retargeted onto {tl} (FAITHFUL): {} verts, palette {}/{} runs, {:?} transform — {}",
+                                            cs.stats.verts,
+                                            cs.palette_slots,
+                                            cs.stats.range_count,
+                                            cs.mode,
+                                            if exact { "playing idle" } else { "showing BIND pose (estimated transform: animation needs a container dump; scrub a clip to preview it)" }
                                         );
                                     }
-                                    _ => {
-                                        status =
-                                            "Apply needs a rigged import on the pedestal + a target skeleton".into()
-                                    }
+                                    Err(e) => status = format!("RETARGET FAILED: {e}"),
+                                }
+                            }
+                            Act::ExportFaithfulCharacter => {
+                                // FAITHFUL export: re-pose the imported rig onto the target skeleton
+                                // with shipped-format skinning (palette-relative BLENDINDICES +
+                                // INFO(56) range table, via mercs2_formats::char_skin — the inverse
+                                // of the proven model_cubeize reader) and inject into the target donor.
+                                let out = (|| -> Result<String, String> {
+                                    let src_path = retarget_src_path
+                                        .clone()
+                                        .ok_or("import a rigged .glb first")?;
+                                    let (thash, tlabel) = retarget_target
+                                        .clone()
+                                        .ok_or("pick a target skeleton first")?;
+                                    let rt = retarget.as_ref().ok_or("pick a target skeleton first")?;
+                                    // The SAME faithful path the preview renders — the UI bone map drives
+                                    // it, so what you see on the pedestal is exactly what gets written.
+                                    // The target container gives both the HIER skeleton and the injection
+                                    // donor. Re-loads the source glb raw (exact f32 weights + node graph).
+                                    let mut paths = vec![opts.wadpath.clone()];
+                                    paths.extend(opts.overlays.iter().cloned());
+                                    let (cs, glb, donor) = faithful_char_skin(&paths, thash, rt, &src_path)?;
+                                    let report = mercs2_formats::char_skin::validate::validate(
+                                        &cs,
+                                        &glb.vjoints,
+                                        &glb.vweights,
+                                        &glb.indices,
+                                    );
+                                    // Host = the donor's LARGEST drawing group (the body) that fits.
+                                    let host = mercs2_formats::model_inject::drawing_group_caps(&donor)
+                                        .into_iter()
+                                        .filter(|&(_, _, tricap)| cs.stats.tris as u32 <= tricap)
+                                        .max_by_key(|&(_, vcap, _)| vcap)
+                                        .map(|(ord, _, _)| ord)
+                                        .ok_or_else(|| {
+                                            format!(
+                                                "no donor drawing group fits {} triangles — decimate",
+                                                cs.stats.tris
+                                            )
+                                        })?;
+                                    let Some(out_path) = rfd::FileDialog::new()
+                                        .add_filter("model block", &["bin"])
+                                        .set_title("Export faithful character block")
+                                        .set_file_name(format!("{tlabel}_faithful.bin"))
+                                        .save_file()
+                                    else {
+                                        return Ok("export cancelled".into());
+                                    };
+                                    let mesh = mercs2_formats::model_inject::ExternalMesh {
+                                        positions: cs.pos.clone(),
+                                        // CONFORMED normals (see CharSkin::nrm) - the
+                                        // source field describes the pre-conform surface.
+                                        normals: if cs.nrm.is_empty() {
+                                            glb.normals.clone()
+                                        } else {
+                                            cs.nrm.clone()
+                                        },
+                                        uvs: glb.uvs.clone(),
+                                        tris: glb.tris.clone(),
+                                        joints: (0..cs.stats.verts)
+                                            .map(|i| {
+                                                [
+                                                    cs.skin_bytes[i * 8],
+                                                    cs.skin_bytes[i * 8 + 1],
+                                                    cs.skin_bytes[i * 8 + 2],
+                                                    cs.skin_bytes[i * 8 + 3],
+                                                ]
+                                            })
+                                            .collect(),
+                                        weights: (0..cs.stats.verts)
+                                            .map(|i| {
+                                                [
+                                                    cs.skin_bytes[i * 8 + 4],
+                                                    cs.skin_bytes[i * 8 + 5],
+                                                    cs.skin_bytes[i * 8 + 6],
+                                                    cs.skin_bytes[i * 8 + 7],
+                                                ]
+                                            })
+                                            .collect(),
+                                    };
+                                    let new_name = mercs2_formats::hash::pandemic_hash_m2(&format!(
+                                        "{tlabel}_faithful"
+                                    ));
+                                    let (block, _stats) =
+                                        mercs2_formats::model_inject::inject_character_into_donor_block(
+                                            &donor, &mesh, &cs.ranges, host, &[], new_name,
+                                        )?;
+                                    std::fs::write(&out_path, &block)
+                                        .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+                                    let checks = report
+                                        .checks
+                                        .iter()
+                                        .map(|c| format!("{}={:?}", c.title, c.status))
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    Ok(format!(
+                                        "EXPORTED {tlabel} — {} verts, palette {}/{} runs, host grp {host}, {:?} [{checks}] -> {}",
+                                        cs.stats.verts,
+                                        cs.palette_slots,
+                                        cs.stats.range_count,
+                                        cs.mode,
+                                        out_path.display()
+                                    ))
+                                })();
+                                status = match out {
+                                    Ok(s) => s,
+                                    Err(e) => format!("EXPORT FAILED: {e}"),
+                                };
+                            }
+                            Act::RetargetManual(src, tgt) => {
+                                if let Some(r) = &mut retarget {
+                                    r.set_manual(src, tgt);
+                                    status = match tgt.and_then(|i| r.target_bones.get(i)) {
+                                        Some(name) => format!("{} → {name} (manual)", r.source_bones.get(src).cloned().unwrap_or_default()),
+                                        None => format!("{} → unmapped", r.source_bones.get(src).cloned().unwrap_or_default()),
+                                    };
+                                }
+                            }
+                            Act::RetargetAlignPos => {
+                                if let Some(r) = &mut retarget {
+                                    let filled = r.align_by_position();
+                                    status = if filled > 0 {
+                                        format!("aligned by 3D position: filled {filled} unmapped bones (shown as 'fuzzy' — review)")
+                                    } else {
+                                        "align by position: nothing to fill (need positions on both sides + name anchors, or already fully mapped)".into()
+                                    };
                                 }
                             }
                             Act::LoadRow(vi) => {
@@ -3334,6 +3655,7 @@ pub fn run(opts: Options) {
                                 }
                             }
                             a @ (Act::ClipSel(_) | Act::ClipNav(_)) => {
+                                clip_seek = 0; // user chose a clip — stop auto-seeking
                                 if let Some(p) = &mut preview {
                                     if !p.clip_catalog.is_empty() {
                                         let n = p.clip_catalog.len();
@@ -3668,6 +3990,37 @@ pub fn run(opts: Options) {
                                     }
                                 }
                             }
+                            Act::ImportModel => {
+                                if !names_pending {
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("model", &["glb", "gltf", "obj"])
+                                        .set_title("Import model — .glb / .gltf / .obj")
+                                        .pick_file()
+                                    {
+                                        status = import_file(
+                                            &path, &mut w, &mut scene, &mut world, &mut imported,
+                                            &mut preview, &mut cam_target, &mut cam_dist,
+                                            &mut retarget, &retarget_target, &mut retarget_src_path,
+                                            &mut wb, &mut sel_bone,
+                                            &placed, &index, &anim_sel, &lua_corpus,
+                                        );
+                                    }
+                                }
+                            }
+                            Act::ClearImport => {
+                                // Unload the current import from the GPU + the in-app store and reset
+                                // every retarget field, so the next import starts from a clean slate.
+                                if let Some(p) = preview.take() {
+                                    scene.unload_model(p.hash);
+                                    imported.remove(&p.hash);
+                                }
+                                retarget = None;
+                                retarget_target = None;
+                                retarget_src_path = None;
+                                sel_bone = None;
+                                show_target_picker = false;
+                                status = "cleared import — drop a .glb or use Import to start over".into();
+                            }
                             Act::SaveScene => {
                                 let f = SceneFile {
                                     items: placed
@@ -3845,6 +4198,9 @@ pub fn run(opts: Options) {
                                     target_group: mod_group,
                                     flip: conform_flip,
                                     mesh,
+                                    diffuse: None,
+                                    specular: None,
+                                    normal: None,
                                 });
                                 status = format!(
                                     "queued new asset {name} (0x{hash:08X}) — {nv} verts, {nt} tris"
@@ -3985,6 +4341,91 @@ pub fn run(opts: Options) {
                                     push(i, [0.35, 0.9, 1.0, 0.9]); // cyan: pinned
                                 }
                             }
+                            // Skeleton workbench: also MARK the mesh the hovered bone drives — a scatter of
+                            // amber dots on a sample of the vertices weighted to it (posed, so they track the
+                            // clip). Shows exactly what geometry a bone controls, for confident manual mapping.
+                            if let (Workbench::Skeleton, Some((bone, is_source)), Some(r)) =
+                                (wb, hover_skel, retarget.as_ref())
+                            {
+                                // Resolve the hovered bone into the PREVIEW's current space: before Apply the
+                                // preview is the raw import (SOURCE joints/positions); after Apply it's the
+                                // retargeted mesh (TARGET joints, posed by the grafted rig). `scatter_bone` is
+                                // the joint index the preview verts actually use.
+                                let retargeted = !p.rig.is_empty();
+                                let (scatter_bone, glow_pos): (Option<usize>, Option<[f32; 3]>) = if retargeted {
+                                    let t = if is_source {
+                                        r.map.get(bone).and_then(|m| m.target_index)
+                                    } else {
+                                        Some(bone)
+                                    };
+                                    let gp = t.and_then(|ti| {
+                                        p.rig.get(ti).map(|b| {
+                                            let m = match pal.as_ref().and_then(|pl| pl.mats.get(ti)) {
+                                                Some(sm) => mercs2_formats::skeleton::mat4_mul(&b.world_bind, sm),
+                                                None => b.world_bind,
+                                            };
+                                            [m[3][0], m[3][1], m[3][2]]
+                                        })
+                                    });
+                                    (t, gp)
+                                } else if is_source {
+                                    (Some(bone), r.source_pos.get(bone).copied())
+                                } else {
+                                    (None, None) // donor bone but no retargeted mesh yet — nothing to show
+                                };
+                                if let Some(gp) = glow_pos {
+                                    // Layered marker: a big soft halo + a hot core so the joint
+                                    // reads at a glance even through the ghosted mesh.
+                                    cards.push(mercs2_engine::particles::GlowCard {
+                                        pos: gp,
+                                        size: (p.radius * 0.24).clamp(0.08, 1.2),
+                                        color: [1.0, 0.85, 0.35, 0.35], // gold halo
+                                    });
+                                    cards.push(mercs2_engine::particles::GlowCard {
+                                        pos: gp,
+                                        size: (p.radius * 0.11).clamp(0.04, 0.5),
+                                        color: [1.0, 0.95, 0.75, 1.0], // hot white-gold core
+                                    });
+                                }
+                                if let Some(sb) = scatter_bone {
+                                    if let Some(md) = imported.get(&p.hash) {
+                                        let step = (md.verts.len() / 700).max(1);
+                                        for v in md.verts.iter().step_by(step) {
+                                            let drive: f32 = (0..4)
+                                                .filter(|&k| v.joints[k] as usize == sb)
+                                                .map(|k| v.weights[k] as f32 / 255.0)
+                                                .sum();
+                                            if drive < 0.12 {
+                                                continue;
+                                            }
+                                            let (mut wp, mut wsum) = (glam::Vec3::ZERO, 0.0f32);
+                                            for k in 0..4 {
+                                                let w = v.weights[k] as f32 / 255.0;
+                                                if w <= 0.0 {
+                                                    continue;
+                                                }
+                                                let m = pal
+                                                    .as_ref()
+                                                    .and_then(|pl| pl.mats.get(v.joints[k] as usize))
+                                                    .map(|m| glam::Mat4::from_cols_array_2d(m))
+                                                    .unwrap_or(glam::Mat4::IDENTITY);
+                                                wp += w * m.transform_point3(glam::Vec3::from(v.pos));
+                                                wsum += w;
+                                            }
+                                            if wsum > 1e-6 {
+                                                wp /= wsum;
+                                            }
+                                            // Brighter where the bone drives the vert harder.
+                                            let a = 0.45 + 0.45 * drive.min(1.0);
+                                            cards.push(mercs2_engine::particles::GlowCard {
+                                                pos: wp.to_array(),
+                                                size: (p.radius * 0.035).clamp(0.012, 0.2),
+                                                color: [1.0, 0.5, 0.12, a], // amber mesh scatter
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                             // Workbench: every node as a spatial anchor (after the hover/pin closure
                             // releases its &mut cards). Colour by role heuristic — translated-away
                             // nodes = functional attach points (rotor/skid/seat/tail/hardpoint);
@@ -4087,6 +4528,9 @@ pub fn run(opts: Options) {
                         }
                         scene.set_glow_cards(&cards);
                     }
+                    // Ghost the mesh ONLY while a bone is hovered (in a tree or the mapping grid), so the
+                    // highlighted bone reads through it; fully opaque otherwise.
+                    scene.set_model_alpha(if hover_skel.is_some() || hovered_bone.is_some() { 0.4 } else { 1.0 });
 
                     // The Inspect preview is a persistent world entity — HIDE it in the Sandbox
                     // (drop its ModelRef so the draw query skips it) so only PLACED objects render
@@ -4444,15 +4888,71 @@ pub(crate) fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, 
 /// The target character skeleton's HIER bone names, in bone order — the Skeleton workbench feeds
 /// these to `retarget::Retarget::build` as the map's right-hand side. Empty when the model has no
 /// rig or fails to load.
-fn target_bone_names(w: &mut WadStack, hash: u32) -> Vec<String> {
-    let Ok(md) = load_model_data(w, hash) else { return Vec::new() };
-    let hashes: Vec<u32> = md.stats.rig.iter().map(|b| b.name_hash).collect();
-    let names = resolve_node_names(&hashes);
-    md.stats
+/// Run the FAITHFUL character skinning (`mercs2_formats::char_skin`) for the Skeleton workbench.
+/// The workshop's Retarget bone map (auto-mapped + user-curated in the UI) is the AUTHORITATIVE
+/// source→target mapping — it is fed to `char_skin` as full overrides, so what the user sees and
+/// edits is exactly what the preview renders and the export writes (preview == export == in-game).
+/// Returns the `char_skin` result, the raw source glb data, and the target donor block (for
+/// injection / the target rig). `target_index == global HIER index` because both the workshop's
+/// `target_bone_info` and `TargetSkeleton::from_skeleton` enumerate the target's HIER in order.
+fn faithful_char_skin(
+    wad_paths: &[String],
+    thash: u32,
+    rt: &crate::retarget::Retarget,
+    src_path: &std::path::Path,
+) -> Result<
+    (
+        mercs2_formats::char_skin::CharSkin,
+        mercs2_formats::char_skin::CharGlbData,
+        Vec<u8>,
+    ),
+    String,
+> {
+    let donor = crate::publish::donor_block(wad_paths, thash)?;
+    let skel = mercs2_formats::skeleton::Skeleton::from_block(&donor)?;
+    let target = mercs2_formats::char_skin::TargetSkeleton::from_skeleton(&skel);
+    let glb = crate::import::load_char_glb(src_path)?;
+    // char_skin::build_character runs Logan's automap on the FULL node graph, FINGER-COLLAPSES in
+    // NPC-84 space, then resolves onto the donor's HIER by name — so it stays correct on HERO donors
+    // and keeps big finger rigs (50 Cent → mattias) under the palette cap. For non-CoD rigs we let it
+    // do that and only layer the user's MANUAL overrides on top. CoD's `j_*` naming it can't read, so
+    // there we feed the hand-verified explicit table as full overrides.
+    let overrides: std::collections::HashMap<usize, Option<u32>> =
+        if rt.convention == crate::retarget::SourceRig::CallOfDuty {
+            let table = rt.joint_table(target.bones.len().max(1));
+            table.iter().enumerate().map(|(j, &t)| (j, Some(t as u32))).collect()
+        } else {
+            rt.map
+                .iter()
+                .filter(|m| m.confidence == crate::retarget::Confidence::Manual)
+                .map(|m| (m.source_index, m.target_index.map(|t| t as u32)))
+                .collect()
+        };
+    let cs = mercs2_formats::char_skin::build_character(&glb.build_input(&target, None, overrides, false))?;
+    Ok((cs, glb, donor))
+}
+
+/// The target HIER bone names AND their bind-pose positions (translation of `world_bind`), index-
+/// aligned. Uses `skin.rig` — the SAME rig `RetargetApply` grafts onto the import — so the retarget's
+/// target indices line up with what actually gets rendered. Positions feed the spatial align.
+pub(crate) fn target_bone_info(w: &mut WadStack, hash: u32) -> (Vec<String>, Vec<[f32; 3]>, Vec<i32>) {
+    let Ok(md) = load_model_data(w, hash) else { return (Vec::new(), Vec::new(), Vec::new()) };
+    let hashes: Vec<u32> = md.skin.rig.iter().map(|b| b.name_hash).collect();
+    let names_map = resolve_node_names(&hashes);
+    let names = md
+        .skin
         .rig
         .iter()
-        .map(|b| names.get(&b.name_hash).cloned().unwrap_or_else(|| format!("0x{:08X}", b.name_hash)))
-        .collect()
+        .map(|b| names_map.get(&b.name_hash).cloned().unwrap_or_else(|| format!("0x{:08X}", b.name_hash)))
+        .collect();
+    let pos = md
+        .skin
+        .rig
+        .iter()
+        .map(|b| [b.world_bind[3][0], b.world_bind[3][1], b.world_bind[3][2]])
+        .collect();
+    let parents = md.skin.rig.iter().map(|b| b.parent).collect();
+    (names, pos, parents)
 }
 
 /// The render state a freshly-placed instance of `hash` should have: LOD rung 0, plus the destruction
@@ -4826,6 +5326,161 @@ fn load_gpu_only(w: &mut WadStack, scene: &mut Scene, hash: u32) -> Result<(), S
 /// origin, tear down the previous preview (keeping its model resident if the sandbox still uses
 /// it). Works for WAD models, drag-drop imports, and merge results alike.
 #[allow(clippy::too_many_arguments)]
+/// Render a bone hierarchy (names + parent indices, `-1` = root) as a collapsible tree. Returns the
+/// index of the bone whose row is hovered this frame (for the viewer highlight), if any. `id` keeps
+/// two trees in the same panel from colliding.
+fn bone_tree(ui: &mut egui::Ui, names: &[String], parents: &[i32], id: &str) -> Option<usize> {
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
+    let mut roots: Vec<usize> = Vec::new();
+    for i in 0..names.len() {
+        match parents.get(i).copied().unwrap_or(-1) {
+            p if p >= 0 && (p as usize) < names.len() => children[p as usize].push(i),
+            _ => roots.push(i),
+        }
+    }
+    fn draw(ui: &mut egui::Ui, i: usize, names: &[String], kids: &[Vec<usize>], id: &str, hov: &mut Option<usize>) {
+        if kids[i].is_empty() {
+            if ui.selectable_label(false, egui::RichText::new(names[i].as_str()).monospace().size(11.0)).hovered() {
+                *hov = Some(i);
+            }
+        } else {
+            let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace().size(11.0))
+                .id_source((id, i))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for &c in &kids[i] {
+                        draw(ui, c, names, kids, id, hov);
+                    }
+                });
+            if r.header_response.hovered() {
+                *hov = Some(i);
+            }
+        }
+    }
+    let mut hov = None;
+    for r in roots {
+        draw(ui, r, names, &children, id, &mut hov);
+    }
+    hov
+}
+
+/// Compact clip player for the Skeleton page: transport for the current clip + a click-to-play
+/// list. Shares the ClipSel / PlayPause / ClipStop actions with the Inspect workbench, so playback
+/// state stays in sync no matter which panel drives it.
+fn clip_player_compact(ui: &mut egui::Ui, p: &Preview, actions: &mut Vec<Act>) {
+    if p.clip_catalog.is_empty() {
+        ui.weak("no clips — Apply retarget onto a target skeleton first");
+        return;
+    }
+    if let Some(ci) = p.cur_clip {
+        let hash = p.clip_catalog[ci].hash;
+        match p.clip_cache.get(&hash) {
+            Some(Some(c)) => {
+                let dur = c.clip.duration.max(1e-3);
+                ui.horizontal(|ui| {
+                    if ui.button(if p.playing { "\u{23F8}" } else { "\u{25B6}" }).clicked() {
+                        actions.push(Act::PlayPause);
+                    }
+                    if ui.button("\u{23F9}").clicked() {
+                        actions.push(Act::ClipStop);
+                    }
+                    ui.monospace(format!("{:>4.1} / {dur:.1}s", p.anim_time));
+                });
+            }
+            Some(None) => {
+                ui.colored_label(crate::gui::theme::BAD, "clip not bound to this rig");
+            }
+            None => {
+                ui.weak("loading clip\u{2026}");
+            }
+        }
+    }
+    egui::ScrollArea::vertical()
+        .max_height(340.0)
+        .id_source("skel_clip_scroll")
+        .show(ui, |ui| {
+            for i in 0..p.clip_catalog.len() {
+                let sel = p.cur_clip == Some(i);
+                if ui.selectable_label(sel, p.clip_catalog[i].label.as_str()).clicked() {
+                    actions.push(Act::ClipSel(i));
+                }
+            }
+        });
+}
+
+/// Import a foreign model file (.obj / .gltf / .glb) onto the preview pedestal. The ONE shared path
+/// for both the Import button and drag-drop, so they can never drift. Returns the status line.
+#[allow(clippy::too_many_arguments)]
+fn import_file(
+    path: &std::path::Path,
+    w: &mut WadStack,
+    scene: &mut Scene,
+    world: &mut World,
+    imported: &mut HashMap<u32, ModelData>,
+    preview: &mut Option<Preview>,
+    cam_target: &mut Vec3,
+    cam_dist: &mut f32,
+    retarget: &mut Option<crate::retarget::Retarget>,
+    retarget_target: &Option<(u32, String)>,
+    retarget_src_path: &mut Option<std::path::PathBuf>,
+    wb: &mut Workbench,
+    sel_bone: &mut Option<usize>,
+    placed: &[Placed],
+    index: &AssetIndex,
+    anim_sel: &Option<AnimSelector>,
+    lua_corpus: &[(String, String, String)],
+) -> String {
+    let im = match crate::import::import_model(path) {
+        Ok(im) => im,
+        Err(e) => return format!("IMPORT FAILED: {e}"),
+    };
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("import").to_string();
+    let label = format!("import_{stem}");
+    let hash = mercs2_formats::hash::pandemic_hash_m2(&label);
+    // A rigged import feeds the Skeleton workbench: detect the source rig and (re)build the bone map.
+    let src_joints = im.skin_joints.clone();
+    let src_pos = im.skin_joint_pos.clone();
+    let src_ibm = im.skin_ibm.clone();
+    let src_parents = im.skin_parents.clone();
+    let md: ModelData = im.into();
+    imported.insert(hash, md.clone());
+    scene.unload_model(hash); // re-import of the same file replaces it
+    let p = build_preview(
+        w, scene, world, hash, label, md, &*preview, placed, index, anim_sel, lua_corpus,
+    );
+    *cam_target = p.center;
+    *cam_dist = (p.radius * 2.4).clamp(0.5, 15000.0);
+    let status = if src_joints.is_empty() {
+        *retarget = None;
+        *retarget_src_path = None;
+        format!(
+            "imported {} — {} verts, {} groups, {} textures (F6 place, F10 export)",
+            p.label, p.verts, p.draws.len(), p.tex_hashes.len()
+        )
+    } else {
+        let (target_names, target_pos, target_parents) = retarget_target
+            .as_ref()
+            .map(|(h, _)| target_bone_info(w, *h))
+            .unwrap_or_default();
+        let r = crate::retarget::Retarget::build_full(
+            src_joints, src_pos, src_ibm, src_parents, target_names, target_pos, target_parents,
+        );
+        let s = format!(
+            "imported RIGGED {} — {} source bones ({}); Skeleton workbench → pick a target + Apply",
+            p.label,
+            r.source_bones.len(),
+            r.convention.label()
+        );
+        *retarget = Some(r);
+        *retarget_src_path = Some(path.to_path_buf());
+        *wb = Workbench::Skeleton;
+        s
+    };
+    *sel_bone = None;
+    *preview = Some(p);
+    status
+}
+
 fn build_preview(
     w: &mut WadStack,
     scene: &mut Scene,
@@ -4871,8 +5526,17 @@ fn build_preview(
             hidden.insert(gi);
         }
     }
-    let bind: Vec<[[f32; 4]; 4]> =
+    let mut bind: Vec<[[f32; 4]; 4]> =
         if md.skin.bones.is_empty() { vec![IDENTITY] } else { md.skin.bones.clone() };
+    // Imported rigged meshes carry a single-entry identity skin, but their per-vertex joints index a
+    // full source (or, post-retarget, target) palette. Pad with identity so every referenced joint
+    // resolves — an out-of-range read returns a zero matrix on the GPU, which collapses those
+    // vertices onto the origin (the "smooshed spike"). At identity the mesh renders at its rest pose.
+    // No-op for WAD models, whose palette already covers their joints.
+    let max_joint = md.verts.iter().flat_map(|v| v.joints).map(|j| j as usize).max().unwrap_or(0);
+    if bind.len() <= max_joint {
+        bind.resize(max_joint + 1, IDENTITY);
+    }
     let entity = world.spawn((
         Transform::IDENTITY,
         ModelRef { model: hash },
@@ -4976,6 +5640,7 @@ fn build_preview(
         character_set,
         clip_cache,
         hier,
+        retarget_source: None,
         tiers: md.tiers.clone(),
         tier: md.tier,
         machine: md.machine.clone(),

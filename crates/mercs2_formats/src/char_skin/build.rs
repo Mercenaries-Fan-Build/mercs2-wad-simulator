@@ -126,6 +126,8 @@ pub struct BuildInput<'a> {
     pub rig: Rig<'a>,
     /// POSITION per vertex, raw model space.
     pub positions: &'a [[f64; 3]],
+    /// NORMAL per vertex, raw model space. May be empty; then no conformed normals are produced.
+    pub normals: &'a [[f32; 3]],
     /// JOINTS_0 per vertex (joint indices).
     pub vjoints: &'a [[u16; 4]],
     /// WEIGHTS_0 per vertex.
@@ -207,6 +209,7 @@ impl CharGlbData {
                 node_name: &self.node_name,
             },
             positions: &self.positions,
+            normals: &self.normals,
             vjoints: &self.vjoints,
             vweights: &self.vweights,
             indices: &self.indices,
@@ -227,6 +230,17 @@ pub struct CharSkin {
     pub skin_bytes: Vec<u8>,
     /// nv re-posed positions (container space), f32 as stored.
     pub pos: Vec<[f32; 3]>,
+    /// nv re-posed NORMALS, in the same space as [`CharSkin::pos`]. Empty if the input had none.
+    ///
+    /// Conforming re-poses geometry, so the SOURCE mesh's normals stop describing the surface the
+    /// moment it lands in container space. Measured on 50 Cent: the source normal field agrees with
+    /// the conformed geometry at mean dot **-0.01** — 90.6% of vertices worse than 0.7 — because the
+    /// container transform alone carries a large rotation. Every consumer that reached for the glTF
+    /// normals was therefore lighting the model with a field that had no relation to its surface.
+    /// Deriving normals from the conformed triangles instead only reaches 0.94 against the authored
+    /// field, since it cannot know the mesh's hard edges; transforming the AUTHORED normals through
+    /// the same map as the positions preserves them exactly.
+    pub nrm: Vec<[f32; 3]>,
     /// Palette range table `{base, count}` for the `INFO(56)` leaf.
     pub ranges: Vec<(u16, u16)>,
     pub palette_slots: usize,
@@ -909,6 +923,24 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     let mut pos = vec![[0.0f32; 3]; nv];
     let mut posed = vec![[0.0f64; 3]; nv];
     let mut moved_sum = 0.0;
+
+    // Normals follow the positions through the SAME two stages, with the transform each stage
+    // requires of a normal rather than of a point.
+    //
+    // Stage 1, source -> container, is a general affine `t` (row-vector: p' = p·L + trans) and is
+    // measurably anisotropic — 3.0x on this pair — so a normal cannot simply be multiplied by L. In
+    // column form the point map is A = L^T, and a normal maps by (A^-1)^T, which reduces to L^-1.
+    //
+    // Stage 2, the per-bone re-pose, is a SIMILARITY: `sr` = rotation x uniform scale. There
+    // (M^-1)^T = (1/s)R, i.e. proportional to the rotation, so applying `sr` and renormalising is
+    // already exact and no inverse is needed.
+    let lin_inv: Option<[f64; 9]> = if inp.normals.is_empty() {
+        None
+    } else {
+        let l = [t[0][0], t[0][1], t[0][2], t[1][0], t[1][1], t[1][2], t[2][0], t[2][1], t[2][2]];
+        inv3(&l)
+    };
+    let mut nrm: Vec<[f32; 3]> = Vec::new();
     for vi in 0..nv {
         let v = cp[vi];
         let mut acc = [0.0f64; 3];
@@ -938,6 +970,28 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         posed[vi] = p;
         moved_sum += len(sub(p, v));
         pos[vi] = [p[0] as f32, p[1] as f32, p[2] as f32];
+
+        if let (Some(li), Some(n0)) = (lin_inv, inp.normals.get(vi)) {
+            let nc = norm(apply3(&li, [n0[0] as f64, n0[1] as f64, n0[2] as f64]));
+            let mut na = [0.0f64; 3];
+            let mut nt = 0.0;
+            for k in 0..4 {
+                let w = inp.vweights[vi][k];
+                if w <= 0.0 {
+                    continue;
+                }
+                let j = inp.vjoints[vi][k] as usize;
+                let Some(sim) = full.get(&j).and_then(|h| xform.get(h)) else { continue };
+                let q = norm(apply3(&sim.sr, nc));
+                na[0] += w * q[0];
+                na[1] += w * q[1];
+                na[2] += w * q[2];
+                nt += w;
+            }
+            // No usable bone: the vertex kept its container-space position, so keep that normal too.
+            let f = if nt > 0.0 { norm(na) } else { nc };
+            nrm.push([f[0] as f32, f[1] as f32, f[2] as f32]);
+        }
     }
     let rejected = weak_bones;
     let ys: Vec<f64> = posed.iter().map(|p| p[1]).collect();
@@ -972,6 +1026,7 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     };
 
     Ok(CharSkin {
+        nrm,
         skin_bytes,
         pos,
         ranges: ranges_u16,

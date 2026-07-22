@@ -164,7 +164,9 @@ fn run() -> Result<(), String> {
     // ---- inject ----
     let mesh = ExternalMesh {
         positions: cs.pos.clone(),
-        normals: glb.normals.clone(),
+        // CONFORMED normals, not the source glTF's. Conforming re-poses the geometry, so the
+        // source field stops describing the surface (measured: mean dot -0.01 against it).
+        normals: if cs.nrm.is_empty() { glb.normals.clone() } else { cs.nrm.clone() },
         uvs: glb.uvs.clone(),
         tris: glb.tris.clone(),
         joints: (0..cs.stats.verts)
@@ -217,6 +219,9 @@ fn run() -> Result<(), String> {
             &args.repoints,
             args.name,
             true, // grow: the import is denser than the donor; packager recomputes page_count
+            // No explicit triangle->group map: this path splits evenly by triangle order. The
+            // faithful sub-object partition lives in xfer_apply and has not been promoted yet.
+            None,
         )?;
         (b, s)
     };

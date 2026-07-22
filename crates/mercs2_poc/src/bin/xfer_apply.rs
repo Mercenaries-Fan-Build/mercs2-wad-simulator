@@ -11,7 +11,8 @@ mod gltf;
 
 use mercs2_formats::char_skin::build::build_palette_ranges;
 use mercs2_formats::char_skin::transfer::{
-    adjacency, smooth_weights, transfer_weights_pruned, vertex_normals, DonorSample, TransferOpts,
+    adjacency, smooth_weights, transfer_weights_pruned, vertex_normals,
+    DonorSample, TransferOpts,
 };
 use mercs2_formats::char_skin::{build_character, TargetSkeleton};
 use mercs2_formats::model_cubeize::read_model_meshes;
@@ -111,6 +112,34 @@ fn main() {
         }
     }
     println!("donor samples: {} ({} meshes re-wound to match stored normals)", donor.len(), flipped);
+
+    // Permanent guard on the normal field. Conforming re-poses the geometry, so the SOURCE glTF's
+    // normals stop describing the surface — measured here at mean dot -0.02 with 91.5% of vertices
+    // worse than 0.7, i.e. a normal field with no relation to the shape it was lighting. The bug was
+    // invisible for a long time because nothing renders normals directly; it shows up only as a
+    // model that looks subtly wrong under light. `CharSkin::nrm` carries them through the same
+    // transform as the positions, which scores 0.94 — the residual being the mesh's real hard edges,
+    // which a geometric derivation cannot reproduce and this preserves.
+    {
+        let conf: Vec<[f64; 3]> =
+            cs.pos.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+        let geo = vertex_normals(&conf, &glb.tris);
+        let n = geo.len().min(cs.nrm.len());
+        let mut sum = 0.0f64;
+        let mut bad = 0usize;
+        for i in 0..n {
+            let c = cs.nrm[i];
+            let d = geo[i][0] * c[0] as f64 + geo[i][1] * c[1] as f64 + geo[i][2] * c[2] as f64;
+            sum += d;
+            if d < 0.7 {
+                bad += 1;
+            }
+        }
+        println!(
+            "normals: conformed field agrees with conformed geometry at mean dot {:.4}, {} of {}              below 0.7 ({:.1}%)",
+            sum / n as f64, bad, n, 100.0 * bad as f64 / n as f64
+        );
+    }
 
     // Target normals in the SAME space as the sampled positions. `cs.posed` is the conformed mesh,
     // so its normals must be derived from it — the source GLB's own normals are in the pre-conform
@@ -256,7 +285,10 @@ fn main() {
 
     let mut mesh = ExternalMesh {
         positions: cs.pos.clone(),
-        normals: glb.normals.clone(),
+        // CONFORMED normals. The source glTF's field describes the PRE-conform surface and agrees
+        // with the conformed geometry at mean dot -0.01, so using it lights the model with a
+        // normal field unrelated to its shape.
+        normals: if cs.nrm.is_empty() { glb.normals.clone() } else { cs.nrm.clone() },
         uvs: glb.uvs.clone(),
         tris,
         joints: slot_joints,

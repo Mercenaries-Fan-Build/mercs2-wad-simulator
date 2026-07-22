@@ -189,6 +189,61 @@ pub fn adjacency(vertex_count: usize, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
     adj
 }
 
+/// Area-weighted vertex normals that treat vertices sharing a POSITION as one surface point.
+///
+/// An exported mesh splits a vertex wherever an attribute other than position is discontinuous — a
+/// UV seam, a material change. Those copies are the same point on the surface, but each one only
+/// sees the triangles on its own side of the seam, so plain per-index normals come out faceted along
+/// every seam: a visible lighting crease down a character that has none. Welding by position first
+/// and redistributing the shared normal afterwards is what makes derived normals match what the
+/// exporter authored.
+///
+/// Positions are keyed at 1e-6, which is far below any real vertex spacing and far above f32 noise.
+pub fn welded_vertex_normals(positions: &[[f64; 3]], tris: &[[u32; 3]]) -> Vec<[f64; 3]> {
+    let key = |p: &[f64; 3]| -> (i64, i64, i64) {
+        (
+            (p[0] * 1.0e6).round() as i64,
+            (p[1] * 1.0e6).round() as i64,
+            (p[2] * 1.0e6).round() as i64,
+        )
+    };
+    let mut rep: HashMap<(i64, i64, i64), usize> = HashMap::new();
+    let mut canon = vec![0usize; positions.len()];
+    for (i, p) in positions.iter().enumerate() {
+        let k = key(p);
+        let r = *rep.entry(k).or_insert(i);
+        canon[i] = r;
+    }
+    let mut acc = vec![[0.0f64; 3]; positions.len()];
+    for t in tris {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        if a >= positions.len() || b >= positions.len() || c >= positions.len() {
+            continue;
+        }
+        let (p, q, r) = (positions[a], positions[b], positions[c]);
+        let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        let v = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+        let f = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        for &vi in &[a, b, c] {
+            let cv = canon[vi];
+            for k in 0..3 {
+                acc[cv][k] += f[k];
+            }
+        }
+    }
+    let mut out = vec![[0.0f64; 3]; positions.len()];
+    for i in 0..positions.len() {
+        let n = acc[canon[i]];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        out[i] = if l > 1e-12 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0, 0.0, 1.0] };
+    }
+    out
+}
+
 /// Area-weighted vertex normals from a triangle list.
 ///
 /// Derived rather than read from the file on purpose. Both sides of the transfer must agree on
