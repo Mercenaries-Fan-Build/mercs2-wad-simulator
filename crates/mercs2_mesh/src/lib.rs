@@ -367,6 +367,19 @@ pub fn build_indexed_rung(
     let mut skipped = 0usize;
     let mut kept: Vec<Placed> = Vec::new();
     for m in &meshes {
+        // Clause (1) of the engine's draw gate: a group whose PRMT draw count is zero is not drawn,
+        // whatever its index buffer still contains. This is the field injection zeroes to neutralise
+        // the host groups it did not fill, and everything else here derives from PRMT index SPANS,
+        // which neutralisation leaves intact -- so without this test an injected character renders
+        // the DONOR's leftover head, hair and gear inside the import.
+        //
+        // Safe by measurement, not by assumption: across 600 retail models / 4,871 groups
+        // (`drawgate_scan`), not one group has a zero draw count, so this can only ever drop
+        // geometry the engine was already refusing to draw.
+        if m.prmt_draw == 0 {
+            skipped += 1;
+            continue;
+        }
         if let Some(bit) = lod_filter {
             if m.state_mask != 0 && (m.state_mask & bit) == 0 {
                 skipped += 1; // segment absent from the selected LOD rung

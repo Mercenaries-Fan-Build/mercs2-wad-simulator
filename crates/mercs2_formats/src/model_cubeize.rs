@@ -371,6 +371,17 @@ pub struct ModelMesh {
     pub colors: Vec<[u8; 4]>,
     /// Triangle-list indices into `positions` (the IBUF triangle strip, de-stripped).
     pub tris: Vec<[u32; 3]>,
+    /// Largest PRMT draw count (`+8`) across this group's records — clause (1) of the engine's draw
+    /// gate. **Zero means the engine does not draw this group at all**, no matter what the index
+    /// buffer still holds.
+    ///
+    /// It has to be surfaced separately because everything else here is derived from PRMT index
+    /// SPANS (`+4`), which neutralisation leaves untouched: injection zeroes only `+8`. A consumer
+    /// reading spans alone therefore sees a neutralised group as full geometry and renders the
+    /// donor's leftover head and gear inside an import. Measured across 600 retail models / 4,871
+    /// groups, NO retail group has a zero draw count, so treating zero as "not drawn" cannot cost
+    /// retail geometry.
+    pub prmt_draw: u32,
     /// Per-PRMT sub-strip material ranges into `tris`. A single PRMG group frequently carries
     /// SEVERAL PRMT records, each an independent sub-strip with its OWN material (e.g. the PMC hall:
     /// group 1 = 23 materials, its floor/walls/trim all in one group). Binding only the first material
@@ -737,7 +748,7 @@ pub fn read_model_meshes_segm(
         // next, spanning a stray triangle across the mesh (the hand->back sliver). So de-strip each
         // PRMT range separately — with a sanity gate; if the ranges don't cover the strip cleanly
         // (e.g. PRMT layout differs), fall back to whole-strip de-stripping.
-        let (tris, submeshes) = destrip_by_prmt(container, &strip, prmt, vmax);
+        let (tris, submeshes, prmt_draw) = destrip_by_prmt(container, &strip, prmt, vmax);
 
         out.push(ModelMesh {
             group_index: gi,
@@ -755,6 +766,7 @@ pub fn read_model_meshes_segm(
             colors,
             tris,
             submeshes,
+            prmt_draw,
         });
     }
     Ok(out)
@@ -770,9 +782,10 @@ fn destrip_by_prmt(
     strip: &[u32],
     prmt: Option<(usize, usize)>,
     vmax: u32,
-) -> (Vec<[u32; 3]>, Vec<SubMesh>) {
+) -> (Vec<[u32; 3]>, Vec<SubMesh>, u32) {
     let mut out = Vec::new();
     let mut subs = Vec::new();
+    let mut prmt_draw = 0u32;
     if let Some((ps, pe)) = prmt {
         let nrec = (pe - ps) / 16;
         if nrec >= 1 {
@@ -780,6 +793,10 @@ fn destrip_by_prmt(
             // models), dedup coincident starts (same-texture instances), and ensure the first range
             // begins at 0 so no strip triangles are dropped. Each [start_i, start_{i+1}) is an
             // independent sub-strip carrying material_i.
+            prmt_draw = (0..nrec)
+                .map(|r| read_u32_le(container, ps + r * 16 + 8))
+                .max()
+                .unwrap_or(0);
             let mut recs: Vec<(usize, usize)> = (0..nrec)
                 .map(|r| {
                     (
@@ -809,7 +826,7 @@ fn destrip_by_prmt(
                     }
                 }
                 if !out.is_empty() {
-                    return (out, subs);
+                    return (out, subs, prmt_draw);
                 }
                 out.clear();
                 subs.clear();
@@ -817,7 +834,7 @@ fn destrip_by_prmt(
         }
     }
     strip_range_to_tris(strip, 0, strip.len(), vmax, &mut out);
-    (out, subs)
+    (out, subs, prmt_draw)
 }
 
 /// De-strip `strip[start..end]` into `out`. Winding parity uses the ABSOLUTE strip index (so a
