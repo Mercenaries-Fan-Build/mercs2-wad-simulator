@@ -201,6 +201,17 @@ fn main() {
     let mut worst = 0.0f64;
     let mut n_samples = 0usize;
 
+    // Per-height-band error. A whole-model rms can be perfectly acceptable while one region is
+    // ruined: a face is a few percent of the vertices, so the average cannot see it, and the average
+    // is the only thing that has been looked at so far. Bands are relative to the model's own
+    // vertical extent, so band 9 is the head on any character.
+    const BANDS: usize = 10;
+    let ylo = targets.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+    let yhi = targets.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+    let yspan = (yhi - ylo).max(1e-9);
+    let mut band_sq = vec![0.0f64; BANDS];
+    let mut band_n = vec![0usize; BANDS];
+
     for pi in 0..poses {
         let mut rng = Rng(0x5EED_0000 + pi as u64);
         let mut axis = vec![[0.0f64; 3]; nb];
@@ -244,6 +255,10 @@ fn main() {
             let d = [a_xfer[0] - a_true[0], a_xfer[1] - a_true[1], a_xfer[2] - a_true[2]];
             let m2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
             sum_sq += m2;
+            let bi = (((v[1] - ylo) / yspan) * BANDS as f64).floor() as usize;
+            let bi = bi.min(BANDS - 1);
+            band_sq[bi] += m2;
+            band_n[bi] += 1;
             // Project the error onto the (posed) normal. The normal is rotated by the TRUE
             // weighting's dominant bone, which is enough to keep "outward" meaningful.
             let n = h.2;
@@ -277,6 +292,16 @@ fn main() {
         100.0 * bulge / h
     );
     println!("  worst {:.5} m  ({:.3}% of height)", worst.sqrt(), 100.0 * worst.sqrt() / h);
+    println!("  rms by height band (0 = feet, 9 = head), % of body height:");
+    for b in 0..BANDS {
+        if band_n[b] == 0 {
+            continue;
+        }
+        let r = (band_sq[b] / band_n[b] as f64).sqrt();
+        let pct = 100.0 * r / h;
+        let bar = "#".repeat(((pct / 0.1).round() as usize).min(60));
+        println!("    band {b}  {:>6} verts  {pct:6.3}%  {bar}", band_n[b] / poses);
+    }
     // Machine-readable tail for sweeps.
     println!(
         "CSV,{k},{prune},{},{smooth},{lambda},{:.6},{:.6},{:.6}",

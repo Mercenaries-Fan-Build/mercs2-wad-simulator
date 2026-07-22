@@ -50,6 +50,15 @@ pub struct Bone {
     /// Pose[b]`, so `+80` is by definition the matrix the vertices were authored against — anything
     /// that binds geometry to bones (retarget, skin authoring, bundle export) must use THIS.
     pub bind_world: Option<[[f32; 4]; 4]>,
+    /// The `+80`-derived bind BEFORE the staleness rejection, and whether it was rejected.
+    ///
+    /// Kept because the rejection is a JUDGEMENT, not a decode: it assumes a bone that lands on its
+    /// parent cannot be a real bind. If the engine instead skins with the raw record, geometry
+    /// conformed to the corrected pose is wrong in exactly the way that hides at rest and shows
+    /// under animation. Retaining the raw value lets that be settled by measurement against shipped
+    /// geometry rather than asserted.
+    pub bind_world_raw: Option<[[f32; 4]; 4]>,
+    pub bind_stale: bool,
 }
 
 impl Bone {
@@ -273,6 +282,8 @@ impl Skeleton {
         // Parents precede children in HIER order, so one forward pass resolves each bone against
         // its parent's ALREADY-VALIDATED bind.
         const COLLAPSE_EPS: f32 = 1e-3;
+        let raw_bind = inv_bind.clone();
+        let mut stale = vec![false; n];
         for r in 0..n {
             let p = parent[r];
             if p < 0 || p as usize >= n {
@@ -284,6 +295,7 @@ impl Skeleton {
             let d_default = dist3(&world[r], &world[p as usize]);
             if d_bind < COLLAPSE_EPS && d_default > COLLAPSE_EPS {
                 inv_bind[r] = None; // stale — fall back to the chained default pose
+                stale[r] = true;
             }
         }
 
@@ -294,6 +306,8 @@ impl Skeleton {
                 parent: parent[r],
                 world: world[r],
                 bind_world: inv_bind[r],
+                bind_world_raw: raw_bind[r],
+                bind_stale: stale[r],
             })
             .collect();
         Ok(Skeleton { bones })

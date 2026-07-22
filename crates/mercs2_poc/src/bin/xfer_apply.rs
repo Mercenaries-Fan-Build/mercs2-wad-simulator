@@ -11,7 +11,7 @@ mod gltf;
 
 use mercs2_formats::char_skin::build::build_palette_ranges;
 use mercs2_formats::char_skin::transfer::{
-    adjacency, smooth_weights, transfer_weights_pruned, vertex_normals,
+    adjacency, clamp_to_donor_reach, smooth_weights, transfer_weights_pruned, vertex_normals,
     DonorSample, TransferOpts,
 };
 use mercs2_formats::char_skin::{build_character, TargetSkeleton};
@@ -51,6 +51,9 @@ fn main() {
     // touching boundaries where a whole run of vertices agrees.
     let smooth: usize = flag(&a, "--smooth").and_then(|s| s.parse().ok()).unwrap_or(2);
     let lambda: f64 = flag(&a, "--lambda").and_then(|s| s.parse().ok()).unwrap_or(0.5);
+    // Allowance for the import legitimately standing a little proud of the donor surface. 0 disables
+    // the reach clamp entirely.
+    let reach: f64 = flag(&a, "--reach").and_then(|s| s.parse().ok()).unwrap_or(1.15);
 
     let glb = gltf::load_char_glb(glb_path).expect("glb");
     let donor_block = std::fs::read(donor_path).expect("donor");
@@ -151,6 +154,18 @@ fn main() {
         target.height,
         &TransferOpts { k, min_weight: prune, target_normals: &tnorm, exclude_radius: 0.0 },
     );
+    if reach > 0.0 {
+        let bone_pos: Vec<[f64; 3]> = skel
+            .bones
+            .iter()
+            .map(|b| {
+                let p = b.bind_pos();
+                [p[0] as f64, p[1] as f64, p[2] as f64]
+            })
+            .collect();
+        let n = clamp_to_donor_reach(&mut t.per_vertex, &cs.posed, &donor, &bone_pos, 0.99, reach);
+        println!("reach clamp (margin {reach}): trimmed {n} vertices");
+    }
     if smooth > 0 {
         let adj = adjacency(cs.posed.len(), &glb.tris);
         smooth_weights(&mut t.per_vertex, &adj, smooth, lambda);

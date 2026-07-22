@@ -542,6 +542,35 @@ fn leaf<'a>(ucfx: &'a [u8], data_off: usize, r: &Row) -> &'a [u8] {
 }
 
 /// Does a donor group currently draw? (IBUF index_count>0 and some PRMT rec count>0)
+/// Per-group draw report for a model payload: `(group, index_count, max PRMT draw count)`.
+///
+/// Exists because "did the injector neutralise the groups it did not fill?" cannot be answered from
+/// the mesh reader. That reader derives a submesh's triangle count from PRMT index SPANS, which
+/// survive neutralisation untouched — only the draw count at `+8` is zeroed. So a block whose
+/// leftover donor geometry still draws looks identical, through the reader, to one that is clean.
+/// Getting this wrong means shipping a character with the DONOR's head, hands and gear still
+/// rendering inside the import.
+pub fn group_draw_report(payload: &[u8]) -> Result<Vec<(usize, u32, u32)>, String> {
+    if payload.len() < 4 || &payload[0..4] != b"UCFX" {
+        return Err("payload is not UCFX".into());
+    }
+    let (data_off, _ndesc, rows) = parse_rows(payload);
+    let groups = find_groups(&rows);
+    Ok(groups
+        .iter()
+        .enumerate()
+        .map(|(gi, g)| {
+            let ic = read_u32_le(leaf(payload, data_off, &rows[g.ibuf_info]), 0);
+            let prmt = leaf(payload, data_off, &rows[g.prmt]);
+            let mx = (0..prmt.len() / 16)
+                .map(|r| read_u32_le(prmt, r * 16 + 8))
+                .max()
+                .unwrap_or(0);
+            (gi, ic, mx)
+        })
+        .collect())
+}
+
 fn group_draws(ucfx: &[u8], data_off: usize, rows: &[Row], g: &Group) -> bool {
     let ic = read_u32_le(leaf(ucfx, data_off, &rows[g.ibuf_info]), 0);
     if ic == 0 {

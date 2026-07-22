@@ -111,6 +111,87 @@ pub const MIN_WEIGHT: f64 = 0.04;
 /// the torso it rests against, without discarding legitimate curvature.
 pub const NORMAL_MIN_DOT: f64 = 0.0;
 
+/// Clamp each bone's influence to the reach it actually has in the DONOR.
+///
+/// Spatial sampling copies a bone's weight to whatever geometry sits at that point, but it cannot
+/// know how far that bone is *supposed* to reach. Where the import's surface stands off further from
+/// a joint than the donor's does, the copied weight is applied at a longer lever arm and the same
+/// rotation throws the vertex proportionally further.
+///
+/// Measured on 50 Cent's face, which is where small joints live: retail's own vertices weighted to
+/// bone 41 sit close enough that a 20 degree rotation moves them 2.5 mm, while the import's sit far
+/// enough to move 10.9 mm — **4.4x** retail, and 2-3x on the rest of the facial cluster. Those bones
+/// carry only ~2% of the region's weight, so the error is invisible in any average (the head band
+/// has the LOWEST rms of the whole model) while being concentrated on eyes, jaw and mouth, where a
+/// centimetre of unwanted travel is the difference between a face and a smear.
+///
+/// So bound it by evidence: for each bone, measure how far it reaches in the donor, and drop
+/// influence beyond that. `quantile` picks the reach (0.99 ignores a few stray donor vertices),
+/// `margin` allows for the import legitimately sitting a little proud of the donor surface. Bones
+/// whose reach cannot be measured are left alone rather than guessed at.
+pub fn clamp_to_donor_reach(
+    per_vertex: &mut [Vec<(u32, f64)>],
+    targets: &[[f64; 3]],
+    donor: &[DonorSample],
+    bone_pos: &[[f64; 3]],
+    quantile: f64,
+    margin: f64,
+) -> usize {
+    // reach[b] = distance from bone b beyond which the donor gives it no meaningful weight
+    let mut per_bone: HashMap<u32, Vec<f64>> = HashMap::new();
+    for s in donor {
+        for &(b, w) in &s.infl {
+            // Ignore crumbs: a 1% influence does not establish that a bone reaches that far.
+            if w < 0.05 {
+                continue;
+            }
+            let Some(p) = bone_pos.get(b as usize) else { continue };
+            let d = ((s.pos[0] - p[0]).powi(2) + (s.pos[1] - p[1]).powi(2) + (s.pos[2] - p[2]).powi(2))
+                .sqrt();
+            per_bone.entry(b).or_default().push(d);
+        }
+    }
+    let mut reach: HashMap<u32, f64> = HashMap::new();
+    for (b, mut ds) in per_bone {
+        ds.sort_by(|a, x| a.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
+        let i = ((ds.len() as f64 - 1.0) * quantile).round() as usize;
+        reach.insert(b, ds[i.min(ds.len() - 1)] * margin);
+    }
+
+    let mut clamped = 0usize;
+    for (vi, infl) in per_vertex.iter_mut().enumerate() {
+        let Some(t) = targets.get(vi) else { continue };
+        let before = infl.len();
+        let keep: Vec<(u32, f64)> = infl
+            .iter()
+            .copied()
+            .filter(|&(b, _)| {
+                let (Some(r), Some(p)) = (reach.get(&b), bone_pos.get(b as usize)) else {
+                    return true; // no evidence either way - leave it
+                };
+                let d = ((t[0] - p[0]).powi(2) + (t[1] - p[1]).powi(2) + (t[2] - p[2]).powi(2)).sqrt();
+                d <= *r
+            })
+            .collect();
+        // Never strip a vertex bare: an unweighted vertex collapses to the origin under skinning,
+        // which is far worse than an over-long lever arm. Keep the original in that case.
+        if keep.is_empty() {
+            continue;
+        }
+        *infl = keep;
+        if infl.len() != before {
+            clamped += 1;
+        }
+        let s: f64 = infl.iter().map(|x| x.1).sum();
+        if s > 0.0 {
+            for x in infl.iter_mut() {
+                x.1 /= s;
+            }
+        }
+    }
+    clamped
+}
+
 /// Laplacian smoothing of a transferred weight field over the target's own connectivity.
 ///
 /// Sampling is a POINT operation: each target vertex asks the donor a question independently, so
