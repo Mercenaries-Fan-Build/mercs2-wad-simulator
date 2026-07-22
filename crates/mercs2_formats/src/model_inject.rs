@@ -1317,6 +1317,7 @@ pub fn inject_multi_into_donor_block(
         repoints,
         new_name_hash,
         false,
+        None,
         false,
         None,
     )
@@ -1334,6 +1335,7 @@ pub fn inject_character_multi_into_donor_block(
     new_name_hash: u32,
     grow: bool,
     tri_group: Option<&[usize]>,
+    group_materials: Option<&[u32]>,
 ) -> Result<(Vec<u8>, Vec<GroupBudgetAudit>, InjectStats), String> {
     inject_multi_into_donor_block_ex(
         container_block,
@@ -1342,6 +1344,7 @@ pub fn inject_character_multi_into_donor_block(
         repoints,
         new_name_hash,
         true,
+        group_materials,
         grow,
         tri_group,
     )
@@ -1354,6 +1357,14 @@ fn inject_multi_into_donor_block_ex(
     repoints: &[MtrlRepoint],
     new_name_hash: u32,
     skin_palette_per_group: bool,
+    // MTRL record index per host group, parallel to `target_group_ordinals`. `None` keeps the
+    // historical single hardcoded material.
+    //
+    // This exists because a draw group carries exactly ONE material, so an import whose parts want
+    // different textures cannot be textured at all while every injected group names the same MTRL
+    // record. Giving each group its own record is what makes a per-part diffuse/specular/normal
+    // possible, and it is how retail authors a character: one sub-object, one material.
+    group_materials: Option<&[u32]>,
     // Let a host group's STRM/IBUF exceed the DONOR's original vertex/index counts, bounded only
     // by the u16 ceiling. Needed when the imported character is denser than the donor it conforms
     // to; the block grows, so the packager MUST recompute page_count/packed_field afterwards.
@@ -1639,7 +1650,12 @@ fn inject_multi_into_donor_block_ex(
         // PRMT: one strip record per existing donor record slot
         let nrec = leaf(ucfx, data_off, &rows[g.prmt]).len() / 16;
         let mut rec = Vec::with_capacity(16);
-        rec.extend_from_slice(&6u32.to_le_bytes());
+        // Material index. Per-group when supplied; otherwise the historical fixed 6.
+        let mat_idx = group_materials
+            .and_then(|gm| gm.get(ci))
+            .copied()
+            .unwrap_or(6u32);
+        rec.extend_from_slice(&mat_idx.to_le_bytes());
         rec.extend_from_slice(&0u32.to_le_bytes());
         rec.extend_from_slice(&(ic - 2).to_le_bytes());
         rec.extend_from_slice(&((vc - 1) as u16).to_le_bytes());

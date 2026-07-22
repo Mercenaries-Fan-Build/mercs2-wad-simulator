@@ -222,6 +222,8 @@ fn run() -> Result<(), String> {
             // No explicit triangle->group map: this path splits evenly by triangle order. The
             // faithful sub-object partition lives in xfer_apply and has not been promoted yet.
             None,
+            // No per-group materials: every group keeps the injector's default record.
+            None,
         )?;
         (b, s)
     };

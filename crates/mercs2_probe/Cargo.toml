@@ -12,6 +12,7 @@ name = "mercs2_probe"
 path = "src/main.rs"
 
 [dependencies]
+png = "0.17" # decode the source glTF's embedded PNG atlases for tex_build
 # The diagnostics + shared world helpers live in the engine library.
 mercs2_engine = { workspace = true }
 mercs2_formats = { workspace = true }

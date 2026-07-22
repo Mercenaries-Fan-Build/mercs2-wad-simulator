@@ -18,6 +18,7 @@ use mercs2_formats::char_skin::{build_character, TargetSkeleton};
 use mercs2_formats::model_cubeize::read_model_meshes;
 use mercs2_formats::model_inject::{
     inject_character_into_donor_block, inject_character_multi_into_donor_block, ExternalMesh,
+    MtrlRepoint,
 };
 use mercs2_formats::skeleton::Skeleton;
 use std::collections::HashMap;
@@ -54,6 +55,29 @@ fn main() {
     // Allowance for the import legitimately standing a little proud of the donor surface. 0 disables
     // the reach clamp entirely.
     let reach: f64 = flag(&a, "--reach").and_then(|s| s.parse().ok()).unwrap_or(1.15);
+    // MTRL record index per host group, parallel to --group. Each part needs its OWN record or its
+    // textures cannot differ from its neighbours'; the injector otherwise hardcodes record 6 for
+    // every group. Defaults are three records of pmc_hum_mattias whose nine texture slots are
+    // pairwise distinct, which is what lets a global-value-scan repoint address them independently.
+    let part_materials: Vec<u32> = flag(&a, "--materials")
+        .unwrap_or("1,12,3")
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    // from:to texture repoints, comma separated, e.g. 0xFAF2CF03:0x1234ABCD
+    let repoints: Vec<MtrlRepoint> = flag(&a, "--repoint")
+        .map(|s| {
+            s.split(',')
+                .filter_map(|p| {
+                    let (f, t) = p.split_once(':')?;
+                    Some(MtrlRepoint {
+                        from: u32::from_str_radix(f.trim().trim_start_matches("0x"), 16).ok()?,
+                        to: u32::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok()?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let glb = gltf::load_char_glb(glb_path).expect("glb");
     let donor_block = std::fs::read(donor_path).expect("donor");
@@ -115,6 +139,41 @@ fn main() {
         }
     }
     println!("donor samples: {} ({} meshes re-wound to match stored normals)", donor.len(), flipped);
+
+    // Optional OBJ dumps of the SOURCE mesh and the CONFORMED mesh, in their own spaces. The
+    // conform fits foreign geometry onto the target skeleton's proportions, which is a real change
+    // of shape and the one step nothing so far has actually looked at: every check to date compared
+    // the conformed mesh against the DONOR, never against the model it is supposed to be.
+    if let Some(dir) = flag(&a, "--dump-obj") {
+        let write = |name: &str, pts: &[[f64; 3]], tris: &[[u32; 3]]| {
+            let mut o = String::new();
+            for p in pts {
+                o.push_str(&format!("v {:.6} {:.6} {:.6}
+", p[0], p[1], p[2]));
+            }
+            for t in tris {
+                o.push_str(&format!("f {} {} {}
+", t[0] + 1, t[1] + 1, t[2] + 1));
+            }
+            let path = format!("{dir}/{name}.obj");
+            std::fs::write(&path, o).expect("write obj");
+            println!("  dumped {path} ({} verts, {} tris)", pts.len(), tris.len());
+        };
+        // Normalise the source to the conformed model's height so the two are comparable as SHAPES
+        // rather than as scales - the glTF is in centimetres and the container is in metres.
+        let ylo = glb.positions.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+        let yhi = glb.positions.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+        let clo = cs.posed.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+        let chi = cs.posed.iter().map(|p| p[1]).fold(f64::MIN, f64::max);
+        let sc = (chi - clo) / (yhi - ylo).max(1e-9);
+        let src: Vec<[f64; 3]> = glb
+            .positions
+            .iter()
+            .map(|p| [p[0] * sc, (p[1] - ylo) * sc + clo, p[2] * sc])
+            .collect();
+        write("src_scaled", &src, &glb.tris);
+        write("conformed", &cs.posed, &glb.tris);
+    }
 
     // Permanent guard on the normal field. Conforming re-poses the geometry, so the SOURCE glTF's
     // normals stop describing the surface — measured here at mean dot -0.02 with 91.5% of vertices
@@ -291,11 +350,106 @@ fn main() {
     let mut order: Vec<usize> = (0..glb.tris.len()).collect();
     order.sort_by_key(|&i| (part_of[i], dom_of(&glb.tris[i])));
     let tris: Vec<[u32; 3]> = order.iter().map(|&i| glb.tris[i]).collect();
-    let per = (tris.len() + groups.len() - 1) / groups.len().max(1);
-    let tri_group: Vec<usize> = (0..tris.len()).map(|i| (i / per).min(groups.len() - 1)).collect();
-    if groups.len() > 1 {
-        println!("partition: {} source parts, ordered by (part, dominant bone) -> {} groups",
-            glb.parts.len(), groups.len());
+
+    // ONE SOURCE PART PER HOST GROUP.
+    //
+    // A draw group carries exactly one material, so a group spanning two source parts cannot be
+    // textured: whichever material it names is wrong for one of them. The previous split cut the
+    // triangle order into EQUAL chunks, which straddles part boundaries by construction (parts here
+    // are 9173/6191/320 triangles against a 3921 chunk), and that is why the import could never
+    // wear its own textures no matter what was packed.
+    //
+    // Splitting by part instead is also how retail authors a character - one sub-object, one
+    // material - so this is the faithful shape as well as the necessary one.
+    let nparts = glb.parts.len();
+    if nparts > groups.len() {
+        eprintln!(
+            "partition: {nparts} source parts but only {} host groups; each group carries ONE              material, so pass at least {nparts}",
+            groups.len()
+        );
+        std::process::exit(2);
+    }
+
+    // Allocate host groups to parts, then split each part's triangles across ITS OWN groups.
+    //
+    // A part may need more than one group even though it has one material: the palette cap is on
+    // BONES, not triangles, and 50 Cent's head part alone reaches 44 bones / 50 slots against the
+    // 48 the game ships. Splitting a part across several groups is fine -- they simply share a
+    // material -- whereas merging two parts into one group is not, because the group could then
+    // only name one of their materials. So: a group never spans parts; a part may span groups.
+    //
+    // Slots are handed out in proportion to triangle count (largest remainder, minimum one each),
+    // which puts the extra groups where the geometry and therefore the bones actually are.
+    let mut alloc = vec![1usize; nparts];
+    let mut spare = groups.len() - nparts;
+    if spare > 0 {
+        let total: f64 = glb.parts.iter().map(|p| p.tri_count as f64).sum::<f64>().max(1.0);
+        let mut want: Vec<(f64, usize)> = glb
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.tri_count as f64 / total * spare as f64, i))
+            .collect();
+        // whole shares first, then the largest remainders
+        for (w, i) in want.iter() {
+            let take = (w.floor() as usize).min(spare);
+            alloc[*i] += take;
+            spare -= take;
+        }
+        want.sort_by(|a, b| {
+            (b.0 - b.0.floor()).partial_cmp(&(a.0 - a.0.floor())).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (_, i) in want {
+            if spare == 0 {
+                break;
+            }
+            alloc[i] += 1;
+            spare -= 1;
+        }
+    }
+
+    // slot index -> which part it carries, and each part's first slot
+    let mut slot_part: Vec<usize> = Vec::with_capacity(groups.len());
+    for (pi, &n) in alloc.iter().enumerate() {
+        for _ in 0..n {
+            slot_part.push(pi);
+        }
+    }
+    let mut first_slot = vec![0usize; nparts];
+    for (si, &pi) in slot_part.iter().enumerate() {
+        if slot_part[..si].iter().all(|&q| q != pi) {
+            first_slot[pi] = si;
+        }
+    }
+    // Within a part, spread its triangles evenly over its own slots.
+    let mut seen = vec![0usize; nparts];
+    let tri_group: Vec<usize> = order
+        .iter()
+        .map(|&i| {
+            let pi = part_of[i];
+            let n = alloc[pi].max(1);
+            let per = (glb.parts[pi].tri_count + n - 1) / n.max(1);
+            let k = (seen[pi] / per.max(1)).min(n - 1);
+            seen[pi] += 1;
+            first_slot[pi] + k
+        })
+        .collect();
+
+    if part_materials.len() < nparts {
+        eprintln!(
+            "--materials gave {} record(s) for {nparts} source parts; each part needs its own              MTRL record or its textures cannot differ from its neighbours'",
+            part_materials.len()
+        );
+        std::process::exit(2);
+    }
+    // One MTRL record per PART, expanded to per-slot for the injector.
+    let materials: Vec<u32> = slot_part.iter().map(|&pi| part_materials[pi]).collect();
+    for (si, &pi) in slot_part.iter().enumerate() {
+        let n = tri_group.iter().filter(|&&g| g == si).count();
+        println!(
+            "partition: host group {} <- part {:?} ({} tris) MTRL {}",
+            groups[si], glb.parts[pi].name, n, materials[si]
+        );
     }
 
     let mut mesh = ExternalMesh {
@@ -319,9 +473,16 @@ fn main() {
     } else {
         mesh.joints = global_joints;
         let (b, _audits, st) = inject_character_multi_into_donor_block(
-            &donor_block, &mesh, &groups, &[], name, true, Some(&tri_group),
+            &donor_block, &mesh, &groups, &repoints, name, true, Some(&tri_group),
+            Some(&materials),
         )
         .expect("inject multi");
+        for (f, t, n) in &st.mtrl_repoints {
+            println!("  repoint 0x{f:08X} -> 0x{t:08X}: {n} occurrence(s)");
+            if *n == 0 {
+                eprintln!("  WARNING: repoint 0x{f:08X} matched nothing - the material is not in this MTRL chunk");
+            }
+        }
         (b, st.target_group, st.vertex_count)
     };
     std::fs::write(out_path, &block).expect("write");
