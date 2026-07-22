@@ -882,6 +882,10 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // Without this filter the preview renders the DONOR's leftover head, hair and gear inside
         // the import and disagrees with the game, which makes it worse than useless: it would show
         // a defect that is not there and hide one that is.
+        // Rung 0 (close-up) with the destruction machine at its pristine default -- the state a
+        // freshly-placed instance gets. For a character this is all-true: characters ship no
+        // destruction machine, so clause (3) is a no-op for them and only the LOD tier bites.
+        let rs = app::default_render_state(&mut w, hash);
         let gate: std::collections::HashSet<usize> = match w.extract_container(hash) {
             Ok(c) => match mercs2_formats::model_inject::group_draw_report(&c) {
                 Ok(rep) => rep.iter().filter(|r| r.1 > 0 && r.2 > 0).map(|r| r.0).collect(),
@@ -901,12 +905,15 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         let draws: Vec<shot::DrawTex> = md
             .draws
             .iter()
-            // Clause 2 as well as clause 1. The engine tests lod_mask against the object's
-            // view_state with an ANY-BIT overlap, and load_model_data asks for tier 0x01, so a host
-            // group in the 0x02/0x04/0x08 tier is simply never drawn. Missing this shipped a build
-            // whose torso and arms were invisible in game while rendering perfectly here: the host
-            // group had been chosen for its material, and nothing checked its tier.
-            .filter(|d| gate.contains(&d.group_index) && (d.lod_mask & 0x01) != 0)
+            // The ENGINE'S OWN GATE, not a hand-rolled approximation of it.
+            //
+            // `segment_visible` is clauses (2) and (3) of `FUN_004722a0`: an ANY-bit overlap of
+            // lod_mask with the object's view_state, and the destruction machine's node-enable
+            // table. The GUI has always used it; this path checked `lod_mask & 0x01` by hand and
+            // therefore modelled clause (2) only for rung 0 and clause (3) not at all. That shipped
+            // a build whose torso and arms were invisible in game while rendering perfectly here -
+            // the host group sat in the 0x02 tier and nothing looked.
+            .filter(|d| gate.contains(&d.group_index) && rs.segment_visible(d.lod_mask, d.node))
             .map(|d| shot::DrawTex {
                 index_start: d.index_start,
                 index_count: d.index_count,
@@ -938,10 +945,10 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             md.indices.len()
         );
         for d in md.draws.iter().filter(|d| gate.contains(&d.group_index) && d.index_count > 0) {
-            if d.lod_mask & 0x01 == 0 {
+            if !rs.segment_visible(d.lod_mask, d.node) {
                 println!(
-                    "    group {:>2}  {:>6} idx  lod 0x{:02X}  <-- NOT IN TIER 0x01, invisible in game",
-                    d.group_index, d.index_count, d.lod_mask
+                    "    group {:>2}  {:>6} idx  lod 0x{:02X}  node {:>4}  <-- GATED OUT, invisible in game",
+                    d.group_index, d.index_count, d.lod_mask, d.node
                 );
                 continue;
             }

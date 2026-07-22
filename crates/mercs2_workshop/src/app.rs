@@ -4961,7 +4961,7 @@ pub(crate) fn target_bone_info(w: &mut WadStack, hash: u32) -> (Vec<String>, Vec
 ///
 /// Imported/synthetic models resolve to no container; their draw groups carry `lod_mask = 0xFF` and
 /// `node = -1`, so the empty state draws them in full.
-fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine::render_state::RenderState {
+pub(crate) fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine::render_state::RenderState {
     use mercs2_formats::orchestrator as orch;
     let Ok(c) = w.extract_container(hash) else {
         return mercs2_engine::render_state::RenderState::rung0(0);
