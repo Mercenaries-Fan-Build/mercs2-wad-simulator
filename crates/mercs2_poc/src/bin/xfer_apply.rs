@@ -10,7 +10,9 @@
 mod gltf;
 
 use mercs2_formats::char_skin::build::build_palette_ranges;
-use mercs2_formats::char_skin::transfer::{transfer_weights, DonorSample};
+use mercs2_formats::char_skin::transfer::{
+    adjacency, smooth_weights, transfer_weights_pruned, vertex_normals, DonorSample, TransferOpts,
+};
 use mercs2_formats::char_skin::{build_character, TargetSkeleton};
 use mercs2_formats::model_cubeize::read_model_meshes;
 use mercs2_formats::model_inject::{
@@ -42,6 +44,12 @@ fn main() {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     let k: usize = flag(&a, "-k").and_then(|s| s.parse().ok()).unwrap_or(4);
+    let prune: f64 = flag(&a, "--prune").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    // Smoothing passes over the target's own mesh connectivity. Sampling is per-point, so isolated
+    // vertices can land on a neighbour body part; averaging over mesh edges removes those without
+    // touching boundaries where a whole run of vertices agrees.
+    let smooth: usize = flag(&a, "--smooth").and_then(|s| s.parse().ok()).unwrap_or(2);
+    let lambda: f64 = flag(&a, "--lambda").and_then(|s| s.parse().ok()).unwrap_or(0.5);
 
     let glb = gltf::load_char_glb(glb_path).expect("glb");
     let donor_block = std::fs::read(donor_path).expect("donor");
@@ -55,9 +63,33 @@ fn main() {
     let ucfx_len = u32::from_le_bytes(donor_block[16..20].try_into().unwrap()) as usize;
     let meshes = read_model_meshes(&donor_block[20..20 + ucfx_len]).expect("donor meshes");
     let mut donor: Vec<DonorSample> = Vec::new();
+    let mut flipped = 0usize;
     for m in &meshes {
         if m.joints.is_empty() || m.weights.is_empty() {
             continue;
+        }
+        // Derive this mesh's normals from its own triangles, then check the derived field against
+        // the stored one: a de-stripped IBUF can come out with the opposite winding, and a globally
+        // flipped normal field would make every compatibility test fail identically (silently
+        // degrading to plain nearest-neighbour rather than erroring). Measure it instead.
+        let mpos: Vec<[f64; 3]> =
+            m.positions.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+        let mut dn = vertex_normals(&mpos, &m.tris);
+        if !m.normals.is_empty() {
+            let agree: f64 = (0..dn.len().min(m.normals.len()))
+                .map(|i| {
+                    let s = m.normals[i];
+                    dn[i][0] * s[0] as f64 + dn[i][1] * s[1] as f64 + dn[i][2] * s[2] as f64
+                })
+                .sum();
+            if agree < 0.0 {
+                for x in dn.iter_mut() {
+                    for axis in 0..3 {
+                        x[axis] = -x[axis];
+                    }
+                }
+                flipped += 1;
+            }
         }
         for i in 0..m.positions.len() {
             let mut infl = Vec::new();
@@ -71,13 +103,30 @@ fn main() {
                     infl.push((m.joints[i][c] as u32, w / tot));
                 }
             }
-            let p = m.positions[i];
-            donor.push(DonorSample { pos: [p[0] as f64, p[1] as f64, p[2] as f64], infl });
+            donor.push(DonorSample {
+                pos: mpos[i],
+                normal: dn.get(i).copied().unwrap_or([0.0; 3]),
+                infl,
+            });
         }
     }
-    println!("donor samples: {}", donor.len());
+    println!("donor samples: {} ({} meshes re-wound to match stored normals)", donor.len(), flipped);
 
-    let t = transfer_weights(&donor, &cs.posed, k, target.height);
+    // Target normals in the SAME space as the sampled positions. `cs.posed` is the conformed mesh,
+    // so its normals must be derived from it — the source GLB's own normals are in the pre-conform
+    // space and would be rotated relative to the donor.
+    let tnorm = vertex_normals(&cs.posed, &glb.tris);
+    let mut t = transfer_weights_pruned(
+        &donor,
+        &cs.posed,
+        target.height,
+        &TransferOpts { k, min_weight: prune, target_normals: &tnorm, exclude_radius: 0.0 },
+    );
+    if smooth > 0 {
+        let adj = adjacency(cs.posed.len(), &glb.tris);
+        smooth_weights(&mut t.per_vertex, &adj, smooth, lambda);
+        println!("smoothed: {smooth} pass(es), lambda {lambda}");
+    }
     println!(
         "transfer: k={k}  median nearest {:.4} m ({:.1}% of height)  far {} ({:.1}%)",
         t.median_dist, 100.0 * t.median_dist / target.height, t.far,
