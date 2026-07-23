@@ -919,6 +919,50 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         xform.insert(h, sim);
     }
 
+    // ---- 6b. Smooth the per-bone SCALE across the distal limb chains ----
+    //
+    // Each target bone gets its OWN uniform-scale similarity from an independent weighted fit, and
+    // section 7 LBS-BLENDS those transforms. A weighted average of similarities that differ in
+    // SCALE is not itself a similarity, so where adjacent co-moving bones fit sharply different
+    // scales the blend SHEARS the surface even at bind pose. Measured on 50 Cent (double-blind
+    // root-cause, 2026-07-22): forearm 1.075, forearm-ROLL leaf 1.136, HAND 0.960 — an ~18% step
+    // across the wrist — produced the along-forearm twist and the wrist skew, and forcing the three
+    // to share the forearm's transform drove the region's non-rigid residual to 0.00%.
+    //
+    // Two scoped corrections, limited to the distal arm/leg chains so the DELIBERATE limb-vs-torso
+    // locality (e.g. thigh 1.45x vs torso) is untouched:
+    //   * a ROLL/TWIST leaf has no size DOF of its own — it only spins about its parent's axis — so
+    //     its independent scale is spurious; it inherits the parent limb bone's whole transform.
+    //   * a HAND/FOOT bone's fit is dominated by the ~15 finger/toe joints collapsed onto it, which
+    //     drags its scale away from the forearm/calf; clamp its scale back toward the parent and
+    //     re-anchor so the wrist/ankle joint stays continuous.
+    let rescale = |sim: &Sim, new_scale: f64, anchor: [f64; 3]| -> Sim {
+        let inv = 1.0 / sim.scale.max(1e-12);
+        let sr: [f64; 9] = std::array::from_fn(|i| sim.sr[i] * inv * new_scale); // same rotation, new scale
+        Sim { sr, t: sub(anchor, apply3(&sr, anchor)), scale: new_scale, rank: sim.rank }
+    };
+    // (roll NPC, forearm/parent NPC, hand NPC) for each arm; forearm = roll - 1, hand = roll + 1.
+    for &(roll_npc, fore_npc, hand_npc) in &[(45u32, 44u32, 46u32), (66, 65, 67)] {
+        let fore_h = sk.index_by_canonical(fore_npc);
+        let roll_h = sk.index_by_canonical(roll_npc);
+        let hand_h = sk.index_by_canonical(hand_npc);
+        let fore_sim = fore_h.and_then(|h| xform.get(&h).copied());
+        // roll leaf inherits the forearm entirely.
+        if let (Some(rh), Some(fs)) = (roll_h, fore_sim) {
+            xform.insert(rh, fs);
+        }
+        // hand scale clamped toward the forearm, re-anchored at the wrist (the hand bone's head).
+        if let (Some(hh), Some(fs)) = (hand_h, fore_sim) {
+            if let Some(hsim) = xform.get(&hh).copied() {
+                let clamped = hsim.scale.clamp(fs.scale * 0.94, fs.scale * 1.06);
+                if (clamped - hsim.scale).abs() > 1e-9 {
+                    let wrist = sk.tgt(hh).unwrap_or([0.0; 3]);
+                    xform.insert(hh, rescale(&hsim, clamped, wrist));
+                }
+            }
+        }
+    }
+
     // ---- 7. pos.bin — LBS over the per-target-bone transforms ----
     let mut pos = vec![[0.0f32; 3]; nv];
     let mut posed = vec![[0.0f64; 3]; nv];
