@@ -64,6 +64,14 @@ pub struct PatchBlock {
     pub aset_entries: Vec<AsetEntry>,
     pub packed_field: u32,
     pub flags: u16,
+    /// This block's index in the archive its `aset_entries` were COPIED FROM, when known.
+    ///
+    /// An ASET row packs up to four block indices (`_P000` plus `_P001`/`_P002`/`_P003` LOD rungs)
+    /// and every one of them is relative to the archive that owns the row. Carrying a block out of
+    /// an 11,370-block `vz.wad` into a 29-block patch therefore invalidates the finer rungs unless
+    /// they are re-pointed. Set this so [`build_patch_wad_multi`] can build the source→patch index
+    /// map and remap them; leave `None` and any non-sentinel rung is conservatively sentinelled.
+    pub source_block_index: Option<u32>,
 }
 
 impl PatchBlock {
@@ -83,6 +91,7 @@ impl PatchBlock {
             aset_entries,
             packed_field: 1,
             flags: 0x8000,
+            source_block_index: None,
         }
     }
 
@@ -110,6 +119,7 @@ impl PatchBlock {
             aset_entries,
             packed_field: tier | decompressed_pages(raw.len()),
             flags: 0x8000,
+            source_block_index: None,
         })
     }
 
@@ -312,14 +322,77 @@ pub fn build_patch_wad_multi(
         out[off + 8..off + 12].copy_from_slice(&flags_pages.to_le_bytes());
     }
 
-    // ── ASET entries (remap block index into u32_2 high bits) ──
+    // ── ASET entries (remap EVERY block index into this patch's index space) ──
+    //
+    // A row packs up to four block indices and all of them are relative to the archive that OWNS the
+    // row: `_P000` (u32_2 hi16) plus the LOD rungs `_P001` (u32_2 lo16), `_P002` (u32_1 hi16) and
+    // `_P003` (u32_1 lo16). `_P000` is rewritten to this block's position. The RUNGS used to be
+    // copied verbatim from the source archive, which silently produced DANGLING references the
+    // moment a block was carried out of a large WAD into a small patch — `vz.wad` has 11,370 blocks,
+    // a patch has tens. The engine then reads INDX out of range, decodes whatever bytes sit there as
+    // a page index + `packed_field`, and can size a streaming buffer at hundreds of gigabytes. That
+    // request can never be satisfied (`FUN_00875b00` only issues when the declared size fits the
+    // largest free run), so the node never reaches provider-status 4, `Stream_Manager_Tick`
+    // (`FUN_008739e0`) unlinks only on 4, the pending count never drains, and world streaming hangs
+    // with no crash and no error. Retail ships ZERO dangling rungs (measured: retail `vz-patch.wad`
+    // 5451 rows, base `vz.wad` 30645 rows, all resolve) — `aset_refcheck` enforces this.
+    //
+    // Remap each rung through the source→patch map; sentinel (`0xFFFF` = "rung absent") anything
+    // this patch does not carry, which degrades the asset to its coarse tier instead of wedging.
+    let src_to_patch: std::collections::HashMap<u32, usize> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| b.source_block_index.map(|s| (s, i)))
+        .collect();
+    // `known_src`: the owning block told us which archive index its rows came from, so the map is
+    // AUTHORITATIVE — a rung absent from it genuinely is not carried and must be sentinelled.
+    // Without it we cannot know the source space, so we only kill refs that CANNOT resolve here
+    // (>= this patch's block count); an in-range value might be one a caller set deliberately, and
+    // silently blanking it would be its own bug.
+    let remap_rung = |v: u16, known_src: bool| -> u16 {
+        if v == 0xFFFF {
+            return 0xFFFF;
+        }
+        if known_src {
+            match src_to_patch.get(&(v as u32)) {
+                Some(&i) if i <= 0xFFFE => i as u16,
+                _ => 0xFFFF, // not carried by this patch — coarse tier only
+            }
+        } else if v as usize >= num_blocks {
+            0xFFFF // out of range for this patch: cannot possibly resolve
+        } else {
+            v
+        }
+    };
+    let mut sentinelled = 0usize;
     for (i, &(blk_idx, entry)) in all_aset.iter().enumerate() {
         let off = aset_offset + i * 16;
-        let u2_remapped = ((blk_idx as u32) << 16) | (entry.u32_2 & 0xFFFF);
+        let known_src = blocks[blk_idx].source_block_index.is_some();
+        let (s1, s2, s3) = (
+            (entry.u32_2 & 0xFFFF) as u16,
+            (entry.u32_1 >> 16) as u16,
+            (entry.u32_1 & 0xFFFF) as u16,
+        );
+        let (p1, p2, p3) = (
+            remap_rung(s1, known_src),
+            remap_rung(s2, known_src),
+            remap_rung(s3, known_src),
+        );
+        if (p1, p2, p3) != (s1, s2, s3) {
+            sentinelled += 1;
+        }
+        let u2 = ((blk_idx as u32) << 16) | p1 as u32;
+        let u1 = ((p2 as u32) << 16) | p3 as u32;
         out[off..off + 4].copy_from_slice(&entry.asset_hash.to_le_bytes());
-        out[off + 4..off + 8].copy_from_slice(&entry.u32_1.to_le_bytes());
-        out[off + 8..off + 12].copy_from_slice(&u2_remapped.to_le_bytes());
+        out[off + 4..off + 8].copy_from_slice(&u1.to_le_bytes());
+        out[off + 8..off + 12].copy_from_slice(&u2.to_le_bytes());
         out[off + 12..off + 16].copy_from_slice(&entry.u32_3.to_le_bytes());
+    }
+    if sentinelled > 0 {
+        eprintln!(
+            "  note: {sentinelled} ASET row(s) referenced LOD rungs this patch does not carry; \
+             sentinelled to 0xFFFF (asset renders at its coarse tier instead of wedging the stream)"
+        );
     }
 
     // ── PTHS ──
@@ -433,6 +506,9 @@ pub fn read_patch_wad(raw: &[u8]) -> Result<PatchWadContents, String> {
             aset_entries: aset_by_block.remove(&i).unwrap_or_default(),
             packed_field: packed,
             flags,
+            // These rows' block indices are relative to THIS wad, so `i` is the source index the
+            // re-emit needs to remap LOD rungs onto their new positions (or sentinel them).
+            source_block_index: Some(i as u32),
         });
     }
 
@@ -635,11 +711,21 @@ mod tests {
         assert_eq!((parsed.blocks[1].aset_entries[0].u32_2 >> 16) & 0xFFFF, 1);
     }
 
+    /// Container FRAMING still matches Python byte-for-byte; the ASET LOD rung fields deliberately
+    /// do NOT, because Python's are wrong.
+    ///
+    /// `tools/ffcs_patch_wad.build_patch_wad_multi` copies `_P001`/`_P002`/`_P003` verbatim out of
+    /// the SOURCE archive's index space. In any patch smaller than its source that leaves DANGLING
+    /// block references — `vz.wad` has 11,370 blocks, a patch has tens. Measured on the shipped
+    /// builds: 22 dangling refs across 10 rows (all `resident-pmcoutpost_fountain` rungs), while
+    /// retail `vz-patch.wad` (5451 rows) and base `vz.wad` (30645 rows) have ZERO. The engine then
+    /// reads INDX out of range, decodes whatever bytes sit there as a page index + `packed_field`,
+    /// and sizes a streaming buffer it can never satisfy — so the node never reaches provider-status
+    /// 4, `Stream_Manager_Tick` (`FUN_008739e0`) unlinks only on 4, the pending count never drains,
+    /// and world streaming hangs with no crash. Byte-parity on those fields is a bug-for-bug
+    /// guarantee, so it is dropped on purpose; `aset_refcheck` is the gate for the correct shape.
     #[test]
-    fn byte_identical_to_python_ffcs_patch_wad() {
-        // Golden produced by `tools/ffcs_patch_wad.build_patch_wad_multi` with the
-        // exact same inputs (see commit message / cross-check). Equal length +
-        // equal Mercs2 CRC fingerprint ⇒ byte-identical container framing.
+    fn python_parity_on_framing_and_lod_rungs_never_dangle() {
         let b0 = PatchBlock::new(
             vec![0xABu8; 24],
             "blocks\\dlc01\\resident_p000_q3.block".to_string(),
@@ -655,11 +741,28 @@ mod tests {
         );
         let wad =
             build_patch_wad_multi(&[b0, b1], 0xCAFEBABE, None, &FFCS_CERT_BLOB).expect("build");
-        assert_eq!(wad.len(), 2_195_456, "WAD length must match Python");
-        assert_eq!(
-            crate::crc32::crc32_mercs2(&wad),
-            0x3B9F_7B27,
-            "WAD bytes must be identical to Python build_patch_wad_multi"
-        );
+
+        // Framing golden, unchanged from the Python cross-check.
+        assert_eq!(wad.len(), 2_195_456, "container framing must still match Python");
+
+        // Every emitted LOD rung either resolves inside this 2-block patch or is the 0xFFFF
+        // sentinel. 0x1234 and 0x5678 came in dangling and must have been repaired.
+        let parsed = read_patch_wad(&wad).expect("read");
+        let nblocks = parsed.blocks.len();
+        for blk in &parsed.blocks {
+            for e in &blk.aset_entries {
+                for (label, rung) in [
+                    ("_P001", (e.u32_2 & 0xFFFF) as usize),
+                    ("_P002", (e.u32_1 >> 16) as usize),
+                    ("_P003", (e.u32_1 & 0xFFFF) as usize),
+                ] {
+                    assert!(
+                        rung == 0xFFFF || rung < nblocks,
+                        "asset 0x{:08X} {label} -> block {rung} dangles in a {nblocks}-block patch",
+                        e.asset_hash
+                    );
+                }
+            }
+        }
     }
 }

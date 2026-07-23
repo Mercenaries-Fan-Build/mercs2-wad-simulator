@@ -209,6 +209,7 @@ fn run() -> Result<(), String> {
             aset_entries: Vec::new(),
             packed_field: recomputed_packed,
             flags: e.flags,
+            source_block_index: None, // carries no ASET rows, so no rungs to remap
         });
 
         if (converted.len() + skipped) % 200 == 0 {
