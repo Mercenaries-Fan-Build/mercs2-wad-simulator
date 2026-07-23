@@ -74,6 +74,37 @@ fn f32s(v: &[f32]) -> Vec<serde_json::Value> {
 
 /// Write the full lossless bundle for one model.
 #[allow(clippy::too_many_arguments)]
+/// A draw group's LOD placement, read from its `state_mask` (`lod_mask`) exactly as the in-app LOD
+/// panel reads it: each set bit is a display level, bit 0 = nearest = "LOD1", and a group draws at a
+/// tier when `(view_state & lod_mask) != 0`. A single-bit mask belongs to that one level; any
+/// multi-bit mask (e.g. `0x0F` = drawn at every distance) is SHARED across levels and collected on
+/// its own so the per-level buckets stay clean. This is the axis a modeller wants to isolate — the
+/// rung (storage block) is a different thing entirely (see the scene-assembly note below).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LodBucket {
+    /// Exactly one tier bit set — display level `bit + 1`.
+    Level(u8),
+    /// Multiple tier bits — always/multi-tier geometry, kept out of the single-level buckets.
+    Shared,
+}
+
+fn lod_bucket(mask: u8) -> LodBucket {
+    if mask != 0 && mask.count_ones() == 1 {
+        LodBucket::Level(mask.trailing_zeros() as u8)
+    } else {
+        LodBucket::Shared
+    }
+}
+
+/// The collection/empty name for a bucket: `LOD1`..`LODn` for a single tier, `shared_LODs` for the
+/// multi-tier groups.
+fn bucket_name(b: LodBucket) -> String {
+    match b {
+        LodBucket::Level(bit) => format!("LOD{}", bit as u16 + 1),
+        LodBucket::Shared => "shared_LODs".to_string(),
+    }
+}
+
 pub fn export_bundle(
     outdir: &Path,
     label: &str,
@@ -91,6 +122,11 @@ pub fn export_bundle(
     clips: &[ClipAnim],
     // Catalog hash -> name, so an animation is `walk_forward` and not `clip_0x4A4E244E`.
     names: &std::collections::HashMap<u32, String>,
+    // The ASSET-namespace catalog (bone-name corpus + texture names). Without it every bone exports
+    // as `node29_0x1234ABCD` and every draw group as a bare ordinal, which is unusable in Blender AND
+    // breaks name-based retarget. With it, a bone hash resolves to `l_hand` and a group's diffuse to
+    // the body part it textures.
+    asset_names: &std::collections::HashMap<u32, String>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(outdir.join("raw")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(outdir.join("textures")).map_err(|e| e.to_string())?;
@@ -113,6 +149,41 @@ pub fn export_bundle(
     // An animated node must use TRS, not `matrix`. A purely rigid, clipless asset keeps the matrix
     // form the vehicle path has always emitted.
     let use_trs = has_skin || !clips.is_empty();
+
+    // A bone's human name from the name corpus, so the armature reads `l_hand` not `node29_0x…` —
+    // and, because retarget matches joints BY NAME, so the rig identity survives a round-trip.
+    // Falls back to `bone{index}` (never the hash) when the hash is not in the catalog.
+    let bone_label = |idx: usize| -> String {
+        hier.get(idx)
+            .and_then(|h| asset_names.get(&h.hash).cloned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("bone{idx}"))
+    };
+    // A draw group's human name. A character's groups differ by MATERIAL (head / body / hands each
+    // wear a different diffuse), so name by the diffuse asset's catalog name, stripped of the shared
+    // model prefix and the diffuse-map suffix, and disambiguated by SEGM id (two groups can share a
+    // material). Rigid accessories with no diffuse fall back to their mount bone + SEGM id.
+    let strip_prefix = format!("{}_", label.to_ascii_lowercase());
+    let group_label = |d: &DrawGroup| -> String {
+        let part = d.diffuse.and_then(|h| asset_names.get(&h)).and_then(|n| {
+            let mut s = n.to_ascii_lowercase();
+            if let Some(rest) = s.strip_prefix(&strip_prefix) {
+                s = rest.to_string();
+            }
+            for suf in ["_df", "_diff", "_di", "_col", "_c", "_d"] {
+                if let Some(base) = s.strip_suffix(suf) {
+                    s = base.to_string();
+                    break;
+                }
+            }
+            if s.is_empty() { None } else { Some(s) }
+        });
+        match part {
+            Some(p) => format!("{p}_s{:02}", d.seg_id),
+            None if d.skinned => format!("seg{:02}", d.seg_id),
+            None => format!("acc_n{}_s{:02}", d.node, d.seg_id),
+        }
+    };
 
     // ---- 1. RAW containers, verbatim. The losslessness guarantee. ----
     let mut rungs_json = Vec::new();
@@ -141,6 +212,14 @@ pub fn export_bundle(
     }
 
     // ---- 2. Textures -> PNG (editable), hash recorded for rebind. ----
+    // The game's `_nm` (normal-slot) textures are grayscale RELIEF, not tangent-space normal maps —
+    // bound directly, Blender reads Z≈0.49 and shades the mottled/banded artifacts. For any texture
+    // used in a normal slot that still LOOKS grayscale (blue not already Z-dominant), derive a proper
+    // OpenGL tangent normal from the height gradient so the surface detail shades correctly.
+    let normal_hashes: std::collections::HashSet<u32> =
+        draws.iter().filter_map(|d| d.normal).collect();
+    // Bump depth for the derived normals. Tunable; the relief is subtle so this scales the gradient.
+    const NORMAL_STRENGTH: f32 = 6.0;
     let mut tex_json = Vec::new();
     let mut tex_file: BTreeMap<u32, String> = BTreeMap::new();
     for (h, td) in textures.iter() {
@@ -149,6 +228,14 @@ pub fn export_bundle(
         // higher mips were never assembled, the bytes only cover a smaller surface and writing at
         // the declared size produces a near-empty plate. `decode_bc` reports what it actually built.
         let (w, h_px, rgba) = crate::texpng::decode_bc(td);
+        // Convert a normal-slot texture that is still grayscale relief; leave a genuine tangent normal
+        // (blue-dominant) untouched so we never double-convert.
+        let normalized = normal_hashes.contains(h) && crate::texpng::mean_blue(&rgba) < 200.0;
+        let rgba = if normalized {
+            crate::texpng::height_to_normal(&rgba, w, h_px, NORMAL_STRENGTH)
+        } else {
+            rgba
+        };
         crate::texpng::write_png(outdir.join(&file).to_str().ok_or("bad path")?, w, h_px, &rgba)?;
         tex_json.push(serde_json::json!({
             "hash": format!("0x{h:08X}"), "file": file, "width": w, "height": h_px,
@@ -156,6 +243,10 @@ pub fn export_bundle(
             // not fully assemble. A re-import must not treat this as the authored resolution.
             "declared_width": td.width, "declared_height": td.height,
             "full_resolution": w == td.width && h_px == td.height,
+            // True when the game's grayscale height was converted to a tangent-space normal map here.
+            // A rebuild must NOT feed this PNG back as-is — the original relief is in raw/, and this is
+            // a derived view for editing/preview.
+            "derived_normal_from_height": normalized,
         }));
         tex_file.insert(*h, file);
     }
@@ -232,7 +323,11 @@ pub fn export_bundle(
 
     // One glTF mesh per draw group, geometry pushed back into its node's local space.
     // (mesh index, SEGM node, LOD rung, deforming?)
-    let mut mesh_of_group: Vec<(usize, i16, u8, bool)> = Vec::new();
+    // (mesh index, SEGM node, LOD rung, deforming?, lod_mask) — `lod_mask` drives the per-tier
+    // bucketing of skinned groups into LOD collections.
+    let mut mesh_of_group: Vec<(usize, i16, u8, bool, u8)> = Vec::new();
+    // Human label per emitted group, aligned 1:1 with `mesh_of_group`.
+    let mut mesh_labels: Vec<String> = Vec::new();
     for d in draws.iter() {
         let s = d.index_start as usize;
         let e = ((d.index_start + d.index_count) as usize).min(indices.len());
@@ -357,9 +452,11 @@ pub fn export_bundle(
         }
 
         let mat = mat_of_slots.get(&(d.diffuse, d.normal, d.specular)).copied().unwrap_or(fallback_mat);
-        mesh_of_group.push((meshes.len(), d.node, d.rung, d.skinned));
+        let glabel = group_label(d);
+        mesh_labels.push(glabel.clone());
+        mesh_of_group.push((meshes.len(), d.node, d.rung, d.skinned, d.lod_mask));
         meshes.push(serde_json::json!({
-            "name": format!("LOD{}_group{}_seg{}_node{}", d.rung, d.group_index, d.seg_id, d.node),
+            "name": glabel,
             "primitives": [{
                 "attributes": attrs,
                 "indices": ai, "material": mat
@@ -399,19 +496,21 @@ pub fn export_bundle(
     // as "this bone, at this detail level", and a modeller can isolate or hide a whole rung.
     //
     // A DEFORMING group is different: it is driven by the skin, not by a parent bone, so it must NOT
-    // hang off the HIER tree (glTF ignores a skinned mesh node's own transform, and parenting it to
-    // an animated joint reads as a double transform in some importers). Those sit at the scene root,
-    // grouped by rung. Rigid groups keep the per-node LOD parents.
-    // ONE glTF SCENE PER RUNG — the rungs become editable LAYERS.
+    // hang off the HIER tree (glTF ignores a skinned mesh node's own transform, and parenting it to an
+    // animated joint reads as a double transform in some importers). Instead each display-tier bucket
+    // (`LOD1`…`LODn` + `shared_LODs`, split by the SAME `lod_mask` gate the in-app LOD panel uses)
+    // becomes its OWN glTF SCENE, which Blender imports as its own COLLECTION — so a modeller gets a
+    // real per-LOD collection to hide/isolate/edit. The catch: Blender REPARENTS a skinned mesh to its
+    // armature on import, discarding the mesh's glTF parent, so grouping under empty parent nodes does
+    // NOT survive (the empties import childless) — a separate SCENE does. Crucially the armature is NOT
+    // duplicated: the joints live only in the shared `rig` scene and every LOD scene's meshes reference
+    // that one skin by index, so Blender builds ONE armature and binds all LODs to it, animations
+    // intact (verified headless, Blender 5.1: 1 armature, 105 clips, one collection per LOD).
     //
-    // Blender imports each glTF scene as its own COLLECTION, which is what makes a rung something a
-    // modder can isolate, hide, and edit; with everything in one scene the rungs import as a single
-    // pile of co-located geometry (their bounding boxes overlap ~100% — they are alternates, not
-    // parts) and read as one welded object. A glTF node has exactly one parent and lives in one
-    // scene, so a rung-scene needs its OWN copy of the HIER tree: copy `ri` occupies
-    // `nodes[ri*hier.len() .. ri*hier.len()+hier.len()]`. Only the tiny node JSON is duplicated —
-    // meshes, accessors and the buffer are shared, and each mesh node still belongs to exactly one
-    // rung, so no geometry is duplicated.
+    // The RIGID / vehicle path keeps the older ONE-SCENE-PER-RUNG layering (the rungs ARE its LODs and
+    // there is no skin to keep in one place). There, each rung-scene needs its OWN copy of the HIER
+    // tree: copy `ri` occupies `nodes[ri*hier.len() .. ri*hier.len()+hier.len()]`. Only the tiny node
+    // JSON is duplicated — meshes, accessors and the buffer are shared.
     //
     // Copy 0 keeps the `nodes[0..hier.len()] == HIER index N` alignment the re-import contract needs.
     //
@@ -419,18 +518,25 @@ pub fn export_bundle(
     // tier draws from several rungs at once (a mask-0x7F group in the resident block is visible at
     // every distance). A rung is the CONTAINER a group must be written back to, which is what an
     // editing layer has to line up with — see `preservation.lod_rungs` in the manifest.
-    let mut rungs: Vec<u8> = mesh_of_group.iter().map(|(_, _, r, _)| *r).collect();
+    let mut rungs: Vec<u8> = mesh_of_group.iter().map(|(_, _, r, _, _)| *r).collect();
     rungs.sort_unstable();
     rungs.dedup();
     if rungs.is_empty() {
         rungs.push(0);
     }
+    // Only tag names with a rung when there is more than one to disambiguate. On a single-block asset
+    // (every character we ship) a `LOD0` on every bone, group and scene is pure noise — that is the
+    // exact clutter that made the export unusable in the Blender outliner.
+    let multi_rung = rungs.len() > 1;
+    // `_r{rung}` (the storage BLOCK), deliberately NOT `_L…` — "LOD" is now reserved for the display
+    // tier buckets (`LOD1`/`shared_LODs`), which are a different axis. Empty on a single-block asset.
+    let rung_tag = |r: u8| if multi_rung { format!("_r{r}") } else { String::new() };
     let h_len = hier.len();
     let rung_slot = |r: u8| rungs.iter().position(|x| *x == r).unwrap_or(0);
     // A skin binds joints by node index, so each rung copy needs its own skin over its own joints.
     let skinned_rungs: Vec<u8> = {
         let mut v: Vec<u8> =
-            mesh_of_group.iter().filter(|(_, _, _, s)| *s).map(|(_, _, r, _)| *r).collect();
+            mesh_of_group.iter().filter(|(_, _, _, s, _)| *s).map(|(_, _, r, _, _)| *r).collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -440,13 +546,18 @@ pub fn export_bundle(
     let node_base = rungs.len() * h_len;
     let mut mesh_nodes: Vec<serde_json::Value> = Vec::new();
     let mut by_node_rung: BTreeMap<(usize, u8), Vec<usize>> = BTreeMap::new();
-    let mut skinned_by_rung: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    // Skinned groups split by (rung, display-tier bucket) — the LOD collections.
+    let mut skinned_by_layer: BTreeMap<(u8, LodBucket), Vec<usize>> = BTreeMap::new();
     let mut unbound_by_rung: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
-    for (mi, node, rung, is_skinned) in &mesh_of_group {
+    for (i, (mi, node, rung, is_skinned, lod_mask)) in mesh_of_group.iter().enumerate() {
         let gni = node_base + mesh_nodes.len();
         let mut mn = serde_json::json!({
-            "name": format!("LOD{rung}_mesh{mi}"), "mesh": mi,
-            "extras": { "lod_rung": rung, "deforming": is_skinned }
+            "name": format!("{}{}", mesh_labels[i], rung_tag(*rung)), "mesh": mi,
+            "extras": {
+                "lod_rung": rung, "deforming": is_skinned,
+                // The tier bucket this group lands in, so the binding is legible on the mesh itself.
+                "lod_bucket": bucket_name(lod_bucket(*lod_mask)),
+            }
         });
         if *is_skinned {
             if let Some(s) = skin_slot(*rung) {
@@ -455,7 +566,7 @@ pub fn export_bundle(
         }
         mesh_nodes.push(mn);
         if *is_skinned {
-            skinned_by_rung.entry(*rung).or_default().push(gni);
+            skinned_by_layer.entry((*rung, lod_bucket(*lod_mask))).or_default().push(gni);
         } else if *node >= 0 && (*node as usize) < hier.len() {
             by_node_rung.entry((*node as usize, *rung)).or_default().push(gni);
         } else {
@@ -474,23 +585,35 @@ pub fn export_bundle(
     for ((node, rung), kids) in &by_node_rung {
         let gi = group_base + lod_groups.len();
         lod_groups.push(serde_json::json!({
-            "name": format!("node{node}_LOD{rung}"), "children": kids,
+            "name": format!("{}{}", bone_label(*node), rung_tag(*rung)), "children": kids,
             "extras": { "lod_rung": rung, "hier_index": node, "lod_group": true }
         }));
         mesh_children.entry((*rung, *node)).or_default().push(gi);
     }
-    for (rung, kids) in &skinned_by_rung {
+    // Each skinned tier bucket becomes its OWN glTF scene → its OWN Blender collection. The bucket
+    // empty is the scene root and carries that tier's mesh nodes; those meshes reference the single
+    // skin whose joints live in the shared `rig` scene, so Blender imports ONE armature and binds
+    // every LOD's meshes to it. VERIFIED headless (Blender 5.1): 1 armature, all clips imported, one
+    // real collection per LOD. This is why splitting into scenes does NOT duplicate the rig — the
+    // node-parenting trick (empties as parents) does not survive Blender's skinned-mesh reparent, but
+    // a separate SCENE does.
+    let mut skinned_lod_scenes: Vec<(String, usize)> = Vec::new();
+    for ((rung, bucket), kids) in &skinned_by_layer {
         let gi = group_base + lod_groups.len();
+        let name = format!("{}{}", bucket_name(*bucket), rung_tag(*rung));
         lod_groups.push(serde_json::json!({
-            "name": format!("skin_LOD{rung}"), "children": kids,
-            "extras": { "lod_rung": rung, "lod_group": true, "deforming": true }
+            "name": name, "children": kids,
+            "extras": {
+                "lod_rung": rung, "lod_bucket": bucket_name(*bucket),
+                "lod_group": true, "deforming": true
+            }
         }));
-        extra_roots.entry(*rung).or_default().push(gi);
+        skinned_lod_scenes.push((name, gi));
     }
     for (rung, kids) in &unbound_by_rung {
         let gi = group_base + lod_groups.len();
         lod_groups.push(serde_json::json!({
-            "name": format!("unbound_LOD{rung}"), "children": kids,
+            "name": format!("unbound{}", rung_tag(*rung)), "children": kids,
             "extras": { "lod_rung": rung, "lod_group": true }
         }));
         extra_roots.entry(*rung).or_default().push(gi);
@@ -512,8 +635,13 @@ pub fn export_bundle(
                 mesh_children.get(&(*rung, h.index)).into_iter().flatten().copied(),
             );
             let m = h.local;
+            // The bone's REAL name from the corpus (`l_hand`), rung-tagged only when disambiguation is
+            // needed. The hash still rides in `extras.hier_hash`, so identity is never lost even when
+            // the name is unknown — but a resolved name is what makes the armature usable and what
+            // name-based retarget reads back.
+            let node_name = format!("{}{}", bone_label(h.index), rung_tag(*rung));
             let mut n = serde_json::json!({
-                "name": format!("node{}_LOD{rung}_0x{:08X}", h.index, h.hash),
+                "name": node_name,
                 "extras": {
                     "hier_index": h.index, "hier_hash": format!("0x{:08X}", h.hash),
                     "lod_rung": rung
@@ -542,19 +670,45 @@ pub fn export_bundle(
     }
     nodes.extend(mesh_nodes);
     nodes.extend(lod_groups);
-    // scene `ri` = rung `rungs[ri]`: that copy's HIER roots plus its own skinned/unbound groups.
-    let scenes_json: Vec<serde_json::Value> = rungs
-        .iter()
-        .enumerate()
-        .map(|(ri, rung)| {
-            let mut r: Vec<usize> = roots.iter().map(|x| x + ri * h_len).collect();
-            r.extend(extra_roots.get(rung).into_iter().flatten().copied());
-            serde_json::json!({
-                "name": format!("LOD{rung}"), "nodes": r,
-                "extras": { "lod_rung": rung }
+    let scenes_json: Vec<serde_json::Value> = if has_skin {
+        // SKINNED asset (every character): ONE shared armature in a `rig` scene, and each display-tier
+        // bucket in its OWN scene so Blender imports a real collection per LOD — all bound to the one
+        // rig. Rigid accessories (e.g. the eyes) ride their bones, so they live in `rig` too. Blender
+        // imports every scene, so nothing is hidden; the default `scene` just picks which is active.
+        let mut rig_roots: Vec<usize> = Vec::new();
+        for ri in 0..rungs.len() {
+            rig_roots.extend(roots.iter().map(|x| x + ri * h_len));
+        }
+        // Unbound (node-less, non-skinned) geometry has nowhere tier-specific to go; keep it with the rig.
+        for kids in extra_roots.values() {
+            rig_roots.extend(kids.iter().copied());
+        }
+        let mut scenes = vec![serde_json::json!({
+            "name": "rig", "nodes": rig_roots, "extras": { "rig_scene": true }
+        })];
+        for (name, node_idx) in &skinned_lod_scenes {
+            scenes.push(serde_json::json!({
+                "name": name, "nodes": [*node_idx], "extras": { "lod_collection": true }
+            }));
+        }
+        scenes
+    } else {
+        // RIGID / vehicle: one scene per storage RUNG (here the rungs ARE the LODs, and there is no
+        // shared skin to keep in one place). Unchanged from the original per-rung layering.
+        rungs
+            .iter()
+            .enumerate()
+            .map(|(ri, rung)| {
+                let mut r: Vec<usize> = roots.iter().map(|x| x + ri * h_len).collect();
+                r.extend(extra_roots.get(rung).into_iter().flatten().copied());
+                serde_json::json!({
+                    "name": if multi_rung { format!("{label}_r{rung}") } else { label.to_string() },
+                    "nodes": r,
+                    "extras": { "lod_rung": rung }
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
 
     // ---- 3b. Skin: the inverse-bind matrices that turn the HIER into a deformer. ----
     let mut skins_json: Vec<serde_json::Value> = Vec::new();
@@ -579,7 +733,7 @@ pub fn export_bundle(
         for r in &skinned_rungs {
             let off = rung_slot(*r) * h_len;
             skins_json.push(serde_json::json!({
-                "name": format!("{label}_skin_LOD{r}"),
+                "name": format!("{label}_skin{}", rung_tag(*r)),
                 // Joint j of the skin is HIER node j — BLENDINDICES index the HIER directly, so the
                 // joint list is the identity mapping and JOINTS_0 needs no remap.
                 "joints": (0..rig.len()).map(|j| j + off).collect::<Vec<_>>(),
@@ -762,10 +916,12 @@ pub fn export_bundle(
     }
 
     std::fs::write(outdir.join("model.bin"), &bin).map_err(|e| e.to_string())?;
-    // Default scene = the FINEST rung. A viewer that only reads the default scene (most non-Blender
-    // tools) then shows the near-detail model rather than every rung stacked on top of itself, which
-    // is what it used to do. Blender reads them all and gives one collection per rung.
-    let default_scene = scenes_json.len().saturating_sub(1);
+    // Default scene: for a SKINNED asset it is the `rig` (scene 0) — the shared armature — because no
+    // single scene holds the whole model any more (each LOD is its own scene). Blender imports every
+    // scene regardless, so all LOD collections still appear; the default only sets which is active.
+    // For the rigid/vehicle path the default is the FINEST rung, so a viewer that reads only the
+    // default scene shows near-detail rather than every rung stacked on itself.
+    let default_scene = if has_skin { 0 } else { scenes_json.len().saturating_sub(1) };
     let mut gltf = serde_json::json!({
         "asset": {"version":"2.0","generator":format!("mercs2_workshop export_bundle ({label})")},
         "scene": default_scene,
@@ -813,7 +969,18 @@ pub fn export_bundle(
                           must be written back to THAT rung's container — `lod_rung` on each draw \
                           group and mesh says which. `lod_mask` is the engine's tier gate and already \
                           carries the supersede resolution (a bit cleared = a finer rung owns that \
-                          tier); do not recompute it from scratch."
+                          tier); do not recompute it from scratch.",
+            "lod_tiers": "The DISPLAY LOD (the axis the in-app LOD panel toggles) is `lod_mask`, NOT \
+                          the rung. Each set bit is a level (bit 0 = nearest = LOD1); a group draws at \
+                          a tier when `(view_state & lod_mask) != 0`. For a skinned asset each \
+                          single-bit tier is its OWN glTF scene (`LOD1`…`LODn`), plus `shared_LODs` \
+                          for multi-bit (always-drawn) groups, and the shared armature is the `rig` \
+                          scene — so Blender imports one real COLLECTION per LOD, all bound to ONE \
+                          armature (a separate scene is used, not empty parents, because Blender \
+                          reparents skinned meshes to the armature and would strip empty parenting). \
+                          This is ORGANISATION only: `lod_mask` on each draw group is the source of \
+                          truth a rebuild reads. Rigid accessories (which parent to a bone) ride the \
+                          `rig` scene; their tier is on `lod_mask` in extras."
         },
         "header": header.map(|h| serde_json::json!({
             "aabb_min": f32s(&h.aabb_min), "aabb_max": f32s(&h.aabb_max),
