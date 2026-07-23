@@ -384,70 +384,73 @@ fn main() {
         std::process::exit(2);
     }
 
-    // Allocate host groups to parts, then split each part's triangles across ITS OWN groups.
+    // Split each part into host groups BY BONE COUNT, not by triangle count.
     //
-    // A part may need more than one group even though it has one material: the palette cap is on
-    // BONES, not triangles, and 50 Cent's head part alone reaches 44 bones / 50 slots against the
-    // 48 the game ships. Splitting a part across several groups is fine -- they simply share a
-    // material -- whereas merging two parts into one group is not, because the group could then
-    // only name one of their materials. So: a group never spans parts; a part may span groups.
+    // A draw group is capped at the 48 bones the game ships, and a part may need more than one group
+    // to stay under it: 50 Cent's body primitive alone references the torso, both arms AND 30 finger
+    // bones. The old split handed groups out in proportion to TRIANGLE count, so the spare group went
+    // to the head (more tris) while the body — where the bones actually pile up — kept overflowing.
     //
-    // Slots are handed out in proportion to triangle count (largest remainder, minimum one each),
-    // which puts the extra groups where the geometry and therefore the bones actually are.
-    let mut alloc = vec![1usize; nparts];
-    let mut spare = groups.len() - nparts;
-    if spare > 0 {
-        let total: f64 = glb.parts.iter().map(|p| p.tri_count as f64).sum::<f64>().max(1.0);
-        let mut want: Vec<(f64, usize)> = glb
-            .parts
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.tri_count as f64 / total * spare as f64, i))
-            .collect();
-        // whole shares first, then the largest remainders
-        for (w, i) in want.iter() {
-            let take = (w.floor() as usize).min(spare);
-            alloc[*i] += take;
-            spare -= take;
-        }
-        want.sort_by(|a, b| {
-            (b.0 - b.0.floor()).partial_cmp(&(a.0 - a.0.floor())).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for (_, i) in want {
-            if spare == 0 {
-                break;
+    // `order` is already sorted by (part, dominant bone), so a cut falls on a contiguous bone span
+    // like retail authors one. Walk it and close the current group the moment adding a triangle would
+    // push its DISTINCT bone set past the cap. A group never spans parts. This DISCOVERS how many
+    // groups each part needs rather than guessing it.
+    const GROUP_BONE_CAP: usize = 46; // headroom under 48 for any contiguous-run bridging the injector adds
+    let tri_bones = |t: &[u32; 3]| -> Vec<u8> {
+        let mut s: Vec<u8> = Vec::new();
+        for &v in t {
+            let vi = v as usize;
+            for c in 0..4 {
+                if cs.skin_bytes[vi * 8 + 4 + c] > 0 && !s.contains(&global_joints[vi][c]) {
+                    s.push(global_joints[vi][c]);
+                }
             }
-            alloc[i] += 1;
-            spare -= 1;
         }
-    }
-
-    // slot index -> which part it carries, and each part's first slot
-    let mut slot_part: Vec<usize> = Vec::with_capacity(groups.len());
-    for (pi, &n) in alloc.iter().enumerate() {
-        for _ in 0..n {
-            slot_part.push(pi);
-        }
-    }
-    let mut first_slot = vec![0usize; nparts];
-    for (si, &pi) in slot_part.iter().enumerate() {
-        if slot_part[..si].iter().all(|&q| q != pi) {
-            first_slot[pi] = si;
-        }
-    }
-    // Within a part, spread its triangles evenly over its own slots.
-    let mut seen = vec![0usize; nparts];
+        s
+    };
+    let mut seg_part: Vec<usize> = Vec::new();
+    let mut cur_bones: Vec<u8> = Vec::new();
     let tri_group: Vec<usize> = order
         .iter()
         .map(|&i| {
             let pi = part_of[i];
-            let n = alloc[pi].max(1);
-            let per = (glb.parts[pi].tri_count + n - 1) / n.max(1);
-            let k = (seen[pi] / per.max(1)).min(n - 1);
-            seen[pi] += 1;
-            first_slot[pi] + k
+            let tb = tri_bones(&glb.tris[i]);
+            let mut merged = cur_bones.clone();
+            for b in &tb {
+                if !merged.contains(b) {
+                    merged.push(*b);
+                }
+            }
+            let open_new = seg_part.last() != Some(&pi) || merged.len() > GROUP_BONE_CAP;
+            if open_new {
+                seg_part.push(pi);
+                cur_bones = tb;
+            } else {
+                cur_bones = merged;
+            }
+            seg_part.len() - 1
         })
         .collect();
+    let nseg = seg_part.len();
+    let mut demand = vec![0usize; nparts];
+    for &pi in &seg_part {
+        demand[pi] += 1;
+    }
+    if nseg > groups.len() {
+        eprintln!(
+            "bone-aware split needs {nseg} host groups (per part {:?}); --group gave {}. \
+             Pass at least {nseg} host groups.",
+            glb.parts
+                .iter()
+                .zip(&demand)
+                .map(|(p, d)| format!("{}:{d}", p.name))
+                .collect::<Vec<_>>(),
+            groups.len()
+        );
+        std::process::exit(2);
+    }
+    // Use exactly the groups the split needs; extra --group entries are left untouched (neutralised).
+    let groups: Vec<_> = groups[..nseg].to_vec();
 
     if part_materials.len() < nparts {
         eprintln!(
@@ -456,9 +459,9 @@ fn main() {
         );
         std::process::exit(2);
     }
-    // One MTRL record per PART, expanded to per-slot for the injector.
-    let materials: Vec<u32> = slot_part.iter().map(|&pi| part_materials[pi]).collect();
-    for (si, &pi) in slot_part.iter().enumerate() {
+    // One MTRL record per PART, expanded to per-segment for the injector.
+    let materials: Vec<u32> = seg_part.iter().map(|&pi| part_materials[pi]).collect();
+    for (si, &pi) in seg_part.iter().enumerate() {
         let n = tri_group.iter().filter(|&&g| g == si).count();
         println!(
             "partition: host group {} <- part {:?} ({} tris) MTRL {}",
