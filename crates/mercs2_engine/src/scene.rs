@@ -222,6 +222,11 @@ pub struct Scene {
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     pipeline: wgpu::RenderPipeline,
+    /// Transparent (alpha-blend, no depth-write) variant of `pipeline`, used when `model_alpha < 1`.
+    pipeline_t: wgpu::RenderPipeline,
+    /// Model opacity, 1.0 = opaque. The workshop drops it (~0.4) in the Skeleton workbench so the bone
+    /// markers are visible through the mesh.
+    model_alpha: f32,
     camera_bgl: wgpu::BindGroupLayout,
     bone_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
@@ -310,6 +315,7 @@ pub struct Scene {
     sky_pipeline_hdr: Option<wgpu::RenderPipeline>,
     /// Geometry pipeline targeting the HDR format (world path). `None` if the post chain is unavailable.
     world_pipeline: Option<wgpu::RenderPipeline>,
+    world_pipeline_t: Option<wgpu::RenderPipeline>,
     /// HDR + bloom post chain. `None` = fall back to direct swapchain present.
     post: Option<crate::post::Post>,
     sky_buf: wgpu::Buffer,
@@ -597,7 +603,10 @@ impl Scene {
         // Geometry pipeline builder, parameterised by color-target format so the SAME shader/layout
         // (incl. the group-3 lights) serve BOTH the direct-to-swapchain path (default `--ecs`/
         // `--animate`) and the HDR world path (`Rgba16Float` target → tone-map + bloom post chain).
-        let build_geom_pipeline = |format: wgpu::TextureFormat| {
+        // `transparent` builds the see-through variant (workshop model-alpha inspection): alpha-blend
+        // and DON'T write depth, so a semi-transparent mesh neither self-occludes nor hides the bone
+        // markers behind it. Opaque path is unchanged (REPLACE + depth write).
+        let build_geom_pipeline = |format: wgpu::TextureFormat, transparent: bool| {
             let vbuf_layout = wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                 step_mode: wgpu::VertexStepMode::Vertex,
@@ -617,7 +626,11 @@ impl Scene {
                     entry_point: "fs_main",
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend: Some(if transparent {
+                            wgpu::BlendState::ALPHA_BLENDING
+                        } else {
+                            wgpu::BlendState::REPLACE
+                        }),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -633,7 +646,7 @@ impl Scene {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: true,
+                    depth_write_enabled: !transparent,
                     depth_compare: wgpu::CompareFunction::Less,
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
@@ -642,7 +655,8 @@ impl Scene {
                 multiview: None,
             })
         };
-        let pipeline = build_geom_pipeline(config.format);
+        let pipeline = build_geom_pipeline(config.format, false);
+        let pipeline_t = build_geom_pipeline(config.format, true);
         let depth_view = make_depth(&device, &config);
 
         // Shadow pass: depth-only render of the scene from the key light into `shadow_tex`. Its own
@@ -877,13 +891,14 @@ impl Scene {
         // direct forward present, so nothing regresses. When present, build HDR-format geometry + sky
         // pipelines that render into the HDR target.
         let post = crate::post::Post::new(&device, config.format, config.width, config.height);
-        let (world_pipeline, sky_pipeline_hdr) = if post.is_some() {
+        let (world_pipeline, world_pipeline_t, sky_pipeline_hdr) = if post.is_some() {
             (
-                Some(build_geom_pipeline(crate::post::HDR_FORMAT)),
+                Some(build_geom_pipeline(crate::post::HDR_FORMAT, false)),
+                Some(build_geom_pipeline(crate::post::HDR_FORMAT, true)),
                 Some(build_sky_pipeline(crate::post::HDR_FORMAT)),
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Loading-screen pass: the same fullscreen-triangle trick as the sky, drawn alone (no
@@ -978,6 +993,8 @@ impl Scene {
             config,
             size,
             pipeline,
+            pipeline_t,
+            model_alpha: 1.0,
             camera_bgl,
             bone_bgl,
             tex_bgl,
@@ -1020,6 +1037,7 @@ impl Scene {
             sky_pipeline,
             sky_pipeline_hdr,
             world_pipeline,
+            world_pipeline_t,
             post,
             sky_buf,
             sky_bind,
@@ -1219,6 +1237,13 @@ impl Scene {
         self.particles.active_emitter_count()
     }
 
+    /// Set model opacity (1.0 = opaque). Below 1 the geometry renders alpha-blended WITHOUT writing
+    /// depth, so it goes see-through and stops occluding the bone-highlight glow behind it — the
+    /// Skeleton workbench uses this to make the skeleton visible through the mesh.
+    pub fn set_model_alpha(&mut self, a: f32) {
+        self.model_alpha = a.clamp(0.0, 1.0);
+    }
+
     /// Set the authored static environmental glow cards (`global_particle_env_godray2` etc.). Replaces
     /// any prior set; an empty slice clears them. Rendered as additive soft billboards in the
     /// transparent FX pass (see `particles::GlowCard`).
@@ -1382,7 +1407,12 @@ impl Scene {
 
         let fit = glam::Mat4::from_scale(glam::Vec3::splat(skin.scale))
             * glam::Mat4::from_translation(-glam::Vec3::from(skin.center));
-        let bone_count = skin.bones.len().max(1);
+        // Size the palette to cover every joint the VERTS actually reference, not just the entries
+        // the skin ships. Imported rigged meshes carry a 1-entry identity skin but their verts index
+        // a full source/target palette; clamping the per-entity palette to 1 makes those verts read
+        // a zero matrix on the GPU and collapse onto the origin (the "smooshed spike").
+        let max_joint = verts.iter().flat_map(|v| v.joints).map(|j| j as usize).max().unwrap_or(0);
+        let bone_count = skin.bones.len().max(max_joint + 1).max(1);
 
         self.models.insert(
             hash,
@@ -1463,8 +1493,8 @@ impl Scene {
         let mvp_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("entity mvp"),
             // mat4 mvp (64) + mat4 model (64) + vec4 cam_pos (16) + vec4 fog_color_density (16)
-            // + vec4 fog_misc (16) = 176 bytes (matches the shader `Camera` struct).
-            size: 176,
+            // + vec4 fog_misc (16) + vec4 overlay (16) = 192 bytes (matches the shader `Camera` struct).
+            size: 192,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1707,7 +1737,12 @@ impl Scene {
                 pass.set_pipeline(self.sky_pipeline_hdr.as_ref().unwrap());
                 pass.set_bind_group(0, &self.sky_bind, &[]);
                 pass.draw(0..3, 0..1);
-                self.draw_geometry(&mut pass, items, self.world_pipeline.as_ref().unwrap());
+                let pl = if self.model_alpha < 0.999 {
+                    self.world_pipeline_t.as_ref().unwrap()
+                } else {
+                    self.world_pipeline.as_ref().unwrap()
+                };
+                self.draw_geometry(&mut pass, items, pl);
             }
             post.run(encoder, view_tex); // bright-pass → blur → composite + tone-map → swapchain
         } else {
@@ -1734,7 +1769,8 @@ impl Scene {
                 pass.set_bind_group(0, &self.sky_bind, &[]);
                 pass.draw(0..3, 0..1);
             }
-            self.draw_geometry(&mut pass, items, &self.pipeline);
+            let pl = if self.model_alpha < 0.999 { &self.pipeline_t } else { &self.pipeline };
+            self.draw_geometry(&mut pass, items, pl);
         }
     }
 
@@ -1892,7 +1928,7 @@ impl Scene {
             let eg = &self.entities[e];
             // Camera uniform (176 B = 44 f32): mvp(16) + model(16) + cam_pos(4) + fog_color_density(4)
             // + fog_misc(4). Fog stays disabled unless set_fog was called.
-            let mut uni = [0f32; 44];
+            let mut uni = [0f32; 48];
             uni[..16].copy_from_slice(&mvp.to_cols_array());
             uni[16..32].copy_from_slice(&model.to_cols_array());
             uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
@@ -1904,6 +1940,7 @@ impl Scene {
             }
             uni[42] = if prelit { 1.0 } else { 0.0 }; // fog_misc.z = prelit (skip exterior sun)
             uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
+            uni[44] = self.model_alpha; // overlay.x = model opacity (1 = opaque)
             self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
                 // Clamp to the entity's allocated bone count so a mismatched palette can't overflow.
