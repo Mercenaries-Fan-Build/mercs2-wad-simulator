@@ -68,6 +68,59 @@ pub fn decode_bc(td: &TextureData) -> (u32, u32, Vec<u8>) {
     (w as u32, h as u32, out)
 }
 
+/// Mean of the blue channel of an RGBA8 buffer. A real tangent-space normal map is blue-dominant
+/// (Z≈+1 → B≈255); the game's `_nm` textures are grayscale relief (B≈128). Used to tell them apart so
+/// only the grayscale ones are converted.
+pub fn mean_blue(rgba: &[u8]) -> f32 {
+    if rgba.len() < 4 {
+        return 0.0;
+    }
+    let n = rgba.len() / 4;
+    let sum: u64 = (0..n).map(|i| rgba[i * 4 + 2] as u64).sum();
+    sum as f32 / n as f32
+}
+
+/// Convert a grayscale HEIGHT/bump image into an OpenGL-convention tangent-space normal map
+/// (R=X, G=+Y up, B=Z-out), which is what glTF — and so Blender's importer — expects. The game's
+/// `_nm` slot is NOT a tangent normal map: all channels carry the same scalar relief, so bound
+/// directly it yields near-sideways normals (Z≈0) and the mottled/banded mis-shading. Deriving the
+/// normal from the height gradient fixes that while keeping the authored surface detail.
+///
+/// Height is read from the red channel (R==G==B for these). `strength` scales the bump (higher =
+/// deeper relief). Edges clamp. Output alpha is opaque.
+pub fn height_to_normal(rgba: &[u8], w: u32, h: u32, strength: f32) -> Vec<u8> {
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 {
+        return rgba.to_vec();
+    }
+    let height_at = |x: usize, y: usize| -> f32 { rgba[(y * w + x) * 4] as f32 / 255.0 };
+    let mut out = vec![0u8; w * h * 4];
+    let enc = |v: f32, inv: f32| ((v * inv * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    for y in 0..h {
+        for x in 0..w {
+            let xl = x.saturating_sub(1);
+            let xr = (x + 1).min(w - 1);
+            let yu = y.saturating_sub(1);
+            let yd = (y + 1).min(h - 1);
+            // Central-difference height gradient.
+            let dx = (height_at(xr, y) - height_at(xl, y)) * 0.5;
+            let dy = (height_at(x, yd) - height_at(x, yu)) * 0.5;
+            // Slope opposes the gradient. glTF/OpenGL wants +Y (green) pointing UP the image, and the
+            // image V axis runs downward, so the Y term is +dy (not -dy, which would be DirectX).
+            let nx = -dx * strength;
+            let ny = dy * strength;
+            let nz = 1.0f32;
+            let inv = 1.0 / (nx * nx + ny * ny + nz * nz).sqrt();
+            let d = (y * w + x) * 4;
+            out[d] = enc(nx, inv);
+            out[d + 1] = enc(ny, inv);
+            out[d + 2] = enc(nz, inv);
+            out[d + 3] = 255;
+        }
+    }
+    out
+}
+
 fn rgb565(v: u16) -> [u8; 3] {
     let r = ((v >> 11) & 0x1F) as u32;
     let g = ((v >> 5) & 0x3F) as u32;
