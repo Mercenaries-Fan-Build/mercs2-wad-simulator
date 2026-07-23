@@ -123,6 +123,13 @@ struct Cli {
     /// placements, edited resident-script blocks). Compose with --extra-only.
     #[arg(long)]
     inject_block: Vec<String>,
+    /// Comma-separated asset hashes (0xHEX) to STRIP from an --inject-block's carried ASET, so those
+    /// assets resolve from BASE instead of the patch block. Required when overriding a resident block
+    /// (e.g. 3185) purely for its scripts: re-registering the streaming-critical world-container
+    /// singletons worldentity(0x50075B3B)/guidmap(0x385EA82C)/foliage(0x27E02A15) double-registers
+    /// them → open-world stream wedge (render_view_handle_crash_analysis.md). Strip those 3.
+    #[arg(long)]
+    strip_aset: Option<String>,
     #[arg(short, long)]
     verbose: bool,
 }
@@ -294,10 +301,26 @@ fn build_extra(spec: &str) -> Result<PatchBlock, String> {
 
 /// Ship a raw decompressed block override "<path_substr>:<file>": look the source block up by path
 /// substring, carry its ASET entries + path, sges-compress the file, overlay it (content-additive).
-fn build_inject_block(archive: &FfcsArchive, spec: &str) -> Result<PatchBlock, String> {
-    let (needle, path) = spec
-        .split_once(':')
-        .ok_or_else(|| format!("--inject-block '{spec}' must be <path_substr>:<file>"))?;
+fn build_inject_block(archive: &FfcsArchive, spec: &str, strip: &std::collections::HashSet<u32>) -> Result<PatchBlock, String> {
+    // Spec: <path_substr>:<file>[:0xHASH:TYPEID ...] — trailing hash/typeid pairs register NEW assets
+    // that live in this overlaid block (e.g. an appended resident script) with their own ASET rows.
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 2 {
+        return Err(format!("--inject-block '{spec}' must be <path_substr>:<file>[:0xHASH:TYPEID ...]"));
+    }
+    let needle = parts[0];
+    let path = parts[1];
+    let mut extra_aset: Vec<AsetEntry> = Vec::new();
+    let rest = &parts[2..];
+    if rest.len() % 2 != 0 {
+        return Err(format!("--inject-block '{spec}': trailing extras must be HASH:TYPEID pairs"));
+    }
+    for pair in rest.chunks(2) {
+        let hash = u32::from_str_radix(pair[0].trim_start_matches("0x"), 16)
+            .map_err(|_| format!("bad extra-aset hash '{}'", pair[0]))?;
+        let type_id: u32 = pair[1].parse().map_err(|_| format!("bad extra-aset type '{}'", pair[1]))?;
+        extra_aset.push(AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, type_id));
+    }
     let ln = needle.to_lowercase();
     let idx = archive
         .paths
@@ -305,14 +328,31 @@ fn build_inject_block(archive: &FfcsArchive, spec: &str) -> Result<PatchBlock, S
         .position(|p| p.to_lowercase().contains(&ln))
         .ok_or_else(|| format!("no block path contains '{needle}'"))?;
     let decompressed = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    let aset: Vec<AsetEntry> = archive
+    // Carry the block's base ASET forward. A resident block (e.g. 3185) can legitimately have more
+    // than one PRIMARY row for the same hash in the base WAD (the engine resolves deterministically
+    // first-wins); dedup those to the first so the patch validator (one-primary-per-hash) accepts it.
+    // Sub-entry rows (sub != 0xFFFF) legitimately repeat and are kept.
+    let mut seen_primary: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut aset: Vec<AsetEntry> = archive
         .aset
         .iter()
         .filter(|e| e.block_index() as usize == idx)
+        .filter(|e| !strip.contains(&e.asset_hash)) // let these resolve from base (no double-register)
+        .filter(|e| e.sub_entry() != 0xFFFF || seen_primary.insert(e.asset_hash))
         .map(|e| AsetEntry::new(e.asset_hash, e.secondary_ref, e.sub_entry() as u32, e.type_id))
         .collect();
+    if !strip.is_empty() {
+        println!("  stripped {} ASET row(s) (resolve from base): {}", strip.len(),
+            strip.iter().map(|h| format!("0x{h:08X}")).collect::<Vec<_>>().join(","));
+    }
     if aset.is_empty() {
         return Err(format!("block {idx} ({}) has no ASET entries", archive.paths[idx]));
+    }
+    for e in &extra_aset {
+        if seen_primary.insert(e.asset_hash) {
+            aset.push(e.clone());
+            println!("  + new-asset ASET row 0x{:08X} type {}", e.asset_hash, e.u32_3);
+        }
     }
     let compressed = compress_sges(&decompressed).map_err(|e| format!("sges: {e}"))?;
     let pages = ((decompressed.len() + 0x7FFF) / 0x8000) as u32;
@@ -466,8 +506,13 @@ fn run() -> Result<(), String> {
     for spec in &cli.inject_extra {
         blocks.push(build_extra(spec)?);
     }
+    let strip: std::collections::HashSet<u32> = cli.strip_aset.as_deref().unwrap_or("")
+        .split(',').filter(|s| !s.is_empty())
+        .map(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16)
+            .map_err(|_| format!("bad --strip-aset hash '{s}'")))
+        .collect::<Result<_, _>>()?;
     for spec in &cli.inject_block {
-        blocks.push(build_inject_block(&archive, spec)?);
+        blocks.push(build_inject_block(&archive, spec, &strip)?);
     }
     if blocks.is_empty() {
         return Err("no model-bearing blocks among the targets".into());
