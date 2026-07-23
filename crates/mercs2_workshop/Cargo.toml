@@ -26,6 +26,10 @@ egui-wgpu = "0.28"
 # OS clipboard for the context menus' copy actions — our hand-rolled bridge must handle egui's
 # PlatformOutput.copied_text itself (egui-winit would normally do this).
 arboard = "3"
+# Native file-open dialog for the "Import model…" button (same import path as drag-drop).
+rfd = "0.14"
+# Offscreen `--shot` renderer: POD vertex/buffer casts.
+bytemuck = { version = "1", features = ["derive"] }
 # NOTE (blueprint editor, planned): `full_moon` (Lua 5.1 AST, round-trip) + `egui-snarl`
 # (node graph) — see docs/modernization/workshop_charter.md §Mission designer.
 mercs2_engine = { workspace = true }
