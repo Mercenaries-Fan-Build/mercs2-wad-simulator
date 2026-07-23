@@ -23,6 +23,7 @@ impl Kind {
     }
 }
 
+#[derive(Clone)]
 pub struct AssetRow {
     pub hash: u32,
     pub block: u16,
@@ -149,6 +150,7 @@ pub fn classify_vehicle_token(cls: &str) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 pub struct AssetIndex {
     pub models: Vec<AssetRow>,
     pub textures: Vec<AssetRow>,
