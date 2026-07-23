@@ -853,6 +853,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
         let t_frac: f32 = get("--render-t").and_then(|s| s.parse().ok()).unwrap_or(0.35);
         let flip_green = args.iter().any(|a| a == "--render-flip-green");
+        let flat = args.iter().any(|a| a == "--render-flat");
         let palette: Vec<[[f32; 4]; 4]> = match get("--render-clip")
             .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         {
@@ -920,12 +921,11 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             .map(|d| shot::DrawTex {
                 index_start: d.index_start,
                 index_count: d.index_count,
-                diffuse: d
-                    .diffuse
-                    .and_then(|h| md.textures.get(&h))
-                    .map(texpng::decode_bc),
-                specular: d.specular.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc),
-                normal: d.normal.and_then(|h| md.textures.get(&h)).map(|td| {
+                // --render-flat: pure geometry (no diffuse/normal/specular), matching the workshop
+                // white-mesh view, so a deformation defect cannot hide behind texture or relief.
+                diffuse: if flat { None } else { d.diffuse.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc) },
+                specular: if flat { None } else { d.specular.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc) },
+                normal: if flat { None } else { d.normal.and_then(|h| md.textures.get(&h)).map(|td| {
                     let (w, h, mut rgba) = texpng::decode_bc(td);
                     // --render-flip-green tests the OpenGL(+Y up)/DirectX(+Y down) convention gap:
                     // glTF authors normal maps +Y up, a DX-era engine samples +Y down, and the
@@ -936,7 +936,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                         }
                     }
                     (w, h, rgba)
-                }),
+                }) },
             })
             .collect();
         let untextured = draws.iter().filter(|d| d.diffuse.is_none()).count();
