@@ -746,6 +746,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                 _p1: 0.0,
                 uv: v.uv,
                 _p2: [0.0, 0.0],
+                tangent: v.tangent,
                 joints: [v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32],
                 weights: [
                     v.weights[0] as f32 / 255.0, v.weights[1] as f32 / 255.0,
@@ -776,7 +777,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             None => vec![IDENT; bone_count],
         };
         // One untextured range: --shot previews a raw glTF import, which carries no WAD material.
-        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None }];
+        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None }];
         shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
         return;
     }
@@ -833,6 +834,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                 _p1: 0.0,
                 uv: v.uv,
                 _p2: [0.0, 0.0],
+                tangent: v.tangent,
                 joints: [v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32],
                 weights: [
                     v.weights[0] as f32 / 255.0,
@@ -850,6 +852,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         const IDENT: [[f32; 4]; 4] =
             [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
         let t_frac: f32 = get("--render-t").and_then(|s| s.parse().ok()).unwrap_or(0.35);
+        let flip_green = args.iter().any(|a| a == "--render-flip-green");
         let palette: Vec<[[f32; 4]; 4]> = match get("--render-clip")
             .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         {
@@ -920,7 +923,19 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                 diffuse: d
                     .diffuse
                     .and_then(|h| md.textures.get(&h))
-                    .map(|td| texpng::decode_bc(td)),
+                    .map(texpng::decode_bc),
+                normal: d.normal.and_then(|h| md.textures.get(&h)).map(|td| {
+                    let (w, h, mut rgba) = texpng::decode_bc(td);
+                    // --render-flip-green tests the OpenGL(+Y up)/DirectX(+Y down) convention gap:
+                    // glTF authors normal maps +Y up, a DX-era engine samples +Y down, and the
+                    // mismatch inverts bump-as-dent along a limb, which reads as a broken bone.
+                    if flip_green {
+                        for px in rgba.chunks_exact_mut(4) {
+                            px[1] = 255 - px[1];
+                        }
+                    }
+                    (w, h, rgba)
+                }),
             })
             .collect();
         let untextured = draws.iter().filter(|d| d.diffuse.is_none()).count();

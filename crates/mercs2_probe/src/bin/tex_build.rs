@@ -184,11 +184,17 @@ fn main() {
             // DXT5nm: the shader reads X from ALPHA and Y from GREEN, then rebuilds Z. Storing X in
             // the 8-bit interpolated alpha is the whole point of BC3 here -- it gives X far more
             // precision than a 5-bit BC1 red channel, which is why the format is used for normals.
+            //
+            // GREEN IS FLIPPED. glTF mandates the OpenGL normal-map convention (+Y up); Mercs2 is a
+            // 2008 Direct3D9 engine and samples +Y down. Leaving the source green as-is inverts every
+            // vertical bump into a dent, which on a bare muscular arm reads as harsh, "broken"
+            // relief; flipping it makes the muscle read as raised, matching how a retail character's
+            // own normal map lights (verified in the normal-mapped preview against pmc_hum_mattias).
             let mut px = vec![0.0f32; size * size * 4];
             for i in 0..size * size {
-                let (r, g) = (rgba[i * 4] as f32, rgba[i * 4 + 1] as f32);
+                let (r, g) = (rgba[i * 4] as f32, 255.0 - rgba[i * 4 + 1] as f32);
                 px[i * 4] = 0.0;       // R unused
-                px[i * 4 + 1] = g;     // G = Y
+                px[i * 4 + 1] = g;     // G = Y (flipped to +Y down)
                 px[i * 4 + 2] = 0.0;   // B unused
                 px[i * 4 + 3] = r;     // A = X
             }

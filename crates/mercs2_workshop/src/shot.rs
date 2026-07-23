@@ -18,6 +18,7 @@ pub struct SV {
     pub weights: [f32; 4],
     pub uv: [f32; 2],
     pub _p2: [f32; 2],
+    pub tangent: [f32; 4],
 }
 
 /// One draw range and the diffuse it binds, already decoded to RGBA8.
@@ -32,6 +33,8 @@ pub struct DrawTex {
     pub index_count: u32,
     /// `(width, height, rgba8)`.
     pub diffuse: Option<(u32, u32, Vec<u8>)>,
+    /// The `_nm` normal map, decoded to RGBA8. DXT5nm: X in ALPHA, Y in GREEN. `None` = flat.
+    pub normal: Option<(u32, u32, Vec<u8>)>,
 }
 
 const WGSL: &str = r#"
@@ -40,17 +43,21 @@ struct Cam { mvp: mat4x4<f32> };
 @group(1) @binding(0) var<storage, read> bones: array<mat4x4<f32>>;
 @group(2) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(2) @binding(1) var s_diffuse: sampler;
+@group(2) @binding(2) var t_normal: texture_2d<f32>;
 struct VIn {
   @location(0) pos: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) joints: vec4<u32>,
   @location(3) weights: vec4<f32>,
   @location(4) uv: vec2<f32>,
+  @location(5) tangent: vec4<f32>,
 };
 struct VOut {
   @builtin(position) clip: vec4<f32>,
   @location(0) n: vec3<f32>,
   @location(1) uv: vec2<f32>,
+  @location(2) t: vec3<f32>,
+  @location(3) b: vec3<f32>,
 };
 @vertex fn vs(in: VIn) -> VOut {
   var wsum = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
@@ -59,26 +66,37 @@ struct VOut {
   var ws = array<f32,4>(in.weights.x, in.weights.y, in.weights.z, in.weights.w);
   var p = vec4<f32>(0.0);
   var nn = vec3<f32>(0.0);
+  var tt = vec3<f32>(0.0);
   for (var k = 0; k < 4; k = k + 1) {
     let w = ws[k] / wsum;
     if (w <= 0.0) { continue; }
     let m = bones[js[k]];
+    let m3 = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
     p += w * (m * vec4<f32>(in.pos, 1.0));
-    nn += w * (mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz) * in.normal);
+    nn += w * (m3 * in.normal);
+    tt += w * (m3 * in.tangent.xyz);
   }
   var o: VOut;
   o.clip = cam.mvp * vec4<f32>(p.xyz, 1.0);
   o.n = nn;
+  o.t = tt;
+  // bitangent handedness from tangent.w, exactly as the engine shader does
+  o.b = cross(nn, tt) * in.tangent.w;
   o.uv = in.uv;
   return o;
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
-  let n = normalize(in.n);
+  // DXT5nm decode + tangent-space perturbation, byte-for-byte what shader.wgsl does. A 1x1 flat
+  // texel (X=0, Y=0) binds where a group has no _nm, so this one path serves both.
+  let nsamp = textureSample(t_normal, s_diffuse, in.uv);
+  let nx = nsamp.a * 2.0 - 1.0;
+  let ny = nsamp.g * 2.0 - 1.0;
+  let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
+  let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
+  let n = normalize(tbn * vec3<f32>(nx, ny, nz));
   let l1 = max(dot(n, normalize(vec3<f32>(0.4, 0.7, 0.6))), 0.0);
   let l2 = max(dot(n, normalize(vec3<f32>(-0.5, 0.2, -0.7))), 0.0) * 0.4;
   let d = clamp(l1 + l2 + 0.22, 0.0, 1.0);
-  // Untextured ranges bind a 1x1 white texel, so this one path serves both and there is no second
-  // pipeline to keep in step.
   let albedo = textureSample(t_diffuse, s_diffuse, in.uv).rgb;
   return vec4<f32>(albedo * d, 1.0);
 }
@@ -142,6 +160,12 @@ pub fn render(
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
+            },
         ],
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -151,17 +175,16 @@ pub fn render(
         min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
-    // Upload each range's diffuse once. A 1x1 white texel stands in for an untextured range so the
-    // shader has a single path.
-    let upload = |w: u32, h: u32, rgba: &[u8]| -> wgpu::BindGroup {
+    // Upload a texture and return its view. Unorm, not Srgb: the colour target is Rgba8Unorm, so an
+    // sRGB view would linearise on read with nothing converting back and every texture would render
+    // dark. Normal maps in particular MUST be linear-sampled.
+    let upload = |w: u32, h: u32, rgba: &[u8]| -> wgpu::TextureView {
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // Unorm, not Srgb: the colour target is Rgba8Unorm, so an sRGB view would linearise on
-            // read with nothing converting back and every texture would render dark.
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -172,20 +195,30 @@ pub fn render(
             wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        let view = tex.create_view(&Default::default());
+        tex.create_view(&Default::default())
+    };
+    let white = upload(1, 1, &[255u8, 255, 255, 255]);
+    // Flat DXT5nm texel: X in alpha, Y in green, both 0.5 -> no perturbation. Bound where a group
+    // has no normal map, so the fragment shader has one path.
+    let flat_nm = upload(1, 1, &[0u8, 128, 255, 128]);
+    let bind_of = |diff: &wgpu::TextureView, nrm: &wgpu::TextureView| -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(diff) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(nrm) },
             ],
         })
     };
-    let white = upload(1, 1, &[255u8, 255, 255, 255]);
-    let tex_binds: Vec<Option<wgpu::BindGroup>> = draws
+    let tex_binds: Vec<wgpu::BindGroup> = draws
         .iter()
-        .map(|d| d.diffuse.as_ref().map(|(w, h, rgba)| upload(*w, *h, rgba)))
+        .map(|d| {
+            let dv = d.diffuse.as_ref().map(|(w, h, r)| upload(*w, *h, r));
+            let nv = d.normal.as_ref().map(|(w, h, r)| upload(*w, *h, r));
+            bind_of(dv.as_ref().unwrap_or(&white), nv.as_ref().unwrap_or(&flat_nm))
+        })
         .collect();
 
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&cam_bgl, &bone_bgl, &tex_bgl], push_constant_ranges: &[] });
@@ -199,6 +232,7 @@ pub fn render(
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32x4, offset: 32, shader_location: 2 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 3 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 64, shader_location: 4 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 5 },
         ],
     };
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -251,7 +285,7 @@ pub fn render(
             rp.set_vertex_buffer(0, vbuf.slice(..));
             rp.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
             for (i, d) in draws.iter().enumerate() {
-                rp.set_bind_group(2, tex_binds[i].as_ref().unwrap_or(&white), &[]);
+                rp.set_bind_group(2, &tex_binds[i], &[]);
                 let end = (d.index_start + d.index_count).min(indices.len() as u32);
                 if end > d.index_start {
                     rp.draw_indexed(d.index_start..end, 0, 0..1);
