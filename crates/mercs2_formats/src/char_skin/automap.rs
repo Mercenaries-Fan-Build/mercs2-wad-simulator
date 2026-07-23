@@ -231,17 +231,16 @@ fn root_not_joint(n: &str) -> bool {
     false
 }
 
-/// `twist(?!.*forearm)` — "twist" whose remainder does not contain "forearm".
+/// A twist bone is a pure HELPER unless it is a FOREARM twist, which carries the forearm's skin and
+/// must map to the forearm — otherwise that geometry is left un-reposed and the arm skews.
+///
+/// The old form matched the regex `twist(?!.*forearm)` literally, checking only the text AFTER
+/// "twist". That is order-dependent, and Unreal names forearm twists `ForeArmTwist01` with the limb
+/// BEFORE "twist", so they slipped through as helpers, dropped the forearm skin, and zig-zagged the
+/// arm at bind. Check the WHOLE name instead: any twist that names the forearm (`forearm` /
+/// `lowerarm`) is a forearm twist, not a helper, whichever side of "twist" the token sits on.
 fn twist_not_forearm(n: &str) -> bool {
-    let mut from = 0;
-    while let Some(p) = n[from..].find("twist") {
-        let idx = from + p;
-        if !n[idx + 5..].contains("forearm") {
-            return true;
-        }
-        from = idx + 5;
-    }
-    false
+    n.contains("twist") && !n.contains("forearm") && !n.contains("lowerarm")
 }
 
 /// `hip(?=.*\d)` — "hip" followed somewhere later by a digit.
