@@ -55,6 +55,10 @@ fn main() {
     // Allowance for the import legitimately standing a little proud of the donor surface. 0 disables
     // the reach clamp entirely.
     let reach: f64 = flag(&a, "--reach").and_then(|s| s.parse().ok()).unwrap_or(1.15);
+    // Along-bone penalty for the transfer. > 1 preferentially matches donor samples at the same
+    // point down the bone, correcting the axial bias of nearest-point matching on a limb thicker
+    // than the donor's. 1.0 = isotropic (old behaviour).
+    let axial: f64 = flag(&a, "--axial").and_then(|s| s.parse().ok()).unwrap_or(3.0);
     // MTRL record index per host group, parallel to --group. Each part needs its OWN record or its
     // textures cannot differ from its neighbours'; the injector otherwise hardcodes record 6 for
     // every group. Defaults are three records of pmc_hum_mattias whose nine texture slots are
@@ -207,21 +211,31 @@ fn main() {
     // so its normals must be derived from it — the source GLB's own normals are in the pre-conform
     // space and would be rotated relative to the donor.
     let tnorm = vertex_normals(&cs.posed, &glb.tris);
+    let bone_pos: Vec<[f64; 3]> = skel
+        .bones
+        .iter()
+        .map(|b| {
+            let p = b.bind_pos();
+            [p[0] as f64, p[1] as f64, p[2] as f64]
+        })
+        .collect();
+    let bone_parent: Vec<i32> = skel.bones.iter().map(|b| b.parent).collect();
     let mut t = transfer_weights_pruned(
         &donor,
         &cs.posed,
         target.height,
-        &TransferOpts { k, min_weight: prune, target_normals: &tnorm, exclude_radius: 0.0 },
+        &TransferOpts {
+            k,
+            min_weight: prune,
+            target_normals: &tnorm,
+            exclude_radius: 0.0,
+            bone_pos: &bone_pos,
+            bone_parent: &bone_parent,
+            axial_penalty: axial,
+        },
     );
+    println!("transfer: axial penalty {axial}");
     if reach > 0.0 {
-        let bone_pos: Vec<[f64; 3]> = skel
-            .bones
-            .iter()
-            .map(|b| {
-                let p = b.bind_pos();
-                [p[0] as f64, p[1] as f64, p[2] as f64]
-            })
-            .collect();
         let n = clamp_to_donor_reach(&mut t.per_vertex, &cs.posed, &donor, &bone_pos, 0.99, reach);
         println!("reach clamp (margin {reach}): trimmed {n} vertices");
     }

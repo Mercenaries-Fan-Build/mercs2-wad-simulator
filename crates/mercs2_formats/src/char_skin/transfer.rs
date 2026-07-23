@@ -421,11 +421,35 @@ pub struct TransferOpts<'a> {
     /// Donor samples closer than this are ignored. Only for the self-test, where donor and target
     /// are the same mesh and a zero-distance self-match would make the measurement vacuous.
     pub exclude_radius: f64,
+    /// Bone bind positions (global HIER index). Empty disables the along-bone constraint below.
+    pub bone_pos: &'a [[f64; 3]],
+    /// Bone parents, same index space as `bone_pos` (-1 = root). Used to derive a limb axis.
+    pub bone_parent: &'a [i32],
+    /// How much harder to penalise displacement ALONG a bone than across it, when matching a target
+    /// to donor samples. 1.0 is isotropic (plain Euclidean — the old behaviour).
+    ///
+    /// Why > 1 is needed. The transfer matches by nearest point, and nearest-point has a systematic
+    /// AXIAL bias on any limb thicker than the donor's: a vertex on the outside of a fat forearm
+    /// sits well off the thin donor's bone, and the closest donor surface point is not radially
+    /// inward but further ALONG the arm — so the vertex inherits weights from the wrong point down
+    /// the bone. On 50 Cent that put the elbows' influence 3-4 cm too far toward the wrist and the
+    /// arm bent like a broken bone. The normal filter cannot catch it: both surfaces face radially
+    /// out, so their normals agree. Penalising axial distance pulls each match back to the same
+    /// point along the bone, which is where retail's own weights sit.
+    pub axial_penalty: f64,
 }
 
 impl<'a> Default for TransferOpts<'a> {
     fn default() -> Self {
-        TransferOpts { k: 4, min_weight: MIN_WEIGHT, target_normals: &[], exclude_radius: 0.0 }
+        TransferOpts {
+            k: 4,
+            min_weight: MIN_WEIGHT,
+            target_normals: &[],
+            exclude_radius: 0.0,
+            bone_pos: &[],
+            bone_parent: &[],
+            axial_penalty: 1.0,
+        }
     }
 }
 
@@ -436,8 +460,43 @@ pub fn transfer_weights_pruned(
     body_height: f64,
     opts: &TransferOpts,
 ) -> Transferred {
-    let TransferOpts { k, min_weight, target_normals, exclude_radius } = *opts;
+    let TransferOpts {
+        k,
+        min_weight,
+        target_normals,
+        exclude_radius,
+        bone_pos,
+        bone_parent,
+        axial_penalty,
+    } = *opts;
     let excl2 = exclude_radius * exclude_radius;
+    let axial_on = axial_penalty > 1.0 && !bone_pos.is_empty();
+
+    // Unit limb axis at a bone: from its parent toward it. `None` at a root or a zero-length bone,
+    // where "along the bone" is undefined and the constraint should not apply.
+    let bone_axis = |b: usize| -> Option<[f64; 3]> {
+        let par = *bone_parent.get(b)? ;
+        if par < 0 {
+            return None;
+        }
+        let (p, q) = (bone_pos.get(b)?, bone_pos.get(par as usize)?);
+        let v = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l > 1e-6 {
+            Some([v[0] / l, v[1] / l, v[2] / l])
+        } else {
+            None
+        }
+    };
+    // Euclidean d2 stretched ALONG `axis` by `axial_penalty`: the same physical offset costs more
+    // when it runs down the bone than across it.
+    let aniso_d2 = |t: &[f64; 3], s: &[f64; 3], axis: &[f64; 3]| -> f64 {
+        let d = [t[0] - s[0], t[1] - s[1], t[2] - s[2]];
+        let along = d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2];
+        let e2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        let radial2 = (e2 - along * along).max(0.0);
+        (axial_penalty * along).powi(2) + radial2
+    };
     // Cell ~2% of body height: comfortably above the measured 1.0% median spacing, so the first
     // ring almost always holds a match, and small enough that buckets stay short.
     let grid = Grid::new(donor, (body_height * 0.02).max(1e-4));
@@ -461,6 +520,33 @@ pub fn transfer_weights_pruned(
             best.push((d2, i));
         }
         best.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // ALONG-BONE CONSTRAINT. Re-rank the candidate pool by anisotropic distance around the
+        // local limb axis, so a donor sample at the same point down the bone wins over one that is
+        // radially nearer but axially shifted. The axis comes from the dominant bone of the nearest
+        // few Euclidean candidates — stable even if that bone is off by one, because adjacent limb
+        // bones point nearly the same way. Chicken-and-egg is unavoidable (the axis needs a bone,
+        // the bone needs the match) but harmless at this precision.
+        if axial_on && !best.is_empty() {
+            let mut acc: HashMap<u32, f64> = HashMap::new();
+            for &(d2, i) in best.iter().take(8) {
+                let w = 1.0 / (d2.sqrt() + 1e-6);
+                for &(bone, bw) in &donor[i].infl {
+                    *acc.entry(bone).or_insert(0.0) += w * bw;
+                }
+            }
+            let dom = acc
+                .into_iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(b, _)| b as usize);
+            if let Some(axis) = dom.and_then(bone_axis) {
+                for e in best.iter_mut() {
+                    e.0 = aniso_d2(t, &donor[e.1].pos, &axis);
+                }
+                best.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            }
+        }
+
         // NORMAL COMPATIBILITY. Prefer donor samples facing the same way as this point; only fall
         // back to raw proximity if none qualify (a genuine gap, which inpainting-style methods fill
         // the same way). This is what stops an inner-arm vertex sampling the torso it rests against.

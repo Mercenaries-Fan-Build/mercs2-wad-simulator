@@ -87,6 +87,7 @@ fn main() {
     let smooth: usize = flag(&a, "--smooth").and_then(|s| s.parse().ok()).unwrap_or(0);
     let lambda: f64 = flag(&a, "--lambda").and_then(|s| s.parse().ok()).unwrap_or(0.5);
     let reach: f64 = flag(&a, "--reach").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let axial: f64 = flag(&a, "--axial").and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let no_normals = a.iter().any(|x| x == "--no-normals");
 
     let block = std::fs::read(&a[1]).expect("donor block");
@@ -169,6 +170,15 @@ fn main() {
     let adj = adjacency(all.len(), &tris);
 
     let excl = target.height * exclude;
+    let bp: Vec<[f64; 3]> = skel
+        .bones
+        .iter()
+        .map(|b| {
+            let p = b.bind_pos();
+            [p[0] as f64, p[1] as f64, p[2] as f64]
+        })
+        .collect();
+    let bpar: Vec<i32> = skel.bones.iter().map(|b| b.parent).collect();
     let mut t = transfer_weights_pruned(
         &all,
         &targets,
@@ -178,17 +188,12 @@ fn main() {
             min_weight: prune,
             target_normals: if no_normals { &[] } else { &tnorm },
             exclude_radius: excl,
+            bone_pos: &bp,
+            bone_parent: &bpar,
+            axial_penalty: axial,
         },
     );
     if reach > 0.0 {
-        let bp: Vec<[f64; 3]> = skel
-            .bones
-            .iter()
-            .map(|b| {
-                let p = b.bind_pos();
-                [p[0] as f64, p[1] as f64, p[2] as f64]
-            })
-            .collect();
         let n = clamp_to_donor_reach(&mut t.per_vertex, &targets, &all, &bp, 0.99, reach);
         println!("reach clamp margin {reach}: trimmed {n} of {}", targets.len());
     }
