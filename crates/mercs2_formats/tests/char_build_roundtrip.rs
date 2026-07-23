@@ -32,6 +32,7 @@ fn load_skeleton() -> TargetSkeleton {
             parent: b["parent"].as_i64().unwrap() as i32,
             name: b["name"].as_str().unwrap().to_string(),
             name_hash: mercs2_formats::hash::pandemic_hash_m2(b["name"].as_str().unwrap()),
+            rot: None,
         })
         .collect();
     TargetSkeleton {
@@ -183,8 +184,8 @@ fn index_by_canonical_resolves_onto_shifted_hero() {
     // (composed with the NPC-84 finger-collapse) keeps its 58-bone map under the palette cap.
     let npc = load_skeleton();
     let mut bones = vec![
-        TargetBone { i: 0, pos: [0.0; 3], parent: -1, name: "x_root_a".into(), name_hash: 0xA },
-        TargetBone { i: 1, pos: [0.0; 3], parent: 0, name: "x_root_b".into(), name_hash: 0xB },
+        TargetBone { i: 0, pos: [0.0; 3], parent: -1, name: "x_root_a".into(), name_hash: 0xA, rot: None },
+        TargetBone { i: 1, pos: [0.0; 3], parent: 0, name: "x_root_b".into(), name_hash: 0xB, rot: None },
     ];
     for b in &npc.bones {
         bones.push(TargetBone {
@@ -193,6 +194,7 @@ fn index_by_canonical_resolves_onto_shifted_hero() {
             parent: if b.parent < 0 { -1 } else { b.parent + 2 },
             name: b.name.clone(),
             name_hash: b.name_hash,
+            rot: b.rot,
         });
     }
     let hero = TargetSkeleton { bones, height: npc.height };

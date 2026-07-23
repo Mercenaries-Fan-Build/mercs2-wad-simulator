@@ -96,6 +96,12 @@ pub struct TargetBone {
     /// HIER name-hash (`pandemic_hash_m2` of the bone name) — used to resolve a canonical NPC-84
     /// automap index onto THIS skeleton by identity, so a HERO donor (reordered HIER) maps right.
     pub name_hash: u32,
+    /// BIND-pose ORIENTATION as an orthonormal 3×3 in the column-vector (`apply3`) convention —
+    /// the rotation the geometry was authored against, which `pos` alone throws away. `None` when
+    /// the donor carried no usable bind matrix. Used by the distal-hand FK pass to orient bones
+    /// whose correspondence cloud is a line or plane (fingers/hand), where a position-only fit
+    /// cannot resolve rotation and cants them.
+    pub rot: Option<[f64; 9]>,
 }
 
 #[derive(Clone)]
@@ -1010,6 +1016,74 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                     xform.insert(hh, rescale(&hsim, clamped, wrist));
                 }
             }
+        }
+    }
+
+    // ---- 6c. Distal-hand FK: orient the hand + finger bones from the TARGET bind orientation ----
+    //
+    // A finger is a LINE of joints and a hand's correspondence cloud is a flat palm plane, so the
+    // position-only weighted fit (section 6) cannot resolve their rotation: `fit_similarity_weighted`
+    // returns rank<2 and the bone inherits a canted parent, compounding down every finger into a flat
+    // splayed claw (the hand reads sub-human at rest even though the body conforms cleanly). The donor
+    // skeleton KNOWS each bone's real bind orientation (`TargetBone::rot`), which `pos` alone threw
+    // away. Re-derive each hand-chain bone by FORWARD KINEMATICS: take the target's parent->child bend
+    // (`R_tgt[h] * R_tgt[parent]^-1`) and apply it to the parent's ALREADY-CONFORMED rotation, walking
+    // parent-first so a finger sees its corrected hand. Scale + wrist anchor stay from 6/6b; only the
+    // rotation changes. Bones (or donors) without a bind orientation fall back to the fit untouched.
+    {
+        let is_hand_chain =
+            |npc: u32| matches!(npc, 46 | 67) || (48..=62).contains(&npc) || (69..=83).contains(&npc);
+        let trot = |h: u32| sk.bones.iter().find(|b| b.i == h).and_then(|b| b.rot);
+        let tdepth = |mut h: u32| -> usize {
+            let mut d = 0;
+            while let Some(p) = sk.parent_of(h) {
+                if p < 0 || d > 256 {
+                    break;
+                }
+                h = p as u32;
+                d += 1;
+            }
+            d
+        };
+        let mut chain: Vec<u32> = bone_order
+            .iter()
+            .copied()
+            .filter(|&h| full_npc.get(&primary[&h]).copied().is_some_and(is_hand_chain))
+            .collect();
+        chain.sort_by_key(|&h| tdepth(h));
+        let mut fk = 0usize;
+        for h in chain {
+            // nearest ANCESTOR that has both a conformed transform and a bind orientation (the finger
+            // may sit under an unmapped attach bone; skip past it to the hand/forearm).
+            let mut cur = sk.parent_of(h).filter(|&p| p >= 0).map(|p| p as u32);
+            let base = loop {
+                match cur {
+                    Some(p) if xform.contains_key(&p) && trot(p).is_some() => break Some(p),
+                    Some(p) => cur = sk.parent_of(p).filter(|&q| q >= 0).map(|q| q as u32),
+                    None => break None,
+                }
+            };
+            let (Some(parent), Some(rt_h)) = (base, trot(h)) else { continue };
+            let (Some(rt_p), Some(par_sim), Some(hsim)) =
+                (trot(parent), xform.get(&parent).copied(), xform.get(&h).copied())
+            else {
+                continue;
+            };
+            let inv = 1.0 / par_sim.scale.max(1e-12);
+            let r_par: [f64; 9] = std::array::from_fn(|i| par_sim.sr[i] * inv);
+            // R_rel = R_tgt[h] * R_tgt[parent]^-1  (parent^-1 = transpose for an orthonormal rotation)
+            let rt_p_t =
+                [rt_p[0], rt_p[3], rt_p[6], rt_p[1], rt_p[4], rt_p[7], rt_p[2], rt_p[5], rt_p[8]];
+            let r_new = mul3(&mul3(&rt_h, &rt_p_t), &r_par);
+            let s = hsim.scale;
+            let sr: [f64; 9] = std::array::from_fn(|i| r_new[i] * s);
+            let anchor_s = *srcp.get(&primary[&h]).unwrap_or(&[0.0; 3]);
+            let anchor_d = sk.tgt(h).unwrap_or(anchor_s);
+            xform.insert(h, Sim { sr, t: sub(anchor_d, apply3(&sr, anchor_s)), scale: s, rank: hsim.rank });
+            fk += 1;
+        }
+        if fk > 0 {
+            notes.push(format!("distal-hand FK: re-oriented {fk} hand/finger bones from target bind"));
         }
     }
 

@@ -34,6 +34,7 @@ fn main() {
                 parent: b["parent"].as_i64().unwrap() as i32,
                 name_hash,
                 name,
+                rot: None,
             }
         })
         .collect();

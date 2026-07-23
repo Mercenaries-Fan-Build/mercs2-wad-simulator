@@ -29,6 +29,27 @@ pub use build::{
 
 use crate::skeleton::Skeleton;
 
+/// Gram-Schmidt a row-major 3×3 (rows = mapped basis) into an orthonormal rotation, or `None`
+/// if it is degenerate (zero/parallel rows). Removes any scale a bind matrix carried.
+fn ortho3_colvec(m: [f64; 9]) -> Option<[f64; 9]> {
+    let row = |i: usize| [m[i * 3], m[i * 3 + 1], m[i * 3 + 2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let sub = |a: [f64; 3], b: [f64; 3], s: f64| [a[0] - b[0] * s, a[1] - b[1] * s, a[2] - b[2] * s];
+    let normed = |a: [f64; 3]| {
+        let n = dot(a, a).sqrt();
+        if n < 1e-9 { None } else { Some([a[0] / n, a[1] / n, a[2] / n]) }
+    };
+    let u0 = normed(row(0))?;
+    let mut r1 = row(1);
+    r1 = sub(r1, u0, dot(r1, u0));
+    let u1 = normed(r1)?;
+    let mut r2 = row(2);
+    r2 = sub(r2, u0, dot(r2, u0));
+    r2 = sub(r2, u1, dot(r2, u1));
+    let u2 = normed(r2)?;
+    Some([u0[0], u0[1], u0[2], u1[0], u1[1], u1[2], u2[0], u2[1], u2[2]])
+}
+
 impl TargetSkeleton {
     /// Derive the target skeleton from a real donor's [`Skeleton`]. Bones are in HIER order,
     /// so `bone i` is global HIER index `i` — matching the mesher's baked `skeleton_npc84`.
@@ -43,12 +64,23 @@ impl TargetSkeleton {
                 // inverse-bind at HIER+80. Retargeting geometry onto the default pose reproduces
                 // that pose in the import. See `Bone::bind_world`.
                 let p = b.bind_pos();
+                // ORIENTATION from the same matrix `bind_pos` reads (bind_world, else world). The
+                // HIER 4x4 is row-vector (basis in the rows, translation in row 3); `apply3` is
+                // column-vector, so the column-vector rotation is the TRANSPOSE of the upper-left
+                // 3x3, then Gram-Schmidt'd to a clean rotation (bind matrices can carry scale).
+                let m = b.bind_world.unwrap_or(b.world);
+                let rot = ortho3_colvec([
+                    m[0][0] as f64, m[1][0] as f64, m[2][0] as f64,
+                    m[0][1] as f64, m[1][1] as f64, m[2][1] as f64,
+                    m[0][2] as f64, m[1][2] as f64, m[2][2] as f64,
+                ]);
                 TargetBone {
                     i: i as u32,
                     pos: [p[0] as f64, p[1] as f64, p[2] as f64],
                     parent: b.parent,
                     name: format!("hash_{:08X}", b.name_hash),
                     name_hash: b.name_hash,
+                    rot,
                 }
             })
             .collect();
