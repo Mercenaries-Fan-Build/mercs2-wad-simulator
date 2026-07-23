@@ -167,6 +167,72 @@ pub fn havok_palette_in_place(
     skin_palette(rig, &model_poses(rig, &local))
 }
 
+/// CROSS-SKELETON RETARGET palette. Drive a foreign character's OWN skeleton (`target_rig` — the
+/// imported mesh's bones, in its own bind pose and proportions) with a clip that was authored for the
+/// game's skeleton (`source_rig`), so the imported mesh animates without being deformed or reshaped.
+///
+/// Copying the clip's LOCAL rotations straight onto the target bones is WRONG whenever the two rigs'
+/// bind bone-orientations differ (Maya/IW joint-orient vs the HIER frame) — it throws the character
+/// into a spread-eagle mess. But so is applying the delta in WORLD space (`anim·bind⁻¹` then target
+/// bind): that only works if the two skeletons' bind poses FACE the same world direction, and a
+/// foreign character authored facing another way then runs sideways (legs stride off-axis while the
+/// torso faces forward). The robust transfer expresses each source bone's rotation as a delta in its
+/// OWN bind-LOCAL frame (`Δ = bind_model⁻¹ · anim_model`) and re-applies it in the TARGET bone's bind
+/// frame (`target_model = target_bind_model · Δ`). Because the delta rides each bone's own bind
+/// orientation, a global facing difference — and per-bone joint-orient differences — cancel out: the
+/// hip swings like a hip, the elbow flexes like an elbow, in the character's OWN forward direction.
+/// Target bone lengths (local translations) and the mesh/weights are never touched, so proportions
+/// and off-body gear are kept.
+///
+/// `target_to_source[j]` maps target bone `j` → the `source_rig` bone that drives it (from the bone
+/// map); an out-of-range entry leaves bone `j` at its bind pose. `track_to_hier_source` maps clip
+/// track → `source_rig` bone. Assumes both rigs list parents before children (as HIER / a normal
+/// glTF skeleton export do).
+pub fn havok_palette_retarget_cross(
+    target_rig: &[BoneRig],
+    source_rig: &[BoneRig],
+    target_to_source: &[usize],
+    sample: &[QsTransform],
+    track_to_hier_source: &[Option<usize>],
+    num_transform_tracks: usize,
+) -> Vec<[[f32; 4]; 4]> {
+    let conj = |q: [f32; 4]| [-q[0], -q[1], -q[2], q[3]];
+    // Source (clip) skeleton: bind vs animated model-space rotations.
+    let src_anim_local = havok_locals(source_rig, sample, track_to_hier_source, num_transform_tracks);
+    let src_anim_model = model_poses(source_rig, &src_anim_local);
+    let src_bind_model = model_poses(source_rig, &bind_qs(source_rig));
+    // Target skeleton bind model-space rotations.
+    let tgt_bind_model = model_poses(target_rig, &bind_qs(target_rig));
+
+    // Target model-space rotation per bone = target bind ∘ (source bind-LOCAL delta). Applying the
+    // delta in the bone's OWN bind frame (target_bind · bind⁻¹·anim), not in world (anim·bind⁻¹ ·
+    // target_bind), is what makes a differently-facing character move in its own forward direction.
+    let mut tgt_model_rot: Vec<[f32; 4]> = vec![[0.0, 0.0, 0.0, 1.0]; target_rig.len()];
+    for j in 0..target_rig.len() {
+        let bind_rot = tgt_bind_model[j].rotation;
+        let s = target_to_source.get(j).copied().unwrap_or(usize::MAX);
+        tgt_model_rot[j] = if s < source_rig.len() {
+            let delta = quat_mul(conj(src_bind_model[s].rotation), src_anim_model[s].rotation);
+            quat_mul(bind_rot, delta)
+        } else {
+            bind_rot
+        };
+    }
+
+    // Model rotation → local rotation (local = parent_model⁻¹ · model); keep target bind translation
+    // and scale so bone lengths — and thus proportions — are the target's, not the clip skeleton's.
+    let mut local = bind_qs(target_rig);
+    for j in 0..target_rig.len() {
+        let p = target_rig[j].parent;
+        local[j].rotation = if p >= 0 {
+            quat_mul(conj(tgt_model_rot[p as usize]), tgt_model_rot[j])
+        } else {
+            tgt_model_rot[j]
+        };
+    }
+    skin_palette(target_rig, &model_poses(target_rig, &local))
+}
+
 /// The model-space matrix of a single `bone` for one clip sample — the same sampleAndCombine →
 /// root-in-place → compose chain as [`havok_palette_in_place`], but returning ONE bone's model
 /// transform (not the whole skin palette). Used to attach a held object (a weapon in the hand) to a
