@@ -35,15 +35,18 @@ pub struct DrawTex {
     pub diffuse: Option<(u32, u32, Vec<u8>)>,
     /// The `_nm` normal map, decoded to RGBA8. DXT5nm: X in ALPHA, Y in GREEN. `None` = flat.
     pub normal: Option<(u32, u32, Vec<u8>)>,
+    /// The `_sm` specular mask, decoded to RGBA8. `None` = black = matte (no highlight).
+    pub specular: Option<(u32, u32, Vec<u8>)>,
 }
 
 const WGSL: &str = r#"
-struct Cam { mvp: mat4x4<f32> };
+struct Cam { mvp: mat4x4<f32>, cam_pos: vec4<f32> };
 @group(0) @binding(0) var<uniform> cam: Cam;
 @group(1) @binding(0) var<storage, read> bones: array<mat4x4<f32>>;
 @group(2) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(2) @binding(1) var s_diffuse: sampler;
 @group(2) @binding(2) var t_normal: texture_2d<f32>;
+@group(2) @binding(3) var t_specular: texture_2d<f32>;
 struct VIn {
   @location(0) pos: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -58,6 +61,7 @@ struct VOut {
   @location(1) uv: vec2<f32>,
   @location(2) t: vec3<f32>,
   @location(3) b: vec3<f32>,
+  @location(4) wpos: vec3<f32>,
 };
 @vertex fn vs(in: VIn) -> VOut {
   var wsum = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
@@ -83,6 +87,7 @@ struct VOut {
   // bitangent handedness from tangent.w, exactly as the engine shader does
   o.b = cross(nn, tt) * in.tangent.w;
   o.uv = in.uv;
+  o.wpos = p.xyz;
   return o;
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
@@ -93,12 +98,27 @@ struct VOut {
   let ny = nsamp.g * 2.0 - 1.0;
   let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
   let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
-  let n = normalize(tbn * vec3<f32>(nx, ny, nz));
-  let l1 = max(dot(n, normalize(vec3<f32>(0.4, 0.7, 0.6))), 0.0);
-  let l2 = max(dot(n, normalize(vec3<f32>(-0.5, 0.2, -0.7))), 0.0) * 0.4;
-  let d = clamp(l1 + l2 + 0.22, 0.0, 1.0);
+  let N = normalize(tbn * vec3<f32>(nx, ny, nz));
   let albedo = textureSample(t_diffuse, s_diffuse, in.uv).rgb;
-  return vec4<f32>(albedo * d, 1.0);
+
+  // Lighting matched to shader.wgsl's DYNAMIC (non-prelit) branch: an ambient floor plus a single
+  // sun key light, and Blinn-Phong specular masked by the _sm map. The exterior sun values are
+  // baked in here (sun_i ~1, ambient ~0.35) so a character previews as it does outdoors, which is
+  // where the arm's harsh specular shows. This is the term that was missing while the arms looked
+  // fine in preview and broken in game.
+  let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
+  let sun_i = 1.0;
+  let ambient = 0.35;
+  let spec_power = 48.0;
+  let ndl = max(dot(N, sun_dir), 0.0);
+  let spec_mask = textureSample(t_specular, s_diffuse, in.uv).rgb;
+  let V = normalize(cam.cam_pos.xyz - in.wpos);
+  var col = albedo * ambient + albedo * (sun_i * ndl);
+  if (ndl > 0.0) {
+    let H = normalize(sun_dir + V);
+    col += spec_mask * pow(max(dot(N, H), 0.0), spec_power);
+  }
+  return vec4<f32>(col, 1.0);
 }
 "#;
 
@@ -131,13 +151,13 @@ pub fn render(
     let pal_flat: Vec<f32> = palette.iter().flat_map(|m| m.iter().flat_map(|r| r.iter().copied())).collect();
     let pbuf = create_init(&device, wgpu::BufferUsages::STORAGE, bytemuck::cast_slice(&pal_flat));
     let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None, size: 64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        label: None, size: 80, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
     });
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(WGSL.into()) });
     let cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
-        entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
+        entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
     });
     let bone_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
@@ -162,6 +182,12 @@ pub fn render(
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
                 count: None,
@@ -201,7 +227,8 @@ pub fn render(
     // Flat DXT5nm texel: X in alpha, Y in green, both 0.5 -> no perturbation. Bound where a group
     // has no normal map, so the fragment shader has one path.
     let flat_nm = upload(1, 1, &[0u8, 128, 255, 128]);
-    let bind_of = |diff: &wgpu::TextureView, nrm: &wgpu::TextureView| -> wgpu::BindGroup {
+    let black = upload(1, 1, &[0u8, 0, 0, 255]); // matte fallback where a group has no _sm
+    let bind_of = |diff: &wgpu::TextureView, nrm: &wgpu::TextureView, spc: &wgpu::TextureView| -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &tex_bgl,
@@ -209,6 +236,7 @@ pub fn render(
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(diff) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(nrm) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(spc) },
             ],
         })
     };
@@ -217,7 +245,8 @@ pub fn render(
         .map(|d| {
             let dv = d.diffuse.as_ref().map(|(w, h, r)| upload(*w, *h, r));
             let nv = d.normal.as_ref().map(|(w, h, r)| upload(*w, *h, r));
-            bind_of(dv.as_ref().unwrap_or(&white), nv.as_ref().unwrap_or(&flat_nm))
+            let sv = d.specular.as_ref().map(|(w, h, r)| upload(*w, *h, r));
+            bind_of(dv.as_ref().unwrap_or(&white), nv.as_ref().unwrap_or(&flat_nm), sv.as_ref().unwrap_or(&black))
         })
         .collect();
 
@@ -270,6 +299,7 @@ pub fn render(
         let view = Mat4::look_at_rh(eye, center, Vec3::Y);
         let mvp = flip_x * proj * view;
         queue.write_buffer(&cam_buf, 0, bytemuck::cast_slice(&mvp.to_cols_array()));
+        queue.write_buffer(&cam_buf, 64, bytemuck::cast_slice(&[eye.x, eye.y, eye.z, 1.0f32]));
 
         let mut enc = device.create_command_encoder(&Default::default());
         {

@@ -777,7 +777,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             None => vec![IDENT; bone_count],
         };
         // One untextured range: --shot previews a raw glTF import, which carries no WAD material.
-        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None }];
+        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None }];
         shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
         return;
     }
@@ -924,6 +924,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     .diffuse
                     .and_then(|h| md.textures.get(&h))
                     .map(texpng::decode_bc),
+                specular: d.specular.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc),
                 normal: d.normal.and_then(|h| md.textures.get(&h)).map(|td| {
                     let (w, h, mut rgba) = texpng::decode_bc(td);
                     // --render-flip-green tests the OpenGL(+Y up)/DirectX(+Y down) convention gap:
