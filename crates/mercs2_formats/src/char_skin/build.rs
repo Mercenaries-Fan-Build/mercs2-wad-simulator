@@ -344,16 +344,22 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         full_npc.insert(j, h);
         origin.insert(j, Origin::Auto);
     }
+    // Fingers keep their OWN bones whenever the donor has them. The legacy rule balled every finger
+    // onto the wrist the moment the whole-model palette crossed the 48-slot cap — but that cap is
+    // re-derived per draw group by the injector and rewritten wholesale by donor transfer, so paying
+    // it here only strands a dense finger rig (50 Cent's 30 finger joints) on one hand bone and
+    // stretches the hand under animation. Collapse a finger ONLY when THIS donor lacks that finger
+    // bone (its canonical index does not resolve); a full Pandemic finger set (mattias) maps
+    // finger-to-finger and conforms each digit to its own bone.
     let mut collapsed_fingers = false;
-    {
-        let used = collect(&full_npc, false);
-        if used.len() > PALETTE_CAP && collect(&full_npc, true).len() < used.len() {
-            for h in full_npc.values_mut() {
-                if let Some(m) = finger_to_hand(*h) {
+    for h in full_npc.values_mut() {
+        if sk.index_by_canonical(*h).is_none() {
+            if let Some(m) = finger_to_hand(*h) {
+                if sk.index_by_canonical(m).is_some() {
                     *h = m;
+                    collapsed_fingers = true;
                 }
             }
-            collapsed_fingers = true;
         }
     }
     let mut full: HashMap<usize, u32> = HashMap::new();
@@ -509,7 +515,7 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         None
     };
 
-    // ---- 3. palette (donor HIER indices; fingers already collapsed in NPC-84 space) ----
+    // ---- 3. palette (donor HIER indices; fingers kept per-bone unless the donor lacked them) ----
     let used = collect(&full, false);
     let (ranges, slot_of, palette_slots) = build_palette_ranges(&used);
     if palette_slots > PALETTE_CAP {
@@ -713,6 +719,50 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         if let Some(p) = p {
             joint_children[*p].push(j);
         }
+    }
+
+    // SKELETON OVERLAY DUMP (visual debugging). Writes both skeletons in the SAME container space,
+    // plus the source->target bone mapping, so a renderer can show how the imported rig lands on the
+    // donor. Gated on an env var so it costs nothing in normal builds.
+    if let Ok(path) = std::env::var("CHARSKIN_SKELDUMP") {
+        let mut out = String::from("{
+");
+        // source joints, placed in container space via the same model->container transform.
+        out.push_str("  \"source\": [
+");
+        let mut first = true;
+        for j in 0..names.len() {
+            let Some(mp) = ibm_raw.get(&j).copied() else { continue };
+            let c = to_container(mp);
+            let par = joint_parent[j].map(|p| p as i64).unwrap_or(-1);
+            let tgt = full.get(&j).map(|&h| h as i64).unwrap_or(-1);
+            if !first { out.push_str(",
+"); }
+            first = false;
+            out.push_str(&format!(
+                "    {{\"j\":{j},\"name\":\"{}\",\"pos\":[{:.5},{:.5},{:.5}],\"parent\":{par},\"tgt\":{tgt}}}",
+                names[j].replace('"', ""), c[0], c[1], c[2]
+            ));
+        }
+        out.push_str("
+  ],
+  \"target\": [
+");
+        first = true;
+        for b in &sk.bones {
+            if !first { out.push_str(",
+"); }
+            first = false;
+            out.push_str(&format!(
+                "    {{\"h\":{},\"pos\":[{:.5},{:.5},{:.5}],\"parent\":{}}}",
+                b.i, b.pos[0], b.pos[1], b.pos[2], b.parent
+            ));
+        }
+        out.push_str("
+  ]
+}
+");
+        let _ = std::fs::write(&path, out);
     }
 
     // primary source joint per target bone: Manual > Auto > Inherited, then lowest index.
