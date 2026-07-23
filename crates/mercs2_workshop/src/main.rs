@@ -697,6 +697,68 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
 
     // Headless: load one model end-to-end (geometry + textures + clips) and print its stats.
     // Overlay-aware: resolves through the full stack, like the window does.
+    // Headless render of the FAITHFUL retarget path (the GUI's Export/preview), so the workshop's
+    // actual output can be checked without opening the GUI. This runs faithful_char_skin (now with
+    // donor transfer) exactly as the Skeleton workbench does.
+    // Usage: --faithful <file.glb> --rebind-target <name> [--faithful-out p] [--faithful-clip 0x..]
+    if let Some(glb) = get("--faithful") {
+        let target = get("--rebind-target").unwrap_or_else(|| "pmc_hum_mattias".into());
+        let out = get("--faithful-out").unwrap_or_else(|| "faithful".into());
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: {e}"),
+        };
+        let thash = mercs2_formats::hash::pandemic_hash_m2(target.trim_start_matches('_'));
+        let mut paths = vec![wadpath.clone()];
+        paths.extend(overlays.iter().cloned());
+        let rt = match import::import_model(std::path::Path::new(&glb))
+            .and_then(|im| {
+                let (tn, tp, tpar) = app::target_bone_info(&mut w, thash);
+                Ok(crate::retarget::Retarget::build_full(
+                    im.skin_joints, im.skin_joint_pos, im.skin_ibm, im.skin_parents, tn, tp, tpar,
+                ))
+            }) {
+            Ok(r) => r,
+            Err(e) => return eprintln!("--faithful: {e}"),
+        };
+        let (cs, glbd, _donor) = match app::faithful_char_skin(&paths, thash, &rt, std::path::Path::new(&glb)) {
+            Ok(v) => v,
+            Err(e) => return eprintln!("--faithful: {e}"),
+        };
+        let target_rig = app::load_model_data(&mut w, thash).map(|m| m.skin.rig).unwrap_or_default();
+        let im = import::char_skin_to_imported(&cs, &glbd, target_rig.clone());
+        // Pose exactly like --render: in-place havok palette, or identity at bind.
+        const IDENT: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let hier: Vec<u32> = target_rig.iter().map(|b| b.name_hash).collect();
+        let t_frac: f32 = get("--faithful-t").and_then(|s| s.parse().ok()).unwrap_or(0.35);
+        let palette: Vec<[[f32; 4]; 4]> = match get("--faithful-clip")
+            .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        {
+            Some(ch) => match w.clip_for_rig(&hier, ch) {
+                Some(ca) => {
+                    let sample = ca.clip.sample_local(ca.clip.duration * t_frac);
+                    mercs2_engine::pose::havok_palette_in_place(&im.skin.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks)
+                }
+                None => vec![IDENT; im.skin.rig.len().max(1)],
+            },
+            None => vec![IDENT; im.skin.rig.len().max(1)],
+        };
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let sv: Vec<shot::SV> = im.verts.iter().map(|v| {
+            for k in 0..3 { lo[k]=lo[k].min(v.pos[k]); hi[k]=hi[k].max(v.pos[k]); }
+            shot::SV { pos: v.pos, _p0: 0.0, normal: v.normal, _p1: 0.0, uv: v.uv, _p2: [0.0,0.0],
+                tangent: v.tangent,
+                joints: [v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32],
+                weights: [v.weights[0] as f32/255.0, v.weights[1] as f32/255.0, v.weights[2] as f32/255.0, v.weights[3] as f32/255.0] }
+        }).collect();
+        // Flat white geometry, matching the workshop white-mesh view (the surface where the break shows).
+        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None }];
+        println!("--faithful: {} verts, {} tris, target {target}", im.verts.len(), im.indices.len()/3);
+        shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
+        return;
+    }
+
     // Headless OFFSCREEN RENDER of a retargeted import to PNGs (front/side/3q) — a visual check.
     // Usage: --shot <file.glb> [--rebind-target <name>] [--shot-out <prefix>] [--shot-clip 0x..]
     if let Some(glb) = get("--shot") {

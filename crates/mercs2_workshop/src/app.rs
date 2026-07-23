@@ -4895,7 +4895,7 @@ pub(crate) fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, 
 /// Returns the `char_skin` result, the raw source glb data, and the target donor block (for
 /// injection / the target rig). `target_index == global HIER index` because both the workshop's
 /// `target_bone_info` and `TargetSkeleton::from_skeleton` enumerate the target's HIER in order.
-fn faithful_char_skin(
+pub(crate) fn faithful_char_skin(
     wad_paths: &[String],
     thash: u32,
     rt: &crate::retarget::Retarget,
@@ -4928,7 +4928,21 @@ fn faithful_char_skin(
                 .map(|m| (m.source_index, m.target_index.map(|t| t as u32)))
                 .collect()
         };
-    let cs = mercs2_formats::char_skin::build_character(&glb.build_input(&target, None, overrides, false))?;
+    let mut cs = mercs2_formats::char_skin::build_character(&glb.build_input(&target, None, overrides, false))?;
+    // DONOR TRANSFER. build_character carries the SOURCE rig's weights across the bone map, which is
+    // fuzzy on the limbs for a mismatched rig (a 119-bone Unreal mannequin onto a 116-bone Pandemic
+    // skeleton) and tears the arms. Overwrite them by sampling the RETAIL donor's own weights at each
+    // conformed vertex -- the exact step the CLI did and this path used to skip, which is why the
+    // workshop preview showed broken arms the shipped asset does not have.
+    match mercs2_formats::char_skin::donor_transfer::apply_donor_transfer(
+        &mut cs,
+        &glb.tris,
+        &donor,
+        &mercs2_formats::char_skin::donor_transfer::DonorTransferOpts::default(),
+    ) {
+        Ok(msg) => eprintln!("faithful_char_skin: {msg}"),
+        Err(e) => eprintln!("faithful_char_skin: donor transfer skipped ({e}); using conform weights"),
+    }
     Ok((cs, glb, donor))
 }
 
