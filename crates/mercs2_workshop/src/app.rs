@@ -668,6 +668,8 @@ pub fn run(opts: Options) {
         .to_string_lossy()
         .into_owned();
     let mut publisher: Option<crate::publish::Publisher> = None;
+    // In-flight background F10 export of a WAD asset (the heavy full-clip-decode path).
+    let mut exporter: Option<Exporter> = None;
     // ── Conform transform (dedicated panel): interactively scale/rotate/place the imported mesh
     // against the donor template, baked into the export. `conform_live` drives the preview entity
     // from these fields so the placement is visible against a donor reference in the sandbox. ──
@@ -1115,6 +1117,26 @@ pub fn run(opts: Options) {
                         }
                     }
 
+                    // ── Background F10 export: collect the finished bundle path (or error) and
+                    // clear the in-flight handle so the progress window closes. ──
+                    let mut export_msg = None;
+                    if let Some(e) = &exporter {
+                        match e.rx.try_recv() {
+                            Ok(m) => export_msg = Some(m),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                export_msg = Some(Err("export worker died".into()))
+                            }
+                        }
+                    }
+                    if let Some(msg) = export_msg {
+                        let lbl = exporter.take().map(|e| e.label).unwrap_or_default();
+                        status = match msg {
+                            Ok(dir) => format!("exported {lbl} -> {dir}"),
+                            Err(e) => format!("EXPORT FAILED: {e}"),
+                        };
+                    }
+
                     // ── Edit-mode held-key nudging of the selected placed instance. ──
                     if !list_visible {
                         if let Some(i) = sel_placed {
@@ -1249,6 +1271,28 @@ pub fn run(opts: Options) {
                                 );
                             });
                         });
+                        // ── Background-export modal: a centered "Exporting…" card while the worker
+                        // decodes the clip set. Request a repaint each frame so the poll above keeps
+                        // running (and the spinner animates) even without pointer input. ──
+                        if let Some(e) = &exporter {
+                            ctx.request_repaint();
+                            egui::Window::new("Exporting")
+                                .collapsible(false)
+                                .resizable(false)
+                                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                                .show(ctx, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::Spinner::new().size(16.0));
+                                        ui.add_space(6.0);
+                                        ui.label(format!("Exporting {} — decoding animation set…", e.label));
+                                    });
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        egui::RichText::new("Depending on the number of animations, this might take several minutes")
+                                            .weak(),
+                                    );
+                                });
+                        }
                         // ── ACTIVITY RAIL: pick the workbench. The viewport/camera never reset when
                         // this changes — only the navigator + inspector reconfigure. ──
                         egui::SidePanel::left("rail")
@@ -1330,7 +1374,7 @@ pub fn run(opts: Options) {
                                         if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
                                             actions.push(Act::Place);
                                         }
-                                        if ui.add_enabled(has_preview, egui::Button::new("Export  F10")).clicked() {
+                                        if ui.add_enabled(has_preview && exporter.is_none(), egui::Button::new("Export  F10")).clicked() {
                                             actions.push(Act::Export);
                                         }
                                         ui.separator();
@@ -3788,10 +3832,25 @@ pub fn run(opts: Options) {
                             }
                             Act::Export => {
                                 if let Some(p) = &preview {
-                                    status = match export_preview(&mut w, &opts.wadpath, &opts.overlays, &imported, &index, p) {
-                                        Ok(dir) => format!("exported {} -> {dir}", p.label),
-                                        Err(e) => format!("EXPORT FAILED: {e}"),
-                                    };
+                                    if imported.contains_key(&p.hash) {
+                                        // Import/merge → the fast OBJ writer (no clip decode); safe inline.
+                                        status = match export_preview(&mut w, &opts.wadpath, &opts.overlays, &imported, &index, p) {
+                                            Ok(dir) => format!("exported {} -> {dir}", p.label),
+                                            Err(e) => format!("EXPORT FAILED: {e}"),
+                                        };
+                                    } else if exporter.is_none() {
+                                        // WAD asset → the heavy rigged bundle (full clip decode) runs on a
+                                        // worker so the UI stays live; the modal reports until it lands.
+                                        status = format!("exporting {}…", p.label);
+                                        exporter = Some(export_bundle_in_background(
+                                            opts.wadpath.clone(),
+                                            opts.overlays.clone(),
+                                            p.hash,
+                                            p.label.clone(),
+                                            index.clone(),
+                                            std::path::PathBuf::from("workshop_export"),
+                                        ));
+                                    }
                                 }
                             }
                             Act::ExportHash(hash, label) => {
@@ -5849,8 +5908,37 @@ pub(crate) fn export_bundle_by_hash(
         &md.skin.rig,
         &clips,
         &clip_names,
+        &index.names,
     )?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Handle to an in-flight background bundle export (poll `rx` once per frame). Mirrors
+/// [`crate::publish::Publisher`].
+pub(crate) struct Exporter {
+    pub rx: std::sync::mpsc::Receiver<Result<String, String>>,
+    /// The asset being exported — for the progress window and the completion message.
+    pub label: String,
+}
+
+/// Run a WAD-asset bundle export off the UI thread. The bundle path opens its OWN wad stack and
+/// touches neither the app's live stack nor the GPU, so it is safe to hand to a worker — and it
+/// MUST be, because decoding a character's full clip set (~100 for Mattias/Jen) takes seconds and
+/// blocked the event loop, painting the window "Not Responding" until it finished.
+pub(crate) fn export_bundle_in_background(
+    base: String,
+    overlays: Vec<String>,
+    hash: u32,
+    label: String,
+    index: AssetIndex,
+    outroot: std::path::PathBuf,
+) -> Exporter {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_label = label.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(export_bundle_by_hash(&base, &overlays, hash, &worker_label, &index, &outroot));
+    });
+    Exporter { rx, label }
 }
 
 /// Write a model to `workshop_export/<label>/` as OBJ + MTL + decoded PNG textures (game-space
