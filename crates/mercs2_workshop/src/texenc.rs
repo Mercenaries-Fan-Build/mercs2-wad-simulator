@@ -32,6 +32,95 @@ pub fn encode_rgba(width: u32, height: u32, rgba: &[u8]) -> TextureData {
     TextureData { width, height, format, mip0: out.clone(), all_mips: out, mip_count: 1 }
 }
 
+/// Box-downsample straight-alpha RGBA8 by 2× (each output texel = average of a 2×2 source block),
+/// clamped at the edges for odd dimensions.
+fn downsample_2x(w: usize, h: usize, rgba: &[u8]) -> (usize, usize, Vec<u8>) {
+    let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+    let mut out = vec![0u8; nw * nh * 4];
+    for y in 0..nh {
+        for x in 0..nw {
+            for c in 0..4 {
+                let mut acc = 0u32;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let sx = (x * 2 + dx).min(w - 1);
+                        let sy = (y * 2 + dy).min(h - 1);
+                        acc += rgba[(sy * w + sx) * 4 + c] as u32;
+                    }
+                }
+                out[(y * nw + x) * 4 + c] = (acc / 4) as u8;
+            }
+        }
+    }
+    (nw, nh, out)
+}
+
+/// Encode RGBA8 to a FULL DXT mip chain (mip0 down to 1×1), one consistent format chosen from the
+/// full image's alpha — the game-safe form (a body shorter than the dimension-derived chain
+/// livelocks the streaming loader unless a resident-tail descriptor says otherwise). `all_mips` is
+/// the contiguous linear chain; `mip_count` is the level count.
+pub fn encode_rgba_full_chain(width: u32, height: u32, rgba: &[u8]) -> TextureData {
+    let has_alpha = rgba.chunks_exact(4).any(|p| p[3] < 250);
+    let format = if has_alpha { TexFormat::Bc3 } else { TexFormat::Bc1 };
+    let encode_level = |w: usize, h: usize, px: &[u8]| -> Vec<u8> {
+        let (bw, bh) = (w.div_ceil(4), h.div_ceil(4));
+        let mut out = Vec::with_capacity(bw * bh * if has_alpha { 16 } else { 8 });
+        let mut block = [[0u8; 4]; 16];
+        for by in 0..bh {
+            for bx in 0..bw {
+                for ty in 0..4 {
+                    for tx in 0..4 {
+                        let sx = (bx * 4 + tx).min(w - 1);
+                        let sy = (by * 4 + ty).min(h - 1);
+                        let s = (sy * w + sx) * 4;
+                        block[ty * 4 + tx] = [px[s], px[s + 1], px[s + 2], px[s + 3]];
+                    }
+                }
+                if has_alpha {
+                    out.extend_from_slice(&encode_alpha_block(&block));
+                }
+                out.extend_from_slice(&encode_color_block(&block));
+            }
+        }
+        out
+    };
+    let (mut w, mut h) = (width as usize, height as usize);
+    let mut px = rgba.to_vec();
+    let mut all = Vec::new();
+    let mut mip0 = Vec::new();
+    let mut levels = 0u32;
+    loop {
+        let enc = encode_level(w, h, &px);
+        if levels == 0 {
+            mip0 = enc.clone();
+        }
+        all.extend_from_slice(&enc);
+        levels += 1;
+        if w == 1 && h == 1 {
+            break;
+        }
+        let (nw, nh, np) = downsample_2x(w, h, &px);
+        w = nw;
+        h = nh;
+        px = np;
+    }
+    TextureData { width, height, format, mip0, all_mips: all, mip_count: levels }
+}
+
+/// Encode a tangent-space normal map (RGB = XYZ) as **DXT5nm** (BC3): the shader reads normal.x from
+/// the ALPHA channel (BC3's high-precision alpha block) and normal.y from GREEN, reconstructing
+/// z = sqrt(1 - x² - y²). We swizzle `[nx,ny,nz,_] -> [255, ny, 255, nx]` then BC3-encode. This is
+/// the format the Mercs2 material NORMAL slot (slot 2) expects; feeding a plain BC1/BC3 normal makes
+/// the shader sample x from a constant alpha and renders creased/blotchy per-pixel normals.
+pub fn encode_normal_full_chain(width: u32, height: u32, rgba: &[u8]) -> TextureData {
+    let mut sw = Vec::with_capacity(rgba.len());
+    for p in rgba.chunks_exact(4) {
+        sw.extend_from_slice(&[255, p[1], 255, p[0]]); // R=1, G=ny, B=1, A=nx
+    }
+    // alpha now = nx (varies) -> encode_rgba_full_chain selects BC3 (DXT5) automatically.
+    encode_rgba_full_chain(width, height, &sw)
+}
+
 fn rgb_to_565(p: [u8; 4]) -> u16 {
     ((p[0] as u16 >> 3) << 11) | ((p[1] as u16 >> 2) << 5) | (p[2] as u16 >> 3)
 }
