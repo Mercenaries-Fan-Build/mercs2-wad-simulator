@@ -1075,7 +1075,11 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             let rt_p_t =
                 [rt_p[0], rt_p[3], rt_p[6], rt_p[1], rt_p[4], rt_p[7], rt_p[2], rt_p[5], rt_p[8]];
             let r_new = mul3(&mul3(&rt_h, &rt_p_t), &r_par);
-            let s = hsim.scale;
+            // Uniform scale DOWN the chain: each finger's own scale came from a rank<2 degenerate
+            // fit and is unreliable; LBS-blending finger bones of DIFFERENT scale shears the surface
+            // into lumps (worst under a clip that curls them) — the same failure 6b smooths on the
+            // arm. Inherit the parent's (already hand-clamped) scale so the whole hand is one scale.
+            let s = par_sim.scale;
             let sr: [f64; 9] = std::array::from_fn(|i| r_new[i] * s);
             let anchor_s = *srcp.get(&primary[&h]).unwrap_or(&[0.0; 3]);
             let anchor_d = sk.tgt(h).unwrap_or(anchor_s);
