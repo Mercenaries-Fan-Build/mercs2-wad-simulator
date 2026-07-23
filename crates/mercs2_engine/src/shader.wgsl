@@ -8,7 +8,8 @@ struct Camera {
     model: mat4x4<f32>,          // model -> WORLD (for world-space position + normals; lights live here)
     cam_pos: vec4<f32>,          // xyz = camera world position (for specular view vector)
     fog_color_density: vec4<f32>, // rgb = fog color, w = density
-    fog_misc: vec4<f32>,          // x = fog enable 0/1, y = fog start distance, z/w reserved
+    fog_misc: vec4<f32>,          // x = fog enable 0/1, y = fog start distance, z = prelit, w = sun intensity
+    overlay: vec4<f32>,           // x = model alpha (1 = opaque), yzw reserved
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -310,5 +311,5 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         );
         rgb = mix(rgb, cam.fog_color_density.rgb, f);
     }
-    return vec4<f32>(rgb, 1.0);
+    return vec4<f32>(rgb, cam.overlay.x);
 }
