@@ -1044,7 +1044,22 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     // to the hand bone in `donor_transfer`.
     {
         // FK only the HAND bones; the fingers below them inherit it verbatim.
-        let is_hand_chain = |npc: u32| matches!(npc, 46 | 67);
+        // Forearm AND hand are solved ABSOLUTELY, from the orientation the SOURCE rig specifies.
+        //
+        // Chaining `R_tgt[h] * R_tgt[parent]^-1 * R_parent` imposes the DONOR's wrist orientation on
+        // geometry that was authored around the SOURCE's wrist. Measured (fit vs source-specified,
+        // decomposed): the forearm is off 19.4 deg total / 17.5 deg of it ROLL, but the hand is off
+        // 72.5 deg / 70.6 deg ROLL -- four times the forearm, because the FK adds ~53 deg of its own
+        // by substituting the donor's wrist relative. SWING is 1.8 deg throughout, so the position
+        // fit gets the DIRECTION right and only the roll is wrong.
+        //
+        // `R = R_tgt * (R_global * R_src)^-1` maps the source bone's own bind frame onto the donor's
+        // with nothing undetermined and nothing borrowed. Doing this for the forearm AND the hand
+        // keeps their RELATIVE orientation equal to the source's, which is what the geometry between
+        // them expects, so the wrist does not shear. An earlier attempt at this DID shear (0.5% ->
+        // 4.7%) because each bone kept its own fitted scale and LBS-blending different scales shears
+        // regardless of rotation -- so the chain also shares one scale here.
+        let is_hand_chain = |npc: u32| matches!(npc, 44 | 65 | 46 | 67);
         let trot = |h: u32| sk.bones.iter().find(|b| b.i == h).and_then(|b| b.rot);
         let tdepth = |mut h: u32| -> usize {
             let mut d = 0;
@@ -1081,27 +1096,31 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             else {
                 continue;
             };
+            let _ = rt_p;
             let inv = 1.0 / par_sim.scale.max(1e-12);
             let r_par: [f64; 9] = std::array::from_fn(|i| par_sim.sr[i] * inv);
-            // R_rel = R_tgt[h] * R_tgt[parent]^-1  (parent^-1 = transpose for an orthonormal rotation)
-            let rt_p_t =
-                [rt_p[0], rt_p[3], rt_p[6], rt_p[1], rt_p[4], rt_p[7], rt_p[2], rt_p[5], rt_p[8]];
-            let r_new = mul3(&mul3(&rt_h, &rt_p_t), &r_par);
-            if std::env::var("CHARSKIN_ROLLDBG").is_ok() {
-                // angle(A, B) for orthonormal rotations = angle of A*B^-1
-                let ang = |a: &[f64; 9], b: &[f64; 9]| -> f64 {
-                    let bt = [b[0], b[3], b[6], b[1], b[4], b[7], b[2], b[5], b[8]];
-                    let m = mul3(a, &bt);
-                    (((m[0] + m[4] + m[8] - 1.0) / 2.0).clamp(-1.0, 1.0)).acos().to_degrees()
-                };
-                let npc_h = full_npc.get(&primary[&h]).copied().unwrap_or(0);
-                eprintln!(
-                    "  [roll] hand npc {npc_h}: FOREARM r_par vs donor-bind = {:.1} deg | \
-                     HAND r_new vs donor-bind = {:.1} deg",
-                    ang(&r_par, &rt_p),
-                    ang(&r_new, &rt_h)
-                );
-            }
+            let r_global: [f64; 9] = [
+                t[0][0], t[1][0], t[2][0], t[0][1], t[1][1], t[2][1], t[0][2], t[1][2], t[2][2],
+            ];
+            // absolute: R_tgt * (R_global * R_src)^-1 — the source bone's own frame onto the donor's
+            let r_new = match inp
+                .ibm
+                .get(primary[&h])
+                .copied()
+                .flatten()
+                .and_then(|m| inv4(&m))
+                .and_then(|iv| {
+                    super::ortho3_colvec([iv[0], iv[1], iv[2], iv[4], iv[5], iv[6], iv[8], iv[9], iv[10]])
+                })
+                .and_then(|rs| super::ortho3_colvec(mul3(&r_global, &rs)))
+            {
+                Some(rsc) => {
+                    let rsc_t =
+                        [rsc[0], rsc[3], rsc[6], rsc[1], rsc[4], rsc[7], rsc[2], rsc[5], rsc[8]];
+                    mul3(&rt_h, &rsc_t)
+                }
+                None => r_par, // no source bind frame: leave it on the fitted parent
+            };
             // Uniform scale DOWN the chain: each finger's own scale came from a rank<2 degenerate
             // fit and is unreliable; LBS-blending finger bones of DIFFERENT scale shears the surface
             // into lumps (worst under a clip that curls them) — the same failure 6b smooths on the
@@ -1112,6 +1131,51 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             let anchor_d = sk.tgt(h).unwrap_or(anchor_s);
             xform.insert(h, Sim { sr, t: sub(anchor_d, apply3(&sr, anchor_s)), scale: s, rank: hsim.rank });
             fk += 1;
+        }
+        // DIAGNOSTIC: is the FOREARM's fitted roll actually undetermined? Compare the rotation
+        // section 6 produced against the one the SOURCE rig specifies (its own bind frame mapped
+        // onto the donor's). Decompose the difference into SWING (pointing direction) and TWIST
+        // (roll about the arm axis). A large TWIST with a small SWING proves the fit got the
+        // direction right and the roll arbitrary.
+        if std::env::var("CHARSKIN_ROLLDBG").is_ok() {
+            let r_global: [f64; 9] = [
+                t[0][0], t[1][0], t[2][0], t[0][1], t[1][1], t[2][1], t[0][2], t[1][2], t[2][2],
+            ];
+            for (bone_npc, tip_npc, lbl) in
+                [(44u32, 46u32, "L forearm"), (65, 67, "R forearm"), (46, 48, "L hand"), (67, 69, "R hand")]
+            {
+                let (Some(bh), Some(th)) =
+                    (sk.index_by_canonical(bone_npc), sk.index_by_canonical(tip_npc))
+                else { continue };
+                let (Some(sim), Some(rt), Some(&sj)) =
+                    (xform.get(&bh).copied(), trot(bh), primary.get(&bh))
+                else { continue };
+                let Some(rs) = inp.ibm.get(sj).copied().flatten().and_then(|m| inv4(&m)).and_then(|iv| {
+                    super::ortho3_colvec([iv[0], iv[1], iv[2], iv[4], iv[5], iv[6], iv[8], iv[9], iv[10]])
+                }) else { continue };
+                let Some(rsc) = super::ortho3_colvec(mul3(&r_global, &rs)) else { continue };
+                let rsc_t = [rsc[0], rsc[3], rsc[6], rsc[1], rsc[4], rsc[7], rsc[2], rsc[5], rsc[8]];
+                let r_should = mul3(&rt, &rsc_t);              // what the SOURCE says it should be
+                let iv = 1.0 / sim.scale.max(1e-12);
+                let r_is: [f64; 9] = std::array::from_fn(|i| sim.sr[i] * iv);  // what the FIT produced
+                let it = [r_is[0], r_is[3], r_is[6], r_is[1], r_is[4], r_is[7], r_is[2], r_is[5], r_is[8]];
+                let diff = mul3(&r_should, &it);
+                let total = (((diff[0] + diff[4] + diff[8] - 1.0) / 2.0).clamp(-1.0, 1.0)).acos().to_degrees();
+                // twist component about the bone's own axis
+                let ax = norm(sub(sk.tgt(th).unwrap_or([0.0; 3]), sk.tgt(bh).unwrap_or([0.0; 3])));
+                let trd = diff[0] + diff[4] + diff[8];
+                let (qw, qx, qy, qz) = if trd > -0.99 {
+                    let ss = (1.0 + trd).max(1e-9).sqrt() * 2.0;
+                    (0.25 * ss, (diff[7] - diff[5]) / ss, (diff[2] - diff[6]) / ss, (diff[3] - diff[1]) / ss)
+                } else { (1.0, 0.0, 0.0, 0.0) };
+                let dc = qx * ax[0] + qy * ax[1] + qz * ax[2];
+                let qn = (qw * qw + dc * dc).max(1e-12).sqrt();
+                let twist_deg = 2.0 * (dc / qn).abs().atan2((qw / qn).abs()).to_degrees();
+                eprintln!(
+                    "  [roll] {lbl:<10} fit-vs-source total {total:6.1} deg | TWIST(roll) {twist_deg:6.1} deg | SWING {:6.1} deg",
+                    (total - twist_deg).abs()
+                );
+            }
         }
         // RIGID: every finger inherits its hand's transform, so the hand cannot shear internally.
         let mut rigid = 0usize;
@@ -1126,99 +1190,9 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                 }
             }
         }
-        // SHARED WRIST TWIST: the palm still reads rolled because the source arm is rigged straight,
-        // so the forearm's roll ABOUT ITS OWN AXIS is unconstrained by the source and the conform
-        // picks an arbitrary one (measured: palm 76 deg off the donor). The source HAND geometry
-        // DOES define a roll (its own bind frame), so the correct twist is recoverable — solving the
-        // hand absolutely got the palm to 28 deg. That alone tore the wrist, because the hand then
-        // rotated RELATIVE to the forearm and the blend band sheared. The fix is to apply that same
-        // twist about the forearm axis to the WHOLE distal arm at once (forearm + roll + hand +
-        // fingers): they rotate together, so nothing moves relative to its neighbour across the wrist
-        // and there is no shear, while the palm still ends up correct.
-        let mut twisted = 0usize;
-        {
-            let r_global: [f64; 9] = [
-                t[0][0], t[1][0], t[2][0], t[0][1], t[1][1], t[2][1], t[0][2], t[1][2], t[2][2],
-            ];
-            let src_rot = |j: usize| -> Option<[f64; 9]> {
-                let m = inp.ibm.get(j).copied().flatten()?;
-                let iv = inv4(&m)?;
-                super::ortho3_colvec([iv[0], iv[1], iv[2], iv[4], iv[5], iv[6], iv[8], iv[9], iv[10]])
-            };
-            let add = |a: V3, b: V3| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-            for (fore_npc, roll_npc, hand_npc, lo, hi) in
-                [(44u32, 45u32, 46u32, 48u32, 62u32), (65, 66, 67, 69, 83)]
-            {
-                let (Some(fore_h), Some(hand_h)) =
-                    (sk.index_by_canonical(fore_npc), sk.index_by_canonical(hand_npc))
-                else {
-                    continue;
-                };
-                let (Some(hsim), Some(rt_h), Some(&hj)) =
-                    (xform.get(&hand_h).copied(), trot(hand_h), primary.get(&hand_h))
-                else {
-                    continue;
-                };
-                // chained vs absolute hand rotation
-                let hinv = 1.0 / hsim.scale.max(1e-12);
-                let r_chain: [f64; 9] = std::array::from_fn(|i| hsim.sr[i] * hinv);
-                let Some(rsc) = src_rot(hj).and_then(|rs| super::ortho3_colvec(mul3(&r_global, &rs)))
-                else {
-                    continue;
-                };
-                let rsc_t = [rsc[0], rsc[3], rsc[6], rsc[1], rsc[4], rsc[7], rsc[2], rsc[5], rsc[8]];
-                let r_abs = mul3(&rt_h, &rsc_t);
-                let ct = [
-                    r_chain[0], r_chain[3], r_chain[6], r_chain[1], r_chain[4], r_chain[7], r_chain[2],
-                    r_chain[5], r_chain[8],
-                ];
-                let diff = mul3(&r_abs, &ct); // R_abs * R_chain^-1
-                // forearm axis + pivot in target space
-                let pivot = sk.tgt(fore_h).unwrap_or([0.0; 3]);
-                let ax = norm(sub(sk.tgt(hand_h).unwrap_or([0.0; 3]), pivot));
-                // keep ONLY the twist of `diff` about `ax` (swing/twist decomposition of the quat)
-                let trd = diff[0] + diff[4] + diff[8];
-                let (qw, qx, qy, qz) = if trd > -0.99 {
-                    let ss = (1.0 + trd).max(1e-9).sqrt() * 2.0;
-                    (0.25 * ss, (diff[7] - diff[5]) / ss, (diff[2] - diff[6]) / ss, (diff[3] - diff[1]) / ss)
-                } else {
-                    (1.0, 0.0, 0.0, 0.0)
-                };
-                let dc = qx * ax[0] + qy * ax[1] + qz * ax[2];
-                let qn = (qw * qw + dc * dc).max(1e-12).sqrt();
-                let (tw, tv) = (qw / qn, dc / qn);
-                let (c, s2) = (2.0 * tw * tw - 1.0, 2.0 * tw * tv);
-                let (x, y, z) = (ax[0], ax[1], ax[2]);
-                let ic = 1.0 - c;
-                let twist = [
-                    c + x * x * ic, x * y * ic - z * s2, x * z * ic + y * s2,
-                    y * x * ic + z * s2, c + y * y * ic, y * z * ic - x * s2,
-                    z * x * ic - y * s2, z * y * ic + x * s2, c + z * z * ic,
-                ];
-                // rotate the whole distal chain about (pivot, ax): out'(v) = twist*(out(v)-pivot)+pivot
-                let mut chain_h = vec![fore_h, hand_h];
-                if let Some(rh) = sk.index_by_canonical(roll_npc) {
-                    chain_h.push(rh);
-                }
-                for npc in lo..=hi {
-                    if let Some(fh) = sk.index_by_canonical(npc) {
-                        chain_h.push(fh);
-                    }
-                }
-                for th in chain_h {
-                    if let Some(sim) = xform.get(&th).copied() {
-                        let new_sr = mul3(&twist, &sim.sr);
-                        let new_t = add(apply3(&twist, sim.t), sub(pivot, apply3(&twist, pivot)));
-                        xform.insert(th, Sim { sr: new_sr, t: new_t, scale: sim.scale, rank: sim.rank });
-                        twisted += 1;
-                    }
-                }
-            }
-        }
         if fk > 0 || rigid > 0 {
             notes.push(format!(
-                "rigid hand: {fk} hand re-oriented, {rigid} finger(s) bound to the hand, {twisted} \
-                 distal-arm bone(s) shared-twisted to align the palm without shearing the wrist"
+                "rigid hand: {fk} hand bone(s) re-oriented from target bind, {rigid} finger bone(s)                  bound to the hand (no independent finger transforms -> no LBS shear)"
             ));
         }
     }
