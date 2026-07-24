@@ -134,6 +134,51 @@ pub fn apply_donor_transfer(
         smooth_weights(&mut t.per_vertex, &adj, opts.smooth, opts.lambda);
     }
 
+    // ---- RIGID HAND (weight side) ----
+    //
+    // The conform already moves the hand as one rigid unit (`build.rs` §6c), but the sampled donor
+    // weights still name the individual finger bones, so at runtime a clip would drive them apart and
+    // shear the hand anyway. Measured on 50 Cent: the body conforms uniformly (p90 0.88x edge change,
+    // 1.1% of edges disturbed) while the hand hit p90 1.57x, extremes 0.15x..8.13x, and 9.9% of edges
+    // stretched past 2x or crushed below half — nine times the body's rate. The source hand is 146
+    // verts total (~28 per finger) against the donor's 630, so there is no density to absorb shear and
+    // no articulation worth having at that resolution. Fold every finger influence onto its hand bone:
+    // the hand then deforms as a unit under any clip. Weapons are unaffected (they attach to the hand
+    // bone, not the fingers).
+    {
+        let hier_of = |npc: u32| -> Option<u32> {
+            let hash = super::npc84_name_hash(npc)?;
+            skel.bones.iter().find(|b| b.name_hash == hash).map(|b| b.index as u32)
+        };
+        let mut finger_to_hand: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for (hand_npc, lo, hi) in [(46u32, 48u32, 62u32), (67, 69, 83)] {
+            if let Some(hand) = hier_of(hand_npc) {
+                for npc in lo..=hi {
+                    if let Some(f) = hier_of(npc) {
+                        finger_to_hand.insert(f, hand);
+                    }
+                }
+            }
+        }
+        let mut folded = 0usize;
+        for infl in t.per_vertex.iter_mut() {
+            if !infl.iter().any(|(b, _)| finger_to_hand.contains_key(b)) {
+                continue;
+            }
+            let mut acc: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+            for (b, w) in infl.iter() {
+                *acc.entry(finger_to_hand.get(b).copied().unwrap_or(*b)).or_insert(0.0) += *w;
+            }
+            let mut v: Vec<(u32, f64)> = acc.into_iter().collect();
+            v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            *infl = v;
+            folded += 1;
+        }
+        if folded > 0 {
+            eprintln!("  rigid hand: folded finger influences onto the hand bone for {folded} vertices");
+        }
+    }
+
     // Whole-model palette from the bones the transfer actually used.
     let mut used: Vec<u32> = t.per_vertex.iter().flatten().map(|x| x.0).collect();
     used.sort_unstable();

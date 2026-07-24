@@ -1019,20 +1019,32 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         }
     }
 
-    // ---- 6c. Distal-hand FK: orient the hand + finger bones from the TARGET bind orientation ----
+    // ---- 6c. RIGID HAND: orient the hand from the target bind, then move the fingers WITH it ----
     //
-    // A finger is a LINE of joints and a hand's correspondence cloud is a flat palm plane, so the
-    // position-only weighted fit (section 6) cannot resolve their rotation: `fit_similarity_weighted`
-    // returns rank<2 and the bone inherits a canted parent, compounding down every finger into a flat
-    // splayed claw (the hand reads sub-human at rest even though the body conforms cleanly). The donor
-    // skeleton KNOWS each bone's real bind orientation (`TargetBone::rot`), which `pos` alone threw
-    // away. Re-derive each hand-chain bone by FORWARD KINEMATICS: take the target's parent->child bend
-    // (`R_tgt[h] * R_tgt[parent]^-1`) and apply it to the parent's ALREADY-CONFORMED rotation, walking
-    // parent-first so a finger sees its corrected hand. Scale + wrist anchor stay from 6/6b; only the
-    // rotation changes. Bones (or donors) without a bind orientation fall back to the fit untouched.
+    // Two separate problems live in the hand and this pass fixes both.
+    //
+    // ORIENTATION: a finger is a LINE of joints and a palm is a flat PLANE, so the position-only fit
+    // in section 6 cannot resolve their rotation (`fit_similarity_weighted` returns rank<2), and the
+    // bone inherits a canted parent — compounding into a splayed claw. The donor knows each bone's
+    // real bind orientation (`TargetBone::rot`), which `pos` alone threw away, so the HAND bone is
+    // re-derived by forward kinematics: the target's parent->child bend `R_tgt[h] * R_tgt[parent]^-1`
+    // applied to the parent's already-conformed rotation.
+    //
+    // DISTORTION: giving each of the ~30 finger bones its OWN fitted transform and LBS-blending them
+    // shears the surface, and a finger has far too few vertices to absorb it. Measured on 50 Cent
+    // (conformed vs source edge lengths): the body is uniform — p90 0.88x, 1.1% of edges disturbed —
+    // while the HAND ran p90 1.57x with extremes 0.15x..8.13x and 9.9% of edges stretched past 2x or
+    // crushed below half. Nine times the body's distortion rate. The source hand is 146 verts for the
+    // whole hand (~28 per finger) against the donor's 630, so there is no spare density to hide it in
+    // and no articulation worth having at that resolution.
+    //
+    // So the fingers do NOT get independent transforms: they inherit the hand's outright and the hand
+    // travels as ONE RIGID UNIT, which is internally distortion-free by construction and preserves the
+    // source's own hand shape. Clip-time shear is prevented separately, by binding the hand's vertices
+    // to the hand bone in `donor_transfer`.
     {
-        let is_hand_chain =
-            |npc: u32| matches!(npc, 46 | 67) || (48..=62).contains(&npc) || (69..=83).contains(&npc);
+        // FK only the HAND bones; the fingers below them inherit it verbatim.
+        let is_hand_chain = |npc: u32| matches!(npc, 46 | 67);
         let trot = |h: u32| sk.bones.iter().find(|b| b.i == h).and_then(|b| b.rot);
         let tdepth = |mut h: u32| -> usize {
             let mut d = 0;
@@ -1086,8 +1098,23 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             xform.insert(h, Sim { sr, t: sub(anchor_d, apply3(&sr, anchor_s)), scale: s, rank: hsim.rank });
             fk += 1;
         }
-        if fk > 0 {
-            notes.push(format!("distal-hand FK: re-oriented {fk} hand/finger bones from target bind"));
+        // RIGID: every finger inherits its hand's transform, so the hand cannot shear internally.
+        let mut rigid = 0usize;
+        for (hand_npc, lo, hi) in [(46u32, 48u32, 62u32), (67, 69, 83)] {
+            let Some(hand_h) = sk.index_by_canonical(hand_npc) else { continue };
+            let Some(hand_sim) = xform.get(&hand_h).copied() else { continue };
+            for npc in lo..=hi {
+                if let Some(fh) = sk.index_by_canonical(npc) {
+                    if xform.insert(fh, hand_sim).is_some() {
+                        rigid += 1;
+                    }
+                }
+            }
+        }
+        if fk > 0 || rigid > 0 {
+            notes.push(format!(
+                "rigid hand: {fk} hand bone(s) re-oriented from target bind, {rigid} finger bone(s)                  bound to the hand (no independent finger transforms -> no LBS shear)"
+            ));
         }
     }
 
