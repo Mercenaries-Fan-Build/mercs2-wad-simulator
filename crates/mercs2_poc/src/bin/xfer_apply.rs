@@ -395,7 +395,17 @@ fn main() {
     // like retail authors one. Walk it and close the current group the moment adding a triangle would
     // push its DISTINCT bone set past the cap. A group never spans parts. This DISCOVERS how many
     // groups each part needs rather than guessing it.
-    const GROUP_BONE_CAP: usize = 46; // headroom under 48 for any contiguous-run bridging the injector adds
+    // Cap on SLOTS, not distinct bones. The injector re-derives each group's palette with
+    // `build_palette_ranges`, which BRIDGES small gaps between contiguous HIER runs — so 46 distinct
+    // bones can occupy 49 slots and blow the 48 the game ships. Counting bones and hoping for
+    // headroom is exactly how that surfaced as a late panic; count what the injector counts.
+    const GROUP_SLOT_CAP: usize = 48;
+    let slots_of = |bones: &[u8]| -> usize {
+        let mut v: Vec<u32> = bones.iter().map(|&b| b as u32).collect();
+        v.sort_unstable();
+        v.dedup();
+        mercs2_formats::char_skin::build::build_palette_ranges(&v).2
+    };
     let tri_bones = |t: &[u32; 3]| -> Vec<u8> {
         let mut s: Vec<u8> = Vec::new();
         for &v in t {
@@ -421,7 +431,7 @@ fn main() {
                     merged.push(*b);
                 }
             }
-            let open_new = seg_part.last() != Some(&pi) || merged.len() > GROUP_BONE_CAP;
+            let open_new = seg_part.last() != Some(&pi) || slots_of(&merged) > GROUP_SLOT_CAP;
             if open_new {
                 seg_part.push(pi);
                 cur_bones = tb;
