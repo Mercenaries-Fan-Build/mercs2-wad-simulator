@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_core"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 modernization — the simulation spine (World, fixed tick, ordered schedule, components). Renderer- and asset-agnostic."
 readme = "README.md"

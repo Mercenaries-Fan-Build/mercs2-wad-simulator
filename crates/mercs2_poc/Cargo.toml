@@ -1,6 +1,7 @@
 [package]
 name = "mercs2_poc"
 version = "0.1.0"
+publish = false                # excluded from the crates.io release set
 edition = "2021"
 description = "Mercenaries 2 modernization — the `inject_character` CLI: bring a novel, externally-authored skinned character (Mixamo/glTF) into the game the FAITHFUL, RE-correct way via mercs2_formats::char_skin (palette-relative BLENDINDICES + INFO(56) range table + direction-aligned re-pose). Hosts the glTF adapter (gltf.rs) feeding char_skin's CharGlbData."
 license.workspace = true

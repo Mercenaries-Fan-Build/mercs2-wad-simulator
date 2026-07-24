@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_faction"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 13 (faction/reputation/pursuit): the combat->infraction->attitude->pursuit loop from faction_reputation_code_map.md."
 readme = "README.md"

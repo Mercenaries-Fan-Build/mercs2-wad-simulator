@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_ai"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 11 (row 23): AI (percept->goal planner, cover, squads, pedestrians, driving). WAVE-1 scaffold."
 readme = "README.md"

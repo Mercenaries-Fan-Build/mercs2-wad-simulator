@@ -10,27 +10,28 @@ repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-gam
 
 # Internal crate versions for publishing. Each publishable member references its intra-workspace
 # deps as `<name> = { workspace = true }`; the version here is what crates.io resolves against.
-# The four originally-published crates (mercs2_formats, ucfx_byteswap, wad_simulator, loadprobe)
-# are at 2.0.0; the rest debut at 1.0.0.
+# Bump sized by commit count since the crate's last release: <=2 patch, <20 minor, >=20 major.
+# NOTE: mercs2_formats crossed to 3.0.0, so every dependent's `workspace = true` requirement moved
+# with it — a `^2.1` consumer (e.g. mercs2-modkit) will NOT pick 3.0.0 up until it is edited too.
 [workspace.dependencies]
-mercs2_formats = { path = "crates/mercs2_formats", version = "2.1.0" }
+mercs2_formats = { path = "crates/mercs2_formats", version = "3.0.0" }
 mercs2_luac = { path = "crates/mercs2_luac", version = "1.0.0" }
-mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.0.0" }
-ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.0.0" }
-mercs2_core = { path = "crates/mercs2_core", version = "1.0.0" }
-mercs2_audio = { path = "crates/mercs2_audio", version = "1.0.0" }
-mercs2_script = { path = "crates/mercs2_script", version = "1.0.0" }
-mercs2_physics = { path = "crates/mercs2_physics", version = "1.0.0" }
-mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.0.0" }
-mercs2_ai = { path = "crates/mercs2_ai", version = "1.0.0" }
-mercs2_anim = { path = "crates/mercs2_anim", version = "1.0.0" }
-mercs2_water = { path = "crates/mercs2_water", version = "1.0.0" }
-mercs2_decal = { path = "crates/mercs2_decal", version = "1.0.0" }
-mercs2_population = { path = "crates/mercs2_population", version = "1.0.0" }
-mercs2_combat = { path = "crates/mercs2_combat", version = "1.0.0" }
-mercs2_faction = { path = "crates/mercs2_faction", version = "1.0.0" }
-mercs2_ui = { path = "crates/mercs2_ui", version = "1.0.0" }
-mercs2_engine = { path = "crates/mercs2_engine", version = "1.0.0" }
+mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.0.1" }
+ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.1.0" }
+mercs2_core = { path = "crates/mercs2_core", version = "1.0.1" }
+mercs2_audio = { path = "crates/mercs2_audio", version = "1.1.0" }
+mercs2_script = { path = "crates/mercs2_script", version = "1.1.0" }
+mercs2_physics = { path = "crates/mercs2_physics", version = "1.0.1" }
+mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.0.1" }
+mercs2_ai = { path = "crates/mercs2_ai", version = "1.0.1" }
+mercs2_anim = { path = "crates/mercs2_anim", version = "1.0.1" }
+mercs2_water = { path = "crates/mercs2_water", version = "1.1.0" }
+mercs2_decal = { path = "crates/mercs2_decal", version = "1.0.1" }
+mercs2_population = { path = "crates/mercs2_population", version = "1.0.1" }
+mercs2_combat = { path = "crates/mercs2_combat", version = "1.1.0" }
+mercs2_faction = { path = "crates/mercs2_faction", version = "1.0.1" }
+mercs2_ui = { path = "crates/mercs2_ui", version = "1.0.1" }
+mercs2_engine = { path = "crates/mercs2_engine", version = "1.1.0" }
 
 # The load path is CPU-bound `sges`/zlib block decompression + mesh assembly. In a plain `dev` build
 # those run UNOPTIMIZED, making the PMC-interior boot ~134s (vs ~15s optimized) — a ~9x tax purely from

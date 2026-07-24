@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_mesh"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 — model container → indexed triangle geometry (vertices, indices, per-material draw groups). Renderer-agnostic."
 license.workspace = true

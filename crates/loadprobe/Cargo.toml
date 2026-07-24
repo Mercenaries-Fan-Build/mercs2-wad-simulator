@@ -1,6 +1,6 @@
 [package]
 name = "loadprobe"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 description = "Mercenaries 2 modernization — world-load progress and forensic analyzer for pmc_blackbox.log (milestone scoring + end-state classification)."
 readme = "README.md"

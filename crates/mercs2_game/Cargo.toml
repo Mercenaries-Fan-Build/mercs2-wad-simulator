@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_game"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 — the game exe: boots the engine from the player's save (profile → SaveState → world). Game-specific config lives here, driving the asset-agnostic engine."
 readme = "README.md"

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_ui"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 reimpl — silo 15 (rows 27/18): GUI/HUD/Scaleform + input extensions. WAVE-1 scaffold."
 readme = "README.md"
