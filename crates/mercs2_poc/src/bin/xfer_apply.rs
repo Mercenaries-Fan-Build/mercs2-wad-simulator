@@ -256,6 +256,11 @@ fn main() {
     used.dedup();
     let (ranges32, slot_of, slots) = build_palette_ranges(&used);
     println!("transferred bones: {}  palette: {} slots / {} runs", used.len(), slots, ranges32.len());
+    // The conform's own notes were being dropped on the floor here, so a pass could silently do
+    // nothing (or something surprising) and leave no trace in the build log.
+    for n in &cs.notes {
+        println!("  note: {n}");
+    }
 
     let nv = cs.posed.len();
     let mut skin = vec![0u8; nv * 8];

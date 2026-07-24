@@ -31,7 +31,7 @@ use crate::skeleton::Skeleton;
 
 /// Gram-Schmidt a row-major 3×3 (rows = mapped basis) into an orthonormal rotation, or `None`
 /// if it is degenerate (zero/parallel rows). Removes any scale a bind matrix carried.
-fn ortho3_colvec(m: [f64; 9]) -> Option<[f64; 9]> {
+pub(crate) fn ortho3_colvec(m: [f64; 9]) -> Option<[f64; 9]> {
     let row = |i: usize| [m[i * 3], m[i * 3 + 1], m[i * 3 + 2]];
     let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     let sub = |a: [f64; 3], b: [f64; 3], s: f64| [a[0] - b[0] * s, a[1] - b[1] * s, a[2] - b[2] * s];

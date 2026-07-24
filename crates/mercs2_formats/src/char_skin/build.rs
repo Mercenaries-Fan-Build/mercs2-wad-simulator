@@ -1162,6 +1162,146 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         }
     }
 
+    // ---- 6d. GIRTH: a bone's THICKNESS must not follow its joint-SPACING scale ----
+    //
+    // Section 6 derives ONE uniform scale per bone from joint POSITIONS, so a region whose source
+    // joints sit closer together than the donor's is shrunk whole — length AND girth. Measured on
+    // 50 Cent -> `pmc_hum_mattias`: `Bone_Hips` 0.881 and both thighs 0.891, the two smallest scales
+    // in the character, against a body scale of ~1.03 — while everything above the waist is scaled
+    // UP (chest 1.063, head 1.148). The pelvis shipped ~15% narrower than the rest of him (hip girth
+    // 143.8mm against the donor's 169.7mm — a female silhouette on a male character), and the scale
+    // ratio predicts that girth deficit to within 1% (0.855 vs 0.847 measured off the mesh), so this
+    // accounts for the whole of the effect.
+    //
+    // Only the AXIAL half of that scale is actually constrained — it is what lands the knee on the
+    // donor's knee. The RADIAL half is free, and nothing justifies shrinking it. So expand radially
+    // about the bone's own axis, back up to the body scale, ONE-SIDED (never shrink — a bone the fit
+    // scaled ABOVE the body scale keeps its own girth):
+    //
+    //     M = I + (k-1)(I - a a^T)      k = clamp(body_scale / own_scale, 1.0, K_MAX)
+    //
+    // Points on the axis are fixed by construction (`M a = a`), so both of the bone's joints stay
+    // exactly where the fit put them and the seam/landmark metrics are unaffected.
+    //
+    // `M` is symmetric and NOT a similarity, which breaks the shortcut section 7's normal stage
+    // relies on ("`sr` is rotation x uniform scale, so applying `sr` and renormalising is exact").
+    // Corrected bones therefore also publish a normal map `M^-1 . sr` in `nrm_lin`. For the same
+    // reason `Sim::scale` stays the AXIAL scale and no longer describes all of `sr`, so a consumer
+    // reading `sr / scale` as a pure rotation (char_diag's rot column) sees the radial term as a
+    // small apparent angle on these bones.
+    let mut nrm_lin: HashMap<u32, [f64; 9]> = HashMap::new();
+    {
+        const K_MAX: f64 = 1.30;
+        // Body scale = the influence-mass-weighted MEDIAN of the fitted axial scales. Weighting by
+        // vertex mass matters: 30 of the ~46 mapped bones are finger bones that 6c binds rigidly to
+        // a single scale, so an unweighted median measures the hand rather than the body.
+        let mut mass: HashMap<u32, f64> = HashMap::new();
+        for vi in 0..nv {
+            for k in 0..4 {
+                let w = inp.vweights[vi][k] as f64;
+                if w <= 0.0 {
+                    continue;
+                }
+                if let Some(&h) = full.get(&(inp.vjoints[vi][k] as usize)) {
+                    *mass.entry(h).or_insert(0.0) += w;
+                }
+            }
+        }
+        let mut rows: Vec<(f64, f64)> = xform
+            .iter()
+            .map(|(h, s)| (s.scale, mass.get(h).copied().unwrap_or(0.0)))
+            .filter(|(s, m)| s.is_finite() && *s > 0.0 && *m > 0.0)
+            .collect();
+        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let half = rows.iter().map(|r| r.1).sum::<f64>() * 0.5;
+        let mut acc = 0.0;
+        let mut body_scale = 1.0;
+        for &(s, m) in &rows {
+            acc += m;
+            if acc >= half {
+                body_scale = s;
+                break;
+            }
+        }
+
+        // Subtree sizes, so the axis can follow the chain rather than an arbitrary child. HIER
+        // stores parents before children, so one reverse sweep accumulates them.
+        let nb = sk.bones.len();
+        let mut sub_size = vec![1usize; nb];
+        for i in (0..nb).rev() {
+            let p = sk.bones[i].parent;
+            if p >= 0 && (p as usize) < nb && (p as usize) != i {
+                sub_size[p as usize] += sub_size[i];
+            }
+        }
+
+        let mut fixed: Vec<(String, f64)> = Vec::new();
+        let hs: Vec<u32> = xform.keys().copied().collect();
+        for h in hs {
+            let sim = xform[&h];
+            if !sim.scale.is_finite() || sim.scale <= 0.0 {
+                continue;
+            }
+            let k = (body_scale / sim.scale).clamp(1.0, K_MAX);
+            if k < 1.001 {
+                continue;
+            }
+            let Some(t_pos) = sk.tgt(h) else { continue };
+            let Some(hi) = sk.bones.iter().position(|b| b.i == h) else { continue };
+            // Axis = toward the child that CONTINUES the chain, taken as the child with the largest
+            // subtree. For a limb that is the only child (thigh -> shin); for the pelvis it picks
+            // `bone_spine1` over the two thighs, so the radial plane is the horizontal one that hip
+            // WIDTH lives in rather than something tilted down a leg. Leaves fall back to the
+            // direction from their parent.
+            let best_child = (0..nb)
+                .filter(|&c| sk.bones[c].parent == hi as i32)
+                .max_by_key(|&c| sub_size[c]);
+            let axis = match best_child.map(|c| sk.bones[c].pos) {
+                Some(cp2) if len(sub(cp2, t_pos)) > 1e-6 => norm(sub(cp2, t_pos)),
+                _ => {
+                    let p = sk.bones[hi].parent;
+                    let pp = (p >= 0 && (p as usize) < nb).then(|| sk.bones[p as usize].pos);
+                    match pp {
+                        Some(pp) if len(sub(t_pos, pp)) > 1e-6 => norm(sub(t_pos, pp)),
+                        _ => continue,
+                    }
+                }
+            };
+            let radial = |g: f64| -> [f64; 9] {
+                std::array::from_fn(|i| {
+                    let (r, c) = (i / 3, i % 3);
+                    let d = if r == c { 1.0 } else { 0.0 };
+                    d + (g - 1.0) * (d - axis[r] * axis[c])
+                })
+            };
+            let m = radial(k);
+            let m_inv = radial(1.0 / k);
+            let sr = mul3(&m, &sim.sr);
+            // Expand about the bone's own target joint: p' = M(p - T) + T, so points ON the axis,
+            // both joints included, do not move at all.
+            let mt = apply3(&m, sim.t);
+            let mtp = apply3(&m, t_pos);
+            let t = [
+                mt[0] + t_pos[0] - mtp[0],
+                mt[1] + t_pos[1] - mtp[1],
+                mt[2] + t_pos[2] - mtp[2],
+            ];
+            nrm_lin.insert(h, mul3(&m_inv, &sim.sr));
+            xform.insert(h, Sim { sr, t, scale: sim.scale, rank: sim.rank });
+            fixed.push((sk.bones[hi].name.clone(), k));
+        }
+        if !fixed.is_empty() {
+            fixed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top: Vec<String> =
+                fixed.iter().take(4).map(|(n, k)| format!("{n} x{k:.3}")).collect();
+            notes.push(format!(
+                "girth: body scale {body_scale:.3}, {} bone(s) expanded radially ({})",
+                fixed.len(),
+                top.join(", ")
+            ));
+        }
+    }
+
     // Re-sync `bone_sims` with what sections 6b/6c ACTUALLY applied.
     //
     // `bone_sims` was filled in section 6 and never updated, while 6b/6c mutate only `xform` — so
@@ -1186,9 +1326,10 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     // measurably anisotropic — 3.0x on this pair — so a normal cannot simply be multiplied by L. In
     // column form the point map is A = L^T, and a normal maps by (A^-1)^T, which reduces to L^-1.
     //
-    // Stage 2, the per-bone re-pose, is a SIMILARITY: `sr` = rotation x uniform scale. There
-    // (M^-1)^T = (1/s)R, i.e. proportional to the rotation, so applying `sr` and renormalising is
-    // already exact and no inverse is needed.
+    // Stage 2, the per-bone re-pose, is normally a SIMILARITY: `sr` = rotation x uniform scale.
+    // There (M^-1)^T = (1/s)R, i.e. proportional to the rotation, so applying `sr` and renormalising
+    // is already exact and no inverse is needed. The exception is section 6d, whose radial girth
+    // correction makes `sr` anisotropic; those bones supply their own normal map via `nrm_lin`.
     let lin_inv: Option<[f64; 9]> = if inp.normals.is_empty() {
         None
     } else {
@@ -1236,8 +1377,12 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                     continue;
                 }
                 let j = inp.vjoints[vi][k] as usize;
-                let Some(sim) = full.get(&j).and_then(|h| xform.get(h)) else { continue };
-                let q = norm(apply3(&sim.sr, nc));
+                let Some(&h) = full.get(&j) else { continue };
+                let Some(sim) = xform.get(&h) else { continue };
+                // Section 6d's radially-expanded bones are NOT similarities, so `sr` is no longer
+                // proportional to their normal map; they publish `M^-1 . sr` for exactly this.
+                let lin = nrm_lin.get(&h).unwrap_or(&sim.sr);
+                let q = norm(apply3(lin, nc));
                 na[0] += w * q[0];
                 na[1] += w * q[1];
                 na[2] += w * q[2];
