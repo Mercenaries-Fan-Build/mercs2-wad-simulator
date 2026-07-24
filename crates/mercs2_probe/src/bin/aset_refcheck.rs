@@ -10,8 +10,9 @@
 //! (`FUN_008739e0`) only unlinks on 4, so the pending count never drains and the world-streaming
 //! gate (`FUN_004b9af0`) never releases — a spinning hang with no crash and no error.
 //!
-//! Retail ships zero dangling refs (measured: retail `vz-patch.wad` 5451 rows, all resolve; base
-//! `vz.wad` 30645 rows, all resolve), so any violation here is ours.
+//! Every WAD that loads has zero dangling refs (measured: retail base `vz.wad` 30645 rows; our
+//! WORKING dlc01 port patch 5451 rows), while the wardrobe builds that hang carry 22 each.
+//! NOTE: there is no Pandemic-shipped `vz-patch.wad` — every vz-patch is a build of ours.
 //!
 //! Usage: `aset_refcheck <wad> [<wad> ...]`  — exit code 1 if any WAD has a violation.
 

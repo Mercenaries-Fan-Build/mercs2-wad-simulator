@@ -334,8 +334,9 @@ pub fn build_patch_wad_multi(
     // request can never be satisfied (`FUN_00875b00` only issues when the declared size fits the
     // largest free run), so the node never reaches provider-status 4, `Stream_Manager_Tick`
     // (`FUN_008739e0`) unlinks only on 4, the pending count never drains, and world streaming hangs
-    // with no crash and no error. Retail ships ZERO dangling rungs (measured: retail `vz-patch.wad`
-    // 5451 rows, base `vz.wad` 30645 rows, all resolve) — `aset_refcheck` enforces this.
+    // with no crash and no error. Every WAD that LOADS has zero dangling rungs (measured: retail base
+    // `vz.wad` 30645 rows; our working dlc01 port patch 5451 rows) while both wardrobe builds that
+    // hang carry 22 — `aset_refcheck` enforces this.
     //
     // Remap each rung through the source→patch map; sentinel (`0xFFFF` = "rung absent") anything
     // this patch does not carry, which degrades the asset to its coarse tier instead of wedging.
@@ -718,7 +719,8 @@ mod tests {
     /// the SOURCE archive's index space. In any patch smaller than its source that leaves DANGLING
     /// block references — `vz.wad` has 11,370 blocks, a patch has tens. Measured on the shipped
     /// builds: 22 dangling refs across 10 rows (all `resident-pmcoutpost_fountain` rungs), while
-    /// retail `vz-patch.wad` (5451 rows) and base `vz.wad` (30645 rows) have ZERO. The engine then
+    /// retail base `vz.wad` (30645 rows) and our WORKING dlc01 port patch (5451 rows) have ZERO.
+    /// (There is no Pandemic-shipped `vz-patch.wad`; every vz-patch is one of ours.) The engine then
     /// reads INDX out of range, decodes whatever bytes sit there as a page index + `packed_field`,
     /// and sizes a streaming buffer it can never satisfy — so the node never reaches provider-status
     /// 4, `Stream_Manager_Tick` (`FUN_008739e0`) unlinks only on 4, the pending count never drains,
