@@ -113,6 +113,15 @@ struct Cli {
     /// (repeatable). E.g. a texture: "0x21A2AFD1:27:heart.bin".
     #[arg(long)]
     inject_extra: Vec<String>,
+    /// Carry a block VERBATIM out of the source WAD into the patch, by path substring (repeatable).
+    ///
+    /// Use this when a block the patch already carries has ASET rows whose `_P001`/`_P002`/`_P003`
+    /// LOD rungs name OTHER base blocks. Without those blocks present, the rungs cannot be remapped
+    /// and get sentinelled — the asset still loads but silently degrades to its coarse tier, losing
+    /// base-game detail. Carrying them keeps the whole chain intact; `aset_closure` measures the cost
+    /// (the pmcoutpost_fountain chain is 3 blocks / 1.5 MB and pulls in nothing further).
+    #[arg(long)]
+    carry_block: Vec<String>,
     /// Build ONLY the --inject-extra blocks (new-asset injection) — do NOT touch any donor block.
     /// Use for from-scratch models/textures that override nothing existing.
     #[arg(long)]
@@ -301,6 +310,41 @@ fn build_extra(spec: &str) -> Result<PatchBlock, String> {
 
 /// Ship a raw decompressed block override "<path_substr>:<file>": look the source block up by path
 /// substring, carry its ASET entries + path, sges-compress the file, overlay it (content-additive).
+/// Copy a source-WAD block into the patch unchanged: same payload, same path, its own ASET rows,
+/// and `source_block_index` set so [`build_patch_wad_multi`] can remap any rung that names it.
+fn build_carry_block(
+    file: &mut File,
+    archive: &FfcsArchive,
+    needle: &str,
+) -> Result<PatchBlock, String> {
+    let ln = needle.to_lowercase();
+    let idx = archive
+        .paths
+        .iter()
+        .position(|p| p.to_lowercase().contains(&ln))
+        .ok_or_else(|| format!("--carry-block: no block path contains '{needle}'"))?;
+    let raw = decompress_block(file, &archive.indx, idx as u16)
+        .map_err(|e| format!("--carry-block decompress [{idx}]: {e}"))?;
+    let mut seen_primary: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let aset: Vec<AsetEntry> = archive
+        .aset
+        .iter()
+        .filter(|e| e.block_index() as usize == idx)
+        .filter(|e| e.sub_entry() != 0xFFFF || seen_primary.insert(e.asset_hash))
+        .map(|e| AsetEntry::new(e.asset_hash, e.secondary_ref, e.sub_entry() as u32, e.type_id))
+        .collect();
+    let tier = archive.indx.get(idx).map(|e| e.packed_field);
+    let mut pb = PatchBlock::from_decompressed(&raw, archive.paths[idx].clone(), aset, tier)?;
+    pb.source_block_index = Some(idx as u32);
+    println!(
+        "  carry-block: [{idx}] {} ({} decompressed bytes, {} ASET row(s))",
+        archive.paths[idx],
+        raw.len(),
+        pb.aset_entries.len()
+    );
+    Ok(pb)
+}
+
 fn build_inject_block(archive: &FfcsArchive, spec: &str, strip: &std::collections::HashSet<u32>) -> Result<PatchBlock, String> {
     // Spec: <path_substr>:<file>[:0xHASH:TYPEID ...] — trailing hash/typeid pairs register NEW assets
     // that live in this overlaid block (e.g. an appended resident script) with their own ASET rows.
@@ -358,6 +402,8 @@ fn build_inject_block(archive: &FfcsArchive, spec: &str, strip: &std::collection
     let pages = ((decompressed.len() + 0x7FFF) / 0x8000) as u32;
     let mut pb = PatchBlock::new(compressed, archive.paths[idx].clone(), aset);
     pb.packed_field = pages;
+    // These rows came out of `archive`, so their block refs are in ITS index space.
+    pb.source_block_index = Some(idx as u32);
     println!(
         "  inject-block: [{idx}] {} ({} decompressed bytes, {} ASET entries)",
         archive.paths[idx],
@@ -511,6 +557,9 @@ fn run() -> Result<(), String> {
         .map(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16)
             .map_err(|_| format!("bad --strip-aset hash '{s}'")))
         .collect::<Result<_, _>>()?;
+    for needle in &cli.carry_block {
+        blocks.push(build_carry_block(&mut file, &archive, needle)?);
+    }
     for spec in &cli.inject_block {
         blocks.push(build_inject_block(&archive, spec, &strip)?);
     }
