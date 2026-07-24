@@ -1087,6 +1087,21 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             let rt_p_t =
                 [rt_p[0], rt_p[3], rt_p[6], rt_p[1], rt_p[4], rt_p[7], rt_p[2], rt_p[5], rt_p[8]];
             let r_new = mul3(&mul3(&rt_h, &rt_p_t), &r_par);
+            if std::env::var("CHARSKIN_ROLLDBG").is_ok() {
+                // angle(A, B) for orthonormal rotations = angle of A*B^-1
+                let ang = |a: &[f64; 9], b: &[f64; 9]| -> f64 {
+                    let bt = [b[0], b[3], b[6], b[1], b[4], b[7], b[2], b[5], b[8]];
+                    let m = mul3(a, &bt);
+                    (((m[0] + m[4] + m[8] - 1.0) / 2.0).clamp(-1.0, 1.0)).acos().to_degrees()
+                };
+                let npc_h = full_npc.get(&primary[&h]).copied().unwrap_or(0);
+                eprintln!(
+                    "  [roll] hand npc {npc_h}: FOREARM r_par vs donor-bind = {:.1} deg | \
+                     HAND r_new vs donor-bind = {:.1} deg",
+                    ang(&r_par, &rt_p),
+                    ang(&r_new, &rt_h)
+                );
+            }
             // Uniform scale DOWN the chain: each finger's own scale came from a rank<2 degenerate
             // fit and is unreliable; LBS-blending finger bones of DIFFERENT scale shears the surface
             // into lumps (worst under a clip that curls them) — the same failure 6b smooths on the
@@ -1111,9 +1126,99 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                 }
             }
         }
+        // SHARED WRIST TWIST: the palm still reads rolled because the source arm is rigged straight,
+        // so the forearm's roll ABOUT ITS OWN AXIS is unconstrained by the source and the conform
+        // picks an arbitrary one (measured: palm 76 deg off the donor). The source HAND geometry
+        // DOES define a roll (its own bind frame), so the correct twist is recoverable — solving the
+        // hand absolutely got the palm to 28 deg. That alone tore the wrist, because the hand then
+        // rotated RELATIVE to the forearm and the blend band sheared. The fix is to apply that same
+        // twist about the forearm axis to the WHOLE distal arm at once (forearm + roll + hand +
+        // fingers): they rotate together, so nothing moves relative to its neighbour across the wrist
+        // and there is no shear, while the palm still ends up correct.
+        let mut twisted = 0usize;
+        {
+            let r_global: [f64; 9] = [
+                t[0][0], t[1][0], t[2][0], t[0][1], t[1][1], t[2][1], t[0][2], t[1][2], t[2][2],
+            ];
+            let src_rot = |j: usize| -> Option<[f64; 9]> {
+                let m = inp.ibm.get(j).copied().flatten()?;
+                let iv = inv4(&m)?;
+                super::ortho3_colvec([iv[0], iv[1], iv[2], iv[4], iv[5], iv[6], iv[8], iv[9], iv[10]])
+            };
+            let add = |a: V3, b: V3| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+            for (fore_npc, roll_npc, hand_npc, lo, hi) in
+                [(44u32, 45u32, 46u32, 48u32, 62u32), (65, 66, 67, 69, 83)]
+            {
+                let (Some(fore_h), Some(hand_h)) =
+                    (sk.index_by_canonical(fore_npc), sk.index_by_canonical(hand_npc))
+                else {
+                    continue;
+                };
+                let (Some(hsim), Some(rt_h), Some(&hj)) =
+                    (xform.get(&hand_h).copied(), trot(hand_h), primary.get(&hand_h))
+                else {
+                    continue;
+                };
+                // chained vs absolute hand rotation
+                let hinv = 1.0 / hsim.scale.max(1e-12);
+                let r_chain: [f64; 9] = std::array::from_fn(|i| hsim.sr[i] * hinv);
+                let Some(rsc) = src_rot(hj).and_then(|rs| super::ortho3_colvec(mul3(&r_global, &rs)))
+                else {
+                    continue;
+                };
+                let rsc_t = [rsc[0], rsc[3], rsc[6], rsc[1], rsc[4], rsc[7], rsc[2], rsc[5], rsc[8]];
+                let r_abs = mul3(&rt_h, &rsc_t);
+                let ct = [
+                    r_chain[0], r_chain[3], r_chain[6], r_chain[1], r_chain[4], r_chain[7], r_chain[2],
+                    r_chain[5], r_chain[8],
+                ];
+                let diff = mul3(&r_abs, &ct); // R_abs * R_chain^-1
+                // forearm axis + pivot in target space
+                let pivot = sk.tgt(fore_h).unwrap_or([0.0; 3]);
+                let ax = norm(sub(sk.tgt(hand_h).unwrap_or([0.0; 3]), pivot));
+                // keep ONLY the twist of `diff` about `ax` (swing/twist decomposition of the quat)
+                let trd = diff[0] + diff[4] + diff[8];
+                let (qw, qx, qy, qz) = if trd > -0.99 {
+                    let ss = (1.0 + trd).max(1e-9).sqrt() * 2.0;
+                    (0.25 * ss, (diff[7] - diff[5]) / ss, (diff[2] - diff[6]) / ss, (diff[3] - diff[1]) / ss)
+                } else {
+                    (1.0, 0.0, 0.0, 0.0)
+                };
+                let dc = qx * ax[0] + qy * ax[1] + qz * ax[2];
+                let qn = (qw * qw + dc * dc).max(1e-12).sqrt();
+                let (tw, tv) = (qw / qn, dc / qn);
+                let (c, s2) = (2.0 * tw * tw - 1.0, 2.0 * tw * tv);
+                let (x, y, z) = (ax[0], ax[1], ax[2]);
+                let ic = 1.0 - c;
+                let twist = [
+                    c + x * x * ic, x * y * ic - z * s2, x * z * ic + y * s2,
+                    y * x * ic + z * s2, c + y * y * ic, y * z * ic - x * s2,
+                    z * x * ic - y * s2, z * y * ic + x * s2, c + z * z * ic,
+                ];
+                // rotate the whole distal chain about (pivot, ax): out'(v) = twist*(out(v)-pivot)+pivot
+                let mut chain_h = vec![fore_h, hand_h];
+                if let Some(rh) = sk.index_by_canonical(roll_npc) {
+                    chain_h.push(rh);
+                }
+                for npc in lo..=hi {
+                    if let Some(fh) = sk.index_by_canonical(npc) {
+                        chain_h.push(fh);
+                    }
+                }
+                for th in chain_h {
+                    if let Some(sim) = xform.get(&th).copied() {
+                        let new_sr = mul3(&twist, &sim.sr);
+                        let new_t = add(apply3(&twist, sim.t), sub(pivot, apply3(&twist, pivot)));
+                        xform.insert(th, Sim { sr: new_sr, t: new_t, scale: sim.scale, rank: sim.rank });
+                        twisted += 1;
+                    }
+                }
+            }
+        }
         if fk > 0 || rigid > 0 {
             notes.push(format!(
-                "rigid hand: {fk} hand bone(s) re-oriented from target bind, {rigid} finger bone(s)                  bound to the hand (no independent finger transforms -> no LBS shear)"
+                "rigid hand: {fk} hand re-oriented, {rigid} finger(s) bound to the hand, {twisted} \
+                 distal-arm bone(s) shared-twisted to align the palm without shearing the wrist"
             ));
         }
     }
