@@ -194,9 +194,13 @@ fn lower(
             // block one level finer. A row pointing at a rung that does not exist is the
             // dangling-LOD-rung trap — a 549 GB buffer request and an open-world stream HANG.
             let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_TEXTURE);
+            // Path convention matches the proven publish pipeline
+            // (`mercs2_workshop::publish`, docs/modernization/workshop_publish_pipeline.md):
+            // `blocks\VZ\mod_<hash>.block`. It lands in PTHS; matching the shape that has actually
+            // shipped working WADs costs nothing.
             let block = PatchBlock::from_decompressed(
                 &block_bytes,
-                format!("blocks\\{target}.block"),
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
                 vec![aset],
                 None,
             )
