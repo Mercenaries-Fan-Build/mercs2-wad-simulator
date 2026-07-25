@@ -424,7 +424,42 @@ alongside the texture path that already works. Until then `add_model`/`add_outfi
 which also blocks Plan 01 phase 5 ("first recipe end-to-end" = an outfit).
 
 Also still open: `patch_lua` lowers at LINK time across the installed set, and the linker is not
-written; `lint::PENDING`'s six WAD-gated rules are now implementable and should land next to it.
+written; `lint::PENDING`'s WAD-gated rules are now implementable and should land next to it.
+
+### ⚠ Corpus review of increment 5 (2026-07-25) — read the index FIRST
+
+`corpus_search` (index fresh, 0 changed since ingest) found that **both structural bugs were already
+written down**, in one code block: `docs/modernization/workshop_publish_pipeline.md` §Architecture
+spells out the exact pipeline —
+
+```
+UCFX container -> single-entry block -> compress_sges
+  -> PatchBlock { path "blocks\VZ\mod_<hash>.block", AsetEntry(hash, sec, 0xFFFF, type_id) }
+```
+
+— the single-entry wrapping I omitted AND the `0xFFFF` sentinel I got wrong, plus the PTHS path
+convention I invented differently (now aligned). I inferred the shape from a test helper in
+`patch_wad.rs` instead of searching. **This grounding note is the first line of this plan's own
+pointers section and I skipped it.** The process rule is cheap and it works: `corpus_status` then
+`corpus_search` BEFORE deriving anything about a format.
+
+Three things the review added that were not otherwise on the radar:
+
+- **New rule M0007** — `docs/aset_format.md` (proven 2026-07-21): an ASET row names up to FOUR LOD
+  rungs, and is single-block only when BOTH halves are sentinel. Per
+  `docs/reverse_engineer/render_core_code_map.md`, a world texture keeps its finer mips as lone
+  `BODY` chunks in finer c3-cell blocks, so a fully-resident replacement **shadows the row and
+  orphans those rungs**. `lint::aset_row_is_single_block` is the predicate, tested against the
+  `ch_veh_tank_ztz98` worked example. Character textures are already fully resident — which is
+  exactly why the `al_hum_boss_ub` end-to-end test passed without tripping it.
+- **New rule M0008** — the `page_count` buffer-sizing livelock on small/non-square textures is a
+  KNOWN-OPEN converter fidelity issue, and our encoder path inherits it.
+- **`mercs2_formats::texture_build` does not exist** — that doc lists it as remaining work, so
+  `texture_encode` + `build_texture_block` is the correct current path, not a workaround.
+
+**Open-Q7 (raw `PlayerVisibleName`) — the corpus has no answer.** Every shipped value is a
+`[SHELL.Misc.NN]` token and nothing records what a non-token string does. A useful negative: stop
+searching, it needs the in-game test.
 
 ## Open questions for the user
 - The domain/nav question is Plan 02; the fork is settled here.
