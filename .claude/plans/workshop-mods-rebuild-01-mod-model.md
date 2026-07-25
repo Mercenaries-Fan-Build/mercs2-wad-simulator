@@ -366,7 +366,31 @@ mirrors what `mercs2_workshop` already does, and a missing table degrades diagno
 failing. `native_hook` touches are deliberately EXCLUDED from suggestion — they are code addresses,
 and reversing one through the asset table would produce a confident, wrong rename.
 
-Next increments, in order: (4) the linter's HANG-class rules; (5) lowering + the builder.
+**Increment 4 (2026-07-25) — the linter. 81 tests green.**
+`lint.rs`: numbered `Mxxxx` rules with a title, doc link and — where the fix is mechanical — the
+exact replacement text. `blocks_build()` is the gate (Hang/Error block, Warning/Info do not), gated
+on EXIT CODE per the standing mandate.
+
+13 hermetic rules implemented, covering the manifest surface: schema validity, the four source-path
+outcomes, self-conflicts, bare hashes (auto-fixable), unknown wardrobe hero, unmergeable script
+target, `raw` with an empty radius, ASI-on-reimpl, a hook that installs nothing, and malformed /
+insecure external pins. Each has a test that FIRES and one that stays QUIET — a rule with only the
+former eventually fires on everything and gets ignored, which is how linters die.
+
+★ **The six HANG-class rules that need the WAD stack are REGISTERED in `lint::PENDING`, not
+silently absent** — dangling `_P001` rungs, `packed_field` under-claim, short texture body, missing
+ASET row, non-resident costume, shared-texture collateral. A linter that quietly omits its most
+important rules reads as a clean bill of health, which is worse than no linter. They land with the
+builder, where the WAD stack is in hand. A test pins that they stay registered.
+
+Two judgment calls: an unknown wearer gets a suggested spelling only on a near-miss (`mattius` →
+`mattias`) because a confident wrong suggestion is worse than none; and without a name table the
+bare-hash rule stays silent rather than emitting a finding the author cannot act on.
+
+Next increment: (5) lowering + the builder — wrap `wad_builder build-skin`, formats
+publish/patch/texture/model_inject and workshop `publish.rs`. This is the first increment needing
+the game stack, so it is also where `lint::PENDING` gets drained and where the hermetic/`#[ignore]`
+split from the Testing section starts to matter.
 
 ## Open questions for the user
 - The domain/nav question is Plan 02; the fork is settled here.
