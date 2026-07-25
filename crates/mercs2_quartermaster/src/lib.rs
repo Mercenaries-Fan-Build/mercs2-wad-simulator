@@ -22,6 +22,7 @@
 
 pub mod blast;
 pub mod discover;
+pub mod lint;
 pub mod manifest;
 pub mod names;
 
@@ -37,6 +38,7 @@ pub use manifest::{
     Contribution, Layer, Load, Manifest, Requirement, Retarget, Shipment, Target, Textures, Touch,
     ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
 };
+pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 
 /// Serialization formats a manifest may be written in. Detection is by EXTENSION; more than one
