@@ -300,3 +300,16 @@ fn every_implemented_rule_carries_a_doc_link() {
         assert!(!r.title.is_empty(), "{} has no title", r.code);
     }
 }
+
+/// The single-block predicate M0007 will use. Both LOD halves must be sentinel — a row names up to
+/// FOUR rungs, and checking only `packed_block_ref` misses `_P002`/`_P003`.
+#[test]
+fn single_block_requires_both_lod_halves_to_be_sentinel() {
+    assert!(lint::aset_row_is_single_block(0x0000_FFFF, 0xFFFF_FFFF));
+    // ch_veh_tank_ztz98 from docs/aset_format.md: _P001 in lo16, _P002 in secondary hi16.
+    assert!(!lint::aset_row_is_single_block(0x0DED_14D7, 0x2093_FFFF));
+    // A _P001 rung present but both other rungs absent is still multi-rung.
+    assert!(!lint::aset_row_is_single_block(0x0DED_14D7, 0xFFFF_FFFF));
+    // _P002 present, _P001 absent.
+    assert!(!lint::aset_row_is_single_block(0x0000_FFFF, 0x2093_FFFF));
+}
