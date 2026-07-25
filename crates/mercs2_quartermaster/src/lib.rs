@@ -21,7 +21,9 @@
 //! * The linter, blast-radius computation, and the builder — later increments.
 
 pub mod blast;
+pub mod build;
 pub mod discover;
+pub mod game;
 pub mod lint;
 pub mod manifest;
 pub mod names;
@@ -38,6 +40,8 @@ pub use manifest::{
     Contribution, Layer, Load, Manifest, Requirement, Retarget, Shipment, Target, Textures, Touch,
     ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
 };
+pub use build::{build, sha256_hex, BuildError, BuildReport, Destination, Placement};
+pub use game::{GameStack, GameStackError};
 pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 
