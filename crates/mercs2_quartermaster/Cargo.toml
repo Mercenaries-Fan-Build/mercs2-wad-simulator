@@ -18,3 +18,9 @@ serde_norway = "0.9"
 serde_json = "1"
 toml = "1"
 mercs2_formats = { workspace = true }
+# Artifacts are verified BY HASH (mandate verify-artifacts-by-hash-not-size-mtime), so sha256 is
+# load-bearing rather than incidental. `mercs2_workshop` hand-rolls one, but it is a binary-only
+# crate so that copy is unreachable — and hand-rolling a hash twice in one workspace is worse than
+# a dependency.
+sha2 = "0.10"
+png = "0.17"  # decode source images for texture lowering (same version the workspace already uses)
