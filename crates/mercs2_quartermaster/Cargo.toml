@@ -1,0 +1,20 @@
+[package]
+name = "mercs2_quartermaster"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 Shipment format: one serde model that reads a manifest.yaml/.json/.toml, validates it, and (later) lints and builds it into an overlay WAD."
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mercs2_quartermaster"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# YAML: `serde_yaml` is ARCHIVED. `serde_yml` is DEPRECATED (its own crates.io blurb calls it an
+# unmaintained compatibility shim). `serde_norway` is the maintained fork of serde-yaml.
+serde_norway = "0.9"
+serde_json = "1"
+toml = "1"
+mercs2_formats = { workspace = true }
