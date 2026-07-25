@@ -20,9 +20,14 @@
 //!   lint-only CI possible for the template repo.
 //! * The linter, blast-radius computation, and the builder — later increments.
 
+pub mod blast;
 pub mod discover;
 pub mod manifest;
 
+pub use blast::{
+    claims, conflicts, merge_class, self_conflicts, unsatisfied_reads, Access, Claim, ClaimRecord,
+    Claimant, Conflict, MergeClass, SelfConflict, UnsatisfiedRead,
+};
 pub use discover::{
     check_sources, find_manifest, open as open_shipment, source_refs, DiscoverError, LoadedShipment,
     OpenError, SourceIssue, SourceRef,
