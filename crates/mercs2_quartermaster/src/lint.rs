@@ -169,7 +169,36 @@ pub const PENDING: &[Rule] = &[
         title: "replace_texture target is shared by several materials — collateral reskin",
         doc: "docs/modding/field_guide.md#trap-6",
     },
+    // Found via corpus_search 2026-07-25, not from first principles.
+    Rule {
+        code: "M0007",
+        title: "fully-resident replacement of a MULTI-RUNG texture drops its finer external mips",
+        doc: "docs/aset_format.md",
+    },
+    Rule {
+        code: "M0008",
+        title: "small / non-square texture may hit the open page_count buffer-sizing livelock",
+        doc: "docs/reverse_engineer/render_core_code_map.md",
+    },
 ];
+
+/// A texture's ASET row is single-block only when BOTH LOD halves are sentinel — the row names up
+/// to four rungs, not one (`docs/aset_format.md`, proven 2026-07-21):
+///
+/// ```text
+/// _P000 -> packed_block_ref hi16 (always present)
+/// _P001 -> packed_block_ref lo16   sentinel 0xFFFF
+/// _P002 -> secondary_ref    hi16   sentinel 0xFFFF
+/// _P003 -> secondary_ref    lo16   sentinel 0xFFFF
+/// ```
+///
+/// This is the predicate M0007 needs: a world texture keeps its finer mips as lone `BODY` chunks in
+/// finer c3-cell blocks (`externalTextures`), so replacing it with ONE fully-resident block shadows
+/// the row and orphans those rungs. Character textures are already fully resident and are unaffected
+/// — which is why the first end-to-end test (`al_hum_boss_ub`) passed without tripping this.
+pub fn aset_row_is_single_block(packed_block_ref: u32, secondary_ref: u32) -> bool {
+    packed_block_ref & 0xFFFF == 0xFFFF && secondary_ref == 0xFFFF_FFFF
+}
 
 /// One finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
