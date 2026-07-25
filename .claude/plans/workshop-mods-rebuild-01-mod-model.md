@@ -321,8 +321,35 @@ the Shipment. It never short-circuits: an author fixing a manifest wants the who
 ⚠ Residual: the lexical check is separator-naive on a Windows-style `src\foo.png` written into a
 manifest read on Unix. Worth a rule when the linter lands.
 
-Next increments, in order: (3) blast radius — write-set + read-set over typed contributions;
-(4) the linter's HANG-class rules; (5) lowering + the builder.
+**Increment 3 (2026-07-25) — blast radius + composition. DONE, 48 tests green.**
+`blast.rs`: `Claim` / `Access` / `MergeClass` / `Intent`, `claims()` (computed for typed kinds,
+declared for `raw`), `self_conflicts`, `conflicts`, `unsatisfied_reads`.
+
+**The composition model survived contact with code, but three parts of it were wrong on paper and
+only the tests found them:**
+
+1. **A claim's identity must be the HASH alone.** Carrying the asset name inside the claim made
+   `touches: ["al_veh_boat_destroyer"]` and `touches: ["0xE54047D5"]` *different claims* — an
+   evasion hole where declaring the hash dodges conflict detection entirely. The name now rides on
+   `ClaimRecord.name` for diagnostics only.
+2. **Merge class depends on INTENT, not just target.** `raw` was inheriting ordinary
+   replacement semantics (`LastWins`) because its declared target looked like any other asset. Opaque
+   bytes must fail closed *before* the target-shaped rules run, or a `raw` block launders a target
+   into permissive semantics.
+3. **Intra-Shipment duplicates are not uniformly errors.** The draft said "any duplicate in one
+   Shipment is a hard error." That rejects a perfectly ordinary multi-outfit pack, whose outfits all
+   share the wardrobe script claim. Only `OrderedList` accumulates; the rule is now class-aware.
+
+The headline test — `two_outfit_mods_for_the_same_hero_coexist` — is the whole point of the model,
+and it passes. Also pinned: same `(wearer, slug)` collides, the same slug on *different* heroes does
+not, minting one name twice is a hard error (registry is first-wins), two texture replacements are
+load order rather than conflict, and a shared `donor` never conflicts because it is a READ.
+
+⚠ `MERGEABLE_SCRIPTS` is currently a one-entry allow-list (`wifpmcinterior`). Deliberate: being
+wrong there costs a false conflict (visible) instead of silent mutual annihilation (fatal). It grows
+as we reverse more targets — this is the curated half of the composition catalog above.
+
+Next increments, in order: (4) the linter's HANG-class rules; (5) lowering + the builder.
 
 ## Open questions for the user
 - The domain/nav question is Plan 02; the fork is settled here.
