@@ -328,10 +328,12 @@ declared for `raw`), `self_conflicts`, `conflicts`, `unsatisfied_reads`.
 **The composition model survived contact with code, but three parts of it were wrong on paper and
 only the tests found them:**
 
-1. **A claim's identity must be the HASH alone.** Carrying the asset name inside the claim made
-   `touches: ["al_veh_boat_destroyer"]` and `touches: ["0xE54047D5"]` *different claims* — an
-   evasion hole where declaring the hash dodges conflict detection entirely. The name now rides on
-   `ClaimRecord.name` for diagnostics only.
+1. **The NAME is the identity; the hash is only the normalized comparison key.** Both spellings an
+   author may write — `al_veh_boat_destroyer` and `0xE54047D5` — must land on one claim, or
+   declaring the hash dodges conflict detection entirely. `pandemic_hash_m2` is one-way, so the hash
+   is the only total function over both spellings and therefore what we compare on; but it must
+   never be what a human reads or writes. Carrying the name *inside* the claim broke the first half
+   (two spellings, two claims), so the name moved to `ClaimRecord.name`.
 2. **Merge class depends on INTENT, not just target.** `raw` was inheriting ordinary
    replacement semantics (`LastWins`) because its declared target looked like any other asset. Opaque
    bytes must fail closed *before* the target-shaped rules run, or a `raw` block launders a target
@@ -348,6 +350,21 @@ load order rather than conflict, and a shared `donor` never conflicts because it
 ⚠ `MERGEABLE_SCRIPTS` is currently a one-entry allow-list (`wifpmcinterior`). Deliberate: being
 wrong there costs a false conflict (visible) instead of silent mutual annihilation (fatal). It grows
 as we reverse more targets — this is the curated half of the composition catalog above.
+
+**Increment 3b (2026-07-25) — hash → name resolution. 60 tests green.**
+`names.rs`: `NameTable` over the committed 23,110-entry `data/production_names.json`, plus
+`enrich()` and `bare_hash_suggestions()`.
+
+Closes the other half of `no-arbitrary-hashes`. Unifying both spellings into one claim was only the
+comparison half; a hand-written hash was still *displayed* as a hash and the author was never told
+to write the name. Now: every claim we can reverse is named in diagnostics, and writing a hash we
+have a name for is a flagged, **auto-fixable** finding (the message carries the replacement text).
+A hash with no known name stays legal and silent — otherwise the documented escape is unusable.
+
+Table is HOST-PROVIDED (path in), consistent with the game stack; `find_from` is a convenience that
+mirrors what `mercs2_workshop` already does, and a missing table degrades diagnostics rather than
+failing. `native_hook` touches are deliberately EXCLUDED from suggestion — they are code addresses,
+and reversing one through the asset table would produce a confident, wrong rename.
 
 Next increments, in order: (4) the linter's HANG-class rules; (5) lowering + the builder.
 
