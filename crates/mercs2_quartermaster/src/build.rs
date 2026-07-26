@@ -340,6 +340,18 @@ pub fn build(
         blocks.push(lowered.block);
     }
 
+    // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
+    // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
+    // known to load — it costs one header read to match them.
+    let csum = match game.as_deref().and_then(|g| g.paths().first().map(|p| p.to_path_buf())) {
+        Some(base) => mercs2_formats::donor::base_csum(&base).map_err(|m| BuildError::Lower {
+            index: 0,
+            kind: "assemble",
+            message: m,
+        })?,
+        None => (0, None),
+    };
+
     let out_dir = out_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| shipment.root.join("build"));
     std::fs::create_dir_all(&out_dir).map_err(|e| BuildError::Io {
         path: out_dir.clone(),
@@ -349,8 +361,7 @@ pub fn build(
     let mut placements = Vec::new();
     let mut wad_path = None;
     if !blocks.is_empty() {
-        // csum 0: the overlay's own checksum word. Retail validates the BASE wad's, not ours.
-        let wad = build_patch_wad_multi(&blocks, 0, None, &FFCS_CERT_BLOB).map_err(|m| {
+        let wad = build_patch_wad_multi(&blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
             BuildError::Lower { index: 0, kind: "assemble", message: m }
         })?;
         let name = format!("{}.wad", manifest.shipment.name);
