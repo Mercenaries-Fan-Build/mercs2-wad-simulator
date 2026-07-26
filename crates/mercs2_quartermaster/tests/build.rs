@@ -94,8 +94,8 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 fn unsupported_kinds_fail_loudly_with_a_reason() {
     for (contribution, expect) in [
         (
-            "  - kind: add_model\n    name: thing\n    model: src/m.glb\n",
-            "BINARY-ONLY",
+            "  - kind: add_outfit\n    name: o\n    slug: O\n    display: O\n    wearer: mattias\n    model: src/m.glb\n",
+            "LINK time",
         ),
         (
             "  - kind: patch_lua\n    target: wifpmcinterior\n    append: src/a.lua\n",
@@ -351,3 +351,141 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
     assert!(codes.contains(&"M0007"), "streamed target must warn: {codes:?}");
     assert!(codes.contains(&"M0009"), "shared target must warn: {codes:?}");
 }
+
+// ---------------------------------------------------------------------------
+// add_model
+// ---------------------------------------------------------------------------
+
+/// Build a minimal, self-contained binary glTF holding one axis-aligned cube.
+///
+/// Written by hand rather than committed as a binary fixture: it keeps the repo free of an opaque
+/// blob, and it exercises the reader against a file whose every byte is accounted for here.
+fn cube_glb() -> Vec<u8> {
+    // 6 faces x 4 verts. Positions/normals/uvs are generated so the data stays inspectable.
+    const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // +Z
+        ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // -Z
+        ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]), // +X
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]), // -X
+        ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]), // +Y
+        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), // -Y
+    ];
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut nrm: Vec<[f32; 3]> = Vec::new();
+    let mut uv: Vec<[f32; 2]> = Vec::new();
+    let mut idx: Vec<u16> = Vec::new();
+    for (n, u, v) in FACES {
+        let base = pos.len() as u16;
+        for (su, sv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            pos.push([
+                n[0] + u[0] * su + v[0] * sv,
+                n[1] + u[1] * su + v[1] * sv,
+                n[2] + u[2] * su + v[2] * sv,
+            ]);
+            nrm.push(n);
+            uv.push([(su + 1.0) * 0.5, (sv + 1.0) * 0.5]);
+        }
+        idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    let mut bin: Vec<u8> = Vec::new();
+    for p in &pos { for c in p { bin.extend_from_slice(&c.to_le_bytes()); } }
+    let n_off = bin.len();
+    for p in &nrm { for c in p { bin.extend_from_slice(&c.to_le_bytes()); } }
+    let t_off = bin.len();
+    for p in &uv { for c in p { bin.extend_from_slice(&c.to_le_bytes()); } }
+    let i_off = bin.len();
+    for i in &idx { bin.extend_from_slice(&i.to_le_bytes()); }
+    while !bin.len().is_multiple_of(4) { bin.push(0); }
+
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in &pos {
+        for c in 0..3 { lo[c] = lo[c].min(p[c]); hi[c] = hi[c].max(p[c]); }
+    }
+    let vcount = pos.len();
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"mode":4}}]}}],
+"accessors":[
+{{"bufferView":0,"componentType":5126,"count":{vcount},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}},
+{{"bufferView":1,"componentType":5126,"count":{vcount},"type":"VEC3"}},
+{{"bufferView":2,"componentType":5126,"count":{vcount},"type":"VEC2"}},
+{{"bufferView":3,"componentType":5123,"count":{},"type":"SCALAR"}}],
+"bufferViews":[
+{{"buffer":0,"byteOffset":0,"byteLength":{}}},
+{{"buffer":0,"byteOffset":{n_off},"byteLength":{}}},
+{{"buffer":0,"byteOffset":{t_off},"byteLength":{}}},
+{{"buffer":0,"byteOffset":{i_off},"byteLength":{}}}],
+"buffers":[{{"byteLength":{}}}]}}"#,
+        lo[0], lo[1], lo[2], hi[0], hi[1], hi[2],
+        idx.len(),
+        n_off, t_off - n_off, i_off - t_off, idx.len() * 2,
+        bin.len()
+    );
+    let mut json = json.into_bytes();
+    while !json.len().is_multiple_of(4) { json.push(b' '); }
+
+    let mut glb = Vec::new();
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&((12 + 8 + json.len() + 8 + bin.len()) as u32).to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&[b'B', b'I', b'N', 0]);
+    glb.extend_from_slice(&bin);
+    glb
+}
+
+/// `add_model` end to end: glTF in, donor resolved from the real WAD, overlay out.
+#[test]
+fn add_model_builds_end_to_end() {
+    let Some(mut game) = discovered_game() else { return };
+    let dir = scratch("add_model");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    // NOT `deliverycrate` — Plan 04's example donor has NO ASET row of any type in vz.wad, so it
+    // cannot host anything. `oc_veh_helicopter_md500` is a real model (type_id 19).
+    let s = shipment(
+        &dir,
+        "  - kind: add_model\n    name: qm_test_prop\n    model: src/prop.glb\n    donor: oc_veh_helicopter_md500\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None).expect("add_model must build");
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
+
+    // The same two structural properties the texture path has to hold.
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let block = &contents.blocks[0];
+    assert_eq!(block.aset_entries[0].u32_2 & 0xFFFF, 0xFFFF, "must register as primary");
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1);
+    assert_eq!(entries[0].name_hash, mercs2_formats::hash::pandemic_hash_m2("qm_test_prop"));
+
+    // The log records what was injected, so a silently-empty mesh cannot pass unnoticed.
+    let log = report.log.join("\n");
+    assert!(log.contains("add_model qm_test_prop"), "{log}");
+    assert!(!log.contains("0 verts"), "geometry must have survived the import: {log}");
+}
+
+/// Auto-pick is not implemented, so an omitted donor must ASK rather than guess — a wrong host
+/// silently produces a prop with the wrong rig and materials.
+#[test]
+fn add_model_without_a_donor_asks_rather_than_guessing() {
+    let Some(mut game) = discovered_game() else { return };
+    let dir = scratch("add_model_nodonor");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    let s = shipment(&dir, "  - kind: add_model\n    name: qm_x\n    model: src/prop.glb\n");
+    match build::build(&s, Some(&mut game), None, None) {
+        Err(e @ BuildError::Unsupported { .. }) => {
+            assert!(e.to_string().contains("auto-pick"), "{e}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
