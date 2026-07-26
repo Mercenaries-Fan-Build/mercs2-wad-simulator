@@ -117,4 +117,46 @@ impl GameStack {
             .iter()
             .any(|w| w.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == type_id))
     }
+
+    /// The raw `(packed_block_ref, secondary_ref)` of an asset's PRIMARY row, last-mounted-wins.
+    ///
+    /// Exposed raw because those two words encode the asset's whole **LOD chain** — up to four
+    /// rungs, not one block (`docs/aset_format.md`, proven 2026-07-21). Callers that need to know
+    /// whether an asset is single-block must inspect both halves; see
+    /// [`crate::lint::aset_row_is_single_block`].
+    /// Every ASET row for `(hash, type_id)` across the stack as
+    /// `(packed_block_ref, secondary_ref, is_primary)`.
+    ///
+    /// A texture may have **no primary row at all** — shared/aliased assets are carried as
+    /// sub-entries inside another asset's block, and `extract_texture` resolves them by falling
+    /// back to any `type_id 27` row (`docs/modernization/texture_extraction_notes.md`). Callers that
+    /// only look for a primary row will silently see nothing for exactly those assets.
+    pub fn aset_rows(&self, name_hash: u32, type_id: u32) -> Vec<(u32, u32, bool)> {
+        let mut out = Vec::new();
+        for wad in self.wads.iter().rev() {
+            for e in wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.asset_hash == name_hash && e.type_id == type_id)
+            {
+                out.push((e.packed_block_ref, e.secondary_ref, e.is_primary()));
+            }
+        }
+        out
+    }
+
+    pub fn primary_lod_chain(&self, name_hash: u32, type_id: u32) -> Option<(u32, u32)> {
+        for wad in self.wads.iter().rev() {
+            if let Some(e) = wad
+                .archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == name_hash && e.type_id == type_id && e.is_primary())
+            {
+                return Some((e.packed_block_ref, e.secondary_ref));
+            }
+        }
+        None
+    }
 }
