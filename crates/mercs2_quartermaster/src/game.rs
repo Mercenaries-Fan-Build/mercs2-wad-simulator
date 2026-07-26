@@ -407,7 +407,7 @@ mod tests {
             if !candidate.is_file() {
                 continue;
             }
-            let stack = GameStack::open(&[candidate.clone()])
+            let stack = GameStack::open(std::slice::from_ref(&candidate))
                 .unwrap_or_else(|e| panic!("a console bake must open, not error: {e}"));
             assert_eq!(stack.platform(), Platform::BigEndianConsole, "{name}");
         }
