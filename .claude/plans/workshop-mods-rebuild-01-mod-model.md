@@ -242,8 +242,25 @@ vz.wad"]` over an `Option`-returning opener that skips gracefully when the insta
   entry with no writer is flagged; an unrecognized target resolves to `Exclusive` (fail-closed).
 - **Determinism.** Build twice, assert byte-identical output — otherwise verify-by-hash means nothing.
 
-*Gated `#[ignore]` — needs the retail install:* donor resolution and auto-pick, `replace_texture`
-dimension/resident-size checks, and a full end-to-end build of the template example verified by sha256.
+*Game-dependent — DISCOVERED, not `#[ignore]`d (user-set 2026-07-25):* donor resolution and
+auto-pick, `replace_texture` dimension/resident-size checks, and the end-to-end build.
+
+**`#[ignore]` was the wrong default.** It means the tests that exercise the real format only run
+when someone remembers a flag — and those are precisely the ones that caught every structural bug so
+far (the bare-container block, the dangling-rung ASET row, the inverted texture classes). They now
+run automatically whenever a PC `vz.wad` is discoverable and skip LOUDLY when it is not, so CI
+without the retail assets stays green without pretending to be coverage.
+
+- `scripts/find-vz-wad.sh [--write]` probes `$MERCS2_VZ_WAD`, sibling `game-files/` checkouts and
+  the usual install paths, and writes `.mercs2-local.toml` (git-ignored — the path is machine
+  specific and points at retail assets we do not redistribute).
+- `game::discover` implements Plan 02's order — env → local config (walking up) → co-located
+  `Mercenaries2.exe` → registry — and reports the `Origin` so the UI can show which install it read.
+  The Workshop Settings page and the `qm` CLI use the same resolver rather than each growing one.
+- **Endian guard:** the box also carries `xbox-vz.wad`, byte-identical in size and big-endian. Its
+  magic reads `SCFF` rather than `FFCS`. `GameStack::open` now rejects it by name instead of failing
+  unrecognisably deep in the parser, and the script filters on magic rather than filename because
+  `pc-game-vz.wad` and `xbox-vz.wad` sit in the same directory.
 
 The template repo's CI is itself a test: `qm lint` over the shipped example Shipment must pass, so the
 example doubles as a conformance fixture the community can diff against.
