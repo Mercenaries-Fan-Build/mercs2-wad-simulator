@@ -25,11 +25,14 @@ use crate::game::{GameStack, Platform};
 use crate::lint::{self, Diagnostic};
 use crate::manifest::Contribution;
 use crate::names::NameTable;
+use mercs2_formats::donor;
 use mercs2_formats::hash::pandemic_hash_m2;
+use mercs2_formats::mesh_import;
+use mercs2_formats::model_inject::inject_static_into_donor_block;
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
-use mercs2_formats::types::TYPE_ID_TEXTURE;
+use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_TEXTURE};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -117,6 +120,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.update(data);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// Which drawing group of the donor hosts the injected geometry.
+///
+/// ⚠ The manifest has no field for this — the Workshop's UI lets an author pick, but `add_model`
+/// carries only name/model/donor. Group 0 is the common case for a simple prop; a donor whose
+/// interesting geometry sits in a later group cannot currently be targeted. Recorded rather than
+/// papered over: it likely wants a `group:` field, which is a format change.
+const DEFAULT_TARGET_GROUP: usize = 0;
 
 /// One lowered contribution.
 struct Lowered {
@@ -218,19 +229,90 @@ fn lower(
             Ok(Lowered { block })
         }
 
-        // See the module docs: the proven code for these lives in binary-only crates.
-        Contribution::AddModel { .. } | Contribution::AddOutfit { .. } => {
-            Err(BuildError::Unsupported {
+        Contribution::AddModel { name, model, donor, retarget } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            if retarget.is_some() {
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: "an inline `retarget:` is the CROSS-RIG path and needs char_skin's \
+                             palette-relative BLENDINDICES + INFO(56) range table. This lowering is \
+                             the RIGID one, which leaves joints empty; hand-authoring global joint \
+                             indices for a skinned group is documented as wrong."
+                        .into(),
+                });
+            }
+            // Resolved Q2 says `donor` may be omitted and auto-picked. Auto-pick is not written, so
+            // this asks rather than guessing — a wrong host silently produces a prop with the wrong
+            // rig and materials.
+            let Some(donor_name) = donor else {
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: "donor auto-pick is not implemented yet — name a `donor:` explicitly. \
+                             The donor supplies the rig, materials and state machine, so picking \
+                             the wrong one fails quietly rather than loudly."
+                        .into(),
+                });
+            };
+
+            let donor_hash = pandemic_hash_m2(donor_name);
+            let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+            let donor_blk = donor::donor_block(&paths, donor_hash)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+
+            let mesh = mesh_import::external_mesh_from_gltf(&root.join(model))
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+
+            let hash = pandemic_hash_m2(name);
+            // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
+            // transform), target the raw rendered group, neutralise the rest.
+            let (new_block, stats) = inject_static_into_donor_block(
+                &donor_blk,
+                &mesh,
+                DEFAULT_TARGET_GROUP,
+                &[],
+                hash,
+                false,
+                false,
+                false,
+                false,
+                &[DEFAULT_TARGET_GROUP],
+                1.0,
+                false,
+            )
+            .map_err(|m| BuildError::Lower {
                 index,
                 kind,
-                reason: "model/outfit lowering lives in mercs2_workshop::publish (donor resolution \
-                         + model inject) and wad_builder's build-skin, both of which are \
-                         BINARY-ONLY crates with no lib.rs. They must be extracted into a library \
-                         before this crate can wrap them — reimplementing would fork the one path \
-                         that is actually proven to work in-game."
-                    .into(),
-            })
+                message: format!("inject into donor {donor_name}: {m}"),
+            })?;
+
+            log.push(format!(
+                "contributions[{index}] add_model {name} 0x{hash:08X} ← donor {donor_name} \
+                 group {DEFAULT_TARGET_GROUP}: {} verts, {} tris",
+                stats.vertex_count, stats.triangle_count
+            ));
+
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
+            let block = PatchBlock::from_decompressed(
+                &new_block,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            Ok(Lowered { block })
         }
+
+        Contribution::AddOutfit { .. } => Err(BuildError::Unsupported {
+            index,
+            kind,
+            reason: "add_outfit composes add_model with a patch_lua on _tOutfits, and the Lua half \
+                     lowers at LINK time across the installed set. The linker is not written yet."
+                .into(),
+        }),
         Contribution::PatchLua { .. } => Err(BuildError::Unsupported {
             index,
             kind,
