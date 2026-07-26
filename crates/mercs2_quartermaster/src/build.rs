@@ -21,7 +21,7 @@
 //! need extracting into a library first. [`lower`] says so out loud rather than quietly skipping.
 
 use crate::discover::LoadedShipment;
-use crate::game::GameStack;
+use crate::game::{GameStack, Platform};
 use crate::lint::{self, Diagnostic};
 use crate::manifest::Contribution;
 use crate::names::NameTable;
@@ -68,6 +68,8 @@ pub enum BuildError {
     Blocked(Vec<Diagnostic>),
     /// A contribution needed the retail WADs and none were configured.
     GameRequired { index: usize, kind: &'static str },
+    /// The configured stack is a console bake and we cannot yet EMIT for one.
+    ConsoleOutputUnsupported,
     /// A kind whose lowering is not implemented yet, with the reason.
     Unsupported { index: usize, kind: &'static str, reason: String },
     Lower { index: usize, kind: &'static str, message: String },
@@ -88,6 +90,14 @@ impl std::fmt::Display for BuildError {
                 f,
                 "contributions[{index}] ({kind}) needs the retail WADs — configure the game folder \
                  (Workshop Settings, or `qm --game <dir>`). `qm lint` runs without one."
+            ),
+            BuildError::ConsoleOutputUnsupported => write!(
+                f,
+                "the configured game stack is a CONSOLE bake (Xbox 360 / PS3, big-endian `SCFF`), \
+                 and we cannot emit for one yet. Note this is not merely an endianness flip: \
+                 `ucfx_byteswap` converts console → PC only, and the reverse needs GPU texture \
+                 RE-tiling, XMA/Xbox-ADPCM audio encoding, big-endian Lua bytecode and Xbox vertex \
+                 declarations. Reading a console WAD is supported; writing one is not."
             ),
             BuildError::Unsupported { index, kind, reason } => {
                 write!(f, "contributions[{index}] ({kind}) cannot be lowered yet: {reason}")
@@ -308,6 +318,11 @@ pub fn build(
     }
     if lint::blocks_build(&diagnostics) {
         return Err(BuildError::Blocked(diagnostics));
+    }
+    // Reading a console bake is fine and supported; EMITTING for one is not. Checked before any
+    // lowering so the failure names the real reason rather than surfacing as a texture-encode error.
+    if game.as_deref().is_some_and(|g| g.platform() != Platform::Pc) {
+        return Err(BuildError::ConsoleOutputUnsupported);
     }
     log.push(format!(
         "lint: {} finding(s), none blocking",
