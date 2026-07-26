@@ -1,16 +1,20 @@
 //! The game stack — the retail WADs a build reads from.
 //!
-//! **Path-in, never path-discovering.** This crate does not look for an install; the host decides
-//! where the WADs are (a Workshop Settings page, `qm --game`, or nothing at all in CI) and hands
-//! the resolved list here. That separation is what lets `qm lint` run in the template repo's CI,
-//! where the retail WADs will never exist.
+//! **The BUILD path is path-in, never path-discovering.** [`GameStack::open`] takes a resolved list
+//! and nothing in `build`/`lint` ever goes looking, so a Shipment build cannot silently pick up an
+//! install nobody chose — and `qm lint` runs in template CI where the retail WADs will never exist.
+//!
+//! [`discover`] is offered *alongside* that, for HOSTS to call: the Workshop Settings page, the
+//! `qm` CLI, and the test suite all need the same resolution order (Plan 02), and having three
+//! implementations of it would guarantee three behaviours. It is a separate, opt-in entry point —
+//! the separation is about who decides, not about refusing to help.
 //!
 //! Order is `[base, overlays…]` and resolution is a **reverse walk — last mounted wins** — matching
 //! the engine (`FUN_00875E80`) and what `mercs2_workshop::publish` already does. Note this is the
 //! opposite direction from the runtime chunk registry, which is first-writer-wins; the two rules
 //! run simultaneously and getting them backwards is the classic error here.
 
-use mercs2_formats::ffcs::{load_ffcs_archive, FfcsArchive};
+use mercs2_formats::ffcs::{load_ffcs_archive, Endian, FfcsArchive};
 use mercs2_formats::texture::{extract_texture, TextureData};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -19,6 +23,9 @@ use std::path::{Path, PathBuf};
 pub enum GameStackError {
     Open { path: PathBuf, message: String },
     Parse { path: PathBuf, message: String },
+    /// A console bake. The PC build is little-endian (`FFCS`); the Xbox/PS3 bakes are big-endian and
+    /// read as `SCFF`. Caught here because otherwise it fails much deeper, unrecognisably.
+    WrongEndian { path: PathBuf },
     Empty,
 }
 
@@ -31,6 +38,12 @@ impl std::fmt::Display for GameStackError {
             GameStackError::Parse { path, message } => {
                 write!(f, "parsing {} as an FFCS archive: {message}", path.display())
             }
+            GameStackError::WrongEndian { path } => write!(
+                f,
+                "{} is a BIG-ENDIAN (Xbox 360 / PS3) bake — the PC build is little-endian. Its \
+                 magic reads `SCFF` rather than `FFCS`. Point at the PC `vz.wad`.",
+                path.display()
+            ),
             GameStackError::Empty => write!(
                 f,
                 "no WADs supplied — a build needs at least the base vz.wad. Configure the game \
@@ -41,6 +54,124 @@ impl std::fmt::Display for GameStackError {
 }
 
 impl std::error::Error for GameStackError {}
+
+/// Env var holding an explicit `vz.wad` path — the highest-priority override.
+pub const VZ_WAD_ENV: &str = "MERCS2_VZ_WAD";
+
+/// Machine-local, git-ignored config naming the install. Written by `scripts/find-vz-wad.sh`.
+pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
+
+/// Where a discovered WAD came from — surfaced so the UI can show it. "Which install was it actually
+/// reading" is behind a large share of our own trap reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Env,
+    LocalConfig,
+    CoLocated,
+    Registry,
+}
+
+#[derive(Debug, Clone)]
+pub struct Discovered {
+    pub path: PathBuf,
+    pub origin: Origin,
+}
+
+/// Locate a `vz.wad` **for a HOST to hand to [`GameStack::open`]**.
+///
+/// This is a convenience for hosts (the Workshop Settings page, the `qm` CLI, tests) and implements
+/// the order Plan 02 specifies. **The build path never calls it** — the crate stays path-in, so a
+/// Shipment build cannot silently pick up an install nobody chose.
+///
+/// Order, first hit wins:
+/// 1. `MERCS2_VZ_WAD`
+/// 2. `.mercs2-local.toml` (`vz_wad = "…"`), searched upward from `start`
+/// 3. co-located `Mercenaries2.exe` next to the running binary, then `data/vz.wad`
+/// 4. the EA registry key (Windows only — the other arm returns `None`, which is why 2 and 3 exist)
+pub fn discover_from(start: &Path) -> Option<Discovered> {
+    if let Some(p) = std::env::var_os(VZ_WAD_ENV) {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(Discovered { path, origin: Origin::Env });
+        }
+    }
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        let candidate = d.join(LOCAL_CONFIG);
+        if candidate.is_file() {
+            if let Some(path) = read_local_config(&candidate) {
+                if path.is_file() {
+                    return Some(Discovered { path, origin: Origin::LocalConfig });
+                }
+            }
+        }
+        dir = d.parent();
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            if exe_dir.join("Mercenaries2.exe").is_file() {
+                let candidate = exe_dir.join("data").join("vz.wad");
+                if candidate.is_file() {
+                    return Some(Discovered { path: candidate, origin: Origin::CoLocated });
+                }
+            }
+        }
+    }
+    mercs2_engine_registry_vz_wad()
+        .map(|path| Discovered { path, origin: Origin::Registry })
+}
+
+/// Discover starting from the current directory.
+pub fn discover() -> Option<Discovered> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    discover_from(&cwd)
+}
+
+fn read_local_config(path: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: toml::Value = toml::from_str(&text).ok()?;
+    let raw = doc.get("vz_wad")?.as_str()?;
+    Some(PathBuf::from(shellexpand_home(raw)))
+}
+
+/// Expand a leading `~/` so the config can be written by hand without an absolute path.
+fn shellexpand_home(raw: &str) -> String {
+    match raw.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => format!("{}/{rest}", home.to_string_lossy()),
+            None => raw.to_string(),
+        },
+        None => raw.to_string(),
+    }
+}
+
+/// The registry lookup lives in `mercs2_engine`, which pulls winit + wgpu — far too heavy for a
+/// headless crate to depend on. It is a dozen lines and Windows-only, so it is reproduced rather
+/// than depended upon; the non-Windows arm matches (`None`).
+#[cfg(windows)]
+fn mercs2_engine_registry_vz_wad() -> Option<PathBuf> {
+    use std::process::Command;
+    // Avoid a winreg dependency for one key: ask the OS.
+    let out = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames",
+            "/v",
+            "Install Dir",
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().find(|l| l.contains("Install Dir"))?;
+    let dir = line.split("REG_SZ").nth(1)?.trim();
+    let candidate = Path::new(dir).join("data").join("vz.wad");
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(not(windows))]
+fn mercs2_engine_registry_vz_wad() -> Option<PathBuf> {
+    None
+}
 
 struct OpenWad {
     path: PathBuf,
@@ -81,6 +212,9 @@ impl GameStack {
                     path: path.clone(),
                     message: e.to_string(),
                 })?;
+            if archive.endian == Endian::Big {
+                return Err(GameStackError::WrongEndian { path: path.clone() });
+            }
             wads.push(OpenWad { path: path.clone(), file, archive });
         }
         Ok(GameStack { wads })
@@ -158,5 +292,69 @@ impl GameStack {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(label: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("qm_game_{}_{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn local_config_is_read_and_tilde_expanded() {
+        let dir = scratch("cfg");
+        let wad = dir.join("vz.wad");
+        std::fs::write(&wad, b"x").unwrap();
+        std::fs::write(dir.join(LOCAL_CONFIG), format!("vz_wad = \"{}\"\n", wad.display()))
+            .unwrap();
+        assert_eq!(read_local_config(&dir.join(LOCAL_CONFIG)), Some(wad));
+
+        // `~/` is expanded so the file can be written by hand.
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(shellexpand_home("~/a/b"), format!("{home}/a/b"));
+        assert_eq!(shellexpand_home("/abs/path"), "/abs/path");
+    }
+
+    /// The config is found by walking UP, so a test running from a subdirectory still sees the
+    /// repo-root file.
+    #[test]
+    fn the_config_is_found_from_a_subdirectory() {
+        let dir = scratch("walkup");
+        let wad = dir.join("vz.wad");
+        std::fs::write(&wad, b"x").unwrap();
+        std::fs::write(dir.join(LOCAL_CONFIG), format!("vz_wad = \"{}\"\n", wad.display()))
+            .unwrap();
+        let deep = dir.join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        // Only meaningful when the env override is absent — it outranks the config by design.
+        if std::env::var_os(VZ_WAD_ENV).is_none() {
+            let found = discover_from(&deep).expect("should walk up to the config");
+            assert_eq!(found.origin, Origin::LocalConfig);
+            assert_eq!(found.path, wad);
+        }
+    }
+
+    #[test]
+    fn a_config_pointing_at_a_missing_file_is_ignored_rather_than_trusted() {
+        let dir = scratch("missing");
+        std::fs::write(dir.join(LOCAL_CONFIG), "vz_wad = \"/nope/vz.wad\"\n").unwrap();
+        assert_eq!(read_local_config(&dir.join(LOCAL_CONFIG)), Some(PathBuf::from("/nope/vz.wad")));
+        if std::env::var_os(VZ_WAD_ENV).is_none() {
+            // discover_from must not return a path that does not exist.
+            assert!(discover_from(&dir).is_none_or(|d| d.path.is_file()));
+        }
+    }
+
+    #[test]
+    fn an_empty_stack_explains_that_lint_still_works() {
+        let err = GameStack::open(&[]).unwrap_err();
+        assert!(err.to_string().contains("qm lint"), "{err}");
     }
 }
