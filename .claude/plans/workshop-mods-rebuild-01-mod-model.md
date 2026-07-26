@@ -461,6 +461,39 @@ Three things the review added that were not otherwise on the radar:
 `[SHELL.Misc.NN]` token and nothing records what a non-token string does. A useful negative: stop
 searching, it needs the in-game test.
 
+### Increment 5b — M0007/M0009 implemented, and the texture classes are NOT what I assumed
+
+Implementing M0007 immediately disproved the reasoning I used to downgrade it. Measured rows:
+
+| texture | rows | primary? | LOD chain |
+|---|---|---|---|
+| `al_hum_boss_ub` | 1 | **NO** | P000 1973 / **P001 4388 / P002 6329 / P003 9696** |
+| `al_hum_boss_lb` | 1 | **NO** | P000 1973 / P001 4387 / P002 6328 / P003 9695 |
+| `pmc_hum_mattias_v3_ub` | 1 | yes | P000 2576 / sentinel × 3 |
+
+**`al_hum_boss_ub` — the target of the end-to-end test — is a four-rung STREAMED texture with no
+primary row of its own.** I had reasoned "it's a character texture, characters are fully resident,
+so the test case is in the safe class." Backwards: the genuinely resident single-block asset is the
+PMC *hero* texture. `al_hum_*` is baked into cell blocks like world content.
+
+So the first Shipment we ever built orphaned three LOD rungs and minted a primary row where retail
+had none — and `wad_simulator` still passed it, correctly, because none of that is a STRUCTURAL
+violation. Structural validity and semantic correctness are different questions, and we now have
+one check for each.
+
+Two rules, both warnings (the change may be exactly what an author wants; it must be loud, not
+forbidden), both with a fires-and-stays-quiet pair against real rows:
+
+- **M0007** — replacing a multi-rung texture with one fully-resident block stops it streaming.
+- **M0009** — replacing a texture with no primary row MINTS one, which then wins the lookup. That is
+  what makes the replacement take effect, and also means every asset sharing that texture gets it
+  (`docs/modernization/texture_extraction_notes.md`).
+
+`game_checks` is deliberately separate from `lint`: folding them together would make the hermetic
+set impossible to run alone, and CI is where the linter matters most. `GameStack::aset_rows` returns
+ALL rows rather than just the primary, because looking only for a primary would silently skip
+precisely the shared assets M0009 exists to catch.
+
 ## Open questions for the user
 - The domain/nav question is Plan 02; the fork is settled here.
 - Whether the first shipped recipe is outfits or texture reskins (leaning outfits).
