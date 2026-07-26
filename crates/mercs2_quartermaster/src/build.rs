@@ -300,7 +300,12 @@ pub fn build(
     let mut log = Vec::new();
     let manifest = &shipment.manifest;
 
-    let diagnostics = lint::lint(manifest, Some(&shipment.root), names);
+    let mut diagnostics = lint::lint(manifest, Some(&shipment.root), names);
+    // Rules that need the retail WADs run only when a stack is configured. They are appended
+    // BEFORE the gate so a game-aware Error would still block, even though M0007 is a warning.
+    if let Some(g) = game.as_deref() {
+        diagnostics.extend(lint::game_checks(manifest, g));
+    }
     if lint::blocks_build(&diagnostics) {
         return Err(BuildError::Blocked(diagnostics));
     }
