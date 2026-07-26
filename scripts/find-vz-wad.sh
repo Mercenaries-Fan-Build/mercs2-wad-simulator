@@ -16,16 +16,29 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PWD_ROOT="$(pwd)"
 WRITE=0
 [[ "${1:-}" == "--write" ]] && WRITE=1
 
-# The PC bake is little-endian and its magic reads `FFCS`. The Xbox 360 / PS3 bakes are big-endian
-# and read `SCFF` — byte-identical content, unreadable by this toolchain. Checking the magic is the
-# only reliable discriminator; filenames are not (`pc-game-vz.wad` and `xbox-vz.wad` sit together).
-is_pc_wad() {
+# Platform is read from the 4-byte magic, not the filename — a game-files/ directory legitimately
+# holds every platform's bake side by side, and the names vary:
+#
+#   PC        FFCS  little-endian, `sges` blocks
+#   Xbox 360  SCFF  big-endian,    `segs` blocks
+#   PS3       SCFF  big-endian     (this dump; docs/ps3_wad_wrapper.md describes an older
+#                                   1 GiB dump with an unknown/encrypted header instead)
+#
+# The console bakes are deliberately kept: Shipments are expected to export to every platform. The
+# BUILDER cannot emit for them yet (ucfx_byteswap converts console -> PC only), so this script
+# prefers PC while still reporting the rest.
+wad_platform() {
     local f="$1"
-    [[ -f "$f" ]] || return 1
-    [[ "$(head -c 4 "$f" | LC_ALL=C od -An -tx1 | tr -d ' \n')" == "46464353" ]]
+    [[ -f "$f" ]] || { echo "missing"; return; }
+    case "$(head -c 4 "$f" | LC_ALL=C od -An -tx1 | tr -d ' \n')" in
+        46464353) echo "pc" ;;
+        53434646) echo "console" ;;
+        *)        echo "unknown" ;;
+    esac
 }
 
 CANDIDATES=()
@@ -42,22 +55,22 @@ CANDIDATES+=(
     "/Applications/Mercenaries 2/data/vz.wad"
     "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad"
     "C:/Program Files/EA Games/Mercenaries 2 World in Flames/data/vz.wad"
+    "$PWD_ROOT/data/vz.wad"
 )
 
 FOUND=""
-REJECTED=()
+OTHERS=()
 for c in "${CANDIDATES[@]}"; do
     [[ -f "$c" ]] || continue
-    if is_pc_wad "$c"; then
-        FOUND="$c"
-        break
-    else
-        REJECTED+=("$c")
-    fi
+    case "$(wad_platform "$c")" in
+        pc)      [[ -z "$FOUND" ]] && FOUND="$c" ;;
+        console) OTHERS+=("console  $c") ;;
+        *)       OTHERS+=("unknown  $c") ;;
+    esac
 done
 
-for r in "${REJECTED[@]:-}"; do
-    [[ -n "$r" ]] && echo "skipped (not a little-endian PC bake): $r" >&2
+for o in "${OTHERS[@]:-}"; do
+    [[ -n "$o" ]] && echo "also present: $o" >&2
 done
 
 if [[ -z "$FOUND" ]]; then
@@ -65,6 +78,8 @@ if [[ -z "$FOUND" ]]; then
 No PC vz.wad found.
 
 Searched \$MERCS2_VZ_WAD, sibling game-files/ directories, and the usual install paths.
+Console bakes, if any, are listed above — they are readable but the builder cannot emit for
+them yet, so they are not selected here.
 Game-dependent tests will SKIP (they will not fail). To point at one explicitly:
 
     scripts/find-vz-wad.sh --write   # after setting MERCS2_VZ_WAD=/path/to/vz.wad
