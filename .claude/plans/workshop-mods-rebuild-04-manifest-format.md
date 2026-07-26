@@ -18,8 +18,8 @@ database of character bios — `WifBios.AddDossierEntry("BioChris")` (wifmission
 *people* while ours is a catalog of *changes* — the word does opposite work in the same UI, and our
 own `patch_lua` contributions will sit in files next to `AddDossierEntry` calls.
 
-**Why Shipment/Quartermaster.** A Quartermaster inventories and issues materiel — the user's framing
-of a Shipment as "an inventory of modifications." It also fixes a latent wart: `dossier.yaml` made the
+**Why Shipment/Quartermaster.** A Quartermaster inventories and issues materiel, which is what a
+Shipment is: an inventory of modifications. It also fixes a latent wart: `dossier.yaml` made the
 package and its metadata file the same word. A Shipment CONTAINS a `manifest.yaml`, which is the
 real-world relationship and the one Cargo already teaches every Rust developer.
 
@@ -151,7 +151,7 @@ read from the binary itself (`dlls/pmc_bb.dll`, **v3.0.0**, 30,208 bytes) plus
   `Installed %d/%d hooks (mode=%s)` and a `[SKIP] %s @ 0x%08X` path). Wally's bridge also uses MinHook
   (Plan 03) — so two independent MinHook users can end up in one process.
 
-**The loader is NOT a contribution.** Modkit installs and manages `pmc_bb.dll` (user-set). A Shipment
+**The loader is NOT a contribution.** Modkit installs and manages `pmc_bb.dll`. A Shipment
 never ships it: N Shipments carrying their own copies would collide on one filename with no
 arbitration, and it is not ours to redistribute per-mod. The Quartermaster treats it as a
 **prerequisite** and errors with setup guidance when absent.
@@ -325,7 +325,7 @@ Every claim in a blast radius carries a class:
   `_nAvailableCostumes` derived from final length, index assignment deterministic (sorted by shipment
   name, NOT load order — a saved costume is a position, so load-order churn silently re-dresses the
   player or nils `tOutfits[iIndex].Model` and wedges `STATE_WAITFORGAME`).
-- **`LastWins`** — many claimants, later wins, load order IS the user's answer. Texture replacement.
+- **`LastWins`** — many claimants, later wins, load order IS the answer. Texture replacement.
 
 ASI plugins are the sharpest `Exclusive` case and deserve calling out: plugins **coexist fine** at the
 loader (it loads every `*.asi` it finds), but two hooking the SAME address do not — and unlike every
@@ -416,7 +416,7 @@ Tier-1 users who install by clicking.
 
 ### What we can actually offer today: integrity, not authenticity
 
-**All v1 can do is SHA-256 the payload** (user-set 2026-07-25). That is not a new mechanism — it is the
+**All v1 can do is SHA-256 the payload** (2026-07-25). That is not a new mechanism — it is the
 standing `verify-artifacts-by-hash-not-size-mtime` mandate applied to a new artifact class, and
 `sha256_hex` already exists (`mercs2_workshop/src/publish.rs:706`). Record the hash of every `plugin:`
 payload in the build log and the placement record.
@@ -433,7 +433,7 @@ Be precise about what that buys, because the two are easy to conflate:
 So a recorded hash is **provenance-of-bytes**, and it only becomes meaningful when attested from
 OUTSIDE the Shipment.
 
-### GitHub releases supply that outside attestation (user-set 2026-07-25)
+### GitHub releases supply that outside attestation (2026-07-25)
 
 ASI plugins are expected to be published on **GitHub release pages**, which carry the hash. That
 breaks the circularity above: the digest is served by the plugin author's release, not asserted by
@@ -487,7 +487,7 @@ stable iteration order — or verify-by-hash means nothing.
 5. ~~Format migrations~~ — **RESOLVED: `format: 1`; newer-than-known is a loud reject.**
 6. ~~Inter-contribution references~~ — **RESOLVED for v1: inline `retarget:` sub-block**; a general
    contribution-`id` graph waits for a case needing a longer chain than "retarget → outfit".
-10. **PLATFORM is a missing axis — OPEN (new 2026-07-25, user-set).** Shipments are expected to
+10. **PLATFORM is a missing axis — OPEN (new 2026-07-25).** Shipments are expected to
     export to **every platform, not just PC**. `target: retail | reimpl` is the ENGINE axis; it says
     nothing about which bake. These are orthogonal, so v1's `target` cannot express "retail, Xbox
     360". The console WADs kept in `game-files/` are a deliberate corpus for this, not stray files.
@@ -505,10 +505,8 @@ stable iteration order — or verify-by-hash means nothing.
     handles Havok section-aware. The inverse needs texture RE-tiling and XMA *encoding*, neither of
     which exists. So platform support is not "add a field"; the field is the cheap part.
 
-    ⚠ Also: `docs/ps3_wad_wrapper.md` describes a PS3 dump of exactly 1 GiB with an
-    unknown/encrypted header. The `ps3-VZ.WAD` in `game-files/` is 2,201,354,240 bytes and presents
-    a plain `SCFF` header, i.e. readable like the Xbox bake. Different dump — worth reconciling
-    before anyone plans PS3 work off that doc.
+    **PC is the present focus** (2026-07-25). This is recorded so the format does not get
+    frozen in a shape that cannot grow the axis — it is not scheduled work.
 
     Until decided, `mercs2_quartermaster` OPENS console bakes and reports
     `Platform::BigEndianConsole`, and `build` refuses with `ConsoleOutputUnsupported` naming the

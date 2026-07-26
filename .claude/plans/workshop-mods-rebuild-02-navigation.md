@@ -5,10 +5,10 @@
 **Scope:** how the Workshop is NAVIGATED once `mercs2_quartermaster` (Plan 01) exists. This is the UX spine.
 A mod = a **Shipment** (see Plan 01 for the naming).
 
-## The decision (settled with the user)
+## The decision (settled)
 
 Navigate by **themed, invented feature-domains** (Unreal-style), NOT by a tool list, and NOT by my
-earlier "object-first" framing. The user explicitly wants us to name our own areas and group related
+earlier "object-first" framing. The decision is to name our own areas and group related
 tools under a theme — and to bring a Lua script editor into the Workshop. My "object-first" and their
 "behavior-theme" converge once **the domain IS the object context**; the disagreement was labels.
 
@@ -69,7 +69,7 @@ thicken over time.
 - Every Tier-1 recipe must have a visible **"show me what this does"** that drops the user a tier —
   that's how a modder graduates without a wiki.
 
-## Inspect = the Library (content browser + preview) — user-set 2026-07-24
+## Inspect = the Library (content browser + preview) — 2026-07-24
 
 **Inspect CONTINUES to exist**, but reframed: it is the **content browser / preview tool**, not an
 authoring workbench. Browse-by-TYPE across the whole install, preview faithfully in the engine, inspect
@@ -91,8 +91,7 @@ engine preview is its whole reason to exist (Plan 01 fork: Workshop = the accura
 | **FaceFX** | `facefxanimationset 0x665EF13E` / `facefxactor 0x1CF649BB` | 86 / 31 | facial anim on a head | ◻ later |
 | minor | `font 0x99E77ACE` (9), `stringdb 0x39E5E978` (3) | — | plate / text list | ◻ later |
 
-Launch order for Inspect categories: **Animations** and **Visual Effects** are the user's named next
-two (Animations is nearly there; VFX is browsable now, faithful preview gated on finishing the effect
+Launch order for Inspect categories: **Animations** and **Visual Effects** are the named next two (Animations is nearly there; VFX is browsable now, faithful preview gated on finishing the effect
 param decode). Audio / UI-GFX / FaceFX follow.
 
 ## The Quartermaster — the Shipment accumulator (naming re-settled 2026-07-25)
@@ -144,7 +143,7 @@ The `Workbench::{Inspect, Sandbox, Mods, Skeleton}` rail (a TOOL list) is replac
 - The engine viewport + camera stay persistent across everything (already true — the activity rail
   only ever swapped navigator+inspector, per memory `mercs2-workshop-devtool`).
 
-## Open questions for the user
+## Open questions
 1. **The domain list + the Systems/Engine slot** — is "code-layer mods get their own domain" the right
    cut? What are the LAUNCH domains vs. STUB domains?
 2. **Where the craft surface lives visually** relative to the domain spine — an always-docked panel, or

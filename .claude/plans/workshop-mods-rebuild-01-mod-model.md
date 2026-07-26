@@ -2,7 +2,7 @@
 
 **Status:** DESIGN (rev 2, 2026-07-25). Multi-session effort. No code written yet.
 **Siblings:** `-02-navigation.md`, `-03-live-bridge.md`, `-04-manifest-format.md` (the format contract)
-**Origin:** user wants to rebuild the Workshop's "Mods" page from the ground up. The page today is a
+**Origin:** rebuild the Workshop's "Mods" page from the ground up. The page today is a
 black-sheep single-recipe bench (inject a static mesh into a vehicle container's group N → emit a WAD).
 See `app.rs` `Workbench::Mods` arm (~lines 1410, 2797–3056) and memory `mercs2-workshop-devtool`.
 
@@ -56,7 +56,7 @@ for the common case, the author never maintains it — they just add contributio
 
 ## Naming (re-settled 2026-07-25)
 
-A mod is a **Shipment** — a documented package of changes; the user's framing is "an inventory of
+A mod is a **Shipment** — a documented package of changes; the framing is "an inventory of
 modifications." It generalizes to ANY mod type — texture swap, mission, or engine rewrite are all
 Shipments.
 
@@ -203,7 +203,7 @@ read-set · failure mode when violated. Seeded from the five mechanisms found in
 | `_tOutfits[hero]` | source-append of `table.insert` (it's a global — no AST edit) | `OrderedList`, keyed `(wearer, slug)` | append-only; index 2 reserved; save persists a POSITION; `_nAvailableCostumes` must be DERIVED from final length. Key is per-hero — retail reuses `Original`/`ChickenSuit` across all three |
 | HQ starters | exclusive by construction | `Exclusive` | second claimant refused to `Debug.Printf` only — silent to the player |
 | reward → support refs | cross-reference | (read-set) | missing key silently skipped; the lookup is also memoized, so late registration is invisible |
-| texture by hash | WAD stack | `LastWins` | load order IS the user's answer |
+| texture by hash | WAD stack | `LastWins` | load order IS the answer |
 | ASET rows | engine-enforced | `KeyedSet(hash)` | `validate_blocks` already rejects a duplicate primary and allows a repeated sub-entry (`patch_wad.rs:631`) |
 | string DBs | `AddStringDb` | `LastWins` + **hard cap 8** | resolver walks DBs in REVERSE then falls back to base language, NULL on miss (`FUN_0046423e`); registration refuses past 8 slots (`FUN_00464540`) — a capped resource, so the 9th claimant silently gets nothing |
 | ASI plugins | `pmc_bb.dll` loader (glob `*.asi` over game root + `scripts\`/`plugins\`/`update\`) | `Exclusive` keyed on **hooked address** | plugins coexist, but two hooking one address do not — and discovery is FILESYSTEM ORDER, so there is no load order that resolves it. Must be a hard error. Loader is Modkit-managed, never a contribution |
@@ -216,7 +216,7 @@ this catalog exists to FIX rather than merely diagnose: `patch_lua` ships a decl
 Quartermaster links the block once across the installed set. Where a recipe implies a fixed edit (the
 `add_outfit` availability-count lift), the Quartermaster owns it and emits it ONCE at link time.
 
-## Testing — ship tests with every phase (user-set 2026-07-25)
+## Testing — ship tests with every phase (2026-07-25)
 
 Align with workspace norms rather than inventing: `mercs2_formats` already carries **276 tests** plus
 `tests/fixtures/`, and game-dependent tests use the established gate — `#[ignore = "needs the retail
@@ -242,7 +242,7 @@ vz.wad"]` over an `Option`-returning opener that skips gracefully when the insta
   entry with no writer is flagged; an unrecognized target resolves to `Exclusive` (fail-closed).
 - **Determinism.** Build twice, assert byte-identical output — otherwise verify-by-hash means nothing.
 
-*Game-dependent — DISCOVERED, not `#[ignore]`d (user-set 2026-07-25):* donor resolution and
+*Game-dependent — DISCOVERED, not `#[ignore]`d (2026-07-25):* donor resolution and
 auto-pick, `replace_texture` dimension/resident-size checks, and the end-to-end build.
 
 **`#[ignore]` was the wrong default.** It means the tests that exercise the real format only run
@@ -319,7 +319,7 @@ Design the CONTRACT before the code. The `manifest.yaml` schema is what everythi
 5. **First recipe end-to-end** — "Add an outfit" (fully proven path, and what the community wants most).
 6. Everything else (navigation, live bridge) is Plans 02 and 03.
 
-⚠ **Phase 0 is not something I can mark done.** Freezing is the user's call, and any freeze is
+⚠ **Phase 0 is not something I can mark done.** Freezing is a judgement call, and any freeze is
 PROVISIONAL until a first Shipment actually BUILDS — writing plausible YAML is not proof.
 
 ### Phase 1 progress
@@ -517,7 +517,7 @@ set impossible to run alone, and CI is where the linter matters most. `GameStack
 ALL rows rather than just the primary, because looking only for a primary would silently skip
 precisely the shared assets M0009 exists to catch.
 
-## Open questions for the user
+## Open questions
 - The domain/nav question is Plan 02; the fork is settled here.
 - Whether the first shipped recipe is outfits or texture reskins (leaning outfits).
 - crates.io publish of `mercs2_formats`/`mercs2_luac` so both repos stop needing side-by-side paths.

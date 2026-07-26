@@ -14,12 +14,12 @@ the highest-leverage item on the roadmap because it multiplies every other capab
 The pieces already exist: the game hosts a Lua 5.1 VM; we have the decompiled Lua corpus; spawn-by-hash
 works; `pmc_bb` gives native logging; we have full symbol coverage of the exe.
 
-## Ownership (settled with the user)
+## Ownership (settled)
 
 We are NOT merely consuming an external bridge. **Wally (loganw234) gave permission to adapt his Lua
-bridge code into Workshop/Modkit**, and the user wants to ENRICH it with our RE knowledge, not just
+bridge code into Workshop/Modkit**, and the intent is to ENRICH it with our RE knowledge, not just
 lift it. He has been building the Lua-bridge side (plus a webmap, a Lua web IDE, a stopgap skinner, and
-a Lua framework "essentials"/"ess") while leaving the bigger engine features to the user. So:
+a Lua framework "essentials"/"ess") while leaving the bigger engine features to us. So:
 
 - **The bridge becomes a shared crate `mercs2_bridge`** — a third pillar alongside `mercs2_quartermaster`
   (Plan 01). Both Workshop AND Modkit benefit ("deploy → see it live" is valuable at every tier).
@@ -52,7 +52,7 @@ transport unchanged):
 - Define the message schema so BOTH engines can serve it, one client speaks it. Community story:
   prototype fast against the reimpl, verify against retail over the same wire.
 
-## Performance discipline (a REAL constraint, user-flagged)
+## Performance discipline (a REAL constraint)
 
 The retail game is old and frame-sensitive. The bridge MUST NOT stall the frame. Requirements to verify
 against Wally's implementation: work off the game's critical path (own thread / debug thread), rate-
@@ -123,7 +123,7 @@ still want a native primitive; decide per capability.
 
 ## Reconcile / adopt list (from the survey)
 - (Resolved 2026-07-24) The untracked `tools/mercs2-skinner/` and `tools/mercs2-mesher/` local copies
-  were DELETED from disk by the user — no reconcile needed. If we later want his JS tools, pull fresh
+  were DELETED from disk — no reconcile needed. If we later want his JS tools, pull fresh
   from `github.com/loganw234`, don't resurrect stale local copies.
 - `mercs2-mesher` retargets glTF by BONE NAME (not spatial NN) with FIVE independent validators (bone
   distance / triangle area / limb direction / bind-height / character height). This CONVERGES with our
