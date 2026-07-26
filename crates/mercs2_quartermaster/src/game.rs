@@ -19,13 +19,38 @@ use mercs2_formats::texture::{extract_texture, TextureData};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+/// Which bake a WAD belongs to.
+///
+/// Console WADs are a deliberate part of the corpus — Shipments are expected to export to every
+/// platform, not just PC — so opening one is NOT an error. What a given operation can *do* with it
+/// is a separate question, answered where that operation lives.
+///
+/// Xbox 360 and PS3 both present `SCFF`/big-endian and are indistinguishable from the header alone,
+/// hence one variant rather than two guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Platform {
+    /// `FFCS`, little-endian, `sges` blocks.
+    Pc,
+    /// `SCFF`, big-endian, `segs` blocks — Xbox 360 or PS3.
+    BigEndianConsole,
+}
+
+impl Platform {
+    fn of(endian: Endian) -> Platform {
+        match endian {
+            Endian::Little => Platform::Pc,
+            Endian::Big => Platform::BigEndianConsole,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum GameStackError {
     Open { path: PathBuf, message: String },
     Parse { path: PathBuf, message: String },
-    /// A console bake. The PC build is little-endian (`FFCS`); the Xbox/PS3 bakes are big-endian and
-    /// read as `SCFF`. Caught here because otherwise it fails much deeper, unrecognisably.
-    WrongEndian { path: PathBuf },
+    /// A stack mixing a PC bake with a console bake. Resolution walks the whole stack, so a mixed
+    /// one would silently read structures of the wrong endianness.
+    MixedPlatforms { paths: Vec<PathBuf> },
     Empty,
 }
 
@@ -38,12 +63,16 @@ impl std::fmt::Display for GameStackError {
             GameStackError::Parse { path, message } => {
                 write!(f, "parsing {} as an FFCS archive: {message}", path.display())
             }
-            GameStackError::WrongEndian { path } => write!(
-                f,
-                "{} is a BIG-ENDIAN (Xbox 360 / PS3) bake — the PC build is little-endian. Its \
-                 magic reads `SCFF` rather than `FFCS`. Point at the PC `vz.wad`.",
-                path.display()
-            ),
+            GameStackError::MixedPlatforms { paths } => {
+                let list: Vec<String> =
+                    paths.iter().map(|p| p.display().to_string()).collect();
+                write!(
+                    f,
+                    "the stack mixes PC and console bakes ({}) — resolution walks the whole stack, \
+                     so this would read structures of the wrong endianness. Use one platform.",
+                    list.join(", ")
+                )
+            }
             GameStackError::Empty => write!(
                 f,
                 "no WADs supplied — a build needs at least the base vz.wad. Configure the game \
@@ -212,12 +241,26 @@ impl GameStack {
                     path: path.clone(),
                     message: e.to_string(),
                 })?;
-            if archive.endian == Endian::Big {
-                return Err(GameStackError::WrongEndian { path: path.clone() });
-            }
             wads.push(OpenWad { path: path.clone(), file, archive });
         }
+        // A console bake is fine on its own; MIXING is not, because resolution walks the stack.
+        let platforms: std::collections::BTreeSet<Platform> =
+            wads.iter().map(|w| Platform::of(w.archive.endian)).collect();
+        if platforms.len() > 1 {
+            return Err(GameStackError::MixedPlatforms {
+                paths: wads.iter().map(|w| w.path.clone()).collect(),
+            });
+        }
         Ok(GameStack { wads })
+    }
+
+    /// Which bake this stack is. Opening a console WAD is allowed; whether a given operation
+    /// supports it is decided by that operation — see `build`.
+    pub fn platform(&self) -> Platform {
+        self.wads
+            .first()
+            .map(|w| Platform::of(w.archive.endian))
+            .unwrap_or(Platform::Pc)
     }
 
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is
@@ -350,6 +393,38 @@ mod tests {
             // discover_from must not return a path that does not exist.
             assert!(discover_from(&dir).is_none_or(|d| d.path.is_file()));
         }
+    }
+
+    /// A console bake OPENS fine — Shipments are expected to export to every platform, so refusing
+    /// to read one would be wrong. Only EMITTING for it is unsupported, and that is the builder's
+    /// call, not this layer's.
+    #[test]
+    fn a_console_bake_opens_and_reports_its_platform() {
+        let Some(found) = discover() else { return };
+        let dir = found.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        for name in ["xbox-vz.wad", "ps3-VZ.WAD"] {
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let stack = GameStack::open(&[candidate.clone()])
+                .unwrap_or_else(|e| panic!("a console bake must open, not error: {e}"));
+            assert_eq!(stack.platform(), Platform::BigEndianConsole, "{name}");
+        }
+    }
+
+    /// Mixing platforms in one stack IS an error: resolution walks the whole stack, so it would read
+    /// structures of the wrong endianness.
+    #[test]
+    fn a_mixed_platform_stack_is_rejected() {
+        let Some(found) = discover() else { return };
+        let dir = found.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let console = dir.join("xbox-vz.wad");
+        if !console.is_file() {
+            return;
+        }
+        let err = GameStack::open(&[found.path.clone(), console]).unwrap_err();
+        assert!(err.to_string().contains("mixes PC and console"), "{err}");
     }
 
     #[test]
