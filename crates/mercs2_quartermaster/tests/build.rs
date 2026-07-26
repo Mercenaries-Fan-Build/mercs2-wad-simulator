@@ -1,8 +1,13 @@
 //! Builder behaviour.
 //!
 //! The hermetic tests pin the GATE and the emission contract — those must hold with no game
-//! present, since that is the state template CI runs in. The one test that needs the retail WADs is
-//! `#[ignore]`d behind the workspace's usual convention.
+//! present, since that is the state template CI runs in.
+//!
+//! The game-dependent tests are **not** `#[ignore]`d. They discover a PC `vz.wad`
+//! (`scripts/find-vz-wad.sh --write`, then `game::discover`) and run automatically when one is
+//! present, skipping loudly when it is not. `#[ignore]` was the wrong default here: it means the
+//! tests that exercise the real format never run unless someone remembers a flag, and those are
+//! precisely the ones that caught every structural bug so far.
 
 use mercs2_quartermaster::build::{self, BuildError, Destination};
 use mercs2_quartermaster::discover;
@@ -161,24 +166,42 @@ fn the_placement_record_is_well_formed_json() {
     assert!(doc["placements"].is_array());
 }
 
+
+/// Open the discovered game stack, or skip with a message that says how to fix it.
+///
+/// Skipping rather than failing keeps CI green where the retail WADs will never exist, but the
+/// message has to be loud: a test that quietly does nothing is worse than one that is absent,
+/// because it reads as coverage.
+fn discovered_game() -> Option<mercs2_quartermaster::GameStack> {
+    match mercs2_quartermaster::game::discover() {
+        Some(found) => {
+            eprintln!("game stack: {} (via {:?})", found.path.display(), found.origin);
+            match mercs2_quartermaster::GameStack::open(&[found.path]) {
+                Ok(g) => Some(g),
+                Err(e) => panic!("discovered a WAD but could not open it: {e}"),
+            }
+        }
+        None => {
+            eprintln!(
+                "SKIPPING: no PC vz.wad discovered. Run `scripts/find-vz-wad.sh --write` \
+                 or set MERCS2_VZ_WAD."
+            );
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Against the real game
 // ---------------------------------------------------------------------------
 
 /// End-to-end texture replacement against the retail WADs.
 ///
-/// `#[ignore]`d by the workspace convention for game-dependent tests. Point `MERCS2_VZ_WAD` at a
-/// `vz.wad` and run:
-///   `cargo test -p mercs2_quartermaster --test build -- --ignored --nocapture`
+/// Runs automatically when a PC `vz.wad` is discoverable (`scripts/find-vz-wad.sh --write`), and
+/// SKIPS loudly otherwise — see `discovered_game`.
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn a_texture_replacement_builds_end_to_end() {
-    let Ok(wad) = std::env::var("MERCS2_VZ_WAD") else {
-        eprintln!("MERCS2_VZ_WAD unset; skipping");
-        return;
-    };
-    let mut game = mercs2_quartermaster::GameStack::open(&[PathBuf::from(&wad)])
-        .expect("open the game stack");
+    let Some(mut game) = discovered_game() else { return };
 
     // Read the target's real dimensions so the fixture matches; a replacement is same-hash and
     // fully resident, so mismatched dimensions are a legitimate hard error.
@@ -290,13 +313,8 @@ fn solid_png(width: u32, height: u32) -> Vec<u8> {
 ///   `pmc_hum_mattias_v3_ub`  primary, single-block         -> silent
 ///   `al_hum_boss_ub`         NON-primary, 4-rung streamed  -> M0007 + M0009
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
-    let Ok(wad) = std::env::var("MERCS2_VZ_WAD") else {
-        eprintln!("MERCS2_VZ_WAD unset; skipping");
-        return;
-    };
-    let game = mercs2_quartermaster::GameStack::open(&[PathBuf::from(&wad)]).expect("stack");
+    let Some(game) = discovered_game() else { return };
     use mercs2_formats::hash::pandemic_hash_m2;
     use mercs2_quartermaster::lint::{self, aset_row_is_single_block};
     const TEX: u32 = mercs2_formats::types::TYPE_ID_TEXTURE;
