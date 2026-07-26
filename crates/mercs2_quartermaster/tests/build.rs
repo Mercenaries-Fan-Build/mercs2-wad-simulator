@@ -201,6 +201,14 @@ fn a_texture_replacement_builds_end_to_end() {
     );
 
     let report = build::build(&s, Some(&mut game), None, None).expect("build");
+
+    // This target turns out to be a 4-rung STREAMED texture with no primary row of its own, so the
+    // game-aware rules fire — and the build still completes, because they are warnings. That pairing
+    // is the point: the author is told what changed without being blocked from shipping it.
+    let codes: Vec<&str> = report.diagnostics.iter().map(|d| d.rule.code).collect();
+    assert!(codes.contains(&"M0007") && codes.contains(&"M0009"), "{codes:?}");
+    assert!(report.diagnostics.iter().all(|d| d.severity < mercs2_quartermaster::Severity::Error));
+
     let wad_path = report.wad.expect("a WAD must be emitted");
     assert!(wad_path.is_file());
 
@@ -273,4 +281,55 @@ fn solid_png(width: u32, height: u32) -> Vec<u8> {
         writer.write_image_data(&data).unwrap();
     }
     out
+}
+
+/// M0007/M0009 against real ASET rows, in both directions.
+///
+/// The classes are the opposite of what "character texture" intuition suggests, which is exactly
+/// why this is measured rather than assumed:
+///   `pmc_hum_mattias_v3_ub`  primary, single-block         -> silent
+///   `al_hum_boss_ub`         NON-primary, 4-rung streamed  -> M0007 + M0009
+#[test]
+#[ignore = "needs the retail vz.wad"]
+fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
+    let Ok(wad) = std::env::var("MERCS2_VZ_WAD") else {
+        eprintln!("MERCS2_VZ_WAD unset; skipping");
+        return;
+    };
+    let game = mercs2_quartermaster::GameStack::open(&[PathBuf::from(&wad)]).expect("stack");
+    use mercs2_formats::hash::pandemic_hash_m2;
+    use mercs2_quartermaster::lint::{self, aset_row_is_single_block};
+    const TEX: u32 = mercs2_formats::types::TYPE_ID_TEXTURE;
+
+    // A hero texture really is single-block AND primary — replacing it changes no residency.
+    let (p, s, primary) = *game
+        .aset_rows(pandemic_hash_m2("pmc_hum_mattias_v3_ub"), TEX)
+        .first()
+        .expect("mattias_v3_ub row");
+    assert!(primary && aset_row_is_single_block(p, s), "packed 0x{p:08X} secondary 0x{s:08X}");
+
+    let dir = scratch("m0007_quiet");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/t.png"), solid_png(4, 4)).unwrap();
+    let quiet = shipment(
+        &dir,
+        "  - kind: replace_texture\n    target: pmc_hum_mattias_v3_ub\n    image: src/t.png\n",
+    );
+    assert!(
+        lint::game_checks(&quiet.manifest, &game).is_empty(),
+        "a resident, primary target must not be flagged"
+    );
+
+    // al_hum_boss_ub is neither: four rungs, and no primary row of its own.
+    let dir2 = scratch("m0007_fires");
+    std::fs::create_dir_all(dir2.join("src")).unwrap();
+    std::fs::write(dir2.join("src/t.png"), solid_png(4, 4)).unwrap();
+    let fires = shipment(
+        &dir2,
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    let codes: Vec<&str> =
+        lint::game_checks(&fires.manifest, &game).iter().map(|d| d.rule.code).collect();
+    assert!(codes.contains(&"M0007"), "streamed target must warn: {codes:?}");
+    assert!(codes.contains(&"M0009"), "shared target must warn: {codes:?}");
 }
