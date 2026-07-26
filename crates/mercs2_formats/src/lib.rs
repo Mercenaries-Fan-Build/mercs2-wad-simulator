@@ -94,6 +94,7 @@ pub mod model_cubeize;
 pub mod model_inject;
 pub mod orchestrator;
 pub mod patch_wad;
+pub mod mesh_import;
 pub mod placement;
 pub mod placement_build;
 pub mod safe_slice;
