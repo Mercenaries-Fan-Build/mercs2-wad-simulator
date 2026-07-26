@@ -36,6 +36,13 @@ pub struct GameplaySystems {
     lut: DonutLut,
     /// Shared audio engine — the loop ticks the SAME engine the Lua `Sound.*` cues into.
     audio: Rc<RefCell<AudioEngine>>,
+    /// Per-model destruction machines + HIER. Empty until a loader populates it (see
+    /// [`destruction_store_mut`](GameplaySystems::destruction_store_mut)); an unpopulated store
+    /// simply means nothing is destructible, never an error.
+    destruction: crate::destruction::DestructionStore,
+    /// This step's destruction side effects (debris / fire), drained by
+    /// [`take_destruction_intents`](GameplaySystems::take_destruction_intents).
+    destruction_intents: Vec<mercs2_destruction::DestructionIntent>,
 }
 
 impl GameplaySystems {
@@ -47,7 +54,22 @@ impl GameplaySystems {
             weapons: crate::combat::WeaponSystem::default(),
             lut: DonutLut::new(),
             audio,
+            destruction: crate::destruction::DestructionStore::new(),
+            destruction_intents: Vec::new(),
         }
+    }
+
+    /// The per-model destruction store, for a loader to populate as models come in
+    /// (`store.insert_model(&model)`). Without this, `Destructible` entities never change state.
+    pub fn destruction_store_mut(&mut self) -> &mut crate::destruction::DestructionStore {
+        &mut self.destruction
+    }
+
+    /// Drain this step's destruction intents — `CreateObject` (debris) and `StartEmitter` (fire).
+    /// The runtime turns each into a spawn / FX request; ignoring them yields correct geometry and
+    /// no effects. Drain-then-clear, mirroring [`take_impacts`](GameplaySystems::take_impacts).
+    pub fn take_destruction_intents(&mut self) -> Vec<mercs2_destruction::DestructionIntent> {
+        std::mem::take(&mut self.destruction_intents)
     }
 
     /// Replace the static collision soup (call when the world geometry finishes streaming). The
@@ -65,7 +87,7 @@ impl GameplaySystems {
     }
 
     /// Run one fixed simulation step of the fleet systems over `world`, in the recovered layer-4 order
-    /// (vehicle → weapons — `FUN_004c9740`), drain the event bus, then advance audio. No-op over a
+    /// (vehicle → weapons → destruction — `FUN_004c9740`), drain the event bus, then advance audio. No-op over a
     /// World carrying none of the fleet components yet.
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         let phys: &dyn PhysicsQuery = &self.physics;
@@ -81,6 +103,15 @@ impl GameplaySystems {
                 hm.and_then(|h| h.sample(p.x, p.z)).unwrap_or(0.0)
             });
         }
+        // Destruction runs AFTER the weapon system, so this step's damage is already on `Health`
+        // when the machines are advanced — retail drives transitions from damage messages, not from
+        // a poll one frame stale. Produces the node-enable tables the render side mirrors onto the
+        // draw gate via `destruction::sync_destruction_to_scene`.
+        self.destruction_intents.extend(mercs2_destruction::destruction_system(
+            world,
+            &self.destruction,
+            mercs2_destruction::DamageBands::default(),
+        ));
         self.bus.dispatch_all();
         self.audio.borrow_mut().tick(dt);
     }
@@ -101,6 +132,62 @@ mod tests {
     /// `StaticSoupPhysics`). This is the end-to-end proof that the engine→system→entity edge is live —
     /// spawn a fleet entity, tick the bundle, the entity moves. (Spawns are Lua/population-driven at
     /// runtime; here we spawn directly to exercise the wire.)
+    /// **The frame-loop wire.** A destroyed vehicle loses its governed geometry when driven purely
+    /// through `GameplaySystems::tick` — no direct call to `destruction_system`. Destruction runs
+    /// after the weapon system, so a kill this step is reflected the same step.
+    #[test]
+    fn destruction_advances_through_gameplay_tick() {
+        use mercs2_core::{Destructible, Health, ModelRef, Transform};
+        use mercs2_formats::orchestrator::{
+            HierNode, StateDef, StateMachine, SwitchNodeDef, STATE_PRISTINE, STATE_WRECK,
+        };
+
+        const MODEL: u32 = 0xC0FF_EE01;
+        const NODE: u32 = 0xAAAA_0001;
+        let h = |s: &str| mercs2_formats::hash::pandemic_hash_m2(s);
+        // `1 <imm>` push · `2 <cmd>` invoke · `3` end.
+        let pristine = vec![1, STATE_WRECK, 1, 0xC650_7EE1u32, 2, h("setstateonmsg"), 3];
+        let wreck = vec![1u32, NODE, 2, h("hide"), 3];
+
+        let audio = Rc::new(RefCell::new(AudioEngine::default()));
+        let mut gp = GameplaySystems::new(audio);
+        gp.destruction_store_mut().insert(
+            MODEL,
+            Some(StateMachine {
+                switch_slots: vec![0],
+                nodes: vec![SwitchNodeDef {
+                    name_hash: NODE,
+                    states: vec![
+                        StateDef { name_hash: STATE_PRISTINE, enter: pristine, exit: vec![] },
+                        StateDef { name_hash: STATE_WRECK, enter: wreck, exit: vec![] },
+                    ],
+                }],
+            }),
+            vec![HierNode {
+                index: 0, hash: NODE, parent: None, local: [0.0; 16],
+                bbox_min: [0.0; 3], bbox_max: [0.0; 3],
+            }],
+        );
+
+        let mut world = World::new();
+        let e = world.spawn((
+            Transform::default(),
+            ModelRef { model: MODEL },
+            Health::new(100.0),
+            Destructible::default(),
+        ));
+
+        gp.tick(&mut world, 1.0 / 60.0);
+        assert!(world.get::<&Destructible>(e).unwrap().draws(0), "healthy: geometry draws");
+
+        world.get::<&mut Health>(e).unwrap().cur = 0.0;
+        gp.tick(&mut world, 1.0 / 60.0);
+        assert!(
+            !world.get::<&Destructible>(e).unwrap().draws(0),
+            "destroyed: the governed subtree must be hidden, driven by tick alone"
+        );
+    }
+
     #[test]
     fn vehicle_system_acts_through_gameplay_tick() {
         use mercs2_core::Transform;

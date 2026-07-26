@@ -61,10 +61,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     })?)?;
     let h = host.clone();
     b.real("ClearFilter", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_set_expr(f as u64, ""); Ok(()) })?)?;
-    // AddObject(f, guid, bInclude) — bInclude defaults true (an explicit include).
     let h = host.clone();
-    b.real("AddObject", lua.create_function(move |_, (f, guid, include): (i64, i64, Option<bool>)| {
-        h.borrow_mut().object_filter_add(f as u64, guid as u64, include.unwrap_or(true));
+    // Arg 3 is **bExclude**, not bInclude — retail's add primitive clears the include bit when the
+    // flag is set (Xbox `0x8247D5AC`: `cmplwi flag,0` → `andc` vs `or`), the PC omitted-arg default
+    // is 0, and `mrxtaskobjective.lua` passes `true` from `RemoveTarget` to un-target. The default
+    // coincides either way; every explicit argument was inverted before 2026-07-26.
+    b.real("AddObject", lua.create_function(move |_, (f, guid, exclude): (i64, i64, Option<bool>)| {
+        h.borrow_mut().object_filter_add(f as u64, guid as u64, exclude.unwrap_or(false));
         Ok(())
     })?)?;
     let h = host.clone();

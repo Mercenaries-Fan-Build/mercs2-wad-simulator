@@ -34,8 +34,9 @@ pub enum ImpactKind {
     Bullet,
     /// A blast detonated — an **explosion mark** (scorch) decal + fireball/smoke.
     Explosion,
-    /// A round struck a character (a [`crate::components::Health`]-bearing entity) — a **blood
-    /// splatter** decal + blood spray.
+    /// A round struck a person (a [`mercs2_core::Human`]-bearing entity) — a **blood
+    /// splatter** decal + blood spray. A damageable non-human (vehicle, destructible prop) is a
+    /// `Bullet`, not blood: carrying `Health` is not what makes a target bleed.
     Blood,
 }
 

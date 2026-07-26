@@ -14,7 +14,8 @@ use hecs::{Entity, World};
 use mercs2_core::event::{Event, EventArg, EventBus};
 use mercs2_core::PhysicsQuery;
 
-use crate::components::{Health, HomingState, RuntimeProjectile, RuntimeWeapon};
+use crate::components::{HomingState, RuntimeProjectile, RuntimeWeapon};
+use mercs2_core::Human;
 use crate::events::WEAPON_EVENT;
 use crate::impact::Impact;
 use crate::stats::FireType;
@@ -159,9 +160,9 @@ pub fn weapon_firing_system_impacts(
                 if let Some(victim) = hit.entity {
                     crate::damage::apply_hit(world, bus, victim, Some(owner), damage, key);
                 }
-                // Impact FX at the strike point: blood on a character (Health-bearing), a bullet hole
-                // on world geometry / non-character bodies. Emitted for world hits too (entity == None).
-                let is_character = hit.entity.map(|v| world.get::<&Health>(v).is_ok()).unwrap_or(false);
+                // Impact FX at the strike point: blood on a person (`Human`-bearing), a bullet hole
+                // on world geometry / non-human bodies. Emitted for world hits too (entity == None).
+                let is_character = hit.entity.map(|v| world.get::<&Human>(v).is_ok()).unwrap_or(false);
                 impacts.push(Impact::from_hit(hit.point, hit.normal, dir, is_character));
             }
         }
@@ -234,7 +235,7 @@ pub fn request_reload(world: &mut World, weapon: Entity) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::Health;
+    use mercs2_core::{Health, Human};
     use crate::stats::WeaponStats;
     use mercs2_core::physics_query::RayHit;
 
@@ -341,7 +342,7 @@ mod tests {
         use crate::impact::ImpactKind;
         let mut world = World::new();
         let mut bus = EventBus::new();
-        let victim = world.spawn((Health::new(100.0),)); // Health-bearing ⇒ character ⇒ blood
+        let victim = world.spawn((Human, Health::new(100.0))); // `Human`-bearing ⇒ person ⇒ blood
         let shooter = world.spawn(());
         let mut w = RuntimeWeapon::new(shooter, WeaponStats::default());
         w.trigger_down = true;
@@ -358,6 +359,31 @@ mod tests {
         assert!((impacts[0].position - Vec3::new(0.0, 0.0, 10.0)).length() < 1e-4);
         // Its normal is -dir (facing back at the shooter).
         assert!((impacts[0].normal - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-4);
+    }
+
+    /// A damageable **non-human** body (a vehicle: `Health` but no `Human`) sparks a bullet hole, not
+    /// blood. The character predicate is `Human`, not "carries a `Health`" — vehicles are health-bearing
+    /// since they take damage, and must not bleed.
+    #[test]
+    fn hitscan_on_a_health_bearing_non_human_is_bullet_not_blood() {
+        use crate::impact::ImpactKind;
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let car = world.spawn((Health::new(600.0),)); // no `Human` ⇒ not a person
+        let shooter = world.spawn(());
+        let mut w = RuntimeWeapon::new(shooter, WeaponStats::default());
+        w.trigger_down = true;
+        w.muzzle = Vec3::ZERO;
+        w.aim_dir = Vec3::Z;
+        world.spawn((w,));
+
+        let phys = HitStub { victim: car, dist: 10.0 };
+        let mut impacts = Vec::new();
+        weapon_firing_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&phys), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Bullet, "a vehicle does not bleed");
+        // It still takes the damage — being a non-human changes the FX, not the damage path.
+        assert!(world.get::<&Health>(car).unwrap().cur < 600.0);
     }
 
     #[test]

@@ -46,6 +46,7 @@
 pub mod app;
 pub mod asset;
 pub mod camera;
+pub mod destruction;
 pub mod diag;
 // The Lua host + simulation cluster. Lua is a core engine pillar, not just WAD content: the VM binding
 // surface (`Pg.*`/`Object.*`/`Player.*`/`Ai.*`/…) marries the scripts to the live engine systems (World,

@@ -52,6 +52,7 @@ mod human;
 mod inventory;
 mod lti;
 mod math_ns;
+mod movie;
 mod net;
 mod object;
 mod object_filter;
@@ -108,9 +109,20 @@ pub(crate) fn stringify_arg(v: &mlua::Value) -> String {
     }
 }
 
-/// One required cfunc in a namespace's surface. `corpus_calls` = call sites seen in the decompiled
-/// game Lua (`docs/mercs2-luacd`); `> 0` means the game actively calls it (a faithful blocker until
-/// it has a real body).
+/// One required cfunc in a namespace's surface. `corpus_calls` = references seen in the decompiled
+/// game Lua; `> 0` means the game actively uses it (a faithful blocker until it has a real body).
+///
+/// **Counting convention** — stated explicitly because two independent audits have flagged these
+/// numbers as "stale" when they were merely counted differently:
+/// - Corpora: `docs/mercs2-luacd/**` **plus** `docs/mercs2-dlc-luacd/src/**`. **Skip
+///   `mercs2-dlc-luacd/raw/`** — it is the same DLC scripts in a rawer decompile, so including it
+///   double-counts every DLC row.
+/// - `*.lua` only. Prose hits in the corpora's own `.md` write-ups do not count.
+/// - Count **references, not just invocations**: a `if Ns.Fn then` capability guard counts, because
+///   it still requires the name to be present on the table.
+///
+/// The number is a priority signal, not an assertion about execution — being off by one changes
+/// nothing downstream, since every consumer only tests `> 0`.
 #[derive(Clone, Copy)]
 pub struct Required {
     pub name: &'static str,
@@ -185,6 +197,30 @@ impl<'a> NsBuilder<'a> {
     /// Finish: install the table as the Lua global `global` and return the coverage delta.
     pub fn install_global(self, global: &str) -> LuaResult<Installed> {
         self.lua.globals().set(global, self.table)?;
+        Ok(Installed {
+            real: self.real,
+            stub: self.stub,
+        })
+    }
+
+    /// Install as a **child table** of an existing global — e.g. `Graphics.FuelTrail`.
+    ///
+    /// Retail builds these with marker rows inside the parent's `luaL_Reg` array
+    /// (`{name, 0xFFFFFFFF}` opens, `{name, 0xFFFFFFFE}` closes), so Lua sees a nested table rather
+    /// than a second global. `Human.Inventory` and the ten `Graphics.*` children are the real cases.
+    /// The parent must already be installed; `install_all`'s order guarantees that for the pairs we
+    /// wire.
+    pub fn install_child(self, parent: &str, name: &str) -> LuaResult<Installed> {
+        let globals = self.lua.globals();
+        let parent_tbl: mlua::Table = match globals.get(parent) {
+            Ok(t) => t,
+            Err(_) => {
+                let t = self.lua.create_table()?;
+                globals.set(parent, t.clone())?;
+                t
+            }
+        };
+        parent_tbl.set(name, self.table)?;
         Ok(Installed {
             real: self.real,
             stub: self.stub,
@@ -276,6 +312,7 @@ pub fn install_all(lua: &Lua, host: &SharedHost) -> LuaResult<Vec<NsCoverage>> {
     ns!(pg);
     ns!(object_state);
     ns!(object);
+    ns!(movie);
     ns!(net);
     ns!(timer);
     ns!(math_ns);

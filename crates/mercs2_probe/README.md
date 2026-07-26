@@ -45,7 +45,17 @@ set, exactly as matched in `main()`:
   `header_diff`, `rigid_probe`.
 * **Node binding** (which HIER node places which mesh): `indx_dump`, `segfix_probe`, `segm_probe2`,
   `node_witness`, `place_probe`, `hier_dump`, `hier_chain`.
-* **Destruction / draw gate**: `sm_dump`, `gate_probe`, `govern_probe`, `health_probe`, `mesh_probe`.
+* **Destruction / draw gate**: `sm_dump`, `gate_probe`, `govern_probe`, `seedcmp`, `mesh_probe`.
+
+  > `health_probe` was **removed** (2026-07-26). It printed drawn/total draw groups per health band,
+  > but assembled geometry from `extract_container` + `build_indexed_all` on the **resident block
+  > alone** — which for a vehicle is the far-LOD proxy (`game_world.rs`: "renders 371-triangle
+  > tanks"). Its counts described the coarse stand-in, not what the engine draws, and read as a
+  > destruction bug: `ch_veh_apc_wz551` showed 3/13 groups pristine and 0/13 destroyed. Measured
+  > through the full LOD chain (`Model::load`, as `govern_probe` does) the same model gives 39/78 →
+  > 49/78 → 9/78, which is the expected shape. `seedcmp` replaces it and additionally compares both
+  > `NodeSeed` variants. If a per-health probe is wanted again, bring it back under a name that says
+  > what it measures — and load the LOD chain.
 * **Animation**: `action_table_probe`, `charanim`, `clipbind`, `swim_clip_probe`.
 * **Textures / materials / FX / lights**: `tex_dump`, `texcmp`, `mtrl_probe`, `fx_probe`,
   `light_probe`.

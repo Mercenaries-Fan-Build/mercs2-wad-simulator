@@ -105,8 +105,13 @@ pub struct MinimapData {
 #[derive(Clone, Debug)]
 pub struct Widget {
     pub kind: WidgetKind,
-    pub location: [f32; 2],
-    pub corrected_location: [f32; 2],
+    /// The widget's screen **rect**, `[x1, y1, x2, y2]` — not a point. The game's
+    /// `MrxGui.Widget:SetLocation(x1, y1, x2, y2)` passes four coordinates and
+    /// `Widget:GetLocation()` destructures four back (`mrxguibase.lua:746/759`); returning fewer
+    /// makes callers like `MrxGuiLoadScreen.InitSaveIcon` compute on a nil.
+    pub location: [f32; 4],
+    /// Safe-area-corrected rect, same `[x1, y1, x2, y2]` layout (`SetWidgetCorrectedLocation`).
+    pub corrected_location: [f32; 4],
     /// RGBA in the caller's domain (the game passes D3DCOLOR-style `0..255`); default white/opaque.
     pub color: [f32; 4],
     pub visible: bool,
@@ -133,8 +138,8 @@ impl Widget {
     fn new(kind: WidgetKind, z: i32) -> Self {
         Widget {
             kind,
-            location: [0.0, 0.0],
-            corrected_location: [0.0, 0.0],
+            location: [0.0; 4],
+            corrected_location: [0.0; 4],
             color: [255.0, 255.0, 255.0, 255.0],
             visible: true,
             sleep: false,

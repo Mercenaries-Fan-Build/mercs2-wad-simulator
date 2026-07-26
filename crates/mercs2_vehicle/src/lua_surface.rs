@@ -30,11 +30,12 @@
 //! ring-1 seat/enter-exit applier (`FUN_0053f110`) produces.
 
 use hecs::Entity;
-use mercs2_core::{Transform, World};
+use mercs2_core::{Health, Transform, World};
 
 use crate::camera::{chase_pose, CameraMode, CameraPose, CameraPreset};
 use crate::components::{
     ChassisBody, Seat, SeatKind, Seating, Vehicle, VehicleControls, VehicleRuntime,
+    DEFAULT_VEHICLE_HEALTH,
 };
 
 /// Resolve a gameplay handle (`uGuid`) to its ECS entity.
@@ -261,6 +262,13 @@ pub fn vehicle_camera_pose(
 /// Convenience: spawn a bare vehicle entity with the full drive + seating component set, ready for
 /// [`crate::system::drive_step_system`]. The binding layer / world loader uses this shape when it
 /// materialises a `_CarPhysicsV2` / `_TankPhysics` object.
+///
+/// The bundle includes a [`Health`](mercs2_core::Health) pool of [`DEFAULT_VEHICLE_HEALTH`] — a vehicle
+/// is a damageable body, and the combat silo's hit applier and radial-blast sweep both select on
+/// `Health`, so a vehicle without one is simply invulnerable. Being health-bearing does *not* make it a
+/// character: the person predicate is `mercs2_core::Human`, which vehicles do not carry (so shots spark
+/// rather than bleed). Reaching zero currently just parks the pool at 0 — turning that into wreckage
+/// (per-node destruction FSM → part detach + debris) is the follow-up tracked in `DEFERRED.md`.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_vehicle(
     world: &mut World,
@@ -274,7 +282,21 @@ pub fn spawn_vehicle(
     seating: Seating,
 ) -> Entity {
     world.spawn((
-        transform, vehicle, body, controls, wheels, tuning, runtime, seating,
+        transform,
+        vehicle,
+        body,
+        controls,
+        wheels,
+        tuning,
+        runtime,
+        seating,
+        Health::new(DEFAULT_VEHICLE_HEALTH),
+        // Destruction: health → damage messages → the model's per-node state machine → the
+        // node-enable table the draw gate reads (clause 3), which is how a vehicle sheds a hood and
+        // then shows its wreck body. Inert until `mercs2_destruction::destruction_system` runs and
+        // the entity has a `ModelRef` naming a model that actually ships a machine — an empty table
+        // reads as "everything draws", so a vehicle with no machine simply never changes.
+        mercs2_core::Destructible::default(),
     ))
 }
 

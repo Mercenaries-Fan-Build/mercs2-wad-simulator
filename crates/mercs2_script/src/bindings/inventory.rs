@@ -6,7 +6,7 @@
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
 //! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
-//! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Inventory")`. Nothing else in
+//! `b.stub(..)` for a deliberate faithful no-op), then `b.install_child("Human", "Inventory")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
 use mlua::{Lua, MultiValue, Result as LuaResult};
@@ -17,7 +17,11 @@ use super::{Installed, NsBuilder, Required};
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Inventory";
 /// The Lua global table this namespace installs as.
-pub const GLOBAL: &str = "Inventory";
+/// Retail nests this INSIDE the `Human` array as a marker-delimited sub-table
+/// (`{"Inventory",0xFFFFFFFF}` @`0x00B99F98` … `{"Inventory",0xFFFFFFFE}` @`0x00B99FE8`), and the
+/// game calls it `Human.Inventory.*` exclusively — 0 bare `Inventory.*` call sites in the whole Lua
+/// corpus. Corrected 2026-07-26.
+pub const GLOBAL: &str = "Human.Inventory";
 /// luaL_Reg table VA in the unpacked SecuROM image (`mercs2_unpacked.exe`, base 0x00400000).
 pub const TABLE_VA: u32 = 0x00b99fa0;
 
@@ -81,15 +85,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
 
-    let installed = b.install_global(GLOBAL)?;
-    // The engine registers the inventory cfunc table as a child of `Human` — the game's Lua reaches it
-    // exclusively as `Human.Inventory.*` (e.g. the masterscript's `Human.Inventory.ReloadAll`). Mirror
-    // the top-level `Inventory` global onto `Human.Inventory` (Human installs first, at ns! order).
-    if let (Ok(human), Ok(inv)) = (
-        lua.globals().get::<mlua::Table>("Human"),
-        lua.globals().get::<mlua::Table>(GLOBAL),
-    ) {
-        human.set("Inventory", inv)?;
-    }
-    Ok(installed)
+    // Installed directly as a child of `Human`, matching retail's marker-delimited sub-table. This
+    // replaces an earlier arrangement that installed a top-level `Inventory` global and then mirrored
+    // it onto `Human.Inventory` — the mirror is unnecessary now, and the stray global was a name the
+    // game never uses (0 bare `Inventory.*` call sites).
+    b.install_child("Human", "Inventory")
 }

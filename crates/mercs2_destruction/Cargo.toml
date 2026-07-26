@@ -1,0 +1,12 @@
+[package]
+name = "mercs2_destruction"
+version = "1.0.0"
+edition = "2021"
+description = "Mercenaries 2 reimpl — entity destruction: health → damage messages → per-node state machine → node-enable + debris/emitter intents."
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mercs2_core = { workspace = true }
+mercs2_formats = { workspace = true }

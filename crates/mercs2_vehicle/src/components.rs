@@ -227,6 +227,17 @@ impl VehicleRuntime {
     }
 }
 
+/// Hit points a freshly-spawned vehicle carries, so it is visible to the combat silo's damage applier
+/// and to the explosion sweep (both select on `mercs2_core::Health`). Without this a vehicle simply
+/// absorbed every bullet and blast with no effect.
+///
+/// `// CONFIRM-LIVE:` a **placeholder**. Retail sources the pool from the authored `VehicleHealth`
+/// value (Xbox symbol `VehicleHealth` @ PDB `0x003b250`); no such field survives in the stripped PC
+/// `_CarPhysicsV2` (0x18c) / `_TankPhysics` (0x78) tuning blocks we have decoded, so there is nothing
+/// on [`VehicleTuning`] to read yet. When `VehicleHealth` is read out, move this onto the tuning block
+/// and source it per-class.
+pub const DEFAULT_VEHICLE_HEALTH: f32 = 600.0;
+
 /// A single seat slot on a vehicle.
 #[derive(Clone, Copy, Debug)]
 pub struct Seat {

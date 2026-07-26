@@ -25,10 +25,10 @@ pub struct ObjectFilter {
     /// The label boolean-expression (`SetFilter`); empty = match nothing by predicate (only the
     /// explicit include set matches).
     pub expr: String,
-    /// Explicitly included object GUIDs (`AddObject(f, guid, true)`).
+    /// Explicitly included object GUIDs — `AddObject(f, guid, false)`, i.e. `bExclude = false`.
     pub include: Vec<u64>,
-    /// Explicitly excluded object GUIDs (`AddObject(f, guid, false)`) — excluded even if the predicate
-    /// or include set would otherwise match.
+    /// Explicitly excluded object GUIDs — `AddObject(f, guid, true)`, i.e. `bExclude = true`.
+    /// Excluded even if the predicate or include set would otherwise match.
     pub exclude: Vec<u64>,
     /// `UsePlayers` — player-controlled characters count as matches.
     pub use_players: bool,
@@ -39,12 +39,24 @@ impl ObjectFilter {
         Self::default()
     }
 
-    /// `AddObject(f, guid, bInclude)` — add to the include set (`bInclude`) or the exclude set.
-    pub fn add(&mut self, guid: u64, include: bool) {
-        let (set, other) = if include {
-            (&mut self.include, &mut self.exclude)
-        } else {
+    /// `AddObject(f, guid, bExclude)` — add to the exclude set when `exclude`, else the include set.
+    ///
+    /// **The third argument is `bExclude`, not `bInclude`** — this was inverted here until
+    /// 2026-07-26. Proven at instruction level in the SecuROM-free Xbox build: the add primitive at
+    /// `0x8247D5AC` does `cmplwi flag,0` and selects `andc` (clear the include bit → exclude) versus
+    /// `or` (set it → include), and the iterator at `0x8247D920` computes its out-flag as
+    /// `!includeBit`. Corroborated on PC — the omitted-arg default is `0` (`0x005F6FCA`),
+    /// `UsePlayers(f,true)` calls the same primitive with `0`, and `mrxtaskobjective.lua` names the
+    /// parameter `bExclude` and passes `true` from `RemoveTarget`.
+    ///
+    /// The default happens to agree (`false` = include either way), so only *explicit* arguments were
+    /// affected — but every shipped `AddObject` call passes one, so the old behaviour was inverted at
+    /// all 7 call sites.
+    pub fn add(&mut self, guid: u64, exclude: bool) {
+        let (set, other) = if exclude {
             (&mut self.exclude, &mut self.include)
+        } else {
+            (&mut self.include, &mut self.exclude)
         };
         other.retain(|&g| g != guid);
         if !set.contains(&guid) {
@@ -302,12 +314,12 @@ mod tests {
         assert!(f.matches(10, &is_vehicle));
         assert!(!f.matches(10, &not_vehicle));
 
-        // explicit include beats a failing predicate
-        f.add(20, true);
+        // explicit include beats a failing predicate — arg 3 is bExclude, so `false` INCLUDES
+        f.add(20, false);
         assert!(f.matches(20, &not_vehicle));
 
-        // explicit exclude beats a passing predicate
-        f.add(10, false);
+        // explicit exclude beats a passing predicate — `true` EXCLUDES
+        f.add(10, true);
         assert!(!f.matches(10, &is_vehicle));
 
         // remove clears both; adding include then exclude moves it
@@ -315,12 +327,37 @@ mod tests {
         assert!(f.matches(10, &is_vehicle));
     }
 
+    /// **Polarity guard.** `AddObject`'s third argument is `bExclude`, not `bInclude` — retail's add
+    /// primitive clears the include bit when the flag is set (Xbox `0x8247D5AC`), and
+    /// `mrxtaskobjective.lua`'s `RemoveTarget` passes `true` to *un*-target. This was inverted until
+    /// 2026-07-26; the coincidentally-correct default hid it from the other tests.
+    #[test]
+    fn add_objects_third_arg_is_exclude_not_include() {
+        let none = labels(&[]);
+        let mut f = ObjectFilter::new();
+
+        f.add(1, true); // bExclude = true
+        assert!(f.exclude.contains(&1), "true must EXCLUDE");
+        assert!(!f.include.contains(&1));
+        assert!(!f.matches(1, &none));
+
+        f.add(2, false); // bExclude = false
+        assert!(f.include.contains(&2), "false must INCLUDE");
+        assert!(!f.exclude.contains(&2));
+        assert!(f.matches(2, &none), "an explicitly included guid matches with no predicate");
+
+        // Re-adding with the opposite flag moves it between the sets rather than duplicating.
+        f.add(1, false);
+        assert!(f.include.contains(&1) && !f.exclude.contains(&1));
+        assert_eq!(f.include.iter().filter(|&&g| g == 1).count(), 1);
+    }
+
     #[test]
     fn registry_mints_and_copies() {
         let mut reg = ObjectFilterRegistry::new();
         let a = reg.create();
         reg.get_mut(a).unwrap().expr = "human".into();
-        reg.get_mut(a).unwrap().add(5, true);
+        reg.get_mut(a).unwrap().add(5, false); // bExclude = false ⇒ include
         let b = reg.copy(a);
         assert_ne!(a, b);
         assert_eq!(reg.get(b).unwrap().expr, "human");

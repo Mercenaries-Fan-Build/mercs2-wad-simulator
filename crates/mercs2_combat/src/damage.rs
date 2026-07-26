@@ -23,7 +23,7 @@ use mercs2_core::event::{Event, EventArg, EventBus};
 use mercs2_core::PhysicsQuery;
 use mercs2_core::Transform;
 
-use crate::components::Health;
+use mercs2_core::Health;
 use crate::events::{DAMAGE_MSG, DESTROY_MSG};
 
 /// The recovered damage taxonomy (`DamageKeyEnum`, code map §5.1 — the enum members are exact; the

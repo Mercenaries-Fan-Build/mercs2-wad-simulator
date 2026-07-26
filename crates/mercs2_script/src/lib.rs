@@ -213,9 +213,11 @@ pub trait EngineHost {
     fn object_filter_set_expr(&mut self, handle: u64, expr: &str) {
         let _ = (handle, expr);
     }
-    /// `ObjectFilter.AddObject(f, guid, bInclude)` — add to the include (`true`) or exclude set.
-    fn object_filter_add(&mut self, handle: u64, guid: u64, include: bool) {
-        let _ = (handle, guid, include);
+    /// `ObjectFilter.AddObject(f, guid, bExclude)` — add to the **exclude** set when `true`, else the
+    /// include set. Note the polarity: retail's third argument is `bExclude` (proven in the Xbox
+    /// build's add primitive), and it was inverted here until 2026-07-26.
+    fn object_filter_add(&mut self, handle: u64, guid: u64, exclude: bool) {
+        let _ = (handle, guid, exclude);
     }
     /// `ObjectFilter.RemoveObject(f, guid)`.
     fn object_filter_remove(&mut self, handle: u64, guid: u64) {
@@ -265,11 +267,11 @@ pub trait EngineHost {
 
     // ===== Render / post-FX parameter state (`Atmosphere`/`Bloom`/`Graphics`/`Fade`) → mercs2_core. =====
     /// The global render/post-FX parameter state, if this host owns one.
-    fn render_state(&mut self) -> Option<&mut mercs2_core::RenderState> {
+    fn render_state(&mut self) -> Option<&mut mercs2_core::RenderSettings> {
         None
     }
     /// Read-only view of the render state (for `Get*` queries).
-    fn render_state_ref(&self) -> Option<&mercs2_core::RenderState> {
+    fn render_state_ref(&self) -> Option<&mercs2_core::RenderSettings> {
         None
     }
 
@@ -415,16 +417,16 @@ pub trait EngineHost {
     }
 
     // ===== Pg world regions + alarms. =====
-    /// `Pg.CreateRegion(name, center, radius)` — register a trigger region; returns its handle.
+    /// `Junk.CreateRegion(name, center, radius)` — register a trigger region; returns its handle.
     fn pg_create_region(&mut self, name: &str, center: [f32; 3], radius: f32) -> u64 {
         let _ = (name, center, radius);
         0
     }
-    /// `Pg.ActivateAlarm(guid, on)` — set an alarm's active state.
+    /// `Junk.ActivateAlarm(guid, on)` — set an alarm's active state.
     fn pg_alarm_set(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
     }
-    /// `Pg.ToggleAlarm(guid)` — flip an alarm; returns the new state.
+    /// `Junk.ToggleAlarm(guid)` — flip an alarm; returns the new state.
     fn pg_alarm_toggle(&mut self, guid: u64) -> bool {
         let _ = guid;
         false
@@ -1842,8 +1844,12 @@ mod tests {
         // `Table.InsertI`). Not in the Surface-B trace — recovered from its only call sites, in
         // `MrxGuiBase:Widget:GetChildren`. Without it that returns nil and every `pairs(GetChildren())`
         // in the GUI layer throws, which takes down any boot that imports MrxUtil (see table_ext.rs).
-        const EXPECTED_NAMESPACES: usize = 36;
-        const EXPECTED_REQUIRED: usize = 1088;
+        // 36 → 37 and 1088 → 1092 on 2026-07-26: the `Movie` table (registry row 21, VA 0x00B99BBC,
+        // 4 cfuncs) was missing from this crate entirely, so the harness had been under-counting the
+        // engine surface by one namespace and four bindings. Its four are `stub`, and deliberately
+        // NOT counted as real — retail has real bodies there; we simply have no movie playback yet.
+        const EXPECTED_NAMESPACES: usize = 37;
+        const EXPECTED_REQUIRED: usize = 1092;
         // Binding-surface burn-down. ALL 1086 Required cfuncs are installed & callable
         // (tests/binding_smoke.rs enforces that). The split is the HONEST progress metric:
         //   real  = BACKED — wired to a real engine mechanism (`mercs2_ai`/`faction`/`population`/
@@ -1863,7 +1869,7 @@ mod tests {
         // (mercs2_ui::WidgetTree) — widget/image/text/sprite/movie/flash/minimap create+mutate+query
         // (real +55); Gui wired the world-marker set (mercs2_ui::MarkerSet) + texture/font handles
         // (real +16); render-state vertical wired Atmosphere (generic value/color/int store + time) +
-        // Bloom + Graphics + Fade to mercs2_core::RenderState (real +40); CameraFx wired the cinematic
+        // Bloom + Graphics + Fade to mercs2_core::RenderSettings (real +40); CameraFx wired the cinematic
         // camera controller pose/shake/blend/follow (real +13); Inventory wired the per-character
         // weapon loadout (set/get/equip/drop/destroy) (real +4); Weapon ammo + Fire burning state +
         // object health/SendDamage wired to real host state (real +7); Pg regions/alarms + Airstrike
@@ -1880,7 +1886,12 @@ mod tests {
         // animation/menu/spawner/param/marker-category verbs) → recorded command logs (real +231).
         // Remaining unbacked = genuine dev stubs (debug menu, asset dumps) + a few getters/subsystem gaps.
         const EXPECTED_REAL: usize = 1060;
-        const EXPECTED_STUB: usize = 28;
+        // 28 → 32 on 2026-07-26 with the `Movie` namespace. Note these four are the one place in this
+        // crate where `stub` does NOT mean "retail also does nothing": `Movie.{Start,Stop,Pause,Resume}`
+        // have real retail bodies (`0x005C6510`/`0x005C6480`/`0x005C64B0`/`0x005C64E0`, none of them the
+        // shared `0x006D5640` no-op). They are unimplemented here pending a movie/Bink path, and are
+        // counted as debt rather than as faithful no-ops.
+        const EXPECTED_STUB: usize = 32;
 
         let host = Rc::new(RefCell::new(RecordingHost::default()));
         let h = ScriptHost::bare().unwrap();

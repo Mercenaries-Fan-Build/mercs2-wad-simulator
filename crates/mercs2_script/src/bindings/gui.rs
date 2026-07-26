@@ -24,7 +24,7 @@ pub const TABLE_VA: u32 = 0x00b9a398;
 pub const REQUIRED: &[Required] = &[
     Required { name: "AddObjective", corpus_calls: 0 },
     Required { name: "LoadTexture", corpus_calls: 27 },
-    Required { name: "GetReticlePosition", corpus_calls: 5 },
+    Required { name: "GetReticlePosition", corpus_calls: 6 },
     Required { name: "LoadFont", corpus_calls: 1 },
     Required { name: "IsPdaOnSelect", corpus_calls: 2 },
     Required { name: "IsXboxController", corpus_calls: 1 },

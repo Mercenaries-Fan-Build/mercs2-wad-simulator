@@ -6,7 +6,7 @@
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
 //! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
-//! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Fire")`. Nothing else in
+//! `b.stub(..)` for a deliberate faithful no-op), then `b.install_child("Graphics", "FuelTrail")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
 use mlua::{Lua, MultiValue, Result as LuaResult};
@@ -15,9 +15,15 @@ use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
-pub const NAMESPACE: &str = "Fire";
+/// **There is no `Fire` namespace.** The table at `0x00B9A7A8` is a marker-delimited SUB-TABLE of
+/// the `Graphics` compound blob named `FuelTrail` (`{"FuelTrail",0xFFFFFFFF}` opens at `0x00B9A7A0`,
+/// `{"FuelTrail",0xFFFFFFFE}` closes at `0x00B9A7C0`), so the real path is
+/// `Graphics.FuelTrail.{Ignite,Extinguish,Put}`. In retail `Ignite`/`Extinguish` point at the shared
+/// no-op stub `0x006D5640` and `Put` returns without effect; there are ZERO script call sites.
+/// Corrected 2026-07-26.
+pub const NAMESPACE: &str = "Graphics.FuelTrail";
 /// The Lua global table this namespace installs as.
-pub const GLOBAL: &str = "Fire";
+pub const GLOBAL: &str = "Graphics.FuelTrail";
 /// luaL_Reg table VA in the unpacked SecuROM image (`mercs2_unpacked.exe`, base 0x00400000).
 pub const TABLE_VA: u32 = 0x00b9a7a8;
 
@@ -41,5 +47,6 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("Put", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_extinguish(o as u64); Ok(()) })?)?;
 
-    b.install_global(GLOBAL)
+    // Nested under `Graphics`, matching the retail marker-row sub-table.
+    b.install_child("Graphics", "FuelTrail")
 }

@@ -198,6 +198,12 @@ const LOAD_PHASES: &[&str] = &[
 ];
 pub(crate) const LOAD_STAGES: u32 = LOAD_PHASES.len() as u32;
 
+/// Starting health for a destructible prop. **A placeholder**: retail reads per-object HP from the
+/// object's own data (Xbox `VehicleHealth` has a vehicle analogue; the prop field is not recovered),
+/// so this is a single value until that lands. It only affects how much damage a prop absorbs, not
+/// which states its machine reaches.
+const DEFAULT_PROP_HEALTH: f32 = 250.0;
+
 /// Exterior prop bounding: load only props within this radius (m) of the pool spawn, capped at
 /// `EXTERIOR_PROP_CAP` distinct meshes, so `--props` stays light next to the full map.
 const EXTERIOR_PROP_RADIUS: f32 = 400.0;
@@ -358,6 +364,7 @@ pub(crate) fn load_world_data(
     };
 
     let terrain = LoadedModel {
+        machine: None, hier: Vec::new(),
         hash: 0x7E44_A100, // arbitrary key for the merged terrain mesh
         verts,
         indices: tm.indices.clone(),
@@ -450,7 +457,7 @@ pub(crate) fn load_world_data(
                     None => println!("[world] {name} clip 0x{h:08X} not found"),
                 }
             }
-            Some(LoadedModel { hash: h, verts: v, indices: i, draws: d, textures: t, skin: s, clips })
+            Some(LoadedModel { hash: h, verts: v, indices: i, draws: d, textures: t, skin: s, clips, machine: None, hier: Vec::new() })
         }
         Err(e) => {
             println!("[world] player avatar load failed: {e}");
@@ -489,6 +496,7 @@ pub(crate) fn load_world_data(
                     indices.len() / 3
                 );
                 let markers = LoadedModel {
+        machine: None, hier: Vec::new(),
                     hash: 0x504C_4143, // "PLAC" — arbitrary key for the merged marker mesh
                     verts,
                     indices,
@@ -788,7 +796,7 @@ fn resolve_pmc_geometry(
                         verts.len(), indices.len() / 3
                     );
                     out.push((
-                        LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() },
+                        LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() },
                         p.pos,
                         yaw_from_quat(&p.quat),
                     ));
@@ -923,7 +931,7 @@ fn load_c3_cells(w: &mut wad::Wad, radius: f32, cap: usize) -> Vec<(LoadedModel,
             if world_space { "WORLD-SPACE (identity)" } else { "cell-local (offset to cell centre)" }
         );
         out.push((
-            LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() },
+            LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() },
             offset,
         ));
     }
@@ -1158,6 +1166,9 @@ fn animate_world(world: &mut World, time: &Time, assets: &AssetStore) {
 
 /// The Mercenaries 2 third-person game as a `Game` over the engine's unified `app::run` loop.
 pub struct Mercs2Game {
+    /// Debris templates a destruction machine asked for while the model was not resident. Counted
+    /// rather than dropped silently — a zero here means every requested piece actually spawned.
+    debris_unresident: usize,
     // Boot config (all `true` for the retail boot; `--interior-orbit` sets `interior_orbit`).
     wadpath: String,
     start_tps: bool,
@@ -1246,6 +1257,7 @@ impl Mercs2Game {
             .map(|p| mercs2_engine::input::Bindings::load(&p))
             .unwrap_or_default();
         Mercs2Game {
+            debris_unresident: 0,
             wadpath,
             start_tps,
             load_cells,
@@ -1550,9 +1562,22 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // ModelName props (exterior + interior furniture) — each non-water instance blocks → collision.
         let mut prop_meshes = 0usize;
         let mut prop_instances = 0usize;
+        let mut prop_destructibles = 0usize;
         for (hash, m, instances) in data.props.into_iter().chain(data.interior_props) {
             scene.load_model(hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             prop_meshes += 1;
+            // Destruction: hand this model's state machine + HIER to the store, then give every
+            // instance of a machine-bearing model the components that drive it. A prop WITHOUT a
+            // machine is simply indestructible and gets neither — that is the engine's own
+            // distinction, not a budget decision, and it keeps `Health` off every fence and bollard.
+            self.runtime
+                .gameplay
+                .destruction_store_mut()
+                .insert(hash, m.machine.clone(), m.hier.clone());
+            let destructible = m.machine.is_some();
+            if destructible {
+                prop_destructibles += 1;
+            }
             let nbones = m.skin.bones.len().max(1);
             for (pos, quat) in instances {
                 let tr = Vec3::new(pos[0], pos[1], pos[2]);
@@ -1563,12 +1588,25 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 }
                 let mut t = Transform::from_translation(tr);
                 t.rotation = q;
-                ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+                let e = ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+                if destructible {
+                    // `Health` is the destruction system's INPUT; `Destructible` is where the machine
+                    // keeps its position and the node-enable table the draw gate reads.
+                    let _ = ctx.world.borrow_mut().insert(
+                        e,
+                        (
+                            mercs2_core::Health::new(DEFAULT_PROP_HEALTH),
+                            mercs2_core::Destructible::default(),
+                        ),
+                    );
+                }
                 prop_instances += 1;
             }
         }
         if prop_meshes > 0 {
-            println!("[world] props spawned: {prop_meshes} distinct meshes, {prop_instances} instances");
+            println!(
+                "[world] props spawned: {prop_meshes} distinct meshes, {prop_instances} instances                  ({prop_destructibles} destructible)"
+            );
         }
 
         // Player avatar.
@@ -1870,6 +1908,42 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 ctx.scene.fx_start_desc(d, imp.position.to_array());
             }
         }
+        // Destruction side effects. The leaf crate RECORDS these (it can neither spawn entities nor
+        // drive FX); this is where they happen. Both are positioned at the destroyed entity's own
+        // transform — retail resolves a hardpoint for emitters (`FUN_004D28C0`), which we do not have
+        // yet, so the object origin is a documented approximation, not the engine's placement.
+        for intent in self.runtime.gameplay.take_destruction_intents() {
+            let at = ctx
+                .world
+                .borrow()
+                .get::<&Transform>(intent.entity)
+                .map(|t| t.translation)
+                .unwrap_or(Vec3::ZERO);
+            match intent.kind {
+                mercs2_engine::destruction::IntentKind::StartEmitter => {
+                    ctx.scene.fx_start_desc(
+                        mercs2_engine::particles::EmitterDesc::impact_fire(),
+                        at.to_array(),
+                    );
+                }
+                mercs2_engine::destruction::IntentKind::CreateObject => {
+                    // Debris — a shed hood, a blown-off turret. `CreateObject` carries five
+                    // arguments and the template slot is not confirmed; `template()` returns the
+                    // last, the only one observed to vary per spawn. We can only realize it if that
+                    // model is already resident; a not-yet-streamed template is counted rather than
+                    // silently dropped, because "debris quietly missing" is exactly the kind of gap
+                    // that reads as working.
+                    match intent.template() {
+                        Some(tpl) if ctx.scene.has_model(tpl) => {
+                            let t = Transform::from_translation(at);
+                            ctx.world.borrow_mut().spawn((t, ModelRef { model: tpl }));
+                        }
+                        _ => self.debris_unresident += 1,
+                    }
+                }
+            }
+        }
+
         // Directional shadow key light, centred on the player (overhead indoors, sun-aligned outdoors).
         let shadow_dir = if self.spawn_interior { [-0.15, -1.0, 0.1] } else { [-0.4, -0.7, 0.5] };
         ctx.scene.set_shadow(self.player.pos.to_array(), shadow_dir, 18.0);

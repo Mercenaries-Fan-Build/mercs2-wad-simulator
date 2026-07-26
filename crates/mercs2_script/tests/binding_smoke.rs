@@ -50,13 +50,24 @@ fn every_required_binding_is_callable() {
     for ns in &cov {
         for req in ns.required {
             checked += 1;
-            // `type(_G[global][name])` — "function" = installed & callable; "nil" = missing/clobbered;
+            // `type(<global>[name])` — "function" = installed & callable; "nil" = missing/clobbered;
             // "NO-GLOBAL" = the namespace table itself never installed.
+            //
+            // `global` may be DOTTED (`Graphics.FuelTrail`, `Human.Inventory`): retail nests those as
+            // marker-delimited sub-tables inside a parent's `luaL_Reg` array, so the reimpl installs
+            // them as child tables and the path has to be walked, not indexed once.
+            let path: Vec<&str> = ns.global.split('.').collect();
+            let walk = path
+                .iter()
+                .map(|seg| {
+                    format!(
+                        "g = g[\"{seg}\"]\n if type(g) ~= \"table\" then return \"NO-GLOBAL\" end\n"
+                    )
+                })
+                .collect::<String>();
             let expr = format!(
-                "local g = _G[\"{}\"]\n\
-                 if type(g) ~= \"table\" then return \"NO-GLOBAL\" end\n\
-                 return type(g[\"{}\"])",
-                ns.global, req.name
+                "local g = _G\n{walk}return type(g[\"{}\"])",
+                req.name
             );
             let ty: String = sh.eval(&expr).unwrap_or_else(|e| format!("ERR({e})"));
             if ty != "function" {

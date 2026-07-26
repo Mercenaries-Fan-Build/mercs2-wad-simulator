@@ -2,7 +2,9 @@
 //!
 //! **Silo 15** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
 //! **Scoreboard row(s):** 27, 18.
-//! **Code map:** `docs/reverse_engineer/scaleform_gfx_class_map.md (+ input_code_map.md)`.
+//! **Code map:** `docs/reverse_engineer/hud_widget_code_map.md` — the widget tree, its memory
+//! layout and the `_GuiInternal` surface. Secondary: `scaleform_gfx_class_map.md` (the GFx/renderer
+//! side) and `input_code_map.md`.
 //! **Owned Lua namespace(s):** `Hud`, `Pda`, `Gui`, `Marker`, `_GuiInternal`.
 //!
 //! This crate is the **owned GUI state model** — the scene-graph the HUD scripts drive. It does no

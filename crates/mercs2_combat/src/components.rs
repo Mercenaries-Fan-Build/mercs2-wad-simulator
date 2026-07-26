@@ -170,24 +170,10 @@ pub struct RuntimeExplosion {
     pub life: f32,
 }
 
-/// A minimal health component — the **local stand-in** for the destruction silo's `RuntimeHealth
-/// {cur,max}` (producer `FUN_004cfed0`). The damage applier writes `cur` and posts `DamageMsg`/
-/// `DestroyMsg`; when the destruction silo lands, retarget the applier at its `RuntimeHealth` and drop
-/// this (`DEFERRED.md`). Kept here so combat is testable without a leaf→leaf edge.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Health {
-    pub cur: f32,
-    pub max: f32,
-}
-
-impl Health {
-    pub fn new(max: f32) -> Self {
-        Self { cur: max, max }
-    }
-    pub fn is_dead(&self) -> bool {
-        self.cur <= 0.0
-    }
-}
+// `Health` is **not** defined here. It is the shared `RuntimeHealth {cur,max}` analog owned by
+// `mercs2_core` (producer `FUN_004cfed0`) — damage, destruction and any health-bearing query must
+// agree on one component type, so each site imports `mercs2_core::Health` directly rather than
+// through a combat-local alias.
 
 /// A character's weapon loadout — the engine-side backing of `Human.Inventory.SetAllWeapons` (code map
 /// §7). The `weapons` are the carried gun stats; index [`equipped`] is the active one (mirrored into a

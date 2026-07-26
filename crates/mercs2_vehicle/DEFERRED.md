@@ -20,6 +20,15 @@ with whether it blocks a faithful reimplementation.
   later integration choice, not required for faithfulness.
   `[faithful-blocker: no]`
 
+- **Vehicle destruction (health → wreckage).** `spawn_vehicle` now gives every vehicle a
+  `mercs2_core::Health`, so it takes bullet/blast damage and can reach zero. What happens *then* is
+  deliberately out of scope here: the retail chain is per-node `RuntimeNodeHealth` → the destruction
+  state machine → `node_enable` toggling model nodes → part detach + debris spawn + burning wreck.
+  That lands as its own subsystem (a future `mercs2_destruction` crate), not inside the drive silo.
+  References: `docs/reverse_engineer/state_machine_destruction_code_map.md` and
+  `docs/modernization/vehicle_model_spec.md` §5.
+  `[faithful-blocker: yes — a vehicle at 0 HP currently just sits at 0]`
+
 ## Faithful blockers (must be resolved by confirm-live, tracked in the code map §5)
 
 These are *not* improvements — they are unread oracle values. Marked `// CONFIRM-LIVE:` in source.
@@ -31,3 +40,7 @@ These are *not* improvements — they are unread oracle values. Marked `// CONFI
   is unknown). Does not block: the constants are what the ring compares. `[faithful-blocker: no]`
 - Camera preset float layout + look-axis apply / pitch clamp (`FUN_0060f6d0` mode gate, string
   stripped). `[faithful-blocker: yes — placeholder pose math]`
+- `DEFAULT_VEHICLE_HEALTH` (`components.rs`) — retail authors this as `VehicleHealth` (Xbox symbol @
+  PDB `0x003b250`); no such field survives in the stripped PC tuning blocks, so every class currently
+  shares one placeholder pool. Recover the value and move it onto `VehicleTuning` (per-class).
+  `[faithful-blocker: yes — placeholder hit points]`

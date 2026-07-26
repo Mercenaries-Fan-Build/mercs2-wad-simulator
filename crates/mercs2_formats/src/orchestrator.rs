@@ -520,7 +520,31 @@ pub fn node_states_for_health(sm: &StateMachine, health: f32, damaged_below: f32
     } else if health < damaged_below {
         delivered.extend(minor.iter().copied());
     }
-    sm.nodes.iter().map(|n| simulate_node_state(n, &delivered)).collect()
+    node_states_for_delivered(sm, &delivered)
+}
+
+/// Per-switch-node chosen state for an explicit set of **already-delivered** damage messages.
+///
+/// This is the stateful entry point [`node_states_for_health`] is built on, and it is the one a
+/// runtime should use. The difference matters: `node_states_for_health` derives the delivered set
+/// from the *current* health fraction alone, so restoring health walks the machine **backwards** —
+/// a shed door would reattach. Retail delivers messages once and the machine only ever moves
+/// forward, so a caller that keeps a monotonically-growing `delivered` set gets the faithful
+/// behaviour. See `mercs2_destruction`, which owns that set per entity.
+pub fn node_states_for_delivered(
+    sm: &StateMachine,
+    delivered: &std::collections::HashSet<u32>,
+) -> Vec<usize> {
+    sm.nodes.iter().map(|n| simulate_node_state(n, delivered)).collect()
+}
+
+/// The `(command_hash, args)` pairs of a state's **enter** script, in order.
+///
+/// Exposed so a runtime can react to the side-effecting commands the engine's enter-scripts carry —
+/// `CreateObject` (debris) and `StartEmitter` (fire) — which `machine_node_enable` deliberately
+/// ignores because they are not `SHOW`/`HIDE`.
+pub fn enter_commands(state: &StateDef) -> Vec<(u32, Vec<u32>)> {
+    commands(&state.enter)
 }
 
 /// GROUND-TRUTH per-**HIER-node** enable flags from the engine state machine — the runtime's

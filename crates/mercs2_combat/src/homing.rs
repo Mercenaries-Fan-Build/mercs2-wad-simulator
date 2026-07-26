@@ -23,7 +23,8 @@ use hecs::{Entity, World};
 use mercs2_core::event::{Event, EventArg, EventBus};
 use mercs2_core::{PhysicsQuery, Transform};
 
-use crate::components::{Health, HomingState, RuntimeExplosion, RuntimeHomingWeapon, RuntimeWeapon};
+use crate::components::{HomingState, RuntimeExplosion, RuntimeHomingWeapon, RuntimeWeapon};
+use mercs2_core::Health;
 use crate::events::{HOMING_LAUNCHED, HOMING_LOCK_CLEAR, HOMING_LOCK_START, HOMING_LOCK_UPDATE};
 
 /// Emit a homing lock event (`Start`/`Update`/`Clear`) carrying the weapon + target handles — the

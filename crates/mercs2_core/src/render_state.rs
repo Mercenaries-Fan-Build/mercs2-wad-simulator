@@ -105,14 +105,14 @@ pub struct FadeState {
 
 /// The aggregate render/post-FX parameter state the presentation namespaces drive.
 #[derive(Clone, Debug, Default)]
-pub struct RenderState {
+pub struct RenderSettings {
     pub atmosphere: AtmosphereState,
     pub bloom: BloomState,
     pub graphics: GraphicsState,
     pub fade: FadeState,
 }
 
-impl RenderState {
+impl RenderSettings {
     pub fn new() -> Self {
         Self::default()
     }
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn bloom_and_graphics_defaults() {
-        let r = RenderState::new();
+        let r = RenderSettings::new();
         assert_eq!(r.bloom.threshold, 1.0);
         assert_eq!(r.graphics.gamma, 1.0);
     }

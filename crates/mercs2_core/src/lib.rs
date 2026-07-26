@@ -37,7 +37,13 @@ pub use hecs;
 pub use hecs::{Entity, World};
 
 mod components;
-pub use components::{AnimState, ModelRef, SkinPalette, Transform};
+pub use components::{AnimState, Destructible, Health, ModelRef, SkinPalette, Transform};
+/// The humanoid vocabulary (see `components.rs` §Humanoid): every person in the world carries
+/// [`Human`] + [`HumanState`], and the ≤[`MAX_PLAYERS`] of them a player is driving additionally
+/// carry [`PlayerControlled`] — the reimpl's form of the marker component `FUN_006A4060` adds to a
+/// character entity on attach. Lives here, not in `mercs2_player`, so `mercs2_ai`/`mercs2_anim`/
+/// `mercs2_combat` can act on people without an edge to the player crate.
+pub use components::{Human, HumanState, PlayerControlled, ANY_STATE, MAX_PLAYERS};
 
 /// The `GuidMap` (see `guidmap.rs`): the name-hash → `Entity` + guid ↔ `Entity` registry modelling the
 /// engine's resident guidmap singleton (`0x385EA82C`). `Pg.GetGuidByName` / `Object.*` resolve against
@@ -68,7 +74,7 @@ pub use object_filter::{eval_label_expr, ObjectFilter, ObjectFilterRegistry};
 /// Global render / post-FX parameter state (see `render_state.rs`): the sky/bloom/graphics/fade params
 /// the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua namespaces drive and the render passes read.
 pub mod render_state;
-pub use render_state::{AtmosphereState, BloomState, FadeState, GraphicsState, RenderState};
+pub use render_state::{AtmosphereState, BloomState, FadeState, GraphicsState, RenderSettings};
 
 /// Keystone B — the serialized event / RPC bus (see `event.rs`): the one name-hash-keyed event bus
 /// the engine shares across GUI (`ToggleHud`), Networking (`NetEventCallback`), and AI

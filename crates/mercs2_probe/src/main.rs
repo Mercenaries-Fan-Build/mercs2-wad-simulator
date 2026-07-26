@@ -31,7 +31,7 @@
 //! `src/bin/` (`cargo run -p mercs2_probe --bin <name>`), each a standalone investigation of one
 //! question: model/LOD assembly (`lod_chunks`, `segm_join`, `viewstate_probe`, ...), the
 //! INDX->SEGM node binding (`indx_dump`, `node_witness`, `segfix_probe`, ...), the destruction
-//! state machine and draw gate (`sm_dump`, `gate_probe`, `health_probe`, ...), animation
+//! state machine and draw gate (`sm_dump`, `gate_probe`, `seedcmp`, ...), animation
 //! (`action_table_probe`, `charanim`, `clipbind`), textures/materials/FX (`tex_dump`, `texcmp`,
 //! `mtrl_probe`, `fx_probe`, `light_probe`) and archive naming (`aset_probe`, `model_namer`).
 //! Those bins take a model NAME (hashed with `pandemic_hash_m2`) or a `0xHASH`, and resolve

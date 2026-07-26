@@ -37,6 +37,7 @@ mercs2_formats = { workspace = true }
 mercs2_mesh = { workspace = true }
 # simulation spine — World / fixed tick / ordered schedule / components (the ECS-driven run path).
 mercs2_core = { workspace = true }
+mercs2_destruction = { workspace = true }
 # Mechanism crates: the engine OWNS and re-exports (`pub use … as <name>`) every gameplay/AV/render
 # subsystem so the game depends only on the engine. None of these depend on the engine (cycle-free);
 # game-specific SELECTION/content lives in `mercs2_game`, the mechanism lives here.

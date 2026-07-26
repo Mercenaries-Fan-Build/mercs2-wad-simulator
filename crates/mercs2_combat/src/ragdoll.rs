@@ -128,7 +128,7 @@ pub fn blast_impulse(center: Vec3, victim_pos: Vec3, damage: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::Health;
+    use mercs2_core::Health;
 
     fn spawn_body(world: &mut World, pos: Vec3, ragdollable: bool) -> Entity {
         let tf = Transform { translation: pos, ..Transform::IDENTITY };

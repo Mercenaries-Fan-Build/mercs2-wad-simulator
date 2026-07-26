@@ -103,7 +103,7 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0;
-    Some(LoadedModel { hash: terrainmesh_hash, verts, indices, draws, textures, skin, clips: Vec::new() })
+    Some(LoadedModel { hash: terrainmesh_hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() })
 }
 
 /// Load one c3 streaming cell's `model` container by block index (the streaming executor's LOAD path).
@@ -148,7 +148,7 @@ pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0;
-    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new() }, offset))
+    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() }, offset))
 }
 
 /// Extract one model container by hash and build its renderable `LoadedModel` (verts/tris + draws +
@@ -204,7 +204,7 @@ pub fn load_model_by_hash_state(
         );
     }
     Some((
-        LoadedModel { hash, verts, indices, draws, textures, skin, clips },
+        LoadedModel { hash, verts, indices, draws, textures, skin, clips, machine: m.machine.clone(), hier: m.hier.clone() },
         stats.bbox_min,
         stats.bbox_max,
     ))
@@ -298,7 +298,14 @@ pub fn load_model_props(
         placed_instances += instances.len();
         out.push((
             hash,
-            LoadedModel { hash, verts, indices, draws, textures, skin, clips },
+            LoadedModel {
+                hash, verts, indices, draws, textures, skin, clips,
+                // Props are where destruction actually lives (buildings, fences, barrels). This
+                // loader reads the container directly rather than via `Model`, so parse the two
+                // destruction pieces off the same resident block.
+                machine: mercs2_formats::orchestrator::parse_state_machine(&container),
+                hier: mercs2_formats::orchestrator::parse_hier(&container),
+            },
             instances,
         ));
     }
@@ -862,6 +869,7 @@ pub fn load_streaming_world_data(
         lowres_draw_by_cell.insert(cell, i);
     }
     let terrain = LoadedModel {
+        machine: None, hier: Vec::new(),
         hash: 0x7E44_A100,
         verts,
         indices: tm.indices.clone(),

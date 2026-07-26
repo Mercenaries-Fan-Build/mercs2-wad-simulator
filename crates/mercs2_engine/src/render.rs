@@ -379,4 +379,12 @@ pub struct LoadedModel {
     pub textures: TexMap,
     pub skin: mesh::SkinData,
     pub clips: Vec<ClipAnim>,
+    /// The model's destruction state machine, if it ships one. Parsed by [`crate::model::Model`] on
+    /// load and otherwise discarded — carried here so the runtime can feed
+    /// [`crate::destruction::DestructionStore`] without re-opening the WAD. `None` for terrain,
+    /// markers and the many props that are simply indestructible.
+    pub machine: Option<mercs2_formats::orchestrator::StateMachine>,
+    /// HIER nodes, needed alongside `machine` because `SHOW`/`HIDE` walk parent links to flip whole
+    /// subtrees. Empty when there is no machine to drive them.
+    pub hier: Vec<mercs2_formats::orchestrator::HierNode>,
 }

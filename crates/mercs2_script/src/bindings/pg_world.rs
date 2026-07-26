@@ -1,12 +1,19 @@
-//! `Pg` engine binding namespace — luaL_Reg table VA 0x00b99e28, 24 cfuncs.
+//! `Junk` engine binding namespace — luaL_Reg table VA 0x00b99e28, 24 cfuncs.
 //!
 //! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! This is the *second* `Pg` luaL_Reg table (world/spawn/asset-tooling; the spawn-by-name half lives
-//! in `pg.rs`). Only one entry here is pure: `FormatTime(seconds)` — a seconds→`"M:SS"` formatter —
+//! **This is not a second `Pg` table.** The namespace registry at `0x00DFD478` (31 rows × 12 bytes)
+//! names this table **`Junk`** at row 19; `Pg` is row 2 and is a different table (`0x00B99328`,
+//! modelled by `pg.rs`). The two share no cfunc names — the overlap is empty. The file keeps its
+//! `pg_world` name for churn reasons only; the global it installs is `Junk`, which is what the
+//! shipped scripts call (`Junk.FormatTime` / `IsInstallable` / `DrawPath`, never `Pg.*` for these).
+//! `CreateRegion` in particular belongs here and **not** to `Pg` — several docs had it under `Pg`.
+//!
+//! World/spawn/asset-tooling surface. Only one entry here is pure: `FormatTime(seconds)` — a
+//! seconds→`"M:SS"` formatter —
 //! which gets a real body. Every other cfunc needs world, asset-DB, or install-manager state that has
 //! no `EngineHost` seam yet, so they are faithful `b.stub`s: the dev/diagnostic dumps (`DumpAssets`,
 //! `DumpTextures`, `DumpMemory`, `DumpStats`, …) mirror retail's return-0 dev stubs, and the
@@ -20,9 +27,13 @@ use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
-pub const NAMESPACE: &str = "PgWorld";
+/// Registry row 19 (`0x00DFD55C`) names this table **`Junk`** — not `PgWorld`, and not part of `Pg`.
+/// The game calls it `Junk.*` (12 sites: `IsInstallable`, `InstallToHDD`, `UseExistingInstall`,
+/// `FormatTime`, `ToggleAlarm`, `DrawPath`). Merging it into `Pg` also zeroed its `corpus_calls`
+/// census, which keyed on `Pg.<name>`. Corrected 2026-07-26.
+pub const NAMESPACE: &str = "Junk";
 /// The Lua global table this namespace installs as.
-pub const GLOBAL: &str = "Pg";
+pub const GLOBAL: &str = "Junk";
 /// luaL_Reg table VA in the unpacked SecuROM image (`mercs2_unpacked.exe`, base 0x00400000).
 pub const TABLE_VA: u32 = 0x00b99e28;
 
@@ -30,13 +41,13 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "SpawnHomingProjectile", corpus_calls: 0 },
     Required { name: "CreateRegion", corpus_calls: 0 },
     Required { name: "Subdue", corpus_calls: 0 },
-    Required { name: "GetModelBBoxExtents", corpus_calls: 0 },
+    Required { name: "GetModelBBoxExtents", corpus_calls: 1 },
     Required { name: "SpawnWithModel", corpus_calls: 0 },
-    Required { name: "FormatTime", corpus_calls: 0 },
-    Required { name: "DrawPath", corpus_calls: 0 },
-    Required { name: "IsInstallable", corpus_calls: 0 },
-    Required { name: "InstallToHDD", corpus_calls: 0 },
-    Required { name: "UseExistingInstall", corpus_calls: 0 },
+    Required { name: "FormatTime", corpus_calls: 2 },
+    Required { name: "DrawPath", corpus_calls: 1 },
+    Required { name: "IsInstallable", corpus_calls: 4 },
+    Required { name: "InstallToHDD", corpus_calls: 2 },
+    Required { name: "UseExistingInstall", corpus_calls: 2 },
     Required { name: "Search", corpus_calls: 0 },
     Required { name: "DumpAssets", corpus_calls: 0 },
     Required { name: "DumpAssetsDiff", corpus_calls: 0 },
@@ -49,7 +60,7 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "DescribeGuid", corpus_calls: 0 },
     Required { name: "SetQGrey", corpus_calls: 0 },
     Required { name: "ActivateAlarm", corpus_calls: 0 },
-    Required { name: "ToggleAlarm", corpus_calls: 0 },
+    Required { name: "ToggleAlarm", corpus_calls: 1 },
     Required { name: "DumpStats", corpus_calls: 0 },
 ];
 

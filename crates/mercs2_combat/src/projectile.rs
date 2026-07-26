@@ -13,7 +13,8 @@ use hecs::{Entity, World};
 use mercs2_core::event::EventBus;
 use mercs2_core::PhysicsQuery;
 
-use crate::components::{Health, RuntimeExplosion, RuntimeProjectile};
+use crate::components::{RuntimeExplosion, RuntimeProjectile};
+use mercs2_core::Human;
 use crate::impact::Impact;
 
 /// One resolved projectile outcome, applied after the (immutable) integration query is dropped.
@@ -128,8 +129,8 @@ pub fn projectile_system_impacts(
                 life: 0.25, // brief linger; the damage applies on its first tick
             },));
         } else if let Some((normal, dir)) = hit_facing {
-            // A character hit sprays blood; a world/prop hit leaves a bullet hole.
-            let is_character = victim.map(|v| world.get::<&Health>(v).is_ok()).unwrap_or(false);
+            // A person hit sprays blood; a world/prop/vehicle hit leaves a bullet hole.
+            let is_character = victim.map(|v| world.get::<&Human>(v).is_ok()).unwrap_or(false);
             impacts.push(Impact::from_hit(point, normal, dir, is_character));
         }
         let _ = world.despawn(proj);
@@ -197,7 +198,7 @@ pub fn explosion_system_impacts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::Health;
+    use mercs2_core::{Health, Human};
     use crate::damage::DamageKey;
     use crate::stats::ExplosiveStats;
     use mercs2_core::physics_query::{ClosestPoint, RayHit};
@@ -316,11 +317,11 @@ mod tests {
         assert_eq!(impacts.len(), 1);
         assert_eq!(impacts[0].kind, ImpactKind::Bullet);
 
-        // Character hit (Health victim) → Blood.
+        // Person hit (`Human` victim) → Blood.
         let mut world = World::new();
         let mut bus = EventBus::new();
         let owner = world.spawn(());
-        let victim = world.spawn((Health::new(100.0),));
+        let victim = world.spawn((Human, Health::new(100.0)));
         world.spawn((RuntimeProjectile {
             owner,
             pos: Vec3::ZERO,
@@ -335,6 +336,26 @@ mod tests {
         projectile_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&HitAhead { victim: Some(victim), dist: 0.1 }), &mut impacts);
         assert_eq!(impacts.len(), 1);
         assert_eq!(impacts[0].kind, ImpactKind::Blood);
+
+        // Health-bearing non-human (a vehicle) → Bullet: the predicate is `Human`, not `Health`.
+        let mut world = World::new();
+        let mut bus = EventBus::new();
+        let owner = world.spawn(());
+        let car = world.spawn((Health::new(600.0),));
+        world.spawn((RuntimeProjectile {
+            owner,
+            pos: Vec3::ZERO,
+            vel: Vec3::new(0.0, 0.0, 30.0),
+            gravity: 0.0,
+            life: 5.0,
+            damage: 10.0,
+            damage_key: DamageKey::BulletLarge,
+            explosive: None,
+        },));
+        let mut impacts = Vec::new();
+        projectile_system_impacts(&mut world, 1.0 / 60.0, &mut bus, Some(&HitAhead { victim: Some(car), dist: 0.1 }), &mut impacts);
+        assert_eq!(impacts.len(), 1);
+        assert_eq!(impacts[0].kind, ImpactKind::Bullet, "a vehicle does not bleed");
     }
 
     #[test]

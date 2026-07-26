@@ -49,7 +49,7 @@ pub use camera::{chase_pose, CameraMode, CameraPose, CameraPreset};
 pub use command::{cmd, handle_command, CommandRecord, CommandRing};
 pub use components::{
     ChassisBody, Seat, SeatKind, Seating, Vehicle, VehicleClass, VehicleControls, VehicleRuntime,
-    VehicleTuning, Wheel, WheelSet,
+    VehicleTuning, Wheel, WheelSet, DEFAULT_VEHICLE_HEALTH,
 };
 pub use drive::{CarActor, DriveSim, TankActor, VehicleActor};
 pub use hijack::{HijackFsm, HijackState, TurretAim};
@@ -114,6 +114,23 @@ mod tests {
             VehicleRuntime::new(),
             lua_surface::default_car_seating(),
         )
+    }
+
+    /// A spawned vehicle is a damageable body: it carries a `Health` pool, so the combat silo's hit
+    /// applier and radial-blast sweep (both of which select on `mercs2_core::Health`) can see it. It is
+    /// NOT a person — no `Human` marker — so shots spark off it rather than draw blood.
+    #[test]
+    fn spawned_vehicle_is_damageable_but_not_human() {
+        let mut world = World::new();
+        let e = spawn_test_car(&mut world, 0x1000, 0.85);
+        let h = *world.get::<&mercs2_core::Health>(e).expect("vehicle must be damageable");
+        assert_eq!(h.max, DEFAULT_VEHICLE_HEALTH);
+        assert_eq!(h.cur, h.max, "spawns pristine");
+        assert!(!h.is_dead());
+        assert!(
+            world.get::<&mercs2_core::Human>(e).is_err(),
+            "a vehicle is not a person"
+        );
     }
 
     // ---- Deliverable 5, test 3: wheel ray finds ground and suspends the body ----

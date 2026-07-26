@@ -60,8 +60,7 @@ pub mod ragdoll;
 pub mod stats;
 
 pub use components::{
-    Health, HomingState, Inventory, RuntimeExplosion, RuntimeHomingWeapon, RuntimeProjectile,
-    RuntimeWeapon,
+    HomingState, Inventory, RuntimeExplosion, RuntimeHomingWeapon, RuntimeProjectile, RuntimeWeapon,
 };
 pub use damage::{DamageKey, ExplosionSize};
 pub use impact::{Impact, ImpactKind};
@@ -151,7 +150,7 @@ mod tests {
     use super::*;
     use glam::Vec3;
     use mercs2_core::physics_query::{ClosestPoint, RayHit};
-    use mercs2_core::Transform;
+    use mercs2_core::{Health, Transform};
 
     struct NoPhysics;
     impl PhysicsQuery for NoPhysics {

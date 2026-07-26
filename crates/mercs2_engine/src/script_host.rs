@@ -107,27 +107,27 @@ pub struct GameScriptHost {
     /// The object attachment graph: child GUID → parent GUID (`Object.Attach`/`Detach`). `GetParent`/
     /// `IsAttached`/`GetAttachedObjects` read it.
     attachments: HashMap<u64, u64>,
-    /// The retained-mode HUD widget tree the `Hud.*` Lua drives (`crate::widgets::WidgetTree`).
+    /// The retained-mode HUD widget tree the `_GuiInternal.*` Lua drives (`crate::widgets::WidgetTree`).
     hud: crate::widgets::WidgetTree,
     /// The HUD world-marker set the `Gui._Marker*` Lua drives.
     markers: crate::widgets::MarkerSet,
     /// Global render/post-FX parameter state the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua drives.
-    render: mercs2_core::RenderState,
+    render: mercs2_core::RenderSettings,
     /// Cinematic camera controller state the `CameraFx.*` Lua drives.
     camera_fx: CameraFxState,
-    /// Per-character weapon loadout (`Inventory.*`): character GUID → its weapon GUIDs.
+    /// Per-character weapon loadout (`Human.Inventory.*`): character GUID → its weapon GUIDs.
     loadouts: HashMap<u64, Vec<u64>>,
     /// Per-weapon ammo state (`Weapon.*`).
     weapons: HashMap<u64, WeaponState>,
-    /// Objects currently on fire (`Fire.Ignite`/`Extinguish`).
+    /// Objects currently on fire (`Graphics.FuelTrail.Ignite`/`Extinguish`).
     burning: std::collections::HashSet<u64>,
     /// Per-object health `(current, max)` (`Object.*Health`, `SendDamage`, `Kill`/`Revive`).
     health: HashMap<u64, (f32, f32)>,
-    /// `Pg.CreateRegion` trigger regions: handle → `(center, radius)`; `region_names` maps name→handle.
+    /// `Junk.CreateRegion` trigger regions: handle → `(center, radius)`; `region_names` maps name→handle.
     regions: HashMap<u64, ([f32; 3], f32)>,
     region_names: HashMap<String, u64>,
     next_region: u64,
-    /// Active alarms (`Pg.ActivateAlarm`/`ToggleAlarm`).
+    /// Active alarms (`Junk.ActivateAlarm`/`ToggleAlarm`).
     alarms: std::collections::HashSet<u64>,
     /// Per-player designator charges (`Airstrike.*Designator`); presence = equipped.
     designators: HashMap<u64, i32>,
@@ -386,7 +386,7 @@ impl GameScriptHost {
             attachments: HashMap::new(),
             hud: crate::widgets::WidgetTree::new(),
             markers: crate::widgets::MarkerSet::new(),
-            render: mercs2_core::RenderState::new(),
+            render: mercs2_core::RenderSettings::new(),
             camera_fx: CameraFxState::default(),
             loadouts: HashMap::new(),
             weapons: HashMap::new(),
@@ -458,22 +458,22 @@ impl GameScriptHost {
 
     /// A copy of `guid`'s live `Health` component (the SAME component the combat silo reads/writes), if
     /// the entity carries one — so Lua `Object.*Health` and combat damage never diverge for live actors.
-    fn health_of(&self, guid: u64) -> Option<crate::combat::Health> {
+    fn health_of(&self, guid: u64) -> Option<mercs2_core::Health> {
         let e = self.entity_of(guid)?;
         let world = self.world.as_ref()?.borrow();
-        world.get::<&crate::combat::Health>(e).ok().map(|h| *h)
+        world.get::<&mercs2_core::Health>(e).ok().map(|h| *h)
     }
 
     /// Read-or-init (`max = default_max`) and mutate `guid`'s live `Health`, writing it back. Returns
     /// whether it was applied (false if no live entity → the caller keeps the shadow fallback).
-    fn with_health(&self, guid: u64, default_max: f32, f: impl FnOnce(&mut crate::combat::Health)) -> bool {
+    fn with_health(&self, guid: u64, default_max: f32, f: impl FnOnce(&mut mercs2_core::Health)) -> bool {
         let Some(e) = self.entity_of(guid) else { return false };
         let Some(world_rc) = self.world.as_ref() else { return false };
         let mut world = world_rc.borrow_mut();
         let mut h = world
-            .get::<&crate::combat::Health>(e)
+            .get::<&mercs2_core::Health>(e)
             .map(|h| *h)
-            .unwrap_or_else(|_| crate::combat::Health::new(default_max));
+            .unwrap_or_else(|_| mercs2_core::Health::new(default_max));
         f(&mut h);
         world.insert_one(e, h).is_ok()
     }
@@ -909,9 +909,9 @@ impl EngineHost for GameScriptHost {
             f.expr = expr.to_string();
         }
     }
-    fn object_filter_add(&mut self, handle: u64, guid: u64, include: bool) {
+    fn object_filter_add(&mut self, handle: u64, guid: u64, exclude: bool) {
         if let Some(f) = self.object_filters.get_mut(handle) {
-            f.add(guid, include);
+            f.add(guid, exclude);
         }
     }
     fn object_filter_remove(&mut self, handle: u64, guid: u64) {
@@ -955,10 +955,10 @@ impl EngineHost for GameScriptHost {
     fn markers_ref(&self) -> Option<&crate::widgets::MarkerSet> {
         Some(&self.markers)
     }
-    fn render_state(&mut self) -> Option<&mut mercs2_core::RenderState> {
+    fn render_state(&mut self) -> Option<&mut mercs2_core::RenderSettings> {
         Some(&mut self.render)
     }
-    fn render_state_ref(&self) -> Option<&mercs2_core::RenderState> {
+    fn render_state_ref(&self) -> Option<&mercs2_core::RenderSettings> {
         Some(&self.render)
     }
 
@@ -1043,7 +1043,7 @@ impl EngineHost for GameScriptHost {
         self.weapons.get(&weapon).map(|w| w.designator).unwrap_or(false)
     }
 
-    // ===== Fire. =====
+    // ===== Graphics.FuelTrail. =====
     fn fire_ignite(&mut self, object: u64) {
         self.burning.insert(object);
     }
@@ -1054,7 +1054,7 @@ impl EngineHost for GameScriptHost {
         self.burning.contains(&object)
     }
 
-    // ===== Health / damage → the live `crate::combat::Health` component (shared with combat), with the
+    // ===== Health / damage → the live `mercs2_core::Health` component (shared with combat), with the
     // shadow HashMap as the pre-realize / no-entity fallback (like `spawns[].pos` for position). =====
     fn object_health(&self, guid: u64) -> f32 {
         if let Some(h) = self.health_of(guid) {
@@ -1851,12 +1851,18 @@ mod tests {
         assert!(m100, "China&&Vehicle matches the labelled vehicle");
         assert!(!m200, "China-only object fails China&&Vehicle");
 
-        // Explicit include overrides a failing predicate; GetObjects returns the include set.
-        sh.exec("ObjectFilter.AddObject(uFilter, 200, true)", "@of").unwrap();
+        // Explicit include overrides a failing predicate. Arg 3 is **bExclude**, so `false` includes
+        // (retail polarity — see `ObjectFilter::add`; this test asserted the inverse until 2026-07-26).
+        sh.exec("ObjectFilter.AddObject(uFilter, 200, false)", "@of").unwrap();
         let m200b: bool = sh.eval("return ObjectFilter.Eval(uFilter, 200)").unwrap();
         assert!(m200b, "explicit include forces a match");
         let objs: Vec<i64> = sh.eval("return ObjectFilter.GetObjects(uFilter, false)").unwrap();
         assert_eq!(objs, vec![200]);
+
+        // And the other way: `true` excludes, beating a passing predicate.
+        sh.exec("ObjectFilter.AddObject(uFilter, 100, true)", "@of").unwrap();
+        let m100b: bool = sh.eval("return ObjectFilter.Eval(uFilter, 100)").unwrap();
+        assert!(!m100b, "bExclude=true must exclude even when the predicate passes");
     }
 
     /// `Object.Attach`/`Detach` drive a REAL attachment graph the getters read (were no-op stubs +
@@ -1903,7 +1909,7 @@ mod tests {
         assert!(host.borrow().audio.borrow().vo_cinematic_mode());
     }
 
-    /// `Hud.*` drives the REAL `crate::widgets::WidgetTree`: create widgets, set/get their state, parent
+    /// `_GuiInternal.*` drives the REAL `crate::widgets::WidgetTree`: create widgets, set/get their state, parent
     /// them, and text/image data round-trips — all through Lua (was a no-op HUD).
     #[test]
     fn game_lua_hud_drives_real_widget_tree() {
@@ -1914,30 +1920,32 @@ mod tests {
         // Create a text widget, set its text + visibility → read them back.
         sh.exec(
             r#"
-            wRoot = Hud.CreateWidget()
-            wText = Hud.CreateTextWidget()
-            Hud.SetTextText(wText, "OBJECTIVE COMPLETE")
-            Hud.SetTextScale(wText, 2.0)
-            Hud.SetWidgetVisible(wText, false)
-            Hud.SetWidgetLocation(wText, 100, 200)
-            Hud.AddWidgetChild(wRoot, wText)
+            wRoot = _GuiInternal.CreateWidget()
+            wText = _GuiInternal.CreateTextWidget()
+            _GuiInternal.SetTextText(wText, "OBJECTIVE COMPLETE")
+            _GuiInternal.SetTextScale(wText, 2.0)
+            _GuiInternal.SetWidgetVisible(wText, false)
+            _GuiInternal.SetWidgetLocation(wText, 100, 200, 340, 264)
+            _GuiInternal.AddWidgetChild(wRoot, wText)
         "#,
             "@hud",
         )
         .unwrap();
 
-        let text: String = sh.eval("return Hud.GetTextText(wText)").unwrap();
+        let text: String = sh.eval("return _GuiInternal.GetTextText(wText)").unwrap();
         assert_eq!(text, "OBJECTIVE COMPLETE");
-        let scale: f32 = sh.eval("return Hud.GetTextScale(wText)").unwrap();
+        let scale: f32 = sh.eval("return _GuiInternal.GetTextScale(wText)").unwrap();
         assert_eq!(scale, 2.0);
-        let vis: bool = sh.eval("return Hud.GetWidgetVisible(wText)").unwrap();
+        let vis: bool = sh.eval("return _GuiInternal.GetWidgetVisible(wText)").unwrap();
         assert!(!vis, "SetWidgetVisible(false) persisted");
-        let loc: (f32, f32) = sh.eval("return Hud.GetWidgetLocation(wText)").unwrap();
-        assert_eq!(loc, (100.0, 200.0));
+        // A widget location is a rect: four in, four out (`mrxguibase.lua` `Widget:GetLocation`
+        // destructures `nX1, nY1, nX2, nY2`).
+        let loc: (f32, f32, f32, f32) = sh.eval("return _GuiInternal.GetWidgetLocation(wText)").unwrap();
+        assert_eq!(loc, (100.0, 200.0, 340.0, 264.0));
 
         // The tree really parented the text under the root.
         let wtext: i64 = sh.eval("return wText").unwrap();
-        let kids: Vec<i64> = sh.eval("return Hud.GetWidgetChildren(wRoot)").unwrap();
+        let kids: Vec<i64> = sh.eval("return _GuiInternal.GetWidgetChildren(wRoot)").unwrap();
         assert_eq!(kids, vec![wtext]);
         assert_eq!(host.borrow().hud.len(), 2, "two widgets live in the tree");
 
@@ -1960,7 +1968,7 @@ mod tests {
         assert!(marker.pulsing);
     }
 
-    /// The presentation namespaces drive the real `mercs2_core::RenderState`: the atmosphere generic
+    /// The presentation namespaces drive the real `mercs2_core::RenderSettings`: the atmosphere generic
     /// value/color store + bloom/graphics/fade params round-trip through Lua (were no-op stubs).
     #[test]
     fn game_lua_render_state_roundtrip() {
@@ -1993,7 +2001,7 @@ mod tests {
         assert_eq!(host.borrow().camera_fx.shake, 0.5);
     }
 
-    /// `Inventory.*` drives a REAL per-character weapon loadout: set/get/equip/drop round-trips through
+    /// `Human.Inventory.*` drives a REAL per-character weapon loadout: set/get/equip/drop round-trips through
     /// Lua (was empty getters + no-op mutators).
     #[test]
     fn game_lua_inventory_loadout() {
@@ -2002,19 +2010,19 @@ mod tests {
         sh.register_engine(host.clone()).unwrap();
 
         let c: i64 = 0x1000;
-        sh.exec(&format!("Inventory.SetAllWeapons({c}, {{10, 20, 30}})"), "@inv").unwrap();
-        let all: Vec<i64> = sh.eval(&format!("return Inventory.GetAllWeapons({c})")).unwrap();
+        sh.exec(&format!("Human.Inventory.SetAllWeapons({c}, {{10, 20, 30}})"), "@inv").unwrap();
+        let all: Vec<i64> = sh.eval(&format!("return Human.Inventory.GetAllWeapons({c})")).unwrap();
         assert_eq!(all, vec![10, 20, 30]);
-        let prim: i64 = sh.eval(&format!("return Inventory.GetPrimaryWeapon({c})")).unwrap();
-        let sec: i64 = sh.eval(&format!("return Inventory.GetSecondaryWeapon({c})")).unwrap();
+        let prim: i64 = sh.eval(&format!("return Human.Inventory.GetPrimaryWeapon({c})")).unwrap();
+        let sec: i64 = sh.eval(&format!("return Human.Inventory.GetSecondaryWeapon({c})")).unwrap();
         assert_eq!((prim, sec), (10, 20));
 
         // Equip adds, Drop removes.
-        sh.exec(&format!("Inventory.EquipWeapon({c}, 40); Inventory.DropWeapon({c}, 20)"), "@inv").unwrap();
-        let after: Vec<i64> = sh.eval(&format!("return Inventory.GetAllWeapons({c})")).unwrap();
+        sh.exec(&format!("Human.Inventory.EquipWeapon({c}, 40); Human.Inventory.DropWeapon({c}, 20)"), "@inv").unwrap();
+        let after: Vec<i64> = sh.eval(&format!("return Human.Inventory.GetAllWeapons({c})")).unwrap();
         assert_eq!(after, vec![10, 30, 40]);
         // A character with no loadout reads nil primary.
-        let none: Option<i64> = sh.eval("return Inventory.GetPrimaryWeapon(0x9999)").unwrap();
+        let none: Option<i64> = sh.eval("return Human.Inventory.GetPrimaryWeapon(0x9999)").unwrap();
         assert_eq!(none, None);
     }
 
@@ -2036,9 +2044,9 @@ mod tests {
         assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetReserveAmmo({w})")).unwrap(), 65);
 
         // Fire: Ignite sets burning, Extinguish clears it.
-        sh.exec("Fire.Ignite(0x700)", "@fr").unwrap();
+        sh.exec("Graphics.FuelTrail.Ignite(0x700)", "@fr").unwrap();
         assert!(host.borrow().object_is_burning(0x700));
-        sh.exec("Fire.Extinguish(0x700)", "@fr").unwrap();
+        sh.exec("Graphics.FuelTrail.Extinguish(0x700)", "@fr").unwrap();
         assert!(!host.borrow().object_is_burning(0x700));
 
         // SendDamage reduces health; enough damage kills (returns true).
@@ -2058,15 +2066,15 @@ mod tests {
         sh.register_engine(host.clone()).unwrap();
 
         // Region registry: CreateRegion mints a stable handle; re-creating the name reuses it.
-        let r1: i64 = sh.eval(r#"return Pg.CreateRegion("bank_lobby", 10, 0, 20, 5)"#).unwrap();
-        let r2: i64 = sh.eval(r#"return Pg.CreateRegion("bank_lobby", 11, 0, 21, 6)"#).unwrap();
+        let r1: i64 = sh.eval(r#"return Junk.CreateRegion("bank_lobby", 10, 0, 20, 5)"#).unwrap();
+        let r2: i64 = sh.eval(r#"return Junk.CreateRegion("bank_lobby", 11, 0, 21, 6)"#).unwrap();
         assert_eq!(r1, r2, "same-named region reuses its handle");
         assert_eq!(host.borrow().regions.get(&(r1 as u64)).copied(), Some(([11.0, 0.0, 21.0], 6.0)));
 
         // Alarm state: Activate then Toggle.
-        sh.exec("Pg.ActivateAlarm(0x42, true)", "@al").unwrap();
+        sh.exec("Junk.ActivateAlarm(0x42, true)", "@al").unwrap();
         assert!(host.borrow().pg_alarm_active(0x42));
-        let now: bool = sh.eval("return Pg.ToggleAlarm(0x42)").unwrap();
+        let now: bool = sh.eval("return Junk.ToggleAlarm(0x42)").unwrap();
         assert!(!now, "toggle turns the active alarm off");
 
         // Airstrike designator lifecycle + FindDesignatorOwner.
@@ -2372,7 +2380,7 @@ mod tests {
         let guids = Rc::new(RefCell::new(GuidMap::new()));
         host.borrow_mut().attach_world(world.clone(), guids.clone());
         // A combat entity carrying a Health component (as the resolver / streaming would spawn it).
-        let e = world.borrow_mut().spawn((Transform::IDENTITY, crate::combat::Health::new(100.0)));
+        let e = world.borrow_mut().spawn((Transform::IDENTITY, mercs2_core::Health::new(100.0)));
         let g = 0x1000_5000u64;
         host.borrow().register_entity(e, g, None);
 
@@ -2380,11 +2388,11 @@ mod tests {
         // Lua damage writes the SAME component the combat silo reads.
         assert!(!host.borrow_mut().object_send_damage(g, 30.0));
         assert_eq!(host.borrow().object_health(g), 70.0);
-        assert_eq!(world.borrow().get::<&crate::combat::Health>(e).unwrap().cur, 70.0, "combat sees the Lua damage");
+        assert_eq!(world.borrow().get::<&mercs2_core::Health>(e).unwrap().cur, 70.0, "combat sees the Lua damage");
         // Kill via Lua → combat sees dead.
         host.borrow_mut().object_kill(g);
         assert!(!host.borrow().object_is_alive(g));
-        assert!(world.borrow().get::<&crate::combat::Health>(e).unwrap().is_dead());
+        assert!(world.borrow().get::<&mercs2_core::Health>(e).unwrap().is_dead());
     }
 
     /// `Player.GetCash`/`GetFuel` now read a real store (were trait-default 0): seed + round-trip + the
