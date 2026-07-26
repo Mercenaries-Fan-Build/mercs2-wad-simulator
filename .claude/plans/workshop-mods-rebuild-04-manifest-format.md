@@ -487,6 +487,33 @@ stable iteration order — or verify-by-hash means nothing.
 5. ~~Format migrations~~ — **RESOLVED: `format: 1`; newer-than-known is a loud reject.**
 6. ~~Inter-contribution references~~ — **RESOLVED for v1: inline `retarget:` sub-block**; a general
    contribution-`id` graph waits for a case needing a longer chain than "retarget → outfit".
+10. **PLATFORM is a missing axis — OPEN (new 2026-07-25, user-set).** Shipments are expected to
+    export to **every platform, not just PC**. `target: retail | reimpl` is the ENGINE axis; it says
+    nothing about which bake. These are orthogonal, so v1's `target` cannot express "retail, Xbox
+    360". The console WADs kept in `game-files/` are a deliberate corpus for this, not stray files.
+
+    | platform | header | endian | blocks |
+    |---|---|---|---|
+    | PC | `FFCS` | little | `sges` |
+    | Xbox 360 | `SCFF` | big | `segs` |
+    | PS3 | `SCFF` | big | `segs` |
+
+    ⚠ **Reading a console bake works; WRITING one is a much larger job than an endian flip.**
+    `ucfx_byteswap` is console → PC *only*, and it is not a byte sweep — it untiles GPU DXT
+    textures, transcodes Xbox-ADPCM/XMA audio to IMA, flips Lua `BINN` bytecode via
+    disassemble/reassemble, rewrites Xbox 12-byte vertex elements to `D3DVERTEXELEMENT9`, and
+    handles Havok section-aware. The inverse needs texture RE-tiling and XMA *encoding*, neither of
+    which exists. So platform support is not "add a field"; the field is the cheap part.
+
+    ⚠ Also: `docs/ps3_wad_wrapper.md` describes a PS3 dump of exactly 1 GiB with an
+    unknown/encrypted header. The `ps3-VZ.WAD` in `game-files/` is 2,201,354,240 bytes and presents
+    a plain `SCFF` header, i.e. readable like the Xbox bake. Different dump — worth reconciling
+    before anyone plans PS3 work off that doc.
+
+    Until decided, `mercs2_quartermaster` OPENS console bakes and reports
+    `Platform::BigEndianConsole`, and `build` refuses with `ConsoleOutputUnsupported` naming the
+    real reason. Mixing platforms in one stack is an error, since resolution walks the whole stack.
+
 7. **Localization of `display:` — STILL OPEN, but the resolver is now READ (decomp, 2026-07-25).**
    The lookup is `FUN_0046423e` (reached via `FUN_00464230` → `FUN_004dd6f1`). Established facts:
    - It takes a **key HASH**, walks the registered DBs **in REVERSE — last-registered wins** — then

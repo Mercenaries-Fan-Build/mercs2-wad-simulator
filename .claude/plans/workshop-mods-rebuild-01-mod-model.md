@@ -257,10 +257,16 @@ without the retail assets stays green without pretending to be coverage.
 - `game::discover` implements Plan 02's order — env → local config (walking up) → co-located
   `Mercenaries2.exe` → registry — and reports the `Origin` so the UI can show which install it read.
   The Workshop Settings page and the `qm` CLI use the same resolver rather than each growing one.
-- **Endian guard:** the box also carries `xbox-vz.wad`, byte-identical in size and big-endian. Its
-  magic reads `SCFF` rather than `FFCS`. `GameStack::open` now rejects it by name instead of failing
-  unrecognisably deep in the parser, and the script filters on magic rather than filename because
-  `pc-game-vz.wad` and `xbox-vz.wad` sit in the same directory.
+- **Platform, not a "trap" (corrected 2026-07-25).** I first read the console WADs sitting beside
+  the PC one as a hazard and made `GameStack::open` REJECT big-endian archives. Wrong on both
+  counts: they are a deliberate corpus, because **Shipments are expected to export to every
+  platform**. Refusing to read one forecloses a stated requirement.
+  Now: `open` accepts them and reports `Platform::{Pc, BigEndianConsole}`; only `build` refuses,
+  with `ConsoleOutputUnsupported` naming the actual obstacle (`ucfx_byteswap` is console → PC only,
+  and the inverse needs texture re-tiling and XMA encoding — see Plan 04 Open-Q10). Mixing platforms
+  in one stack IS an error, since resolution walks the whole stack. The script reports every bake it
+  finds and merely *prefers* PC. Detection is by magic rather than filename because a `game-files/`
+  directory legitimately holds all of them at once.
 
 The template repo's CI is itself a test: `qm lint` over the shipped example Shipment must pass, so the
 example doubles as a conformance fixture the community can diff against.
