@@ -6,14 +6,18 @@
 //!
 //! ## What runs where
 //!
-//! Everything in this module is **hermetic**: manifest text plus, optionally, the Shipment
-//! directory. No game install, no network. That is what lets template CI run `qm lint` on every
-//! push when the retail WADs will never be available there.
+//! [`lint`] is **hermetic**: manifest text plus, optionally, the Shipment directory. No game
+//! install, no network. That is what lets template CI run `qm lint` on every push when the retail
+//! WADs will never be available there.
 //!
-//! Several of the worst traps *cannot* be checked hermetically — a short texture BODY needs the
-//! target's resident mip-chain size from the base WAD, and a dangling LOD rung needs the built
-//! block. Those are registered in [`PENDING`] rather than silently absent, so the gap is visible
-//! instead of being mistaken for a clean bill of health.
+//! [`game_checks`] is the separate set that needs the retail WADs. Kept apart deliberately — folding
+//! them together would make the hermetic set impossible to run on its own, and CI is the place the
+//! linter matters most.
+//!
+//! Several of the worst traps still cannot be checked at all yet — a short texture BODY needs the
+//! target's resident mip-chain size, and a dangling LOD rung needs the built block. Those are
+//! registered in [`PENDING`] rather than silently absent, so the gap is visible instead of being
+//! mistaken for a clean bill of health.
 //!
 //! ## Gating
 //!
@@ -21,6 +25,7 @@
 //! standing mandate is that a build is gated on EXIT CODE, never on a printed count.
 
 use crate::blast::{self, MergeClass};
+use crate::game::GameStack;
 use crate::discover::{self, SourceIssue};
 use crate::manifest::{Contribution, Manifest, Requirement, Target};
 use crate::names::{self, NameTable};
@@ -114,6 +119,20 @@ pub const M0171_INSECURE_URL: Rule = Rule {
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
 
+/// Needs the game stack — see [`game_checks`], not [`lint`].
+pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
+    code: "M0007",
+    title: "fully-resident replacement of a MULTI-RUNG texture stops it streaming",
+    doc: "docs/aset_format.md",
+};
+
+/// Needs the game stack. The shared-texture case: retail carries the asset only as a sub-entry.
+pub const M0009_NO_PRIMARY_ROW: Rule = Rule {
+    code: "M0009",
+    title: "replacing a texture that has no primary ASET row mints one, capturing every sharer",
+    doc: "docs/modernization/texture_extraction_notes.md",
+};
+
 /// Every hermetic rule this build implements.
 pub const RULES: &[Rule] = &[
     M0100_MANIFEST_INVALID,
@@ -171,11 +190,6 @@ pub const PENDING: &[Rule] = &[
     },
     // Found via corpus_search 2026-07-25, not from first principles.
     Rule {
-        code: "M0007",
-        title: "fully-resident replacement of a MULTI-RUNG texture drops its finer external mips",
-        doc: "docs/aset_format.md",
-    },
-    Rule {
         code: "M0008",
         title: "small / non-square texture may hit the open page_count buffer-sizing livelock",
         doc: "docs/reverse_engineer/render_core_code_map.md",
@@ -198,6 +212,62 @@ pub const PENDING: &[Rule] = &[
 /// — which is why the first end-to-end test (`al_hum_boss_ub`) passed without tripping this.
 pub fn aset_row_is_single_block(packed_block_ref: u32, secondary_ref: u32) -> bool {
     packed_block_ref & 0xFFFF == 0xFFFF && secondary_ref == 0xFFFF_FFFF
+}
+
+/// Rules that need the retail WADs. Separate from [`lint`] on purpose: everything there runs in CI
+/// with no game, and mixing the two would make the hermetic set impossible to run alone.
+pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        if let Contribution::ReplaceTexture { target, .. } = c {
+            let hash = mercs2_formats::hash::pandemic_hash_m2(target);
+            // Use EVERY row, not just the primary one: a shared texture may have no primary row at
+            // all, and looking only for one would silently skip exactly those assets.
+            let rows = game.aset_rows(hash, mercs2_formats::types::TYPE_ID_TEXTURE);
+            let Some(&(packed, secondary, _)) = rows.first() else { continue };
+
+            if !aset_row_is_single_block(packed, secondary) {
+                let rungs = [packed & 0xFFFF, secondary >> 16, secondary & 0xFFFF]
+                    .iter()
+                    .filter(|r| **r != 0xFFFF)
+                    .count();
+                out.push(Diagnostic {
+                    rule: M0007_MULTI_RUNG_REPLACE,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "{target} is a STREAMED texture whose row names {rungs} finer rung(s) \
+                         besides the resident one (packed 0x{packed:08X}, secondary \
+                         0x{secondary:08X}). Retail keeps those mips as separate BODY chunks in \
+                         finer c3-cell blocks. This replacement is one fully-resident block, so \
+                         those rungs stop being named: the texture no longer streams and ships its \
+                         whole chain inline. That is how HERO textures already work \
+                         (pmc_hum_* rows are single-block), but here it changes residency and \
+                         resident size. Structurally valid — verify in-game before shipping."
+                    ),
+                    at: Some(index),
+                    fix: None,
+                });
+            }
+
+            if !rows.iter().any(|(_, _, primary)| *primary) {
+                out.push(Diagnostic {
+                    rule: M0009_NO_PRIMARY_ROW,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "{target} has NO primary ASET row — retail carries it as a shared \
+                         sub-entry inside another asset's block, and the engine resolves it by \
+                         falling back to any type_id 27 row. This replacement mints a primary row, \
+                         which then wins the lookup. That is what makes the replacement take \
+                         effect, but it also means every asset that shares this texture now gets \
+                         your version."
+                    ),
+                    at: Some(index),
+                    fix: None,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// One finding.
