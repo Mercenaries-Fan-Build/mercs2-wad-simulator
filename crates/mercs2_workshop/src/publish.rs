@@ -16,7 +16,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
 use mercs2_engine::{mesh, wad};
-use mercs2_formats::ffcs::{find_chunk, load_ffcs_archive};
+// Donor resolution and block framing moved to `mercs2_formats::donor` so the headless
+// `mercs2_quartermaster` can use the same proven path — this crate is binary-only, so anything
+// living here is unreachable from outside. Re-exported: `app.rs` still calls `publish::donor_block`.
+pub use mercs2_formats::donor::{base_csum, donor_block};
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::model_inject::{
     drawing_group_caps, inject_fresh_skeleton, inject_parts_into_donor_block,
@@ -89,75 +92,6 @@ pub fn publish_in_background(
 }
 
 /// Find a model container by name-hash in a decompressed block: (start, end, field_c).
-fn find_model(dec: &[u8], want: u32) -> Option<(usize, usize, u32)> {
-    let (count, entries) = parse_block_entry_table(dec);
-    let mut offset = 4 + count as usize * 16;
-    for e in &entries {
-        let end = offset + e.chunk_size as usize;
-        if end > dec.len() {
-            break;
-        }
-        if e.type_hash == MODEL_TYPE_HASH && e.name_hash == want {
-            return Some((offset, end, e.field_c));
-        }
-        offset = end;
-    }
-    None
-}
-
-/// Resolve a donor model container across the stack (reverse order, last-wins), sourcing from
-/// the block its ASET entry points to — the same container the engine instantiates.
-/// Returns the donor wrapped as a SINGLE-ENTRY block (what `inject_into_donor_block` takes).
-pub fn donor_block(wad_paths: &[String], donor: u32) -> Result<Vec<u8>, String> {
-    let mut last = format!("donor 0x{donor:08X}: not in any wad of the stack");
-    for path in wad_paths.iter().rev() {
-        let mut file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                last = format!("open {path}: {e}");
-                continue;
-            }
-        };
-        let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let archive = match load_ffcs_archive(&mut file, size) {
-            Ok(a) => a,
-            Err(e) => {
-                last = format!("FFCS {path}: {e}");
-                continue;
-            }
-        };
-        let Some(entry) = archive
-            .aset
-            .iter()
-            .find(|e| e.asset_hash == donor && e.type_id == MODEL_ASET_TYPE_ID)
-        else {
-            continue;
-        };
-        let block_index = entry.block_index() as u16;
-        let dec = match decompress_block(&mut file, &archive.indx, block_index) {
-            Ok(d) => d,
-            Err(e) => {
-                last = format!("decompress block {block_index} of {path}: {e}");
-                continue;
-            }
-        };
-        let Some((start, end, field_c)) = find_model(&dec, donor) else {
-            last = format!("donor 0x{donor:08X}: ASET points at block {block_index} of {path} but no model container there");
-            continue;
-        };
-        let container = &dec[start..end];
-        let mut block = Vec::with_capacity(20 + container.len());
-        block.extend_from_slice(&1u32.to_le_bytes());
-        block.extend_from_slice(&donor.to_le_bytes());
-        block.extend_from_slice(&MODEL_TYPE_HASH.to_le_bytes());
-        block.extend_from_slice(&field_c.to_le_bytes());
-        block.extend_from_slice(&(container.len() as u32).to_le_bytes());
-        block.extend_from_slice(container);
-        return Ok(block);
-    }
-    Err(last)
-}
-
 /// The whole publish, blocking (runs on the worker).
 fn publish(
     wad_paths: &[String],
@@ -263,13 +197,7 @@ fn publish(
     }
 
     // ── Assemble the patch WAD (CSUM value/meta mirrored from the base, like cube_mod). ──
-    let mut base = std::fs::File::open(&wad_paths[0])
-        .map_err(|e| format!("open {}: {e}", wad_paths[0]))?;
-    let base_size = base.metadata().map(|m| m.len()).unwrap_or(0);
-    let base_archive =
-        load_ffcs_archive(&mut base, base_size).map_err(|e| format!("base FFCS: {e}"))?;
-    let csum_value = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.offset).unwrap_or(0);
-    let csum_meta = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.meta);
+    let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
 
     let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
     if let Some(parent) = output.parent() {
@@ -503,11 +431,7 @@ pub fn publish_conformant(
     blocks.extend(tex_blocks);
 
     // assemble + self-test (reuse the multi-block packer)
-    let mut base = std::fs::File::open(&wad_paths[0]).map_err(|e| format!("open base: {e}"))?;
-    let base_size = base.metadata().map(|m| m.len()).unwrap_or(0);
-    let base_archive = load_ffcs_archive(&mut base, base_size).map_err(|e| format!("base FFCS: {e}"))?;
-    let csum_value = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.offset).unwrap_or(0);
-    let csum_meta = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.meta);
+    let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
     let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
     std::fs::write(output, &wad_bytes).map_err(|e| format!("write {}: {e}", output.display()))?;
     let sha = sha256_hex(&wad_bytes);
@@ -655,13 +579,7 @@ pub fn publish_skel(
         PatchBlock::new(compressed, format!("blocks\\VZ\\mod_{hash:08x}.block"), aset);
     pb.packed_field = ((new_block.len() + 0x7FFF) / 0x8000) as u32;
 
-    let mut base =
-        std::fs::File::open(&wad_paths[0]).map_err(|e| format!("open {}: {e}", wad_paths[0]))?;
-    let base_size = base.metadata().map(|m| m.len()).unwrap_or(0);
-    let base_archive =
-        load_ffcs_archive(&mut base, base_size).map_err(|e| format!("base FFCS: {e}"))?;
-    let csum_value = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.offset).unwrap_or(0);
-    let csum_meta = find_chunk(&base_archive.chunks, b"CSUM").map(|r| r.meta);
+    let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
     let mut all_blocks = vec![pb];
     all_blocks.extend(tex_blocks);
     let wad_bytes = build_patch_wad_multi(&all_blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
