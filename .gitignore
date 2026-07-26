@@ -10,3 +10,7 @@ __pycache__/
 # scratch sandbox scene written by the workbench's "Save scene" button.
 /workshop_export/
 /workshop_scene.json
+
+# Machine-local game paths (scripts/find-vz-wad.sh). Never committed: the path is
+# machine-specific and points at retail assets we do not redistribute.
+/.mercs2-local.toml
