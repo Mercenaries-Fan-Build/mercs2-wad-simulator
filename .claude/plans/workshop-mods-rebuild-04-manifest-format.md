@@ -216,7 +216,11 @@ contributions:
   - kind: add_model                # Data, new-hash additive
     name: my_custom_helipad
     model: src/helipad/pad.glb
-    donor: deliverycrate           # optional — omit to let the Quartermaster pick a valid host
+    donor: oc_veh_helicopter_md500 # a REAL model (type_id 19). ⚠ the earlier example here said
+                                   #   `deliverycrate`, which has NO ASET row of any type in
+                                   #   vz.wad — it is a name in the table, not a hostable asset.
+                                   #   Optional in principle; auto-pick is not implemented, so the
+                                   #   builder asks rather than guessing.
 
   - kind: patch_lua                # Script — a DECLARED MUTATION, not a finished block (Composition)
     target: wifpmcinterior         # base script to extend

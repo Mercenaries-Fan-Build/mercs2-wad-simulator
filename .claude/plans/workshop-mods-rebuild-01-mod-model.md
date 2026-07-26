@@ -441,10 +441,43 @@ the existing lowering building blocks … + workshop `publish.rs`". That is **no
 returns `Unsupported` with that reason rather than reimplementing — forking the one path proven to
 work in-game would be worse than waiting.
 
-**Next: extract the lowering into a library.** Either give `mercs2_workshop` a `lib.rs` exposing
-`publish`/`retarget`, or move the donor-resolution + model-inject core into `mercs2_formats`
-alongside the texture path that already works. Until then `add_model`/`add_outfit` cannot lower,
-which also blocks Plan 01 phase 5 ("first recipe end-to-end" = an outfit).
+**Increment 6 (2026-07-25) — the extraction, and `add_model` end to end. 99 tests green.**
+
+`mercs2_formats::donor` now holds what was stranded in the binary-only Workshop: `donor_block`
+(reverse walk, last-mounted-wins, sourcing from the block the ASET row names), `find_model_container`,
+`single_entry_block` and `base_csum`. `mercs2_workshop::publish` lost 82 net lines and re-exports
+`donor_block` for `app.rs`; its behaviour, including its encoder choice, is untouched.
+
+A SECOND stranded dependency turned up on the way: every glTF reader in the workspace is unreachable
+too — `mercs2_workshop::import` and `mercs2_poc/src/gltf.rs` are both in crates with **no `lib.rs`**.
+So `mercs2_formats::mesh_import` carries a deliberately narrow rigid-path reader. `gltf` is pinned
+`default-features = false, features = ["utils"]`: the default `import` feature drags in `image` and
+`base64` to decode embedded textures, which this crate never needs — a Shipment supplies its maps as
+separate files. `mercs2_formats` goes from one dependency to two, both pure Rust.
+
+★ **`add_model` builds end to end and `wad_simulator` reports `type_id 19 model consumed=2776
+issues=0`** — the base's 2,775 plus ours, consumed with no violations. Second working recipe.
+
+Three corrections that came out of it:
+- **`donor: deliverycrate` (Plan 04's example) is not a valid donor.** It has NO ASET row of any
+  type in `vz.wad` — a name in the table, not a hostable asset. The example now names
+  `oc_veh_helicopter_md500` (type_id 19), verified.
+- **The overlay must mirror the base WAD's CSUM value/meta.** The proven path does; I was passing
+  `0/None`, a gratuitous divergence from shapes known to load.
+- **`add_model` has no way to say WHICH donor group hosts the geometry.** The Workshop's UI lets an
+  author pick; the manifest has no field, so the builder defaults to group 0 and says so in the log.
+  Likely wants a `group:` field — a format change, so recorded rather than invented.
+
+Deliberately refused rather than guessed: an omitted `donor` (auto-pick is unimplemented, and a
+wrong host fails quietly), and an inline `retarget:` (that is the cross-rig path needing `char_skin`,
+not this rigid one).
+
+**Next:** `add_outfit` still cannot lower — its Lua half links across the installed set and the
+linker is unwritten. That is now the only thing between here and Plan 01 phase 5.
+
+⚠ Unrelated pre-existing breakage noticed: `mercs2_formats::save::tests` (8 of them) read a hardcoded
+`C:/Users/Shadow/Documents/...` path and fail on any non-Windows machine. They want the same
+discovery-or-skip treatment the WAD tests now have.
 
 Also still open: `patch_lua` lowers at LINK time across the installed set, and the linker is not
 written; `lint::PENDING`'s WAD-gated rules are now implementable and should land next to it.
