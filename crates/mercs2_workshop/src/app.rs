@@ -459,17 +459,26 @@ enum Workbench {
     Mods,
     /// Retarget a Source-rigged (ValveBiped / Mixamo / Unreal) import onto a Mercs2 HIER skeleton.
     Skeleton,
+    /// Where the game and the reference bundle live — the two paths the tool cannot discover for
+    /// itself on every platform. Last on the rail: configuration, not an authoring surface.
+    Settings,
 }
 
 impl Workbench {
-    const ALL: [Workbench; 4] =
-        [Workbench::Inspect, Workbench::Sandbox, Workbench::Mods, Workbench::Skeleton];
+    const ALL: [Workbench; 5] = [
+        Workbench::Inspect,
+        Workbench::Sandbox,
+        Workbench::Mods,
+        Workbench::Skeleton,
+        Workbench::Settings,
+    ];
     fn label(self) -> &'static str {
         match self {
             Workbench::Inspect => "Inspect",
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mods",
             Workbench::Skeleton => "Skeleton",
+            Workbench::Settings => "Settings",
         }
     }
     /// The command-bar breadcrumb verb.
@@ -479,6 +488,7 @@ impl Workbench {
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mod project",
             Workbench::Skeleton => "Retarget",
+            Workbench::Settings => "Settings",
         }
     }
 }
@@ -696,6 +706,12 @@ pub fn run(opts: Options) {
     // The active workbench (activity rail) + the vehicle inventory the Mods navigator lists as donor
     // templates (rebuilt when names/overlays change).
     let mut wb = Workbench::Inspect;
+    // Settings workbench: the saved document plus the outcome of the last action. `cfg_note` is the
+    // ONLY feedback the page gives, so it carries the validation result (model count / name count),
+    // never a bare "saved" — a settings page that cannot say what it just accepted is how a bad path
+    // gets remembered and fails at the next launch instead of at the click.
+    let mut cfg = crate::settings::load();
+    let mut cfg_note: Option<Result<String, String>> = None;
     // Persist the user's dragged panel widths ourselves — feeding the remembered width back as
     // `default_width` each frame keeps a drag sticky even when collapsing a card would otherwise let
     // egui re-fit the panel to its (now shorter) content.
@@ -1307,6 +1323,7 @@ pub fn run(opts: Options) {
                                     theme::RailIcon::Sandbox,
                                     theme::RailIcon::Mods,
                                     theme::RailIcon::Skeleton,
+                                    theme::RailIcon::Settings,
                                 ];
                                 for (i, w) in Workbench::ALL.iter().enumerate() {
                                     if theme::rail_item(ui, Some(i + 1), w.label(), icons[i], wb == *w) {
@@ -1458,6 +1475,16 @@ pub fn run(opts: Options) {
                                                 actions.push(Act::RetargetApply);
                                             }
                                         });
+                                    }
+                                    // The page itself is the whole surface; the command bar just says
+                                    // where the file being edited actually is.
+                                    Workbench::Settings => {
+                                        let loc = crate::settings::config_path()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "(no config directory)".into());
+                                        ui.label(
+                                            egui::RichText::new(loc).color(theme::FAINT).size(11.0),
+                                        );
                                     }
                                 }
                             });
@@ -1970,6 +1997,167 @@ pub fn run(opts: Options) {
                                             }
                                         }
                                     });
+                                }
+                            }
+                            // ── SETTINGS: the two paths the tool cannot always discover. ──
+                            // Two cards in the inspector's own vocabulary (`section` + `row_chip`),
+                            // NOT prose: each is a path chip you can read at a glance, a count in the
+                            // eyebrow badge, and two buttons. Everything explanatory — the fallback
+                            // chain, what the bundle is for, where the value actually came from —
+                            // rides in hover text, because it is what you read ONCE and the state is
+                            // what you read every time.
+                            Workbench::Settings => {
+                                ui.label(theme::disp_text("SETTINGS", 15.0, theme::TX));
+                                ui.add_space(10.0);
+
+                                // Tail of a path — the part that identifies it. The full string is
+                                // always one hover away, so the chip never has to carry 80 characters.
+                                let tail = |p: &std::path::Path| -> String {
+                                    let n: Vec<_> = p.components().rev().take(2).collect();
+                                    n.iter()
+                                        .rev()
+                                        .map(|c| c.as_os_str().to_string_lossy())
+                                        .collect::<Vec<_>>()
+                                        .join("/")
+                                };
+                                // A path row: green when the user set it, neutral when it was found
+                                // by the fallback chain. State is the fill, not a sentence.
+                                let path_chip = |ui: &mut egui::Ui, set: bool, text: &str, hover: &str| {
+                                    let (fill, bord) = if set {
+                                        (theme::GOOD_SOFT, theme::GOOD_DK)
+                                    } else {
+                                        (theme::G2, theme::LINE)
+                                    };
+                                    theme::row_chip(ui, fill, bord, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(text)
+                                                .monospace()
+                                                .size(10.5)
+                                                .color(if set { theme::TX } else { theme::DIM }),
+                                        );
+                                    })
+                                    .on_hover_text(hover);
+                                };
+
+                                // ── Game archive ──
+                                let wad_badge = format!("{} models", index.models.len());
+                                theme::section(ui, "Game archive", Some(&wad_badge), true, |ui| {
+                                    let set = cfg.wad_path.is_some();
+                                    let shown = cfg
+                                        .wad_path
+                                        .as_deref()
+                                        .map(tail)
+                                        .unwrap_or_else(|| tail(std::path::Path::new(&opts.wadpath)));
+                                    path_chip(
+                                        ui,
+                                        set,
+                                        &shown,
+                                        &format!(
+                                            "In use: {}\n\n{}",
+                                            opts.wadpath,
+                                            if set {
+                                                "Saved setting. Cleared, the app falls back to auto-detection."
+                                            } else if cfg!(windows) {
+                                                "Auto-detected from the EA Games registry key. Choose a file to pin it."
+                                            } else {
+                                                // No registry off Windows — this page is the only
+                                                // way to avoid retyping `--wad` on every launch.
+                                                "No auto-detection on this platform: without a saved path, --wad is required every launch."
+                                            }
+                                        ),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Choose…").clicked() {
+                                            if let Some(p) = crate::settings::pick_wad() {
+                                                // Validate before saving, for the same reason the
+                                                // first-run picker does: a remembered bad path fails
+                                                // at the NEXT launch, far from the click that caused it.
+                                                cfg_note = Some(match crate::settings::check_wad(&p) {
+                                                    Ok(desc) => {
+                                                        cfg.wad_path = Some(p);
+                                                        cfg.save()
+                                                            .map(|_| format!("Saved ({desc}). Restart to load it."))
+                                                            .map_err(|e| format!("Could not save: {e}"))
+                                                    }
+                                                    Err(e) => Err(format!("Not a game archive: {e}")),
+                                                });
+                                            }
+                                        }
+                                        if ui
+                                            .add_enabled(set, egui::Button::new("Clear"))
+                                            .on_hover_text("Forget the saved path and go back to auto-detection")
+                                            .clicked()
+                                        {
+                                            cfg.wad_path = None;
+                                            cfg_note = Some(
+                                                cfg.save()
+                                                    .map(|_| "Cleared — back to auto-detection.".to_string())
+                                                    .map_err(|e| format!("Could not save: {e}")),
+                                            );
+                                        }
+                                    });
+                                });
+
+                                // ── Reference data ──
+                                // The badge IS the health readout: names resolved is the one number
+                                // that says whether the bundle is doing its job.
+                                let data_badge = if names_pending {
+                                    "loading…".to_string()
+                                } else {
+                                    format!("{} names", index.names.len())
+                                };
+                                theme::section(ui, "Reference data", Some(&data_badge), true, |ui| {
+                                    let set = cfg.data_dir.is_some();
+                                    let home = crate::index::data_home();
+                                    let shown = match (cfg.data_dir.as_deref(), home.as_deref()) {
+                                        (Some(p), _) => tail(p),
+                                        (None, Some(h)) => tail(h),
+                                        (None, None) => "none — embedded names only".to_string(),
+                                    };
+                                    path_chip(
+                                        ui,
+                                        set,
+                                        &shown,
+                                        &match &home {
+                                            Some(h) => format!(
+                                                "In use: {}\n\nThe workshop_data bundle: hash to name for every asset and bone.",
+                                                h.display()
+                                            ),
+                                            None => "No bundle found — only the names compiled into the app, so most assets and bones show as bare 0x… hashes.\n\nShips with the release as mercs2-workshop-data.zip.".to_string(),
+                                        },
+                                    );
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Choose…").clicked() {
+                                            if let Some(p) = crate::settings::pick_data_dir() {
+                                                cfg_note = Some(match crate::settings::check_data_dir(&p) {
+                                                    Ok(desc) => {
+                                                        cfg.data_dir = Some(p);
+                                                        cfg.save()
+                                                            .map(|_| format!("Saved ({desc}). Restart to load it."))
+                                                            .map_err(|e| format!("Could not save: {e}"))
+                                                    }
+                                                    Err(e) => Err(e),
+                                                });
+                                            }
+                                        }
+                                        if ui.add_enabled(set, egui::Button::new("Clear")).clicked() {
+                                            cfg.data_dir = None;
+                                            cfg_note = Some(
+                                                cfg.save()
+                                                    .map(|_| "Cleared.".to_string())
+                                                    .map_err(|e| format!("Could not save: {e}")),
+                                            );
+                                        }
+                                    });
+                                });
+
+                                // Outcome of the last action — one line, only when there IS one.
+                                if let Some(note) = &cfg_note {
+                                    let (col, text) = match note {
+                                        Ok(m) => (theme::GOOD, m.as_str()),
+                                        Err(m) => (theme::BAD, m.as_str()),
+                                    };
+                                    theme::status_dot(ui, text, col);
                                 }
                             }
                           } // ── end match wb (navigator) ──

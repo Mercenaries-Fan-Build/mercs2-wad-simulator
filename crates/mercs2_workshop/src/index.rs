@@ -225,10 +225,18 @@ impl AssetIndex {
 /// is NOT a game-distributed file — the merged name pack, registry rows, spawnable templates,
 /// ECS schemas, the decompiled-Lua corpus. Built by `--pack-data`, resolved here so the app runs
 /// self-contained (no repo checkout needed). Resolution: `MERCS2_WORKSHOP_DATA` env, then
-/// `workshop_data/` next to the exe, then a `workshop_data/` walk-up from the CWD.
+/// the saved setting, then `workshop_data/` next to the exe, then a `workshop_data/` walk-up from
+/// the CWD. The env var stays FIRST so a dev can point one run at a scratch bundle without
+/// disturbing the saved configuration; the setting sits above the positional guesses because it is
+/// the only step in the chain the user actually chose.
 pub fn data_home() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MERCS2_WORKSHOP_DATA") {
         let p = PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Some(p) = crate::settings::load().data_dir {
         if p.is_dir() {
             return Some(p);
         }
@@ -386,6 +394,18 @@ pub fn write_names_pack(path: &Path, names: &HashMap<u32, String>) -> std::io::R
     out.extend_from_slice(&(blob.len() as u32).to_le_bytes());
     out.extend_from_slice(&blob);
     std::fs::write(path, out)
+}
+
+/// How many names a `names.bin` holds, from its header alone — no blob parse, so the settings page
+/// can validate a picked bundle without paying the full load. `None` if it is not a names pack.
+pub fn names_pack_count(path: &Path) -> Option<u32> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 12];
+    std::io::Read::read_exact(&mut f, &mut head).ok()?;
+    if &head[0..8] != NAMES_PACK_MAGIC {
+        return None;
+    }
+    Some(u32::from_le_bytes(head[8..12].try_into().ok()?))
 }
 
 /// Load `names.bin`; `None` on any structural mismatch (caller falls back to raw corpora).

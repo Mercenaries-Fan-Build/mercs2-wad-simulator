@@ -738,6 +738,7 @@ pub mod theme {
         Sandbox,
         Mods,
         Skeleton,
+        Settings,
         Log,
     }
 
@@ -770,6 +771,18 @@ pub mod theme {
                 p.circle_stroke(c + vec2(-4.0, -4.0), 2.2, s);
                 p.circle_stroke(c + vec2(4.0, 4.0), 2.2, s);
                 p.line_segment([c + vec2(-2.6, -2.6), c + vec2(2.6, 2.6)], s);
+            }
+            // A gear: a ring with six short radial teeth.
+            RailIcon::Settings => {
+                p.circle_stroke(c, 3.2, s);
+                for k in 0..6 {
+                    let a = std::f32::consts::TAU * k as f32 / 6.0;
+                    let (sn, cs) = a.sin_cos();
+                    p.line_segment([
+                        c + vec2(cs * 4.6, sn * 4.6),
+                        c + vec2(cs * 6.6, sn * 6.6),
+                    ], s);
+                }
             }
             RailIcon::Log => {
                 p.circle_stroke(c, 6.0, s);

@@ -43,6 +43,26 @@ jobs:
             suffix: "-windows-i686.exe"
             build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder -p mercs2_formats"
             bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static"
+          # macOS builds the FULL workspace, like the other 64-bit rows. The two C-library deps that
+          # forced the i686 rows to stay engine-free resolve to system frameworks here — gilrs uses
+          # IOKit and cpal uses CoreAudio — so there is nothing to install and no sysroot to assemble.
+          # (`winreg` is the only OS-gated dep in the workspace and is already `cfg(windows)`.)
+          #
+          # BOTH arches build on the arm64 runner: aarch64 natively, x86_64 as a cross-target the
+          # Apple toolchain links without an extra sysroot. Intel-native runners (macos-13) are being
+          # retired, so cross-compiling is the durable way to keep publishing the x86_64 asset —
+          # which the modkit asks for BY EXACT NAME (`wad_simulator-macos-x86_64`, no fallback), and
+          # which no job built until now, so every macOS modkit install failed at the fetch.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: "-macos-arm64"
+            build: "--workspace"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            suffix: "-macos-x86_64"
+            build: "--workspace"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
 
     runs-on: ${{ matrix.os }}
 
@@ -108,6 +128,31 @@ jobs:
             case " $published " in *" $n "*) ;; *) echo "  - $n";; esac
           done < built.txt
 
+      # The workshop's reference bundle (workshop_charter.md, "Reference bundle" mandate): everything
+      # the tool consults that is NOT a game-distributed file. Its centrepiece is `names.bin`, the
+      # hash -> name pack — and BONE names live only there. The binary embeds `aset_names.tsv`, which
+      # is the ASSET namespace and covers just 1,084 of the 10,199 bone hashes that actually appear in
+      # HIER; the pack covers 5,309. So without this step every released workshop drew its skeletons
+      # and exported its glTF nodes as `bone0`, `bone1`, … and name-based retarget had nothing to
+      # match on. Built ONCE (the pack is OS-independent) from the committed
+      # `data/production_names.json`, which needs neither the parent-repo rainbow table nor a game
+      # install — that self-containment is the whole reason the pack can be built on a CI runner.
+      - name: Build workshop_data reference bundle (once)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          ./target/${{ matrix.target }}/release/mercs2_workshop --pack-data workshop_data
+          # GUARDRAIL: a pack that built but resolved almost nothing is the exact silent failure this
+          # step exists to end — fail loudly rather than ship another nameless-bone release.
+          n=$(sed -n 's/.*"names": \([0-9]*\).*/\1/p' workshop_data/manifest.json)
+          echo "names.bin: ${n:-0} names"
+          if [ "${n:-0}" -lt 20000 ]; then
+            echo "::error::workshop_data/names.bin has only ${n:-0} names (expected >= 20000) — bone names would be missing"
+            exit 1
+          fi
+          zip -r dist/mercs2-workshop-data.zip workshop_data > /dev/null
+          echo "bundled:"; unzip -l dist/mercs2-workshop-data.zip | tail -5
+
       # The mesh/texture-prep Python scripts are the community's front-end to the authoring tools
       # (FBX/glTF/PNG -> the blobs model_forge/smuggler consume). They are OS-independent, so bundle
       # them ONCE — from the x86_64-linux job only — rather than 4x per platform. Shipped alongside
@@ -128,4 +173,5 @@ jobs:
           # Second glob matches only in the one job that built the scripts zip; a no-match is harmless.
           files: |
             dist/*${{ matrix.suffix }}
+            dist/mercs2-workshop-data.zip
             dist/mercs2-mesh-pipeline-scripts.zip

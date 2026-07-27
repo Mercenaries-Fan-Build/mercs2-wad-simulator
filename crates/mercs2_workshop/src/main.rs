@@ -48,6 +48,8 @@
 //!                 repo-corpora fallback).
 //! - [`luaview`] — read-only Lua source viewer (hand-rolled lexer/highlighter).
 //! - [`publish`] — background-threaded mod publishing: inject, compress, SHA-256, load self-test.
+//! - [`settings`] — persisted game-archive + reference-bundle paths: the Settings workbench, the
+//!                 first-run picker, and the resolution chain both of them feed.
 //! - [`texenc`]  — CPU BC1/BC3 encode for imported images.
 //! - [`texpng`]  — CPU BC1/BC3 decode + PNG write for the headless texture dumps.
 
@@ -59,6 +61,7 @@ mod index;
 mod luaview;
 mod publish;
 mod retarget;
+mod settings;
 mod shot;
 mod texenc;
 mod texpng;
@@ -92,22 +95,30 @@ fn main() {
         return;
     }
 
-    let wadpath = match get("--wad").or_else(wad::registry_vz_wad) {
-        Some(p) => p,
-        None => {
-            eprintln!("workshop: no vz.wad found (install not in registry) — pass --wad <path>");
-            return;
-        }
-    };
+    // The WAD stays OPTIONAL until after the `--pack-data` branch below. Every other mode needs a
+    // game install, but building the reference bundle does not: its names come from the committed
+    // `data/production_names.json`, and the WAD is consulted only by the fallback trim. Failing here
+    // made `--pack-data` unrunnable on a machine without the game — i.e. on the CI runner that is
+    // supposed to PUBLISH the bundle, which is why released workshops shipped with no bone names.
+    // Resolution order: the flag (a one-off run must never rewrite the saved config), then the
+    // saved setting, then the registry. That middle step is the whole reason this tool is usable
+    // off Windows at all — `registry_vz_wad` is `cfg(not(windows)) -> None`, so before it a macOS
+    // or Linux user had to retype `--wad <path>` on every single launch.
+    let wadpath = get("--wad")
+        .or_else(|| {
+            settings::load().wad_path.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
+        })
+        .or_else(wad::registry_vz_wad);
     let names_csv = get("--names").map(std::path::PathBuf::from).or_else(index::default_names_csv);
 
     // Overlay stack: every `--overlay <path>`, in argument order, plus (unless --no-auto-patch)
     // an auto-loaded `vz-patch.wad` next to the base — the retail exe's own patch lookup.
     let mut overlays: Vec<String> = Vec::new();
     if !args.iter().any(|a| a == "--no-auto-patch") {
-        let auto = std::path::Path::new(&wadpath).with_file_name("vz-patch.wad");
-        if auto.is_file() {
-            overlays.push(auto.to_string_lossy().into_owned());
+        if let Some(auto) = wadpath.as_ref().map(|w| std::path::Path::new(w).with_file_name("vz-patch.wad")) {
+            if auto.is_file() {
+                overlays.push(auto.to_string_lossy().into_owned());
+            }
         }
     }
     for i in 0..args.len().saturating_sub(1) {
@@ -126,10 +137,63 @@ fn main() {
             .filter(|s| !s.starts_with("--"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("workshop_data"));
-        if let Err(e) = pack_data(&out, names_csv, &wadpath, &overlays) {
+        if let Err(e) = pack_data(&out, names_csv, wadpath.as_deref(), &overlays) {
             eprintln!("--pack-data: {e}");
+            std::process::exit(1);
         }
         return;
+    }
+
+    // Every mode past this point reads the game archive. Nothing found means one of two very
+    // different situations, and treating them alike is what made the tool unopenable off Windows:
+    // a HEADLESS run has nobody to answer a dialog and must fail with a message a script can read,
+    // but the GUI launch has a user right there — so it asks once, with a native picker, and
+    // remembers the answer. Both paths are also reachable later from the Settings workbench.
+    const PASSIVE_FLAGS: [&str; 4] = ["--wad", "--names", "--overlay", "--no-auto-patch"];
+    let headless =
+        args[1..].iter().any(|a| a.starts_with("--") && !PASSIVE_FLAGS.contains(&a.as_str()));
+    let wadpath = match wadpath {
+        Some(p) => p,
+        None if headless => {
+            eprintln!("workshop: no vz.wad found (install not in registry) — pass --wad <path>");
+            return;
+        }
+        None => {
+            eprintln!("workshop: no vz.wad found — asking where the game is installed");
+            let Some(picked) = settings::pick_wad() else {
+                eprintln!("workshop: no game archive selected — pass --wad <path> to skip the prompt");
+                return;
+            };
+            // Validate BEFORE saving: a remembered path that does not open would turn a one-time
+            // mistake into a permanent one, and the next launch would fail far from the cause.
+            match settings::check_wad(&picked) {
+                Ok(desc) => {
+                    let mut s = settings::load();
+                    s.wad_path = Some(picked.clone());
+                    match s.save() {
+                        Ok(cfg) => eprintln!("[settings] game archive saved to {} ({desc})", cfg.display()),
+                        Err(e) => eprintln!("[settings] could not save ({e}) — using it for this run only"),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("workshop: {} cannot be opened as a game archive: {e}", picked.display());
+                    return;
+                }
+            }
+            picked.to_string_lossy().into_owned()
+        }
+    };
+    // The overlay scan above ran while the archive path was still unknown, so a path that came from
+    // the picker never had its sibling patch considered. Re-check against the FINAL archive, keeping
+    // the auto-patch ahead of the explicit `--overlay`s as before, and skip what is already listed.
+    if !args.iter().any(|a| a == "--no-auto-patch") {
+        let auto = std::path::Path::new(&wadpath).with_file_name("vz-patch.wad");
+        if auto.is_file() {
+            let s = auto.to_string_lossy().into_owned();
+            if !overlays.contains(&s) {
+                overlays.insert(0, s);
+            }
+        }
     }
 
     // Headless: one TSV row per model, in ONE wad open:
@@ -1815,7 +1879,9 @@ fn load_production_names() -> Option<std::collections::HashMap<u32, String>> {
 fn pack_data(
     out: &std::path::Path,
     names_csv: Option<std::path::PathBuf>,
-    wadpath: &str,
+    // `None` when no game install was found. Only the raw-corpora fallback below needs it; the
+    // committed-production-names path is fully self-contained, so a missing WAD is not fatal here.
+    wadpath: Option<&str>,
     // The patch/DLC overlays opened on top of the base — their assets must be scanned too, or the
     // trim drops every patch-only name. See `referenced_hashes`.
     overlays: &[String],
@@ -1839,11 +1905,20 @@ fn pack_data(
                 return Err("no name corpora found — run from the repo checkout".into());
             }
             let full = names.len();
-            eprintln!(
-                "[pack] scanning WAD + {} overlay(s) for referenced hashes (assets + clips + bone nodes)…",
-                overlays.len()
-            );
-            let referenced = referenced_hashes(wadpath, overlays);
+            let referenced = match wadpath {
+                Some(w) => {
+                    eprintln!(
+                        "[pack] scanning WAD + {} overlay(s) for referenced hashes (assets + clips + bone nodes)…",
+                        overlays.len()
+                    );
+                    referenced_hashes(w, overlays)
+                }
+                // No install: ship the whole pool rather than nothing. Untrimmed is bigger, never wrong.
+                None => {
+                    eprintln!("[pack] no WAD — writing UNTRIMMED names.bin");
+                    Default::default()
+                }
+            };
             if !referenced.is_empty() {
                 names.retain(|h, _| referenced.contains(h));
             }
