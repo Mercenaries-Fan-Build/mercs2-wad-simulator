@@ -114,10 +114,19 @@ pub struct WorldData {
     /// Merged placement-marker mesh (one model + one static entity), when `--placements` is set.
     placements: Option<LoadedModel>,
     /// Named world markers → world position (lowercased name → pos), harvested from the placement
-    /// records. This is the engine's `Pg.GetGuidByName`→position lookup: the base game spawns the hero
-    /// at a NAMED marker (`SetSpawnLocations`/`CreatePlayerCharacter(location=…)`, e.g. `PmcCon001_Start1`
-    /// / `Pmc_Entry1`) resolved here — NOT a hardcoded coordinate (see `vanilla_boot_load_order.md`).
+    /// records. These are entity-ized at setup so `Pg.GetGuidByName` resolves them to LIVE entities,
+    /// which is how the boot flow places the hero: the master script picks a marker NAME
+    /// (`VzaCon001_Start1` for a new game, `Pmc_Entry1` when resuming) and
+    /// `CreatePlayerCharacter` turns it into a position via `Pg.GetGuidByName` → `Object.GetPosition`.
+    /// Nothing here is a hardcoded coordinate (see `vanilla_boot_load_order.md`).
     named_locations: std::collections::HashMap<String, [f32; 3]>,
+    /// The world's transit landing pads, from the `LandingZone` COMP joined to each pad's Transform/Name
+    /// (`worldutil::landing_zone_pads`). Entity-ized at setup so `Pg.GetAllLandingZones` — which
+    /// `MrxTransit.Reset` calls on the very first save the boot writes — has real objects to return.
+    /// Independent of `--placements`: the transit system is not a debug view.
+    landing_zones: Vec<mercs2_engine::worldutil::LandingZonePad>,
+    /// Layer name → the objects it contains, so a completed `Pg.LoadLayer` can wake them.
+    layer_index: mercs2_engine::worldutil::LayerIndex,
     /// PMC-subset real-geometry models resolved by name→mesh (currently none — see report).
     pmc_models: Vec<(LoadedModel, [f32; 3], f32)>,
     /// PMC interior instances (`--interior`): resolved interior geometry + authored world Transform
@@ -475,19 +484,20 @@ pub(crate) fn load_world_data(
     };
     progress.step(if load_cells { "cells" } else { "cells (skipped)" });
 
+    // The world's name → position index, over EVERY placement-bearing block (not just `layers_static`).
+    //
+    // Deliberately NOT behind `--placements`. That flag gates a debug *marker mesh*; this is the table
+    // `Pg.GetGuidByName` resolves against — 1240 corpus call sites, and the mission scripts' only way to
+    // reach an authored entity. Gating it made name resolution a rendering option, which is why
+    // `VzaCon001` parked on `VzaCon001_StartingBoat` in every run that did not pass the flag.
+    let named_locations = mercs2_engine::worldutil::world_name_index(assets.base_mut(), &ls);
+
     // World placements (layers_static block 29): a merged marker mesh + the interior-hunt report,
     // plus an attempt to resolve the PMC-subset to real geometry (opt-in via `--placements`).
-    let (placements, pmc_models, named_locations) = if load_placements {
+    let (placements, pmc_models) = if load_placements {
         match mercs2_formats::placement::load_placements(&ls) {
             Ok(pl) => {
                 report_interior_hunt(&pl);
-                // Named markers → world position: the engine's Pg.GetGuidByName→pos lookup the base
-                // game resolves the hero spawn against (SetSpawnLocations/CreatePlayerCharacter).
-                let named: std::collections::HashMap<String, [f32; 3]> = pl
-                    .iter()
-                    .filter_map(|p| p.name.as_ref().map(|n| (n.to_ascii_lowercase(), p.pos)))
-                    .collect();
-                println!("[placements] {} named markers indexed for spawn resolution", named.len());
                 let (verts, indices, draws) = build_placement_markers(&pl);
                 println!(
                     "[placements] marker mesh: {} placements -> {} verts / {} tris",
@@ -506,15 +516,15 @@ pub(crate) fn load_world_data(
                     clips: Vec::new(),
                 };
                 let pmc = resolve_pmc_geometry(assets.base_mut(), &pl);
-                (Some(markers), pmc, named)
+                (Some(markers), pmc)
             }
             Err(e) => {
                 println!("[placements] load failed: {e}");
-                (None, Vec::new(), std::collections::HashMap::new())
+                (None, Vec::new())
             }
         }
     } else {
-        (None, Vec::new(), std::collections::HashMap::new())
+        (None, Vec::new())
     };
     progress.step(if load_placements { "placements" } else { "placements (skipped)" });
 
@@ -640,7 +650,18 @@ pub(crate) fn load_world_data(
     };
     progress.step("hero spawn");
 
-    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies })
+    // Transit landing pads (`LandingZone` COMP). Read unconditionally: `MrxTransit.Reset` runs on the
+    // boot's first save regardless of any debug flag, and `SaveSingleton` (mrxtransit.lua:367) iterates
+    // `_tLandingZones` with none of the `if not _tLandingZones` guards its siblings carry — an empty
+    // list there is a shipped-bug crash, not a degraded view.
+    let landing_zones = mercs2_engine::worldutil::landing_zone_pads(&ls);
+    println!("[world] {} transit landing pads read from LandingZone COMP", landing_zones.len());
+
+    // Which objects each streamable layer brings in — the data behind `Event.ObjectHibernation`.
+    // Layers are ordinary ASET assets (type 9), so this is a straight archive read, not a side table.
+    let layer_index = mercs2_engine::worldutil::layer_index(assets.base_mut());
+
+    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, landing_zones, layer_index, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies })
 }
 
 /// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
@@ -975,24 +996,73 @@ fn hero_character_name(hero_idx: u8) -> &'static str {
     }
 }
 
-fn boot_config_from(
-    sel: Option<&std::path::Path>,
-) -> (crate::pmc::RecruitUnlocks, crate::pmc::Stockpile, Vec<String>, String, String, String) {
+/// Fog + sun for the two boot environments, as `((color, density, start), Some((intensity, ambient)))`.
+/// Interior: no outdoor sun + a dark neutral fog (metres, not km). Exterior: key light + thin haze.
+/// Shared by `config` (opening value) and `setup` (branch-correct value) so the two cannot drift.
+fn atmosphere_for(interior: bool) -> (([f32; 3], f32, f32), Option<(f32, f32)>) {
+    if interior {
+        (([0.16, 0.17, 0.18], 0.0075, 2.0), Some((0.0, 0.30)))
+    } else {
+        (([0.55, 0.62, 0.70], 0.00016, 60.0), Some((0.9, 0.35)))
+    }
+}
+
+/// Everything a shell selection resolves into before the world loads.
+pub(crate) struct BootConfig {
+    pub recruits: crate::pmc::RecruitUnlocks,
+    pub stockpile: crate::pmc::Stockpile,
+    pub models: Vec<String>,
+    /// Human-readable one-liner for the `[shell] boot:` log.
+    pub label: String,
+    /// The save's active contract. **Display only** — it does NOT decide where the hero spawns; the
+    /// master script's boot branch does (see [`mercs2_engine::script_host::run_boot_flow`]).
+    pub contract: String,
+    /// `mattias` / `chris` / `jen` — the `Pg.Spawn` template the boot flow creates.
+    pub hero_character: String,
+    /// The save being resumed, or `None` for a **new game**. This is the value that picks the master
+    /// script's branch, and therefore the hero's start marker: `None` → `VzaCon001_Start1` (opening
+    /// contract), `Some` → `Pmc_Entry1` (HQ entrance).
+    pub save: Option<mercs2_engine::script_host::BootSaveState>,
+}
+
+/// Translate a parsed save into the boot payload the master script's `LoadSingleton` reads. The field
+/// mapping is one-to-one with `MrxMissionFlow.SaveSingleton` (`mrxmissionflow.lua:597`), which is where
+/// these same fields were serialized from.
+fn boot_save_from(state: &mercs2_formats::save::SaveState) -> mercs2_engine::script_host::BootSaveState {
+    mercs2_engine::script_host::BootSaveState {
+        flow_keys: state.completed_flow.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        culled_bindings: state.flow_chain.clone(),
+        active_missions: state.active_missions.iter().map(|m| m.id.clone()).collect(),
+        layers: state.layers.clone(),
+    }
+}
+
+fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
     // Retail new game = Mattias, upgrade tier 0, wardrobe untouched → his base/default skin
-    // (matches the user's observed fresh retail saves). New game = the opening contract PmcCon001,
-    // so the hero spawns at `PmcCon001_Start1` (the base-game first-contract start).
-    let new_game_models = || crate::hero::player_model_candidates(1, 0, 0);
-    let Some(path) = sel else {
-        return (Default::default(), Default::default(), new_game_models(), "new game".into(), "PmcCon001".into(), "mattias".into());
+    // (matches the user's observed fresh retail saves).
+    //
+    // NOTE: a new game carries NO save (`save: None`), which is the whole point — that is what makes
+    // `xQ!L.LoadSingleton` take its new-game branch and start the hero at `VzaCon001_Start1`, the
+    // opening contract, before the player owns the PMC. `contract` below is a display label for the
+    // shell; it is deliberately not consulted when placing the hero.
+    let new_game = |label: &str| BootConfig {
+        recruits: Default::default(),
+        stockpile: Default::default(),
+        models: crate::hero::player_model_candidates(1, 0, 0),
+        label: label.into(),
+        contract: "VzaCon001".into(),
+        hero_character: "mattias".into(),
+        save: None,
     };
+    let Some(path) = sel else { return new_game("new game") };
     let parsed = std::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| mercs2_formats::save::parse(&b));
     match parsed {
         Ok(prof) => {
-            let recruits = prof
-                .save_state()
-                .ok()
+            let state = prof.save_state().ok();
+            let recruits = state
+                .as_ref()
                 .map(|s| crate::pmc::RecruitUnlocks::from_starters(&s.unlocked_starters))
                 .unwrap_or_default();
             let stockpile = crate::pmc::Stockpile { cash: prof.cash as i64, ..Default::default() };
@@ -1009,11 +1079,23 @@ fn boot_config_from(
                 crate::hero::hero(hero_idx).display,
                 crate::hero::look_label(hero_idx, prof.upgrade_index, 0),
             );
-            (recruits, stockpile, models, label, prof.active_contract().to_string(), hero_character_name(hero_idx).to_string())
+            // A save whose Lua payload wouldn't decode still RESUMES — it is not a new game. Handing the
+            // master script an empty-but-present table keeps it on the resume branch (Pmc_Entry1) rather
+            // than silently replaying the intro.
+            let save = Some(state.as_ref().map(boot_save_from).unwrap_or_default());
+            BootConfig {
+                recruits,
+                stockpile,
+                models,
+                label,
+                contract: prof.active_contract().to_string(),
+                hero_character: hero_character_name(hero_idx).to_string(),
+                save,
+            }
         }
         Err(e) => {
             println!("[shell] save {} unreadable ({e}) — booting new game", path.display());
-            (Default::default(), Default::default(), new_game_models(), "new game (save unreadable)".into(), "PmcCon001".into(), "mattias".into())
+            new_game("new game (save unreadable)")
         }
     }
 }
@@ -1182,7 +1264,6 @@ pub struct Mercs2Game {
     recruits: crate::pmc::RecruitUnlocks,
     stockpile: crate::pmc::Stockpile,
     player_models: Vec<String>,
-    active_contract: String,
     hero_character: String,
     test_world: bool,
     menu_gp_prev: [bool; 4],
@@ -1269,7 +1350,6 @@ impl Mercs2Game {
             recruits,
             stockpile,
             player_models,
-            active_contract: String::from("PmcCon001"),
             hero_character: String::from("mattias"),
             test_world: false,
             menu_gp_prev: [false; 4],
@@ -1301,14 +1381,22 @@ impl Mercs2Game {
     }
 
     /// Resolve a picked save into the boot configuration and store it for `spawn_loader`.
-    fn apply_boot(&mut self, sel: Option<std::path::PathBuf>) {
-        let (r, sp, models, label, contract, character) = boot_config_from(sel.as_deref());
-        self.recruits = r;
-        self.stockpile = sp;
-        self.player_models = models;
-        self.active_contract = contract;
-        self.hero_character = character;
-        println!("[shell] boot: {label}");
+    ///
+    /// `sel = None` is **New Game**: no save reaches the script host, so the master script takes its
+    /// new-game branch and the hero starts at the opening contract instead of inside the PMC HQ.
+    pub(crate) fn apply_boot(&mut self, sel: Option<std::path::PathBuf>) {
+        let cfg = boot_config_from(sel.as_deref());
+        // The PMC interior is the HQ the player only occupies once they own it. Retail ties it to the
+        // resume branch (`_bPmcRequired = true`, `xQ!L.lua:663`), so a new game does not load it.
+        self.spawn_interior = cfg.save.is_some();
+        self.recruits = cfg.recruits;
+        self.stockpile = cfg.stockpile;
+        self.player_models = cfg.models;
+        self.hero_character = cfg.hero_character;
+        // Hand the save (or nothing) to the script host BEFORE the boot flow runs — `run_boot_flow`
+        // answers `Pg.LoadGame` from it, and that answer picks the branch.
+        self.script_host.borrow_mut().set_boot_save_state(cfg.save);
+        println!("[shell] boot: {} [contract {}]", cfg.label, cfg.contract);
     }
 }
 
@@ -1316,12 +1404,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
     type LoadData = WorldData;
 
     fn config(&self) -> mercs2_engine::app::GameConfig {
-        // Interior: no outdoor sun + a dark neutral fog (metres, not km). Exterior: key light + thin haze.
-        let (fog, sun) = if self.spawn_interior {
-            (([0.16, 0.17, 0.18], 0.0075, 2.0), Some((0.0, 0.30)))
-        } else {
-            (([0.55, 0.62, 0.70], 0.00016, 60.0), Some((0.9, 0.35)))
-        };
+        // NOTE: the engine reads this ONCE, before the menu runs (`app::run`), so on a menu boot the
+        // interior/exterior branch is not decided yet — `apply_boot` only learns it when a save is
+        // picked. `setup` re-applies the branch-correct pair via `Scene::set_fog`/`set_sun`; what is
+        // chosen here is just the opening value.
+        let (fog, sun) = atmosphere_for(self.spawn_interior);
         let bindings = mercs2_engine::input::find_mercs2_ini()
             .map(|p| mercs2_engine::input::Bindings::load(&p))
             .unwrap_or_default();
@@ -1450,47 +1537,58 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // `Pg.GetGuidByName` and every spawn below land in the World that actually renders.
         self.script_host.borrow_mut().attach_world(ctx.world.clone(), self.guids.clone());
         let scene = &mut *ctx.scene;
-        // ---- Hero spawn (data-driven): interior derivation OR a named contract/HQ marker. ----
+        // Re-apply the atmosphere now that the boot branch IS known (see `config`): a new game starts
+        // outdoors at the opening contract and must not inherit the interior's sunless dark fog.
+        let (fog, sun) = atmosphere_for(self.spawn_interior);
+        scene.set_fog(fog.0, fog.1, fog.2);
+        if let Some((intensity, ambient)) = sun {
+            scene.set_sun(intensity, ambient);
+        }
+        // ---- Provisional hero spawn ----
+        // The AUTHORITATIVE spawn comes from the boot Lua flow below (the master script picks the start
+        // marker; `CreatePlayerCharacter` resolves it through `Pg.GetGuidByName` against the live world).
+        // This is only the fallback for a boot where the script host is absent or the flow never reached
+        // `Pg.Spawn` — without it the player would sit at the origin. It is NOT the game's answer, so it
+        // is deliberately overwritten, not consulted, once the flow has run.
         if let Some(sp) = data.interior_spawn {
             self.player.pos = Vec3::new(sp[0], sp[1] + 2.0, sp[2]);
-            println!("[world] hero spawn: HQ interior (actor + hardpoint) -> ({:.1}, {:.1}, {:.1})", self.player.pos.x, self.player.pos.y, self.player.pos.z);
-        } else {
-            let contract_marker = format!("{}_start1", self.active_contract.to_ascii_lowercase());
-            let candidates = [contract_marker.as_str(), "pmc_entry1", "pmc_start1"];
-            let resolved = candidates
-                .iter()
-                .filter(|&&n| !n.is_empty() && n != "_start1")
-                .find_map(|&n| data.named_locations.get(n).map(|&p| (n, p)));
-            match resolved {
-                Some((name, p)) => {
-                    self.player.pos = Vec3::new(p[0], p[1], p[2]);
-                    println!("[world] hero spawn: marker '{name}' -> ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
-                }
-                None => {
-                    println!("[world] SPAWN MARKER unresolved ({} named markers total; none of {candidates:?})", data.named_locations.len());
-                }
-            }
+            println!("[world] provisional spawn: HQ interior (actor + hardpoint) -> ({:.1}, {:.1}, {:.1})", self.player.pos.x, self.player.pos.y, self.player.pos.z);
         }
 
         // Entity-ize the named world markers into the live World + guidmap (so `Pg.GetGuidByName`
         // resolves real entities), BEFORE the boot Lua flow's CreatePlayerCharacter → GetGuidByName.
-        {
-            let mut w = ctx.world.borrow_mut();
-            let host = self.script_host.borrow();
-            for (name, pos) in &data.named_locations {
-                let e = w.spawn((Transform::from_translation(Vec3::from(*pos)),));
-                host.register_named_entity(e, mercs2_formats::hash::pandemic_hash_m2(name));
-            }
-            println!("[world] {} named markers registered as live entities (guidmap)", data.named_locations.len());
-        }
+        mercs2_engine::script_host::register_named_markers(
+            &self.script_host,
+            &ctx.world,
+            &data.named_locations,
+        );
+        // The layer → objects index, AFTER the markers: it wakes objects by name through the guidmap,
+        // so the entities those names resolve to have to exist first.
+        self.script_host.borrow_mut().set_layer_index(data.layer_index.clone());
+        // The transit landing pads, AFTER the named markers so a pad that carries a `Name` reuses that
+        // one entity instead of creating a second at the same spot.
+        mercs2_engine::script_host::register_landing_zones(
+            &self.script_host,
+            &ctx.world,
+            &data.landing_zones,
+        );
         if let Some(sh) = &self.script {
             self.script_host.borrow_mut().set_boot_context(self.hero_character.clone());
-            mercs2_engine::script_host::run_boot_flow(sh, &self.script_host, &self.active_contract, &self.hero_character);
-            if data.interior_spawn.is_none() {
-                if let Some(p) = self.script_host.borrow_mut().take_hero_spawn() {
+            mercs2_engine::script_host::run_boot_flow(sh, &self.script_host, &self.hero_character);
+            // The game's own answer, unconditionally. `Pg.Spawn(hero, x,y,z)` at the end of
+            // `CreatePlayerCharacter` is where retail places the hero, so whatever it produced wins over
+            // the provisional guess above — including on the interior boot, where the flow resolves
+            // `Pmc_Entry1` against the live marker entity rather than a derived hardpoint.
+            match self.script_host.borrow_mut().take_hero_spawn() {
+                Some(p) => {
                     self.player.pos = Vec3::new(p[0], p[1], p[2]);
                     println!("[world] hero spawn via boot Lua flow: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
                 }
+                None => println!(
+                    "[world] boot Lua flow produced no hero spawn — keeping the provisional position \
+                     ({:.1}, {:.1}, {:.1}). The flow's CreatePlayerCharacter never reached Pg.Spawn.",
+                    self.player.pos.x, self.player.pos.y, self.player.pos.z
+                ),
             }
         }
 
@@ -1811,15 +1909,24 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 let right_flat = fwd_flat.cross(Vec3::Y).normalize();
                 let (mx, my) = inp.move_vec();
                 let mv = fwd_flat * my + right_flat * mx;
+                // The controller reads the world through `LocomotionQuery` rather than taking the soup,
+                // heightmap and watermap as separate parameters — it lives in `mercs2_player` now, and a
+                // leaf crate cannot name `mercs2_water` or the engine's heightmap. `SceneLocomotion`
+                // borrows all three, so building one per frame is free.
+                let q = mercs2_engine::locomotion::SceneLocomotion {
+                    tris: &self.collision_tris,
+                    hmap: self.hmap.as_ref(),
+                    water: self.watermap.as_ref(),
+                    interior: self.spawn_interior,
+                };
                 self.player.update(
                     &mut ctx.world.borrow_mut(),
-                    mv,
-                    inp.held(Action::Sprint),
-                    inp.held(Action::Jump),
-                    &self.collision_tris,
-                    self.hmap.as_ref(),
-                    self.watermap.as_ref(),
-                    self.spawn_interior,
+                    mercs2_engine::player::LocomotionInput {
+                        move_dir: mv,
+                        sprint: inp.held(Action::Sprint),
+                        jump: inp.held(Action::Jump),
+                    },
+                    &q,
                     dt,
                 );
                 // Player weapon fire — STAND-IN (raycast + invented range/interval; the real path is the
@@ -1869,12 +1976,18 @@ impl mercs2_engine::app::Game for Mercs2Game {
     fn fixed_update(&mut self, ctx: &mut mercs2_engine::app::Ctx) {
         // Animation (idle/walk/run/swim + crossfade) at the fixed tick.
         animate_world(&mut ctx.world.borrow_mut(), ctx.time, &self.store.borrow());
-        // Fleet gameplay (vehicle/combat/physics/audio) + population, same fixed cadence.
-        self.runtime.tick(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt);
+        // Fleet gameplay (player roster → vehicle/combat/physics/audio) + population, same fixed cadence.
+        // The player concern is owned by the script host — Lua is its primary driver — so the tick
+        // borrows it rather than holding its own copy. Scoped so the host borrow ends before the
+        // mission-Lua pump below takes its own.
+        {
+            let mut host = self.script_host.borrow_mut();
+            self.runtime.tick(&mut ctx.world.borrow_mut(), host.player_mut(), ctx.time.fixed_dt);
+        }
         self.runtime.tick_population(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt, self.player.pos);
         // Persistent mission-Lua: advance the event/timer system, then realize its runtime Pg.Spawns.
         if let Some(sh) = &self.script {
-            mercs2_engine::script_host::pump_resident(sh, ctx.time.fixed_dt);
+            mercs2_engine::script_host::pump_resident(sh, &self.script_host, ctx.time.fixed_dt);
             let new_spawns = self.script_host.borrow_mut().take_new_spawns();
             if !new_spawns.is_empty() {
                 let realized = self.runtime.realize_spawns(&mut ctx.world.borrow_mut(), &new_spawns);

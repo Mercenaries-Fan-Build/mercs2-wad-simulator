@@ -45,10 +45,31 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use mlua::{Lua, Result as LuaResult, Table};
+use mlua::{Lua, Result as LuaResult, Table, Value};
 
 pub mod bindings;
+/// The embedded Lua VM crate, re-exported so hosts can build Lua values natively (tables, callbacks)
+/// against the SAME `mlua` version this crate links — mixing versions would be a type error, and
+/// serializing to Lua source instead would mean splicing untrusted strings (save/mission names) into a
+/// chunk. See `mercs2_engine::script_host::install_boot_save_state` for the motivating consumer.
+pub use mlua;
 pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
+/// The canonical `ObjectHibernation` phases + the folding function, re-exported because the ENGINE is
+/// the producer: it must fire the same canonical spelling the registrations were folded onto, and the
+/// `bindings` submodules are otherwise private. See `bindings::event::canon_phase` for why the corpus's
+/// five spellings collapse to two.
+pub use bindings::event::{canon_phase, PHASE_ASLEEP, PHASE_AWAKE};
+
+/// The Lua-boundary handle type. Engine GUIDs cross into Lua as **lightuserdata**, the way retail
+/// pushes them (`FUN_0059FF50` accepts only tags 2/7; `GetAnyCharacter` writes tag 2 — see
+/// [`guid`] for the full provenance), because ~114 shipped-script sites `type()`-check them.
+pub mod guid;
+pub use guid::Guid;
+
+/// Locating the decompiled game-script corpus (see `corpus.rs`) — the behavioural spec the replay
+/// suites and `examples/mission_lab.rs` run against. It lives outside this repo by design, so
+/// [`corpus::root`] returns `Option` and callers degrade with [`corpus::skip_notice`].
+pub mod corpus;
 
 /// The engine services the script bindings call. The engine (`mercs2_engine`) implements this; the
 /// script host only ever talks to the engine through it. Every method here corresponds to an original
@@ -67,6 +88,24 @@ pub trait EngineHost {
     /// `Pg.GetGuidByName` — resolve a placed-object name to its runtime GUID (0 = not found; the
     /// binding maps 0 → Lua `nil` so the game's `if not uGuid` control flow is authentic).
     fn guid_by_name(&mut self, name: &str) -> u64;
+    /// `Pg.GetAllLandingZones(nSlot)` — the transit landing pads serving **co-op player slot** `nSlot`,
+    /// as `(landing-zone number, pad guid)` pairs in ascending zone order.
+    ///
+    /// Empty when the host has no world loaded — a world with no pads honestly has none.
+    ///
+    /// ⚠ Two shapes here are easy to get wrong and both are pinned by the corpus:
+    /// * `nSlot` is the **player slot**, not a category. `MrxTransit.Reset` calls this with `1` and `2`
+    ///   and zips the results into `{uLocation1, uLocation2}`, whose only consumer is
+    ///   `MrxUtil.TeleportHeroesToLocations` — hero N lands on pad N
+    ///   (`corpus/mercs2-luacd/src/resident/mrxtransit.lua:328-342,89`).
+    /// * The Lua table is keyed by the **absolute zone number**, which is *sparse* — retail vz ships
+    ///   1..8, 12, 15..18, 20..25, 27..30 — not by dense position. `Reset` writes
+    ///   `_tLandingZones[nIndex]` straight from the iteration key, and missions address zones by
+    ///   absolute number (`MrxTransit.SetLocationIsNuked(30, …)`, `vz/wifmissionflow.lua:1245`).
+    fn landing_zones(&self, slot: u32) -> Vec<(u32, u64)> {
+        let _ = slot;
+        Vec::new()
+    }
     /// `Pg.Spawn(template, x,y,z,yaw, bLink, bHighDetail)` — instantiate a template actor. This is the
     /// bottom-out of `MrxUtil.SpawnActor`, and where a template NAME (e.g. `HqInterior`) is resolved
     /// into geometry. Returns the new actor's GUID (0 on failure → Lua `nil`).
@@ -94,58 +133,27 @@ pub trait EngineHost {
     /// binding wired in a later phase; the seam is final.)
     fn add_layers(&mut self, layers: &[String]);
 
-    // ===== Player: economy (money/fuel — signed i32 on the profile/economy singleton `[0x1176054]`,
-    // see the money-fuel-datatype notes; `i64` here so the Lua number round-trips exactly). =====
-    /// `Player.GetCash`.
-    fn player_cash(&self) -> i64 {
-        0
+    // ===== The player concern (`Player.*` — 107 cfuncs) → `mercs2_player`. =====
+    //
+    // Two accessors replace the 43 bespoke `player_*` methods this trait used to declare. Same shape as
+    // `hud()`/`hud_ref()` above: the leaf crate owns the state and the binding bodies call it directly,
+    // so widening the `Player` surface never widens this trait again.
+    //
+    // Silo 17 rewrote all 107 bodies against `player_code_map.md`. The old methods encoded several
+    // things the map contradicts — a native 1e9 cash clamp (it is a Lua soft-clamp scoped to
+    // `MrxPmc.AddCashQty`), `GetAnyCharacter` as a lookup (it pushes a constant sentinel), and
+    // `player_max_players`/`player_current_players` conflating four independent retail numbers.
+    /// The player roster + the profile/economy singleton, if this host owns one.
+    ///
+    /// The real game host does; smoke and example hosts return `None`, and the `Player.*` surface then
+    /// degrades to nil/neutral — which is also what retail does for an unresolved handle
+    /// (`FUN_004B2A50` is `push nil; return 1`, and shipped scripts rely on `if Player.X(u) then`).
+    fn player_world(&mut self) -> Option<&mut mercs2_player::PlayerWorld> {
+        None
     }
-    /// `Player.SetCash`.
-    fn player_set_cash(&mut self, cash: i64) {
-        let _ = cash;
-    }
-    /// `Player.GetFuel`.
-    fn player_fuel(&self) -> i64 {
-        0
-    }
-    /// `Player.SetFuel`.
-    fn player_set_fuel(&mut self, fuel: i64) {
-        let _ = fuel;
-    }
-    /// `Player.GetFuelCapacity`.
-    fn player_fuel_capacity(&self) -> i64 {
-        0
-    }
-    /// `Player.SetFuelCapacity`.
-    fn player_set_fuel_capacity(&mut self, cap: i64) {
-        let _ = cap;
-    }
-
-    // ===== Player / character GUID getters (0 = none → the binding maps it to Lua `nil`). =====
-    /// `Player.GetLocalPlayer` — the local player object's GUID.
-    fn player_local_player(&self) -> u64 {
-        0
-    }
-    /// `Player.GetAnyCharacter` — any player-controlled character (the most-called `Player` cfunc).
-    fn player_any_character(&self) -> u64 {
-        0
-    }
-    /// `Player.GetLocalCharacter`.
-    fn player_local_character(&self) -> u64 {
-        0
-    }
-    /// `Player.GetPrimaryCharacter`.
-    fn player_primary_character(&self) -> u64 {
-        0
-    }
-    /// `Player.GetSecondaryCharacter` (0 = no second player).
-    fn player_secondary_character(&self) -> u64 {
-        0
-    }
-    /// `Player.IsLocal`.
-    fn player_is_local(&self, guid: u64) -> bool {
-        let _ = guid;
-        true
+    /// Read-only view, for the `Get*` / `Is*` queries.
+    fn player_world_ref(&self) -> Option<&mercs2_player::PlayerWorld> {
+        None
     }
 
     // ===== Object: health / life / labels (the highest-traffic `Object` cfuncs). =====
@@ -325,37 +333,74 @@ pub trait EngineHost {
         let _ = shot;
     }
 
-    // ===== Inventory: per-character weapon loadout (`Inventory.*`). =====
-    /// `SetAllWeapons(character, weapons)` — replace the character's weapon loadout.
-    fn inventory_set_weapons(&mut self, character: u64, weapons: Vec<u64>) {
+    // ===== `Human.Inventory.*` — the per-character weapon loadout. =====
+    //
+    // Backed by `mercs2_combat::inventory` (the `RuntimeInventory` record). The **return shapes** here
+    // are load-bearing and were wrong before: `inventory_equipment_code_map.md` §10 item 5 records that
+    // retail's `SetAllWeapons`, `EquipWeapon` and `DropWeapon` all push a **boolean**, `ReloadAll` pushes
+    // `true` (or nil when its second argument is absent), and `DestroyAllWeapons` pushes **nothing**.
+    // Shipped scripts branch on those.
+    //
+    // The trait stays **scalar-only**: `mercs2_script` depends on `mlua`/`mercs2_ui`/`mercs2_core`/
+    // `mercs2_player` and must never name a `mercs2_combat` type. The engine impl does the ECS work.
+
+    /// `SetAllWeapons(uChar, …)` — destroy the current loadout, then apply at most 2 primaries + 2
+    /// secondaries. Returns whether the apply succeeded (a locked human rejects it one call deeper).
+    fn inventory_set_weapons(&mut self, character: u64, weapons: Vec<u64>) -> bool {
         let _ = (character, weapons);
+        false
     }
-    /// `GetAllWeapons(character)` — the character's weapon GUIDs.
-    fn inventory_weapons(&self, character: u64) -> Vec<u64> {
-        let _ = character;
+    /// `GetAllWeapons(uChar [, bExcludeFlagged])` — **one** array: primaries (equipped first), then
+    /// secondaries.
+    ///
+    /// ⚠ One table, not two. §4.4 reads the epilogue as `lua_createtable` + N × `rawseti` then
+    /// `return 1`; §7.3 shows the Lua side taking it as a single value. Ordering is still load-bearing
+    /// — `mrxplayer.lua:666,702` pairs the results of the **two calls** positionally.
+    ///
+    /// `exclude_flagged` filters the per-edge **exclude** bit `0x02`, not the equipped bit `0x01`.
+    fn inventory_weapons(&self, character: u64, exclude_flagged: bool) -> Vec<u64> {
+        let _ = (character, exclude_flagged);
         Vec::new()
     }
-    /// `GetPrimaryWeapon(character)` — slot 0 (0 = none → nil).
+    /// `GetPrimaryWeapon(uChar)` — the equipped primary, falling back to the other primary slot.
+    /// `0` = none → nil.
     fn inventory_primary(&self, character: u64) -> u64 {
         let _ = character;
         0
     }
-    /// `GetSecondaryWeapon(character)` — slot 1 (0 = none → nil).
+    /// `GetSecondaryWeapon(uChar)` — the equipped secondary, falling back to the previous one.
     fn inventory_secondary(&self, character: u64) -> u64 {
         let _ = character;
         0
     }
-    /// `EquipWeapon(character, weapon)` — add the weapon to the loadout (if absent).
-    fn inventory_equip(&mut self, character: u64, weapon: u64) {
-        let _ = (character, weapon);
+    /// `GetVehicleWeapon(uChar)` — the mounted weapon slot. **No fallback**; retail also returns nil
+    /// when it is 0, and the binding has zero shipped call sites.
+    fn inventory_vehicle_weapon(&self, character: u64) -> u64 {
+        let _ = character;
+        0
     }
-    /// `DropWeapon(character, weapon)` — remove the weapon from the loadout.
-    fn inventory_drop(&mut self, character: u64, weapon: u64) {
+    /// `EquipWeapon(uChar, uWeapon)` — equip a carried weapon into the slot its own `Equipment` class
+    /// selects. Returns a boolean.
+    fn inventory_equip(&mut self, character: u64, weapon: u64) -> bool {
         let _ = (character, weapon);
+        false
     }
-    /// `DestroyAllWeapons(character)` — clear the loadout.
+    /// `DropWeapon(uChar, uWeapon)` — detach, promoting the fallback into the vacated slot. Returns a
+    /// boolean.
+    fn inventory_drop(&mut self, character: u64, weapon: u64) -> bool {
+        let _ = (character, weapon);
+        false
+    }
+    /// `DestroyAllWeapons(uChar)` — queue every carried weapon for **deferred** destruction. Pushes
+    /// nothing.
     fn inventory_destroy_all(&mut self, character: u64) {
         let _ = character;
+    }
+    /// `ReloadAll(uChar, bSomething)` — `None` is retail's bail when argument 2 is absent, which the
+    /// binding pushes as nil.
+    fn inventory_reload_all(&mut self, character: u64, arg2: Option<bool>) -> Option<bool> {
+        let _ = (character, arg2);
+        None
     }
 
     // ===== Weapon ammo (`Weapon.*`) — per-weapon clip/reserve state. =====
@@ -565,6 +610,14 @@ pub trait EngineHost {
     /// `Vehicle.Exit(rider)` → success.
     fn vehicle_exit(&mut self, rider: u64) -> bool {
         let _ = rider;
+        false
+    }
+    /// `Object.InSeat(guid)` — is this character occupying a vehicle seat.
+    ///
+    /// Retail reads the character's own `RiderLink+0x50` (`0x005CD9F0`), so the occupancy edge belongs
+    /// to the rider; implementations should key on the rider for the same reason.
+    fn object_in_seat(&self, guid: u64) -> bool {
+        let _ = guid;
         false
     }
     /// `Vehicle.Usable`.
@@ -804,124 +857,27 @@ pub trait EngineHost {
         let _ = (faction, toward, relation);
     }
 
-    // ===== Player: identity / session / binding / profile (the depth surface `Player.*` reads). =====
-    // The host tracks the player↔character binding + the profile hero fields; getters the game reads
-    // return real host state, pure session actions the single-player host ignores are faithful no-ops.
-    /// `Player.GetPlayer(id)` — the player object for a slot id (0 = local).
-    fn player_get_player(&self, id: i64) -> u64 {
-        let _ = id;
-        self.player_local_player()
-    }
-    /// `Player.GetCharacter(player)` — the character a player currently controls.
-    fn player_character_of(&self, player: u64) -> u64 {
-        let _ = player;
-        0
-    }
-    /// `Player.GetControlledObject(player)` — the object (character or vehicle) a player drives.
-    fn player_controlled_object(&self, player: u64) -> u64 {
-        self.player_character_of(player)
-    }
-    /// `Player.GetPrimaryPlayer`.
-    fn player_primary_player(&self) -> u64 {
-        self.player_local_player()
-    }
-    /// `Player.GetSecondaryPlayer` (0 = no second player → nil).
-    fn player_secondary_player(&self) -> u64 {
-        0
-    }
-    /// `Player.GetPlayerId(player)` / `GetLocalPlayerId` / `GetLocalId`.
-    fn player_id_of(&self, player: u64) -> i64 {
-        let _ = player;
-        0
-    }
-    /// `Player.GetName(player)`.
-    fn player_name(&self, player: u64) -> String {
-        let _ = player;
-        String::new()
-    }
-    /// `Player.GetAllPlayers`.
-    fn player_all_players(&self) -> Vec<u64> {
-        let p = self.player_local_player();
-        if p == 0 { Vec::new() } else { vec![p] }
-    }
-    /// `Player.GetAllCharacters`.
-    fn player_all_characters(&self) -> Vec<u64> {
-        let c = self.player_any_character();
-        if c == 0 { Vec::new() } else { vec![c] }
-    }
-    /// `Player.GetMaximumPlayers` / `GetMaximumLocalPlayers` (2-player co-op).
-    fn player_max_players(&self) -> i64 {
-        2
-    }
-    /// `Player.GetCurrentPlayers` / `GetCurrentLocalPlayers`.
-    fn player_current_players(&self) -> i64 {
-        1
-    }
-    /// `Player.IsCoopMultiplayer`.
-    fn player_is_coop(&self) -> bool {
-        false
-    }
-    /// `Player.IsJoined(player)`.
-    fn player_is_joined(&self, player: u64) -> bool {
-        player != 0
-    }
-    /// `Player.GetSelectedCharacter` — the selected hero template name (`chris`/`mattias`/`jen`).
+    // ===== Player identity / session / binding / profile: see `player_world()` above. =====
+    // The 30 bespoke methods that used to sit here are gone. Two of them additionally have to be
+    // *unlearned* rather than merely moved, because the map shows their defaults were wrong in kind,
+    // not just in value:
+    //   * `player_max_players` / `player_current_players` collapsed four independent retail numbers
+    //     into two. `GetMaximumPlayers` reports a global nothing enforces, `GetMaximumLocalPlayers` and
+    //     `GetCurrentLocalPlayers` are two *different* .rdata float constants (2.0 and a hardcoded
+    //     1.0), and the real roster cap is three compile-time immediates. See
+    //     `mercs2_player::roster`'s module docs.
+    //   * `player_selected_character` returned a hero *template name* while `GetProfileCharacter`
+    //     returns the profile byte at `+0x61`. They are different things; the name selection stays on
+    //     the game host as `hero_character`, and the profile byte lives on
+    //     `mercs2_player::PlayerProfile`.
+
+    /// `Player.GetSelectedCharacter` — the selected hero *template* name (`chris`/`mattias`/`jen`).
+    ///
+    /// Retained on this trait rather than moved into `mercs2_player`, because it is the game's hero
+    /// *selection*, not a field of the retail player or profile record — and note it is **not one of
+    /// the 107**: it is an extra the binding installs, which `NsCoverage::real_count` filters out.
     fn player_selected_character(&self) -> String {
         String::new()
-    }
-    /// `Player.GetProfileCharacter` — the save's hero character (header @0x4D).
-    fn player_profile_character(&self) -> String {
-        self.player_selected_character()
-    }
-    /// `Player.GetProfileUpgrade` — the save's upgrade tier (header @0x4F).
-    fn player_profile_upgrade(&self) -> i64 {
-        0
-    }
-    /// `Player.GetProfileCostume` — the save's wardrobe costume (0 in all shipped saves).
-    fn player_profile_costume(&self) -> i64 {
-        0
-    }
-    /// `Player.GetAvailableCostumes`.
-    fn player_available_costumes(&self) -> Vec<i64> {
-        Vec::new()
-    }
-    /// `Player.AttachToCharacter(player, character)` — bind a player to a character.
-    fn player_attach_to_character(&mut self, player: u64, character: u64) {
-        let _ = (player, character);
-    }
-    /// `Player.DetachFromCharacter(player)`.
-    fn player_detach_from_character(&mut self, player: u64) {
-        let _ = player;
-    }
-    /// `Player.BindToLocal(player)`.
-    fn player_bind_local(&mut self, player: u64) {
-        let _ = player;
-    }
-    /// `Player.BindToRemote(player)`.
-    fn player_bind_remote(&mut self, player: u64) {
-        let _ = player;
-    }
-    /// `Player.Unbind(player)`.
-    fn player_unbind(&mut self, player: u64) {
-        let _ = player;
-    }
-    /// `Player.CreatePlayer` — mint a new player object (0 = failed → nil).
-    fn player_create(&mut self) -> u64 {
-        0
-    }
-    /// `Player.DestroyPlayer(player)`.
-    fn player_destroy(&mut self, player: u64) {
-        let _ = player;
-    }
-    /// `Player.ClearPlayerDB`.
-    fn player_clear_db(&mut self) {}
-    /// `Player.SetOutfit(character, outfit)` — the `_tOutfits`→wardrobe override.
-    fn player_set_outfit(&mut self, character: u64, outfit: i64) {
-        let _ = (character, outfit);
-    }
-    /// `Player.SetProfileCostume(costume)`.
-    fn player_set_profile_costume(&mut self, costume: i64) {
-        let _ = costume;
     }
 
     // ===== Object: the depth surface (identity / transform / physics / hibernation state). =====
@@ -947,10 +903,16 @@ pub trait EngineHost {
     fn object_is_valid(&self, guid: u64) -> bool {
         guid != 0
     }
-    /// `Object.IsPlayerControlled(guid)`.
-    fn object_is_player_controlled(&self, guid: u64) -> bool {
+    /// `Object.IsPlayerControlled(guid)` — **returns the controlling player's GUID**, `0` for none.
+    ///
+    /// ⚠ Despite the `Is` prefix this is not a predicate. Retail `FUN_005CDFF0` tests the queried guid
+    /// against `player+0x24` and pushes the player, and the shipped Lua consumes it as a handle:
+    /// `local uPlayer = Object.IsPlayerControlled(uDriver)` (`mrxhijack.lua:504`, `:316`, `:343`;
+    /// `mrxvehicle.lua:565`) feeding straight into `Player.SetInputEnabled(uPlayer, …)`. Typed as
+    /// `bool`, those 74 call sites become `SetInputEnabled(true, …)`.
+    fn object_is_player_controlled(&self, guid: u64) -> u64 {
         let _ = guid;
-        false
+        0
     }
     /// `Object.GetInvincible(guid)`.
     fn object_get_invincible(&self, guid: u64) -> bool {
@@ -1221,21 +1183,13 @@ pub trait EngineHost {
         0
     }
 
-    // ===== Player mode flags (`Player.Set*` — engine-read gameplay gates). =====
-    /// Set a named player-mode boolean flag (`Player.SetInputEnabled`/`SetCinematicMode`/… → the engine
-    /// reads these to gate control, HUD, grapple, scope, vehicle locks, disguise, PDA/satellite modes).
-    fn player_set_mode(&mut self, key: &str, on: bool) {
-        let _ = (key, on);
-    }
-    /// Read a named player-mode flag (with the caller's default if unset).
-    fn player_mode(&self, key: &str, default: bool) -> bool {
-        let _ = key;
-        default
-    }
-    /// Set a named player-mode scalar (`SetHealthClamp`/`SetSwimmingSearchRadius`/`SetAimMode`).
-    fn player_set_mode_scalar(&mut self, key: &str, value: f32) {
-        let _ = (key, value);
-    }
+    // The stringly-keyed player-mode store that used to live here (`player_set_mode` / `player_mode` /
+    // `player_set_mode_scalar`) is gone. It was written by 17 cfuncs and read by nothing but its own
+    // tests, and its untyped shape hid a real defect: every one of the 14 boolean gates was declared
+    // `|_, on: Option<bool>|`, so it read ARGUMENT 1 — the player handle — as its flag, and mlua's
+    // Lua-truthiness conversion (`_ => true`) meant `SetCinematicMode(uPlayer, false)` set the gate to
+    // `true`. The gates are now typed fields on `mercs2_player::PlayerObject`, reached via
+    // `player_world()`.
 
     // ===== Seat occupancy (`Vehicle.EnterBySeatGuid`/`TransferToSeat`, `Human.ForceExitSeatNoSnap`). =====
     /// Seat a human in `seat` (a seat GUID), moving it out of any previous seat.
@@ -1285,6 +1239,41 @@ pub trait EngineHost {
 /// no `Send` is required (and `mlua`'s default build does not demand it).
 pub type SharedHost = Rc<RefCell<dyn EngineHost>>;
 
+/// The engine's **own** Lua bootstrap glue, recovered verbatim from the binary's string pool
+/// (`docs/mercs2-pdb-analysis/lua-scripting.md`, "Notable strings"):
+///
+/// ```text
+/// _tostring = tostring; tostring = Sys.ToStringL; help = Sys.Help; StringToGuid = Sys.StringToGuid;
+/// ASSERT = Debug.Assert; print = Debug.Printf
+/// ```
+///
+/// This is the mechanism behind the namespace registry's third field — each `{name, luaL_Reg*,
+/// initLuaChunk}` row can carry a Lua source string the engine runs at registration — and it is why the
+/// shipped scripts call **bare** `StringToGuid(...)` (8 sites in `mrxguihudvehicledisguise.lua` alone)
+/// alongside the qualified `Sys.StringToGuid(...)`. Without it, `mrxguihudvehicledisguise` was the one
+/// module of 370 that failed to import: `StringToGuid` resolved to nil and the faction-texture table
+/// took a nil key.
+///
+/// It runs **after** the bindings, not in [`COMPAT_PRELUDE`], because every right-hand side is a member
+/// of a namespace that does not exist until `install_all` has run.
+///
+/// Each alias is guarded on its source existing, because our binding surface is a subset of retail's —
+/// `Sys.Help` in particular is a dev-console entry point we do not implement. Guarding keeps a missing
+/// cfunc from taking the whole glue chunk down with it; the aliases whose targets *do* exist still land.
+const BOOTSTRAP_GLUE: &str = r#"
+-- Recovered verbatim; see the Rust doc comment for provenance.
+if Sys then
+  _tostring = tostring
+  if Sys.ToStringL then tostring = Sys.ToStringL end
+  if Sys.Help then help = Sys.Help end
+  if Sys.StringToGuid then StringToGuid = Sys.StringToGuid end
+end
+if Debug then
+  if Debug.Assert then ASSERT = Debug.Assert end
+  if Debug.Printf then print = Debug.Printf end
+end
+"#;
+
 /// The 5.1→5.4 compatibility prelude — exactly the constructs the charter measured across the 409
 /// corpus files. The heavy ones (`setfenv`/`module`/`loadstring`/`table.setn`/`math.mod`/
 /// `string.gfind`) are 0 files, so this is small and non-invasive.
@@ -1293,6 +1282,18 @@ const COMPAT_PRELUDE: &str = r#"
 unpack = unpack or table.unpack
 loadstring = loadstring or load
 if not table.getn then function table.getn(t) return #t end end
+-- `table.maxn` — 5.1, removed in 5.2. Unlike `#t` it spans holes: it is the largest **positive
+-- numeric** key, which is why `randomlyteleportplayer.lua:17` uses it to size a sparse spawn-point
+-- table. Returning `#t` instead would stop at the first gap.
+if not table.maxn then
+  function table.maxn(t)
+    local n = 0
+    for k in pairs(t) do
+      if type(k) == "number" and k > n then n = k end
+    end
+    return n
+  end
+end
 math.mod = math.mod or math.fmod
 string.gfind = string.gfind or string.gmatch
 _MODULES = _MODULES or {}
@@ -1438,6 +1439,18 @@ impl Loader {
         }
     }
 
+    /// The registered name of an already-loaded module table, for the `dynamic_remove(oModule)` shape.
+    ///
+    /// Identity comparison, not structural: two modules can be structurally equal and must still be
+    /// distinguishable.
+    fn name_of_module(&self, module: &Table) -> Option<String> {
+        self.loaded
+            .borrow()
+            .iter()
+            .find(|(_, t)| *t == module)
+            .map(|(k, _)| k.clone())
+    }
+
     /// `import(name)` — load `name` once (cached), bind it as a global, return its module table.
     fn import(&self, lua: &Lua, name: &str) -> LuaResult<Table> {
         let key = name.to_ascii_lowercase();
@@ -1564,12 +1577,24 @@ impl ScriptHost {
         )?;
         lua.globals().set("dynamic_import", dyn_import_fn)?;
 
-        // `dynamic_remove(name)` — drop a dynamically-loaded module so a later `import` re-runs its
-        // body. `MrxTask.Cleanup` calls this on the task's own `sModuleName` when a mission tears down,
-        // which is how a contract's module-level state is reset between plays.
+        // `dynamic_remove(nameOrModule)` — drop a dynamically-loaded module so a later `import` re-runs
+        // its body. `MrxTask.Cleanup` calls this on the task's own `sModuleName` when a mission tears
+        // down, which is how a contract's module-level state is reset between plays.
+        //
+        // ⚠ **Two shapes ship.** `MrxTask.Cleanup` passes the name *string*, but
+        // `MrxGuiCinematic.SubtitleImportCallback` (resident/mrxguicinematic.lua:153) passes the module
+        // *table* it was just handed. A string-only signature raises on the second, which aborts the
+        // cinematic callback chain mid-boot.
         let drem = loader.clone();
-        let dyn_remove_fn = lua.create_function(move |lua, name: String| {
-            drem.remove(lua, &name);
+        let dyn_remove_fn = lua.create_function(move |lua, target: Value| {
+            let name = match target {
+                Value::String(s) => Some(s.to_str()?.to_owned()),
+                Value::Table(ref t) => drem.name_of_module(t),
+                _ => None,
+            };
+            if let Some(name) = name {
+                drem.remove(lua, &name);
+            }
             Ok(())
         })?;
         lua.globals().set("dynamic_remove", dyn_remove_fn)?;
@@ -1601,7 +1626,11 @@ impl ScriptHost {
     /// coverage gate can measure "N stubs remaining" across the whole binding surface. Installing is a
     /// side effect (globals are set); the returned records are pure data.
     pub fn register_engine_reported(&self, host: SharedHost) -> LuaResult<Vec<NsCoverage>> {
-        bindings::install_all(&self.lua, &host)
+        let cov = bindings::install_all(&self.lua, &host)?;
+        // The engine's own bootstrap glue runs AFTER the namespaces exist — it aliases members of them
+        // into `_G`. See [`BOOTSTRAP_GLUE`].
+        self.lua.load(BOOTSTRAP_GLUE).set_name("@bootstrap_glue").exec()?;
+        Ok(cov)
     }
 
     /// Install the lenient bring-up auto-stub layer ([`AUTOSTUB_LUA`]): reads of unimplemented
@@ -1649,6 +1678,21 @@ impl ScriptHost {
         crate::bindings::event::fire_game_state_change(&self.lua, state, phase)
     }
 
+    /// Dispatch every engine-side callback the host has queued this tick — the counterpart to the
+    /// `fire_*` entry points above, for callbacks the *engine* completes rather than the script.
+    ///
+    /// Call once per frame, after the event pump. Covers:
+    /// * **HUD** — movie end callbacks (`Hud.SetMovieEndCallback`), which also advances movie playback.
+    /// * **Player** — boundary / PDA / satellite / disguise / join-leave callbacks.
+    ///
+    /// Both registries retain the real `mlua::Function`, which is the whole point: these verbs used to
+    /// go through `record_all`, whose `stringify_arg` maps `Value::Function` → `""`, so the closures
+    /// were destroyed at registration and pushed into a Vec nothing drained.
+    pub fn pump_callbacks(&self, host: &SharedHost, dt: f32) -> LuaResult<()> {
+        crate::bindings::hud::pump_hud_callbacks(&self.lua, host, dt)?;
+        crate::bindings::player::pump_player_callbacks(&self.lua, host)
+    }
+
     /// Fire the `ObjectHibernation` handlers waiting on `(guid, phase)` — the streaming system calls
     /// this when an object wakes (`"awake"`) or hibernates (`"asleep"`). This is the condition behind
     /// the awake-gate that opens nearly every object script:
@@ -1660,6 +1704,34 @@ impl ScriptHost {
     /// Fire the `ObjectDeath` handlers registered for `guid`.
     pub fn fire_object_death(&self, guid: u64) -> LuaResult<()> {
         crate::bindings::event::fire_object_death(&self.lua, guid)
+    }
+
+    /// Fire the `ObjectInSeat` handlers matching `(occupant, vehicle, seat, action)` — the engine calls
+    /// this when a character takes (`action = "e"`) or leaves (`"x"`) a seat. `seat` is a real seat
+    /// code (`"d"`/`"p"`); the `"a"` wildcard belongs to the filter, never to the event.
+    pub fn fire_object_in_seat(
+        &self,
+        occupant: u64,
+        vehicle: u64,
+        seat: &str,
+        action: &str,
+    ) -> LuaResult<()> {
+        crate::bindings::event::fire_object_in_seat(&self.lua, occupant, vehicle, seat, action)
+    }
+
+    /// Drain the layer names whose load completed since the last call — the layers whose objects the
+    /// engine should now wake (see `Pg.__flush_layer_loads`). Clears the list.
+    ///
+    /// `Pg.LoadLayer` is Lua-side bookkeeping that instantiates nothing, so this is how the engine
+    /// learns a layer arrived. Unload requests are not reported: they wake nothing.
+    pub fn take_streamed_layers(&self) -> LuaResult<Vec<String>> {
+        let g = self.lua.globals();
+        let Ok(t) = g.get::<mlua::Table>("__layers_streamed") else { return Ok(Vec::new()) };
+        let out: Vec<String> = t.sequence_values::<String>().flatten().collect();
+        if !out.is_empty() {
+            g.set("__layers_streamed", self.lua.create_table()?)?;
+        }
+        Ok(out)
     }
 
     /// Advance the `TimerRelative` handlers by `dt` seconds (the engine's per-tick `Event.__pump`).
@@ -1804,7 +1876,10 @@ mod tests {
 
         // Run the EXACT MrxUtil.SpawnActor body for the inanimate HqInterior against the real
         // Pg.Spawn / Object.* bindings (mrxutil.lua:463-490).
-        let guid: i64 = h
+        // The spawned handle comes back as a `Guid` (lightuserdata), not an integer — see
+        // [`crate::guid`]. Reading it as `i64` here is what a shipped script would do only if it did
+        // arithmetic on a handle, which none of them does.
+        let guid: Guid = h
             .eval(
                 r#"
                 local uGuid = Pg.GetGuidByName("HqInterior")
@@ -1816,7 +1891,7 @@ mod tests {
                 "#,
             )
             .unwrap();
-        assert_eq!(guid, 1);
+        assert_eq!(guid, Guid(1));
 
         let hb = host.borrow();
         assert_eq!(hb.logs, vec!["gui loaded".to_string()]);
@@ -1885,6 +1960,17 @@ mod tests {
         // action residue (Hud/Object/Lti/Pg/Camera/Sys/Gui/Ai/Atmosphere/Vo/ObjectFilter/ObjectState
         // animation/menu/spawner/param/marker-category verbs) → recorded command logs (real +231).
         // Remaining unbacked = genuine dev stubs (debug menu, asset dumps) + a few getters/subsystem gaps.
+        //
+        // Silo 17 (2026-07-26) rewrote all 107 `Player` bodies against `player_code_map.md` and moved
+        // three verbs off the recorded-command log onto retained-callback registries — `Player`'s eight
+        // callback registrations, plus `Hud.SetMovieEndCallback` and `Hud.InterpolateWidget`. **The
+        // counts below do not move**: `record_all` already counted as `real`, and that was the problem.
+        // `stringify_arg` maps `Value::Function` → `""`, so every one of those closures was destroyed at
+        // registration and pushed into a Vec nothing drains. Since `MrxGuiBase`'s animation queue chains
+        // itself through `InterpolateWidget`'s completion callback, that single sink was holding up the
+        // entire GUI — every fade and menu transition, the intro cinematic, and with it the release of
+        // `STATE_WAITFORGAME`. Real/stub totals were never the signal here; whether a callback can fire
+        // is. ~205 verbs still route to `script_cmds` with no drain — that remains open.
         const EXPECTED_REAL: usize = 1060;
         // 28 → 32 on 2026-07-26 with the `Movie` namespace. Note these four are the one place in this
         // crate where `stub` does NOT mean "retail also does nothing": `Movie.{Start,Stop,Pause,Resume}`
