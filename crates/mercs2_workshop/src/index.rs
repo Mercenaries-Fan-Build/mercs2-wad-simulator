@@ -412,7 +412,7 @@ pub fn names_pack_count(path: &Path) -> Option<u32> {
 }
 
 /// Load `names.bin`; `None` on any structural mismatch (caller falls back to raw corpora).
-fn load_names_pack(path: &Path) -> Option<HashMap<u32, String>> {
+pub fn load_names_pack(path: &Path) -> Option<HashMap<u32, String>> {
     let t0 = std::time::Instant::now();
     let data = std::fs::read(path).ok()?;
     if data.len() < 16 || &data[0..8] != NAMES_PACK_MAGIC {

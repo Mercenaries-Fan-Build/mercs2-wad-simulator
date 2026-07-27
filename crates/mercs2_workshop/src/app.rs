@@ -499,17 +499,76 @@ const VEH_CLASS_ORDER: &[&str] = &[
     "motorcycle", "boat", "other",
 ];
 
+/// The name map a RELEASED build can always reach: the bundled `workshop_data/names.bin` (found
+/// through the full [`crate::index::data_home`] chain, so a bundle the user installed, pointed
+/// Settings at, or let the tool fetch for itself all count) overlaid by the ASET dictionary
+/// compiled into the binary. Loaded once, lazily — only the pack, never the multi-second raw
+/// corpora merge, because those are the dev-only fallbacks in `resolve_node_names` steps 3-4 and
+/// paying 8 s for them on the UI thread would be worse than the hashes they replace.
+fn bundled_names() -> &'static std::collections::HashMap<u32, String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<u32, String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut m = crate::index::data_home()
+            .map(|h| h.join("names.bin"))
+            .filter(|p| p.is_file())
+            .and_then(|p| crate::index::load_names_pack(&p))
+            .unwrap_or_default();
+        // Applied LAST so it wins, matching `load_all_names_staged`: every entry here is a name we
+        // actually cracked, and needs no bundle at all.
+        m.extend(crate::index::embedded_aset_names());
+        m
+    })
+}
+
 /// Group the catalog's vehicle models by class for the workbench inventory.
-/// Resolve HIER node-name hashes to names. The rainbow table (VERIFIED cracks — the human/vehicle
-/// rigs, `hp_seat_*`, `bone_wheel_*`, `bone_ub`, …) is authoritative and consulted FIRST; the
-/// generated `docs/data/bone_name_candidates.txt` grammar file is only a fallback for hashes the
-/// rainbow table doesn't cover, so an unverified brute-force guess can never shadow a real name.
-fn resolve_node_names(hashes: &[u32]) -> std::collections::HashMap<u32, String> {
+/// Resolve HIER node-name hashes to names. Sources in priority order: the caller's already-loaded
+/// map, the shipped reference bundle, the rainbow table (VERIFIED cracks — the human/vehicle rigs,
+/// `hp_seat_*`, `bone_wheel_*`, `bone_ub`, …), and last the generated
+/// `docs/data/bone_name_candidates.txt` grammar file, so an unverified brute-force guess can never
+/// shadow a real name.
+///
+/// The first two sources exist because the last two are DEV-ONLY and fail SILENTLY in a release:
+/// `rainbow_names` reads `env!("CARGO_MANIFEST_DIR")/../../../rainbow_table.json`, an absolute path
+/// baked in at COMPILE time that resolves only on the machine that built the binary (and in CI
+/// points above the repo root, at a file that repo does not even carry), while the candidates file
+/// is looked up relative to the CWD. A downloaded workshop found neither, so every target bone on
+/// the Skeleton page read `0x…` and name-based auto-map had nothing to match on — no matter which
+/// reference bundle the user installed, because this path never consulted one.
+fn resolve_node_names(
+    hashes: &[u32],
+    preloaded: Option<&std::collections::HashMap<u32, String>>,
+) -> std::collections::HashMap<u32, String> {
     use mercs2_formats::hash::pandemic_hash_m2;
     let want_set: std::collections::BTreeSet<u32> = hashes.iter().copied().collect();
-    // Verified first.
-    let mut out = mercs2_engine::worldutil::rainbow_names(&want_set);
-    // Fill only the gaps from the generated candidate grammar (unverified).
+    let mut out: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    // 1. What the caller already holds (the GUI's `AssetIndex::names`) — free, and the same content
+    //    `bundled_names` would load, so passing it keeps that load off the UI thread entirely.
+    if let Some(m) = preloaded {
+        for &h in &want_set {
+            if let Some(n) = m.get(&h) {
+                out.insert(h, n.clone());
+            }
+        }
+    }
+    // 2. The shipped bundle. This is what makes a DOWNLOADED workshop resolve bone names at all —
+    //    and it also covers the GUI's boot window, while the background name load is still running.
+    if out.len() < want_set.len() {
+        for &h in &want_set {
+            if !out.contains_key(&h) {
+                if let Some(n) = bundled_names().get(&h) {
+                    out.insert(h, n.clone());
+                }
+            }
+        }
+    }
+    // 3. Dev checkout only: the rainbow table's verified cracks.
+    if out.len() < want_set.len() {
+        for (h, n) in mercs2_engine::worldutil::rainbow_names(&want_set) {
+            out.entry(h).or_insert(n);
+        }
+    }
+    // 4. Dev checkout only: fill the remaining gaps from the candidate grammar (unverified).
     if out.len() < want_set.len() {
         for root in ["docs/data/bone_name_candidates.txt", "../../docs/data/bone_name_candidates.txt"] {
             let Ok(txt) = std::fs::read_to_string(root) else { continue };
@@ -3065,7 +3124,7 @@ pub fn run(opts: Options) {
                                                 .on_hover_text("green = positioned attach node (rotor/skid/seat/tail/hardpoint) · grey = structural");
                                             if hp_names.is_empty() {
                                                 let hashes: Vec<u32> = p.rig.iter().map(|b| b.name_hash).collect();
-                                                hp_names = resolve_node_names(&hashes);
+                                                hp_names = resolve_node_names(&hashes, Some(&index.names));
                                             }
                                             let mut hps: Vec<(usize, String, [f32; 3])> = Vec::new();
                                             for (i, b) in p.rig.iter().enumerate() {
@@ -3584,7 +3643,7 @@ pub fn run(opts: Options) {
                             Act::RetargetSetTarget(hash, label) => {
                                 retarget_target = Some((hash, label.clone()));
                                 if let Some(r) = &retarget {
-                                    let (names, pos, parents) = target_bone_info(&mut w, hash);
+                                    let (names, pos, parents) = target_bone_info(&mut w, hash, Some(&index.names));
                                     let nr = crate::retarget::Retarget::build_full(
                                         r.source_bones.clone(), r.source_pos.clone(),
                                         r.source_ibm.clone(), r.source_parents.clone(), names, pos, parents,
@@ -3601,7 +3660,7 @@ pub fn run(opts: Options) {
                             }
                             Act::RetargetRemap => match (&retarget, &retarget_target) {
                                 (Some(r), Some((hash, _))) => {
-                                    let (names, pos, parents) = target_bone_info(&mut w, *hash);
+                                    let (names, pos, parents) = target_bone_info(&mut w, *hash, Some(&index.names));
                                     let nr = crate::retarget::Retarget::build_full(
                                         r.source_bones.clone(), r.source_pos.clone(),
                                         r.source_ibm.clone(), r.source_parents.clone(), names, pos, parents,
@@ -5267,10 +5326,17 @@ pub(crate) fn faithful_char_skin(
 /// The target HIER bone names AND their bind-pose positions (translation of `world_bind`), index-
 /// aligned. Uses `skin.rig` — the SAME rig `RetargetApply` grafts onto the import — so the retarget's
 /// target indices line up with what actually gets rendered. Positions feed the spatial align.
-pub(crate) fn target_bone_info(w: &mut WadStack, hash: u32) -> (Vec<String>, Vec<[f32; 3]>, Vec<i32>) {
+pub(crate) fn target_bone_info(
+    w: &mut WadStack,
+    hash: u32,
+    // The caller's loaded name map when it has one (the GUI); `None` on the headless paths, which
+    // then read the bundled pack directly. Never let this fall back to the dev-only corpora alone —
+    // that is what made every released Skeleton page show `0x…` for its target bones.
+    preloaded: Option<&std::collections::HashMap<u32, String>>,
+) -> (Vec<String>, Vec<[f32; 3]>, Vec<i32>) {
     let Ok(md) = load_model_data(w, hash) else { return (Vec::new(), Vec::new(), Vec::new()) };
     let hashes: Vec<u32> = md.skin.rig.iter().map(|b| b.name_hash).collect();
-    let names_map = resolve_node_names(&hashes);
+    let names_map = resolve_node_names(&hashes, preloaded);
     let names = md
         .skin
         .rig
@@ -5792,7 +5858,7 @@ fn import_file(
     } else {
         let (target_names, target_pos, target_parents) = retarget_target
             .as_ref()
-            .map(|(h, _)| target_bone_info(w, *h))
+            .map(|(h, _)| target_bone_info(w, *h, Some(&index.names)))
             .unwrap_or_default();
         let r = crate::retarget::Retarget::build_full(
             src_joints, src_pos, src_ibm, src_parents, target_names, target_pos, target_parents,

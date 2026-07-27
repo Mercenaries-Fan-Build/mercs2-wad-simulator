@@ -779,7 +779,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         paths.extend(overlays.iter().cloned());
         let rt = match import::import_model(std::path::Path::new(&glb))
             .and_then(|im| {
-                let (tn, tp, tpar) = app::target_bone_info(&mut w, thash);
+                let (tn, tp, tpar) = app::target_bone_info(&mut w, thash, None);
                 Ok(crate::retarget::Retarget::build_full(
                     im.skin_joints, im.skin_joint_pos, im.skin_ibm, im.skin_parents, tn, tp, tpar,
                 ))
@@ -841,7 +841,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: {e}"),
         };
-        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash);
+        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash, None);
         let tmd = match app::load_model_data(&mut w, thash) {
             Ok(m) => m,
             Err(e) => return eprintln!("--shot target {target}: {e}"),
@@ -1134,7 +1134,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash);
+        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash, None);
         let tmd = match app::load_model_data(&mut w, thash) {
             Ok(m) => m,
             Err(e) => return eprintln!("--rebind-check target {target}: {e}"),
@@ -1502,7 +1502,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let (names, pos, _parents) = app::target_bone_info(&mut w, hash);
+        let (names, pos, _parents) = app::target_bone_info(&mut w, hash, None);
         println!("{arg} (0x{hash:08X}): {} bones", names.len());
         for (i, (n, p)) in names.iter().zip(pos.iter()).enumerate() {
             println!("{i:3} {n}  [{:.3}, {:.3}, {:.3}]", p[0], p[1], p[2]);
