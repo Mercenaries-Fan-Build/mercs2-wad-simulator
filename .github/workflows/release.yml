@@ -137,21 +137,62 @@ jobs:
       # match on. Built ONCE (the pack is OS-independent) from the committed
       # `data/production_names.json`, which needs neither the parent-repo rainbow table nor a game
       # install — that self-containment is the whole reason the pack can be built on a CI runner.
+      # The bundle's OTHER four sources live in the research repo, not this one: the registry rows,
+      # the spawnable templates, the 220-class ECS schemas and the two decompiled-Lua corpora. They
+      # are ~11 MB across 431 files, and copying them in here would duplicate data that is actively
+      # maintained over there — so CI reads them at their source instead. Both repos are public, so
+      # the default GITHUB_TOKEN suffices; sparse + blobless + depth-1 pulls only these five paths
+      # out of an 81 MB repo. Without this the release bundle is names.bin and nothing else, and
+      # every insight feature that reads a corpus (COMP inspector, Lua references, blueprint lifter)
+      # is dead in a downloaded workshop.
+      - name: Check out the reference corpora (once)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/checkout@v4
+        with:
+          repository: Mercenaries-Fan-Build/notes-on-the-released-game
+          path: _refdata
+          sparse-checkout: |
+            docs/data/live_registry_hashes.csv
+            docs/data/spawnable_templates.csv
+            docs/mercs2-ecs
+            docs/mercs2-luacd/src
+            docs/mercs2-dlc-luacd/src
+          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+
       - name: Build workshop_data reference bundle (once)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
-          ./target/${{ matrix.target }}/release/mercs2_workshop --pack-data workshop_data
-          # GUARDRAIL: a pack that built but resolved almost nothing is the exact silent failure this
-          # step exists to end — fail loudly rather than ship another nameless-bone release.
+          # Run from _refdata so `pack_data`'s repo walk-up finds the corpora at `docs/…`. It also
+          # walks up from the EXE, which still reaches this workspace's `data/production_names.json`
+          # — so the names come from here and the corpora from there, with no new flags.
+          out="$GITHUB_WORKSPACE/workshop_data"
+          cd _refdata
+          "$GITHUB_WORKSPACE/target/${{ matrix.target }}/release/mercs2_workshop" --pack-data "$out"
+          cd "$GITHUB_WORKSPACE"
+          # GUARDRAIL 1: a pack that built but resolved almost nothing is the exact silent failure
+          # this step exists to end — fail loudly rather than ship another nameless-bone release.
           n=$(sed -n 's/.*"names": \([0-9]*\).*/\1/p' workshop_data/manifest.json)
           echo "names.bin: ${n:-0} names"
           if [ "${n:-0}" -lt 20000 ]; then
             echo "::error::workshop_data/names.bin has only ${n:-0} names (expected >= 20000) — bone names would be missing"
             exit 1
           fi
+          # GUARDRAIL 2: every content the manifest PROMISES must actually be in the bundle. The
+          # corpora resolve by walk-up, so a moved path degrades to a warning inside --pack-data and
+          # would otherwise ship a bundle quietly missing whole features.
+          missing=""
+          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc; do
+            [ -e "workshop_data/$c" ] || missing="$missing $c"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::workshop_data is missing:$missing"
+            exit 1
+          fi
+          echo "bundle contents:"; du -sh workshop_data/* | sed 's/^/  /'
           zip -r dist/mercs2-workshop-data.zip workshop_data > /dev/null
-          echo "bundled:"; unzip -l dist/mercs2-workshop-data.zip | tail -5
+          echo "zip: $(du -h dist/mercs2-workshop-data.zip | cut -f1), $(unzip -l dist/mercs2-workshop-data.zip | tail -1)"
 
       # The mesh/texture-prep Python scripts are the community's front-end to the authoring tools
       # (FBX/glTF/PNG -> the blobs model_forge/smuggler consume). They are OS-independent, so bundle

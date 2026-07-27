@@ -28,6 +28,12 @@ egui-wgpu = "0.28"
 arboard = "3"
 # Native file-open dialog for the "Import model…" button (same import path as drag-drop).
 rfd = "0.14"
+# Self-service reference data: fetch the release's workshop_data bundle when none is installed, so a
+# bare downloaded binary is not stuck showing bare 0x… hashes for every bone. `ureq` (blocking,
+# rustls) rather than reqwest — a winit event loop wants no async runtime, and rustls keeps the
+# Linux build off a system OpenSSL. `zip` reads the published asset; flate2 is already in the tree.
+ureq = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # Offscreen `--shot` renderer: POD vertex/buffer casts.
 bytemuck = { version = "1", features = ["derive"] }
 # NOTE (blueprint editor, planned): `full_moon` (Lua 5.1 AST, round-trip) + `egui-snarl`

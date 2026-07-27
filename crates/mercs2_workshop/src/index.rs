@@ -256,9 +256,12 @@ pub fn data_home() -> Option<PathBuf> {
             return Some(cand);
         }
         if !dir.pop() {
-            return None;
+            break;
         }
     }
+    // LAST: a bundle this tool downloaded for itself (see `fetch`). Deliberately behind every other
+    // step — a bundle the user installed or pointed Settings at must always beat a fetched copy.
+    crate::fetch::installed_dir().filter(|p| p.is_dir())
 }
 
 /// Load EVERY name corpus, merged lowest→highest priority: bone-name candidates (141k, HIER

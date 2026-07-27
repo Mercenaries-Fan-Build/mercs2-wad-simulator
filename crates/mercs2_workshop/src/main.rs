@@ -44,6 +44,7 @@
 //! - [`bundle`]  — the lossless export bundle; nothing is discarded (raw rung bytes survive).
 //! - [`gui`]     — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
 //! - [`import`]  — foreign model import (`.obj`/`.gltf`/`.glb`) into the engine's `ModelData`.
+//! - [`fetch`]   — download + install the released reference bundle (self-service `workshop_data`).
 //! - [`index`]   — asset catalog + name resolution (packed `names.bin`, embedded ASET dictionary,
 //!                 repo-corpora fallback).
 //! - [`luaview`] — read-only Lua source viewer (hand-rolled lexer/highlighter).
@@ -55,6 +56,7 @@
 
 mod app;
 mod bundle;
+mod fetch;
 mod gui;
 mod import;
 mod index;
@@ -1870,7 +1872,15 @@ fn load_production_names() -> Option<std::collections::HashMap<u32, String>> {
                 }
                 return Some(out);
             }
-            dir = dir.parent()?;
+            match dir.parent() {
+                Some(p) => dir = p,
+                // Exhausted THIS root — try the next. `?` here returned None from the whole
+                // function the moment the CWD walk-up hit the filesystem root, so the exe-directory
+                // root below was never reached: any run whose CWD sits outside the repo silently
+                // dropped to the slow raw-corpora path (and, without the parent-repo rainbow table
+                // beside it, to a near-empty names.bin).
+                None => break,
+            }
         }
     }
     None

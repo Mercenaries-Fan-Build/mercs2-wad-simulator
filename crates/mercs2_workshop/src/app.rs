@@ -712,6 +712,11 @@ pub fn run(opts: Options) {
     // gets remembered and fails at the next launch instead of at the click.
     let mut cfg = crate::settings::load();
     let mut cfg_note: Option<Result<String, String>> = None;
+    // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
+    // Never started automatically — only from the Settings button, so the tool never reaches out to
+    // the network on its own.
+    let mut fetch_rx: Option<std::sync::mpsc::Receiver<crate::fetch::Event>> = None;
+    let mut fetch_msg = String::new();
     // Persist the user's dragged panel widths ourselves — feeding the remembered width back as
     // `default_width` each frame keeps a drag sticky even when collapsing a card would otherwise let
     // egui re-fit the panel to its (now shorter) content.
@@ -983,6 +988,40 @@ pub fn run(opts: Options) {
                     let t = start.elapsed().as_secs_f32();
                     let dt = last_frame.elapsed().as_secs_f32().min(0.05);
                     last_frame = std::time::Instant::now();
+
+                    // ── Reference-data download (Settings): drain whatever the worker has said. The
+                    // names already in memory are NOT swapped out underneath the running session —
+                    // a whole catalog re-label mid-frame is a far bigger surprise than "restart to
+                    // load it", and every other path in this chain is read once at boot too. ──
+                    if let Some(rx) = &fetch_rx {
+                        let mut finished = false;
+                        loop {
+                            match rx.try_recv() {
+                                Ok(crate::fetch::Event::Progress(m)) => fetch_msg = m,
+                                Ok(crate::fetch::Event::Done(p)) => {
+                                    cfg_note = Some(Ok(format!(
+                                        "Reference data installed to {} — restart to load it.",
+                                        p.display()
+                                    )));
+                                    finished = true;
+                                }
+                                Ok(crate::fetch::Event::Failed(e)) => {
+                                    cfg_note = Some(Err(format!("Download failed: {e}")));
+                                    finished = true;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                // Worker vanished without a verdict — do not leave the UI spinning.
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    finished = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if finished {
+                            fetch_rx = None;
+                            fetch_msg.clear();
+                        }
+                    }
 
                     // ── Boot loading screen: engine loading path (shell plate + spinner + bar)
                     // until the name corpora are in, then fall through into the browser. ──
@@ -2148,7 +2187,39 @@ pub fn run(opts: Options) {
                                                     .map_err(|e| format!("Could not save: {e}")),
                                             );
                                         }
+                                        // Self-service: fetch the bundle from the release rather than
+                                        // asking someone to find a zip and unpack it to the right
+                                        // place. Explicit — the tool never downloads unprompted.
+                                        let busy = fetch_rx.is_some();
+                                        let label = if busy { "Downloading…" } else { "Download" };
+                                        if ui
+                                            .add_enabled(!busy, egui::Button::new(label))
+                                            .on_hover_text(
+                                                "Fetch the reference bundle published with the latest release and install it for this user",
+                                            )
+                                            .clicked()
+                                        {
+                                            let (tx, rx) = std::sync::mpsc::channel();
+                                            fetch_rx = Some(rx);
+                                            fetch_msg = "starting…".into();
+                                            cfg_note = None;
+                                            std::thread::spawn(move || {
+                                                crate::fetch::download(|e| {
+                                                    let _ = tx.send(e);
+                                                });
+                                            });
+                                        }
                                     });
+                                    if fetch_rx.is_some() {
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::Spinner::new().size(11.0));
+                                            ui.label(
+                                                egui::RichText::new(&fetch_msg)
+                                                    .color(theme::DIM)
+                                                    .size(10.5),
+                                            );
+                                        });
+                                    }
                                 });
 
                                 // Outcome of the last action — one line, only when there IS one.
