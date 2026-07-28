@@ -54,13 +54,15 @@ pub mod events;
 pub mod firing;
 pub mod homing;
 pub mod impact;
+pub mod inventory;
 pub mod lua_surface;
 pub mod projectile;
 pub mod ragdoll;
 pub mod stats;
 
 pub use components::{
-    HomingState, Inventory, RuntimeExplosion, RuntimeHomingWeapon, RuntimeProjectile, RuntimeWeapon,
+    CarriedBy, Equipment, EquipmentType, HomingState, InventoryFlags, PendingDestroy, RuntimeExplosion,
+    RuntimeHomingWeapon, RuntimeInventory, RuntimeProjectile, RuntimeWeapon, WeaponVisibility,
 };
 pub use damage::{DamageKey, ExplosionSize};
 pub use impact::{Impact, ImpactKind};
