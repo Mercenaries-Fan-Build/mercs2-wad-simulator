@@ -622,9 +622,16 @@ pub(crate) fn load_world_data(
 
     // Static watermap (the `watr` singleton in the resident block) — the surface-height + wet-mask grid
     // the player's swim FSM samples. Best-effort: a WAD without it (interior-only) just yields no swim.
-    let watermap = load_watermap(assets.base_mut());
+    let watermap = load_watermap(&mut assets);
     match &watermap {
-        Some(_) => println!("[world] watermap loaded (swim enabled)"),
+        Some(wm) => {
+            let wet = wm.wet_cell_count();
+            let (lo, hi) = wm.wet_height_range().unwrap_or((f32::NAN, f32::NAN));
+            println!(
+                "[world] watermap loaded (swim enabled): {wet} wet / {} dry cells, surface {lo:.1}..{hi:.1} m",
+                wm.width() * wm.height() - wet,
+            );
+        }
         None => println!("[world] no watermap in WAD (swim disabled)"),
     }
     progress.step("watermap");
@@ -664,17 +671,37 @@ pub(crate) fn load_world_data(
     Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, landing_zones, layer_index, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies })
 }
 
-/// Load the static watermap singleton (`m2("watermap")`, type `0x4D7D30C4`) from the resident block:
-/// resolve its UCFX container, pull the `watr` chunk body, and parse the height-field + wet mask.
-fn load_watermap(w: &mut wad::Wad) -> Option<mercs2_engine::water_sim::Watermap> {
-    let name_hash = mercs2_formats::hash::pandemic_hash_m2("watermap");
-    let container =
-        wad::extract_container_typed(w, name_hash, mercs2_formats::types::TYPE_HASH_WATERMAP).ok()?;
-    let watr = mercs2_formats::ucfx::extract_chunk_body(&container, b"watr")?;
+/// Load the static watermap singleton (type `0x4D7D30C4`) out of the resident block: resolve its UCFX
+/// container **by type**, pull the `watr` chunk body, and parse the height-field + wet mask.
+///
+/// By type, not by name: `0x4D7D30C4` is `pandemic_hash_m2("watermap")` — the *type* hash. There is no
+/// asset named "watermap". Retail's watermap sits in `resident_P000_Q3` under an unrelated authored
+/// name hash inside an ASET row that is itself named for the resident group, so a name-keyed lookup
+/// misses it every time — which is what made the boot report no watermap and disable swimming on a WAD
+/// that plainly has one. `AssetSource::extract_singleton` walks the type-0 ASET rows the way the engine
+/// walks the resident entry table. See `docs/watermap_format.md`.
+fn load_watermap(
+    assets: &mut mercs2_engine::asset::AssetSource,
+) -> Option<mercs2_engine::water_sim::Watermap> {
+    let ty = mercs2_formats::types::TYPE_HASH_WATERMAP;
+    let Some((name_hash, container)) = assets.extract_singleton(ty) else {
+        println!("[world] no watermap chunk (type 0x{ty:08X}) in any mounted WAD");
+        return None;
+    };
+    let Some(watr) = mercs2_formats::ucfx::extract_chunk_body(&container, b"watr") else {
+        println!("[world] watermap 0x{name_hash:08X}: container carries no `watr` chunk");
+        return None;
+    };
     match mercs2_engine::water_sim::Watermap::from_watr_bytes(&watr) {
-        Ok(wm) => Some(wm),
+        Ok(wm) => {
+            println!(
+                "[world] watermap 0x{name_hash:08X}: {}x{} @ {} m ({} B watr), origin ({:.0}, {:.0})",
+                wm.width(), wm.height(), wm.cell_size(), watr.len(), wm.origin_x, wm.origin_z
+            );
+            Some(wm)
+        }
         Err(e) => {
-            println!("[world] watermap parse failed: {e:?}");
+            println!("[world] watermap 0x{name_hash:08X}: watr parse failed: {e:?}");
             None
         }
     }
@@ -1034,6 +1061,8 @@ fn boot_save_from(state: &mercs2_formats::save::SaveState) -> mercs2_engine::scr
         culled_bindings: state.flow_chain.clone(),
         active_missions: state.active_missions.iter().map(|m| m.id.clone()).collect(),
         layers: state.layers.clone(),
+        transit_enabled: state.transit_enabled,
+        transit_zones: state.transit_zones.clone(),
     }
 }
 
@@ -1784,6 +1813,13 @@ impl mercs2_engine::app::Game for Mercs2Game {
         }
         self.hmap = Some(data.hmap);
         self.watermap = data.watermap;
+        // The sim silo's water mechanism gets the same map. Without this `WaterWorld::tick` is a
+        // permanent no-op (it idles on `watermap: None`), so every `Swimmer` in the ECS — NPCs and
+        // anything else that floats — stays OnLand no matter how deep it is. The player controller
+        // reads the map through `SceneLocomotion` instead; both now see one loaded watermap.
+        if let Some(wm) = &self.watermap {
+            self.runtime.water.set_watermap(wm.clone());
+        }
 
         // Resident audio: decode wavebanks + merge sounddbs into one cue catalog.
         if !data.wavebank_bodies.is_empty() {
