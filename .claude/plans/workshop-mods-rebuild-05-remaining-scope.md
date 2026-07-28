@@ -89,8 +89,25 @@ source-append onto the base script, compile once, emit one block.
 - `wad_builder::build_skin` (`main.rs:353`) is a complete reference flow, including a re-read-and-
   verify step worth copying.
 
-**To write:**
-1. The linker module itself, in `mercs2_quartermaster` — a deploy/link phase distinct from `build`.
+### Step 4 progress — the linker core WORKS (2026-07-28)
+
+`mercs2_quartermaster::link` links N Shipments' appends into one `scripts_vz`, verified against the
+retail block. **`two_script_mods_both_survive_the_link` passes** — two independent wardrobe mods,
+base 58,828 B → 59,143 B linked source → 80,301 B bytecode, entry count unchanged, CSUMs verifying,
+LuaQ header correct. That is the annihilation this whole design exists to prevent, now prevented.
+
+Also pinned: mutations on different scripts stay independent; an unknown target is *named* rather
+than skipped (a mod whose script vanished would otherwise install "successfully" and do nothing); a
+syntax error in a mod's append surfaces the compiler's own message with a line number; and a link
+with no mutations leaves the block byte-identical.
+
+Ordering is **by Shipment name, not install order** — two installs of the same set must produce
+identical bytes, or verify-by-hash means nothing. Load order decides who *wins* a conflict; it does
+not get to decide the bytes of a merge that has no conflict. Each append is attributed with a
+`-- [Quartermaster] appended by Shipment: <name>` comment so a decompiled linked block is readable.
+
+**Still to write:**
+1. ~~The linker module itself.~~ **DONE** — core linking, ordering, error surfacing.
 2. **Base-block acquisition.** Nothing resolves `scripts_vz` from a `GameStack`; `build_skin` only
    handles an *existing patch WAD*. Add a raw-block accessor, or match the PTHS path substring.
 3. Corpus lookup by script name (`"wifpmcinterior"` → `vz/wifpmcinterior.lua`, searching
