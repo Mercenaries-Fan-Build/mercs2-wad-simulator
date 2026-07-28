@@ -42,9 +42,36 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const DEFAULT_LOG: &str = "C:/Users/Shadow/Desktop/Mercenaries 2 World in Flames/pmc_blackbox.log";
-const DEFAULT_EXE_SYMBOLS: &str =
-    "C:/Users/Shadow/Desktop/notes-on-the-released-game/scripts/mercs2_annotations.json";
+/// Environment variable naming the exe-symbol annotations JSON, since it lives in the sibling
+/// research repo whose location varies per checkout and cannot be derived from this one.
+const EXE_SYMBOLS_ENV: &str = "MERCS2_EXE_SYMBOLS";
+
+/// The game's `pmc_blackbox.log`, which retail writes into the install folder.
+///
+/// Derived from the resolved install (`--game-dir`/`MERCS2_GAME_DIR`/`VZ_WAD`/registry) rather than a
+/// literal `C:/Users/Shadow/Desktop/...`, which named one developer's machine and could not resolve
+/// anywhere else.
+/// Mirrors `mercs2_formats::game_paths::GAME_DIR_VARS`, reproduced locally rather than depended upon —
+/// this is a small standalone log tool and pulling in the format crate for three lines of path probing
+/// would be the tail wagging the dog. Keep the variable names in step.
+fn default_log() -> Option<PathBuf> {
+    ["MERCS2_GAME_DIR", "VZ_WAD"]
+        .iter()
+        .filter_map(|v| std::env::var_os(v).filter(|s| !s.is_empty()))
+        .map(PathBuf::from)
+        .find_map(|p| {
+            // Accept the install root, its `data` folder, or `data/vz.wad`; the log sits at the root.
+            let root = if p.is_file() { p.parent()?.parent()?.to_path_buf() } else if p.join("data").is_dir() { p } else { p.parent()?.to_path_buf() };
+            let log = root.join("pmc_blackbox.log");
+            log.is_file().then_some(log)
+        })
+}
+
+/// The annotations JSON from `$MERCS2_EXE_SYMBOLS`, if set and present.
+fn default_exe_symbols() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os(EXE_SYMBOLS_ENV)?);
+    p.is_file().then_some(p)
+}
 
 #[derive(Parser)]
 #[command(name = "loadprobe", about = "Quantify world-load progress + forensic dump of pmc_blackbox.log")]
@@ -86,8 +113,9 @@ struct Cli {
     symbolize: bool,
 
     /// Curated Mercenaries2.exe VA→name map for --symbolize.
-    #[arg(long, default_value = DEFAULT_EXE_SYMBOLS)]
-    exe_symbols: PathBuf,
+    /// Defaults to `$MERCS2_EXE_SYMBOLS`; required when `--symbolize` is used.
+    #[arg(long)]
+    exe_symbols: Option<PathBuf>,
 
     /// Extra directory to search for .asi/.dll module files (repeatable). The
     /// log's directory and its scripts/ subdir are always searched.
@@ -111,7 +139,14 @@ fn main() -> ExitCode {
         colored::control::set_override(false);
     }
 
-    let path = cli.log.unwrap_or_else(|| PathBuf::from(DEFAULT_LOG));
+    let Some(path) = cli.log.or_else(default_log) else {
+        eprintln!(
+            "loadprobe: no log given and none found in the install.\n  \
+             Pass the log path, or set MERCS2_GAME_DIR (or VZ_WAD) so `<install>/pmc_blackbox.log` \
+             resolves."
+        );
+        return ExitCode::from(2);
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => {
@@ -138,14 +173,25 @@ fn main() -> ExitCode {
                 dirs.push(parent.join("scripts"));
             }
             dirs.extend(cli.module_dir.iter().cloned());
-            let mut sym = symbolize::Symbolizer::new(&cli.exe_symbols, dirs);
+            // The annotations JSON lives in the sibling research repo, whose location this repo cannot
+            // derive — so it must be named explicitly. An absent map is not fatal: the .asi/.dll COFF
+            // symbols beside the log are an independent source, and either alone is useful.
+            let exe_symbols = cli
+                .exe_symbols
+                .clone()
+                .or_else(default_exe_symbols)
+                .unwrap_or_else(|| PathBuf::from("<none>"));
+            let mut sym = symbolize::Symbolizer::new(&exe_symbols, dirs);
             if sym.has_any_source() {
                 for line in crash.block.iter_mut() {
                     *line = sym.rewrite_line(line);
                 }
             } else {
-                eprintln!("loadprobe: --symbolize found no symbol sources \
-                    (exe map {} and no .asi/.dll next to the log)", cli.exe_symbols.display());
+                eprintln!(
+                    "loadprobe: --symbolize found no symbol sources (exe map {} and no .asi/.dll \
+                     next to the log). Pass --exe-symbols <file> or set {EXE_SYMBOLS_ENV}.",
+                    exe_symbols.display()
+                );
             }
         }
     }
