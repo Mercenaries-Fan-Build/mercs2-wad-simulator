@@ -9,9 +9,9 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_child("Graphics", "FuelTrail")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -41,11 +41,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Ignite/extinguish drive the real per-object burning state (the fire FX/particle rendering is a
     // render-pass concern; the burning flag is engine state gameplay + the renderer read).
     let h = host.clone();
-    b.real("Ignite", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_ignite(o as u64); Ok(()) })?)?;
+    b.real("Ignite", lua.create_function(move |_, o: Guid| { h.borrow_mut().fire_ignite(o.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Extinguish", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_extinguish(o as u64); Ok(()) })?)?;
+    b.real("Extinguish", lua.create_function(move |_, o: Guid| { h.borrow_mut().fire_extinguish(o.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Put", lua.create_function(move |_, o: i64| { h.borrow_mut().fire_extinguish(o as u64); Ok(()) })?)?;
+    b.real("Put", lua.create_function(move |_, o: Guid| { h.borrow_mut().fire_extinguish(o.raw()); Ok(()) })?)?;
 
     // Nested under `Graphics`, matching the retail marker-row sub-table.
     b.install_child("Graphics", "FuelTrail")
