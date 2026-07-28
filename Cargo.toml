@@ -34,6 +34,10 @@ mercs2_faction = { path = "crates/mercs2_faction", version = "1.0.1" }
 mercs2_ui = { path = "crates/mercs2_ui", version = "1.0.1" }
 mercs2_player = { path = "crates/mercs2_player", version = "1.0.1" }
 mercs2_engine = { path = "crates/mercs2_engine", version = "1.1.0" }
+# The Shipment format, linter and builder. Registered here because neither the Workshop nor Modkit
+# owns the format — this crate does, and both are clients. Without an entry they cannot write
+# `mercs2_quartermaster = { workspace = true }` at all.
+mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "1.0.0" }
 
 # The load path is CPU-bound `sges`/zlib block decompression + mesh assembly. In a plain `dev` build
 # those run UNOPTIMIZED, making the PMC-interior boot ~134s (vs ~15s optimized) — a ~9x tax purely from
