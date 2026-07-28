@@ -323,6 +323,27 @@ impl GameStack {
     /// rungs, not one block (`docs/aset_format.md`, proven 2026-07-21). Callers that need to know
     /// whether an asset is single-block must inspect both halves; see
     /// [`crate::lint::aset_row_is_single_block`].
+    /// A whole decompressed block, located by a substring of its PTHS path — the way
+    /// `wad_builder build-skin` finds `scripts_vz`, because there is no index constant to rely on
+    /// and the path string is what actually identifies it.
+    ///
+    /// Reverse walk, so an overlay's block shadows the base's.
+    pub fn block_by_path(&mut self, needle: &str) -> Option<Vec<u8>> {
+        let needle = needle.to_lowercase();
+        for wad in self.wads.iter_mut().rev() {
+            let Some(idx) = wad.archive.paths.iter().position(|p| p.to_lowercase().contains(&needle))
+            else {
+                continue;
+            };
+            if let Ok(dec) =
+                mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
+            {
+                return Some(dec);
+            }
+        }
+        None
+    }
+
     /// Every ASET row for `(hash, type_id)` across the stack as
     /// `(packed_block_ref, secondary_ref, is_primary)`.
     ///
