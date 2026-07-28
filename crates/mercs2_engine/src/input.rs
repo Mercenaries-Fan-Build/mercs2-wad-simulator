@@ -497,7 +497,7 @@ fn key_from_name(s: &str) -> Option<KeyCode> {
 
 /// Locate `Mercs2.ini` next to the game install (sibling of the `data/` dir that holds `vz.wad`).
 pub fn find_mercs2_ini() -> Option<std::path::PathBuf> {
-    let vz = crate::wad::registry_vz_wad()?;
+    let vz = crate::wad::resolve_vz_wad(None)?;
     let p = std::path::Path::new(&vz).parent()?.parent()?.join("Mercs2.ini");
     p.exists().then_some(p)
 }

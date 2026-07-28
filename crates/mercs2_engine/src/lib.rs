@@ -68,7 +68,7 @@ pub mod input;
 pub use mercs2_mesh as mesh;
 pub mod model;
 pub mod particles;
-pub mod player;
+pub mod paths;
 pub mod pose;
 pub mod post;
 pub mod registry;
@@ -79,6 +79,7 @@ pub mod scene;
 pub mod ui;
 pub mod wad;
 pub mod water;
+pub mod locomotion;
 pub mod worldutil;
 
 // Mechanism re-exports. The engine OWNS these subsystems; the game reaches them ONLY through the
@@ -92,6 +93,7 @@ pub use mercs2_combat as combat;
 pub use mercs2_decal as decal;
 pub use mercs2_faction as faction;
 pub use mercs2_physics as physics;
+pub use mercs2_player as player;
 pub use mercs2_population as population;
 pub use mercs2_script as script;
 pub use mercs2_vehicle as vehicle;

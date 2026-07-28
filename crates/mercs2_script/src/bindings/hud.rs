@@ -9,10 +9,63 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("_GuiInternal")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
-use crate::SharedHost;
+use mlua::{Function, Lua, MultiValue, Result as LuaResult, Value};
+
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
+
+/// The Lua side of the HUD's retained-callback registry: the `Function` the script registered plus the
+/// context arguments it supplied, keyed by the opaque id `mercs2_ui` holds.
+///
+/// **Why this exists.** `SetMovieEndCallback` used to go through `record_all`, whose `stringify_arg`
+/// maps `Value::Function` → `""`. The closure was destroyed at registration and the resulting tuple was
+/// pushed into a Vec nothing drains, so a movie could never report completion — and since
+/// `MrxGuiCinematic`'s end callback is what releases `STATE_WAITFORGAME`
+/// (`wifmissionflow.lua:44 → MrxState.Exit(STATE_WAITFORGAME, _EndBlockingSequence)`), the whole
+/// world-load state machine stalled behind the intro cinematic.
+#[derive(Default)]
+pub struct HudCallbacks {
+    fns: BTreeMap<u32, (Function, Vec<Value>)>,
+}
+
+/// Shared handle, published into the Lua app-data exactly as `bindings::event` publishes its
+/// `EventManager`.
+pub type Cbs = Rc<RefCell<HudCallbacks>>;
+
+/// Drain the widget tree's finished movies and invoke their retained Lua callbacks as
+/// `fCallback(unpack(tData))`.
+///
+/// Called once per tick by the engine's resident pump, mirroring `ScriptHost::fire_*` for the event
+/// bus. Errors propagate so a broken handler is visible rather than swallowed.
+pub fn pump_hud_callbacks(lua: &Lua, host: &SharedHost, dt: f32) -> LuaResult<()> {
+    let Some(cbs) = lua.app_data_ref::<Cbs>().map(|c| c.clone()) else { return Ok(()) };
+    let fires = {
+        let mut g = host.borrow_mut();
+        match g.hud() {
+            Some(tree) => {
+                tree.tick_movies();
+                tree.tick_animations(dt);
+                // Animations first: a completed animation commonly *starts* the movie, and dispatching
+                // in this order lets that happen a tick sooner.
+                let mut f = tree.take_anim_completions();
+                f.extend(tree.take_movie_end_fires());
+                f
+            }
+            None => Vec::new(),
+        }
+    };
+    for id in fires {
+        let entry = cbs.borrow().fns.get(&id).cloned();
+        if let Some((f, ctx)) = entry {
+            f.call::<()>(mlua::MultiValue::from_vec(ctx))?;
+        }
+    }
+    Ok(())
+}
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 /// Registry row 12 (`0x00DFD508`) names this table **`_GuiInternal`**. It is NOT `Hud`: `Hud` is a
@@ -162,7 +215,6 @@ const STUB_NAMES: &[&str] = &[
     "PushWidgetToFront",
     "PushWidgetToBack",
     "SetWidgetAnchoring",
-    "InterpolateWidget",
     "SetWidgetUpdateCallback",
     "SetWidgetViewport",
     "AddWidgetChild",
@@ -241,7 +293,6 @@ const STUB_NAMES: &[&str] = &[
     "PlayMovie",
     "PauseMovie",
     "StopMovie",
-    "SetMovieEndCallback",
     // --- PDA blips (mutators) ---
     "RegisterForPdaUpdate",
     "RemovePdaBlip",
@@ -259,6 +310,32 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
     use mercs2_ui::WidgetKind;
 
+    // The retained-callback table, published as app-data so `pump_hud_callbacks` can find it — the same
+    // mechanism `bindings::event` uses for `EventManager`.
+    let cbs: Cbs = Rc::new(RefCell::new(HudCallbacks::default()));
+    lua.set_app_data(cbs.clone());
+
+    // # Why a widget id is `i64` here and not a [`Guid`]
+    //
+    // Every *other* handle on this surface converted to lightuserdata (see [`crate::guid`]), but the
+    // widget id did not, because two shipped call sites say it is a number in retail:
+    // `mrxguidialogbox.lua:331-333` does `local nId = _GuiInternal.GetWidgetHighlightId()` and then
+    // branches on `if nId ~= 0 then` before comparing `nId` against `oOption.BasicData.uId`; and
+    // `mrxguipda.lua:111,151` clears the PDA widget with the literal `_GuiInternal.SetPlayerPDAWidget
+    // (oPda:GetOwner(), 0)`. A lightuserdata is truthy and never equal to `0`, so both of those would
+    // be wrong. Nothing in the corpus type-checks a widget id as `"userdata"` either — the 114
+    // `"userdata"` comparisons are on player/object/viewport handles and texture names.
+    //
+    // The ids are still used as table keys (`WidgetIdIndex[uId]`, `mrxguibase.lua:407/891/1443`),
+    // which integers satisfy. **`GetWidgetChildren` must keep returning the same type it takes**, or
+    // that index lookup misses.
+    //
+    // The **viewport** id likewise stays `i64`, matching `Player.GetViewportId` (`player.rs`), whose
+    // `-1` = "not joined" is a value the shipped code reads rather than a miss. `mrxguibase.lua:137`
+    // does check `"userdata" ~= type(uViewportId)`, but only past an `if not Net.IsMultiplayer() then
+    // return true` early-out, so it is unreachable on a single-player boot — not enough to overrule
+    // the `-1` contract. Confirm-live if a multiplayer session is ever brought up.
+    //
     // create(kind) → handle; single-value setter on a widget field; getter reading a widget field.
     macro_rules! create {
         ($name:literal, $kind:expr) => {{
@@ -282,8 +359,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     macro_rules! wget {
         ($name:literal, |$wd:ident| $body:expr, $default:expr) => {{
             let hh = host.clone();
-            b.real($name, lua.create_function(move |_, wid: i64| {
-                Ok(hh.borrow().hud_ref().and_then(|t| t.get(wid as u64)).map(|$wd| $body).unwrap_or($default))
+            b.real($name, lua.create_function(move |_, wid: Option<i64>| {
+                Ok(hh.borrow().hud_ref().and_then(|t| t.get(wid.unwrap_or(0) as u64)).map(|$wd| $body).unwrap_or($default))
             })?)?;
         }};
     }
@@ -298,8 +375,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     create!("MinimapCreate", WidgetKind::Minimap);
     for name in ["DeleteWidget", "MinimapDelete"] {
         let hh = host.clone();
-        b.real(name, lua.create_function(move |_, wid: i64| {
-            if let Some(t) = hh.borrow_mut().hud() { t.delete(wid as u64); }
+        b.real(name, lua.create_function(move |_, wid: Option<i64>| {
+            if let Some(t) = hh.borrow_mut().hud() { t.delete(wid.unwrap_or(0) as u64); }
             Ok(())
         })?)?;
     }
@@ -331,8 +408,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
     let hh = host.clone();
-    b.real("SetWidgetColor", lua.create_function(move |_, (wid, r, g, bl, a): (i64, f32, f32, f32, Option<f32>)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.color = [r, g, bl, a.unwrap_or(255.0)]; } }
+    b.real("SetWidgetColor", lua.create_function(move |_, (wid, r, g, bl, a): (Option<i64>, f32, f32, f32, Option<f32>)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { w.color = [r, g, bl, a.unwrap_or(255.0)]; } }
         Ok(())
     })?)?;
     wset!("SetWidgetVisible", bool, |w, v| { w.visible = v; });
@@ -346,26 +423,26 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // --- tree / z-order ---
     for (name, front) in [("PushWidgetToFront", true), ("PushWidgetToBack", false)] {
         let hh = host.clone();
-        b.real(name, lua.create_function(move |_, wid: i64| {
-            if let Some(t) = hh.borrow_mut().hud() { if front { t.push_to_front(wid as u64) } else { t.push_to_back(wid as u64) } }
+        b.real(name, lua.create_function(move |_, wid: Option<i64>| {
+            if let Some(t) = hh.borrow_mut().hud() { if front { t.push_to_front(wid.unwrap_or(0) as u64) } else { t.push_to_back(wid.unwrap_or(0) as u64) } }
             Ok(())
         })?)?;
     }
     for name in ["AddWidgetChild", "SetWidgetChild"] {
         let hh = host.clone();
-        b.real(name, lua.create_function(move |_, (parent, child): (i64, i64)| {
-            if let Some(t) = hh.borrow_mut().hud() { t.add_child(parent as u64, child as u64); }
+        b.real(name, lua.create_function(move |_, (parent, child): (Option<i64>, i64)| {
+            if let Some(t) = hh.borrow_mut().hud() { t.add_child(parent.unwrap_or(0) as u64, child as u64); }
             Ok(())
         })?)?;
     }
     let hh = host.clone();
-    b.real("RemoveWidgetChild", lua.create_function(move |_, (parent, child): (i64, i64)| {
-        if let Some(t) = hh.borrow_mut().hud() { t.remove_child(parent as u64, child as u64); }
+    b.real("RemoveWidgetChild", lua.create_function(move |_, (parent, child): (Option<i64>, i64)| {
+        if let Some(t) = hh.borrow_mut().hud() { t.remove_child(parent.unwrap_or(0) as u64, child as u64); }
         Ok(())
     })?)?;
     let hh = host.clone();
-    b.real("RemoveAllWidgetChildren", lua.create_function(move |_, parent: i64| {
-        if let Some(t) = hh.borrow_mut().hud() { t.remove_all_children(parent as u64); }
+    b.real("RemoveAllWidgetChildren", lua.create_function(move |_, parent: Option<i64>| {
+        if let Some(t) = hh.borrow_mut().hud() { t.remove_all_children(parent.unwrap_or(0) as u64); }
         Ok(())
     })?)?;
 
@@ -413,13 +490,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wset!("SetSpriteTexture", String, |w, v| { if let Some(s) = w.sprite.as_mut() { s.texture = v; } });
     wset!("SetSpriteFrame", i64, |w, v| { if let Some(s) = w.sprite.as_mut() { s.frame = v as u32; } });
     let hh = host.clone();
-    b.real("SetSpriteTextureSize", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(s) = w.sprite.as_mut() { s.texture_size = [x, y]; } } }
+    b.real("SetSpriteTextureSize", lua.create_function(move |_, (wid, x, y): (Option<i64>, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { if let Some(s) = w.sprite.as_mut() { s.texture_size = [x, y]; } } }
         Ok(())
     })?)?;
     let hh = host.clone();
-    b.real("SetSpriteFrameSize", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(s) = w.sprite.as_mut() { s.frame_size = [x, y]; } } }
+    b.real("SetSpriteFrameSize", lua.create_function(move |_, (wid, x, y): (Option<i64>, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { if let Some(s) = w.sprite.as_mut() { s.frame_size = [x, y]; } } }
         Ok(())
     })?)?;
 
@@ -430,9 +507,100 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wset!("SetMovieFile", Option<String>, |w, v| {
         if let Some(m) = w.movie.as_mut() { m.file = v.unwrap_or_default(); }
     });
-    wset!("PlayMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = true; } });
+    // `MovieWidget:Play(bLoop)` (`mrxguibase.lua:1391`). Starting playback re-arms the end latch, so a
+    // widget replayed after its callback already fired can complete again.
+    wset!("PlayMovie", Option<bool>, |w, _v| {
+        if let Some(m) = w.movie.as_mut() { m.playing = true; m.end_fired = false; }
+    });
     wset!("PauseMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = false; } });
-    wset!("StopMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = false; m.frame = 0; } });
+    // Stop is an explicit cancel: it must NOT fire the end callback, or a script that stops a movie
+    // early would get the same completion signal as one that watched it through.
+    wset!("StopMovie", Option<bool>, |w, _v| {
+        if let Some(m) = w.movie.as_mut() { m.playing = false; m.frame = 0; m.end_fired = true; }
+    });
+
+    // `_GuiInternal.InterpolateWidget(uId, nTime, x1, y1, x2, y2, r, g, b, a, fComplete, tData,
+    //  u1, v1, u2, v2, nRotation, nRotationDirection, nElapsedTime)` — `mrxguibase.lua:715/717`.
+    //
+    // **The single most load-bearing callback in the GUI.** `MrxGuiBase`'s animation queue advances by
+    // handing `_HandleAnimationComplete` in as `fComplete` and continuing the chain when the engine
+    // calls it back (`mrxguibase.lua:635-720`). Routed through `record_all` — as this was — the closure
+    // is stringified to `""` and the queue stalls at its first entry, taking with it every fade, every
+    // menu transition, and the cinematic fade-in that starts the intro movie.
+    //
+    // The UV / rotation / elapsed tail (args 13-19) is accepted and not yet modelled: the widget tree
+    // has no rotation-animation channel. Those are inert rather than dropped-and-forgotten, and the
+    // geometry + colour + completion contract — everything the scripts actually observe — is real.
+    let hh = host.clone();
+    let cbs_interp = cbs.clone();
+    #[allow(clippy::type_complexity)]
+    b.real("InterpolateWidget", lua.create_function(move |_, args: MultiValue| {
+        let a: Vec<Value> = args.into_vec();
+        let num = |i: usize| -> Option<f32> {
+            match a.get(i) {
+                Some(Value::Integer(n)) => Some(*n as f32),
+                Some(Value::Number(n)) => Some(*n as f32),
+                _ => None,
+            }
+        };
+        let Some(wid) = num(0).map(|v| v as u64) else { return Ok(()) };
+        let duration = num(1).unwrap_or(0.0);
+        let to_location = [num(2), num(3), num(4), num(5)];
+        // Channels the caller did not mean to touch arrive as the -4096 sentinel.
+        let to_color = [
+            num(6).unwrap_or(mercs2_ui::COLOR_UNCHANGED),
+            num(7).unwrap_or(mercs2_ui::COLOR_UNCHANGED),
+            num(8).unwrap_or(mercs2_ui::COLOR_UNCHANGED),
+            num(9).unwrap_or(mercs2_ui::COLOR_UNCHANGED),
+        ];
+        let f = match a.get(10) {
+            Some(Value::Function(f)) => Some(f.clone()),
+            _ => None,
+        };
+        let ctx = super::unpack_ctx(a.get(11).cloned());
+
+        let id = {
+            let mut g = hh.borrow_mut();
+            match g.hud() {
+                Some(tree) => {
+                    let id = f.is_some().then(|| tree.mint_callback());
+                    tree.interpolate(wid, duration, to_location, to_color, id);
+                    id
+                }
+                None => None,
+            }
+        };
+        if let (Some(id), Some(f)) = (id, f) {
+            cbs_interp.borrow_mut().fns.insert(id, (f, ctx));
+        }
+        Ok(())
+    })?)?;
+
+    // `_GuiInternal.SetMovieEndCallback(uId, fCallback, tData)` `0x005BC640` — `mrxguibase.lua:1404`,
+    // reached as `oMovie:SetEndCallback(HideSlow, {oWidget})` from `MrxGuiCinematic.ShowMovie:139`.
+    //
+    // The `Function` and its context table are retained here; `mercs2_ui` holds only the opaque id, the
+    // way retail holds a Lua ref rather than a closure. `pump_hud_callbacks` dispatches on completion.
+    let hh = host.clone();
+    let cbs_movie = cbs.clone();
+    b.real("SetMovieEndCallback", lua.create_function(move |_, (wid, f, ctx): (Option<i64>, Option<Function>, Option<Value>)| {
+        let id = match (&f, hh.borrow_mut().hud()) {
+            (Some(_), Some(tree)) => {
+                let id = tree.mint_callback();
+                tree.set_movie_end_callback(wid.unwrap_or(0) as u64, Some(id)).then_some(id)
+            }
+            // A nil callback clears the registration; a host with no widget tree is a no-op.
+            (None, Some(tree)) => {
+                tree.set_movie_end_callback(wid.unwrap_or(0) as u64, None);
+                None
+            }
+            _ => None,
+        };
+        if let (Some(id), Some(f)) = (id, f) {
+            cbs_movie.borrow_mut().fns.insert(id, (f, super::unpack_ctx(ctx)));
+        }
+        Ok(())
+    })?)?;
 
     // --- flash widget ---
     wset!("SetFlashSwfFile", String, |w, v| { if let Some(f) = w.flash.as_mut() { f.swf = v; } });
@@ -445,25 +613,40 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wset!("MinimapSetRotation", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.rotation = v; } });
     wset!("MinimapSetRange", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.range = v; } });
     wset!("SetMinimapRadius", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.radius = v; } });
-    wset!("SetMinimapOwner", i64, |w, v| { if let Some(m) = w.minimap.as_mut() { m.owner = v as u64; } });
+    // The minimap owner is a **player handle**, not a widget id: `mrxguibase.lua:1419` is
+    // `_GuiInternal.SetMinimapOwner(self.BasicData.uId, uGuid)` reached from `Widget:SetOwner(uGuid)`,
+    // which gates on `"userdata" ~= type(uGuid)` at :853. An `i64` here raised on every owner set.
+    wset!("SetMinimapOwner", Guid, |w, v| { if let Some(m) = w.minimap.as_mut() { m.owner = v.raw(); } });
     let hh = host.clone();
-    b.real("MinimapSetPlayerLocation", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.player_location = [x, y]; } } }
+    b.real("MinimapSetPlayerLocation", lua.create_function(move |_, (wid, x, y): (Option<i64>, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { if let Some(m) = w.minimap.as_mut() { m.player_location = [x, y]; } } }
         Ok(())
     })?)?;
     let hh = host.clone();
-    b.real("MinimapSetFocusLocation", lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.focus_location = [x, y]; } } }
+    b.real("MinimapSetFocusLocation", lua.create_function(move |_, (wid, x, y): (Option<i64>, f32, f32)| {
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { if let Some(m) = w.minimap.as_mut() { m.focus_location = [x, y]; } } }
+        Ok(())
+    })?)?;
+    // `_GuiInternal.MinimapAddObjective(uId, sName, nX, nY, nZ, nR, nG, nB, uGuid, nWidth, nHeight,
+    //  sTexture, bSticky, bRotate, bOriented, nSortOrder)` — `mrxguibase.lua:1485` and the identical
+    // `:1516`, reached from `MinimapWidget:AddObjective` (:1484) and `:AddObjectiveWithGuid` (:1512),
+    // the latter gating on `"userdata" ~= type(uGuid)` at :1513 before it calls.
+    //
+    // Argument **2 is the objective's name**, and the handle is argument **9**. An earlier signature
+    // read arg 2 as the handle, so every objective landed under the same key and the colour channels
+    // were read as the position. Objectives are therefore keyed by the engine hash of their name —
+    // the same key `MinimapRemoveObjective(uId, sName)` (:1524) removes by.
+    let hh = host.clone();
+    #[allow(clippy::type_complexity)]
+    b.real("MinimapAddObjective", lua.create_function(move |_, (wid, name, x, y, z, _r, _g, _b, _guid, _rest): (Option<i64>, String, f32, f32, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Guid, MultiValue)| {
+        let key = mercs2_formats::hash::pandemic_hash_m2(&name) as u64;
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { if let Some(m) = w.minimap.as_mut() { m.objectives.insert(key, [x, y, z.unwrap_or(0.0)]); } } }
         Ok(())
     })?)?;
     let hh = host.clone();
-    b.real("MinimapAddObjective", lua.create_function(move |_, (wid, oid, x, y, z): (i64, i64, f32, f32, Option<f32>)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.objectives.insert(oid as u64, [x, y, z.unwrap_or(0.0)]); } } }
-        Ok(())
-    })?)?;
-    let hh = host.clone();
-    b.real("MinimapRemoveObjective", lua.create_function(move |_, (wid, oid): (i64, i64)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { if let Some(m) = w.minimap.as_mut() { m.objectives.remove(&(oid as u64)); } } }
+    b.real("MinimapRemoveObjective", lua.create_function(move |_, (wid, name): (Option<i64>, String)| {
+        let key = mercs2_formats::hash::pandemic_hash_m2(&name) as u64;
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid.unwrap_or(0) as u64) { if let Some(m) = w.minimap.as_mut() { m.objectives.remove(&key); } } }
         Ok(())
     })?)?;
 

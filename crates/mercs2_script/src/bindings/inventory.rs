@@ -2,16 +2,16 @@
 //!
 //! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
-//! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
+//! `corpus_calls` = call sites across the base corpus **plus** `docs/mercs2-dlc-luacd/src` (the base-only recipe an earlier revision named is retracted — it undercounts by 75 files)). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
 //! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_child("Human", "Inventory")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult, Value};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -37,52 +37,87 @@ pub const REQUIRED: &[Required] = &[
     Required { name: "DestroyAllWeapons", corpus_calls: 0 },
 ];
 
-/// A human's weapon loadout. The native inventory component isn't owned yet, so the weapon getters
-/// report an empty loadout (`nil` for a single slot, empty table for `GetAllWeapons`, so the game's
-/// `for w in tWeapons` iteration is a faithful no-op) and the mutators are accepted no-ops. A later
-/// silo backs these with the real inventory component (see report — needs `inventory_*` host methods).
+/// A human's weapon loadout, backed by `mercs2_combat::inventory`.
+///
+/// **Return shapes are the substance here.** Four of the nine cfuncs were pushing the wrong thing, and
+/// shipped scripts branch on all four (`inventory_equipment_code_map.md` §10 item 5):
+/// `SetAllWeapons`/`EquipWeapon`/`DropWeapon` push a **boolean**, `ReloadAll` pushes `true` or **nil**
+/// when its second argument is absent, and `DestroyAllWeapons` pushes **nothing**.
+///
+/// A handle miss returns nil and does **not** raise — retail's arg reader (`FUN_0059FF50`) returns 0 for
+/// anything it does not recognise rather than erroring.
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // Slot getters read the real per-character loadout; 0 → nil so `if not w` control flow holds.
+    // `0` → nil so the game's `if not w` control flow holds; non-zero → lightuserdata (`crate::guid`).
+    fn guid_opt(g: u64) -> Guid {
+        Guid(g)
+    }
+
     let h = host.clone();
-    b.real("GetPrimaryWeapon", lua.create_function(move |_, c: i64| {
-        let g = h.borrow().inventory_primary(c as u64);
-        Ok(if g == 0 { None } else { Some(g as i64) })
+    b.real("GetPrimaryWeapon", lua.create_function(move |_, c: Guid| {
+        Ok(guid_opt(h.borrow().inventory_primary(c.raw())))
     })?)?;
     let h = host.clone();
-    b.real("GetSecondaryWeapon", lua.create_function(move |_, c: i64| {
-        let g = h.borrow().inventory_secondary(c as u64);
-        Ok(if g == 0 { None } else { Some(g as i64) })
+    b.real("GetSecondaryWeapon", lua.create_function(move |_, c: Guid| {
+        Ok(guid_opt(h.borrow().inventory_secondary(c.raw())))
     })?)?;
     let h = host.clone();
-    b.real("GetAllWeapons", lua.create_function(move |_, c: i64| {
-        Ok(h.borrow().inventory_weapons(c as u64).into_iter().map(|w| w as i64).collect::<Vec<_>>())
+    // ⚠ No fallback, unlike the other two slot getters.
+    b.real("GetVehicleWeapon", lua.create_function(move |_, c: Guid| {
+        Ok(guid_opt(h.borrow().inventory_vehicle_weapon(c.raw())))
+    })?)?;
+    let h = host.clone();
+    // ⚠ **ONE** array table — primaries (equipped first) then secondaries — plus the optional 2nd arg.
+    //
+    // An earlier revision returned two Lua values and its comment claimed that was required. It is the
+    // opposite of the oracle: §4.4 reads the epilogue as `FUN_005A1270(N, &L)` = `lua_createtable` +
+    // N × `rawseti`, then **`return 1`** (`mov eax,1` @`0x005BF14E`); §7.3 shows the Lua side as a
+    // single-value assignment iterated with `pairs`. Two returns made every shipped
+    // `GetAllWeapons` → `SetAllWeapons` round trip silently drop its secondaries.
+    b.real("GetAllWeapons", lua.create_function(move |lua, (c, exclude): (Guid, Option<bool>)| {
+        let all = h.borrow().inventory_weapons(c.raw(), exclude.unwrap_or(false));
+        lua.create_sequence_from(all.into_iter().map(Guid))
     })?)?;
 
-    // Loadout mutators → the real loadout.
     let h = host.clone();
-    b.real("SetAllWeapons", lua.create_function(move |_, (c, weapons): (i64, Vec<i64>)| {
-        h.borrow_mut().inventory_set_weapons(c as u64, weapons.into_iter().map(|w| w as u64).collect());
+    // ⚠ Argument 2 arrives as a **table of GUIDs or a bare GUID** — six shipped mission sites use the
+    // bare form, and a table-only signature raises on them. Pushes a boolean.
+    b.real("SetAllWeapons", lua.create_function(move |_, (c, weapons): (Guid, Option<Value>)| {
+        let list: Vec<u64> = match weapons {
+            Some(Value::Table(t)) => t
+                .sequence_values::<Guid>()
+                .filter_map(|v| v.ok())
+                .map(Guid::raw)
+                .collect(),
+            // The bare form is a single handle — now lightuserdata, historically an integer.
+            Some(other) => match Guid::from_value(&other) {
+                Guid(0) => Vec::new(),
+                g => vec![g.raw()],
+            },
+            None => Vec::new(),
+        };
+        Ok(h.borrow_mut().inventory_set_weapons(c.raw(), list))
+    })?)?;
+    let h = host.clone();
+    b.real("EquipWeapon", lua.create_function(move |_, (c, w): (Guid, Guid)| {
+        Ok(h.borrow_mut().inventory_equip(c.raw(), w.raw()))
+    })?)?;
+    let h = host.clone();
+    b.real("DropWeapon", lua.create_function(move |_, (c, w): (Guid, Guid)| {
+        Ok(h.borrow_mut().inventory_drop(c.raw(), w.raw()))
+    })?)?;
+    let h = host.clone();
+    // Pushes **nothing** — the one mutator here that does not report.
+    b.real("DestroyAllWeapons", lua.create_function(move |_, c: Guid| {
+        h.borrow_mut().inventory_destroy_all(c.raw());
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("EquipWeapon", lua.create_function(move |_, (c, w): (i64, i64)| { h.borrow_mut().inventory_equip(c as u64, w as u64); Ok(()) })?)?;
-    let h = host.clone();
-    b.real("DropWeapon", lua.create_function(move |_, (c, w): (i64, i64)| { h.borrow_mut().inventory_drop(c as u64, w as u64); Ok(()) })?)?;
-    let h = host.clone();
-    b.real("DestroyAllWeapons", lua.create_function(move |_, c: i64| { h.borrow_mut().inventory_destroy_all(c as u64); Ok(()) })?)?;
-
-    // GetVehicleWeapon → nil until the vehicle↔weapon link exists. ReloadAll(character) → reload every
-    // weapon in the character's loadout to capacity (real, via the weapon ammo store).
-    b.real("GetVehicleWeapon", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
-    let h = host.clone();
-    b.real("ReloadAll", lua.create_function(move |_, c: i64| {
-        let weapons = h.borrow().inventory_weapons(c as u64);
-        for w in weapons {
-            h.borrow_mut().weapon_reload(w);
-        }
-        Ok(())
+    // ⚠ Argument 2 is **required**: retail bails and pushes nil without it, and the two shipped DLC
+    // call sites were written against that bail.
+    b.real("ReloadAll", lua.create_function(move |_, (c, arg2): (Guid, Option<bool>)| {
+        Ok(h.borrow_mut().inventory_reload_all(c.raw(), arg2))
     })?)?;
 
     // Installed directly as a child of `Human`, matching retail's marker-delimited sub-table. This

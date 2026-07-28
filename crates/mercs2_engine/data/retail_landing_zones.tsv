@@ -1,0 +1,73 @@
+# TEST FIXTURE ONLY -- the retail `vz` transit landing pads (the `LandingZone` COMP), extracted.
+#
+# NOT A GAME ASSET PATH. The loader that reads this file is `#[cfg(test)]`, so it cannot be compiled
+# into the shipping game at all. The game reads these pads from the player's own vz.wad
+# (`worldutil::landing_zone_pads`, called from `mercs2_game::world`) and this file is never consulted
+# there. Nothing here makes the game playable without owning it, and nothing here may ever be wired
+# into a runtime path -- if you find yourself wanting to, read the WAD instead.
+#
+# WHY IT EXISTS. `Pg.GetAllLandingZones(nSlot)` answers from WORLD DATA, not from Lua. The shipped
+# corpus holds only REFERENCES to these pads -- a zone number (`nLandingZone = 12`,
+# `vz/wifhqdata.lua:126`) or a name to resolve (`sParkingLot = "12_chi_hq_lz_playerone"`, `:128`) --
+# so a test host with the Lua corpus but no archive cannot produce them. `MrxTransit.Reset` then
+# bails on the empty list, leaves `_tLandingZones = false`, and the shipped `SaveSingleton` (which
+# iterates it with none of the `if not _tLandingZones` guards its siblings carry) is a hard error.
+#
+# PROVENANCE. Every row is measured, not authored: `worldutil::landing_zone_pads()` over the retail
+# `layers_static` block of vz.wad. 46 records = 23 zones x 2 co-op player slots. The zone set
+# `1..8, 12, 15..18, 20..25, 27..30` is corroborated independently by the vendored save fixtures'
+# `tTransitData` and by a live capture of retail play (see
+# `retail_capture_corroborates_the_authored_landing_zone_set`). `landing_zone_pads_match_the_vendored_table`
+# re-derives this file from the WAD and fails on any drift, so it cannot silently rot.
+#
+# Zone 12 slot 1 has an empty name: it ships with a `LandingZone` record and a `Transform` but no
+# `Name` COMP. Reproduced, not repaired -- it is why the COMP, and not the name convention, is the
+# enumeration authority. Zone 3 slot 1's `..._llz_playerone` is likewise a retail typo, kept.
+#
+# Columns, tab-separated: zone  slot  key  name  x  y  z
+1	1	882922	01_pmc_hq_lz_playerone	2631.5313	8.071381	-887.1286
+1	2	882988	01_pmc_hq_lz_playertwo	2624.1704	8.071384	-887.0991
+2	1	816199	02_oil_hq_lz_playerone	2515.0476	-30.111942	1462.6904
+2	2	816200	02_oil_hq_lz_playertwo	2511.395	-30.111958	1458.8574
+3	1	882927	03_mar_airport_llz_playerone	3026.451	-0.860748	1759.4299
+3	2	882983	03_mar_airport_lz_playertwo	3026.452	-0.860754	1764.8027
+4	1	882928	04_mer_white_lz_playerone	1321.8656	1.87808	-1612.889
+4	2	882985	04_mer_white_lz_playertwo	1322.7579	1.840455	-1607.8966
+5	1	882931	05_gur_hq_lz_playerone	1582.8275	162.42937	-2451.154
+5	2	882981	05_gur_hq_lz_playertwo	1580.7023	162.42935	-2454.4382
+6	1	1119349	06_gua_upperclass_lz_playerone	332.6632	-13.437506	-2027.7076
+6	2	1119350	06_gua_upperclass_lz_playertwo	329.25055	-13.437494	-2031.5884
+7	1	882934	07_all_hq_lz_playerone	260.55487	-30.041842	224.7245
+7	2	882975	07_all_hq_lz_playertwo	260.59012	-30.011986	220.14267
+8	1	882936	08_pir_hq_lz_playerone	2081.7854	-27.89162	2619.0552
+8	2	882987	08_pir_hq_lz_playertwo	2084.0403	-27.891626	2615.1013
+12	1	882945		-2315.9001	15.611906	1081.1229
+12	2	882977	12_chi_hq_lz_playertwo	-2318.6128	15.611915	1085.0865
+15	1	1119346	15_mar_altagracia_lz_playerone	1558.2863	-20.38021	1181.3029
+15	2	1119347	15_mar_altagracia_lz_playertwo	1558.2776	-20.38021	1186.9607
+16	1	1190417	16_mar_cambias_lz_playerone	1861.4719	-18.719028	462.0749
+16	2	1190418	16_mar_cambias_lz_playertwo	1856.1697	-18.719028	462.0749
+17	1	1190421	17_gur_con053_lz_playerone	1066.2466	-7.266837	-1808.8857
+17	2	1190423	17_gur_con053_lz_playertwo	1063.8003	-7.266836	-1803.7465
+18	1	1190427	18_gur_con052_lz_playerone	2603.0999	71.066826	-2316.744
+18	2	1190429	18_gur_con052_lz_playertwo	2598.2588	71.0668	-2313.9924
+20	1	1190437	20_all_con050_lz_playerone	-559.56555	-29.743567	314.489
+20	2	1190438	20_all_con050_lz_playertwo	-553.88226	-29.743551	316.16367
+21	1	1190441	21_all_con053_lz_playerone	-1328.9524	-30.618565	218.09288
+21	2	1190442	21_all_con053_lz_playertwo	-1327.6833	-30.618555	224.08575
+22	1	1190443	22_all_con052_lz_playerone	-1076.4574	-24.846392	1920.3792
+22	2	1190445	22_all_con052_lz_playertwo	-1070.7627	-24.846392	1920.3792
+23	1	1190452	23_chi_con050_lz_playerone	-2087.762	-10.783969	93.91729
+23	2	1190453	23_chi_con050_lz_playertwo	-2089.2205	-10.752282	88.03108
+24	1	1190457	24_chi_con051_lz_playerone	-1902.2805	19.523397	894.4012
+24	2	1190458	24_chi_con051_lz_playertwo	-1897.4014	19.5234	899.0588
+25	1	1190461	25_chi_con053_lz_playerone	-3236.2886	17.783783	358.9965
+25	2	1190462	25_chi_con053_lz_playertwo	-3233.7031	17.783783	354.38126
+27	1	1190469	27_pir_con051_lz_playerone	1307.4995	-13.684546	2788.0508
+27	2	1190470	27_pir_con051_lz_playertwo	1306.767	-13.684546	2792.516
+28	1	1190473	28_pir_con052_lz_playerone	701.7336	-1.573082	1328.9144
+28	2	1190474	28_pir_con052_lz_playertwo	704.80426	-1.643124	1332.0651
+29	1	1294835	29_oil_depot_lz_playerone	2013.7527	-30.196297	1509.7965
+29	2	1294836	29_oil_depot_lz_playertwo	2018.2905	-30.196297	1509.8733
+30	1	1294840	30_chi_hqb_lz_playerone	-2295.944	-11.806061	687.893
+30	2	1294841	30_chi_hqb_lz_playertwo	-2297.421	-11.806062	681.85767

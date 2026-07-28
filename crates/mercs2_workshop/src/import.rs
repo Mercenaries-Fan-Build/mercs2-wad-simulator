@@ -44,16 +44,148 @@ pub struct Imported {
     pub skin_parents: Vec<i32>,
 }
 
+/// Every material's texture slots for one glTF/GLB, keyed by the file's OWN material index.
+///
+/// Both import paths resolve materials through this, so a preview built from the raw import and one
+/// built from the conformed `char_skin` mesh bind the SAME hash for the same source image. That is
+/// what lets the Skeleton workbench keep a character's skins across Apply: the conformed mesh reuses
+/// the source's material indices (carried per-primitive on `CharGlbData::parts`) instead of trying to
+/// match two INDEPENDENTLY MERGED vertex streams. It cannot: `load_char_glb` merges in `doc.meshes()`
+/// document order and skips unskinned primitives, while [`import_model`] merges in scene-DFS order
+/// and keeps them, so on any multi-mesh character the two streams are permutations of each other.
+#[derive(Default)]
+pub struct MaterialTextures {
+    /// Encoded texture bodies, ready for `Scene::load_model`.
+    pub textures: TexMap,
+    /// material index → diffuse (MTRL slot 0) hash.
+    pub diffuse: HashMap<usize, u32>,
+    /// material index → specular (slot 1) hash.
+    pub specular: HashMap<usize, u32>,
+    /// material index → normal (slot 2) hash, encoded DXT5nm as that slot expects.
+    pub normal: HashMap<usize, u32>,
+}
+
+/// Resolve every material's texture slots from an ALREADY-imported document.
+///
+/// Slot mapping follows the publish path (`extract_skel_parts`): 0 = baseColor, 1 = specular,
+/// 2 = normal. For slot 1, `metallicRoughness` is the usual carrier, but a Blender/Substance export
+/// of a game rip frequently has none and puts the gloss under `KHR_materials_specular` instead —
+/// checked as a fallback so those materials do not silently lose their specular.
+fn material_textures(
+    doc: &gltf::Document,
+    images: &[gltf::image::Data],
+    stem: &str,
+) -> MaterialTextures {
+    let mut out = MaterialTextures::default();
+    // (image, is_normal) → hash. One image can be a colour map for one material and a normal map for
+    // another; those need different encodings, so the kind is part of the key.
+    let mut cache: HashMap<(usize, bool), u32> = HashMap::new();
+    let mut encode = |img_idx: usize, is_normal: bool, out: &mut MaterialTextures| -> Option<u32> {
+        if let Some(&h) = cache.get(&(img_idx, is_normal)) {
+            return Some(h);
+        }
+        let img = images.get(img_idx)?;
+        let rgba = to_rgba8(img)?;
+        // `#tex<n>` is the name the colour path has always used — keep it so a re-import of the same
+        // file lands on the same hashes. Normals get their own namespace: different encoding.
+        let tag = if is_normal { "nrm" } else { "tex" };
+        let h = pandemic_hash_m2(&format!("{stem}#{tag}{img_idx}"));
+        let td = if is_normal {
+            crate::texenc::encode_normal_full_chain(img.width, img.height, &rgba)
+        } else {
+            crate::texenc::encode_rgba(img.width, img.height, &rgba)
+        };
+        out.textures.insert(h, td);
+        cache.insert((img_idx, is_normal), h);
+        Some(h)
+    };
+    for m in doc.materials() {
+        let Some(mi) = m.index() else { continue }; // the default material binds nothing
+        if let Some(t) = m.pbr_metallic_roughness().base_color_texture() {
+            if let Some(h) = encode(t.texture().source().index(), false, &mut out) {
+                out.diffuse.insert(mi, h);
+            }
+        }
+        let spec = m
+            .pbr_metallic_roughness()
+            .metallic_roughness_texture()
+            .or_else(|| m.specular().and_then(|s| s.specular_texture()))
+            .or_else(|| m.specular().and_then(|s| s.specular_color_texture()));
+        if let Some(t) = spec {
+            if let Some(h) = encode(t.texture().source().index(), false, &mut out) {
+                out.specular.insert(mi, h);
+            }
+        }
+        if let Some(t) = m.normal_texture() {
+            if let Some(h) = encode(t.texture().source().index(), true, &mut out) {
+                out.normal.insert(mi, h);
+            }
+        }
+    }
+    out
+}
+
+/// Load JUST the material/texture side of a glTF/GLB — what the Skeleton workbench needs to skin a
+/// mesh that came through [`load_char_glb`], which reads geometry only.
+pub fn load_material_textures(path: &Path) -> Result<MaterialTextures, String> {
+    let (doc, _buffers, images) =
+        gltf::import(path).map_err(|e| format!("gltf {}: {e}", path.display()))?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("import");
+    Ok(material_textures(&doc, &images, stem))
+}
+
+/// One draw group per SOURCE primitive, straight off [`CharGlbData::parts`].
+///
+/// `parts` partitions the very triangle stream the conformed mesh is built from, so each group's
+/// index range and material are exact BY CONSTRUCTION — no matching against a separately-merged
+/// import, which is what used to fail and leave the whole character untextured. A file with no parts
+/// (or no materials to bind) degrades to one untextured group over the whole buffer.
+fn part_draws(parts: &[MeshPart], index_count: usize, mats: Option<&MaterialTextures>) -> Vec<DrawGroup> {
+    let mut draws: Vec<DrawGroup> = parts
+        .iter()
+        .filter(|p| p.tri_count > 0)
+        .enumerate()
+        .map(|(gi, p)| DrawGroup {
+            index_start: (p.tri_start * 3) as u32,
+            index_count: (p.tri_count * 3) as u32,
+            diffuse: p.material.zip(mats).and_then(|(m, mt)| mt.diffuse.get(&m).copied()),
+            specular: p.material.zip(mats).and_then(|(m, mt)| mt.specular.get(&m).copied()),
+            normal: p.material.zip(mats).and_then(|(m, mt)| mt.normal.get(&m).copied()),
+            group_index: gi,
+            ..Default::default()
+        })
+        .collect();
+    if draws.is_empty() {
+        draws.push(DrawGroup {
+            index_start: 0,
+            index_count: index_count as u32,
+            group_index: 0,
+            ..Default::default()
+        });
+    }
+    draws
+}
+
 /// Build an [`Imported`] from a faithful [`CharSkin`] result so the Skeleton-workbench PREVIEW
 /// renders EXACTLY what the shipped/injected character looks like — the same data
 /// `inject_character_into_donor_block` writes, but with the palette-relative BLENDINDICES
 /// **expanded back to GLOBAL** (the engine/GPU skins with global indices; only the WAD reader
 /// `model_cubeize` expands the INFO(56) range table at load, and imports never pass through it).
 ///
-/// The mesh is `char_skin`'s re-posed geometry (mesh0/prim0), skinned to `target_rig` (the target
-/// character's HIER BoneRig, in HIER order). Since the mesh is conformed into the target's bind
-/// space, the target's own animation clips drive it directly — no cross-skeleton retarget.
-pub fn char_skin_to_imported(cs: &CharSkin, glb: &CharGlbData, target_rig: Vec<BoneRig>) -> Imported {
+/// The mesh is `char_skin`'s re-posed geometry, skinned to `target_rig` (the target character's HIER
+/// BoneRig, in HIER order). Since the mesh is conformed into the target's bind space, the target's
+/// own animation clips drive it directly — no cross-skeleton retarget.
+///
+/// `mats` are the SOURCE file's materials from [`load_material_textures`]. Pass them to keep the
+/// character's skins: the draw groups come from `glb.parts`, which partitions the very triangle
+/// stream this builds from, so each group's material index is exact by construction. `None` gives a
+/// single untextured group (what the flat-white `--faithful` shot wants).
+pub fn char_skin_to_imported(
+    cs: &CharSkin,
+    glb: &CharGlbData,
+    target_rig: Vec<BoneRig>,
+    mats: Option<&MaterialTextures>,
+) -> Imported {
     let palette = expand_ranges(&cs.ranges); // slot -> global HIER (the reader's expansion)
     let nv = cs.pos.len();
     let mut verts = Vec::with_capacity(nv);
@@ -88,13 +220,7 @@ pub fn char_skin_to_imported(cs: &CharSkin, glb: &CharGlbData, target_rig: Vec<B
         });
     }
     let indices = glb.indices.clone();
-    let draws = vec![DrawGroup {
-        index_start: 0,
-        index_count: indices.len() as u32,
-        diffuse: None,
-        group_index: 0,
-        ..Default::default()
-    }];
+    let draws = part_draws(&glb.parts, indices.len(), mats);
     // identity bind palette sized to cover every referenced global bone
     const IDENT: [[f32; 4]; 4] =
         [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -132,7 +258,7 @@ pub fn char_skin_to_imported(cs: &CharSkin, glb: &CharGlbData, target_rig: Vec<B
         verts,
         indices,
         draws,
-        textures: TexMap::new(),
+        textures: mats.map(|m| m.textures.clone()).unwrap_or_default(),
         stats,
         skin,
         skin_joints: Vec::new(),
@@ -327,20 +453,9 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
         gltf::import(path).map_err(|e| format!("gltf {}: {e}", path.display()))?;
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("import");
 
-    // Base-color image index → (synthetic hash, TextureData), encoded once.
-    let mut textures: TexMap = TexMap::new();
-    let mut tex_hash_for_image: HashMap<usize, u32> = HashMap::new();
-    let mut ensure_tex = |img_idx: usize, textures: &mut TexMap| -> Option<u32> {
-        if let Some(&h) = tex_hash_for_image.get(&img_idx) {
-            return Some(h);
-        }
-        let img = images.get(img_idx)?;
-        let rgba = to_rgba8(img)?;
-        let h = pandemic_hash_m2(&format!("{stem}#tex{img_idx}"));
-        textures.insert(h, crate::texenc::encode_rgba(img.width, img.height, &rgba));
-        tex_hash_for_image.insert(img_idx, h);
-        Some(h)
-    };
+    // All three texture slots per material, resolved once — the same table the Skeleton workbench's
+    // conformed preview binds, so import and Apply show the same materials.
+    let mats = material_textures(&doc, &images, stem);
 
     let mut verts: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
@@ -559,15 +674,13 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
                 Some(ind) => indices.extend(ind.into_u32().map(|i| base + i)),
                 None => indices.extend(base..verts.len() as u32),
             }
-            let diffuse = prim
-                .material()
-                .pbr_metallic_roughness()
-                .base_color_texture()
-                .and_then(|t| ensure_tex(t.texture().source().index(), &mut textures));
+            let mi = prim.material().index();
             draws.push(DrawGroup {
                 index_start: start,
                 index_count: indices.len() as u32 - start,
-                diffuse,
+                diffuse: mi.and_then(|m| mats.diffuse.get(&m).copied()),
+                specular: mi.and_then(|m| mats.specular.get(&m).copied()),
+                normal: mi.and_then(|m| mats.normal.get(&m).copied()),
                 group_index: draws.len(),
                 ..Default::default()
             });
@@ -576,7 +689,7 @@ fn import_gltf(path: &Path) -> Result<Imported, String> {
     if verts.is_empty() {
         return Err("gltf contained no mesh primitives".into());
     }
-    Ok(finish(verts, indices, draws, textures, skin_joints, skin_joint_pos, skin_ibm, skin_parents))
+    Ok(finish(verts, indices, draws, mats.textures, skin_joints, skin_joint_pos, skin_ibm, skin_parents))
 }
 
 const IDENT4: [[f32; 4]; 4] =
@@ -761,6 +874,64 @@ fn mat_dir(m: &[[f32; 4]; 4], d: [f32; 3]) -> [f32; 3] {
     }
     let l = (o[0] * o[0] + o[1] * o[1] + o[2] * o[2]).sqrt().max(1e-6);
     [o[0] / l, o[1] / l, o[2] / l]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn part(tri_start: usize, tri_count: usize, material: Option<usize>) -> MeshPart {
+        MeshPart { name: String::new(), tri_start, tri_count, material }
+    }
+
+    /// The parts partition tiles the index buffer exactly, and each group binds its OWN material's
+    /// slots. This is the regression: a multi-mesh character used to collapse to one untextured
+    /// group because the texture transfer required two independently-merged vertex streams to match.
+    #[test]
+    fn part_draws_tile_the_buffer_and_carry_materials() {
+        let mut mats = MaterialTextures::default();
+        mats.diffuse.insert(0, 0xD0);
+        mats.specular.insert(0, 0x50);
+        mats.normal.insert(1, 0x11);
+
+        let parts = [part(0, 2, Some(0)), part(2, 3, Some(1)), part(5, 1, None)];
+        let draws = part_draws(&parts, 18, Some(&mats));
+        assert_eq!(draws.len(), 3);
+
+        // Contiguous, gapless, covering every index.
+        let mut next = 0u32;
+        for (gi, d) in draws.iter().enumerate() {
+            assert_eq!(d.index_start, next, "group {gi} is not contiguous");
+            assert_eq!(d.group_index, gi);
+            next += d.index_count;
+        }
+        assert_eq!(next, 18, "groups do not cover the whole index buffer");
+
+        assert_eq!((draws[0].diffuse, draws[0].specular, draws[0].normal), (Some(0xD0), Some(0x50), None));
+        // material 1 has only a normal map; material-less parts bind nothing.
+        assert_eq!((draws[1].diffuse, draws[1].specular, draws[1].normal), (None, None, Some(0x11)));
+        assert_eq!((draws[2].diffuse, draws[2].specular, draws[2].normal), (None, None, None));
+    }
+
+    /// No materials (the flat-white `--faithful` shot) still yields drawable geometry.
+    #[test]
+    fn part_draws_without_materials_still_draw() {
+        let draws = part_draws(&[part(0, 4, Some(0))], 12, None);
+        assert_eq!(draws.len(), 1);
+        assert_eq!((draws[0].index_start, draws[0].index_count), (0, 12));
+        assert_eq!(draws[0].diffuse, None);
+    }
+
+    /// An empty / degenerate partition falls back to one group over the whole buffer rather than
+    /// producing a model that draws nothing.
+    #[test]
+    fn part_draws_empty_partition_falls_back() {
+        for parts in [vec![], vec![part(0, 0, Some(0))]] {
+            let draws = part_draws(&parts, 33, None);
+            assert_eq!(draws.len(), 1);
+            assert_eq!((draws[0].index_start, draws[0].index_count), (0, 33));
+        }
+    }
 }
 
 /// gltf image data → straight RGBA8.

@@ -1,0 +1,14 @@
+{
+    "crucible.roles.postValidator": {
+        "provider": "ollama",
+        "model": "laguna-xs.2:latest"
+    },
+    "crucible.roles.planner": {
+        "provider": "ollama",
+        "model": "laguna-xs.2:latest"
+    },
+    "crucible.roles.executor": {
+        "provider": "ollama",
+        "model": "qwen3-coder:30b"
+    }
+}

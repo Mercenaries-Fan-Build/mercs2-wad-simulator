@@ -32,7 +32,8 @@ pub mod widget;
 
 pub use marker::{Marker, MarkerKind, MarkerSet};
 pub use widget::{
-    FlashData, ImageData, MinimapData, MovieData, SpriteData, TextData, Widget, WidgetKind, WidgetTree,
+    FlashData, ImageData, MinimapData, MovieData, SpriteData, TextData, Widget, WidgetAnim, WidgetKind,
+    WidgetTree, COLOR_UNCHANGED,
 };
 
 #[cfg(test)]

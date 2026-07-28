@@ -12,8 +12,14 @@
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
+/// A cue's voice id, `0` → nil.
+///
+/// Deliberately **not** a [`Guid`]: a voice id is minted by the audio mixer, not by the engine's GUID
+/// allocator, and nothing in the Lua corpus round-trips it — the shipped `Sound.StopSound` addresses
+/// a sound by `(emitter, cue)`, never by the value `CueSound` returned, and no call site type-checks
+/// it. Making it lightuserdata would be an assertion the corpus does not support.
 fn voice_opt(v: u64) -> Option<i64> {
     if v == 0 { None } else { Some(v as i64) }
 }
@@ -123,12 +129,37 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
     // --- cue playback ---
+    // ⚠ The call shape is `Sound.CueSound(uEmitter, sCue)` / `Sound.StopSound(uEmitter, sCue)` — the
+    // **emitter handle comes first**, and `0` is the "no emitter, play 2D" form:
+    // `pmccon002.lua:164` `Sound.CueSound(uAlarm, "fol_alarm_bldg_01")`,
+    // `pmccon001.lua:496` `Sound.CueSound(Pg.GetGuidByName("PMC001_EntourageScorpion"), "exp_bust_thru_wall")`,
+    // `wifvzboundary.lua:87-89` `Sound.CueSound(0, "ui_static")` / `Sound.StopSound(0, "ui_static")`,
+    // `mine.lua:64` `Sound.StopSound(uGuid, "wpn_bomb_timer_01_finalstage")`.
+    //
+    // An earlier single-`String` signature read the emitter as the cue name (silently playing cue
+    // `"268435456"`); once `Pg.GetGuidByName` returns lightuserdata that same signature **raises**,
+    // which would abort the caller's chain. Hence the explicit `(Guid, String)`.
+    //
+    // The emitter is accepted and not yet placed: `AudioEngine` has no per-emitter 3D voice pool, so
+    // playback is the 2D path either way. Tracked in the burn-down.
     let h = host.clone();
-    b.real("CueSound", lua.create_function(move |_, cue: String| Ok(voice_opt(h.borrow_mut().sound_cue(&cue))))?)?;
+    b.real("CueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
+        Ok(voice_opt(h.borrow_mut().sound_cue(&cue)))
+    })?)?;
+    // Stop/pause are addressed by `(emitter, cue)`, but the host's stop is keyed by the voice id
+    // `sound_cue` minted and there is no `(emitter, cue) → voice` index yet, so a cue-addressed stop
+    // reaches no voice. Forwarding the emitter keeps the arity honest without inventing a mapping;
+    // the index needs a host seam (burn-down).
     let h = host.clone();
-    b.real("StopSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_stop(v as u64); Ok(()) })?)?;
+    b.real("StopSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {
+        h.borrow_mut().sound_stop(emitter.raw());
+        Ok(())
+    })?)?;
     let h = host.clone();
-    b.real("PauseSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_pause(v as u64); Ok(()) })?)?;
+    b.real("PauseSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {
+        h.borrow_mut().sound_pause(emitter.raw());
+        Ok(())
+    })?)?;
     let h = host.clone();
     b.real("StopAndFlushAllSounds", lua.create_function(move |_, ()| { h.borrow_mut().sound_stop_all(); Ok(()) })?)?;
     let h = host.clone();
@@ -170,13 +201,21 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("_GetLibVersion", lua.create_function(move |_, ()| Ok(h.borrow().sound_lib_version()))?)?;
 
-    // --- test cue variants (route through the same cue playback path) ---
+    // --- test cue variants (same `(emitter, cue)` shape, same playback path) ---
     let h = host.clone();
-    b.real("TestCueSound", lua.create_function(move |_, cue: String| Ok(voice_opt(h.borrow_mut().sound_cue(&cue))))?)?;
+    b.real("TestCueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
+        Ok(voice_opt(h.borrow_mut().sound_cue(&cue)))
+    })?)?;
     let h = host.clone();
-    b.real("TestStopSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_stop(v as u64); Ok(()) })?)?;
+    b.real("TestStopSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {
+        h.borrow_mut().sound_stop(emitter.raw());
+        Ok(())
+    })?)?;
     let h = host.clone();
-    b.real("TestPauseSound", lua.create_function(move |_, v: i64| { h.borrow_mut().sound_pause(v as u64); Ok(()) })?)?;
+    b.real("TestPauseSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {
+        h.borrow_mut().sound_pause(emitter.raw());
+        Ok(())
+    })?)?;
 
     // --- faithful-default GETTERS (game reads the return; no host state modelled yet) ---
     // `is-locked` music queries → never locked in a fresh session.

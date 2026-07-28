@@ -3703,23 +3703,25 @@ pub fn run(opts: Options) {
                                         if target_rig.is_empty() {
                                             return Err(format!("target {tl} carries no skeleton"));
                                         }
-                                        let mut md: ModelData =
-                                            crate::import::char_skin_to_imported(&cs, &glb, target_rig)
-                                                .into();
-                                        // Texture the conformed mesh from the SOURCE file: it is the same
-                                        // merged primitive stream, so its per-material draw groups + textures
-                                        // + UVs map onto the re-posed verts. Re-imported (not read from the
-                                        // in-app store, which a prior Apply overwrote with a bald mesh).
-                                        if let Ok(src) = crate::import::import_model(&src_path) {
-                                            let src: ModelData = src.into();
-                                            if src.verts.len() == md.verts.len() && src.indices == md.indices {
-                                                for (v, iv) in md.verts.iter_mut().zip(src.verts.iter()) {
-                                                    v.uv = iv.uv;
-                                                }
-                                                md.draws = src.draws;
-                                                md.textures = src.textures;
+                                        // Texture the conformed mesh from the SOURCE file's MATERIALS,
+                                        // keyed by the material index each `CharGlbData` part already
+                                        // carries. This used to re-import the file and copy its draws
+                                        // across only if the two vertex streams matched byte for byte —
+                                        // which a multi-mesh character never does (the two importers
+                                        // merge in different orders), so every one of them previewed
+                                        // bald. The part partition needs no such matching.
+                                        let mats = match crate::import::load_material_textures(&src_path) {
+                                            Ok(m) => m,
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "[skeleton] source materials unreadable ({e}); previewing untextured"
+                                                );
+                                                Default::default()
                                             }
-                                        }
+                                        };
+                                        let md: ModelData =
+                                            crate::import::char_skin_to_imported(&cs, &glb, target_rig, Some(&mats))
+                                                .into();
                                         Ok((cs, md, tl))
                                     })()
                                 } else {

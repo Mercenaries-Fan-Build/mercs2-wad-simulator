@@ -21,7 +21,7 @@ use mercs2_engine::{mesh, wad};
 const SAMPLE: usize = 200;
 
 fn open_base() -> Option<wad::Wad> {
-    wad::open(&wad::registry_vz_wad()?).ok()
+    wad::open(&wad::resolve_vz_wad(None)?).ok()
 }
 
 /// Identify the segments a build kept. NOT by `index_start`: that is an offset into the build's own

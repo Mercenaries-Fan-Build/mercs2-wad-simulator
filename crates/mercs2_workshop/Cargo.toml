@@ -17,7 +17,9 @@ serde_json = "1"
 png = "0.17" # --tex-png headless dump (CPU BC1/BC3 decode -> PNG for visual inspection)
 # glTF import (drag-drop a .gltf/.glb onto the workshop window -> engine-rendered preview).
 # `import` decodes buffers + images (PNG/JPEG) so materials come across without extra plumbing.
-gltf = "1"
+# KHR_materials_specular: community rips exported from Blender/Substance routinely carry their
+# specular there instead of in metallicRoughness; without the feature those maps are invisible to us.
+gltf = { version = "1", features = ["KHR_materials_specular"] }
 # The inspector GUI (Unreal-style Details panel, mouse-driven): egui painted through the engine's
 # Scene overlay hook. egui 0.28 matches wgpu 0.20; the winit-0.29 event bridge is hand-rolled in
 # gui.rs (egui-winit 0.28 wants winit 0.30, which the engine is not on yet).

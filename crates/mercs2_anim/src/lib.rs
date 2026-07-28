@@ -71,19 +71,24 @@ mod tests {
     /// Live end-to-end gate against retail `vz.wad`: parse the resident animation tables, resolve the
     /// three mercs' idles through the data-driven picker, and confirm the live-captured Chris idle
     /// clip (`0xED37BC56`) is reachable for Chris. SKIPS (stays green) when the WAD is absent, so CI
-    /// without the retail data passes. Run with `VZ_WAD=/path/to/vz.wad cargo test -p mercs2_anim`.
+    /// without the retail data passes.
+    ///
+    /// Run with `MERCS2_GAME_DIR=<install> cargo test -p mercs2_anim` (or `VZ_WAD`); either takes the
+    /// install root, its `data` folder, or the file. This is a leaf crate and cannot reach
+    /// `mercs2_engine::paths` (the carve rule), so discovery comes from `mercs2_formats` — the crate
+    /// both already depend on. The previous hardcoded Windows install path meant this test silently
+    /// never ran off Windows.
     #[test]
     fn live_clip_picker_if_wad_present() {
         use mercs2_formats::anim_select::block_has_lookup;
         use mercs2_formats::ffcs::load_ffcs_archive;
         use mercs2_formats::sges::decompress_block;
 
-        let path = std::env::var("VZ_WAD").unwrap_or_else(|_| {
-            "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
-        });
+        let Some(path) = mercs2_formats::game_paths::vz_wad_from_env() else {
+            return eprintln!("skip: vz.wad not found (set MERCS2_GAME_DIR or VZ_WAD)");
+        };
         let Ok(mut f) = std::fs::File::open(&path) else {
-            eprintln!("skip: vz.wad not present at {path}");
-            return;
+            return eprintln!("skip: vz.wad not readable at {}", path.display());
         };
         let size = f.metadata().unwrap().len();
         let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");

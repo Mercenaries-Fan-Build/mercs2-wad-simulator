@@ -1,0 +1,14 @@
+-- Stand-in for the shipped localization module `Subtitles_08_RME_J`.
+--
+-- One of the `Subtitles_*` family; see README.md in this directory for the full rationale. In short:
+-- the decompiled corpus is 370 of 382 scripts and none of the subtitle modules are among them, but
+-- `MrxGuiCinematic.ShowMovie` will not play a subtitled movie until its
+-- `dynamic_import("Subtitles_" .. sFile, ...)` resolves to a module exposing a `SubtitleData` TABLE.
+-- Raising instead aborts the caller's callback chain and strands MrxState mid-transition.
+--
+-- Empty is correct: `type(tSubtitleData) == "table"` is the only thing the caller checks, and an
+-- empty table means "this movie has no subtitle lines" rather than inventing dialogue we do not have.
+--
+-- This root is searched AFTER the corpus, so a real `Subtitles_08_RME_J` shadows this file the moment it
+-- is decompiled. Delete it at that point.
+SubtitleData = {}

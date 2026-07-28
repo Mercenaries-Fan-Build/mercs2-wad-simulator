@@ -129,7 +129,7 @@ fn dump_effect(w: &mut wad::Wad, name: &str) {
 }
 
 fn main() {
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
     let dec = wad::decompress_block_index(&mut w, PMC_INTERIOR_STATE_BLOCK)
         .expect("decompress interior state block 667");
     let placements = load_placements(&dec).unwrap_or_default();

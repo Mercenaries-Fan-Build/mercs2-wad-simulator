@@ -12,16 +12,21 @@
 use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
-/// Extract an AI actor guid from an order argument: a bare integer, or a `{AIGuid=…}`/`{Guid=…}` table
-/// (code map §5 order-table form). `0` when absent.
-fn guid_of(v: &Value) -> i64 {
+/// Extract an AI actor guid from an order argument: a bare handle, or a `{AIGuid=…}`/`{Guid=…}` table
+/// (code map §5 order-table form). [`Guid::NONE`] when absent.
+///
+/// The table branch reads its field as [`Guid`] because the handle the script stored there is now
+/// lightuserdata — `Ai.Goal{AIGuid = Player.GetLocalCharacter(), …}` puts the very value
+/// `GetLocalCharacter` pushed into the table, and reading it back as `i64` would fail on it.
+fn guid_of(v: &Value) -> Guid {
     match v {
-        Value::Integer(i) => *i,
-        Value::Number(n) => *n as i64,
-        Value::Table(t) => t.get::<i64>("AIGuid").or_else(|_| t.get::<i64>("Guid")).unwrap_or(0),
-        _ => 0,
+        Value::Table(t) => t
+            .get::<Guid>("AIGuid")
+            .or_else(|_| t.get::<Guid>("Guid"))
+            .unwrap_or(Guid::NONE),
+        other => Guid::from_value(other),
     }
 }
 
@@ -130,51 +135,48 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Ai.Goal(guid, "verb")  OR  Ai.Goal{AIGuid=guid, Goal='verb', ...}  (code map §5 table form).
     let h = host.clone();
     b.real("Goal", lua.create_function(move |_, (first, maybe_goal): (Value, Option<String>)| {
-        let (guid, goal): (i64, String) = match first {
+        let (guid, goal): (Guid, String) = match &first {
             Value::Table(t) => (
-                t.get::<i64>("AIGuid").or_else(|_| t.get::<i64>("Guid")).unwrap_or(0),
+                guid_of(&first),
                 t.get::<String>("Goal").unwrap_or_default(),
             ),
-            Value::Integer(i) => (i, maybe_goal.unwrap_or_default()),
-            Value::Number(n) => (n as i64, maybe_goal.unwrap_or_default()),
-            _ => (0, maybe_goal.unwrap_or_default()),
+            other => (Guid::from_value(other), maybe_goal.unwrap_or_default()),
         };
-        Ok(h.borrow_mut().ai_goal(guid as u64, &goal))
+        Ok(h.borrow_mut().ai_goal(guid.raw(), &goal))
     })?)?;
 
     // Relation get/set tolerate a nil faction guid (faction-manager setup queries relations for
     // factions that aren't resolved yet) → neutral 0 / no-op, matching the lenient engine.
     let h = host.clone();
-    b.real("SetRelation", lua.create_function(move |_, (from, to, value): (Option<i64>, Option<i64>, i64)| {
-        if let (Some(f), Some(t)) = (from, to) {
-            h.borrow_mut().ai_set_relation(f as u64, t as u64, value);
+    b.real("SetRelation", lua.create_function(move |_, (from, to, value): (Guid, Guid, i64)| {
+        // Both handles must resolve; a nil/unknown either side is a silent no-op (nil-handle contract).
+        if from.is_some() && to.is_some() {
+            h.borrow_mut().ai_set_relation(from.raw(), to.raw(), value);
         }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("GetRelation", lua.create_function(move |_, (from, to): (Option<i64>, Option<i64>)| {
-        Ok(match (from, to) {
-            (Some(f), Some(t)) => h.borrow().ai_get_relation(f as u64, t as u64),
-            _ => 0,
+    b.real("GetRelation", lua.create_function(move |_, (from, to): (Guid, Guid)| {
+        Ok(if from.is_some() && to.is_some() {
+            h.borrow().ai_get_relation(from.raw(), to.raw())
+        } else {
+            0
         })
     })?)?;
     let h = host.clone();
-    b.real("SetState", lua.create_function(move |_, (guid, state, on): (i64, String, Option<bool>)| {
-        Ok(h.borrow_mut().ai_set_state(guid as u64, &state, on.unwrap_or(true)))
+    b.real("SetState", lua.create_function(move |_, (guid, state, on): (Guid, String, Option<bool>)| {
+        Ok(h.borrow_mut().ai_set_state(guid.raw(), &state, on.unwrap_or(true)))
     })?)?;
 
     // Ai.DefaultGoal(tParameters) — the table-form goal post (mrxai.lua:19). Faithfully routes to the
     // same action ring as Ai.Goal (there is no separate compiled "default goal" body; AI code map §5/§8).
     let h = host.clone();
     b.real("DefaultGoal", lua.create_function(move |_, params: Value| {
-        let (guid, goal): (i64, String) = match params {
-            Value::Table(t) => (
-                t.get::<i64>("AIGuid").or_else(|_| t.get::<i64>("Guid")).unwrap_or(0),
-                t.get::<String>("Goal").unwrap_or_default(),
-            ),
-            _ => (0, String::new()),
+        let (guid, goal): (Guid, String) = match &params {
+            Value::Table(t) => (guid_of(&params), t.get::<String>("Goal").unwrap_or_default()),
+            _ => (Guid::NONE, String::new()),
         };
-        Ok(h.borrow_mut().ai_goal(guid as u64, &goal))
+        Ok(h.borrow_mut().ai_goal(guid.raw(), &goal))
     })?)?;
 
     // --- Order verbs → the recovered 1024-slot action ring (`ai_order` → `AiWorld::order`). ---
@@ -191,31 +193,43 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         let verb_name = verb;
         b.real(verb, lua.create_function(move |_, first: Value| {
             let guid = guid_of(&first);
-            Ok(h.borrow_mut().ai_order(guid as u64, verb_name))
+            Ok(h.borrow_mut().ai_order(guid.raw(), verb_name))
         })?)?;
     }
 
     // --- Faction/reputation → the recovered mood bridge (`mercs2_faction::FactionWorld`). ---
+    // A **faction is a handle**, not an id: every shipped call site resolves it with
+    // `Pg.GetGuidByName` — `allcon003.lua:116` is `Ai.AddInfraction(Player.GetLocalCharacter(),
+    // Pg.GetGuidByName("China"), 100)` and `gurcon002.lua:196` is
+    // `Ai.SetInfractionMultiplier(GetGuidByName("Guerilla"), 0)`. Once `Pg.GetGuidByName` returns
+    // lightuserdata, an `i64` parameter here does not merely mis-read it, it **raises** and takes the
+    // caller's chain with it.
+    //
     // Ai.AddInfraction(offender, faction, amount).
     let h = host.clone();
-    b.real("AddInfraction", lua.create_function(move |_, (offender, faction, amount): (i64, i64, Option<i64>)| {
-        h.borrow_mut().ai_add_infraction(offender as u64, faction as u64, amount.unwrap_or(0));
+    b.real("AddInfraction", lua.create_function(move |_, (offender, faction, amount): (Guid, Guid, Option<i64>)| {
+        h.borrow_mut().ai_add_infraction(offender.raw(), faction.raw(), amount.unwrap_or(0));
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("SetInfractionMultiplier", lua.create_function(move |_, (faction, mult): (i64, i64)| {
-        h.borrow_mut().ai_set_infraction_multiplier(faction as u64, mult);
+    // ⚠ The multiplier is **fractional** at two shipped sites (`oilcon021.lua:109` passes `0.1`), so it
+    // is read as an f64. The host's model is integral, so a sub-1 multiplier floors to 0 — that is a
+    // host-side gap, not a reason to raise on a legitimate argument.
+    b.real("SetInfractionMultiplier", lua.create_function(move |_, (faction, mult): (Guid, f64)| {
+        h.borrow_mut().ai_set_infraction_multiplier(faction.raw(), mult as i64);
         Ok(())
     })?)?;
     // Ai.SetAttitude/ChangeRelation(faction, toward, value) — directed relation write (drives price/pursuit).
+    // Both subjects are faction/object handles, like `SetRelation`'s (0 shipped call sites for either
+    // name, so the shape follows `SetRelation`'s, which the corpus does exercise).
     let h = host.clone();
-    b.real("SetAttitude", lua.create_function(move |_, (faction, toward, value): (i64, i64, i64)| {
-        h.borrow_mut().ai_set_attitude(faction as u64, toward as u64, value);
+    b.real("SetAttitude", lua.create_function(move |_, (faction, toward, value): (Guid, Guid, i64)| {
+        h.borrow_mut().ai_set_attitude(faction.raw(), toward.raw(), value);
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("ChangeRelation", lua.create_function(move |_, (faction, toward, value): (i64, i64, i64)| {
-        h.borrow_mut().ai_set_attitude(faction as u64, toward as u64, value);
+    b.real("ChangeRelation", lua.create_function(move |_, (faction, toward, value): (Guid, Guid, i64)| {
+        h.borrow_mut().ai_set_attitude(faction.raw(), toward.raw(), value);
         Ok(())
     })?)?;
 
@@ -223,15 +237,26 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Ai.TweakAttachedSpawners(target, {SpawnerState="on"/"off", SecondsPerCycle=…, …}) — apply an adjust
     // to all groups; the InGroup form scopes to a single group via `Group`/`GroupIndex`.
     let h = host.clone();
-    b.real("TweakAttachedSpawners", lua.create_function(move |_, (target, opts): (i64, Option<mlua::Table>)| {
+    b.real("TweakAttachedSpawners", lua.create_function(move |_, (target, opts): (Guid, Option<mlua::Table>)| {
         let (state, respawn) = spawner_opts(&opts);
-        Ok(h.borrow_mut().ai_tweak_spawners(target as u64, 0xFF, state.as_deref(), respawn))
+        Ok(h.borrow_mut().ai_tweak_spawners(target.raw(), 0xFF, state.as_deref(), respawn))
     })?)?;
     let h = host.clone();
-    b.real("TweakAttachedSpawnersInGroup", lua.create_function(move |_, (target, group, opts): (i64, i64, Option<mlua::Table>)| {
+    // ⚠ The group is **named**, not numbered, at every shipped call site:
+    // `gurcon002.lua:529,532` are `Ai.TweakAttachedSpawnersInGroup(TallCommBuild, "Ground", {…})` and
+    // `(…, "Balcony", …)`. An `i64` parameter raised on all 14 of them. The name→group-index table is
+    // authored placement data this build does not load, so a named group falls back to "every group"
+    // (`0xFF`, the same mask the ungrouped `TweakAttachedSpawners` uses) rather than guessing an index
+    // — over-broad, but it applies the adjust the script asked for instead of aborting its chain.
+    // A numeric group keeps the exact single-group mask. Confirm-live when placement groups land.
+    b.real("TweakAttachedSpawnersInGroup", lua.create_function(move |_, (target, group, opts): (Guid, Value, Option<mlua::Table>)| {
         let (state, respawn) = spawner_opts(&opts);
-        let mask = 1u8.checked_shl(group as u32).unwrap_or(0);
-        Ok(h.borrow_mut().ai_tweak_spawners(target as u64, mask, state.as_deref(), respawn))
+        let mask = match &group {
+            Value::Integer(i) => 1u8.checked_shl(*i as u32).unwrap_or(0),
+            Value::Number(n) => 1u8.checked_shl(*n as u32).unwrap_or(0),
+            _ => 0xFF,
+        };
+        Ok(h.borrow_mut().ai_tweak_spawners(target.raw(), mask, state.as_deref(), respawn))
     })?)?;
 
     // --- Getters the game reads → real-state defaults (see burn-down: perception/subject/spawn-list
@@ -240,8 +265,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("GetPerceivability", lua.create_function(|_, _: MultiValue| Ok(0i64))?)?;
     b.real("GetState", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
     b.real("TestDropZone", lua.create_function(|_, _: MultiValue| Ok(false))?)?;
-    // GUID getter: 0 → nil so the game's `if not uFaction` control flow is authentic.
-    b.real("GetFactionGuid", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
+    // GUID getter: `Guid::NONE` → nil so the game's `if not uFaction` control flow is authentic, and
+    // so that when this gains a body it already pushes the lightuserdata handle the other faction
+    // slots (`AddInfraction`, `SetRelation`) expect.
+    b.real("GetFactionGuid", lua.create_function(|_, _: MultiValue| Ok(Guid::NONE))?)?;
     b.real("GetAttrib", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
     b.real("GetSubjectData", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;
     b.real("GetSpawnList", lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?)?;

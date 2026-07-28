@@ -12,10 +12,11 @@
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
-fn guid_opt(g: u64) -> Option<i64> {
-    if g == 0 { None } else { Some(g as i64) }
+/// A host handle as Lua sees it. `0` ("no such object") surfaces as `nil` — see [`Guid`].
+fn guid_opt(g: u64) -> Guid {
+    Guid(g)
 }
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -76,41 +77,41 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
     let h = host.clone();
-    b.real("GetDriver", lua.create_function(move |_, veh: i64| Ok(guid_opt(h.borrow().vehicle_driver(veh as u64))))?)?;
+    b.real("GetDriver", lua.create_function(move |_, veh: Guid| Ok(guid_opt(h.borrow().vehicle_driver(veh.raw()))))?)?;
     let h = host.clone();
-    b.real("GetRiders", lua.create_function(move |_, veh: i64| {
-        Ok(h.borrow().vehicle_riders(veh as u64).into_iter().map(|g| g as i64).collect::<Vec<_>>())
+    b.real("GetRiders", lua.create_function(move |_, veh: Guid| {
+        Ok(h.borrow().vehicle_riders(veh.raw()).into_iter().map(Guid).collect::<Vec<_>>())
     })?)?;
     let h = host.clone();
-    b.real("GetFromRider", lua.create_function(move |_, rider: i64| Ok(guid_opt(h.borrow().vehicle_from_rider(rider as u64))))?)?;
+    b.real("GetFromRider", lua.create_function(move |_, rider: Guid| Ok(guid_opt(h.borrow().vehicle_from_rider(rider.raw()))))?)?;
     let h = host.clone();
-    b.real("GetSeatFromRider", lua.create_function(move |_, rider: i64| Ok(h.borrow().vehicle_seat_from_rider(rider as u64)))?)?;
+    b.real("GetSeatFromRider", lua.create_function(move |_, rider: Guid| Ok(h.borrow().vehicle_seat_from_rider(rider.raw())))?)?;
     let h = host.clone();
-    b.real("GetSeatByType", lua.create_function(move |_, (veh, ty): (i64, String)| Ok(h.borrow().vehicle_seat_by_type(veh as u64, &ty)))?)?;
+    b.real("GetSeatByType", lua.create_function(move |_, (veh, ty): (Guid, String)| Ok(h.borrow().vehicle_seat_by_type(veh.raw(), &ty)))?)?;
     let h = host.clone();
-    b.real("Enter", lua.create_function(move |_, (veh, rider, seat): (i64, i64, Option<String>)| {
-        Ok(h.borrow_mut().vehicle_enter(veh as u64, rider as u64, seat.as_deref().unwrap_or("d")))
+    b.real("Enter", lua.create_function(move |_, (veh, rider, seat): (Guid, Guid, Option<String>)| {
+        Ok(h.borrow_mut().vehicle_enter(veh.raw(), rider.raw(), seat.as_deref().unwrap_or("d")))
     })?)?;
     let h = host.clone();
-    b.real("Exit", lua.create_function(move |_, rider: i64| Ok(h.borrow_mut().vehicle_exit(rider as u64)))?)?;
+    b.real("Exit", lua.create_function(move |_, rider: Guid| Ok(h.borrow_mut().vehicle_exit(rider.raw())))?)?;
     let h = host.clone();
-    b.real("Usable", lua.create_function(move |_, veh: i64| Ok(h.borrow().vehicle_usable(veh as u64)))?)?;
+    b.real("Usable", lua.create_function(move |_, veh: Guid| Ok(h.borrow().vehicle_usable(veh.raw())))?)?;
     let h = host.clone();
-    b.real("IsFlying", lua.create_function(move |_, veh: i64| Ok(h.borrow().vehicle_is_flying(veh as u64)))?)?;
+    b.real("IsFlying", lua.create_function(move |_, veh: Guid| Ok(h.borrow().vehicle_is_flying(veh.raw())))?)?;
     let h = host.clone();
-    b.real("IsFlipped", lua.create_function(move |_, veh: i64| Ok(h.borrow().vehicle_is_flipped(veh as u64)))?)?;
+    b.real("IsFlipped", lua.create_function(move |_, veh: Guid| Ok(h.borrow().vehicle_is_flipped(veh.raw())))?)?;
     let h = host.clone();
-    b.real("SetParts", lua.create_function(move |_, veh: i64| { h.borrow_mut().vehicle_set_parts(veh as u64); Ok(()) })?)?;
+    b.real("SetParts", lua.create_function(move |_, veh: Guid| { h.borrow_mut().vehicle_set_parts(veh.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("OpenDoor", lua.create_function(move |_, veh: i64| { h.borrow_mut().vehicle_set_door(veh as u64, true); Ok(()) })?)?;
+    b.real("OpenDoor", lua.create_function(move |_, veh: Guid| { h.borrow_mut().vehicle_set_door(veh.raw(), true); Ok(()) })?)?;
     let h = host.clone();
-    b.real("CloseDoor", lua.create_function(move |_, veh: i64| { h.borrow_mut().vehicle_set_door(veh as u64, false); Ok(()) })?)?;
+    b.real("CloseDoor", lua.create_function(move |_, veh: Guid| { h.borrow_mut().vehicle_set_door(veh.raw(), false); Ok(()) })?)?;
     let h = host.clone();
-    b.real("SetCanPlayerUse", lua.create_function(move |_, (veh, can): (i64, bool)| { h.borrow_mut().vehicle_set_can_player_use(veh as u64, can); Ok(()) })?)?;
+    b.real("SetCanPlayerUse", lua.create_function(move |_, (veh, can): (Guid, bool)| { h.borrow_mut().vehicle_set_can_player_use(veh.raw(), can); Ok(()) })?)?;
     let h = host.clone();
-    b.real("EnableTurret", lua.create_function(move |_, (veh, on): (i64, Option<bool>)| { h.borrow_mut().vehicle_enable_turret(veh as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    b.real("EnableTurret", lua.create_function(move |_, (veh, on): (Guid, Option<bool>)| { h.borrow_mut().vehicle_enable_turret(veh.raw(), on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("ClearControls", lua.create_function(move |_, veh: i64| { h.borrow_mut().vehicle_clear_controls(veh as u64); Ok(()) })?)?;
+    b.real("ClearControls", lua.create_function(move |_, veh: Guid| { h.borrow_mut().vehicle_clear_controls(veh.raw()); Ok(()) })?)?;
 
     // --- faithful-default GETTERS (game reads the return; seat/hijack state not modelled yet) ---
     // seat-lookup queries → empty seat / on-foot → nil so `if not uRider` control flow is authentic.
@@ -139,55 +140,55 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     ] {
         let h = host.clone();
         let ev = event;
-        b.real(verb, lua.create_function(move |_, veh: i64| {
-            Ok(h.borrow_mut().vehicle_hijack_event(veh as u64, ev))
+        b.real(verb, lua.create_function(move |_, veh: Guid| {
+            Ok(h.borrow_mut().vehicle_hijack_event(veh.raw(), ev))
         })?)?;
     }
     // Vehicle.SetHijackState(veh, name) — explicit override.
     let h = host.clone();
-    b.real("SetHijackState", lua.create_function(move |_, (veh, name): (i64, String)| {
-        Ok(h.borrow_mut().vehicle_hijack_event(veh as u64, &format!("set:{name}")))
+    b.real("SetHijackState", lua.create_function(move |_, (veh, name): (Guid, String)| {
+        Ok(h.borrow_mut().vehicle_hijack_event(veh.raw(), &format!("set:{name}")))
     })?)?;
 
     // --- Turret / rotor articulation → `mercs2_vehicle::TurretAim` on the host. ---
     let h = host.clone();
-    b.real("SetTurretPitch", lua.create_function(move |_, (veh, pitch): (i64, f32)| {
-        h.borrow_mut().vehicle_set_turret(veh as u64, Some(pitch), None, None);
+    b.real("SetTurretPitch", lua.create_function(move |_, (veh, pitch): (Guid, f32)| {
+        h.borrow_mut().vehicle_set_turret(veh.raw(), Some(pitch), None, None);
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("SetTurretYaw", lua.create_function(move |_, (veh, yaw): (i64, f32)| {
-        h.borrow_mut().vehicle_set_turret(veh as u64, None, Some(yaw), None);
+    b.real("SetTurretYaw", lua.create_function(move |_, (veh, yaw): (Guid, f32)| {
+        h.borrow_mut().vehicle_set_turret(veh.raw(), None, Some(yaw), None);
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("SpinHeli", lua.create_function(move |_, (veh, on): (i64, Option<bool>)| {
-        h.borrow_mut().vehicle_set_turret(veh as u64, None, None, Some(on.unwrap_or(true)));
+    b.real("SpinHeli", lua.create_function(move |_, (veh, on): (Guid, Option<bool>)| {
+        h.borrow_mut().vehicle_set_turret(veh.raw(), None, None, Some(on.unwrap_or(true)));
         Ok(())
     })?)?;
 
     // Vehicle.RestoreHealth(veh) — restore the vehicle object to full health (Object health seam).
     let h = host.clone();
-    b.real("RestoreHealth", lua.create_function(move |_, veh: i64| {
-        let max = h.borrow().object_max_health(veh as u64);
-        h.borrow_mut().object_set_health(veh as u64, max);
+    b.real("RestoreHealth", lua.create_function(move |_, veh: Guid| {
+        let max = h.borrow().object_max_health(veh.raw());
+        h.borrow_mut().object_set_health(veh.raw(), max);
         Ok(())
     })?)?;
 
     // --- seat occupancy + weapon restore → real host state. ---
     let h = host.clone();
-    b.real("EnterBySeatGuid", lua.create_function(move |_, (human, seat): (i64, i64)| {
-        h.borrow_mut().human_enter_seat(human as u64, seat as u64);
+    b.real("EnterBySeatGuid", lua.create_function(move |_, (human, seat): (Guid, Guid)| {
+        h.borrow_mut().human_enter_seat(human.raw(), seat.raw());
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("TransferToSeat", lua.create_function(move |_, (human, seat): (i64, i64)| {
-        h.borrow_mut().human_enter_seat(human as u64, seat as u64);
+    b.real("TransferToSeat", lua.create_function(move |_, (human, seat): (Guid, Guid)| {
+        h.borrow_mut().human_enter_seat(human.raw(), seat.raw());
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("RestoreAmmo", lua.create_function(move |_, weapon: i64| {
-        h.borrow_mut().weapon_restore_ammo(weapon as u64);
+    b.real("RestoreAmmo", lua.create_function(move |_, weapon: Guid| {
+        h.borrow_mut().weapon_restore_ammo(weapon.raw());
         Ok(())
     })?)?;
 

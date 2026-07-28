@@ -28,7 +28,7 @@ fn dump(tag: &str, block: &[u8]) {
 }
 
 fn main() {
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
     {
         // The WAD's OWN name->block index (PTHS): enumerate every interior/hq/vz_state block path so we
         // can drive the interior loader from data instead of hardcoded block numbers.

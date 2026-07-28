@@ -53,11 +53,32 @@ section below), not a blind live capture.
   `PhysicsCreateExplosion` queries the Havok broadphase for `hkpRigidBody` overlap; the precise body set
   (and impulse application) lands with the physics silo. The gameplay-damage overlap is faithful.
 
-- **RuntimeHealth ownership** `[faithful-blocker: no]` — damage lands on a local `Health {cur,max}`
-  component (the stand-in for the destruction silo's `RuntimeHealth`, producer `FUN_004cfed0`) and posts
-  `DamageMsg 0xC6507EE1` / `DestroyMsg 0x1ED7AD78` — the exact events the destruction FSM consumes (code
-  map §5.3A). When the destruction silo lands, retarget the applier at its `RuntimeHealth` and drop the
-  local `Health`. The event contract is already faithful.
+- ~~**RuntimeHealth ownership**~~ **DONE.** The destruction silo landed and produced no competing type:
+  `Health` is now single-defined in `mercs2_core::components`, this crate imports it, and
+  `mercs2_destruction` consumes `mercs2_core::{Health, Destructible}`. Wave-1 seam item 5's first half is
+  closed, and there was never a `RuntimeHealth` to retarget at.
+
+- **Hoisting the inventory types to `mercs2_core`** `[faithful-blocker: no]` — `RuntimeInventory` /
+  `Equipment` / `CarriedBy` live here, and the Wave-1 seam review anticipated hoisting them alongside
+  `Health`. **Deliberately not done**, because that item's trigger has not fired: there is exactly one
+  `struct Inventory`-shaped type in the workspace, and nothing outside this crate reads a loadout.
+  Hoisting now would also drag the `Entity`-typed carry relation into the crate that "deliberately
+  depends on nothing but hecs + glam", and would buy nothing at the binding seam — `mercs2_script`
+  cannot name a `mercs2_combat` type either way, so the `EngineHost` signatures stay scalar regardless.
+  **Trigger to revisit:** a second crate needing to query a loadout — most likely `mercs2_population`
+  giving NPCs loadouts through the second apply path (`FUN_006F9260`), or a player save/load path.
+
+- **The carry edge's `+0x04` object** `[faithful-blocker: no]` — retail's `RuntimeEquipmentLink`
+  (`0x00DF9510`) edge carries a per-edge flag (bit `0x02` = equipped, modelled) plus a `+0x04` pointer
+  whose target is unidentified (`inventory_equipment_code_map.md` §9.1). Modelled as absent.
+
+- **`FUN_004F30D0`, the destroy primitive** `[faithful-blocker: no]` — genuinely VM-blocked, and static
+  exhaustion was already performed (§9.2). "Despawn the entity and unregister the guid" is the stand-in;
+  `inventory::drain_pending_destroy` is where it lives.
+
+- **`FUN_005280A0`'s veto predicate** `[faithful-blocker: no]` — retail's destroy-all is not
+  unconditional: that call can veto individual weapons. The predicate is unread, so
+  `destroy_all_weapons` queues everything.
 
 ## Firing / equip
 

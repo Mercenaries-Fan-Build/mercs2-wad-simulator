@@ -34,10 +34,10 @@ struct Obj {
 
 #[derive(Default)]
 struct HarnessHost {
-    cash: i64,
-    fuel: i64,
-    fuel_cap: i64,
-    player_char: u64,
+    /// The player mechanism (`mercs2_player::PlayerWorld`) — the roster, the profile/economy singleton
+    /// and the callback registry. A real mechanism, not a stand-in, so these hooks cannot pass against
+    /// a fake that has drifted from the crate under test.
+    player: mercs2_player::PlayerWorld,
     objs: HashMap<u64, Obj>,
     next_guid: u64,
     named: HashMap<String, u64>,
@@ -63,11 +63,35 @@ impl HarnessHost {
     /// A host with one player character (guid 1, "Mattias", 100 HP) already in the world — enough for
     /// the Object/Player hooks to have something to act on, like a booted game.
     fn booted() -> Rc<RefCell<Self>> {
-        let mut h = HarnessHost { fuel_cap: 100, ..Default::default() };
+        let mut h = HarnessHost {
+            player: mercs2_player::PlayerWorld::single_player(),
+            ..Default::default()
+        };
+        h.player.profile.set_fuel_capacity(100);
         let g = h.spawn_obj("Mattias");
-        h.player_char = g;
+        // Possess the spawned character from slot 0, so `Player.Get*Character` resolve to it.
+        mercs2_player::possession::attach_to_character(
+            &mut h.player.roster,
+            0,
+            g,
+            mercs2_player::CheatFlags::default(),
+        );
         h.velocities.insert(g, 3.5);
         Rc::new(RefCell::new(h))
+    }
+
+    /// Resolve the `Player.GetAnyCharacter` sentinel the way the engine's `GuidMap` does downstream.
+    ///
+    /// `GetAnyCharacter` performs **no lookup** — it pushes the constant `0xF0000000`
+    /// (`player_code_map.md` §3.1, and §10.7 for the lightuserdata tag) — so a host that owns objects
+    /// has to map it onto a real character before indexing. Without this, every one of the 223 shipped
+    /// `Object.*(Player.GetAnyCharacter())` call sites misses and reads the "no such object" default.
+    fn resolve(&self, guid: u64) -> u64 {
+        if guid == mercs2_player::ANY_CHARACTER_SENTINEL {
+            self.player.roster.local().map(|p| p.character).unwrap_or(guid)
+        } else {
+            guid
+        }
     }
 
     fn spawn_obj(&mut self, name: &str) -> u64 {
@@ -114,115 +138,101 @@ impl EngineHost for HarnessHost {
         g
     }
     fn object_set_name(&mut self, guid: u64, name: &str) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.name = name.to_string();
         }
         self.named.insert(name.to_string(), guid);
     }
     fn object_set_position(&mut self, guid: u64, pos: [f32; 3]) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.pos = pos;
         }
     }
     fn object_set_yaw(&mut self, guid: u64, yaw: f32) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.yaw = yaw;
         }
     }
     fn object_get_position(&mut self, guid: u64) -> [f32; 3] {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.pos).unwrap_or([0.0; 3])
     }
     fn object_get_yaw(&mut self, guid: u64) -> f32 {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.yaw).unwrap_or(0.0)
     }
     fn teleport_hero(&mut self, _pos: [f32; 3]) {}
     fn add_layers(&mut self, _layers: &[String]) {}
 
-    // economy
-    fn player_cash(&self) -> i64 {
-        self.cash
+    // The player concern is backed by the REAL mechanism, exactly as `Ai.*` is backed by a real
+    // `mercs2_ai::AiWorld` here — so these hooks exercise `mercs2_player` rather than a hand-rolled
+    // stand-in that can drift from it.
+    fn player_world(&mut self) -> Option<&mut mercs2_player::PlayerWorld> {
+        Some(&mut self.player)
     }
-    fn player_set_cash(&mut self, cash: i64) {
-        self.cash = cash;
-    }
-    fn player_fuel(&self) -> i64 {
-        self.fuel
-    }
-    fn player_set_fuel(&mut self, fuel: i64) {
-        self.fuel = fuel;
-    }
-    fn player_fuel_capacity(&self) -> i64 {
-        self.fuel_cap
-    }
-    fn player_set_fuel_capacity(&mut self, cap: i64) {
-        self.fuel_cap = cap;
-    }
-
-    // character getters
-    fn player_local_player(&self) -> u64 {
-        self.player_char
-    }
-    fn player_any_character(&self) -> u64 {
-        self.player_char
-    }
-    fn player_local_character(&self) -> u64 {
-        self.player_char
-    }
-    fn player_primary_character(&self) -> u64 {
-        self.player_char
-    }
-    fn player_secondary_character(&self) -> u64 {
-        0
-    }
-    fn player_is_local(&self, guid: u64) -> bool {
-        guid == self.player_char
+    fn player_world_ref(&self) -> Option<&mercs2_player::PlayerWorld> {
+        Some(&self.player)
     }
 
     // object health/life/labels
     fn object_health(&self, guid: u64) -> f32 {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.health).unwrap_or(0.0)
     }
     fn object_set_health(&mut self, guid: u64, hp: f32) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.health = hp;
             o.alive = hp > 0.0;
         }
     }
     fn object_max_health(&self, guid: u64) -> f32 {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.max_health).unwrap_or(0.0)
     }
     fn object_is_alive(&self, guid: u64) -> bool {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.alive).unwrap_or(false)
     }
     fn object_kill(&mut self, guid: u64) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.alive = false;
             o.health = 0.0;
         }
     }
     fn object_revive(&mut self, guid: u64) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.alive = true;
             o.health = o.max_health;
         }
     }
     fn object_remove(&mut self, guid: u64) {
+        let guid = self.resolve(guid);
         self.objs.remove(&guid);
     }
     fn object_name(&self, guid: u64) -> String {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.name.clone()).unwrap_or_default()
     }
     fn object_add_label(&mut self, guid: u64, label: &str) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.labels.insert(label.to_string());
         }
     }
     fn object_remove_label(&mut self, guid: u64, label: &str) {
+        let guid = self.resolve(guid);
         if let Some(o) = self.objs.get_mut(&guid) {
             o.labels.remove(label);
         }
     }
     fn object_has_label(&self, guid: u64, label: &str) -> bool {
+        let guid = self.resolve(guid);
         self.objs.get(&guid).map(|o| o.labels.contains(label)).unwrap_or(false)
     }
     fn object_set_invincible(&mut self, _guid: u64, _on: bool) {}
@@ -282,6 +292,7 @@ impl EngineHost for HarnessHost {
 
     // movement
     fn object_velocity(&self, guid: u64) -> f32 {
+        let guid = self.resolve(guid);
         self.velocities.get(&guid).copied().unwrap_or(0.0)
     }
 
@@ -383,7 +394,9 @@ fn h_object_setinvincible_reason_arg() {
 // --- The MrxUtil.SpawnActor recipe (mrxutil.lua:463-490) ---
 fn h_spawnactor_recipe() {
     let (sh, host) = setup();
-    let guid: i64 = sh
+    // The handle comes back as lightuserdata (see `mercs2_script::Guid`), so read it as a `Guid` —
+    // reading it as `i64` is what only a script doing arithmetic on a handle would need, and none does.
+    let guid: mercs2_script::Guid = sh
         .eval(
             r#"local uGuid = Pg.GetGuidByName("HqInterior")
                if not uGuid then uGuid = Pg.Spawn("PmcHqInterior", 0,0,0, 0, false, true) end
@@ -392,7 +405,7 @@ fn h_spawnactor_recipe() {
                return uGuid"#,
         )
         .unwrap();
-    assert!(guid > 0);
+    assert!(guid.is_some());
     let hb = host.borrow();
     let g = *hb.named.get("HqInterior").expect("named");
     assert_eq!(hb.objs[&g].pos, [3750.0, 450.0, -3840.0]);
@@ -515,7 +528,9 @@ fn h_vehicle_enter_getdriver_exit() {
 // --- Audio (mrxguihudmessage / mission scripts: Sound.CueSound; music FSM) ---
 fn h_sound_cuesound() {
     let (sh, host) = setup();
-    let ok: bool = sh.eval(r#"return Sound.CueSound("ui_confirm") ~= nil"#).unwrap();
+    // `Sound.CueSound(uEmitter, sCue)` — the emitter handle comes first and `0` is the "no emitter,
+    // play 2D" form the UI cues use (`wifvzboundary.lua:87`, `mrxguiinterface.lua:367`).
+    let ok: bool = sh.eval(r#"return Sound.CueSound(0, "ui_confirm") ~= nil"#).unwrap();
     assert!(ok, "CueSound must return a voice id, not nil");
     assert_eq!(host.borrow().cues, vec!["ui_confirm".to_string()]);
 }

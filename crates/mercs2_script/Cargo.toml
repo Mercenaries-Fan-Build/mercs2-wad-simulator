@@ -17,9 +17,15 @@ path = "src/lib.rs"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 # The HUD widget tree + marker set the `Hud.*`/`Gui.*` bindings drive (via the EngineHost seam).
 mercs2_ui = { workspace = true }
+# The player roster + profile singleton the 107 `Player.*` bindings drive (same seam shape as
+# mercs2_ui above: EngineHost hands out `Option<&mut PlayerWorld>` and the bodies call it directly).
+mercs2_player = { workspace = true }
 # The render/post-FX parameter state (RenderState) the `Atmosphere`/`Bloom`/`Graphics`/`Fade` drive,
 # and the ObjectFilter/render-state types the EngineHost seam names.
 mercs2_core = { workspace = true }
+# The engine name hash (`pandemic_hash_m2`) that `String.GetHash` funnels into — one implementation,
+# shared with the asset/bone/template name paths rather than duplicated here.
+mercs2_formats = { workspace = true }
 
 [dev-dependencies]
 # The game-hook harness backs its EngineHost with the real AI mechanism so the Ai.* hooks exercise

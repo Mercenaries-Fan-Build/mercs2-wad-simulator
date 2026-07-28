@@ -8,8 +8,15 @@ pub const CONTAINER_SENTINEL: u32 = 0xFFFF_FFFF;
 pub const WATR_EXPECTED_SIZE: usize = 495_669;
 pub const WATR_GRID_DIM: u32 = 257;
 pub const WATR_LAYER_COUNT: u32 = 5;
-pub const WATR_HEADER_BYTES: usize = 36;
-pub const WATR_FOOTER_BYTES: usize = 33_290;
+/// Fixed `watr` header size. **44, not the 36 the format doc originally claimed** — `+36`/`+40` are
+/// the coarse layer's dequantization bias and scale, not the first two height samples. See
+/// `mercs2_water::watermap` for the four facts that pin it.
+pub const WATR_HEADER_BYTES: usize = 44;
+/// Layer 4: the coarse `u16` grid, `coarse_width × coarse_height` at `coarse_cell_m` (129×129 @ 64 m
+/// on retail — the same 8192 m span as the fine grid). Was carried as an opaque 33,290-byte "footer";
+/// it is 33,282 bytes, and the 8-byte difference is exactly the header correction above.
+pub const WATR_COARSE_DIM: u32 = 129;
+pub const WATR_FOOTER_BYTES: usize = (WATR_COARSE_DIM as usize) * (WATR_COARSE_DIM as usize) * 2;
 
 pub const FXDICT_DICT_RECORD_BYTES: usize = 20;
 

@@ -8,8 +8,6 @@ use mercs2_formats::{ffcs, hash::pandemic_hash_m2, placement, sges, ucfx};
 use std::collections::BTreeMap;
 use std::fs::File;
 
-const DEFAULT_WAD: &str =
-    "C:/Users/Shadow/Desktop/notes-on-the-released-game/game-files/vz.wad";
 
 fn open_archive(path: &str) -> (ffcs::FfcsArchive, File, u64) {
     let mut f = File::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
@@ -21,7 +19,16 @@ fn open_archive(path: &str) -> (ffcs::FfcsArchive, File, u64) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "ffcs".into());
-    let wadpath = args.next().unwrap_or_else(|| DEFAULT_WAD.into());
+    // No hardcoded install path: an explicit argument, else MERCS2_GAME_DIR / VZ_WAD.
+    let wadpath = args
+        .next()
+        .or_else(|| {
+            mercs2_formats::game_paths::vz_wad_from_env().map(|p| p.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| {
+            eprintln!("usage: docaudit <vz.wad> — or set MERCS2_GAME_DIR / VZ_WAD");
+            std::process::exit(1)
+        });
     match cmd.as_str() {
         "ffcs" => ffcs_report(&wadpath),
         "layers" => layers_report(&wadpath),

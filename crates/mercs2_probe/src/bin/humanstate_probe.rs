@@ -405,7 +405,7 @@ fn main() {
         .iter()
         .position(|a| a == "--wad")
         .and_then(|i| argv.get(i + 1).cloned())
-        .or_else(wad::registry_vz_wad)
+        .or_else(|| wad::resolve_vz_wad(None))
         .expect("locate vz.wad");
     println!("WAD = {path}");
     let mut w = wad::open(&path).expect("open wad");

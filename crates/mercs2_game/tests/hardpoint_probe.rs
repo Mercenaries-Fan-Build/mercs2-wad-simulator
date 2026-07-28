@@ -15,7 +15,7 @@ const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
 #[test]
 #[ignore]
 fn interior_hardpoint_derives_the_spawn() {
-    let path = wad::registry_vz_wad().expect("vz.wad via registry");
+    let path = wad::resolve_vz_wad(None).expect("vz.wad via registry");
     let mut w = wad::open(&path).expect("open vz.wad");
 
     // The ornate main hall the player teleports onto (the "HqInterior" actor mesh).

@@ -20,7 +20,7 @@ const TEX_A: u32 = 0x2210_1D86; // block 2977
 const TEX_B: u32 = 0xFB38_5BF0; // block 2976
 
 fn open_base() -> Option<Vec<wad::Wad>> {
-    let path = wad::registry_vz_wad()?;
+    let path = wad::resolve_vz_wad(None)?;
     Some(vec![wad::open(&path).ok()?])
 }
 

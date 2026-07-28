@@ -300,21 +300,27 @@ impl HumanState {
 }
 
 /// The number of player slots the retail engine supports. **Not a tunable** — the cap is a compile-time
-/// constant in two independent places (`FUN_006CDAF0` rejects `index > 1`; `FUN_006CDAC0` loops `i < 2`),
-/// and `Player.GetMaximumPlayers` merely *reports* an unrelated global (`DAT_017C0DD0`) that enforces
-/// nothing. Raising the reported maximum does not widen the roster.
+/// constant in **three** independent places (`FUN_006CDAF0` rejects `index > 1`; `FUN_006CDAC0` loops
+/// `i < 2`; `FUN_006CD960` rejects local slots `>= 2`), and `Player.GetMaximumPlayers` merely *reports*
+/// an unrelated global (`DAT_017C0DD0`) that enforces nothing. Raising the reported maximum does not
+/// widen the roster. The `Players` container's own capacity word `0x00DF9B9C` has zero references
+/// binary-wide, so nothing bounds it there either (`player_code_map.md` §2.3).
 pub const MAX_PLAYERS: usize = 2;
 
 /// Annotation: this humanoid is currently driven by a player rather than by AI.
 ///
-/// Faithful to `FUN_006A4060`, which attaches a player to a character by **adding a marker component
-/// to the character entity** and detaches by removing it. Systems that want only player-driven humans
-/// widen their query (`(&mut HumanState, &PlayerControlled)`) instead of taking a dependency on
-/// `mercs2_player`.
+/// **This is a reimpl convenience, not the engine's mechanism.** Retail's possession link is the single
+/// field `player+0x20`, written at `0x006A422E` inside `FUN_006A4060` (`player_code_map.md` §5). An
+/// earlier revision of this doc claimed `FUN_006A4060` marks the character by adding a component — that
+/// reading was **retracted**: the container it touches (`0x00DF9B10`) names itself `CheatInfiniteAmmo`
+/// and carries a 1-byte element, and the attach path only visits it to re-apply an *already active*
+/// cheat to the new body (with cheats off the branch never runs). Whether the engine marks the
+/// character player-driven at all beyond that field is still open (map §9.1).
 ///
-/// `slot` is denormalized onto the marker for query ergonomics — retail keeps the slot index on the
-/// player record (`player+0x2C`) and the character GUID at `player+0x20`, so the reimpl's
-/// `mercs2_player` remains the owner of that pairing; this field is the reverse lookup made cheap.
+/// So this component is a **denormalization `mercs2_player` maintains** so systems wanting only
+/// player-driven humans can widen their query (`(&mut HumanState, &PlayerControlled)`) instead of
+/// taking a dependency on the player crate. `mercs2_player` remains the owner of the slot↔character
+/// pairing (`player+0x2C` / `player+0x20`); `slot` here is that reverse lookup made cheap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerControlled {
     /// Player slot, `0..MAX_PLAYERS`. Slot 0 is the primary/hero.

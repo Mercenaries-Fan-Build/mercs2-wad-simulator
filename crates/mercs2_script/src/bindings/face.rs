@@ -11,7 +11,7 @@
 
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -39,13 +39,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Facial anim set binding + current expression → real per-face host state (the facial-anim playback
     // is a render/anim-channel concern; the bound set + current expression are engine state).
     let h = host.clone();
-    b.real("BindFaceAnimSet", lua.create_function(move |_, (g, set): (i64, String)| { h.borrow_mut().face_bind_anim_set(g as u64, Some(&set)); Ok(()) })?)?;
+    b.real("BindFaceAnimSet", lua.create_function(move |_, (g, set): (Guid, String)| { h.borrow_mut().face_bind_anim_set(g.raw(), Some(&set)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("UnbindFaceAnimSet", lua.create_function(move |_, g: i64| { h.borrow_mut().face_bind_anim_set(g as u64, None); Ok(()) })?)?;
+    b.real("UnbindFaceAnimSet", lua.create_function(move |_, g: Guid| { h.borrow_mut().face_bind_anim_set(g.raw(), None); Ok(()) })?)?;
     let h = host.clone();
-    b.real("PlayFaceAnim", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().face_play(g as u64, &name); Ok(()) })?)?;
+    b.real("PlayFaceAnim", lua.create_function(move |_, (g, name): (Guid, String)| { h.borrow_mut().face_play(g.raw(), &name); Ok(()) })?)?;
     let h = host.clone();
-    b.real("PlayFacialExpression", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().face_play(g as u64, &name); Ok(()) })?)?;
+    b.real("PlayFacialExpression", lua.create_function(move |_, (g, name): (Guid, String)| { h.borrow_mut().face_play(g.raw(), &name); Ok(()) })?)?;
 
     // Stance/action translation table → nil until the anim DB is wired (faithful getter); briefing-LOD
     // toggle → recorded Face command.

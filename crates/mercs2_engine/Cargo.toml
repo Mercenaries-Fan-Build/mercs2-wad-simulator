@@ -53,6 +53,8 @@ mercs2_population = { workspace = true }
 mercs2_combat = { workspace = true }
 mercs2_faction = { workspace = true }
 mercs2_ui = { workspace = true }
+# The player concern (roster + profile singleton) the script host owns and the tick reaches.
+mercs2_player = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key

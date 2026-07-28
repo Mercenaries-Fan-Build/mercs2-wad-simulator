@@ -126,8 +126,11 @@ impl GameRuntime {
     /// FSM, and the decal pool aging. Every one idles until entities/content carry their components —
     /// the same data-driven way the engine's systems idle. (Population needs the camera anchor, so it's
     /// [`tick_population`](Self::tick_population).)
-    pub fn tick(&mut self, world: &mut World, dt: f32) {
-        self.gameplay.tick(world, dt);
+    ///
+    /// `player` is the script host's [`mercs2_player::PlayerWorld`], passed through to the roster
+    /// passes that open the recovered layer-4 order.
+    pub fn tick(&mut self, world: &mut World, player: &mut mercs2_player::PlayerWorld, dt: f32) {
+        self.gameplay.tick(world, player, dt);
         // Combat impacts → projected decals (bullet holes / scorch / blood) + stash for particle FX.
         // The decal pool + the render impacts are now fed by a real producer (was dead bookkeeping).
         let impacts = self.gameplay.take_impacts();
@@ -220,7 +223,7 @@ mod tests {
         world.get::<&mut VehicleControls>(car).unwrap().accel = 1.0; // throttle
         let z0 = world.get::<&Transform>(car).unwrap().translation.z;
         for _ in 0..240 {
-            rt.tick(&mut world, 1.0 / 60.0);
+            rt.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         }
         let z1 = world.get::<&Transform>(car).unwrap().translation.z;
         assert!((z1 - z0).abs() > 1.0, "realized+throttled vehicle should drive; dz = {}", z1 - z0);
@@ -277,7 +280,7 @@ mod tests {
             AiFaction(2),
         ));
 
-        rt.tick(&mut world, 1.0 / 60.0);
+        rt.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         assert_eq!(
             world.get::<&PerceptionRecord>(watched).unwrap().hostile_aware, 1,
             "AI perception must run through the runtime tick"
@@ -294,7 +297,7 @@ mod tests {
         assert_eq!(rt.decal.pool.live_count(), 1);
 
         let mut world = World::new();
-        rt.tick(&mut world, 1.0 / 60.0); // decal.update runs inside tick
+        rt.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0); // decal.update runs inside tick
         assert_eq!(rt.decal.pool.live_count(), 1, "a fresh decal survives a short tick");
     }
 

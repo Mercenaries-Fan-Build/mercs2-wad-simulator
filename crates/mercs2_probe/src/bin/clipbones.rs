@@ -21,7 +21,12 @@ fn main() {
         eprintln!("usage: clipbones 0xHASH [0xHASH ...]");
         std::process::exit(2);
     }
-    let path = wad::registry_vz_wad().unwrap_or_else(|| "game-files/vz.wad".into());
+    // `game-files/vz.wad` was a repo-relative fallback that only worked from one checkout layout;
+    // `resolve_vz_wad` (VZ_WAD, then the registry) is the single path source.
+    let path = wad::resolve_vz_wad(None).unwrap_or_else(|| {
+        eprintln!("no vz.wad found — set VZ_WAD to the install folder, its data folder, or the file");
+        std::process::exit(1)
+    });
     let mut w = wad::open(&path).expect("open vz.wad");
 
     // `--order 0xCLIP`: dump that clip's ENTIRE track->bone binding IN TRACK ORDER.

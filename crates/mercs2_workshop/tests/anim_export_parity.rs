@@ -52,7 +52,7 @@ fn gltf_trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> [[f32; 4]; 4] {
 #[test]
 #[ignore = "needs the retail vz.wad"]
 fn exported_animation_matches_engine_pose() {
-    let Some(mut w) = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()) else {
+    let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
         eprintln!("no vz.wad — skipping");
         return;
     };
@@ -147,7 +147,7 @@ fn exported_animation_matches_engine_pose() {
 #[test]
 #[ignore = "needs the retail vz.wad"]
 fn a_conjugated_quaternion_would_be_caught() {
-    let Some(mut w) = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()) else {
+    let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
         eprintln!("no vz.wad — skipping");
         return;
     };

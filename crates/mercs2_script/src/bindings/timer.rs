@@ -46,11 +46,16 @@ enum State {
 type Timers = Rc<RefCell<HashMap<String, State>>>;
 
 /// Derive the map key from the control's first argument (name/handle); no argument → single default.
+///
+/// A handle argument now arrives as **lightuserdata** rather than `Value::Integer` (see
+/// [`crate::guid`]), so it needs its own arm — without it every handle-keyed timer collapsed onto the
+/// same empty-string slot as the no-argument form, and `Start(a)`/`Stop(b)` aliased.
 fn key_of(args: &Variadic<Value>) -> String {
     match args.first() {
         Some(Value::String(s)) => s.to_string_lossy(),
         Some(Value::Integer(i)) => i.to_string(),
         Some(Value::Number(n)) => n.to_string(),
+        Some(Value::LightUserData(ud)) => crate::guid::stringify_light_userdata(*ud),
         _ => String::new(),
     }
 }

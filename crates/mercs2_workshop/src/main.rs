@@ -102,15 +102,24 @@ fn main() {
     // `data/production_names.json`, and the WAD is consulted only by the fallback trim. Failing here
     // made `--pack-data` unrunnable on a machine without the game — i.e. on the CI runner that is
     // supposed to PUBLISH the bundle, which is why released workshops shipped with no bone names.
+    //
     // Resolution order: the flag (a one-off run must never rewrite the saved config), then the
-    // saved setting, then the registry. That middle step is the whole reason this tool is usable
-    // off Windows at all — `registry_vz_wad` is `cfg(not(windows)) -> None`, so before it a macOS
-    // or Linux user had to retype `--wad <path>` on every single launch.
+    // saved setting, then `resolve_vz_wad` — which is `$MERCS2_GAME_DIR` / `$VZ_WAD` and only THEN
+    // the registry key. Two independent reasons this tool works off Windows: `registry_vz_wad` is
+    // `cfg(not(windows)) -> None`, so before the saved setting a macOS or Linux user had to retype
+    // `--wad <path>` on every launch, and before the environment step a machine configured for
+    // every other tool in the repo still looked unconfigured to this one.
+    //
+    // The flag and the environment both take an install root, its `data` folder, or the file. An
+    // unresolvable `--wad` is kept AS TYPED rather than falling through to the next source: the
+    // later open then fails naming the path the user actually gave, instead of silently succeeding
+    // against a different install.
     let wadpath = get("--wad")
+        .map(|p| wad::vz_wad_in(&p).unwrap_or(p))
         .or_else(|| {
             settings::load().wad_path.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
         })
-        .or_else(wad::registry_vz_wad);
+        .or_else(|| wad::resolve_vz_wad(None));
     let names_csv = get("--names").map(std::path::PathBuf::from).or_else(index::default_names_csv);
 
     // Overlay stack: every `--overlay <path>`, in argument order, plus (unless --no-auto-patch)
@@ -374,7 +383,16 @@ fn main() {
                 Ok(p) => p,
                 Err(e) => return eprintln!("--mod-skel: import {mesh_path}: {e}"),
             };
-        println!("[mod-skel] {} parts, {} materials from {mesh_path}", parts.len(), mat_images.len());
+        // Per-slot resolved counts, not just the material count: a material whose slot stayed `None`
+        // silently keeps the DONOR's texture there, and that is worth seeing before publishing.
+        println!(
+            "[mod-skel] {} parts, {} materials from {mesh_path} ({} diffuse / {} specular / {} normal resolved)",
+            parts.len(),
+            mat_images.len(),
+            mat_images.iter().filter(|i| i.is_some()).count(),
+            spec_images.iter().filter(|i| i.is_some()).count(),
+            normal_images.iter().filter(|i| i.is_some()).count(),
+        );
         let mut paths = vec![wadpath.clone()];
         paths.extend(overlays.iter().cloned());
         match publish::publish_skel(
@@ -792,7 +810,22 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Err(e) => return eprintln!("--faithful: {e}"),
         };
         let target_rig = app::load_model_data(&mut w, thash).map(|m| m.skin.rig).unwrap_or_default();
-        let im = import::char_skin_to_imported(&cs, &glbd, target_rig.clone());
+        // Build the model EXACTLY as the Skeleton workbench's Apply does, materials included, so this
+        // flag reports the workbench's real material binding headlessly. The RENDER below stays flat
+        // white on purpose (that is the surface a geometry break shows on) — it builds its own
+        // untextured draw group and ignores `im.draws` / `im.textures`.
+        let mats = import::load_material_textures(std::path::Path::new(&glb)).unwrap_or_default();
+        let im = import::char_skin_to_imported(&cs, &glbd, target_rig.clone(), Some(&mats));
+        println!(
+            "--faithful: {} draw groups ({} diffuse / {} specular / {} normal bound), {} textures \
+             from {} materials",
+            im.draws.len(),
+            im.draws.iter().filter(|d| d.diffuse.is_some()).count(),
+            im.draws.iter().filter(|d| d.specular.is_some()).count(),
+            im.draws.iter().filter(|d| d.normal.is_some()).count(),
+            im.textures.len(),
+            mats.diffuse.len(),
+        );
         // Pose exactly like --render: in-place havok palette, or identity at bind.
         const IDENT: [[f32; 4]; 4] =
             [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -1670,7 +1703,15 @@ fn extract_skel_parts(
                 mat_images[idx] = to_rgba(img);
             }
         }
-        if let Some(t) = m.pbr_metallic_roughness().metallic_roughness_texture() {
+        // metallicRoughness is the usual slot-1 carrier, but a Blender/Substance export of a game rip
+        // often has none and puts the gloss under KHR_materials_specular — without the fallback those
+        // materials silently keep the DONOR's specular instead of the mod's.
+        let spec = m
+            .pbr_metallic_roughness()
+            .metallic_roughness_texture()
+            .or_else(|| m.specular().and_then(|s| s.specular_texture()))
+            .or_else(|| m.specular().and_then(|s| s.specular_color_texture()));
+        if let Some(t) = spec {
             if let Some(img) = images.get(t.texture().source().index()) {
                 spec_images[idx] = to_rgba(img);
             }

@@ -103,8 +103,8 @@ pub fn spawn_default_vehicle(
 /// - **humanoid** (`mercs2_core`): the `Human` marker + a default `HumanState` — this is what makes the
 ///   entity a *person* to every silo that acts on people (combat's blood-vs-spark impact pick, the
 ///   animation selection key, the AI's people goals). Deliberately **not** `PlayerControlled`: retail
-///   possession is applied on *attach* (`FUN_006A4060` adds the marker to an already-spawned character
-///   and removes it on detach), never at spawn — `mercs2_player` owns that pairing;
+///   possession is applied on *attach* (`FUN_006A4060` writes the character GUID to the possession
+///   field `player+0x20` at `0x006A422E`), never at spawn — `mercs2_player` owns that pairing;
 /// - **AI** (`mercs2_ai`): `Perception`/`Stimulus`/`Target`/`PerceptionRecord` (seen by + sees others),
 ///   `AiBehavior` (unrestricted), `AiSkill`, `Squad`, and a **neutral `AiFaction(0)`** the caller
 ///   overrides with the real faction (`set_faction`);
@@ -199,7 +199,7 @@ mod tests {
 
     /// A spawned character is a **person**: it carries the `Human` marker + a default `HumanState`, the
     /// vocabulary every people-acting silo queries. It is deliberately NOT `PlayerControlled` — retail
-    /// possession is applied on attach (`FUN_006A4060` adds the marker to an existing character entity),
+    /// possession is applied on attach (`FUN_006A4060` writes the character GUID to `player+0x20`),
     /// never at spawn.
     #[test]
     fn character_spawns_as_a_human_but_unpossessed() {
@@ -351,7 +351,7 @@ mod tests {
 
         let z0 = world.get::<&Transform>(car).unwrap().translation.z;
         for _ in 0..240 {
-            gp.tick(&mut world, 1.0 / 60.0);
+            gp.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         }
         let z1 = world.get::<&Transform>(car).unwrap().translation.z;
         assert!((z1 - z0).abs() > 1.0, "resolved+throttled vehicle should drive; dz = {}", z1 - z0);

@@ -18,7 +18,7 @@ fn main() {
         .and_then(|a| a.strip_prefix("0x"))
         .and_then(|h| u32::from_str_radix(h, 16).ok())
         .unwrap_or(0xA3C1_FABC); // pmc_hum_mattias_v3
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     let m = Model::load(&mut w, mhash).expect("load model");
     let (verts, _indices, draws, stats) = m.flatten();

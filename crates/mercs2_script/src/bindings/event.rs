@@ -25,10 +25,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use mlua::{Function, Lua, Result as LuaResult, Table, Value, Variadic};
+use mlua::{Function, IntoLua, Lua, Result as LuaResult, Table, Value, Variadic};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Event";
@@ -108,6 +108,29 @@ const KINDS: &[(&str, i64)] = &[
     ("PosZ", 40),
 ];
 
+/// The `Event.ObjectInSeat` filter: `{occupant, vehicle, seat, action}`.
+///
+/// # The vocabulary, from the corpus (42 sites)
+///
+/// * **occupant** — a character guid. `0`, an unreadable value, or the string `"Hero"`
+///   (`wifpmcgarage.lua:410`) mean *any occupant*.
+/// * **vehicle** — a vehicle guid; `0` means *any vehicle*. `wifpmcgarage.lua:472` registers
+///   `{uCharacter, 0, "d", "x"}` to catch that character leaving the driver seat of **anything**.
+/// * **seat** — `"d"` driver or `"p"` passenger, case-insensitive. `"a"` is a **wildcard**: it appears
+///   27 times in this filter and *never* as a real seat (`Vehicle.Enter` and `Vehicle.GetSeatByType`
+///   only ever pass `"d"`/`"p"`), so it cannot be a seat type. INFERRED from that distribution, not
+///   read from the exe.
+/// * **action** — `"e"`/`"E"` enter, `"x"` exit. Case-insensitive.
+#[derive(Debug, Clone, Default)]
+struct InSeatFilter {
+    /// `None` = match any vehicle.
+    vehicle: Option<u64>,
+    /// Lowercased seat code; `None` = match any seat.
+    seat: Option<String>,
+    /// Lowercased action (`"e"` / `"x"`); `None` = match either.
+    action: Option<String>,
+}
+
 /// One registered event handler.
 struct EventReg {
     kind: i64,
@@ -124,6 +147,8 @@ struct EventReg {
     subject: Option<u64>,
     // ObjectHibernation: the phase on `subject` this handler waits for (`"awake"` / `"asleep"`).
     phase: Option<String>,
+    // ObjectInSeat: the `{occupant, vehicle, seat, action}` filter. `subject` holds the occupant.
+    in_seat: Option<InSeatFilter>,
     // GameStateChange: the `(stateName, phase)` this handler waits for (e.g. `("WaitForStreaming",
     // "exit")`), fired by the engine's state machine via `fire_game_state_change`.
     state_match: Option<(String, String)>,
@@ -157,6 +182,8 @@ fn make(
     persistent: bool,
 ) -> LuaResult<i64> {
     let cbargs = seq_values(&cbargs)?;
+    // Set only by the ObjectInSeat arm; kept out of the tuple, which is already seven wide.
+    let mut in_seat: Option<InSeatFilter> = None;
     let (script_name, filter, timer_remaining, timer_period, subject, phase, state_match) = if kind == KIND_SCRIPT_EVENT {
         // params = { name, [filter_fn] }
         (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None, None, None)
@@ -166,15 +193,39 @@ fn make(
         (None, None, Some(secs), Some(secs), None, None, None)
     } else if kind == KIND_OBJECT_DEATH {
         // params = { guid } — fired by the engine when that object dies (Object.Kill / damage).
-        let g: Option<i64> = params.get(1).ok();
-        (None, None, None, None, g.map(|x| x as u64), None, None)
+        // The handle inside the params table is whatever the producing binding pushed, i.e. now
+        // lightuserdata; reading it as `Guid` accepts that (and, transitionally, an integer).
+        let g = params.get::<Guid>(1).unwrap_or(Guid::NONE);
+        (None, None, None, None, g.opt(), None, None)
     } else if kind == KIND_OBJECT_HIBERNATION {
         // params = { guid, phase } — fired by the streaming system when that object wakes/sleeps.
         // The awake-gate every real object script opens with:
         //   Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})
-        let g: Option<i64> = params.get(1).ok();
-        let ph = params.get::<String>(2).ok();
-        (None, None, None, None, g.map(|x| x as u64), ph, None)
+        // The phase is CANONICALISED here — see [`canon_phase`]; the corpus spells two phases five
+        // different ways and storing them verbatim made 28 of 109 registrations unmatchable.
+        let g = params.get::<Guid>(1).unwrap_or(Guid::NONE);
+        let ph = params
+            .get::<String>(2)
+            .ok()
+            .map(|s| canon_phase(&s).map(str::to_string).unwrap_or(s));
+        (None, None, None, None, g.opt(), ph, None)
+    } else if kind == KIND_OBJECT_IN_SEAT {
+        // params = { occupant, vehicle, seat, action } — see [`InSeatFilter`] for the vocabulary.
+        //
+        // The occupant is read as a `Guid`, so the string `"Hero"` (`wifpmcgarage.lua:410`) and a
+        // missing value both land as `Guid::NONE` → any-occupant. That is a deliberate widening: this
+        // module cannot resolve "Hero" without the host, and with a single local player "the hero" and
+        // "any character" select the same object. In split-screen co-op they would not — recorded in
+        // `DEFERRED.md`.
+        let occ = params.get::<Guid>(1).unwrap_or(Guid::NONE);
+        let veh = params.get::<Guid>(2).unwrap_or(Guid::NONE);
+        let f = InSeatFilter {
+            vehicle: veh.opt(),
+            seat: params.get::<String>(3).ok().map(|s| s.to_ascii_lowercase()).filter(|s| s != "a"),
+            action: params.get::<String>(4).ok().map(|s| s.to_ascii_lowercase()).filter(|s| !s.is_empty()),
+        };
+        in_seat = Some(f);
+        (None, None, None, None, occ.opt(), None, None)
     } else if kind == KIND_GAME_STATE_CHANGE {
         // params = { stateName, phase } — fired by the engine's state machine (e.g. {"WaitForStreaming","exit"}).
         let st = params.get::<String>(1).ok();
@@ -188,7 +239,7 @@ fn make(
     let h = m.next;
     m.regs.insert(
         h,
-        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, phase, state_match },
+        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, phase, in_seat, state_match },
     );
     Ok(h)
 }
@@ -266,6 +317,15 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     lua.set_app_data(mgr.clone());
 
     // Create(kind, params, callback, [args]) -> handle
+    //
+    // Two deliberate non-`Guid` types here (see the nil-handle contract in `super`):
+    // - `kind` is a **constant** (`Event.ScriptEvent`, …), not an engine handle. A nil there is a real
+    //   script bug — a misspelled `Event.Xxx` — and must keep raising rather than silently registering
+    //   a handler under kind 0.
+    // - the returned event handle is minted by this module's own `EventManager`, not by the engine's
+    //   GUID allocator. The corpus only ever stores it and hands it back to `Event.Delete`
+    //   (`e = Event.Delete(e)`); no call site type-checks it, so there is no evidence it is a
+    //   lightuserdata in retail and no reason to make it one here.
     let m = mgr.clone();
     b.real(
         "Create",
@@ -369,12 +429,72 @@ pub fn fire_object_death(lua: &Lua, guid: u64) -> LuaResult<()> {
     Ok(())
 }
 
+/// The canonical `ObjectHibernation` phase for whatever spelling a script used.
+///
+/// # Why this is needed
+///
+/// The shipped corpus spells the phase **five** ways across 109 registrations:
+///
+/// | spelling | sites | meaning |
+/// |---|--:|---|
+/// | `"awake"` | 80 | object woke |
+/// | `"a"` | 4 | object woke |
+/// | `"hibernated"` | 19 | object went to sleep |
+/// | `"s"` | 5 | object went to sleep |
+/// | `"asleep"` | 1 | object went to sleep |
+///
+/// That there are exactly **two** phases is settled by what the handlers do, not by the strings:
+/// every `"s"`/`"hibernated"`/`"asleep"` site is a sleep handler (`_OnAsleep` `wifpmcgarage.lua:364`,
+/// `_OnHqHibernation` `mrxhqmanager.lua:185`, `_OnPmcHibernation` `wifpmcinterior.lua:2069`, and
+/// `Object.Remove` on stream-out at `oilcon001.lua:1727`/`pircon001.lua:193`), and every
+/// `"a"`/`"awake"` site is a wake handler.
+///
+/// Storing the raw string and comparing it exactly — which is what this did before — meant a producer
+/// firing any single spelling could match at most one group. **28 of the 109 registrations could never
+/// fire**, including `vzacon001.lua:120`, the boat gate the whole world-load state machine waits on.
+///
+/// # Confidence: the grouping is proven, the retail predicate is NOT recovered
+///
+/// `event_bus_code_map.md:36` gets as far as "installs match predicate via `vt[0](filter_args)`" and
+/// does not disassemble the per-type predicate, so retail's actual comparison is unknown. What is
+/// certain is that it is **not** an exact match (that would break 28 shipped sites) and **not** a
+/// first-character match (`"awake"` and `"asleep"` share `'a'` yet mean opposites).
+///
+/// This maps by author intent, which is the observable ground truth. The one place that could differ
+/// from retail is `"asleep"` — the single outlier, at `gurcon002.lua:194`. If retail happens to
+/// first-char match, that site registers as *awake* and is a shipped bug; we would then be fixing a
+/// bug rather than reproducing it. One site, flagged in `DEFERRED.md`, needs a live read of the
+/// predicate to settle. Do not raise this to a claim of oracle grounding.
+///
+/// Returns `None` for a spelling not in the table above. The caller then stores the raw string, so an
+/// unknown phase keeps the old exact-match behaviour instead of being forced into a bucket it may not
+/// belong to — guessing which of two opposite meanings a novel spelling has is exactly the error this
+/// function exists to fix.
+pub fn canon_phase(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "a" | "awake" => Some(PHASE_AWAKE),
+        "s" | "asleep" | "hibernated" => Some(PHASE_ASLEEP),
+        _ => None,
+    }
+}
+
+/// Canonical "the object woke" phase. Producers fire this; [`canon_phase`] folds `"a"`/`"awake"` onto it.
+pub const PHASE_AWAKE: &str = "awake";
+/// Canonical "the object went to sleep / streamed out" phase. [`canon_phase`] folds
+/// `"s"`/`"asleep"`/`"hibernated"` onto it.
+pub const PHASE_ASLEEP: &str = "hibernated";
+
 /// Fire every `ObjectHibernation` handler registered for `(guid, phase)` — the streaming system calls
 /// this when an object wakes (`"awake"`) or hibernates (`"asleep"`). This is the condition behind the
 /// awake-gate that opens essentially every object script in the corpus:
 /// `Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})` — `OnActivate` runs
 /// while the object is still asleep, so real setup has to wait for this.
 pub fn fire_object_hibernation(lua: &Lua, guid: u64, phase: &str) -> LuaResult<()> {
+    // Canonicalise the PRODUCER's spelling too, not just the registration's. Callers reasonably pass
+    // whatever the corpus reads like at the call site they are mirroring (`"a"`, `"awake"`), and a
+    // producer saying `"a"` against a registration canonicalised to `"awake"` would match nothing —
+    // the same failure this canonicalisation exists to remove, just moved to the other side.
+    let phase = canon_phase(phase).unwrap_or(phase);
     let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
         Some(m) => (*m).clone(),
         None => return Ok(()),
@@ -400,6 +520,65 @@ pub fn fire_object_hibernation(lua: &Lua, guid: u64, phase: &str) -> LuaResult<(
     Ok(())
 }
 
+/// Fire every `ObjectInSeat` handler matching `(occupant, vehicle, seat, action)` — the engine calls
+/// this when a character takes or leaves a seat (`Vehicle.Enter` / `Vehicle.Exit`).
+///
+/// `action` is `"e"` (entered) or `"x"` (exited); `seat` is the real seat code (`"d"`/`"p"`), never the
+/// `"a"` wildcard — wildcards belong to the *filter*, not to the event.
+///
+/// # Callback arguments
+///
+/// The handler is called with its registered `cbargs` **followed by `(occupant, vehicle)`**. That is
+/// not a guess: `wifpmcgarage.lua` registers `_OnVehicleExit` with `{vRegion, nSlot}` and declares
+/// `function _OnVehicleExit(vRegion, nSlot, uCharacter, uVehicle)` (`:523`) — two cbargs, then the two
+/// appended values, in that order. It is consistent with `vzacon001.lua`'s
+/// `EnsureHeroesInBoat(self, uOccupant)` registered with `{self}`, which simply ignores the trailing
+/// vehicle the way Lua ignores any extra argument.
+pub fn fire_object_in_seat(
+    lua: &Lua,
+    occupant: u64,
+    vehicle: u64,
+    seat: &str,
+    action: &str,
+) -> LuaResult<()> {
+    let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
+        Some(m) => (*m).clone(),
+        None => return Ok(()),
+    };
+    let seat = seat.to_ascii_lowercase();
+    let action = action.to_ascii_lowercase();
+    let fired: Vec<(i64, Function, Vec<Value>, bool)> = {
+        let m = mgr.borrow();
+        m.regs
+            .iter()
+            .filter(|(_, r)| {
+                if r.kind != KIND_OBJECT_IN_SEAT {
+                    return false;
+                }
+                let Some(f) = r.in_seat.as_ref() else { return false };
+                // `None` on any field is the wildcard — see `InSeatFilter`.
+                r.subject.is_none_or(|s| s == occupant)
+                    && f.vehicle.is_none_or(|v| v == vehicle)
+                    && f.seat.as_deref().is_none_or(|s| s == seat)
+                    && f.action.as_deref().is_none_or(|a| a == action)
+            })
+            .map(|(h, r)| (*h, r.callback.clone(), r.cbargs.clone(), r.persistent))
+            .collect()
+    };
+    for (h, callback, mut cbargs, persistent) in fired {
+        // Through `Guid`, not a hand-built `LightUserData`: that is the one place the handle→Lua
+        // representation is defined (non-zero → lightuserdata, 0 → nil), and the scripts receiving
+        // these values type-check them with `type(u) == "userdata"`.
+        cbargs.push(Guid::from(occupant).into_lua(lua)?);
+        cbargs.push(Guid::from(vehicle).into_lua(lua)?);
+        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        if !persistent {
+            mgr.borrow_mut().regs.remove(&h);
+        }
+    }
+    Ok(())
+}
+
 /// Number of event handlers still registered. The engine doesn't need this; tooling does — a script
 /// that re-registers on every stream-in without `Event.Delete`ing on stream-out shows up here as a
 /// count that climbs each cycle (the duplicate-handler leak).
@@ -407,5 +586,40 @@ pub fn live_handle_count(lua: &Lua) -> usize {
     match lua.app_data_ref::<Mgr>() {
         Some(m) => m.borrow().regs.len(),
         None => 0,
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+
+    /// Both spellings of each phase fold together, and the two phases stay apart.
+    ///
+    /// The separation matters more than the folding: `"awake"` and `"asleep"` differ by three letters
+    /// in the middle and share a first character, so any matcher keyed on a prefix would collapse
+    /// opposites — a wake handler firing on stream-OUT would run mission setup for an object that just
+    /// left the world.
+    #[test]
+    fn the_five_corpus_spellings_fold_to_two_phases() {
+        for wake in ["a", "awake", "AWAKE", " Awake "] {
+            assert_eq!(canon_phase(wake), Some(PHASE_AWAKE), "{wake:?} means awake");
+        }
+        for sleep in ["s", "asleep", "hibernated", "HIBERNATED"] {
+            assert_eq!(canon_phase(sleep), Some(PHASE_ASLEEP), "{sleep:?} means asleep");
+        }
+        assert_ne!(PHASE_AWAKE, PHASE_ASLEEP, "the two phases must never compare equal");
+        // The canonical forms are themselves stable under folding, so a producer firing a canonical
+        // phase matches a registration that was already canonicalised.
+        assert_eq!(canon_phase(PHASE_AWAKE), Some(PHASE_AWAKE));
+        assert_eq!(canon_phase(PHASE_ASLEEP), Some(PHASE_ASLEEP));
+    }
+
+    /// An unrecognised spelling is reported as unknown rather than guessed into a bucket. Registration
+    /// then keeps the raw string, preserving the old exact-match behaviour for it.
+    #[test]
+    fn an_unknown_spelling_is_not_guessed() {
+        for odd in ["", "wake", "sleeping", "dormant", "0"] {
+            assert_eq!(canon_phase(odd), None, "{odd:?} is not a spelling we have evidence for");
+        }
     }
 }

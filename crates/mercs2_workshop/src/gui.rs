@@ -284,14 +284,39 @@ pub mod theme {
     pub fn install(ctx: &egui::Context) {
         // ── fonts ──
         let mut fonts = egui::FontDefinitions::default();
-        // Body: prefer Segoe UI (the native Windows UI face) ahead of egui's default proportional.
-        if load_font(&mut fonts, "segoe", &["C:/Windows/Fonts/segoeui.ttf"]) {
+        // Body: prefer the platform's native UI face ahead of egui's default proportional.
+        //
+        // `load_font` walks the list and returns false if none load, so a platform with none of them
+        // simply keeps egui's built-in font. The list previously held only the Windows paths, so on
+        // macOS and Linux both lookups always failed — not a crash, but the app never got a native
+        // face and the display family silently collapsed onto the proportional stack.
+        //
+        // `.ttc` collections are deliberately not listed: `FontData::from_owned` wants a single face.
+        const BODY_FONTS: &[&str] = &[
+            "C:/Windows/Fonts/segoeui.ttf",                    // Windows: Segoe UI
+            "/System/Library/Fonts/Supplemental/Arial.ttf",     // macOS
+            "/Library/Fonts/Arial.ttf",                         // macOS, older layout
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  // Linux: Debian/Ubuntu
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",              // Linux: Arch
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf", // Linux: Fedora
+        ];
+        // Display face for the stencil eyebrows / headings — a condensed/narrow cut on each platform.
+        const DISPLAY_FONTS: &[&str] = &[
+            "C:/Windows/Fonts/bahnschrift.ttf",                        // Windows
+            "/System/Library/Fonts/Supplemental/Arial Narrow.ttf",      // macOS
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf", // Linux: Debian/Ubuntu
+            "/usr/share/fonts/liberation-narrow/LiberationSansNarrow-Regular.ttf", // Linux: Fedora
+        ];
+        if load_font(&mut fonts, "segoe", BODY_FONTS) {
             fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "segoe".to_owned());
         }
-        // Display: Bahnschrift for the stencil eyebrows / headings.
-        let disp_key = if load_font(&mut fonts, "disp_ttf", &["C:/Windows/Fonts/bahnschrift.ttf"]) {
+        let disp_key = if load_font(&mut fonts, "disp_ttf", DISPLAY_FONTS) {
             // Bahnschrift sits high in its line box vs Segoe — nudge the baseline down so disp labels
             // and body/mono text vertically centre together (visible on the command bar).
+            //
+            // This factor was measured for the Windows pair (Bahnschrift over Segoe UI) and is applied
+            // to whichever display face loaded. The non-Windows cuts have not been measured, so on
+            // those platforms treat it as an approximation, not a tuned value.
             if let Some(fd) = fonts.font_data.get_mut("disp_ttf") {
                 fd.tweak.y_offset_factor = 0.09;
             }

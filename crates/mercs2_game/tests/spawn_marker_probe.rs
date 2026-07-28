@@ -13,7 +13,7 @@ use mercs2_engine::worldutil::find_terrain_blocks;
 #[test]
 #[ignore]
 fn spawn_markers_present_in_vz_wad() {
-    let path = wad::registry_vz_wad().expect("vz.wad resolvable via EA registry");
+    let path = wad::resolve_vz_wad(None).expect("vz.wad resolvable via EA registry");
     let mut w = wad::open(&path).expect("open vz.wad");
     let (_low, ls) = find_terrain_blocks(&mut w).expect("find layers_static");
     let placements = mercs2_formats::placement::load_placements(&ls).expect("load placements");

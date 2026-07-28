@@ -11,7 +11,7 @@
 
 use mlua::{Lua, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -79,6 +79,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     use mercs2_ui::MarkerKind;
 
     // --- world-space HUD markers → the real `mercs2_ui::MarkerSet` on the host. ---
+    // The **marker id** stays an `i64`, like the widget id it is a sibling of (see the rationale in
+    // `bindings::hud`): it is minted by `mercs2_ui::MarkerSet`, not by the engine's GUID allocator, and
+    // no shipped script type-checks one — all 15 `_Marker*` cfuncs have 0 corpus call sites, so there
+    // is no evidence either way and inventing a lightuserdata would be a claim, not a recovery. The
+    // *followed object* (`_MarkerSetFollowGuid`'s second argument) is a real handle and is a `Guid`.
     for (name, kind) in [
         ("_MarkerAdd", MarkerKind::Blip),
         ("_MarkerAddOld", MarkerKind::Blip),
@@ -93,38 +98,38 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         })?)?;
     }
     let h = host.clone();
-    b.real("_MarkerRemove", lua.create_function(move |_, id: i64| {
-        if let Some(m) = h.borrow_mut().markers() { m.remove(id as u64); }
+    b.real("_MarkerRemove", lua.create_function(move |_, id: Option<i64>| {
+        if let Some(m) = h.borrow_mut().markers() { m.remove(id.unwrap_or(0) as u64); }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("_MarkerSetLocation", lua.create_function(move |_, (id, x, y, z): (i64, f32, f32, Option<f32>)| {
-        if let Some(m) = h.borrow_mut().markers() { m.set_location(id as u64, [x, y, z.unwrap_or(0.0)]); }
+    b.real("_MarkerSetLocation", lua.create_function(move |_, (id, x, y, z): (Option<i64>, f32, f32, Option<f32>)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_location(id.unwrap_or(0) as u64, [x, y, z.unwrap_or(0.0)]); }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("_MarkerSetColor", lua.create_function(move |_, (id, r, g, bl, a): (i64, f32, f32, f32, Option<f32>)| {
-        if let Some(m) = h.borrow_mut().markers() { m.set_color(id as u64, [r, g, bl, a.unwrap_or(255.0)]); }
+    b.real("_MarkerSetColor", lua.create_function(move |_, (id, r, g, bl, a): (Option<i64>, f32, f32, f32, Option<f32>)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_color(id.unwrap_or(0) as u64, [r, g, bl, a.unwrap_or(255.0)]); }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("_MarkerSetFollowGuid", lua.create_function(move |_, (id, guid): (i64, i64)| {
-        if let Some(m) = h.borrow_mut().markers() { m.set_follow(id as u64, guid as u64); }
+    b.real("_MarkerSetFollowGuid", lua.create_function(move |_, (id, guid): (Option<i64>, Guid)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_follow(id.unwrap_or(0) as u64, guid.raw()); }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("_MarkerSetScale", lua.create_function(move |_, (id, s): (i64, f32)| {
-        if let Some(m) = h.borrow_mut().markers() { m.set_scale(id as u64, s); }
+    b.real("_MarkerSetScale", lua.create_function(move |_, (id, s): (Option<i64>, f32)| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_scale(id.unwrap_or(0) as u64, s); }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("_MarkerPulse", lua.create_function(move |_, id: i64| {
-        if let Some(m) = h.borrow_mut().markers() { m.set_pulsing(id as u64, true); }
+    b.real("_MarkerPulse", lua.create_function(move |_, id: Option<i64>| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_pulsing(id.unwrap_or(0) as u64, true); }
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("_MarkerHaltPulse", lua.create_function(move |_, id: i64| {
-        if let Some(m) = h.borrow_mut().markers() { m.set_pulsing(id as u64, false); }
+    b.real("_MarkerHaltPulse", lua.create_function(move |_, id: Option<i64>| {
+        if let Some(m) = h.borrow_mut().markers() { m.set_pulsing(id.unwrap_or(0) as u64, false); }
         Ok(())
     })?)?;
     let h = host.clone();

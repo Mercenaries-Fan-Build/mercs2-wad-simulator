@@ -11,7 +11,7 @@
 
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 const FNV1A_OFFSET_BASIS: u32 = 0x811C_9DC5;
@@ -61,30 +61,32 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Pure hash — fully faithful.
     b.real("GetStringHash", lua.create_function(|_, s: String| Ok(pandemic_hash_m2(&s) as i64))?)?;
 
-    // Query — no linked object until the native state machine is backed.
-    b.real("GetLinkGuid", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    // Query — no linked object until the native state machine is backed. `Guid::NONE` pushes nil, so
+    // the callers' `if not uLink then` stays authentic, and when this gains a body the return type is
+    // already the lightuserdata handle the scripts type-check.
+    b.real("GetLinkGuid", lua.create_function(|_, _: MultiValue| Ok(Guid::NONE))?)?;
 
     // SendDamage(target, amount) → apply damage to the target's health (returns whether it died).
     let h = host.clone();
-    b.real("SendDamage", lua.create_function(move |_, (target, amount, _rest): (i64, f32, MultiValue)| {
-        Ok(h.borrow_mut().object_send_damage(target as u64, amount))
+    b.real("SendDamage", lua.create_function(move |_, (target, amount, _rest): (Guid, f32, MultiValue)| {
+        Ok(h.borrow_mut().object_send_damage(target.raw(), amount))
     })?)?;
 
     // State-machine state + node emitters → real host state (the emitter's particle *rendering* is a
     // separate render pass; the active-emitter set + state name are engine state).
     let h = host.clone();
-    b.real("SetState", lua.create_function(move |_, (guid, state): (i64, String)| {
-        h.borrow_mut().object_sm_set_state(guid as u64, &state);
+    b.real("SetState", lua.create_function(move |_, (guid, state): (Guid, String)| {
+        h.borrow_mut().object_sm_set_state(guid.raw(), &state);
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("StartEmitter", lua.create_function(move |_, (guid, name): (i64, String)| {
-        h.borrow_mut().object_start_emitter(guid as u64, &name);
+    b.real("StartEmitter", lua.create_function(move |_, (guid, name): (Guid, String)| {
+        h.borrow_mut().object_start_emitter(guid.raw(), &name);
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("StopEmitter", lua.create_function(move |_, (guid, name): (i64, String)| {
-        h.borrow_mut().object_stop_emitter(guid as u64, &name);
+    b.real("StopEmitter", lua.create_function(move |_, (guid, name): (Guid, String)| {
+        h.borrow_mut().object_stop_emitter(guid.raw(), &name);
         Ok(())
     })?)?;
 
