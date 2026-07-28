@@ -12,7 +12,7 @@ use mercs2_engine::{mesh, wad};
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "ch_veh_tank_ztz98".into());
     let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
 
     println!("{name} = {hash:#010x}\n");
 
