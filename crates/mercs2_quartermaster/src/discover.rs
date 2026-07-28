@@ -210,8 +210,22 @@ pub enum SourceIssue {
     },
 }
 
-impl std::fmt::Display for SourceIssue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl SourceIssue {
+    /// The problem, WITHOUT the `contributions[i]` prefix.
+    ///
+    /// [`Display`](std::fmt::Display) is self-contained because a `SourceIssue` may be reported on
+    /// its own. A [`Diagnostic`](crate::lint::Diagnostic) already prints the contribution index from
+    /// its `at` field, so folding the full Display into one produced the location twice:
+    ///
+    /// ```text
+    /// [M0110] error: contributions[0]: contributions[0] (replace_texture) field `image`: …
+    /// ```
+    pub fn detail(&self) -> String {
+        let (what, _, kind, field, path) = self.parts();
+        format!("({kind}) field `{field}`: {} {what}", path.display())
+    }
+
+    fn parts(&self) -> (&'static str, usize, &'static str, &'static str, &Path) {
         let (what, index, kind, field, path) = match self {
             SourceIssue::Absolute {
                 index,
@@ -250,11 +264,14 @@ impl std::fmt::Display for SourceIssue {
                 path,
             } => ("is not under src/", index, kind, field, path),
         };
-        write!(
-            f,
-            "contributions[{index}] ({kind}) field `{field}`: {} {what}",
-            path.display()
-        )
+        (what, *index, kind, field, path.as_path())
+    }
+}
+
+impl std::fmt::Display for SourceIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (_, index, _, _, _) = self.parts();
+        write!(f, "contributions[{index}] {}", self.detail())
     }
 }
 
