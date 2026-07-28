@@ -696,11 +696,12 @@ mod tests {
     fn live_human_animgroup_if_wad_present() {
         use crate::ffcs::load_ffcs_archive;
         use crate::sges::decompress_block;
-        let path = std::env::var("VZ_WAD").unwrap_or_else(|_| {
-            "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
-        });
+        let Some(path) = crate::game_paths::vz_wad_from_env() else {
+            eprintln!("skip: vz.wad not found (set MERCS2_GAME_DIR or VZ_WAD)");
+            return;
+        };
         let Ok(mut f) = std::fs::File::open(&path) else {
-            eprintln!("skip: vz.wad not present at {path}");
+            eprintln!("skip: vz.wad not readable at {}", path.display());
             return;
         };
         let size = f.metadata().unwrap().len();
