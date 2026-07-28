@@ -25,8 +25,9 @@ use mercs2_formats::ffcs::load_ffcs_archive;
 
 // The crate is bin-only (no lib target), so pull in the real rainbow resolver
 // directly rather than duplicating it as registry_hash_dump.rs had to.
-#[path = "../names.rs"]
-mod names;
+// From the crate lib now; this used to be `#[path = "../names.rs"] mod names;`, the workaround
+// for a crate that had no [lib] and so compiled this module once per binary.
+use wad_simulator::names;
 use names::RainbowTable;
 
 /// ASET `type_id` -> type name. 1:1 with the UCFX `type_hash` in decompressed
