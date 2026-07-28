@@ -153,14 +153,21 @@ pub struct BareHashSuggestion {
     pub name: String,
 }
 
+impl BareHashSuggestion {
+    /// The suggestion WITHOUT the `contributions[i]` prefix, for a [`crate::lint::Diagnostic`] that
+    /// already prints the index from its `at` field.
+    pub fn detail(&self) -> String {
+        format!(
+            "({}) refers to `{}`, which is `{}` — a name reads and diffs better, and cannot drift \
+             from the asset it was copied for. The hash works; this is a suggestion, not a defect.",
+            self.kind, self.written, self.name
+        )
+    }
+}
+
 impl std::fmt::Display for BareHashSuggestion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "contributions[{}] ({}) declares `{}` — write `{}` instead; the name is the identity, \
-             and a hand-copied hash silently drifts from the asset it was meant to name",
-            self.index, self.kind, self.written, self.name
-        )
+        write!(f, "contributions[{}] {}", self.index, self.detail())
     }
 }
 
@@ -169,29 +176,38 @@ pub fn bare_hash_suggestions(manifest: &Manifest, names: &NameTable) -> Vec<Bare
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         let kind = c.kind();
-        let touches: &[Touch] = match c {
-            Contribution::Raw { touches, .. } => touches,
-            Contribution::NativeHook { touches, .. } => touches,
-            _ => continue,
-        };
-        for t in touches {
-            if !t.is_bare_hash() {
-                continue;
+
+        // References to assets that ALREADY EXIST. `name:` on add_model/add_outfit is deliberately
+        // absent: that field mints a new identity, so a hash there is not an unnamed reference to
+        // something we could name — and if it collided with a retail asset that would be a
+        // different and more serious finding than "you could have written a name".
+        let mut refs: Vec<&str> = Vec::new();
+        match c {
+            Contribution::ReplaceTexture { target, .. } => refs.push(target),
+            Contribution::EditStateMachine { target, .. } => refs.push(target),
+            Contribution::AddModel { donor, .. } | Contribution::AddOutfit { donor, .. } => {
+                if let Some(d) = donor {
+                    refs.push(d);
+                }
             }
-            let hex = t.0.trim().trim_start_matches("0x").trim_start_matches("0X");
-            let Ok(hash) = u32::from_str_radix(hex, 16) else {
-                continue;
+            _ => {}
+        }
+        // `raw` declares its blast radius by hand, so its `touches` are asset references too. A
+        // native hook's `touches` are CODE ADDRESSES — reversing one through the ASSET name table
+        // would be nonsense, so those are skipped rather than mis-suggested.
+        if let Contribution::Raw { touches, .. } = c {
+            refs.extend(touches.iter().map(|t| t.0.as_str()));
+        }
+
+        for r in refs {
+            let Some(hash) = crate::manifest::bare_hash(r) else {
+                continue; // already a name
             };
-            // A native hook's `touches` are code addresses, not asset hashes — reversing one
-            // through the ASSET name table would be nonsense. Only suggest for `raw`.
-            if matches!(c, Contribution::NativeHook { .. }) {
-                continue;
-            }
             if let Some(name) = names.reverse(hash) {
                 out.push(BareHashSuggestion {
                     index,
                     kind,
-                    written: t.0.trim().to_string(),
+                    written: r.trim().to_string(),
                     name: name.to_string(),
                 });
             }
