@@ -211,9 +211,11 @@ fn every_listed_rule_carries_its_doc() {
             continue;
         }
         let doc = lines.get(i + 1).map(|l| l.trim()).unwrap_or("");
+        // A URL, not a repo-relative path: whoever is reading this has the tool, not a checkout of
+        // the repo the docs live in.
         assert!(
-            doc.starts_with("docs/"),
-            "{} has no doc link; the next line was {doc:?}",
+            doc.starts_with("https://"),
+            "{} has no doc URL; the next line was {doc:?}",
             &t[..5]
         );
         checked += 1;

@@ -346,21 +346,21 @@ fn default_corpus() -> Option<PathBuf> {
 fn cmd_rules() -> ExitCode {
     println!("Hermetic — run by `qm lint` with no game install:");
     for r in lint::RULES {
-        println!("  {}  {}\n      {}", r.code, r.title, r.doc);
+        println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     println!("\nNeed the retail WADs — `qm lint --with-game`, and always during `qm build`:");
     for r in [lint::M0007_MULTI_RUNG_REPLACE, lint::M0009_NO_PRIMARY_ROW] {
-        println!("  {}  {}\n      {}", r.code, r.title, r.doc);
+        println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     println!("\nChecked against the WAD the builder emits, before it reaches disk:");
     for r in lint::ARTIFACT_RULES {
-        println!("  {}  {}\n      {}", r.code, r.title, r.doc);
+        println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     // Printed on purpose. A linter that silently omits its most dangerous rules reads as a clean
     // bill of health, which is worse than no linter at all.
     println!("\nKNOWN AND NOT YET CHECKED — these can still hang the game:");
     for r in lint::PENDING {
-        println!("  {}  {}\n      {}", r.code, r.title, r.doc);
+        println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     ExitCode::SUCCESS
 }
