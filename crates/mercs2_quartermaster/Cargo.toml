@@ -23,4 +23,12 @@ mercs2_formats = { workspace = true }
 # crate so that copy is unreachable — and hand-rolling a hash twice in one workspace is worse than
 # a dependency.
 sha2 = "0.10"
+# The Lua linker compiles the base script plus each Shipment's appended source into one scripts_vz
+# block. Verified against retail bytecode by `mercs2_luac/tests/parity.rs`.
+#
+# ⚠ This crate must NEVER also depend on `mercs2_script`. That crate links mlua's vendored Lua 5.4
+# while this compiler vendors a patched Lua 5.1, and both export the same unprefixed C symbols
+# (`lua_newstate`, `lua_pcall`, …). Linking both is a runtime SIGSEGV, not a link error. The Lua
+# corpus is therefore taken as a PATH, not by depending on the crate that owns it.
+mercs2_luac = { workspace = true }
 png = "0.17"  # decode source images for texture lowering (same version the workspace already uses)
