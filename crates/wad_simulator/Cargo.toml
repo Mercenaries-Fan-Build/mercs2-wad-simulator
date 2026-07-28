@@ -9,6 +9,10 @@ repository.workspace = true
 keywords = ["wad", "mercenaries", "simulation", "engine"]
 categories = ["development-tools", "command-line-utilities"]
 
+[lib]
+name = "wad_simulator"
+path = "src/lib.rs"
+
 [[bin]]
 name = "wad_simulator"
 path = "src/main.rs"
