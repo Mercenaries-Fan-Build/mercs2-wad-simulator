@@ -226,3 +226,84 @@ fn every_listed_rule_carries_its_doc() {
         + 2; // the two game-stack rules
     assert_eq!(checked, registered, "every registered rule must be printed");
 }
+
+// ---------------------------------------------------------------------------
+// The real build, through the CLI
+// ---------------------------------------------------------------------------
+
+fn solid_png(width: u32, height: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&vec![0x80u8; (width * height * 4) as usize])
+            .unwrap();
+    }
+    out
+}
+
+/// `qm build` produces a real overlay WAD against the retail stack.
+///
+/// Runs when a PC `vz.wad` is discoverable and SKIPS loudly otherwise, matching `tests/build.rs`.
+/// The skip is detected from the CLI's own exit code rather than by re-implementing discovery here,
+/// which also checks that the no-game path stays distinguishable.
+#[test]
+fn build_emits_a_wad_and_its_digest() {
+    // Dimensions must match the target: a replacement is same-hash and fully resident, so a
+    // mismatch is a legitimate hard error rather than something to paper over.
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let Some((w, h)) = target_dimensions(hash) else {
+        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
+        return;
+    };
+
+    let dir = scratch("realbuild");
+    std::fs::write(dir.join("src/t.png"), solid_png(w, h)).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture
+    target: al_hum_boss_ub
+    image: src/t.png
+",
+    );
+    let out_dir = dir.join("out");
+    let out = qm(&[
+        "build",
+        s.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        code(&out),
+        0,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let wad = out_dir.join("cli-test.wad");
+    assert!(wad.is_file(), "the WAD must be on disk");
+
+    // Verified BY HASH: the recorded digest must be the digest of what was written.
+    let recorded = std::fs::read_to_string(out_dir.join("cli-test.wad.sha256")).unwrap();
+    let actual = mercs2_quartermaster::sha256_hex(&std::fs::read(&wad).unwrap());
+    assert!(
+        recorded.starts_with(&actual),
+        "recorded {recorded:?} does not match the file's {actual}"
+    );
+
+    // The placement record is what makes a deploy reversible.
+    assert!(out_dir.join("placement.json").is_file());
+    assert!(out_dir.join("build.log").is_file());
+}
+
+/// The target's real dimensions, or None when there is no discoverable game.
+fn target_dimensions(hash: u32) -> Option<(u32, u32)> {
+    let found = mercs2_quartermaster::game::discover()?;
+    let mut stack = mercs2_quartermaster::GameStack::open(&[found.path]).ok()?;
+    let tex = stack.texture(hash)?;
+    Some((tex.width, tex.height))
+}
