@@ -9,10 +9,10 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult, Table};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Pg";
@@ -121,7 +121,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
                 Some(n) if !n.is_empty() => h.borrow_mut().guid_by_name(&n),
                 _ => 0,
             };
-            Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
+            // A handle crosses as lightuserdata (retail tag 2); 0 stays nil (`crate::guid`).
+            Ok::<Guid, mlua::Error>(Guid(guid))
         })?,
     )?;
 
@@ -131,18 +132,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "Spawn",
         lua.create_function(
             move |_,
-                  (template, x, y, z, yaw, _link, high): (
-                String,
-                f32,
-                f32,
-                f32,
-                f32,
-                Option<bool>,
-                Option<bool>,
-            )| {
+                  (template, x, y, z, yaw, _link, high): (String, f32, f32, f32, f32, Option<bool>, Option<bool>)| {
                 let guid =
                     h.borrow_mut().pg_spawn(&template, [x, y, z], yaw, high.unwrap_or(false));
-                Ok::<Option<i64>, mlua::Error>((guid != 0).then_some(guid as i64))
+                Ok::<Guid, mlua::Error>(Guid(guid))
             },
         )?,
     )?;
@@ -168,6 +161,31 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         b.real(name, lua.create_function(|_, _: MultiValue| Ok(false))?)?;
     }
 
+    // `Pg.GetAllLandingZones(nSlot)` — the world's transit pads for **co-op player slot** `nSlot`,
+    // keyed by **absolute landing-zone number**.
+    //
+    // The key is sparse, not a dense 1..n index: retail `vz` ships zones 1..8, 12, 15..18, 20..25,
+    // 27..30 (23 of them, each with a pad per slot — measured off the shipped `layers_static` block,
+    // not inferred). `MrxTransit.Reset` writes `_tLandingZones[nIndex]` straight from the iteration
+    // key (`corpus/mercs2-luacd/src/resident/mrxtransit.lua:334-342`), `vz/wifhqdata.lua`'s
+    // `nLandingZone` fields enumerate absolute numbers, and missions address them the same way
+    // (`MrxTransit.SetLocationIsNuked(30, …)`, `vz/wifmissionflow.lua:1245`). Handing back a densely
+    // packed table would silently renumber every pad.
+    //
+    // Values are object handles — `Reset` feeds each to `Object.GetLocalizedName`/`GetPosition` — so
+    // they cross as lightuserdata like every other guid.
+    let h = host.clone();
+    b.real(
+        "GetAllLandingZones",
+        lua.create_function(move |lua, slot: Option<u32>| {
+            let t = lua.create_table()?;
+            for (zone, guid) in h.borrow().landing_zones(slot.unwrap_or(1)) {
+                t.set(zone, crate::Guid(guid))?;
+            }
+            Ok::<Table, mlua::Error>(t)
+        })?,
+    )?;
+
     // ===== Collection / query getters (the game reads the returned list). =====
     // No world-object index on the host yet → faithful empty list so the mission Lua's `for _,g in
     // tObjs` / `#tObjs` loops run with zero results instead of nil-indexing.
@@ -175,7 +193,6 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "GetAllGuidsByName",
         "GetObjectsInArea",
         "GetAwakeObjects",
-        "GetAllLandingZones",
         "FastCollectHelicopters",
         "FastCollectJets",
         "FastCollectFlying",
@@ -208,7 +225,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     for name in ["SpawnRelative", "SpawnFromCamera", "SpawnPlayer", "SpawnPlayerAdvanced"] {
         b.real(
             name,
-            lua.create_function(|_, _: MultiValue| Ok::<Option<i64>, mlua::Error>(None))?,
+            lua.create_function(|_, _: MultiValue| Ok::<Guid, mlua::Error>(Guid::NONE))?,
         )?;
     }
 
@@ -268,10 +285,27 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         let Ok(pend) = lua.globals().get::<mlua::Table>("__pending_layer_loads") else { return Ok(()) };
         let entries: Vec<mlua::Table> = pend.clone().sequence_values::<mlua::Table>().flatten().collect();
         lua.globals().set("__pending_layer_loads", lua.create_table()?)?;
+        // Record what streamed in, for the engine to wake. `Pg.LoadLayer` is Lua-side bookkeeping —
+        // it instantiates nothing — so without this the objects a layer brings in never signal
+        // `Event.ObjectHibernation` and every script gated on its own awake-event waits forever.
+        // Drained by the engine's pump (`GameScriptHost::take_streamed_layers`), which owns the
+        // layer→objects index; a Lua-side global keeps the binding free of engine types.
+        let streamed: mlua::Table = match lua.globals().get("__layers_streamed") {
+            Ok(t) => t,
+            Err(_) => {
+                let t = lua.create_table()?;
+                lua.globals().set("__layers_streamed", t.clone())?;
+                t
+            }
+        };
         for e in entries {
             let cb: mlua::Function = e.get("cb")?;
             let req: String = e.get("req")?;
             let layer: String = e.get("layer")?;
+            // Unload does not wake anything; Load and Reload both bring the layer's objects in.
+            if req != "Unload" {
+                streamed.push(layer.clone())?;
+            }
             if let Err(err) = cb.call::<()>((req, layer.clone(), "layer", true)) {
                 // Surface the divergence (was silently swallowed → the layer load never cascaded).
                 if let Ok(dbg) = lua.globals().get::<mlua::Table>("Debug") {
