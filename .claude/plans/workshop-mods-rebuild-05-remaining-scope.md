@@ -276,13 +276,28 @@ self-contained.
 Needs: `lint` (hermetic, no game), `build` (game-stack from `game_paths`/flags), gated on exit code
 per the standing mandate.
 
-## E. Consumption and publishing — the crate has no consumers wired
+## E. Consumption and publishing — ✅ DONE (2026-07-28)
 
 The stated architecture is "neither Workshop nor Modkit owns the format — the crate does, and both
-are clients." Neither can consume it today:
-- not in `[workspace.dependencies]`, so no `workspace = true` dep is possible
-- at `0.1.0` while siblings are 1.x/3.x
-- no `README.md`, which siblings have for crates.io
+are clients." That was unimplement**able**, not merely unimplemented: with no `[workspace.dependencies]`
+entry, neither client could write `mercs2_quartermaster = { workspace = true }` at all. Registered at
+`1.0.0` (first release, matching siblings at 1.x/3.x), with a `README.md`.
+
+**Distribution is ours, not the community's.** `qm` joins the curated set in
+`.github/workflows/release.yml`, so a modder gets a prebuilt binary from the release page and needs
+no Rust toolchain — the same model the ASIs already use (release assets carrying their digests) and
+which Modkit already auto-updates against. The alternative considered and rejected was having the
+template repo's CI build `qm` from a git dependency, which pushes our build problems onto every
+Shipment author.
+
+Four 64-bit rows only. `qm` is authoring tooling and never runs inside the game's 32-bit process, so
+unlike an injected tool it has no reason to match the game's bitness; putting it on the i686 rows
+would also mean cross-compiling `mercs2_luac`'s vendored C Lua for i686 with nothing asking for it.
+The workflow records that so the omission stays a decision rather than becoming an oversight —
+which is what `GUARDRAIL 2` in that file exists to prevent.
+
+Consequence for I: the template repo's CI installs a **pinned released `qm`** and verifies its
+sha256, rather than building anything.
 
 ## F. Rule doc links are repo-relative to the *notes* repo
 
@@ -335,11 +350,14 @@ sequencing item rather than the rest of B.
 
 ~~**Revised next step: D, ahead of the rest of B.**~~ Done — `qm` exists, so I is unblocked.
 
-**Next: I (the template repo), then E, then the rest of B.** I is now the only item with an external
-audience waiting on it, and it is also the first real test of the format as a *contract* rather than
-as a data structure: the example Shipment has to be one somebody can copy without reading any of
-these plans. E (publishing) follows because the template's CI wants an installable `qm` rather than
-a `cargo run` inside this workspace. The remaining B rules stay valuable but block nothing.
+**Next: I (the template repo), then the rest of B.** E is done, so the template's CI has a released
+`qm` to install rather than a workspace to build. I is the only remaining item with an external
+audience waiting on it, and it is the first real test of the format as a *contract* rather than as a
+data structure: the example Shipment has to be one somebody can copy without reading any of these
+plans. The remaining B rules stay valuable but block nothing.
+
+**Cut a release before I.** The template CI pins a `qm` version and verifies its digest, so a tag has
+to exist first. Nothing in I can be tested end-to-end until it does.
 
 **A note on the sibling repo.** The reversed knowledge this crate encodes lives in
 `~/src/mercenaries-game` — the decompiled Lua, the ASET/texture format docs, the Ghidra corpus, and
