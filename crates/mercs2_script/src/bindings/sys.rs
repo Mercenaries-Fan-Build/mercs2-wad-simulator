@@ -12,7 +12,7 @@
 use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Sys";
@@ -136,12 +136,16 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real(
         "GuidToString",
-        lua.create_function(move |_, guid: i64| Ok(h.borrow().sys_guid_to_string(guid as u64)))?,
+        lua.create_function(move |_, guid: Guid| Ok(h.borrow().sys_guid_to_string(guid.raw())))?,
     )?;
 
     // Sys.StringToGuid("0x000f9a64") — the faithful inverse of GuidToString: parse a hex (or decimal)
-    // guid literal to its number (wifpmcgarage.lua/wiftutorialgatehonk.lua read the result). No host
-    // method needed; the string→number marshal is self-contained. Unparseable → nil.
+    // guid literal to a **handle** (wifpmcgarage.lua:243 assigns it to `uVehicle`,
+    // wiftutorialgatehonk.lua:10 to `uGateGuid`, and oilrig.lua:38 feeds the result straight into
+    // `Camera.Shake`'s camera-handle slot). It therefore returns `Guid`, not a number: the results go
+    // into handle slots and are compared against handles minted elsewhere, and only lightuserdata
+    // makes those comparisons and the corpus's `type(u) == "userdata"` gates work.
+    // No host method needed; the string→number marshal is self-contained. Unparseable → nil.
     b.real(
         "StringToGuid",
         lua.create_function(|_, s: String| {
@@ -149,12 +153,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             let parsed = t
                 .strip_prefix("0x")
                 .or_else(|| t.strip_prefix("0X"))
-                .and_then(|hex| i64::from_str_radix(hex, 16).ok())
-                .or_else(|| t.parse::<i64>().ok());
-            Ok(match parsed {
-                Some(g) => Value::Integer(g),
-                None => Value::Nil,
-            })
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                .or_else(|| t.parse::<u64>().ok());
+            Ok(Guid(parsed.unwrap_or(0)))
         })?,
     )?;
 
@@ -169,7 +170,25 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("RealTimeStamp", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
     b.real("TimeStampMark", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
     b.real("Clock", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
-    b.real("TimeStampGetElapsed", lua.create_function(move |_, ts: f64| Ok(boot.elapsed().as_secs_f64() - ts))?)?;
+    // `Option<f64>` in AND out, deliberately: the shipped binding tolerates a nil stamp, and the
+    // shipped Lua proves it. `MrxPlayState.GetTotalTimeElapsed` (`mrxplaystate.lua:100-107`) does
+    //
+    //     local nThisSession = Sys.TimeStampGetElapsed(_uSessionStartTimestamp)
+    //     if type(nPriorSessions) == "number" and type(nThisSession) == "number" then ...
+    //     else return Sys.MainTime() end
+    //
+    // — a type test on the RESULT plus a fallback, which is only reachable if this function can
+    // return a non-number. It is reached on every real boot: `xQ!L._StartPlayerVisibleGameplay`
+    // calls `WifMissionFlow.LoadSingleton` at `:861`, whose `UnlockMission` → `_fPreContractSave`
+    // → `GenerateSaveData` chain reads `GetTotalTimeElapsed` while `_uSessionStartTimestamp` is
+    // still nil — `StartSessionTimer()` is eight lines later, at `:869`. Declaring `ts: f64` made
+    // that a hard `error converting Lua nil to f64` and stranded the resume boot mid-transition.
+    b.real(
+        "TimeStampGetElapsed",
+        lua.create_function(move |_, ts: Option<f64>| {
+            Ok(ts.map(|t| boot.elapsed().as_secs_f64() - t))
+        })?,
+    )?;
     b.real("DiffTime", lua.create_function(|_, (a, b): (f64, f64)| Ok(a - b))?)?;
     b.real(
         "Time",
@@ -222,7 +241,36 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("GetShellCode", lua.create_function(|_, ()| Ok(String::new()))?)?;
     // Sys.GetVersion() → (sCode, sData) — two strings (mrxguishell.lua:527).
     b.real("GetVersion", lua.create_function(|_, ()| Ok((String::new(), String::new())))?)?;
-    b.real("ToStringL", lua.create_function(|_, _: MultiValue| Ok(String::new()))?)?;
+    // `Sys.ToStringL(v)` — the engine's own `tostring`, and it **must actually stringify**.
+    //
+    // ⚠ This was a stub returning `""`, which was harmless until the recovered bootstrap glue
+    // (`crate::BOOTSTRAP_GLUE`) started running `tostring = Sys.ToStringL`. That replaces Lua's global
+    // `tostring` with this function, so *every* `tostring(x)` in the game returned an empty string.
+    // Mostly that shows up as gutted log lines ("MrxState.Enter: state STATE_WAITFORGAME (refcount=)"),
+    // but it is not merely cosmetic: `wiftutorialvehicledisguise.lua:37,41` **branches** on
+    // `tostring(bState) == "true"`, so the disguise tutorial silently took the wrong arm.
+    //
+    // Delegating to Lua's own `tostring` is the honest implementation, and the glue's own first
+    // statement — `_tostring = tostring` — is the evidence: it preserves the original precisely because
+    // `Sys.ToStringL` is meant to *be* a tostring, not to replace it with nothing.
+    // Resolve at CALL time, not install time: the glue runs after `install_all`, so `_tostring` does
+    // not exist yet while this closure is being built.
+    //
+    // Order of preference matters and is not interchangeable. `_tostring` is the pristine Lua
+    // `tostring` the glue stashed; prefer it. Only if the glue has *not* run is the global `tostring`
+    // still Lua's own and safe to call — after the glue it IS this function, so reaching for it first
+    // would recurse until the C stack overflows.
+    b.real(
+        "ToStringL",
+        lua.create_function(|lua, v: Value| {
+            let g = lua.globals();
+            let f: mlua::Function = match g.get::<Option<mlua::Function>>("_tostring")? {
+                Some(f) => f,
+                None => g.get("tostring")?,
+            };
+            f.call::<String>(v)
+        })?,
+    )?;
 
     // --- Setters / actions / dev sinks the retail engine consumes but the game does not read back. ---
     // --- Config setters → the host settings store (Set* ↔ Get* real roundtrips). ---
