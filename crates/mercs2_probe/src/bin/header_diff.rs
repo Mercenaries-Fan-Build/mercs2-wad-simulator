@@ -18,7 +18,7 @@ const MODELS: &[&str] = &[
 ];
 
 fn main() {
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
     // The header is descriptor row 0's INFO leaf (72 bytes) — same one parse_model_header reads.
     println!("{:<26} {:>4} {:>4}  header words 0x20..0x48 (u32 / f32)", "model", "lodc", "t0tri");
     for name in MODELS {
