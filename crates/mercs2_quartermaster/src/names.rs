@@ -17,7 +17,7 @@
 //! that want the workspace copy, and mirrors what `mercs2_workshop` already does.
 
 use crate::blast::{Claim, ClaimRecord};
-use crate::manifest::{Contribution, Manifest, Touch};
+use crate::manifest::{Contribution, Manifest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
