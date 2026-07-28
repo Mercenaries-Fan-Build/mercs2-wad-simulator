@@ -1,0 +1,18 @@
+-- Stand-in for the shipped localization module `Subtitles_01_AOA_M`.
+--
+-- Companion to `Subtitles_01_AOA_C.lua` in this directory, which carries the full rationale: the
+-- decompiled corpus is 370 of 382 scripts and the `Subtitles_*` localization modules are among the
+-- ones we do not have, but `MrxGuiCinematic.ShowMovie` will not play a subtitled movie until its
+-- `dynamic_import("Subtitles_" .. sFile, ...)` resolves to a module exposing a `SubtitleData` TABLE.
+--
+-- `_M` is the movie the NEW-GAME boot flow reaches: `WifMissionFlow._PlayMovie` → `ShowMovie
+-- 01_AOA_M`, driven from `_StartPlayerVisibleGameplay` during the `WaitForStreaming` exit. Without
+-- this file that import raises, which strands MrxState mid-transition — the boot never completes
+-- `GlobalExit`.
+--
+-- This root is appended AFTER the corpus, so a real `Subtitles_01_AOA_M` shadows this one the moment
+-- it is decompiled. Delete this file at that point.
+--
+-- Empty is correct: `type(tSubtitleData) == "table"` is the only thing the caller checks, and an empty
+-- table means "this movie has no subtitle lines" rather than inventing dialogue we do not have.
+SubtitleData = {}

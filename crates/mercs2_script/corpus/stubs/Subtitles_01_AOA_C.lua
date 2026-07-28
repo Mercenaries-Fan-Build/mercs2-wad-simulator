@@ -1,0 +1,26 @@
+-- Stand-in for the shipped localization module `Subtitles_01_AOA_C`.
+--
+-- WHY THIS FILE EXISTS. The decompiled corpus is **370 of 382** scripts, and the `Subtitles_*`
+-- localization modules are among the ones we do not have (`find docs/mercs2-luacd/src -iname
+-- 'subtitles_*'` returns nothing). The shipped game obviously had them, so their absence is a gap in
+-- our data, not in the engine.
+--
+-- WHY IT MATTERS. `MrxGuiCinematic.ShowMovie` (resident/mrxguicinematic.lua:72-91) will not play a
+-- subtitled movie until it has the subtitle table:
+--
+--     if bSubtitles and not tSubtitles then
+--       dynamic_import("Subtitles_" .. sFile, SubtitleImportCallback, {...})
+--       return
+--     end
+--
+-- and `SubtitleImportCallback` (:146-156) re-enters `ShowMovie` with whatever it got. So the module
+-- must resolve AND expose a `SubtitleData` **table**, or the pair loops forever — raising instead
+-- aborts the caller's callback chain, and returning a nil module re-enters the same import (both were
+-- tried; the second overflows the C stack).
+--
+-- This root is appended AFTER the corpus, so a real `Subtitles_01_AOA_C` would shadow this one the
+-- moment it is decompiled. Delete this file at that point.
+--
+-- Empty is correct: `type(tSubtitleData) == "table"` is the only thing the caller checks, and an empty
+-- table means "this movie has no subtitle lines" rather than inventing dialogue we do not have.
+SubtitleData = {}
