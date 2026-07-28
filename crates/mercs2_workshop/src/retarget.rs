@@ -9,7 +9,7 @@
 //! human-readable bone map the inspector shows, and the source→target joint table `apply` consumes.
 
 /// The recognised source-rig conventions. Detection is by joint-name shape.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SourceRig {
     /// Valve Source engine — `ValveBiped.Bip01_*` (Z-up, inches).
     ValveBiped,
@@ -1229,6 +1229,87 @@ mod tests {
         // The left forearm must map to the left forearm, not the right.
         let fa = r.map.iter().find(|m| m.source.contains("Forearm")).unwrap();
         assert_eq!(fa.target_name.as_deref(), Some("Bone_LForearm"));
+    }
+
+    /// `Spine4` is ValveBiped's UPPER chest (it skips Spine3) and must NOT share `Bone_Chest` with
+    /// `Spine2` — that correspondence sits ~14% of body height too low and drags the ribcage into the
+    /// belly. Pins the pair so a future edit cannot quietly re-collapse them onto one target.
+    #[test]
+    fn valvebiped_spine4_is_the_upper_chest_not_bone_chest() {
+        assert_eq!(valvebiped_target_name("ValveBiped.Bip01_Spine2").as_deref(), Some("Bone_Chest"));
+        assert_eq!(valvebiped_target_name("ValveBiped.Bip01_Spine4").as_deref(), Some("bone_neck"));
+        assert_ne!(
+            valvebiped_target_name("ValveBiped.Bip01_Spine2"),
+            valvebiped_target_name("ValveBiped.Bip01_Spine4"),
+            "Spine2 and Spine4 must occupy DISTINCT rungs"
+        );
+        // The lower rungs are unchanged by that split.
+        assert_eq!(valvebiped_target_name("ValveBiped.Bip01_Spine").as_deref(), Some("bone_spine1"));
+        assert_eq!(valvebiped_target_name("ValveBiped.Bip01_Spine1").as_deref(), Some("Bone_Spine2"));
+    }
+
+    /// `GlobalSRT` is the Pandemic root and identifies the game's OWN rig. Both halves of the test
+    /// matter: it must fire on a native rig, and a lone landmark must NOT claim the identity path —
+    /// a foreign rig routed through it would map every bone to a name the target does not have.
+    #[test]
+    fn detect_pandemic_needs_globalsrt_and_a_landmark() {
+        let native = names(&["GlobalSRT", "bone_root", "Bone_Hips", "bone_spine1", "Bone_LThigh"]);
+        assert_eq!(SourceRig::detect(&native), SourceRig::Pandemic);
+        // `Bone_Hips` alone reads as ordinary anatomy — not native.
+        assert_ne!(SourceRig::detect(&names(&["Bone_Hips", "bone_spine1"])), SourceRig::Pandemic);
+        // `GlobalSRT` alone, with no Pandemic landmark, is not enough either.
+        assert_ne!(SourceRig::detect(&names(&["GlobalSRT", "pelvis", "spine_01"])), SourceRig::Pandemic);
+        // A ValveBiped rig that happens to carry a GlobalSRT stays ValveBiped.
+        let valve = names(&["GlobalSRT", "ValveBiped.Bip01_Pelvis", "ValveBiped.Bip01_Spine"]);
+        assert_ne!(SourceRig::detect(&valve), SourceRig::Pandemic);
+    }
+
+    /// A model authored on the exported base kit comes back on the donor's own skeleton, so the map
+    /// must be a pure IDENTITY by bone name. Regression for the round-trip that detected the game's
+    /// own rig as `generic` and let automap collapse it. `source_parents` is supplied so
+    /// `remap_via_char_skin` really runs — the point is that the explicit table SURVIVES it.
+    #[test]
+    fn pandemic_native_rig_maps_to_itself() {
+        let bones = names(&[
+            "GlobalSRT", "bone_root", "Bone_Hips", "bone_spine1", "Bone_Spine2", "Bone_Chest",
+            "bone_neck", "Bone_Head", "Bone_LThigh", "Bone_LShin", "Bone_LFootBone1", "Bone_LBicep",
+        ]);
+        // GlobalSRT → root → hips → {spine chain → neck → head, thigh → shin → foot}; bicep off chest.
+        let parents = vec![-1i32, 0, 1, 2, 3, 4, 5, 6, 2, 8, 9, 5];
+        let r = Retarget::build_full(
+            bones.clone(),
+            Vec::new(),
+            Vec::new(),
+            parents,
+            bones.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(r.convention, SourceRig::Pandemic);
+        assert_eq!(r.mapped_count(), bones.len(), "every native bone resolves");
+        for (i, b) in bones.iter().enumerate() {
+            assert_eq!(r.map[i].target_name.as_deref(), Some(b.as_str()), "{b} must map to itself");
+            assert_eq!(r.map[i].target_index, Some(i));
+        }
+        // And the same holds through `joint_table`, which is what the full-override path feeds
+        // `char_skin` — an identity permutation, not a collapse onto the pelvis.
+        assert_eq!(r.joint_table(bones.len()), (0..bones.len()).collect::<Vec<_>>());
+    }
+
+    /// A bone the author ADDED that the donor lacks has no honest target: the identity name fails to
+    /// resolve, so the row is left for the shared mapper rather than silently claiming a wrong bone.
+    #[test]
+    fn pandemic_leaves_an_author_added_bone_off_the_explicit_table() {
+        assert_eq!(explicit_target_name(SourceRig::Pandemic, "Bone_LThigh").as_deref(), Some("Bone_LThigh"));
+        // Case is folded downstream (`pandemic_hash_m2` folds it too), so this still resolves.
+        assert_eq!(explicit_target_name(SourceRig::Pandemic, "bone_lthigh").as_deref(), Some("bone_lthigh"));
+        let src = names(&["GlobalSRT", "bone_root", "Bone_Hips", "Bone_LThigh", "bone_cape_01"]);
+        let tgt = names(&["GlobalSRT", "bone_root", "Bone_Hips", "Bone_LThigh"]);
+        let r = Retarget::build(src, &tgt);
+        assert_eq!(r.convention, SourceRig::Pandemic);
+        let t = |sub: &str| r.map.iter().find(|m| m.source == sub).and_then(|m| m.target_name.clone());
+        assert_eq!(t("Bone_LThigh").as_deref(), Some("Bone_LThigh"));
+        assert_eq!(t("bone_cape_01"), None, "a bone the donor lacks stays unmapped");
     }
 
     #[test]
