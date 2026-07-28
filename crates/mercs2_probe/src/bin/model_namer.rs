@@ -175,7 +175,7 @@ fn main() {
         prefixes.len()
     );
 
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     let mut found: BTreeMap<u32, String> = BTreeMap::new();
     let (mut no_container, mut no_tex, mut no_hit) = (0u32, 0u32, 0u32);
