@@ -1,10 +1,11 @@
 [package]
 name = "mercs2_quartermaster"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "Mercenaries 2 Shipment format: one serde model that reads a manifest.yaml/.json/.toml, validates it, and (later) lints and builds it into an overlay WAD."
+description = "Mercenaries 2 Shipment format: reads a manifest.yaml/.json/.toml, lints it against the engine's HANG-class traps, and builds it into an overlay WAD. Ships the `qm` CLI."
 license.workspace = true
 repository.workspace = true
+readme = "README.md"
 
 [lib]
 name = "mercs2_quartermaster"
