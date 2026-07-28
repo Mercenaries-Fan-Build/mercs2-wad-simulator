@@ -136,21 +136,45 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// papered over: it likely wants a `group:` field, which is a format change.
 const DEFAULT_TARGET_GROUP: usize = 0;
 
-/// One lowered contribution: a block, a declared script mutation, or both.
+/// Every script mutation a Shipment declares, derived from its manifest alone.
 ///
-/// `add_outfit` is the "both" case, and it is why this is not simply a `PatchBlock`. Its Data half
-/// (the model) lowers here and now; its Script half cannot, because Lua links across the whole
-/// installed set rather than per Shipment.
-#[derive(Default)]
-struct Lowered {
-    block: Option<PatchBlock>,
-    mutation: Option<ScriptMutation>,
-}
-
-impl Lowered {
-    fn block(block: PatchBlock) -> Self {
-        Lowered { block: Some(block), mutation: None }
+/// **Hermetic on purpose — no game stack, no lowering.** That is what lets the same function serve
+/// two callers that are otherwise very different: [`build`], linking one Shipment so its overlay is
+/// valid standalone, and [`link_installed`], linking N Shipments at deploy so none of them
+/// overwrites another. If mutations could only be obtained as a side effect of lowering, the deploy
+/// path would have to re-run model injection just to find out which scripts are touched.
+pub fn script_mutations(
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+) -> Result<Vec<ScriptMutation>, BuildError> {
+    let shipment = manifest.shipment.name.clone();
+    let mut out = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        match c {
+            Contribution::AddOutfit { name, slug, display, wearer, .. } => {
+                out.push(ScriptMutation {
+                    shipment: shipment.clone(),
+                    target: "wifpmcinterior".into(),
+                    append: link::outfit_row_append(wearer, slug, name, display),
+                });
+            }
+            Contribution::PatchLua { target, append } => {
+                let path = root.join(append);
+                let source = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
+                    index,
+                    kind: "patch_lua",
+                    message: format!("reading {}: {e}", path.display()),
+                })?;
+                out.push(ScriptMutation {
+                    shipment: shipment.clone(),
+                    target: target.clone(),
+                    append: source,
+                });
+            }
+            _ => {}
+        }
     }
+    Ok(out)
 }
 
 /// Lower a single contribution into a patch block.
@@ -160,7 +184,7 @@ fn lower(
     root: &Path,
     game: Option<&mut GameStack>,
     log: &mut Vec<String>,
-) -> Result<Lowered, BuildError> {
+) -> Result<Option<PatchBlock>, BuildError> {
     let kind = contribution.kind();
     match contribution {
         Contribution::ReplaceTexture { target, image } => {
@@ -245,7 +269,7 @@ fn lower(
                 None,
             )
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowered::block(block))
+            Ok(Some(block))
         }
 
         Contribution::AddModel { name, model, donor, retarget } => {
@@ -322,13 +346,18 @@ fn lower(
                 None,
             )
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowered::block(block))
+            Ok(Some(block))
         }
 
         // `add_outfit` is a FIXED composition of add_model + a patch_lua on `_tOutfits`. The Data
         // half lowers here; the Script half is declared and linked later, because Lua is linked
         // across the installed set rather than per Shipment.
-        Contribution::AddOutfit { name, slug, display, wearer, model, donor, retarget, .. } => {
+        // `slug`/`display` are the SCRIPT half's fields and are consumed by `script_mutations`;
+        // only the Data half is lowered here.
+        // `display` is the SCRIPT half's field and is consumed by `script_mutations`; only the Data
+        // half is lowered here. `slug` is kept for the log line, which is how an author confirms the
+        // wardrobe row they expected is the one that was generated.
+        Contribution::AddOutfit { name, slug, wearer, model, donor, retarget, .. } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
@@ -382,43 +411,17 @@ fn lower(
 
             // The Script half. `Model` is the ASSET name SetOutfit receives; `Name` is the
             // unlock/tracking key; both are distinct from the display string.
-            let append = link::outfit_row_append(wearer, slug, name, display);
             log.push(format!(
                 "contributions[{index}] add_outfit {name} 0x{hash:08X} ← donor {donor_name}: \
                  {} verts, {} tris | wardrobe row {wearer}/{slug}",
                 stats.vertex_count, stats.triangle_count
             ));
-            Ok(Lowered {
-                block: Some(block),
-                mutation: Some(ScriptMutation {
-                    shipment: String::new(), // filled in by `build`, which knows the Shipment name
-                    target: "wifpmcinterior".into(),
-                    append,
-                }),
-            })
+            Ok(Some(block))
         }
 
-        Contribution::PatchLua { target, append } => {
-            let source = std::fs::read_to_string(root.join(append)).map_err(|e| {
-                BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!("reading {}: {e}", root.join(append).display()),
-                }
-            })?;
-            log.push(format!(
-                "contributions[{index}] patch_lua {target}: {} B of source declared for linking",
-                source.len()
-            ));
-            Ok(Lowered {
-                block: None,
-                mutation: Some(ScriptMutation {
-                    shipment: String::new(),
-                    target: target.clone(),
-                    append: source,
-                }),
-            })
-        }
+        // Contributes no block: its whole effect is a declared mutation, collected by
+        // `script_mutations` and realised at link time.
+        Contribution::PatchLua { .. } => Ok(None),
         Contribution::EditStateMachine { .. } | Contribution::NativeHook { .. }
         | Contribution::Raw { .. } => Err(BuildError::Unsupported {
             index,
@@ -516,18 +519,12 @@ pub fn build(
     // the first conflict, hiding the rest.
 
     let mut blocks = Vec::new();
-    let mut mutations: Vec<ScriptMutation> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        let lowered = lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)?;
-        if let Some(b) = lowered.block {
+        if let Some(b) = lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)? {
             blocks.push(b);
         }
-        if let Some(mut m) = lowered.mutation {
-            // `lower` does not know which Shipment it is lowering; the ordering key is set here.
-            m.shipment = manifest.shipment.name.clone();
-            mutations.push(m);
-        }
     }
+    let mutations = script_mutations(manifest, &shipment.root)?;
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -653,6 +650,123 @@ pub fn build(
     })?;
 
     Ok(BuildReport { diagnostics, wad: wad_path, placements, log })
+}
+
+/// The filename of the deploy-time link overlay. Named to sort and read as "last".
+pub const LINK_WAD_NAME: &str = "zz-quartermaster-link.wad";
+
+/// What a cross-Shipment link produced.
+#[derive(Debug, Clone)]
+pub struct LinkReport {
+    pub wad: Option<PathBuf>,
+    pub placements: Vec<Placement>,
+    pub linked: Vec<crate::link::LinkedScript>,
+    pub log: Vec<String>,
+}
+
+/// Link **every installed Shipment's** script mutations into ONE overlay.
+///
+/// This is the half `build` cannot do. Each Shipment's own overlay carries a `scripts_vz` linked
+/// from its own mutations, which makes it valid standalone — but WAD resolution is last-mounted-
+/// wins, so installing two of them means one Shipment's Lua silently disappears. That is the exact
+/// failure the mutation-not-a-block design exists to prevent, and preventing it requires a step
+/// that sees all of them at once.
+///
+/// The result **must be mounted LAST**, after every Shipment overlay. Because it is built from all
+/// their mutations together it is a superset of each, so whichever per-Shipment block it shadows, it
+/// shadows with something strictly more complete.
+///
+/// Returns `wad: None` when no installed Shipment touches a script — there is nothing to shadow, and
+/// emitting an overlay that merely restates the base block would be noise a user has to reason about.
+pub fn link_installed(
+    shipments: &[&LoadedShipment],
+    game: &mut GameStack,
+    corpus_root: &Path,
+    out_dir: &Path,
+) -> Result<LinkReport, BuildError> {
+    if game.platform() != Platform::Pc {
+        return Err(BuildError::ConsoleOutputUnsupported);
+    }
+    let mut log = Vec::new();
+    let mut mutations = Vec::new();
+    for s in shipments {
+        mutations.extend(script_mutations(&s.manifest, &s.root)?);
+    }
+    if mutations.is_empty() {
+        log.push("no installed Shipment touches a script — nothing to link".into());
+        return Ok(LinkReport { wad: None, placements: Vec::new(), linked: Vec::new(), log });
+    }
+    log.push(format!(
+        "linking {} mutation(s) from {} Shipment(s)",
+        mutations.len(),
+        shipments.len()
+    ));
+
+    let raw = game.block_by_path("scripts_vz").ok_or_else(|| BuildError::Lower {
+        index: 0,
+        kind: "link",
+        message: "no scripts_vz block in the configured game stack".into(),
+    })?;
+    let mut block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
+        index: 0,
+        kind: "link",
+        message: format!("parsing scripts_vz: {m}"),
+    })?;
+    let linked =
+        link::link_into(&mut block, corpus_root, &mutations).map_err(|e| BuildError::Lower {
+            index: 0,
+            kind: "link",
+            message: e.to_string(),
+        })?;
+    for l in &linked {
+        log.push(format!(
+            "linked {}: {} → {} B source, {} B bytecode, from {:?}",
+            l.target, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes, l.contributors
+        ));
+    }
+
+    let decompressed = block.serialize();
+    let aset: Vec<AsetEntry> = block
+        .entries
+        .iter()
+        .map(|e| AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_SCRIPT))
+        .collect();
+    let patch = PatchBlock::from_decompressed(
+        &decompressed,
+        "blocks\\VZ\\scripts_vz_P000_Q3.block".into(),
+        aset,
+        None,
+    )
+    .map_err(|m| BuildError::Lower { index: 0, kind: "link", message: m })?;
+
+    let csum = mercs2_formats::donor::base_csum(game.paths()[0])
+        .map_err(|m| BuildError::Lower { index: 0, kind: "link", message: m })?;
+    let wad_bytes = build_patch_wad_multi(&[patch], csum.0, csum.1, &FFCS_CERT_BLOB)
+        .map_err(|m| BuildError::Lower { index: 0, kind: "link", message: m })?;
+
+    std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
+        path: out_dir.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let path = out_dir.join(LINK_WAD_NAME);
+    std::fs::write(&path, &wad_bytes).map_err(|e| BuildError::Io {
+        path: path.clone(),
+        message: e.to_string(),
+    })?;
+    let digest = sha256_hex(&wad_bytes);
+    log.push(format!("wrote {LINK_WAD_NAME}: {} bytes, sha256 {digest}", wad_bytes.len()));
+
+    Ok(LinkReport {
+        wad: Some(path),
+        placements: vec![Placement {
+            name: LINK_WAD_NAME.to_string(),
+            bytes: wad_bytes.len(),
+            sha256: digest,
+            destination: Destination::Overlay,
+        }],
+        linked,
+        log,
+    })
 }
 
 fn placement_json(placements: &[Placement]) -> String {
