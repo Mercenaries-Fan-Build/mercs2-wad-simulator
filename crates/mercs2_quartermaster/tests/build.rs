@@ -52,7 +52,7 @@ fn a_blocking_diagnostic_fails_the_build() {
     model: src/m.glb
 ",
     );
-    match build::build(&s, None, None, None) {
+    match build::build(&s, None, None, None, None) {
         Err(BuildError::Blocked(d)) => {
             assert!(d.iter().any(|x| x.rule.code == "M0140"));
         }
@@ -74,7 +74,7 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
     image: src/t.png
 ",
     );
-    match build::build(&s, None, None, None) {
+    match build::build(&s, None, None, None, None) {
         Err(e @ BuildError::GameRequired { .. }) => {
             let msg = e.to_string();
             assert!(msg.contains("qm lint"), "should say lint still works: {msg}");
@@ -92,22 +92,25 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 /// dropped contribution produces a WAD that looks fine and does nothing.
 #[test]
 fn unsupported_kinds_fail_loudly_with_a_reason() {
+    // add_outfit and patch_lua used to live here; both lower now. What remains genuinely
+    // unimplemented is the rest of the kind set.
     for (contribution, expect) in [
         (
-            "  - kind: add_outfit\n    name: o\n    slug: O\n    display: O\n    wearer: mattias\n    model: src/m.glb\n",
-            "LINK time",
+            "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/a.bin\n",
+            "not implemented",
         ),
         (
-            "  - kind: patch_lua\n    target: wifpmcinterior\n    append: src/a.lua\n",
-            "LINK time",
+            "  - kind: raw\n    payload: src/a.bin\n    target_layer: data\n    touches: [\"al_veh_boat_destroyer\"]\n",
+            "not implemented",
         ),
     ] {
         let dir = scratch("unsupported");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/m.glb"), b"x").unwrap();
         std::fs::write(dir.join("src/a.lua"), b"x").unwrap();
+        std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
         let s = shipment(&dir, contribution);
-        match build::build(&s, None, None, None) {
+        match build::build(&s, None, None, None, None) {
             Err(e @ BuildError::Unsupported { .. }) => {
                 assert!(e.to_string().contains(expect), "unhelpful reason: {e}");
             }
@@ -124,7 +127,7 @@ fn unsupported_kinds_fail_loudly_with_a_reason() {
 fn an_empty_shipment_still_emits_a_record_and_a_log() {
     let dir = scratch("empty");
     let s = shipment(&dir, "  []\n");
-    let report = build::build(&s, None, None, None).expect("empty shipment builds");
+    let report = build::build(&s, None, None, None, None).expect("empty shipment builds");
     assert!(report.wad.is_none(), "nothing to put in a WAD");
     assert!(report.placements.is_empty());
     assert!(dir.join("build/placement.json").is_file());
@@ -136,7 +139,7 @@ fn the_output_directory_can_be_redirected() {
     let dir = scratch("outdir");
     let out = dir.join("elsewhere");
     let s = shipment(&dir, "  []\n");
-    build::build(&s, None, None, Some(&out)).expect("build");
+    build::build(&s, None, None, Some(&out), None).expect("build");
     assert!(out.join("placement.json").is_file());
     assert!(!dir.join("build").exists());
 }
@@ -159,7 +162,7 @@ fn sha256_matches_known_vectors() {
 fn the_placement_record_is_well_formed_json() {
     let dir = scratch("record");
     let s = shipment(&dir, "  []\n");
-    build::build(&s, None, None, None).expect("build");
+    build::build(&s, None, None, None, None).expect("build");
     let text = std::fs::read_to_string(dir.join("build/placement.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
     assert_eq!(doc["format"], 1);
@@ -223,7 +226,7 @@ fn a_texture_replacement_builds_end_to_end() {
 ",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None).expect("build");
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("build");
 
     // This target turns out to be a 4-rung STREAMED texture with no primary row of its own, so the
     // game-aware rules fire — and the build still completes, because they are warnings. That pairing
@@ -278,7 +281,7 @@ fn a_texture_replacement_builds_end_to_end() {
     // Expect "UCFX / FORMAT" to be absent and the verdict to report no violations.
 
     // Determinism: the mandate only means something if two builds agree byte for byte.
-    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")))
+    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None)
         .expect("second build");
     assert_eq!(
         placement.sha256, again.placements[0].sha256,
@@ -452,7 +455,7 @@ fn add_model_builds_end_to_end() {
         "  - kind: add_model\n    name: qm_test_prop\n    model: src/prop.glb\n    donor: oc_veh_helicopter_md500\n",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None).expect("add_model must build");
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("add_model must build");
     let wad_path = report.wad.expect("a WAD must be emitted");
     let on_disk = std::fs::read(&wad_path).unwrap();
     assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
@@ -481,7 +484,7 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
     let s = shipment(&dir, "  - kind: add_model\n    name: qm_x\n    model: src/prop.glb\n");
-    match build::build(&s, Some(&mut game), None, None) {
+    match build::build(&s, Some(&mut game), None, None, None) {
         Err(e @ BuildError::Unsupported { .. }) => {
             assert!(e.to_string().contains("auto-pick"), "{e}");
         }
@@ -489,3 +492,125 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
     }
 }
 
+
+/// ★ `add_outfit` end to end — the recipe Plan 01 phase 5 is defined by.
+///
+/// It is the composed case: a Data half (the model, injected into a hero-rigged donor) and a Script
+/// half (the `_tOutfits` row), and the Script half only works because it goes through the linker
+/// rather than shipping its own block.
+#[test]
+fn add_outfit_builds_model_and_wardrobe_row_together() {
+    let Some(mut game) = discovered_game() else { return };
+    let Some(corpus) = corpus_for_tests() else {
+        eprintln!("SKIPPING: no Lua corpus");
+        return;
+    };
+    let dir = scratch("add_outfit");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/sean.glb"), cube_glb()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_outfit\n    name: qm_sean_devlin\n    slug: SeanDevlin\n\
+         \x20   display: Sean Devlin\n    wearer: mattias\n    model: src/sean.glb\n\
+         \x20   donor: pmc_hum_mattias\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, Some(&corpus))
+        .expect("add_outfit must build");
+    let log = report.log.join("\n");
+    eprintln!("{log}");
+
+    // Both halves must appear: the model injected, and the wardrobe script linked.
+    assert!(log.contains("add_outfit qm_sean_devlin"), "{log}");
+    assert!(log.contains("wardrobe row mattias/SeanDevlin"), "{log}");
+    assert!(log.contains("linked wifpmcinterior"), "the Script half must go through the linker: {log}");
+
+    // The overlay carries BOTH blocks — the model and the relinked scripts_vz.
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    assert_eq!(contents.blocks.len(), 2, "expected a model block and a scripts_vz block");
+
+    // And the linked script really contains our row plus the derived availability lift.
+    let script_blk = contents
+        .blocks
+        .iter()
+        .find(|b| b.path_string.to_lowercase().contains("scripts_vz"))
+        .expect("a scripts_vz block");
+    let dec = mercs2_formats::sges::decompress_sges(&script_blk.compressed_data).expect("sges");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+    parsed.verify_csums().expect("CSUMs must verify");
+    let idx = parsed.find_by_name("wifpmcinterior").expect("wifpmcinterior present");
+    let luaq = parsed.extract_lua(idx).expect("extract");
+    assert!(luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER), "game dialect");
+
+    // The strings we appended survive into the compiled chunk's constant table.
+    let hay = String::from_utf8_lossy(&luaq);
+    assert!(hay.contains("SeanDevlin"), "the outfit Name must be in the constants");
+    assert!(hay.contains("qm_sean_devlin"), "the Model name must be in the constants");
+    assert!(
+        hay.contains("GetAvailableCostumes"),
+        "the derived availability lift must be present, or the outfit is unreachable"
+    );
+}
+
+/// The lift is emitted by the Quartermaster ONCE, not once per Shipment. Two outfits in one
+/// Shipment must still yield exactly one definition.
+#[test]
+fn the_availability_lift_is_emitted_exactly_once() {
+    use mercs2_quartermaster::link;
+    let a = link::ScriptMutation {
+        shipment: "a".into(),
+        target: "wifpmcinterior".into(),
+        append: link::outfit_row_append("mattias", "One", "m_one", "One"),
+    };
+    let b = link::ScriptMutation {
+        shipment: "b".into(),
+        target: "wifpmcinterior".into(),
+        append: link::outfit_row_append("mattias", "Two", "m_two", "Two"),
+    };
+    let (src, _) = link::linked_source("base\n", &[&a, &b]);
+    let epilogue = link::derived_epilogue("wifpmcinterior").unwrap();
+    let full = format!("{src}{epilogue}");
+    assert_eq!(
+        full.matches("function GetAvailableCostumes()").count(),
+        1,
+        "two hard-coded counts is exactly the bug the derived lift removes"
+    );
+    assert!(full.contains("\"One\"") && full.contains("\"Two\""), "both rows must survive");
+}
+
+/// An author-supplied display string cannot escape its Lua literal and inject code.
+///
+/// Asserted by COMPILING the generated row rather than by pattern-matching the text: a substring
+/// check cannot tell `\"` from `"`, which is exactly the distinction that matters here. If the
+/// escaping failed, the hostile text would become statements and the whole thing would still be
+/// valid Lua — so the property is that the payload survives as one *string constant*.
+#[test]
+fn a_hostile_display_string_stays_a_string() {
+    use mercs2_quartermaster::link::outfit_row_append;
+    const HOSTILE: &str = "evil\" ) end print(\"pwned";
+    let row = outfit_row_append("mattias", "S", "m", HOSTILE);
+
+    // It must compile as a single statement against a table that exists.
+    let program = format!("_tOutfits = {{ mattias = {{}} }}\n{row}");
+    let chunk = mercs2_luac::compile(&program, "escape_test").expect("generated row must compile");
+
+    // And the hostile text must appear in the constant table verbatim — i.e. as data, not code.
+    let hay = String::from_utf8_lossy(&chunk);
+    assert!(
+        hay.contains(HOSTILE),
+        "the payload should survive as one string constant, meaning it was escaped, not executed"
+    );
+}
+
+fn corpus_for_tests() -> Option<PathBuf> {
+    let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
+    while let Some(d) = dir {
+        let c = d.join("crates/mercs2_script/corpus/mercs2-luacd/src");
+        if c.is_dir() {
+            return Some(c);
+        }
+        dir = d.parent();
+    }
+    None
+}
