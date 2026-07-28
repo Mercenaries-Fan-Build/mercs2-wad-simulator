@@ -175,14 +175,197 @@ pub struct RuntimeExplosion {
 // agree on one component type, so each site imports `mercs2_core::Health` directly rather than
 // through a combat-local alias.
 
-/// A character's weapon loadout — the engine-side backing of `Human.Inventory.SetAllWeapons` (code map
-/// §7). The `weapons` are the carried gun stats; index [`equipped`] is the active one (mirrored into a
-/// [`RuntimeWeapon`] on the same entity when equipped). This is the combat-silo slice of the human
-/// inventory; the full pickup/ammo-pack economy lives in the player/inventory silo.
-#[derive(Clone, Debug, Default)]
-pub struct Inventory {
-    /// The carried weapons' stats, in slot order.
-    pub weapons: Vec<crate::stats::WeaponStats>,
-    /// Index into `weapons` of the currently-equipped weapon.
-    pub equipped: usize,
+/// A character's weapon loadout — the **`RuntimeInventory`** record
+/// (`inventory_equipment_code_map.md` §2.1), carried on the *character* entity.
+///
+/// Eleven dwords `+0x00 … +0x28` plus a flags dword at `+0x2C`, closing exactly on the registrar's
+/// static record size of `0x30` with no unaccounted offset.
+///
+/// # What this replaced, and why it could not stand
+///
+/// The previous model was `{ weapons: Vec<WeaponStats>, equipped: usize }`. Three things were wrong
+/// with it, each load-bearing:
+///
+/// 1. **One `equipped` index cannot represent retail.** A human has an equipped primary **and** an
+///    equipped secondary **and** possibly a vehicle weapon *simultaneously*, so `GetPrimaryWeapon` and
+///    `GetSecondaryWeapon` were made mutually exclusive by construction.
+/// 2. **Storing `WeaponStats` by value made the returned values non-entities.** Shipped Lua calls
+///    `Object.GetParent(w)`, `Weapon.GetReserveAmmo(w)`, `Object.SetPosition(w, …)` and
+///    `Object.HasLabel(w, "Grenade")` on whatever `GetAllWeapons` hands back — they must be real ECS
+///    entities, and their ammo must live on the weapon, not be copied into the human's record.
+/// 3. **The secondary carousel is three rungs deep, not two.** `FUN_00527C70` rotates
+///    `+0x04 ← +0x10 ← +0x14`, so a two-field model gives the rotation the wrong third rung.
+///
+/// # Naming confidence
+///
+/// The offsets and the *semantics* are **H** (read on the PC side). Most of the field *names* are **M**:
+/// they come from positionally joining the Xbox debug build's literal pool against the PC evidence.
+/// The one place that join was previously wrong is recorded on [`last_last_secondary`](Self::last_last_secondary).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeInventory {
+    /// `+0x00` — equipped **primary** weapon (`GetPrimaryWeapon` `0x005BEA61`). `None` = empty slot.
+    pub equipped_primary: Option<Entity>,
+    /// `+0x04` — equipped **secondary** (`GetSecondaryWeapon` `0x005BEBE1`; rotated by `FUN_00527C70`).
+    pub equipped_secondary: Option<Entity>,
+    /// `+0x08` — equipped **vehicle/mounted** weapon (`GetVehicleWeapon` `0x005BED4D`, no fallback).
+    pub equipped_vehicle: Option<Entity>,
+    /// `+0x0C` — last-equipped primary, i.e. the *other* primary slot. `GetPrimaryWeapon` falls back to
+    /// it at `0x005BEA67`.
+    pub last_primary: Option<Entity>,
+    /// `+0x10` — last-equipped secondary; `GetSecondaryWeapon`'s fallback at `0x005BEBE8`.
+    pub last_secondary: Option<Entity>,
+    /// `+0x14` — **last-*last*-equipped secondary**: the third rung of the secondary carousel.
+    ///
+    /// ⚠ Earlier revisions of the code map named this the pickup holding-pen. That is retracted, and the
+    /// PC side settles it independently of the Xbox name join: a slot `FUN_00527C70` **rotates through
+    /// on every secondary swap** cannot be a pickup pen. The pen is [`pending_pickup`](Self::pending_pickup)
+    /// at `+0x18`.
+    pub last_last_secondary: Option<Entity>,
+    /// `+0x18` — equipment waiting to be picked up (`FUN_0051B1E0`, zeroed at `0x0051B972`).
+    pub pending_pickup: Option<Entity>,
+    /// `+0x1C` — ammo prop (`FUN_0051B1E0` `0x0051B45F`).
+    pub ammo_prop: Option<Entity>,
+    /// `+0x20` — the mounted/emplaced weapon currently in use. **Non-zero ⇒ the human is on a turret**,
+    /// and every loadout mutator detaches first. `EnableWeapons` zeroes it.
+    pub weapon_in_use: Option<Entity>,
+    /// `+0x24` — pending equip action: set by the draw path, tested and cleared by the equip tick.
+    pub current_equip_action: u32,
+    /// `+0x28` — weapon visibility, enum-valued. A newtype rather than an enum because only one
+    /// comparison (`cmp eax,2`) is recovered; inventing variant names would be a fabrication.
+    pub weapon_visibility: WeaponVisibility,
+    /// `+0x2C` — the flags dword. See [`InventoryFlags`].
+    pub flags: InventoryFlags,
 }
+
+/// `RuntimeInventory+0x28`. Only the `== 2` comparison is recovered (`FUN_0051C140` `0x0051C1DB`), so
+/// this stays a newtype over the raw value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WeaponVisibility(pub u32);
+
+/// `RuntimeInventory+0x2C` — the flags dword.
+///
+/// Bit names are **M** (positional, from the Xbox pool's packed line); the bit *semantics* are **H**,
+/// read from the 19 gate sites.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InventoryFlags(pub u32);
+
+impl InventoryFlags {
+    /// `& 0x08` — **locked**. Every loadout mutator returns false immediately. See
+    /// `crate::inventory::gate`.
+    pub const LOCKED: u32 = 0x08;
+    /// `| 0x04` — a draw is in flight. Cleared on failure (`&= 0xF9`).
+    pub const DRAWING: u32 = 0x04;
+    /// `| 0x02` — a holster/swap is in flight. Also cleared by the `&= 0xF9` failure path.
+    pub const SWAPPING: u32 = 0x02;
+
+    pub fn locked(self) -> bool {
+        self.0 & Self::LOCKED != 0
+    }
+
+    pub fn set_locked(&mut self, on: bool) {
+        if on {
+            self.0 |= Self::LOCKED;
+        } else {
+            self.0 &= !Self::LOCKED;
+        }
+    }
+
+    /// The `&= 0xF9` failure path: clear both in-flight bits, leaving `LOCKED` untouched.
+    pub fn clear_in_flight(&mut self) {
+        self.0 &= !(Self::DRAWING | Self::SWAPPING);
+    }
+}
+
+/// The registrar's static record size for `RuntimeInventory` (`0x00645782`), agreeing with the live
+/// descriptor. The eleven dwords plus the flags dword close exactly inside it.
+pub const RUNTIME_INVENTORY_STRIDE: usize = 0x30;
+/// The `RuntimeInventory` container global.
+pub const RUNTIME_INVENTORY_CONTAINER: u32 = 0x017B_F3D8;
+
+/// `Equipment` — the **slot-class tag, carried on the weapon**, not on the human
+/// (`inventory_equipment_code_map.md` §3.1, container `0x017BCDB8`).
+///
+/// `Weapon.IsPrimary` must read this same field, or the `Weapon` and `Human.Inventory` namespaces
+/// disagree about what a given weapon is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Equipment {
+    pub class: EquipmentType,
+}
+
+/// The recovered `EquipmentTypeEnum` values. Only these two are used by the loadout paths; the
+/// unlabeled remainder of the enum is deliberately not modelled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EquipmentType {
+    #[default]
+    Primary,
+    Secondary,
+}
+
+/// The `Equipment` container global.
+pub const EQUIPMENT_CONTAINER: u32 = 0x017B_CDB8;
+
+/// `CarriedBy` — the **carry relation edge, carried on the weapon** (retail's `RuntimeEquipmentLink`
+/// container `0x00DF9510`, §3.2).
+///
+/// # Why the edge lives on the child
+///
+/// `hecs` has no relation primitive, and three shapes were possible:
+///
+/// * a `Vec<Entity>` on the human — rejected: it has nowhere to put the **per-edge flag**, and both
+///   `GetAllWeapons` and `FUN_005283F0` consult that flag rather than the human's record;
+/// * a side-table resource — rejected: `hecs` has no resources, so it would live on the host, which is
+///   exactly the shadow table this change removes;
+/// * the edge as a component on the weapon — **chosen**. Find-edge is an O(1) component get, and
+///   "at most one holder per weapon" becomes structural rather than an invariant to police.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CarriedBy {
+    /// The human carrying this weapon.
+    pub holder: Entity,
+    /// The per-edge flags retail keeps on the link record. See [`CarriedBy::EQUIPPED`] and
+    /// [`CarriedBy::EXCLUDED`].
+    pub flags: u32,
+    /// Insertion order, so `GetAllWeapons` can reproduce a stable sequence.
+    pub seq: u32,
+}
+
+impl CarriedBy {
+    /// Per-edge bit **`0x01`** — this edge is the equipped one. `GetAllWeapons` pushes it *first*
+    /// (`0x005BEED8 test byte [esi+8], 1`), and `FUN_005283F0` uses it to decide equip-vs-stow for an
+    /// already-attached weapon (`0x005284E3`/`0x00528540`). Written by `FUN_0052A3B0` (`&0xFE` at
+    /// `0x0052A46E`/`0x0052A4B3`) and rebuilt by `FUN_00667210` (`&0xFE` at `0x00667366`).
+    /// Confidence **H** (§3.2).
+    pub const EQUIPPED: u32 = 0x01;
+
+    /// Per-edge bit **`0x02`** — the **exclude** bit: edges carrying it are skipped when
+    /// `GetAllWeapons`' second argument is true (`0x005BEE8F test byte [esi+8], 2`). It also
+    /// short-circuits the holster path and gates `FUN_0052A3B0`'s push-down.
+    ///
+    /// ⚠ Confidence **H (behaviour) / OPEN (meaning)**. Its sole writer is `FUN_006FC280`
+    /// (`or byte [edi+8],2` @`0x006FC2A5`) when a second object accessor returns, so it appears to
+    /// track the presence of the edge's `+0x04` participant — but *what that object is* is the
+    /// residual open item (§9.1). Do not name it for what it seems to mean.
+    ///
+    /// An earlier revision of this file called `0x02` "EQUIPPED" and attached bit `0x01`'s evidence
+    /// to it — a wrong-bit attribution plus confidence inflation on a row the map marks open.
+    pub const EXCLUDED: u32 = 0x02;
+
+    pub fn is_equipped(&self) -> bool {
+        self.flags & Self::EQUIPPED != 0
+    }
+
+    /// Whether `GetAllWeapons(uChar, true)` should skip this edge.
+    pub fn is_excluded(&self) -> bool {
+        self.flags & Self::EXCLUDED != 0
+    }
+}
+
+/// The carry-relation container global.
+pub const CARRY_RELATION_CONTAINER: u32 = 0x00DF_9510;
+
+/// `PendingDestroy` — a weapon queued for destruction by `SetAllWeapons`/`DestroyAllWeapons`.
+///
+/// **The destroy is a deferred queue push, not a synchronous reap** (§4.9), and that deferral is what
+/// makes the shipped snapshot-restore pattern legal: `mrxplayer.lua:661-724` destroys a loadout and
+/// re-applies captured GUIDs, which a synchronous reap would invalidate mid-sequence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PendingDestroy;
