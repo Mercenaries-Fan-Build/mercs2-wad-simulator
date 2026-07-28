@@ -89,7 +89,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mhash = args.get(1).and_then(|a| a.strip_prefix("0x")).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0x39AF17DC);
     let out = args.get(2).cloned().unwrap_or_else(|| ".".into());
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     // Work at the MTRL level: every material carries a FULL texture list (all slots), not just the
     // diffuse(0)/normal(2) the mesh builder keeps. Dump EVERY texture in EVERY slot so nothing is hidden.
