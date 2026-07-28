@@ -115,6 +115,20 @@ impl AssetRegistry {
         self.chunks.get(&(type_hash, name_hash)).copied()
     }
 
+    /// The registered chunk of a `type_hash`, whatever its name — for the **singleton** classes
+    /// (`watermap`, `materialtable`) the engine addresses by type. Returns `(name_hash, ChunkRef)`.
+    /// Already-registered only; no I/O. See [`resolve_singleton`](Self::resolve_singleton).
+    ///
+    /// A singleton class has exactly one chunk in the archive, so the scan is unambiguous; if a class
+    /// ever carried several, the lowest name hash is picked so the answer is at least deterministic.
+    pub fn lookup_singleton(&self, type_hash: u32) -> Option<(u32, ChunkRef)> {
+        self.chunks
+            .iter()
+            .filter(|((t, _), _)| *t == type_hash)
+            .min_by_key(|((_, n), _)| *n)
+            .map(|((_, n), c)| (*n, *c))
+    }
+
     /// The bytes of a registered chunk. `None` if its owning block has since been evicted.
     pub fn slice(&self, c: ChunkRef) -> Option<&[u8]> {
         self.resident.get(&(c.src, c.block))?.get(c.start..c.end)
@@ -222,6 +236,39 @@ impl AssetRegistry {
         None
     }
 
+    /// Resolve a **singleton** asset class by `type_hash` alone, streaming its block in on demand.
+    ///
+    /// The name-keyed [`resolve`](Self::resolve) cannot reach `watermap`/`materialtable`: their ASET row
+    /// names the resident group that holds them, not the chunk, so there is no name to ask for. Retail
+    /// gets them for free — the resident block is always in memory and its entry table is walked by
+    /// type. We reproduce that: find the blocks carrying an ASET row of this class's `type_id`
+    /// ([`wad::aset_blocks_for_type_id`]), make them resident (which registers every chunk they carry,
+    /// exactly as retail's block-streaming does), and take the one row of the wanted type.
+    ///
+    /// Walks the WAD stack in REVERSE, so an overlay's copy wins — the same last-opened rule as
+    /// [`resolve`](Self::resolve). Returns `(name_hash, ChunkRef)`; `None` if no open archive has one.
+    pub fn resolve_singleton(
+        &mut self,
+        wads: &mut [Wad],
+        type_hash: u32,
+    ) -> Option<(u32, ChunkRef)> {
+        if let Some(hit) = self.lookup_singleton(type_hash) {
+            return Some(hit);
+        }
+        let type_id = mercs2_formats::types::type_id_for_type_hash(type_hash)?;
+        for src in (0..wads.len()).rev() {
+            for block in wad::aset_blocks_for_type_id(&wads[src], type_id) {
+                if self.make_resident(wads, src, block).is_err() {
+                    continue;
+                }
+                if let Some(hit) = self.lookup_singleton(type_hash) {
+                    return Some(hit);
+                }
+            }
+        }
+        None
+    }
+
     /// Evict oldest blocks until under the cap, never evicting `protect`.
     fn enforce_cap(&mut self, protect: (usize, u16)) -> usize {
         let mut evicted = 0;
@@ -282,6 +329,30 @@ mod tests {
         assert_eq!(r.slice(t), Some(&b"pixels"[..]));
         // Same name, different type = a different key. md500 owns both 0x9FCAE910 rows.
         assert_eq!(r.lookup(TEX, 0xAA), None);
+    }
+
+    /// A singleton class is addressed by TYPE, not by name — the watermap's chunk name hash is an
+    /// authored value nobody can predict, so `lookup(type, name)` is unusable for it and
+    /// `lookup(type, pandemic_hash("watermap"))` (the type hash reused as a name) finds nothing.
+    #[test]
+    fn singletons_are_found_by_type_not_by_name() {
+        const WATERMAP: u32 = mercs2_formats::types::TYPE_HASH_WATERMAP;
+        let mut r = AssetRegistry::default();
+        // The resident block: the watermap under an unrelated authored name, plus block-mates.
+        r.register_block_bytes(
+            0,
+            3185,
+            block(&[(0xAA, MODEL, b"mesh"), (0x3A03_2A6F, WATERMAP, b"watr-body")]),
+        );
+
+        // The old name-keyed path, with the type hash pressed into service as a name: nothing.
+        assert_eq!(r.lookup(WATERMAP, WATERMAP), None);
+        // By type: found, and it reports the authored name so callers can log it.
+        let (name, c) = r.lookup_singleton(WATERMAP).expect("watermap found by type");
+        assert_eq!(name, 0x3A03_2A6F);
+        assert_eq!(r.slice(c), Some(&b"watr-body"[..]));
+        // A class with nothing of that type registered stays absent rather than matching a neighbour.
+        assert_eq!(r.lookup_singleton(TEX), None);
     }
 
     #[test]
