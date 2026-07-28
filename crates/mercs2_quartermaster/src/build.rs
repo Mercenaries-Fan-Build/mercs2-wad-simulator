@@ -29,8 +29,12 @@
 //! `native_hook` is the kind that produces no WAD content at all — an `.asi` file placed in the
 //! loader's search path, plus the [`Placement`] record that makes the drop reversible.
 //!
-//! `edit_state_machine` still returns `Unsupported` — with the reason, rather than being quietly
-//! skipped, because a dropped contribution produces a WAD that looks fine and does nothing.
+//! `edit_state_machine` returns `Unsupported`, and is expected to keep doing so for a while: the
+//! destruction machine can be read and cannot be written, and three of the four things blocking it
+//! live outside this crate. The reason it returns says which, so the refusal is actionable rather
+//! than a deferral — and it points the author at `raw`, which can carry a hand-built block today
+//! with a declared blast radius. A kind that returns `Unsupported` with a reason is honest; one
+//! that is quietly skipped produces a WAD that looks fine and does nothing.
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
@@ -999,10 +1003,48 @@ fn lower(
             })
         }
 
-        Contribution::EditStateMachine { .. } => Err(BuildError::Unsupported {
+        // NOT implemented, and the reason is worth stating precisely rather than deferring: the
+        // destruction machine can be READ and cannot be WRITTEN, and three of the four gaps are
+        // outside this crate.
+        //
+        // 1. No serializer. `orchestrator::parse_state_machine` decodes the family (validated on
+        //    retail: al_veh_boat_destroyer 0xE54047D5 parses to 59 switch slots and 47 nodes), but
+        //    `StateMachine` is a VIEW — no descriptor indices, no data offsets, no container
+        //    position — so it cannot even round-trip. Nothing in the workspace writes SWIT / NODE /
+        //    STAT / CHDR / CEXE; `mercs2_workshop`'s bundler lists exactly these tags under
+        //    `preserved_only_in_raw`, which is the ecosystem carrying them verbatim because it
+        //    cannot author them either.
+        // 2. The family is a NESTED container inside the model container, so writing one means
+        //    rebuilding that container's descriptor table (tag / offset / size / descendant count
+        //    per row), re-basing every following sibling's data offset, recomputing the CSUM, and
+        //    re-emitting the whole model block. `model_inject` rewrites geometry groups, not an
+        //    arbitrary sibling subtree.
+        // 3. `states:` has no schema. Nothing in the manifest format says what that file contains,
+        //    so defining one is a format change (Plan 04), not a lowering.
+        // 4. There would be no way to check the result. The closest known destructible-model
+        //    corruption — collapsing a group's PRMT records so the machine reads off the end — is
+        //    an access violation at model instantiation that `wad_simulator` does NOT catch; it
+        //    shows up only in-game. Every structural bug this crate has shipped was caught by that
+        //    simulator, so a lowering it cannot see is a lowering with no safety net at all.
+        Contribution::EditStateMachine { target, .. } => Err(BuildError::Unsupported {
             index,
             kind,
-            reason: "not implemented in this increment".into(),
+            reason: format!(
+                "the destruction state machine can be READ but not WRITTEN. \
+                 `orchestrator::parse_state_machine` decodes the SWIT/NODE/STAT/CHDR/CEXE family \
+                 and is validated against retail, but it returns a decoded VIEW with no descriptor \
+                 indices or data offsets, and no serializer for the family exists anywhere in the \
+                 workspace — mercs2_workshop's bundler lists exactly these tags as preserved only \
+                 in raw bytes. The family is also a nested container INSIDE the model container, so \
+                 writing one means rebuilding that container's descriptor table and re-emitting the \
+                 whole model block. On top of that, `states:` has no schema: nothing in the manifest \
+                 format says what that file contains, so defining one is a format change rather \
+                 than a lowering. Shipping a guess would be worse than refusing, because the \
+                 closest known corruption of this kind faults at model instantiation and \
+                 wad_simulator does not catch it — it only appears in-game. \
+                 If you have already hand-built the block for {target:?}, ship it as `kind: raw` \
+                 with `target_layer: data`: that at least carries a declared blast radius."
+            ),
         }),
     }
 }

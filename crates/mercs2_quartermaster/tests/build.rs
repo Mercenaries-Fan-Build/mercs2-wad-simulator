@@ -102,8 +102,12 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 ///
 /// `add_outfit`, `patch_lua`, `raw` and `native_hook` all used to be here. `edit_state_machine` is
 /// what is left, and it is the one kind still genuinely unlowerable.
+///
+/// The refusal is asserted for CONTENT, not just for its variant. "Not implemented" tells an author
+/// nothing they can act on; what they need is which of the four gaps they hit, and that a
+/// hand-built block can ship through `raw` today.
 #[test]
-fn edit_state_machine_fails_loudly_with_a_reason() {
+fn edit_state_machine_refuses_with_the_reason_and_a_way_forward() {
     let dir = scratch("unsupported");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
@@ -113,7 +117,13 @@ fn edit_state_machine_fails_loudly_with_a_reason() {
     );
     match build::build(&s, None, None, None, None) {
         Err(e @ BuildError::Unsupported { .. }) => {
-            assert!(e.to_string().contains("not implemented"), "{e}");
+            let m = e.to_string();
+            // What is missing: no writer for the chunk family, and no schema for `states:`.
+            assert!(m.contains("no serializer"), "{m}");
+            assert!(m.contains("`states:` has no schema"), "{m}");
+            // And the escape hatch that exists today.
+            assert!(m.contains("kind: raw"), "{m}");
+            assert!(m.contains("al_veh_boat_destroyer"), "{m}");
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
