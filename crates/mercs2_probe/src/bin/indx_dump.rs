@@ -10,7 +10,7 @@ fn main() {
     let names: Vec<String> = if args.is_empty() {
         vec!["pmc_hum_mattias_v3".into(), "ch_veh_tank_ztz98".into(), "vz_veh_tank_amx30_elite".into()]
     } else { args };
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
     for name in &names {
         let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));
         let Ok(lods) = wad::extract_model_lods(&mut w, hash) else { continue };
