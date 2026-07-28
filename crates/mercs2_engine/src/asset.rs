@@ -263,6 +263,19 @@ impl AssetSource {
             .ok_or_else(|| format!("0x{hash:08X}: no 0x{chunk_type:08X} chunk in any open wad"))
     }
 
+    /// The container of a **singleton** asset class, found by `chunk_type` alone — `watermap`
+    /// (`0x4D7D30C4`), `materialtable`, and the other ASET `type_id 0` classes.
+    ///
+    /// These have no addressable name: the ASET row's `asset_hash` names the resident group that holds
+    /// the chunk, and the chunk's own `name_hash` is an unrelated authored hash, so
+    /// [`extract_container_typed`](Self::extract_container_typed) can never find one. Returns the
+    /// chunk's `name_hash` alongside its bytes for logging/diagnostics.
+    pub fn extract_singleton(&mut self, chunk_type: u32) -> Option<(u32, Vec<u8>)> {
+        let AssetSource { wads, registry, .. } = self;
+        let (name_hash, c) = registry.resolve_singleton(wads, chunk_type)?;
+        registry.slice(c).map(|b| (name_hash, b.to_vec()))
+    }
+
     /// Resident-mip texture (fast path — model loads) by hash — last wins.
     ///
     /// NOT routed through the registry: a texture's mip chain is spread across the finer-LOD blocks of
