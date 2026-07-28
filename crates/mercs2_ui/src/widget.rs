@@ -72,6 +72,15 @@ pub struct MovieData {
     pub file: String,
     pub playing: bool,
     pub frame: u32,
+    /// The end-callback registered by `Hud.SetMovieEndCallback` (`0x005BC640`), as an **opaque id**.
+    ///
+    /// Retail stores a Lua ref, not a closure, and so do we — the `mlua::Function` and its context
+    /// arguments are held by the binding layer and keyed on this id, which keeps `mercs2_ui` free of a
+    /// Lua dependency. See [`WidgetTree::take_movie_end_fires`] for how it is dispatched.
+    pub end_callback: Option<u32>,
+    /// Whether this movie's end callback has already been queued, so a still-`playing` movie cannot
+    /// fire it twice.
+    pub end_fired: bool,
 }
 
 /// `Flash` (Scaleform) widget data.
@@ -100,6 +109,36 @@ pub struct MinimapData {
     /// Objective blips: id → world location.
     pub objectives: HashMap<u64, [f32; 3]>,
 }
+
+/// An in-flight `InterpolateWidget` animation.
+///
+/// **This is the spine of the game's whole GUI**, not a cosmetic tween. `MrxGuiBase`'s animation queue
+/// (`Widget:AnimateToPoint` → `_HandleAnimationComplete`, `mrxguibase.lua:635-720`) drives every
+/// widget move/fade by calling `_GuiInternal.InterpolateWidget(uId, nTime, …, _HandleAnimationComplete,
+/// {self}, …)` and **continuing the chain from the completion callback**. If the callback never fires,
+/// the queue stalls at its first entry and everything downstream of it — the cinematic fade-in that
+/// starts the intro movie, and so the release of `STATE_WAITFORGAME` — never happens.
+#[derive(Clone, Debug)]
+pub struct WidgetAnim {
+    /// Total duration in seconds, as the script requested it.
+    pub duration: f32,
+    /// Seconds still to run. Reaching `<= 0` snaps to the target and queues the callback.
+    pub remaining: f32,
+    /// Rect at the moment the animation was issued.
+    pub from_location: [f32; 4],
+    /// Rect to reach.
+    pub to_location: [f32; 4],
+    /// Colour at issue time, and the target.
+    pub from_color: [f32; 4],
+    pub to_color: [f32; 4],
+    /// Completion callback, as an **opaque id** — retail stores a Lua ref, and so do we, which keeps
+    /// this crate free of a Lua dependency. See [`WidgetTree::take_anim_completions`].
+    pub on_complete: Option<u32>,
+}
+
+/// The sentinel the game passes for "leave this channel alone" in `InterpolateWidget`'s colour
+/// arguments (`mrxguibase.lua:715` defaults each of R/G/B/Translucency to `-4096`).
+pub const COLOR_UNCHANGED: f32 = -4096.0;
 
 /// A single widget node.
 #[derive(Clone, Debug)]
@@ -132,6 +171,8 @@ pub struct Widget {
     pub movie: Option<MovieData>,
     pub flash: Option<FlashData>,
     pub minimap: Option<MinimapData>,
+    /// The in-flight `InterpolateWidget` animation, if any. See [`WidgetAnim`].
+    pub anim: Option<WidgetAnim>,
 }
 
 impl Widget {
@@ -157,6 +198,7 @@ impl Widget {
             movie: matches!(kind, WidgetKind::Movie).then(MovieData::default),
             flash: matches!(kind, WidgetKind::Flash).then(FlashData::default),
             minimap: matches!(kind, WidgetKind::Minimap).then(MinimapData::default),
+            anim: None,
         }
     }
 }
@@ -168,11 +210,156 @@ pub struct WidgetTree {
     widgets: HashMap<u64, Widget>,
     next: u64,
     z_top: i32,
+    /// Monotonic id source for retained callbacks. Never reused, so a stale id from a deleted widget
+    /// can never be mistaken for a live registration.
+    next_callback: u32,
+    /// Movie end-callback ids whose movie has finished, awaiting dispatch by the script layer.
+    pending_movie_ends: Vec<u32>,
+    /// Animation completion ids awaiting dispatch by the script layer.
+    pending_anim_completions: Vec<u32>,
 }
 
 impl WidgetTree {
     pub fn new() -> Self {
-        WidgetTree { widgets: HashMap::new(), next: 1, z_top: 0 }
+        WidgetTree { widgets: HashMap::new(), next: 1, z_top: 0, ..Default::default() }
+    }
+
+    /// Mint an opaque callback id for the script layer to associate with a retained Lua function.
+    pub fn mint_callback(&mut self) -> u32 {
+        self.next_callback += 1;
+        self.next_callback
+    }
+
+    /// `Hud.SetMovieEndCallback(uId, fCallback, tData)` — `0x005BC640`.
+    ///
+    /// Returns `false` if `handle` is not a movie widget. Re-registering replaces, and clears any
+    /// already-fired latch so the next play can complete again.
+    pub fn set_movie_end_callback(&mut self, handle: u64, callback: Option<u32>) -> bool {
+        let Some(m) = self.widgets.get_mut(&handle).and_then(|w| w.movie.as_mut()) else {
+            return false;
+        };
+        m.end_callback = callback;
+        m.end_fired = false;
+        true
+    }
+
+    /// Advance movie playback one frame and queue the end callback of any movie that finished.
+    ///
+    /// **Headless completion model, and it is a deliberate choice.** There is no Bink decoder here, so
+    /// a movie has no frame count to play out. Rather than stall forever — which is what a
+    /// never-completing movie does to the game's state machine, since `MrxGuiCinematic`'s end callback
+    /// is what releases `STATE_WAITFORGAME` — a playing movie completes on the tick after it starts.
+    /// Observably: the cinematic is skipped and gameplay resumes, which is the same outcome as a player
+    /// skipping it.
+    ///
+    /// The frame counter still advances so `Hud.GetMovieCurrentFrameNumber` moves rather than sitting
+    /// at 0. When a real decoder lands, this is the one function that changes.
+    pub fn tick_movies(&mut self) {
+        for w in self.widgets.values_mut() {
+            let Some(m) = w.movie.as_mut() else { continue };
+            if !m.playing {
+                continue;
+            }
+            m.frame += 1;
+            if !m.end_fired {
+                m.end_fired = true;
+                m.playing = false;
+                if let Some(id) = m.end_callback {
+                    self.pending_movie_ends.push(id);
+                }
+            }
+        }
+    }
+
+    /// Drain the movie end-callbacks awaiting dispatch. The script layer invokes the retained Lua
+    /// functions these ids key.
+    pub fn take_movie_end_fires(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.pending_movie_ends)
+    }
+
+    /// `Hud.InterpolateWidget(uId, nTime, x1, y1, x2, y2, r, g, b, a, fComplete, tData, …)` — start an
+    /// animation toward a rect and/or colour, with `on_complete` fired when it finishes.
+    ///
+    /// A colour channel of [`COLOR_UNCHANGED`] (`-4096`) holds its current value, which is the default
+    /// `MrxGuiBase` passes for every channel it does not mean to touch. A `None` rect coordinate
+    /// likewise holds — `_HandleAnimationComplete` passes `nil` for `x2`/`y2` when the animation point
+    /// maintains the widget's dimensions.
+    ///
+    /// A zero (or negative) duration completes on the **next tick** rather than instantly: completing
+    /// inside the setter would re-enter Lua from a binding, and the animation queue in `mrxguibase.lua`
+    /// is explicitly written against a deferred completion.
+    ///
+    /// Returns `false` if the handle is unknown.
+    #[allow(clippy::too_many_arguments)]
+    pub fn interpolate(
+        &mut self,
+        handle: u64,
+        duration: f32,
+        to_location: [Option<f32>; 4],
+        to_color: [f32; 4],
+        on_complete: Option<u32>,
+    ) -> bool {
+        let Some(w) = self.widgets.get_mut(&handle) else { return false };
+        let from_location = w.location;
+        let from_color = w.color;
+        let mut target_loc = from_location;
+        for (i, v) in to_location.iter().enumerate() {
+            if let Some(v) = v {
+                target_loc[i] = *v;
+            }
+        }
+        let mut target_col = from_color;
+        for (i, v) in to_color.iter().enumerate() {
+            if *v != COLOR_UNCHANGED {
+                target_col[i] = *v;
+            }
+        }
+        w.anim = Some(WidgetAnim {
+            duration: duration.max(0.0),
+            remaining: duration.max(0.0),
+            from_location,
+            to_location: target_loc,
+            from_color,
+            to_color: target_col,
+            on_complete,
+        });
+        true
+    }
+
+    /// Advance every in-flight animation by `dt`, applying the interpolated values, and queue the
+    /// completion callback of each animation that finished.
+    ///
+    /// Completions are **queued, not invoked** — the script layer drains them via
+    /// [`take_anim_completions`](Self::take_anim_completions), so a callback that starts the next
+    /// animation in the queue does so on the following tick rather than recursing inside this loop.
+    pub fn tick_animations(&mut self, dt: f32) {
+        for w in self.widgets.values_mut() {
+            let Some(a) = w.anim.as_mut() else { continue };
+            a.remaining -= dt;
+            if a.remaining > 0.0 && a.duration > 0.0 {
+                // Linear blend. Retail's easing curve is not recovered; linear is the honest stand-in
+                // and the endpoints — which is all the script observes via GetLocation — are exact.
+                let t = 1.0 - (a.remaining / a.duration).clamp(0.0, 1.0);
+                for i in 0..4 {
+                    w.location[i] = a.from_location[i] + (a.to_location[i] - a.from_location[i]) * t;
+                    w.color[i] = a.from_color[i] + (a.to_color[i] - a.from_color[i]) * t;
+                }
+                continue;
+            }
+            // Finished: snap to the target exactly, then release the callback.
+            w.location = a.to_location;
+            w.color = a.to_color;
+            let done = a.on_complete;
+            w.anim = None;
+            if let Some(id) = done {
+                self.pending_anim_completions.push(id);
+            }
+        }
+    }
+
+    /// Drain the animation completions awaiting dispatch.
+    pub fn take_anim_completions(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.pending_anim_completions)
     }
 
     /// Number of live widgets.
@@ -342,5 +529,101 @@ mod tests {
         assert_eq!(t.draw_order(), vec![b, a]);
         t.push_to_back(a);
         assert_eq!(*t.draw_order().first().unwrap(), a);
+    }
+
+    /// An animation interpolates toward its target and **fires its completion exactly once**, at the
+    /// end. This is the property `MrxGuiBase`'s animation queue is built on: it chains the next
+    /// animation from the completion callback, so a completion that never arrives stalls the whole GUI,
+    /// and one that arrives twice double-advances the queue.
+    #[test]
+    fn an_animation_interpolates_then_completes_once() {
+        let mut t = WidgetTree::new();
+        let w = t.create(WidgetKind::Container);
+        let cb = t.mint_callback();
+        assert!(t.interpolate(w, 1.0, [Some(100.0), Some(0.0), None, None], [COLOR_UNCHANGED; 4], Some(cb)));
+
+        t.tick_animations(0.5);
+        let mid = t.get(w).unwrap().location[0];
+        assert!((mid - 50.0).abs() < 1e-3, "halfway through, halfway there; got {mid}");
+        assert!(t.take_anim_completions().is_empty(), "not finished yet");
+
+        t.tick_animations(0.5);
+        assert_eq!(t.get(w).unwrap().location[0], 100.0, "snaps exactly to the target");
+        assert_eq!(t.take_anim_completions(), vec![cb], "fires on completion");
+
+        t.tick_animations(1.0);
+        assert!(t.take_anim_completions().is_empty(), "and never again");
+    }
+
+    /// A colour channel of [`COLOR_UNCHANGED`] holds — that sentinel is what `MrxGuiBase` passes for
+    /// every channel an animation point does not mean to touch, so treating it as a target would fade
+    /// every widget to −4096.
+    #[test]
+    fn the_color_sentinel_holds_a_channel() {
+        let mut t = WidgetTree::new();
+        let w = t.create(WidgetKind::Container);
+        t.get_mut(w).unwrap().color = [10.0, 20.0, 30.0, 40.0];
+        // Animate only alpha to 0; RGB must survive.
+        t.interpolate(w, 0.0, [None; 4], [COLOR_UNCHANGED, COLOR_UNCHANGED, COLOR_UNCHANGED, 0.0], None);
+        t.tick_animations(0.1);
+        assert_eq!(t.get(w).unwrap().color, [10.0, 20.0, 30.0, 0.0]);
+    }
+
+    /// A zero-duration animation completes on the **next tick**, not inside the setter — completing
+    /// synchronously would re-enter Lua from inside a binding.
+    #[test]
+    fn a_zero_duration_animation_completes_on_the_next_tick() {
+        let mut t = WidgetTree::new();
+        let w = t.create(WidgetKind::Container);
+        let cb = t.mint_callback();
+        t.interpolate(w, 0.0, [Some(5.0), None, None, None], [COLOR_UNCHANGED; 4], Some(cb));
+        assert!(t.take_anim_completions().is_empty(), "nothing fires during the call itself");
+        t.tick_animations(1.0 / 60.0);
+        assert_eq!(t.take_anim_completions(), vec![cb]);
+        assert_eq!(t.get(w).unwrap().location[0], 5.0);
+    }
+
+    /// A playing movie completes and fires its end callback once; `StopMovie` is an explicit cancel and
+    /// must **not** produce the same completion signal as watching it through.
+    #[test]
+    fn a_movie_fires_its_end_callback_once_and_stop_cancels() {
+        let mut t = WidgetTree::new();
+        let m = t.create(WidgetKind::Movie);
+        let cb = t.mint_callback();
+        assert!(t.set_movie_end_callback(m, Some(cb)));
+
+        // Not playing yet: nothing happens.
+        t.tick_movies();
+        assert!(t.take_movie_end_fires().is_empty());
+
+        t.get_mut(m).unwrap().movie.as_mut().unwrap().playing = true;
+        t.tick_movies();
+        assert_eq!(t.take_movie_end_fires(), vec![cb]);
+        t.tick_movies();
+        assert!(t.take_movie_end_fires().is_empty(), "exactly once");
+
+        // Replay, then cancel before the tick: no completion.
+        {
+            let mv = t.get_mut(m).unwrap().movie.as_mut().unwrap();
+            mv.playing = true;
+            mv.end_fired = false;
+        }
+        {
+            let mv = t.get_mut(m).unwrap().movie.as_mut().unwrap();
+            mv.playing = false;
+            mv.end_fired = true; // what StopMovie does
+        }
+        t.tick_movies();
+        assert!(t.take_movie_end_fires().is_empty(), "a stopped movie does not report completion");
+    }
+
+    /// A callback registered against a non-movie widget is rejected rather than silently accepted, so a
+    /// script that targets the wrong handle finds out.
+    #[test]
+    fn a_movie_callback_needs_a_movie_widget() {
+        let mut t = WidgetTree::new();
+        let c = t.create(WidgetKind::Container);
+        let cb = t.mint_callback();
+        assert!(!t.set_movie_end_callback(c, Some(cb)));
     }
 }
