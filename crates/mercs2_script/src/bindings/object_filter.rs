@@ -11,7 +11,7 @@
 
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -48,54 +48,61 @@ pub const REQUIRED: &[Required] = &[
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
+    // A filter handle is an engine handle like any other, so it leaves as lightuserdata (`crate::guid`)
+    // and comes back through `Guid`'s `FromLua`.
     let h = host.clone();
-    b.real("Create", lua.create_function(move |_, _: MultiValue| Ok(h.borrow_mut().object_filter_create() as i64))?)?;
+    b.real("Create", lua.create_function(move |_, _: MultiValue| Ok(Guid(h.borrow_mut().object_filter_create())))?)?;
     let h = host.clone();
-    b.real("Copy", lua.create_function(move |_, src: i64| Ok(h.borrow_mut().object_filter_copy(src as u64) as i64))?)?;
+    b.real("Copy", lua.create_function(move |_, src: Guid| Ok(Guid(h.borrow_mut().object_filter_copy(src.raw()))))?)?;
 
     // Configuration mutators → the registry filter.
     let h = host.clone();
-    b.real("SetFilter", lua.create_function(move |_, (f, expr): (i64, String)| {
-        h.borrow_mut().object_filter_set_expr(f as u64, &expr);
+    b.real("SetFilter", lua.create_function(move |_, (f, expr): (Guid, String)| {
+        h.borrow_mut().object_filter_set_expr(f.raw(), &expr);
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("ClearFilter", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_set_expr(f as u64, ""); Ok(()) })?)?;
+    b.real("ClearFilter", lua.create_function(move |_, f: Guid| { h.borrow_mut().object_filter_set_expr(f.raw(), ""); Ok(()) })?)?;
     let h = host.clone();
     // Arg 3 is **bExclude**, not bInclude — retail's add primitive clears the include bit when the
     // flag is set (Xbox `0x8247D5AC`: `cmplwi flag,0` → `andc` vs `or`), the PC omitted-arg default
     // is 0, and `mrxtaskobjective.lua` passes `true` from `RemoveTarget` to un-target. The default
     // coincides either way; every explicit argument was inverted before 2026-07-26.
-    b.real("AddObject", lua.create_function(move |_, (f, guid, exclude): (i64, i64, Option<bool>)| {
-        h.borrow_mut().object_filter_add(f as u64, guid as u64, exclude.unwrap_or(false));
+    b.real("AddObject", lua.create_function(move |_, (f, guid, exclude): (Guid, Guid, Option<bool>)| {
+        h.borrow_mut().object_filter_add(f.raw(), guid.raw(), exclude.unwrap_or(false));
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("RemoveObject", lua.create_function(move |_, (f, guid): (i64, i64)| {
-        h.borrow_mut().object_filter_remove(f as u64, guid as u64);
+    b.real("RemoveObject", lua.create_function(move |_, (f, guid): (Guid, Guid)| {
+        h.borrow_mut().object_filter_remove(f.raw(), guid.raw());
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("ClearObjects", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_clear(f as u64); Ok(()) })?)?;
+    b.real("ClearObjects", lua.create_function(move |_, f: Guid| { h.borrow_mut().object_filter_clear(f.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("UsePlayers", lua.create_function(move |_, (f, on): (i64, Option<bool>)| {
-        h.borrow_mut().object_filter_use_players(f as u64, on.unwrap_or(true));
+    b.real("UsePlayers", lua.create_function(move |_, (f, on): (Guid, Option<bool>)| {
+        h.borrow_mut().object_filter_use_players(f.raw(), on.unwrap_or(true));
         Ok(())
     })?)?;
 
     // Evaluators → query the registry filter.
     let h = host.clone();
-    b.real("GetObjects", lua.create_function(move |_, (f, _which): (i64, Option<bool>)| {
-        Ok(h.borrow().object_filter_objects(f as u64).into_iter().map(|g| g as i64).collect::<Vec<_>>())
+    // The sequence this returns is iterated straight into other handle slots and then type-checked:
+    // `mrxtaskobjectiveaction.lua:21` feeds each element to `Pg.AddContextAction`, and the same
+    // objective's `_TargetActioned`/`_TargetDestroyed` gate on `type(uGuid) == "userdata"` (:31, :40)
+    // before calling `RemoveTarget`. Integers made both gates fail closed.
+    b.real("GetObjects", lua.create_function(move |_, (f, _which): (Guid, Option<bool>)| {
+        Ok(h.borrow().object_filter_objects(f.raw()).into_iter().map(Guid).collect::<Vec<_>>())
     })?)?;
     let h = host.clone();
-    b.real("Eval", lua.create_function(move |_, (f, guid): (i64, i64)| {
-        Ok(h.borrow().object_filter_eval(f as u64, guid as u64))
+    b.real("Eval", lua.create_function(move |_, (f, guid): (Guid, Guid)| {
+        Ok(h.borrow().object_filter_eval(f.raw(), guid.raw()))
     })?)?;
     let h = host.clone();
-    b.real("_GC", lua.create_function(move |_, f: i64| { h.borrow_mut().object_filter_gc(f as u64); Ok(()) })?)?;
+    b.real("_GC", lua.create_function(move |_, f: Guid| { h.borrow_mut().object_filter_gc(f.raw()); Ok(()) })?)?;
 
-    b.real("GetCoopPlayerGuid", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    // No second player in a single-player session → the "no such handle" GUID, which surfaces as nil.
+    b.real("GetCoopPlayerGuid", lua.create_function(|_, _: MultiValue| Ok(Guid::NONE))?)?;
 
     // Filter-graph association/relation edges → recorded ObjectFilter commands (the filter-graph
     // relation model consumes them).
