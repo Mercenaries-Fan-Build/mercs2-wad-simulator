@@ -9,7 +9,7 @@
 //! `C:/Program Files (x86)/EA Games/...`, which could not resolve off Windows, so the live tests
 //! guarded by it silently never ran there and reported green.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The environment variables naming the install, in precedence order.
 ///
@@ -17,22 +17,32 @@ use std::path::PathBuf;
 /// shells and scripts keep working.
 pub const GAME_DIR_VARS: [&str; 2] = ["MERCS2_GAME_DIR", "VZ_WAD"];
 
+/// Interpret one user-supplied path as the install root, its `data` folder, or the archive itself.
+///
+/// A file is taken as-is (so a renamed or copied archive works); a folder is probed at `data/<name>`
+/// then `<name>`. `None` when nothing exists there, so a caller falls through instead of being
+/// handed an unopenable path.
+///
+/// Exposed separately because this rule is what "a path to the game" MEANS, and every resolver needs
+/// it — `mercs2_quartermaster` had it copied verbatim, which is precisely the drift the rest of this
+/// module exists to prevent.
+pub fn wad_under(path: &Path, name: &str) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    [path.join("data").join(name), path.join(name)].into_iter().find(|c| c.is_file())
+}
+
 /// Resolve a WAD by filename from whichever of [`GAME_DIR_VARS`] is set.
 ///
-/// Each variable may hold the install root, its `data` folder, or a WAD file directly. A file is
-/// taken as-is (so a renamed or copied archive works); a folder is probed at `data/<name>` then
-/// `<name>`. Returns `None` when nothing is set or nothing exists — callers skip rather than fail.
+/// Each variable may hold the install root, its `data` folder, or a WAD file directly — see
+/// [`wad_under`]. Returns `None` when nothing is set or nothing exists; callers skip rather than fail.
 pub fn wad_from_env(name: &str) -> Option<PathBuf> {
     GAME_DIR_VARS
         .iter()
         .filter_map(|v| std::env::var_os(v).filter(|s| !s.is_empty()))
         .map(PathBuf::from)
-        .find_map(|p| {
-            if p.is_file() {
-                return Some(p);
-            }
-            [p.join("data").join(name), p.join(name)].into_iter().find(|c| c.is_file())
-        })
+        .find_map(|p| wad_under(&p, name))
 }
 
 /// [`wad_from_env`] for the base archive, `vz.wad`.

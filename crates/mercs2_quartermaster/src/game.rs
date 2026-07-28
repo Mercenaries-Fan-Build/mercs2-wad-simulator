@@ -140,13 +140,9 @@ pub fn discover_from(start: &Path) -> Option<Discovered> {
         let Some(p) = std::env::var_os(var).filter(|s| !s.is_empty()) else { continue };
         // A folder is accepted as well as a file: the install root or its `data` folder. Requiring the
         // full `…/data/vz.wad` is the papercut, and a folder is the form users actually have.
-        let p = PathBuf::from(p);
-        let hit = if p.is_file() {
-            Some(p)
-        } else {
-            [p.join("data").join("vz.wad"), p.join("vz.wad")].into_iter().find(|c| c.is_file())
-        };
-        if let Some(path) = hit {
+        // The dir-or-file rule is `game_paths`' to own — what "a path to the game" means should have
+        // exactly one definition, and this was a verbatim copy of it.
+        if let Some(path) = mercs2_formats::game_paths::wad_under(&PathBuf::from(p), "vz.wad") {
             return Some(Discovered { path, origin: Origin::Env });
         }
     }
