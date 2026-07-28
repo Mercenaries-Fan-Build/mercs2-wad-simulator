@@ -18,3 +18,6 @@ __pycache__/
 # Crucible's local LanceDB code index (.crucible/manifest.json + lancedb/). A regenerable
 # machine-local cache, ~420 MB across 33k files — never committed.
 /.crucible/
+
+# macOS Finder metadata.
+.DS_Store
