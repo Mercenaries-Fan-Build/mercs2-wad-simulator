@@ -35,7 +35,7 @@ fn bank_body(w: &mut wad::Wad, name: &str, type_hash: u32, raw_ok: bool) -> Opti
 #[test]
 #[ignore]
 fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
-    let path = wad::registry_vz_wad().expect("vz.wad resolvable via EA registry");
+    let path = wad::resolve_vz_wad(None).expect("vz.wad resolvable via EA registry");
     let mut w = wad::open(&path).expect("open vz.wad");
 
     // Load every resident wavebank into one engine + merge every per-bank sounddb into one catalog —
