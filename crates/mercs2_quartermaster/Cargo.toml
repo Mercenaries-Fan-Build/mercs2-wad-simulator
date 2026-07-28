@@ -32,3 +32,8 @@ sha2 = "0.10"
 # corpus is therefore taken as a PATH, not by depending on the crate that owns it.
 mercs2_luac = { workspace = true }
 png = "0.17"  # decode source images for texture lowering (same version the workspace already uses)
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "qm"
+path = "src/bin/qm.rs"
