@@ -5296,8 +5296,27 @@ pub(crate) fn faithful_char_skin(
     // and keeps big finger rigs (50 Cent → mattias) under the palette cap. For non-CoD rigs we let it
     // do that and only layer the user's MANUAL overrides on top. CoD's `j_*` naming it can't read, so
     // there we feed the hand-verified explicit table as full overrides.
+    // ValveBiped joins CoD on the full-override path. Its names ARE readable by the generic mapper,
+    // but `automap`'s `ladder_assign` spreads a chain across the rungs by INDEX (`k*rungs/n`) with no
+    // idea where the joints physically sit. ValveBiped carries FOUR spine rungs (it skips Spine3)
+    // against Pandemic's three, so the overflow doubles up the BOTTOM rung and every rung above the
+    // waist lands low — Spine1 -5.8%, Spine2 -6.3%, Spine4 -14.0% of body height — compressing the
+    // torso into the pelvis. `automap` is parity-locked to Logan's mapper (a ValveBiped fixture pins
+    // this exact behaviour), so the ladder is corrected HERE, in the convention's hand-verified table,
+    // rather than by forking the shared mapper.
+    // Pandemic (NATIVE) joins them, for the strongest reason of the three: there is nothing to
+    // retarget. A model authored on the exported base kit is ALREADY on the donor's skeleton, so the
+    // explicit table is a pure identity by bone name and feeding it as full overrides is what keeps
+    // the authoring round-trip lossless. Left on the automap path the game's own rig was detected as
+    // `generic`, collapsed 116 bones onto 28, and came back 1.224 m tall with the skull drawn out
+    // into a spike — measured on a re-imported `pmc_hum_mattias` bundle.
     let overrides: std::collections::HashMap<usize, Option<u32>> =
-        if rt.convention == crate::retarget::SourceRig::CallOfDuty {
+        if matches!(
+            rt.convention,
+            crate::retarget::SourceRig::CallOfDuty
+                | crate::retarget::SourceRig::ValveBiped
+                | crate::retarget::SourceRig::Pandemic
+        ) {
             let table = rt.joint_table(target.bones.len().max(1));
             table.iter().enumerate().map(|(j, &t)| (j, Some(t as u32))).collect()
         } else {
@@ -5313,14 +5332,24 @@ pub(crate) fn faithful_char_skin(
     // skeleton) and tears the arms. Overwrite them by sampling the RETAIL donor's own weights at each
     // conformed vertex -- the exact step the CLI did and this path used to skip, which is why the
     // workshop preview showed broken arms the shipped asset does not have.
-    match mercs2_formats::char_skin::donor_transfer::apply_donor_transfer(
-        &mut cs,
-        &glb.tris,
-        &donor,
-        &mercs2_formats::char_skin::donor_transfer::DonorTransferOpts::default(),
-    ) {
-        Ok(msg) => eprintln!("faithful_char_skin: {msg}"),
-        Err(e) => eprintln!("faithful_char_skin: donor transfer skipped ({e}); using conform weights"),
+    //
+    // NOT for a NATIVE rig. Donor transfer exists to repair weights a fuzzy bone map mangled; on a
+    // model authored against the exported base kit there is no fuzzy map and its weights ALREADY ARE
+    // the retail ones. Resampling them from the donor would throw away every weight the author
+    // deliberately painted on new geometry and silently replace it with whatever the stock body does
+    // at that point in space — the one thing an authoring round-trip must never do.
+    if rt.convention == crate::retarget::SourceRig::Pandemic {
+        eprintln!("faithful_char_skin: native rig — keeping the author's own weights (no donor transfer)");
+    } else {
+        match mercs2_formats::char_skin::donor_transfer::apply_donor_transfer(
+            &mut cs,
+            &glb.tris,
+            &donor,
+            &mercs2_formats::char_skin::donor_transfer::DonorTransferOpts::default(),
+        ) {
+            Ok(msg) => eprintln!("faithful_char_skin: {msg}"),
+            Err(e) => eprintln!("faithful_char_skin: donor transfer skipped ({e}); using conform weights"),
+        }
     }
     Ok((cs, glb, donor))
 }
