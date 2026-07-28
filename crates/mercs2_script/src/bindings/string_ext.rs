@@ -211,5 +211,49 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
         })?,
     )?;
 
+    // `String.GetHash(s)` — the engine name hash. **90 call sites**, the most-used member of this
+    // namespace by a wide margin, and it was missing entirely.
+    //
+    // Installed as an `extra` rather than added to `REQUIRED` because it is **not in the Surface-B
+    // trace** (0 of 1357 `.rdata` luaL_Reg entries carry the name), so claiming a required row we
+    // cannot source from the oracle would be dishonest. What *is* proven is the behaviour:
+    // `docs/modding/field_guide.md` — "`String.GetHash` in Lua funnels into the same function",
+    // `Hash_String FUN_00824270` — and `human_character_controller_validation.md` §A3 reads that
+    // function instruction by instruction and shows it **is** `pandemic_hash_m2` (the `|0x20`
+    // case-fold, the `0x1000193` FNV step, the `^0x2A` M2 finaliser).
+    //
+    // So this is the same hash `mercs2_formats` already implements for asset/bone/template names —
+    // one implementation, no drift. Scripts key tables on it (`factionzone.lua:6-10` maps faction
+    // name-hashes to abbreviations), so a wrong hash silently mismatches rather than erroring.
+    b.extra(
+        "GetHash",
+        lua.create_function(|lua, v: Value| {
+            let s = lua.coerce_string(v)?.map(|s| s.to_string_lossy()).unwrap_or_default();
+            // The hash is a u32; Lua numbers are floats in this VM, and every value here fits
+            // exactly in the f64 mantissa, so the round-trip through a table key is lossless.
+            Ok(mercs2_formats::hash::pandemic_hash_m2(&s) as i64)
+        })?,
+    )?;
+
     b.install_global(GLOBAL)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `String.GetHash` must agree exactly with the engine hash the rest of the workspace uses —
+    /// scripts key tables on the result, so a divergence is a silent lookup miss, not an error.
+    #[test]
+    fn get_hash_is_the_engine_name_hash() {
+        // Spot values from `factionzone.lua`'s association map, which keys on these.
+        for name in ["Allied", "China", "Civ", "Guerilla", "OC"] {
+            let h = mercs2_formats::hash::pandemic_hash_m2(name);
+            assert_ne!(h, 0, "{name} must hash to something");
+        }
+        // The `|0x20` case-fold is part of the algorithm, so casing must not matter.
+        assert_eq!(
+            mercs2_formats::hash::pandemic_hash_m2("Allied"),
+            mercs2_formats::hash::pandemic_hash_m2("allied"),
+            "the M2 hash case-folds"
+        );
+    }
 }
