@@ -92,7 +92,7 @@ fn main() {
         return;
     }
 
-    let wadpath = match get("--wad").or_else(wad::registry_vz_wad) {
+    let wadpath = match get("--wad").or_else(|| wad::resolve_vz_wad(None)) {
         Some(p) => p,
         None => {
             eprintln!("workshop: no vz.wad found (install not in registry) — pass --wad <path>");
@@ -308,7 +308,16 @@ fn main() {
                 Ok(p) => p,
                 Err(e) => return eprintln!("--mod-skel: import {mesh_path}: {e}"),
             };
-        println!("[mod-skel] {} parts, {} materials from {mesh_path}", parts.len(), mat_images.len());
+        // Per-slot resolved counts, not just the material count: a material whose slot stayed `None`
+        // silently keeps the DONOR's texture there, and that is worth seeing before publishing.
+        println!(
+            "[mod-skel] {} parts, {} materials from {mesh_path} ({} diffuse / {} specular / {} normal resolved)",
+            parts.len(),
+            mat_images.len(),
+            mat_images.iter().filter(|i| i.is_some()).count(),
+            spec_images.iter().filter(|i| i.is_some()).count(),
+            normal_images.iter().filter(|i| i.is_some()).count(),
+        );
         let mut paths = vec![wadpath.clone()];
         paths.extend(overlays.iter().cloned());
         match publish::publish_skel(
@@ -726,7 +735,22 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Err(e) => return eprintln!("--faithful: {e}"),
         };
         let target_rig = app::load_model_data(&mut w, thash).map(|m| m.skin.rig).unwrap_or_default();
-        let im = import::char_skin_to_imported(&cs, &glbd, target_rig.clone());
+        // Build the model EXACTLY as the Skeleton workbench's Apply does, materials included, so this
+        // flag reports the workbench's real material binding headlessly. The RENDER below stays flat
+        // white on purpose (that is the surface a geometry break shows on) — it builds its own
+        // untextured draw group and ignores `im.draws` / `im.textures`.
+        let mats = import::load_material_textures(std::path::Path::new(&glb)).unwrap_or_default();
+        let im = import::char_skin_to_imported(&cs, &glbd, target_rig.clone(), Some(&mats));
+        println!(
+            "--faithful: {} draw groups ({} diffuse / {} specular / {} normal bound), {} textures \
+             from {} materials",
+            im.draws.len(),
+            im.draws.iter().filter(|d| d.diffuse.is_some()).count(),
+            im.draws.iter().filter(|d| d.specular.is_some()).count(),
+            im.draws.iter().filter(|d| d.normal.is_some()).count(),
+            im.textures.len(),
+            mats.diffuse.len(),
+        );
         // Pose exactly like --render: in-place havok palette, or identity at bind.
         const IDENT: [[f32; 4]; 4] =
             [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -1604,7 +1628,15 @@ fn extract_skel_parts(
                 mat_images[idx] = to_rgba(img);
             }
         }
-        if let Some(t) = m.pbr_metallic_roughness().metallic_roughness_texture() {
+        // metallicRoughness is the usual slot-1 carrier, but a Blender/Substance export of a game rip
+        // often has none and puts the gloss under KHR_materials_specular — without the fallback those
+        // materials silently keep the DONOR's specular instead of the mod's.
+        let spec = m
+            .pbr_metallic_roughness()
+            .metallic_roughness_texture()
+            .or_else(|| m.specular().and_then(|s| s.specular_texture()))
+            .or_else(|| m.specular().and_then(|s| s.specular_color_texture()));
+        if let Some(t) = spec {
             if let Some(img) = images.get(t.texture().source().index()) {
                 spec_images[idx] = to_rgba(img);
             }
