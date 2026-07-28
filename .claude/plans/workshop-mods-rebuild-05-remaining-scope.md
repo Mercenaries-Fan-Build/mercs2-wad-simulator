@@ -325,16 +325,38 @@ returns `Unsupported`.
 - **Open-Q7** raw `PlayerVisibleName` — needs one in-game test; the corpus has no answer.
 - **Open-Q10** platform axis — recorded, deliberately parked, PC only.
 
-## I. Template repo `mercs2-shipment-template`
+## I. Template repo `mercs2-shipment-template` — ✅ DONE (2026-07-28)
 
-**The repo now exists:** <https://github.com/Mercenaries-Fan-Build/mercs2-shipment-template>
+<https://github.com/Mercenaries-Fan-Build/mercs2-shipment-template> — pushed, CI green on the first
+run.
 
-To fill in: folder skeleton, a filled-in `manifest.yaml`, README, and CI running **`qm lint` only**
-(a public runner has no retail WADs — which is exactly why the hermetic/game-stack split in the
-linter is load-bearing rather than tidy).
+**The example had to be one that builds and loads as-is**, or the template teaches a modder to
+ignore output on day one. `pmc_hum_mattias_v3_ub` was chosen because it is FULLY RESIDENT: its whole
+mip chain lives in one block, so replacing it with one resident block changes nothing structural.
+The obvious alternative — `al_hum_boss_ub`, which our own tests use — emits M0007 *and* M0009,
+because it is a 4-rung streamed texture carried as a shared sub-entry. Verified by dogfooding
+`qm lint --with-game` across candidates rather than by reasoning about it, then built and put
+through `wad_simulator`: no violations, `issues=0` on every type.
 
-Still depends on D: the CI step is `qm lint`, and there is no `qm` yet. That makes D the next
-sequencing item rather than the rest of B.
+**CI installs a pinned prebuilt `qm` and verifies its sha256 against GitHub's own record of the
+release asset.** GitHub exposes a `digest` field per asset, which is the same value a hardcoded
+digest would be copied from — so pinning one in the workflow would add a second thing to bump
+alongside `QM_VERSION` while adding no assurance. Bumping the version is now a one-line edit.
+
+The hermetic/game-stack split paid for itself here: the runner has no retail WADs and never will.
+
+### Found by running the released binary rather than the debug build
+
+`qm`'s name-table fallback used a `CARGO_MANIFEST_DIR`-relative path — the filesystem of the machine
+that BUILT it. The released binary therefore looked for its data on a CI runner and never found it,
+so M0130 silently never ran. Same class as the hardcoded asset paths that worked on exactly one dev
+machine. Now walks up from the executable, then the working directory, with a regression test.
+
+**Still open:** a bare downloaded `qm` has no name table anywhere, so template CI prints a one-line
+note saying M0130 will not run. Correct behaviour — silently running one rule short is the failure
+this crate exists to avoid — but it is noise on every run. The fix is to make `qm` carry the table:
+`data/production_names.json` is 1.0 MB / 23,110 names against a 6.7 MB debug binary. Worth doing,
+not blocking.
 
 ---
 
@@ -350,14 +372,18 @@ sequencing item rather than the rest of B.
 
 ~~**Revised next step: D, ahead of the rest of B.**~~ Done — `qm` exists, so I is unblocked.
 
-**Next: I (the template repo), then the rest of B.** E is done, so the template's CI has a released
-`qm` to install rather than a workspace to build. I is the only remaining item with an external
-audience waiting on it, and it is the first real test of the format as a *contract* rather than as a
-data structure: the example Shipment has to be one somebody can copy without reading any of these
-plans. The remaining B rules stay valuable but block nothing.
+**A–E and I are done.** What is left:
 
-**Cut a release before I.** The template CI pins a `qm` version and verifies its digest, so a tag has
-to exist first. Nothing in I can be tested end-to-end until it does.
+- **B**, the remaining HANG rules: M0003 → M0004, then reassess M0006. M0005/M0008 stay research.
+- **G**, the unimplemented lowering: `edit_state_machine`, `native_hook`, `raw`.
+- **F**, doc links — now the most visible gap. `Diagnostic::Display` prints `— see docs/…` paths that
+  resolve against the *notes* repo, and a modder reading template CI output has neither repo checked
+  out. These want to be URLs, and `docs/modding/manifest_format.md` still is not written.
+- **H**, format gaps (`add_model` `group:`, donor auto-pick, Open-Q7, Open-Q10).
+- Making `qm` carry its own name table (see I).
+
+**F is the natural next item.** The template repo is live, so its CI output is now the first thing a
+new modder reads — and every rule link in it currently points at a path they do not have.
 
 **A note on the sibling repo.** The reversed knowledge this crate encodes lives in
 `~/src/mercenaries-game` — the decompiled Lua, the ASET/texture format docs, the Ghidra corpus, and
