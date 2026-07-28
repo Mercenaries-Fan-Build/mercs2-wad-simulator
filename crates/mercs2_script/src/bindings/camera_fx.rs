@@ -11,7 +11,7 @@
 
 use mlua::{Lua, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -68,13 +68,25 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("SetLookAt", lua.create_function(move |_, (x, y, z): (f32, f32, f32)| { h.borrow_mut().camera_set_lookat([x, y, z]); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Shake", lua.create_function(move |_, intensity: Option<f32>| { h.borrow_mut().camera_shake(intensity.unwrap_or(1.0)); Ok(()) })?)?;
+    // ⚠ `Camera.Shake(uCamera, sShake, uTarget, nAmplitude, nTime)` — five arguments, the first and
+    // third of them **handles**: `pmccon004.lua:117` is
+    // `Camera.Shake(playerCamera, "ShakeCameraMedium", playerCharacter, 6, 5)` and `oilrig.lua:38`
+    // is `Camera.Shake(StringToGuid("0x1"), "ShakeCameraConstantlyRandom", uiGuid, 0.5, 2000)`.
+    // The earlier single-`Option<f32>` signature read the camera handle as the intensity; with
+    // handles now arriving as lightuserdata that is not a mis-read but a raised conversion error, so
+    // the whole shape has to be spelled out. Only the amplitude reaches the fixed-function camera
+    // controller — the named shake profile and the target handle need a shake-curve model we do not
+    // have (burn-down).
+    b.real("Shake", lua.create_function(move |_, (_camera, _shake, _target, amplitude, _time): (Guid, Option<String>, Guid, Option<f32>, Option<f32>)| {
+        h.borrow_mut().camera_shake(amplitude.unwrap_or(1.0));
+        Ok(())
+    })?)?;
     let h = host.clone();
     b.real("Blend", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().camera_set_blending(true); Ok(()) })?)?;
     let h = host.clone();
     b.real("StopBlending", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().camera_set_blending(false); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Follow", lua.create_function(move |_, guid: Option<i64>| { h.borrow_mut().camera_follow(guid.unwrap_or(0) as u64); Ok(()) })?)?;
+    b.real("Follow", lua.create_function(move |_, guid: Guid| { h.borrow_mut().camera_follow(guid.raw()); Ok(()) })?)?;
     let h = host.clone();
     b.real("Hold", lua.create_function(move |_, on: Option<bool>| { h.borrow_mut().camera_hold(on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
