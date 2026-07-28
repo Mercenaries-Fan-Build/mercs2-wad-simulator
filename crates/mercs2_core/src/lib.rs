@@ -40,9 +40,10 @@ mod components;
 pub use components::{AnimState, Destructible, Health, ModelRef, SkinPalette, Transform};
 /// The humanoid vocabulary (see `components.rs` §Humanoid): every person in the world carries
 /// [`Human`] + [`HumanState`], and the ≤[`MAX_PLAYERS`] of them a player is driving additionally
-/// carry [`PlayerControlled`] — the reimpl's form of the marker component `FUN_006A4060` adds to a
-/// character entity on attach. Lives here, not in `mercs2_player`, so `mercs2_ai`/`mercs2_anim`/
-/// `mercs2_combat` can act on people without an edge to the player crate.
+/// carry [`PlayerControlled`] — a denormalization of retail's possession *field* `player+0x20` (see
+/// that type's docs; the engine does not mark the character with a component). Lives here, not in
+/// `mercs2_player`, so `mercs2_ai`/`mercs2_anim`/`mercs2_combat` can act on people without an edge to
+/// the player crate.
 pub use components::{Human, HumanState, PlayerControlled, ANY_STATE, MAX_PLAYERS};
 
 /// The `GuidMap` (see `guidmap.rs`): the name-hash → `Entity` + guid ↔ `Entity` registry modelling the
@@ -59,6 +60,18 @@ pub mod streaming;
 /// / hkpCharacterProxy move).
 pub mod physics_query;
 pub use physics_query::{PhysicsQuery, RayHit};
+
+/// The `LocomotionQuery` seam (see `locomotion_query.rs`): [`PhysicsQuery`] plus the two world probes
+/// on-foot movement needs — ground height under the feet and the water column overhead. Keeps
+/// `mercs2_player`'s character controller off `mercs2_physics`/`mercs2_water`/the engine heightmap.
+pub mod locomotion_query;
+pub use locomotion_query::{LocomotionQuery, WaterColumn};
+
+/// The character swim-state FSM (see `swim.rs`): the depth-driven OnLand→Submerged classification
+/// shared by `mercs2_water` (which drives it over the ECS from the watermap) and `mercs2_player`
+/// (which switches locomotion mode on it). Pure `f32` policy; `mercs2_water` re-exports both types.
+pub mod swim;
+pub use swim::{SwimConfig, SwimState};
 
 /// Keystone A — the reflection / component-descriptor registry (see `registry.rs`): the engine's
 /// component/serialization spine that keys every component class by its name-hash and carries its
