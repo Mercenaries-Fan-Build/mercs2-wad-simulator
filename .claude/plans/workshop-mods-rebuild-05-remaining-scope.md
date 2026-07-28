@@ -239,7 +239,37 @@ a blocker that has already appeared three times.
 
 ---
 
-## D. The `qm` CLI — does not exist
+## D. The `qm` CLI — ✅ DONE (2026-07-28)
+
+Four commands: `lint` (hermetic), `build`, `link` (across the installed set), `rules`.
+
+**Three exit codes, not two.** `0` clean, `1` findings at Error or above, `2` the command could not
+run. Splitting 1 from 2 was not in the original scope and turned out to matter: collapsed into one
+nonzero code, a CI runner with no game install is indistinguishable from a failing mod. The template
+repo will hit exactly that.
+
+`lint` never looks for a game at all — not "looks and tolerates absence". That is the property
+section I depends on, and `lint_needs_no_game_install` asserts stderr stays free of the discovery
+message rather than only checking the exit code.
+
+`rules` prints the unimplemented HANG-class traps under their own `KNOWN AND NOT YET CHECKED`
+heading. Same reasoning as `PENDING` existing at all: a linter that silently omits its most dangerous
+checks reads as a clean bill of health.
+
+The name table is optional (it powers M0130 only) and says so when missing, rather than quietly
+running one rule short.
+
+Tests are subprocess-level, because "gated on exit code, never a printed count" is a claim about the
+process rather than about `BuildReport` — including the clean-exits-zero case, without which the
+others prove nothing. One builds a real WAD against retail vz.wad and checks the digest, placement
+record and log.
+
+Fixed in passing: diagnostics printed the contribution index twice
+(`contributions[0]: contributions[0] (replace_texture) …`), invisible until a CLI started showing
+them to modders. `SourceIssue::detail()` now returns the location-free form while `Display` stays
+self-contained.
+
+### Original scope, for reference
 
 `mercs2_quartermaster` is library-only: no `src/bin/`, no `[[bin]]`. Every plan references
 `qm build ./my-shipment` and `qm lint`, and the template repo's CI depends on `qm lint` existing.
@@ -303,10 +333,13 @@ sequencing item rather than the rest of B.
 5. **B** in the order given — M0001 and M0002 done; M0003 → M0004 next.
 6. **D → I**, then E, F, G, H as they become relevant.
 
-**Revised next step: D, ahead of the rest of B.** The template repo in I now exists, and its CI is
-specified as `qm lint` — which does not exist. Finishing B first would leave a published repo whose
-CI cannot run, whereas D unblocks I immediately and gives every remaining rule a way to be exercised
-by hand. The rest of B is valuable but not on anyone's critical path.
+~~**Revised next step: D, ahead of the rest of B.**~~ Done — `qm` exists, so I is unblocked.
+
+**Next: I (the template repo), then E, then the rest of B.** I is now the only item with an external
+audience waiting on it, and it is also the first real test of the format as a *contract* rather than
+as a data structure: the example Shipment has to be one somebody can copy without reading any of
+these plans. E (publishing) follows because the template's CI wants an installable `qm` rather than
+a `cargo run` inside this workspace. The remaining B rules stay valuable but block nothing.
 
 **A note on the sibling repo.** The reversed knowledge this crate encodes lives in
 `~/src/mercenaries-game` — the decompiled Lua, the ASET/texture format docs, the Ghidra corpus, and
