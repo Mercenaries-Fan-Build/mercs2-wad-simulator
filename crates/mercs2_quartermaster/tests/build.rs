@@ -614,3 +614,113 @@ fn corpus_for_tests() -> Option<PathBuf> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// Cross-Shipment link (deploy)
+// ---------------------------------------------------------------------------
+
+fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/m.glb"), cube_glb()).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!(
+            "format: 1\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+             contributions:\n  - kind: add_outfit\n    name: {asset}\n    slug: {slug}\n\
+             \x20   display: {slug}\n    wearer: mattias\n    model: src/m.glb\n\
+             \x20   donor: pmc_hum_mattias\n"
+        ),
+    )
+    .unwrap();
+    discover::open(dir).expect("open")
+}
+
+/// ★ The deploy-side failure this design exists to prevent.
+///
+/// Each Shipment's own overlay carries a `scripts_vz` linked from ITS mutations only. WAD
+/// resolution is last-mounted-wins, so installing two of them means one Shipment's Lua disappears
+/// silently. `link_installed` sees all of them at once and emits one overlay that supersedes both.
+#[test]
+fn two_installed_shipments_both_survive_the_deploy_link() {
+    let Some(mut game) = discovered_game() else { return };
+    let Some(corpus) = corpus_for_tests() else { return };
+    let root = scratch("deploy_link");
+
+    let a = outfit_shipment(&root.join("sean"), "sean-devlin", "qm_sean", "SeanDevlin");
+    let b = outfit_shipment(&root.join("roze"), "roze-skin", "qm_roze", "Roze");
+
+    // Each on its own links only its own row — the standalone-valid case, and the trap.
+    for (s, mine, theirs) in [(&a, "SeanDevlin", "Roze"), (&b, "Roze", "SeanDevlin")] {
+        let muts = build::script_mutations(&s.manifest, &s.root).expect("mutations");
+        assert_eq!(muts.len(), 1);
+        assert!(muts[0].append.contains(mine));
+        assert!(!muts[0].append.contains(theirs), "a Shipment must not know about the other");
+    }
+
+    let report = build::link_installed(&[&a, &b], &mut game, &corpus, &root.join("deploy"))
+        .expect("deploy link");
+    eprintln!("{}", report.log.join("\n"));
+
+    assert_eq!(report.linked.len(), 1, "one target, compiled once for both Shipments");
+    assert_eq!(
+        report.linked[0].contributors,
+        vec!["roze-skin", "sean-devlin"],
+        "sorted by Shipment name so the bytes do not depend on install order"
+    );
+
+    // The emitted overlay must carry BOTH rows.
+    let wad = report.wad.expect("a link WAD");
+    assert!(wad.ends_with(build::LINK_WAD_NAME), "must be named to mount last: {}", wad.display());
+    let bytes = std::fs::read(&wad).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&bytes));
+
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+    let blk = contents.blocks.iter().find(|b| b.path_string.contains("scripts_vz")).expect("block");
+    let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+    parsed.verify_csums().expect("CSUMs");
+    let idx = parsed.find_by_name("wifpmcinterior").unwrap();
+    let luaq = parsed.extract_lua(idx).unwrap();
+    let hay = String::from_utf8_lossy(&luaq);
+
+    assert!(hay.contains("SeanDevlin"), "the first Shipment's outfit must survive");
+    assert!(hay.contains("Roze"), "the SECOND Shipment's outfit must survive — this is the bug");
+    assert!(hay.contains("qm_sean") && hay.contains("qm_roze"), "both models must be referenced");
+}
+
+/// Deploy order must not change the bytes, or verify-by-hash is meaningless and a saved costume
+/// index can shift under a player between deploys.
+#[test]
+fn the_deploy_link_is_order_independent() {
+    let Some(mut game) = discovered_game() else { return };
+    let Some(corpus) = corpus_for_tests() else { return };
+    let root = scratch("deploy_order");
+    let a = outfit_shipment(&root.join("a"), "aaa-mod", "qm_a", "Aaa");
+    let b = outfit_shipment(&root.join("b"), "zzz-mod", "qm_b", "Zzz");
+
+    let one = build::link_installed(&[&a, &b], &mut game, &corpus, &root.join("one")).unwrap();
+    let two = build::link_installed(&[&b, &a], &mut game, &corpus, &root.join("two")).unwrap();
+    assert_eq!(
+        one.placements[0].sha256, two.placements[0].sha256,
+        "install order must not change the linked bytes"
+    );
+}
+
+/// Nothing to link means no overlay — an overlay that merely restates the base block is noise a
+/// user would have to reason about.
+#[test]
+fn a_set_with_no_script_mods_emits_no_link_wad() {
+    let Some(mut game) = discovered_game() else { return };
+    let Some(corpus) = corpus_for_tests() else { return };
+    let root = scratch("deploy_none");
+    std::fs::create_dir_all(root.join("tex/src")).unwrap();
+    std::fs::write(root.join("tex/src/t.png"), fake_png()).unwrap();
+    let s = shipment(
+        &root.join("tex"),
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    let report =
+        build::link_installed(&[&s], &mut game, &corpus, &root.join("out")).expect("link");
+    assert!(report.wad.is_none());
+    assert!(report.linked.is_empty());
+}

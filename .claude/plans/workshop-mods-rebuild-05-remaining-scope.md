@@ -80,12 +80,19 @@ length. That once-ness is structural rather than conventional: two Shipments eac
 `shipped + 1` produce the same number, the later definition wins, and one outfit is in the WAD, in
 the table, and invisible.
 
-⚠ **What remains is the cross-Shipment relink.** `build` links a Shipment's *own* mutations so its
-overlay is valid standalone. When several script-touching Shipments are installed together, deploy
-must re-link all of their mutations into ONE block — otherwise the last WAD mounted wins and the
-rest of the Lua disappears, which is the failure this design exists to prevent. `link_into` already
-takes N mutations from N Shipments and is tested that way; what is missing is the deploy-side caller
-that collects them across installed Shipments. That is Modkit's side of the seam.
+**The cross-Shipment relink is DONE too** — `build::link_installed` takes every installed Shipment,
+collects their mutations, links once, and emits `zz-quartermaster-link.wad` to be mounted LAST.
+Because it is built from all their mutations together it is a superset of each per-Shipment block,
+so whichever it shadows, it shadows with something strictly more complete. Verified against retail:
+`script consumed=644 issues=0`, no violations, and `two_installed_shipments_both_survive_the_deploy_
+link` asserts each Shipment alone knows nothing of the other while the linked block carries both.
+
+The enabler was making `script_mutations` derive from the **manifest alone** — no game stack, no
+lowering. Otherwise the deploy path would have had to re-run model injection just to discover which
+scripts are touched. `lower` went back to producing blocks only.
+
+Deploy order does not change the bytes (`the_deploy_link_is_order_independent`), and a set with no
+script mods emits no overlay at all rather than one that merely restates the base block.
 
 ### Original scope, for reference
 
