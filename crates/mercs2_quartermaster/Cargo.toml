@@ -33,6 +33,11 @@ sha2 = "0.10"
 # corpus is therefore taken as a PATH, not by depending on the crate that owns it.
 mercs2_luac = { workspace = true }
 png = "0.17"  # decode source images for texture lowering (same version the workspace already uses)
+# M0003's predicate. `texture::texture_buffer_too_small` carries two retail-verified false-positive
+# gates — without them the rule fires on the 9,562 streamed bodies retail legitimately ships short —
+# so this is a dependency rather than a second copy. `wad_simulator` links no Lua runtime, so it does
+# not reintroduce the mlua/`mercs2_luac` symbol collision warned about above.
+wad_simulator = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 
 [[bin]]
