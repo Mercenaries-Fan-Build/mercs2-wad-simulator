@@ -84,7 +84,11 @@ impl PatchBlock {
     /// constructor MUST set `packed_field` themselves.
     ///
     /// Prefer [`PatchBlock::from_decompressed`], which computes it for you.
-    pub fn new(compressed_data: Vec<u8>, path_string: String, aset_entries: Vec<AsetEntry>) -> Self {
+    pub fn new(
+        compressed_data: Vec<u8>,
+        path_string: String,
+        aset_entries: Vec<AsetEntry>,
+    ) -> Self {
         Self {
             compressed_data,
             path_string,
@@ -145,21 +149,118 @@ fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
-/// Validate the invariants a patch WAD must satisfy for the engine to load it safely.
+/// One thing wrong with a set of blocks about to become a WAD.
 ///
-/// Called by [`build_patch_wad_multi`]; exposed so a builder can pre-flight a block
-/// list and report problems against mod names before assembling anything.
+/// Separate from [`validate_blocks`] because that returns `Result<(), String>` and therefore stops
+/// at the first problem — fine for a builder that must refuse, useless for a linter that wants to
+/// hand an author the whole list. It also lets the duplicate-primary case become a real diagnostic
+/// instead of an `eprintln!` nobody captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockFinding {
+    /// Two blocks claim one hash as PRIMARY. **Not fatal** — the runtime registry is first-writer-
+    /// wins, so the winner is deterministic (lowest block index), and retail ships this shape. Worth
+    /// surfacing because a duplicate a MOD introduces means its asset silently loses.
+    DuplicatePrimary {
+        hash: u32,
+        kept_block: usize,
+        dropped_block: usize,
+        kept: String,
+        dropped: String,
+    },
+    /// `packed_field` under-claims the inflated size. The engine sizes its decompression buffer at
+    /// `declared_pages << 15` and overruns the heap. **Fatal.**
+    PackedFieldUnderClaim {
+        block: usize,
+        path: String,
+        declared_pages: u32,
+        needed_pages: u32,
+        inflated_bytes: usize,
+    },
+    /// An ASET row names a LOD block index that does not exist in this WAD. The streamer requests a
+    /// buffer sized from garbage. **Fatal.**
+    DanglingLodRung {
+        block: usize,
+        path: String,
+        hash: u32,
+        rung: usize,
+        names_block: u16,
+        block_count: usize,
+    },
+    /// A block would not inflate at all.
+    Sges {
+        block: usize,
+        path: String,
+        message: String,
+    },
+    /// INDX+ASET+PTHS outgrew the 2 MB below DATA; PTHS would be written into the payload region.
+    /// **Fatal.**
+    HeaderOverflow { needed: usize },
+}
+
+impl BlockFinding {
+    /// Whether this would break the game rather than merely surprise the author.
+    pub fn is_fatal(&self) -> bool {
+        !matches!(self, BlockFinding::DuplicatePrimary { .. })
+    }
+}
+
+impl std::fmt::Display for BlockFinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockFinding::DuplicatePrimary { hash, kept_block, dropped_block, kept, dropped } => write!(
+                f,
+                "asset 0x{hash:08X} is claimed PRIMARY by [{kept_block}] {kept} and \
+                 [{dropped_block}] {dropped}; the registry is first-writer-wins so block \
+                 {kept_block} keeps it and the other claim is silently dropped"
+            ),
+            BlockFinding::PackedFieldUnderClaim { block, path, declared_pages, needed_pages, inflated_bytes } => write!(
+                f,
+                "block [{block}] {path} declares {declared_pages} decompressed page(s) but inflates \
+                 to {inflated_bytes} bytes ({needed_pages} page(s)) — the engine would size its \
+                 buffer at {} bytes and overrun the heap",
+                (*declared_pages as usize) * PAGE_SIZE
+            ),
+            BlockFinding::DanglingLodRung { block, path, hash, rung, names_block, block_count } => write!(
+                f,
+                "block [{block}] {path}: asset 0x{hash:08X} names block {names_block} as its _P00{rung} \
+                 LOD rung, but this WAD has only {block_count} block(s) — the streamer sizes a buffer \
+                 from that garbage index and the open-world load hangs"
+            ),
+            BlockFinding::Sges { block, path, message } => {
+                write!(f, "block [{block}] {path}: {message}")
+            }
+            BlockFinding::HeaderOverflow { needed } => write!(
+                f,
+                "INDX+ASET+PTHS need {needed} bytes but DATA starts at {DATA_OFFSET} \
+                 — too many blocks/assets for the patch-WAD header region"
+            ),
+        }
+    }
+}
+
+/// Which index space a block set's ASET rungs are expressed in.
 ///
-/// 1. **One primary ASET row per asset hash.** The engine resolves an asset by hash to
-///    a single ASET row; two primary rows for one hash in one WAD leave the winner
-///    undefined. Sub-entry rows (low 16 bits != 0xFFFF) legitimately repeat and are
-///    not checked.
-/// 2. **`packed_field` covers the decompressed payload.** It sizes the engine's
-///    decompression buffer (`pages << 15`); under-declaring overruns the heap.
-///    Only checked for `sges` blocks, which are the ones the engine inflates.
-/// 3. **The header region fits under DATA.** INDX + ASET + PTHS share the 2 MB below
-///    `0x208000`; overflowing silently writes PTHS into the DATA region.
-pub fn validate_blocks(blocks: &[PatchBlock]) -> Result<(), String> {
+/// This is a parameter rather than a doc note because getting it wrong produces a *confident wrong
+/// answer*, not an error. [`build_patch_wad_multi`] validates its input BEFORE remapping rungs, and
+/// at that point every rung is still relative to the 11,370-block `vz.wad` the blocks were carried
+/// from — so a rung check there reports nearly every carried block as dangling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockStage {
+    /// Rungs still point into the archive the blocks came from. Rung checks are SKIPPED: the
+    /// builder has not remapped them yet, so out-of-range is expected and not a defect.
+    PreRemap,
+    /// Rungs are in this WAD's own index space — the state of blocks read back by
+    /// [`read_patch_wad`]. This is the stage at which a dangling rung is a real HANG.
+    Emitted,
+}
+
+/// Every problem with a block set, rather than just the first.
+///
+/// This is the form a linter needs; [`validate_blocks`] is the fail-fast adapter the builder uses.
+/// See [`BlockStage`] for why the caller must say which index space the rungs are in.
+pub fn validate_blocks_all(blocks: &[PatchBlock], stage: BlockStage) -> Vec<BlockFinding> {
+    let mut out = Vec::new();
+
     // 1 — one primary ASET row per hash.
     let mut primary_owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     for (bi, blk) in blocks.iter().enumerate() {
@@ -168,58 +269,124 @@ pub fn validate_blocks(blocks: &[PatchBlock]) -> Result<(), String> {
                 continue; // sub-entry row — repeats are legal
             }
             if let Some(prev) = primary_owner.insert(entry.asset_hash, bi) {
-                // NOT fatal. Two claims are resolvable, not undefined: the runtime registry keeps
-                // the FIRST block to register a hash and creates nothing on an occupied slot, so
-                // the winner is deterministic (lowest block index). Retail `vz-patch.wad` ships
-                // with both shapes — a block listing one hash twice (dlc01 human blocks) and two
-                // c3 blocks claiming one hash (c30185/c30186) — and the game loads it. Failing
-                // here made the builder refuse to edit a WAD the engine itself accepts. Warn so a
-                // duplicate a MOD introduces is still visible, and keep the first claimant.
                 if prev != bi {
-                    eprintln!(
-                        "  warning: asset 0x{:08X} claimed PRIMARY by [{prev}] {} and [{bi}] {}; \
-                         engine takes the first (block {prev})",
-                        entry.asset_hash, blocks[prev].path_string, blk.path_string
-                    );
+                    out.push(BlockFinding::DuplicatePrimary {
+                        hash: entry.asset_hash,
+                        kept_block: prev,
+                        dropped_block: bi,
+                        kept: blocks[prev].path_string.clone(),
+                        dropped: blk.path_string.clone(),
+                    });
                     primary_owner.insert(entry.asset_hash, prev);
                 }
             }
         }
     }
 
-    // 2 — packed_field must cover the decompressed payload.
+    // 2 — packed_field must cover the decompressed payload, and 3 — no rung may dangle.
+    //
+    // The rung check lives here because it is only answerable once the block COUNT is known, which
+    // is a property of the set rather than of any one block.
     for (bi, blk) in blocks.iter().enumerate() {
+        for entry in &blk.aset_entries {
+            if stage == BlockStage::PreRemap {
+                break; // rungs are still source-relative; see `BlockStage`
+            }
+            // hi16 of u32_2 is _P000 (always present); lo16 is _P001; u32_1's halves are _P002/3.
+            // 0xFFFF is the sentinel for "no such rung".
+            let rungs = [
+                (1usize, (entry.u32_2 & 0xFFFF) as u16),
+                (2, (entry.u32_1 >> 16) as u16),
+                (3, (entry.u32_1 & 0xFFFF) as u16),
+            ];
+            for (rung, named) in rungs {
+                if named != 0xFFFF && named as usize >= blocks.len() {
+                    out.push(BlockFinding::DanglingLodRung {
+                        block: bi,
+                        path: blk.path_string.clone(),
+                        hash: entry.asset_hash,
+                        rung,
+                        names_block: named,
+                        block_count: blocks.len(),
+                    });
+                }
+            }
+        }
+
         if blk.compressed_data.len() < 4 || &blk.compressed_data[0..4] != b"sges" {
             continue; // stored/raw block: the engine does not inflate it
         }
-        let raw = crate::sges::decompress_sges(&blk.compressed_data)
-            .map_err(|e| format!("block [{bi}] {}: {e}", blk.path_string))?;
-        let needed = decompressed_pages(raw.len());
-        if blk.declared_pages() < needed {
-            return Err(format!(
-                "block [{bi}] {} declares {} decompressed page(s) but inflates to {} bytes \
-                 ({needed} page(s)) — the engine would size its buffer at {} bytes and overrun the heap",
-                blk.path_string,
-                blk.declared_pages(),
-                raw.len(),
-                (blk.declared_pages() as usize) * PAGE_SIZE
-            ));
+        match crate::sges::decompress_sges(&blk.compressed_data) {
+            Ok(raw) => {
+                let needed = decompressed_pages(raw.len());
+                if blk.declared_pages() < needed {
+                    out.push(BlockFinding::PackedFieldUnderClaim {
+                        block: bi,
+                        path: blk.path_string.clone(),
+                        declared_pages: blk.declared_pages(),
+                        needed_pages: needed,
+                        inflated_bytes: raw.len(),
+                    });
+                }
+            }
+            Err(e) => out.push(BlockFinding::Sges {
+                block: bi,
+                path: blk.path_string.clone(),
+                message: e,
+            }),
         }
     }
 
-    // 3 — header region must fit below DATA.
-    let total_aset: usize = blocks.iter().map(|b| b.aset_entries.len()).sum();
-    let pths_len: usize =
-        blocks.iter().map(|b| b.path_string.len() + 1).sum::<usize>() + PTHS_TRAILER.len() + 1;
-    let header_end = 0x8000 + blocks.len() * 12 + total_aset * 16 + pths_len;
-    if header_end > DATA_OFFSET {
-        return Err(format!(
-            "INDX+ASET+PTHS need {header_end} bytes but DATA starts at {DATA_OFFSET} \
-             — too many blocks/assets for the patch-WAD header region"
-        ));
+    // 4 — header region must fit below DATA.
+    if let Some(needed) = header_overflow(blocks) {
+        out.push(BlockFinding::HeaderOverflow { needed });
     }
+    out
+}
 
-    Ok(())
+/// Bytes the INDX+ASET+PTHS region would need, if that exceeds [`DATA_OFFSET`].
+fn header_overflow(blocks: &[PatchBlock]) -> Option<usize> {
+    let total_aset: usize = blocks.iter().map(|b| b.aset_entries.len()).sum();
+    let pths_len: usize = blocks
+        .iter()
+        .map(|b| b.path_string.len() + 1)
+        .sum::<usize>()
+        + PTHS_TRAILER.len()
+        + 1;
+    let header_end = 0x8000 + blocks.len() * 12 + total_aset * 16 + pths_len;
+    (header_end > DATA_OFFSET).then_some(header_end)
+}
+
+/// Validate the invariants a patch WAD must satisfy for the engine to load it safely, failing on
+/// the first fatal one.
+///
+/// Called by [`build_patch_wad_multi`]; exposed so a builder can pre-flight a block list and report
+/// problems against mod names before assembling anything. Non-fatal findings go to stderr as
+/// warnings. Use [`validate_blocks_all`] when you want every finding as data.
+///
+/// 1. **One primary ASET row per asset hash.** Reported, not fatal — the runtime registry is
+///    first-writer-wins, so the outcome is defined, and retail ships this shape.
+/// 2. **`packed_field` covers the decompressed payload.** It sizes the engine's decompression
+///    buffer (`pages << 15`); under-declaring overruns the heap. Only checked for `sges` blocks,
+///    which are the ones the engine inflates.
+/// 3. **The header region fits under DATA.** INDX + ASET + PTHS share the 2 MB below `0x208000`;
+///    overflowing silently writes PTHS into the DATA region.
+///
+/// The dangling-LOD-rung check is deliberately NOT run here: this is called before rungs are
+/// remapped, when they are still source-relative. See [`BlockStage`].
+pub fn validate_blocks(blocks: &[PatchBlock]) -> Result<(), String> {
+    // Delegates so the two cannot drift. `PreRemap` because `build_patch_wad_multi` calls this
+    // BEFORE re-pointing LOD rungs into the patch's index space — see `BlockStage`.
+    let found = validate_blocks_all(blocks, BlockStage::PreRemap);
+    for finding in &found {
+        if !finding.is_fatal() {
+            eprintln!("  warning: {finding}");
+        }
+    }
+    match found.into_iter().find(BlockFinding::is_fatal) {
+        Some(fatal) => Err(fatal.to_string()),
+        None => Ok(()),
+    }
 }
 
 /// Build a PC FFCS patch WAD from one or more blocks.
@@ -415,7 +582,8 @@ pub fn read_patch_wad(raw: &[u8]) -> Result<PatchWadContents, String> {
     }
 
     // Parse the five chunk rows.
-    let mut chunks: std::collections::HashMap<[u8; 4], (u32, u32)> = std::collections::HashMap::new();
+    let mut chunks: std::collections::HashMap<[u8; 4], (u32, u32)> =
+        std::collections::HashMap::new();
     for i in 0..5 {
         let off = 0x0C + i * 12;
         let mut tag = [0u8; 4];
@@ -608,9 +776,22 @@ mod tests {
     /// The condition is still reported as a warning.
     #[test]
     fn duplicate_primary_aset_hash_is_allowed_first_wins() {
-        let a = PatchBlock::from_decompressed(b"aaaa", "blocks\\a.block".into(), vec![primary(0xDEAD)], None).unwrap();
-        let b = PatchBlock::from_decompressed(b"bbbb", "blocks\\b.block".into(), vec![primary(0xDEAD)], None).unwrap();
-        validate_blocks(&[a, b]).expect("duplicate primary must not be fatal — engine takes the first");
+        let a = PatchBlock::from_decompressed(
+            b"aaaa",
+            "blocks\\a.block".into(),
+            vec![primary(0xDEAD)],
+            None,
+        )
+        .unwrap();
+        let b = PatchBlock::from_decompressed(
+            b"bbbb",
+            "blocks\\b.block".into(),
+            vec![primary(0xDEAD)],
+            None,
+        )
+        .unwrap();
+        validate_blocks(&[a, b])
+            .expect("duplicate primary must not be fatal — engine takes the first");
     }
 
     /// A single block listing one hash twice is likewise fine: it resolves to itself either way.
@@ -630,8 +811,20 @@ mod tests {
     #[test]
     fn duplicate_sub_entry_aset_hash_is_allowed() {
         let sub = |h: u32| AsetEntry::new(h, 0xFFFF_FFFF, 0x0000_0007, 19); // low16 = 7
-        let a = PatchBlock::from_decompressed(b"aaaa", "blocks\\a.block".into(), vec![sub(0xBEEF)], None).unwrap();
-        let b = PatchBlock::from_decompressed(b"bbbb", "blocks\\b.block".into(), vec![sub(0xBEEF)], None).unwrap();
+        let a = PatchBlock::from_decompressed(
+            b"aaaa",
+            "blocks\\a.block".into(),
+            vec![sub(0xBEEF)],
+            None,
+        )
+        .unwrap();
+        let b = PatchBlock::from_decompressed(
+            b"bbbb",
+            "blocks\\b.block".into(),
+            vec![sub(0xBEEF)],
+            None,
+        )
+        .unwrap();
         validate_blocks(&[a, b]).expect("sub-entry rows may repeat");
     }
 
@@ -673,7 +866,10 @@ mod tests {
         let b0 = PatchBlock::new(
             vec![0xABu8; 24], // len % 4 == 0, last byte != 0
             "blocks\\dlc01\\resident_p000_q3.block".to_string(),
-            vec![AsetEntry::new(0x11111111, 0xFFFFFFFF, 0x1234, 0xAA), AsetEntry::new(0x22222222, 1, 2, 3)],
+            vec![
+                AsetEntry::new(0x11111111, 0xFFFFFFFF, 0x1234, 0xAA),
+                AsetEntry::new(0x22222222, 1, 2, 3),
+            ],
         );
         let b1 = PatchBlock::new(
             vec![0xCDu8; 32],
@@ -745,7 +941,11 @@ mod tests {
             build_patch_wad_multi(&[b0, b1], 0xCAFEBABE, None, &FFCS_CERT_BLOB).expect("build");
 
         // Framing golden, unchanged from the Python cross-check.
-        assert_eq!(wad.len(), 2_195_456, "container framing must still match Python");
+        assert_eq!(
+            wad.len(),
+            2_195_456,
+            "container framing must still match Python"
+        );
 
         // Every emitted LOD rung either resolves inside this 2-block patch or is the 0xFFFF
         // sentinel. 0x1234 and 0x5678 came in dangling and must have been repaired.
@@ -766,5 +966,92 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod block_finding_tests {
+    use super::*;
+
+    fn primary(hash: u32) -> AsetEntry {
+        AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, 19)
+    }
+
+    /// A rung naming a block this WAD does not have is the dangling-rung HANG. Only answerable once
+    /// the block COUNT is known, which is why it is a property of the SET.
+    #[test]
+    fn a_rung_naming_a_missing_block_is_reported_and_fatal() {
+        // _P001 (lo16 of u32_2) points at block 9 in a one-block WAD.
+        let row = AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_0009, 19);
+        let blk =
+            PatchBlock::from_decompressed(b"payload", "blocks\\a.block".into(), vec![row], None)
+                .unwrap();
+        let found = validate_blocks_all(&[blk], BlockStage::Emitted);
+        let rung = found
+            .iter()
+            .find(|f| matches!(f, BlockFinding::DanglingLodRung { .. }))
+            .expect("must report the dangling rung");
+        assert!(rung.is_fatal());
+        assert!(rung.to_string().contains("hangs"), "{rung}");
+    }
+
+    /// The sentinel means "no such rung" and must not be mistaken for an index.
+    #[test]
+    fn fully_sentinel_rows_are_quiet() {
+        let blk = PatchBlock::from_decompressed(
+            b"payload",
+            "blocks\\a.block".into(),
+            vec![primary(0xBEEF)],
+            None,
+        )
+        .unwrap();
+        assert!(validate_blocks_all(&[blk], BlockStage::Emitted).is_empty());
+    }
+
+    /// Two blocks claiming one hash is resolvable, not undefined — retail ships it. Reported so a
+    /// duplicate a MOD introduces is visible, but never fatal.
+    #[test]
+    fn a_duplicate_primary_is_reported_but_not_fatal() {
+        let mk = |p: &str| {
+            PatchBlock::from_decompressed(b"payload", p.into(), vec![primary(0xBEEF)], None)
+                .unwrap()
+        };
+        let found = validate_blocks_all(
+            &[mk("blocks\\a.block"), mk("blocks\\b.block")],
+            BlockStage::Emitted,
+        );
+        let dup = found
+            .iter()
+            .find(|f| matches!(f, BlockFinding::DuplicatePrimary { .. }))
+            .expect("must report it");
+        assert!(
+            !dup.is_fatal(),
+            "retail ships this shape; it must not block a build"
+        );
+        assert!(dup.to_string().contains("first-writer-wins"), "{dup}");
+    }
+
+    /// Every finding, not just the first — the property `validate_blocks` cannot provide.
+    #[test]
+    fn all_findings_are_returned_together() {
+        let a = PatchBlock::from_decompressed(
+            b"payload",
+            "blocks\\a.block".into(),
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_0009, 19)],
+            None,
+        )
+        .unwrap();
+        let b = PatchBlock::from_decompressed(
+            b"payload",
+            "blocks\\b.block".into(),
+            vec![AsetEntry::new(0xCAFE, 0xFFFF_FFFF, 0x0000_0007, 19)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            validate_blocks_all(&[a, b], BlockStage::Emitted).len(),
+            2,
+            "both rungs must be reported"
+        );
     }
 }
