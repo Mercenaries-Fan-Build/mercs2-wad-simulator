@@ -712,6 +712,92 @@ pub fn load_char_glb(path: &Path) -> Result<mercs2_formats::char_skin::CharGlbDa
             });
         }
     }
+    // RIGID, BONE-PARENTED primitives — the eyes, teeth and equipment packs. Retail authors these as
+    // `MESH` sub-objects in their mount node's LOCAL space rather than as `SKIN`, so they carry no
+    // JOINTS_0/WEIGHTS_0 and the loop above skipped them: re-importing `pmc_hum_mattias` silently lost
+    // 603 verts across 6 parts — both eyes, both eye reflections and both hip packs. That is precisely
+    // the equipment-and-face system an authoring kit exists to expose, so dropping it is not an option.
+    //
+    // A rigid part mounted on a bone IS a single-bone skin: bake its node's world transform to put the
+    // vertices in bind space, then bind them 100% to the nearest ancestor joint. At bind `Skin_J == I`
+    // so they land exactly where authored, and under animation they ride that bone rigidly — which is
+    // what the engine does with them anyway. Everything downstream then treats them as ordinary
+    // geometry, with no special case.
+    {
+        let joint_of_node: std::collections::HashMap<usize, u16> =
+            joint_nodes.iter().enumerate().map(|(j, &n)| (n, j as u16)).collect();
+        // Row-major, column-vector (that is the layout `cm_to_rm` produces): p' = M · p.
+        let xform = |m: &[f64; 16], p: [f64; 3]| -> [f64; 3] {
+            [
+                m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+                m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+                m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+            ]
+        };
+        let xform_dir = |m: &[f64; 16], p: [f32; 3]| -> [f32; 3] {
+            let (x, y, z) = (p[0] as f64, p[1] as f64, p[2] as f64);
+            let v = [
+                m[0] * x + m[1] * y + m[2] * z,
+                m[4] * x + m[5] * y + m[6] * z,
+                m[8] * x + m[9] * y + m[10] * z,
+            ];
+            let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
+            [(v[0] / n) as f32, (v[1] / n) as f32, (v[2] / n) as f32]
+        };
+        for node in doc.nodes() {
+            let Some(mesh) = node.mesh() else { continue };
+            if node.skin().is_some() {
+                continue; // already handled as a real skin
+            }
+            // Walk up to the mount bone. A part whose chain reaches no joint has nothing to ride.
+            let mut cur = node.index() as i32;
+            let mut mount = None;
+            while cur >= 0 {
+                if let Some(&j) = joint_of_node.get(&(cur as usize)) {
+                    mount = Some(j);
+                    break;
+                }
+                cur = node_parent[cur as usize];
+            }
+            let Some(mount) = mount else { continue };
+            let nw = node_world[node.index()];
+            for prim in mesh.primitives() {
+                let r = prim.reader(get);
+                let Some(pos) = r.read_positions() else { continue };
+                if prim.get(&gltf::Semantic::Joints(0)).is_some() {
+                    continue; // skinned after all — the first loop owns it
+                }
+                let base = positions.len() as u32;
+                let ps: Vec<[f64; 3]> =
+                    pos.map(|p| xform(&nw, [p[0] as f64, p[1] as f64, p[2] as f64])).collect();
+                let m = ps.len();
+                let nm: Vec<[f32; 3]> = r
+                    .read_normals()
+                    .map(|it| it.map(|n| xform_dir(&nw, n)).collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; m]);
+                let uv: Vec<[f32; 2]> = r
+                    .read_tex_coords(0)
+                    .map(|tc| tc.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.0, 0.0]; m]);
+                positions.extend(ps);
+                normals.extend(nm);
+                uvs.extend(uv);
+                vjoints.extend(std::iter::repeat([mount, 0, 0, 0]).take(m));
+                vweights.extend(std::iter::repeat([1.0, 0.0, 0.0, 0.0]).take(m));
+                let tri_start = indices.len() / 3;
+                match r.read_indices() {
+                    Some(ind) => indices.extend(ind.into_u32().map(|i| base + i)),
+                    None => indices.extend(base..base + m as u32),
+                }
+                parts.push(MeshPart {
+                    name: mesh.name().unwrap_or("").to_string(),
+                    tri_start,
+                    tri_count: indices.len() / 3 - tri_start,
+                    material: prim.material().index(),
+                });
+            }
+        }
+    }
     if positions.is_empty() {
         return Err("glb has no skinned mesh primitive".into());
     }

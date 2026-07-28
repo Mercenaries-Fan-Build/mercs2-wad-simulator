@@ -921,7 +921,18 @@ pub fn export_bundle(
     // scene regardless, so all LOD collections still appear; the default only sets which is active.
     // For the rigid/vehicle path the default is the FINEST rung, so a viewer that reads only the
     // default scene shows near-detail rather than every rung stacked on itself.
-    let default_scene = if has_skin { 0 } else { scenes_json.len().saturating_sub(1) };
+    // The SKINNED default must be the finest display tier, not the `rig` scene. `rig` carries the
+    // armature plus the rigid accessories only — for `pmc_hum_mattias` that is 6 mesh nodes and 603
+    // verts (the eyes, their reflections and the hip packs) out of 34 nodes and 29,023 verts. Any
+    // consumer that reads only the default scene (our own `import_model`, three.js, most viewers)
+    // therefore opened a pair of floating eyeballs on a skeleton and no body. Blender still imports
+    // every scene either way, so this costs nothing there and fixes everything else. Tier `0x01` is
+    // the close-up rung, and it is the first LOD scene pushed after `rig`.
+    let default_scene = if has_skin {
+        if skinned_lod_scenes.is_empty() { 0 } else { 1 }
+    } else {
+        scenes_json.len().saturating_sub(1)
+    };
     let mut gltf = serde_json::json!({
         "asset": {"version":"2.0","generator":format!("mercs2_workshop export_bundle ({label})")},
         "scene": default_scene,

@@ -22,6 +22,12 @@ pub enum SourceRig {
     /// line up with the generic anatomy keywords (`j_shoulder` is the UPPER ARM, `j_hip` the THIGH,
     /// `j_knee` the SHIN, `j_elbow` the FOREARM), so it gets an explicit role table — see [`classify_cod`].
     CallOfDuty,
+    /// **The game's OWN rig** — `GlobalSRT`, `Bone_Root`, `Bone_Hips`, `Bone_LThigh`, `bone_spine1`,
+    /// `bone_attach_chest`, … A model authored on the exported base kit comes back on this rig, so it
+    /// needs NO retarget: every source bone already IS a target bone, matched by name. Detecting it is
+    /// what makes the authoring round-trip lossless — left as `Generic` it fell through to the
+    /// foreign-rig automap, which collapsed all 116 bones onto 28 and smeared the skull into a spike.
+    Pandemic,
     /// Unknown convention — mapped on generic anatomy keywords alone.
     Generic,
 }
@@ -33,6 +39,7 @@ impl SourceRig {
             SourceRig::Mixamo => "Mixamo",
             SourceRig::Unreal => "Unreal mannequin",
             SourceRig::CallOfDuty => "Call of Duty (IW-engine)",
+            SourceRig::Pandemic => "Pandemic (the game's own rig — native)",
             SourceRig::Generic => "generic rig",
         }
     }
@@ -40,6 +47,13 @@ impl SourceRig {
     /// Detect the convention from the joint-name set.
     pub fn detect(names: &[String]) -> SourceRig {
         let any = |needle: &str| names.iter().any(|n| n.to_ascii_lowercase().contains(needle));
+        // NATIVE FIRST. `GlobalSRT` is the Pandemic rig root and appears in no other convention here;
+        // requiring a second landmark keeps a foreign rig that merely borrowed the name from claiming
+        // the identity path. Checked ahead of the rest because the generic keyword tests below would
+        // otherwise swallow it — `Bone_Hips`/`bone_spine1` read as ordinary anatomy words.
+        if any("globalsrt") && (any("bone_hips") || any("bone_root")) {
+            return SourceRig::Pandemic;
+        }
         if any("valvebiped") || any("bip01") {
             SourceRig::ValveBiped
         } else if any("mixamorig") {
@@ -63,6 +77,8 @@ impl SourceRig {
             // CoD assets arrive via a Y-up glTF export (Blender `export_yup`); the importer bakes
             // world transforms, so no extra fix is applied here.
             SourceRig::CallOfDuty => (UpAxis::Y, 1.0),
+            // Native: already in Mercs2 space (metres, Y-up) — it came OUT of the game.
+            SourceRig::Pandemic => (UpAxis::Y, 1.0),
             SourceRig::Generic => (UpAxis::Y, 1.0),
         }
     }
@@ -914,6 +930,11 @@ fn explicit_target_name(conv: SourceRig, src: &str) -> Option<String> {
         SourceRig::ValveBiped => valvebiped_target_name(src),
         SourceRig::Mixamo => mixamo_target_name(src),
         SourceRig::Unreal => unreal_target_name(src),
+        // IDENTITY. The source bone already carries the target's own name, so the map is the name
+        // itself — the caller resolves it against the real target skeleton case-insensitively, which
+        // is exactly right because `pandemic_hash_m2` folds case too. Any bone the author ADDED that
+        // the target lacks simply fails to resolve and is left unmapped, which is the honest answer.
+        SourceRig::Pandemic => Some(src.to_string()),
         SourceRig::Generic => None,
     }
 }
@@ -927,7 +948,16 @@ fn valvebiped_target_name(src: &str) -> Option<String> {
         "Pelvis" => return Some("Bone_Hips".into()),
         "Spine" => return Some("bone_spine1".into()),
         "Spine1" => return Some("Bone_Spine2".into()),
-        "Spine2" | "Spine4" => return Some("Bone_Chest".into()),
+        "Spine2" => return Some("Bone_Chest".into()),
+        // ValveBiped skips Spine3: `Spine4` is the UPPER chest that parents both clavicles and sits
+        // at ~79% of body height. Pandemic's spine tops out at `Bone_Chest` (65%), which `Spine2`
+        // already claims, so pairing Spine4 with it hands the CONFORM a correspondence 14% of body
+        // height too LOW and drags the whole ribcage-and-shoulders region toward the belly (measured:
+        // legs fall to 31.8% of height against the donor's 43.6%). `bone_neck` (81.5%) is the closest
+        // rung this rig offers, within 2.3%. Binding upper-chest verts near the neck costs nothing at
+        // runtime because `donor_transfer` re-derives every weight from the RETAIL donor by position
+        // afterwards — this map drives the GEOMETRY conform, not the shipped skin.
+        "Spine4" => return Some("bone_neck".into()),
         "Neck" | "Neck1" => return Some("bone_neck".into()),
         "Head" | "Head1" => return Some("Bone_Head".into()),
         _ => {}

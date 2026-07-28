@@ -821,6 +821,14 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // Flat white geometry, matching the workshop white-mesh view (the surface where the break shows).
         let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None }];
         println!("--faithful: {} verts, {} tris, target {target}", im.verts.len(), im.indices.len()/3);
+        // The renderer FRAMES the bbox, so a conform that got the proportions wrong still fills the
+        // image and reads as correct. Print the conformed extent in METRES beside the target rig's
+        // own landmark heights — that comparison is what actually says whether the body is the right
+        // size and whether its joints landed where the donor's are.
+        println!(
+            "--faithful: conformed bbox  x {:.3}..{:.3}  y {:.3}..{:.3}  z {:.3}..{:.3}   height {:.3} m",
+            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], hi[1] - lo[1]
+        );
         shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
         return;
     }
