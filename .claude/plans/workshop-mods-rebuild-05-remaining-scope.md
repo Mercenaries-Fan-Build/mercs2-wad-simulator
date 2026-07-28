@@ -170,18 +170,59 @@ is a small addition, three need real work.
 
 | Code | Rule | Status |
 |---|---|---|
-| M0002 | `packed_field` under-claim → heap overrun | **Library fn exists** — `patch_wad::validate_blocks:162`. Needs a `_all()` variant; today first-error-wins and can't yield a `Vec<Diagnostic>` |
-| M0001 | Dangling `_P001/2/3` rungs → 549 GB request, stream hang | **Algorithm exists**, 7 lines in `mercs2_probe/src/bin/aset_refcheck.rs:53`, inside a `main()`. Lift to `mercs2_formats` on top of `AsetEntry::lod_chain` |
+| M0002 | `packed_field` under-claim → heap overrun | ✅ **DONE** — `patch_wad::validate_blocks_all` + `lint::artifact_checks` |
+| M0001 | Dangling `_P001/2/3` rungs → 549 GB request, stream hang | ✅ **DONE** — same pair. Written fresh in `mercs2_formats` rather than lifted from `mercs2_probe`: the rung walk is trivial, and the hard part turned out to be *when* it may run, not how |
 | M0003 | BODY < `linear_mip_chain_size` → BUFFER_TOO_SMALL livelock | **Most mature** — `wad_simulator::texture::texture_buffer_too_small:109`, with two retail-verified false-positive gates (9,562 legitimately-short streamed bodies). Do **not** reimplement |
 | M0004 | New hash minted with no ASET row → silent wedge | **Inverse only.** `aset_validate` answers the opposite question. The forward direction is a set difference (`block_internal_hashes − aset_hashes`) whose two halves sit adjacent in `simulate.rs:618-628` and is never taken |
 | M0006 | `replace_texture` target shared by several materials | **No refcount anywhere.** Primitives exist (`parse_mtrl`, `mtrl_diffuse_hashes`); `simulate.rs:276` `xref_sources` keeps only the *first* referrer — making it a `Vec` yields the fan-in map nearly free. **M0009 already ships ~70% of this rule's real blast radius** |
 | M0005 | Non-resident costume → `STATE_WAITFORGAME` wedge | **Nothing.** Captured only in a doc comment in `override_base_blocks.rs:1-13`. Needs a residency predicate and a costume classifier |
 | M0008 | Small/non-square `page_count` livelock | **Nothing.** No code branches on `width != height`. The RE it rests on is `render_core_code_map.md` in the notes repo, which records the buffer-sizing livelock as a **known-open** converter fidelity issue — so this rule is blocked on research, not just implementation |
 
-Suggested order: M0002 → M0001 → M0003 → M0004, then reassess M0006 (M0009 may already suffice)
+Suggested order: ~~M0002 → M0001~~ → M0003 → M0004, then reassess M0006 (M0009 may already suffice)
 and treat M0005/M0008 as research, not implementation.
 
-**Blocker:** M0001 and M0003 need `mercs2_probe` and `wad_simulator` to gain a `[lib]`.
+**Blocker:** M0003 needs `wad_simulator`'s `[lib]` — which now exists, so this is unblocked.
+
+### Step complete — M0001 + M0002 (2026-07-28)
+
+Both landed, and the shape they landed in is worth recording because it generalises.
+
+Neither rule is answerable from the manifest, and neither is answerable from the game stack
+either — they are properties of *the WAD the builder emits*. That made a **third lint stage** the
+right home rather than forcing them into `lint` (hermetic) or `game_checks`:
+
+```
+lint            manifest text only          → CI, no game
+game_checks     + the retail WADs           → the author's machine
+artifact_checks + the WAD we just assembled → after lowering, before the write
+```
+
+`artifact_checks` is the only stage that can catch a defect **the lowering introduced** rather than
+one the author wrote — which is precisely the class of bug that has actually shipped here twice (a
+bare container where an entry-table block was required; an ASET rung left at `0x0000` instead of the
+`0xFFFF` sentinel). Neither was visible in the manifest. Both were plain in the bytes.
+
+Two things fell out that were not anticipated:
+
+1. **The rung check has a stage hazard.** `build_patch_wad_multi` validates its input *before* it
+   remaps LOD rungs into the patch's index space. Run the check there and every rung still points
+   into the 11,370-block `vz.wad`, so nearly every carried block reports as dangling — a confident
+   wrong answer, not an error. `patch_wad::BlockStage` now makes the caller name the index space, so
+   the wrong answer is unrepresentable rather than merely documented.
+2. **The duplicate-primary case is a real diagnostic** (M0180), not a fatal one. The registry is
+   first-writer-wins and retail ships the shape, so it must not block a build — but a duplicate a
+   *mod* introduces means one contribution silently does nothing, which the author wants to know.
+   It had been reaching an `eprintln!` nobody captured.
+
+Also promoted out of the block validator while it was open: M0181 (header-region overflow) and
+M0182 (an emitted block that will not inflate).
+
+`verify_emitted` runs the stage on both emit paths — the per-Shipment overlay and the
+cross-Shipment link WAD — and runs it **before the write**, so a WAD that would hang the game never
+reaches the disk where its presence would read as success.
+
+Tests: 122 in `mercs2_quartermaster`, 280 in `mercs2_formats`, all green, none ignored. Every new
+rule ships the firing/quiet fixture pair this document requires.
 
 ---
 
@@ -241,19 +282,31 @@ returns `Unsupported`.
 
 ## I. Template repo `mercs2-shipment-template`
 
-Standalone repo: folder skeleton, filled-in `manifest.yaml`, README, CI running **`qm lint` only**
-(a public runner has no retail WADs). Depends on D.
+**The repo now exists:** <https://github.com/Mercenaries-Fan-Build/mercs2-shipment-template>
+
+To fill in: folder skeleton, a filled-in `manifest.yaml`, README, and CI running **`qm lint` only**
+(a public runner has no retail WADs — which is exactly why the hermetic/game-stack split in the
+linter is load-bearing rather than tidy).
+
+Still depends on D: the CI step is `qm lint`, and there is no `qm` yet. That makes D the next
+sequencing item rather than the rest of B.
 
 ---
 
 ## Suggested sequencing
 
-1. **`mercs2_luac` parity regression** — cheap, and everything in A rests on it.
-2. **BINN metadata survey** — decides whether the linker approach holds at all.
-3. **C (library extraction)** — unblocks A, B and future work in one pass.
-4. **A (the linker)** → `add_outfit` lowers → Plan 01 phase 5.
-5. **B** in the order given.
+1. ✅ **`mercs2_luac` parity regression** — cheap, and everything in A rests on it.
+2. ✅ **BINN metadata survey** — decides whether the linker approach holds at all.
+3. ✅ **C (library extraction)** — unblocks A, B and future work in one pass.
+4. ✅ **A (the linker)** → `add_outfit` lowers → Plan 01 phase 5. Includes the cross-Shipment
+   relink, so two script-touching Shipments no longer annihilate each other.
+5. **B** in the order given — M0001 and M0002 done; M0003 → M0004 next.
 6. **D → I**, then E, F, G, H as they become relevant.
+
+**Revised next step: D, ahead of the rest of B.** The template repo in I now exists, and its CI is
+specified as `qm lint` — which does not exist. Finishing B first would leave a published repo whose
+CI cannot run, whereas D unblocks I immediately and gives every remaining rule a way to be exercised
+by hand. The rest of B is valuable but not on anyone's critical path.
 
 **A note on the sibling repo.** The reversed knowledge this crate encodes lives in
 `~/src/mercenaries-game` — the decompiled Lua, the ASET/texture format docs, the Ghidra corpus, and
