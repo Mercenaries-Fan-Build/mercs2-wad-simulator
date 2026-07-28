@@ -20,7 +20,7 @@ fn main() {
         .strip_prefix("0x")
         .and_then(|h| u32::from_str_radix(h, 16).ok())
         .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_')));
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
     let c = wad::extract_container(&mut w, hash).expect("container");
 
     let mut blk = vec![0u8; 20];
