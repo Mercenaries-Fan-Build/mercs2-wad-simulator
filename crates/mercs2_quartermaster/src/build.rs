@@ -13,22 +13,24 @@
 //!
 //! ## Lowering status
 //!
-//! `replace_texture`, `add_model`, `add_outfit`, `patch_lua` and `raw` all lower here.
+//! Every kind lowers here except `edit_state_machine`.
 //!
 //! `raw` is the open lower bound: opaque bytes plus an author-DECLARED blast radius. It is the one
 //! kind with no encoder behind it, so the lowering checks everything structural it can and refuses
 //! rather than warns — and it requires the declared `touches` to match the payload's own entry
 //! table exactly, because that declaration is the only thing that can mint the ASET rows.
 //!
-//! `add_outfit` is the composed case and the reason [`Lowered`] carries an `Option` of each half: a
-//! Data half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script
-//! half that cannot, because Lua links across the installed set rather than per Shipment. Linking a
+//! `add_outfit` is the composed case, and the reason [`Lowering`] has more than one outcome: a Data
+//! half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script half
+//! that cannot, because Lua links across the installed set rather than per Shipment. Linking a
 //! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
 //! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
 //!
-//! `edit_state_machine`, `native_hook` and `raw` still return `Unsupported` — with the reason,
-//! rather than being quietly skipped, because a dropped contribution produces a WAD that looks fine
-//! and does nothing.
+//! `native_hook` is the kind that produces no WAD content at all — an `.asi` file placed in the
+//! loader's search path, plus the [`Placement`] record that makes the drop reversible.
+//!
+//! `edit_state_machine` still returns `Unsupported` — with the reason, rather than being quietly
+//! skipped, because a dropped contribution produces a WAD that looks fine and does nothing.
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
@@ -63,6 +65,85 @@ pub struct Placement {
     pub bytes: usize,
     pub sha256: String,
     pub destination: Destination,
+}
+
+/// Where the Quartermaster puts an `.asi`, relative to the game folder.
+///
+/// **The author never names this**, which is the whole point: `native_hook` has no `dest` field, so
+/// there is no spelling of a Shipment that writes next to `Mercenaries2.exe` or into `data\vz.wad`.
+/// Those stay unreachable by construction rather than by a lint rule somebody could suppress.
+///
+/// `pmc_bb.dll` (v3.0.0, read directly: the format strings `%s*.asi`, `%sscripts\`, `%splugins\`,
+/// `%supdate\`) globs four roots — the game directory itself and these three subfolders. `scripts\`
+/// is chosen because it is where the ecosystem already puts them (`cruise.asi`, `dlc_enable.asi`)
+/// and because keeping mod files out of the game root makes an uninstall obvious.
+///
+/// A forward slash on purpose: the loader's own literal is `scripts\`, but this string is a
+/// filesystem path a deploy tool joins, not an engine path like the backslashed PTHS entries.
+pub const ASI_SUBDIR: &str = "scripts";
+
+/// The one `.asi` name the loader refuses to load: it skips its own.
+///
+/// Read from the binary, not assumed. A plugin shipped under this name would be placed correctly,
+/// hash correctly, and never load — with the loader logging nothing at all, because it never
+/// considered the file.
+pub const RESERVED_ASI: &str = "pmc_bb.asi";
+
+/// `IMAGE_FILE_MACHINE_I386`. The game is a 32-bit process, so a 64-bit plugin cannot load into it.
+const PE_MACHINE_I386: u16 = 0x014C;
+/// `IMAGE_FILE_DLL`. The loader calls `LoadLibrary`, which will not run an executable image.
+const PE_CHARACTERISTICS_DLL: u16 = 0x2000;
+
+/// What lowering one contribution produced.
+///
+/// Three outcomes rather than `Option<PatchBlock>`, because the Code layer genuinely does not
+/// produce a block: an `.asi` is a file in the game folder, and a format that could only express
+/// WAD content could not describe our own live bridge.
+enum Lowering {
+    /// Nothing to emit here. The contribution's effect is realised elsewhere — a `patch_lua`
+    /// declares a mutation that the linker applies later.
+    Nothing,
+    Block(PatchBlock),
+    /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
+    /// next to the digest it records for them.
+    File {
+        name: String,
+        relative: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Reject a plugin the game's loader could not load, by reading its PE header.
+///
+/// Both failures are observable in `pmc_blackbox.log` as `[FAILED] … (error: …)` — which is rare
+/// good news for this codebase — but only to a modder who knows to look. Neither is recoverable at
+/// deploy time, and both are cheap to see here.
+fn asi_load_blocker(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+        return Some("it is not a PE image at all (no `MZ` header)".into());
+    }
+    let pe_at = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    if pe_at + 24 > bytes.len() || &bytes[pe_at..pe_at + 4] != b"PE\0\0" {
+        return Some("its `e_lfanew` does not point at a `PE\\0\\0` signature".into());
+    }
+    let coff = pe_at + 4;
+    let machine = u16::from_le_bytes([bytes[coff], bytes[coff + 1]]);
+    let characteristics = u16::from_le_bytes([bytes[coff + 18], bytes[coff + 19]]);
+    if machine != PE_MACHINE_I386 {
+        return Some(format!(
+            "it is built for machine 0x{machine:04X}, not i386 (0x{PE_MACHINE_I386:04X}). \
+             Mercenaries2.exe is a 32-bit process and `LoadLibrary` refuses a foreign architecture"
+        ));
+    }
+    if characteristics & PE_CHARACTERISTICS_DLL == 0 {
+        return Some(
+            "its COFF characteristics do not set `IMAGE_FILE_DLL`, so it is an executable image \
+             rather than a DLL. An `.asi` is a DLL with a different extension; the loader calls \
+             `LoadLibrary` on it"
+                .into(),
+        );
+    }
+    None
 }
 
 /// Read the assembled WAD back and run [`crate::lint::artifact_checks`] on it.
@@ -255,7 +336,7 @@ fn lower(
     root: &Path,
     game: Option<&mut GameStack>,
     log: &mut Vec<String>,
-) -> Result<Option<PatchBlock>, BuildError> {
+) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
     match contribution {
         Contribution::ReplaceTexture { target, image } => {
@@ -344,7 +425,7 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
         Contribution::AddModel {
@@ -439,7 +520,7 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
         // `add_outfit` is a FIXED composition of add_model + a patch_lua on `_tOutfits`. The Data
@@ -541,12 +622,12 @@ fn lower(
                  {} verts, {} tris | wardrobe row {wearer}/{slug}",
                 stats.vertex_count, stats.triangle_count
             ));
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
         // Contributes no block: its whole effect is a declared mutation, collected by
         // `script_mutations` and realised at link time.
-        Contribution::PatchLua { .. } => Ok(None),
+        Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
 
         // The OPEN LOWER BOUND: bytes we cannot interpret, plus a radius the author DECLARED.
         //
@@ -789,16 +870,140 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
-        Contribution::EditStateMachine { .. } | Contribution::NativeHook { .. } => {
-            Err(BuildError::Unsupported {
+        // The Code layer. This is the ONE kind that emits no WAD content: on retail a plugin is an
+        // `.asi` — a plain Windows DLL under a different extension — dropped where `pmc_bb.dll`
+        // globs for it. So it lowers to a placement, and the placement record is what makes it
+        // reversible: an overlay is undone by deleting one file, but a file dropped into the game
+        // folder cannot be backed out unless something wrote down what was put where.
+        Contribution::NativeHook {
+            target,
+            plugin,
+            symbol,
+            touches,
+        } => {
+            let Some(plugin) = plugin else {
+                // M0161 already blocks the both-absent case, so reaching here means a `symbol` with
+                // no payload.
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: format!(
+                        "this contribution names the symbol {} but ships no `plugin:`, and the \
+                         Quartermaster does not compile native code — there is no binary for it to \
+                         produce. Build the hook into an `.asi` and ship that, or, if the plugin is \
+                         somebody else's, depend on it through `load.requires` with a pinned \
+                         sha256 rather than vendoring their binary.",
+                        symbol.as_deref().unwrap_or("(none)")
+                    ),
+                });
+            };
+            if *target != crate::manifest::Target::Retail {
+                // M0160 already blocks reimpl+plugin as an Error, so this is the belt to its
+                // braces: if that rule is ever relaxed, the lowering must still not place an ASI
+                // into a runtime that has no loader for one.
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: "an `.asi` is a RETAIL mechanism — `pmc_bb.dll` loads it into the \
+                             retail exe. The reimpl Code layer is a Rust/wasm/Lua plugin and has no \
+                             consumer yet, so there is nothing to place."
+                        .into(),
+                });
+            }
+
+            let path = root.join(plugin);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
                 index,
                 kind,
-                reason: "not implemented in this increment".into(),
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+
+            let name = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{} has no usable file name", path.display()),
+                })?
+                .to_string();
+
+            // The loader globs `*.asi`. A plugin under any other extension is placed correctly and
+            // never even considered — the quietest possible failure, and the file is right there
+            // looking installed. The name is also the FileArtifact claim the conflict system keys
+            // on, so renaming here would make the claim and the placement disagree.
+            if !name.to_ascii_lowercase().ends_with(".asi") {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{name} is not an `.asi`. The loader globs `*.asi` across the game folder \
+                         and scripts/plugins/update, so a file under any other extension is never \
+                         considered — it would sit in the right place, hashing correctly, doing \
+                         nothing. Rename the built DLL to `.asi`."
+                    ),
+                });
+            }
+            if name.eq_ignore_ascii_case(RESERVED_ASI) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{RESERVED_ASI} is reserved: the loader skips its own name, so a plugin \
+                         shipped under it is never loaded and nothing is logged, because the file \
+                         is never considered. Rename it."
+                    ),
+                });
+            }
+            if let Some(why) = asi_load_blocker(&bytes) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{name} cannot be loaded by the game: {why}. The loader reports this as \
+                         `[FAILED] … (error: …)` in pmc_blackbox.log rather than silently, but only \
+                         to someone who reads it."
+                    ),
+                });
+            }
+
+            let relative = format!("{ASI_SUBDIR}/{name}");
+            // The digest is recorded plainly and claims only INTEGRITY. A hash of malware is a
+            // correct hash, and a Shipment recording its own payload's digest proves internal
+            // consistency and nothing else — so the log says what an ASI is rather than letting a
+            // green digest read as a safety check.
+            log.push(format!(
+                "contributions[{index}] native_hook {name} → {relative}: {} bytes, sha256 {} \
+                 (hooks: {}) — UNRESTRICTED NATIVE CODE in the game process; the digest proves the \
+                 bytes are unmodified, not that they are safe",
+                bytes.len(),
+                sha256_hex(&bytes),
+                if touches.is_empty() {
+                    "none declared".to_string()
+                } else {
+                    touches
+                        .iter()
+                        .map(|t| t.0.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+
+            Ok(Lowering::File {
+                name,
+                relative,
+                bytes,
             })
         }
+
+        Contribution::EditStateMachine { .. } => Err(BuildError::Unsupported {
+            index,
+            kind,
+            reason: "not implemented in this increment".into(),
+        }),
     }
 }
 
@@ -903,9 +1108,16 @@ pub fn build(
     // the first conflict, hiding the rest.
 
     let mut blocks = Vec::new();
+    let mut files = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        if let Some(b) = lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)? {
-            blocks.push(b);
+        match lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)? {
+            Lowering::Nothing => {}
+            Lowering::Block(b) => blocks.push(b),
+            Lowering::File {
+                name,
+                relative,
+                bytes,
+            } => files.push((name, relative, bytes)),
         }
     }
     let mutations = script_mutations(manifest, &shipment.root)?;
@@ -1057,6 +1269,33 @@ pub fn build(
             destination: Destination::Overlay,
         });
         wad_path = Some(path);
+    }
+
+    // Code-layer artifacts. The digest is taken from the bytes that were WRITTEN, read back off the
+    // disk, rather than from the buffer we happen to hold: the record's whole job is to describe
+    // what is actually there, and a digest of the intended bytes would still verify after a
+    // truncated write.
+    for (name, relative, bytes) in files {
+        let path = out_dir.join(&name);
+        std::fs::write(&path, &bytes).map_err(|e| BuildError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        let written = std::fs::read(&path).map_err(|e| BuildError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        let digest = sha256_hex(&written);
+        log.push(format!(
+            "wrote {name}: {} bytes, sha256 {digest} → place at {relative}",
+            written.len()
+        ));
+        placements.push(Placement {
+            name,
+            bytes: written.len(),
+            sha256: digest,
+            destination: Destination::GameFolder { relative },
+        });
     }
 
     // The placement record: what goes where, each with its digest. Deploy/undo consumes this — a

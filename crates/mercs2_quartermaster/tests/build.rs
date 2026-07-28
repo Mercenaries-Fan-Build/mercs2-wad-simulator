@@ -99,26 +99,23 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 
 /// A kind we cannot lower yet must FAIL LOUDLY with the reason, never be skipped — a silently
 /// dropped contribution produces a WAD that looks fine and does nothing.
+///
+/// `add_outfit`, `patch_lua`, `raw` and `native_hook` all used to be here. `edit_state_machine` is
+/// what is left, and it is the one kind still genuinely unlowerable.
 #[test]
-fn unsupported_kinds_fail_loudly_with_a_reason() {
-    // add_outfit, patch_lua and raw used to live here; all three lower now. What remains genuinely
-    // unimplemented is the rest of the kind set.
-    for (contribution, expect) in [(
+fn edit_state_machine_fails_loudly_with_a_reason() {
+    let dir = scratch("unsupported");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
+    let s = shipment(
+        &dir,
         "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/a.bin\n",
-        "not implemented",
-    )] {
-        let dir = scratch("unsupported");
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("src/m.glb"), b"x").unwrap();
-        std::fs::write(dir.join("src/a.lua"), b"x").unwrap();
-        std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
-        let s = shipment(&dir, contribution);
-        match build::build(&s, None, None, None, None) {
-            Err(e @ BuildError::Unsupported { .. }) => {
-                assert!(e.to_string().contains(expect), "unhelpful reason: {e}");
-            }
-            other => panic!("expected Unsupported, got {other:?}"),
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Unsupported { .. }) => {
+            assert!(e.to_string().contains("not implemented"), "{e}");
         }
+        other => panic!("expected Unsupported, got {other:?}"),
     }
 }
 
@@ -1150,6 +1147,249 @@ fn a_retail_block_survives_being_carried_through_raw() {
          --skip-audio",
         wad.display(),
         paths[0].display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// native_hook — the Code layer, which emits no WAD at all
+// ---------------------------------------------------------------------------
+
+/// A PE image carrying only the headers the loadability check reads.
+///
+/// Deliberately header-only. `asi_load_blocker` inspects exactly four things — `MZ`, `e_lfanew`,
+/// the `PE\0\0` signature, and the COFF `Machine`/`Characteristics` words — so a fixture with a
+/// real body would add bytes no assertion depends on. The offsets are pinned against the real
+/// `pmc_bb.dll` v3.0.0, which reads `e_lfanew=0x80, machine=0x014C, characteristics=0x230E`.
+fn fake_asi(machine: u16, characteristics: u16) -> Vec<u8> {
+    let pe_at = 0x80usize;
+    let mut out = vec![0u8; pe_at + 24];
+    out[0..2].copy_from_slice(b"MZ");
+    out[0x3C..0x40].copy_from_slice(&(pe_at as u32).to_le_bytes());
+    out[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+    let coff = pe_at + 4;
+    out[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+    out[coff + 18..coff + 20].copy_from_slice(&characteristics.to_le_bytes());
+    // A distinguishable tail, so "the bytes that were written are the bytes we supplied" is a real
+    // assertion rather than one two all-zero buffers would also satisfy.
+    out.extend_from_slice(b"quartermaster-asi-fixture");
+    out
+}
+
+/// A 32-bit DLL, the shape the loader can actually load.
+fn loadable_asi() -> Vec<u8> {
+    fake_asi(0x014C, 0x230E)
+}
+
+fn hook_shipment(dir: &Path, file: &str, bytes: &[u8], extra: &str) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join(file), bytes).unwrap();
+    shipment(
+        dir,
+        &format!("  - kind: native_hook\n    target: retail\n    plugin: src/{file}\n{extra}"),
+    )
+}
+
+/// ★ `native_hook` produces a PLACEMENT, not a block — and the record is what makes the drop
+/// reversible. An overlay is undone by deleting one file; an `.asi` in the game folder is not
+/// backable-out unless something wrote down what was put where.
+#[test]
+fn a_native_hook_places_a_file_and_records_its_digest() {
+    let dir = scratch("hook_ok");
+    let asi = loadable_asi();
+    let s = hook_shipment(
+        &dir,
+        "mybridge.asi",
+        &asi,
+        "    touches: [\"0x004CF340\"]\n",
+    );
+
+    let report = build::build(&s, None, None, None, None).expect("native_hook must build");
+    assert!(
+        report.wad.is_none(),
+        "the Code layer contributes nothing to a WAD"
+    );
+    assert_eq!(report.placements.len(), 1);
+    let p = &report.placements[0];
+    assert_eq!(p.name, "mybridge.asi");
+    assert_eq!(
+        p.destination,
+        Destination::GameFolder {
+            relative: format!("{}/mybridge.asi", build::ASI_SUBDIR)
+        },
+        "the builder chooses the path; there is no manifest field that could name the exe"
+    );
+
+    // Verified BY HASH against what is on disk, not against the buffer the builder held.
+    let written = std::fs::read(dir.join("build/mybridge.asi")).expect("the .asi must be emitted");
+    assert_eq!(written, asi, "the plugin must be copied verbatim");
+    assert_eq!(p.sha256, build::sha256_hex(&written));
+    assert_eq!(p.bytes, written.len());
+
+    // The record deploy consumes has to carry all three, or an undo cannot verify what it removes.
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+            .unwrap();
+    let entry = &doc["placements"][0];
+    assert_eq!(entry["name"], "mybridge.asi");
+    assert_eq!(entry["sha256"], p.sha256);
+    assert_eq!(entry["destination"]["kind"], "game_folder");
+    assert_eq!(
+        entry["destination"]["relative"],
+        format!("{}/mybridge.asi", build::ASI_SUBDIR)
+    );
+
+    // The log must state what an ASI is. A recorded digest proves the bytes are unmodified and
+    // nothing else, and a green "verified" reads as "safe" to someone installing by clicking.
+    let log = report.log.join("\n");
+    assert!(log.contains("UNRESTRICTED NATIVE CODE"), "{log}");
+    assert!(log.contains(&p.sha256), "{log}");
+    assert!(
+        log.contains("0x004CF340"),
+        "the hooks must be recorded: {log}"
+    );
+}
+
+/// The chosen destination must be one the loader actually searches. `pmc_bb.dll` v3.0.0 globs
+/// `%s*.asi`, `%sscripts\`, `%splugins\` and `%supdate\` — read from the binary, not assumed — so a
+/// subdir outside that set would place the file where nothing looks for it.
+#[test]
+fn the_chosen_subdir_is_one_the_loader_searches() {
+    assert!(
+        ["", "scripts", "plugins", "update"].contains(&build::ASI_SUBDIR),
+        "{} is not a directory pmc_bb.dll globs",
+        build::ASI_SUBDIR
+    );
+}
+
+/// The loader skips its own name, so a plugin shipped as `pmc_bb.asi` is placed correctly, hashes
+/// correctly, and is never even considered — nothing is logged, because nothing was tried.
+#[test]
+fn the_loaders_own_name_is_refused() {
+    let dir = scratch("hook_reserved");
+    let s = hook_shipment(&dir, "pmc_bb.asi", &loadable_asi(), "");
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            assert!(e.to_string().contains("reserved"), "{e}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// The loader globs `*.asi`. Any other extension is placed and never considered — the quietest
+/// failure available, with the file sitting there looking installed.
+#[test]
+fn a_plugin_that_is_not_an_asi_is_refused() {
+    let dir = scratch("hook_ext");
+    let s = hook_shipment(&dir, "mybridge.dll", &loadable_asi(), "");
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            assert!(e.to_string().contains("globs `*.asi`"), "{e}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// A plugin the game could not load, caught by its PE header. Both cases fail at `LoadLibrary` —
+/// the game is a 32-bit process, and an executable image is not a DLL — and both are visible only
+/// in a log the modder has to know to read.
+#[test]
+fn a_plugin_the_game_cannot_load_is_refused() {
+    for (bytes, expect) in [
+        (fake_asi(0x8664, 0x230E), "32-bit process"),
+        (fake_asi(0x014C, 0x010E), "IMAGE_FILE_DLL"),
+        (
+            b"not a pe image at all, just some bytes here".to_vec(),
+            "PE image",
+        ),
+    ] {
+        let dir = scratch("hook_badpe");
+        let s = hook_shipment(&dir, "mybridge.asi", &bytes, "");
+        match build::build(&s, None, None, None, None) {
+            Err(e @ BuildError::Lower { .. }) => {
+                assert!(e.to_string().contains(expect), "{e}");
+            }
+            other => panic!("expected Lower for {expect}, got {other:?}"),
+        }
+    }
+}
+
+/// A `symbol` with no payload asks the Quartermaster to produce native code, which it does not do.
+/// The reason has to point at both real options rather than just refusing.
+#[test]
+fn a_symbol_without_a_plugin_says_what_to_do_instead() {
+    let dir = scratch("hook_symbol");
+    let s = shipment(
+        &dir,
+        "  - kind: native_hook\n    target: retail\n    symbol: MyDetour\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Unsupported { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("MyDetour"), "{m}");
+            assert!(m.contains("load.requires"), "{m}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+/// An ASI on a reimpl target is blocked by M0160 before lowering is reached — asserted here so the
+/// two mechanisms cannot both be removed on the assumption the other covers it.
+#[test]
+fn an_asi_on_a_reimpl_target_never_reaches_lowering() {
+    let dir = scratch("hook_reimpl");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/mybridge.asi"), loadable_asi()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: native_hook\n    target: reimpl\n    plugin: src/mybridge.asi\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => {
+            assert!(d.iter().any(|x| x.rule.code == "M0160"), "{d:?}");
+        }
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+    assert!(
+        !dir.join("build/mybridge.asi").exists(),
+        "nothing may be placed"
+    );
+}
+
+/// A Shipment may carry both layers at once, and both must appear in one record — that is the
+/// composite case Modkit's deploy has to handle.
+#[test]
+fn a_shipment_can_emit_a_wad_and_a_file_together() {
+    let dir = scratch("hook_and_wad");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/state.block"), raw_payload(0x00C0_FFEE)).unwrap();
+    std::fs::write(dir.join("src/mybridge.asi"), loadable_asi()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: raw\n    payload: src/state.block\n    target_layer: data\n\
+         \x20   touches: [\"0x00C0FFEE\"]\n\
+         \x20 - kind: native_hook\n    target: retail\n    plugin: src/mybridge.asi\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("build");
+    assert_eq!(report.placements.len(), 2);
+    assert_eq!(report.placements[0].destination, Destination::Overlay);
+    assert!(matches!(
+        report.placements[1].destination,
+        Destination::GameFolder { .. }
+    ));
+    // Determinism covers the file half too: a placement record whose digests move between builds
+    // cannot be verified at deploy.
+    let again = build::build(&s, None, None, Some(&dir.join("second")), None).expect("second");
+    assert_eq!(
+        report
+            .placements
+            .iter()
+            .map(|p| p.sha256.clone())
+            .collect::<Vec<_>>(),
+        again
+            .placements
+            .iter()
+            .map(|p| p.sha256.clone())
+            .collect::<Vec<_>>()
     );
 }
 
