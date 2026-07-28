@@ -47,7 +47,11 @@ pub mod zone;
 pub use buoyancy::{
     submersion_fraction, Buoyancy, WaterDragTunables, BUOYANCY_HASH, BUOYANCY_STRIDE,
 };
-pub use swim::{update_swim_state, SwimConfig, SwimState, Swimmer};
+pub use swim::{update_swim_state, Swimmer};
+/// The swim FSM re-exported from its home in `mercs2_core::swim`. It moved there so `mercs2_player`'s
+/// on-foot controller can share the classification without a leaf→leaf edge; this re-export keeps
+/// `mercs2_water::{SwimState, SwimConfig}` working for existing consumers.
+pub use mercs2_core::{SwimConfig, SwimState};
 pub use wave::{WaveComponent, WaveModel};
 pub use watermap::{
     Watermap, WaterSample, WatermapError, CELL_SIZE_M, GRID_DIM, HEIGHT_MIN_M, OPEN_WATER_SURFACE_M,
