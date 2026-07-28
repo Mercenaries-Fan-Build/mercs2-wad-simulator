@@ -307,3 +307,40 @@ fn target_dimensions(hash: u32) -> Option<(u32, u32)> {
     let tex = stack.texture(hash)?;
     Some((tex.width, tex.height))
 }
+
+// ---------------------------------------------------------------------------
+// Data resolution — no build-machine paths
+// ---------------------------------------------------------------------------
+
+/// The name table must be found by walking up from the EXECUTABLE or the working directory, never
+/// from a path baked in at compile time.
+///
+/// `CARGO_MANIFEST_DIR` resolves to whatever machine built the binary, so a released `qm` would look
+/// for its data on a CI runner's filesystem and silently run one rule short — the same class of bug
+/// as the hardcoded asset paths that only worked on one dev machine.
+///
+/// Running with the working directory inside this checkout must therefore find the real table.
+#[test]
+fn the_name_table_is_found_by_walking_up_not_by_a_compiled_in_path() {
+    let dir = scratch("names");
+    std::fs::write(dir.join("src/t.png"), b"present").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture
+    target: al_hum_boss_ub
+    image: src/t.png
+",
+    );
+    // CARGO_MANIFEST_DIR is this crate's directory, which is inside the workspace that owns
+    // data/production_names.json — so a correct walk-up finds it.
+    let out = Command::new(env!("CARGO_BIN_EXE_qm"))
+        .args(["lint", s.to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("no name table found"),
+        "the table is in this checkout and must be found: {stderr}"
+    );
+}
