@@ -173,7 +173,7 @@ fn parse_table(cont: &[u8]) -> Option<(usize, usize, usize, Vec<String>, Option<
 }
 
 fn main() {
-    let mut w = wad::registry_vz_wad()
+    let mut w = wad::resolve_vz_wad(None)
         .and_then(|p| wad::open(&p).ok())
         .expect("open vz.wad");
 
