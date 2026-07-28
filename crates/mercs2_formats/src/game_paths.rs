@@ -50,6 +50,45 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
     wad_from_env("vz.wad")
 }
 
+/// Machine-local, git-ignored config naming the install, written by `scripts/find-vz-wad.sh`.
+///
+/// A **dev-checkout fallback only**, and deliberately lower priority than the environment: Modkit
+/// manages the install and hands paths to the tools it launches, so a per-tool config competing with
+/// that is how a fleet of tools ends up disagreeing about where the game is. It exists so tests run
+/// on a checkout without ceremony.
+pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
+
+/// `vz_wad = "…"` from the nearest [`LOCAL_CONFIG`], searching upward from `start`.
+pub fn wad_from_local_config(start: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start);
+    while let Some(d) = dir {
+        if let Ok(text) = std::fs::read_to_string(d.join(LOCAL_CONFIG)) {
+            if let Some(raw) = text
+                .lines()
+                .find(|l| l.trim_start().starts_with("vz_wad"))
+                .and_then(|l| l.split('=').nth(1))
+            {
+                let p = PathBuf::from(raw.trim().trim_matches('"'));
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// The base archive: environment first, then the dev-checkout config.
+///
+/// This is the resolution a **test** wants — enough to run on a developer's machine without setup,
+/// and `None` on CI so it skips rather than fails. Hosts that also need co-location and the registry
+/// use `mercs2_quartermaster::game::discover`, which layers those on top and reports where the
+/// answer came from.
+pub fn vz_wad(start: &Path) -> Option<PathBuf> {
+    vz_wad_from_env().or_else(|| wad_from_local_config(start))
+}
+
 /// The environment variable naming the saves folder.
 pub const SAVES_DIR_VAR: &str = "MERCS2_SAVES_DIR";
 

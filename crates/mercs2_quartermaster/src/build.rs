@@ -13,12 +13,17 @@
 //!
 //! ## Lowering status
 //!
-//! `replace_texture` lowers end-to-end here. **The other kinds do not yet**, and the reason is
-//! structural rather than missing work: the proven lowering code for models and outfits lives in
-//! `mercs2_workshop` (`publish.rs`, donor resolution + model inject) and `wad_builder`
-//! (`build-skin`), and **both are binary-only crates with no `src/lib.rs`** — so Plan 01's "wrap
-//! the existing building blocks, don't reimplement them" is not currently possible for them. They
-//! need extracting into a library first. [`lower`] says so out loud rather than quietly skipping.
+//! `replace_texture`, `add_model`, `add_outfit` and `patch_lua` all lower here.
+//!
+//! `add_outfit` is the composed case and the reason [`Lowered`] carries an `Option` of each half: a
+//! Data half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script
+//! half that cannot, because Lua links across the installed set rather than per Shipment. Linking a
+//! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
+//! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
+//!
+//! `edit_state_machine`, `native_hook` and `raw` still return `Unsupported` — with the reason,
+//! rather than being quietly skipped, because a dropped contribution produces a WAD that looks fine
+//! and does nothing.
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
@@ -32,7 +37,9 @@ use mercs2_formats::model_inject::inject_static_into_donor_block;
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
-use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_TEXTURE};
+use mercs2_formats::scripts_block::ScriptsBlock;
+use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_TEXTURE};
+use crate::link::{self, ScriptMutation};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -129,9 +136,21 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// papered over: it likely wants a `group:` field, which is a format change.
 const DEFAULT_TARGET_GROUP: usize = 0;
 
-/// One lowered contribution.
+/// One lowered contribution: a block, a declared script mutation, or both.
+///
+/// `add_outfit` is the "both" case, and it is why this is not simply a `PatchBlock`. Its Data half
+/// (the model) lowers here and now; its Script half cannot, because Lua links across the whole
+/// installed set rather than per Shipment.
+#[derive(Default)]
 struct Lowered {
-    block: PatchBlock,
+    block: Option<PatchBlock>,
+    mutation: Option<ScriptMutation>,
+}
+
+impl Lowered {
+    fn block(block: PatchBlock) -> Self {
+        Lowered { block: Some(block), mutation: None }
+    }
 }
 
 /// Lower a single contribution into a patch block.
@@ -226,7 +245,7 @@ fn lower(
                 None,
             )
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowered { block })
+            Ok(Lowered::block(block))
         }
 
         Contribution::AddModel { name, model, donor, retarget } => {
@@ -303,24 +322,103 @@ fn lower(
                 None,
             )
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowered { block })
+            Ok(Lowered::block(block))
         }
 
-        Contribution::AddOutfit { .. } => Err(BuildError::Unsupported {
-            index,
-            kind,
-            reason: "add_outfit composes add_model with a patch_lua on _tOutfits, and the Lua half \
-                     lowers at LINK time across the installed set. The linker is not written yet."
-                .into(),
-        }),
-        Contribution::PatchLua { .. } => Err(BuildError::Unsupported {
-            index,
-            kind,
-            reason: "patch_lua lowers at LINK time, not build time: it ships a declared mutation \
-                     and the block is compiled once across the whole installed set. The linker is \
-                     not written yet."
-                .into(),
-        }),
+        // `add_outfit` is a FIXED composition of add_model + a patch_lua on `_tOutfits`. The Data
+        // half lowers here; the Script half is declared and linked later, because Lua is linked
+        // across the installed set rather than per Shipment.
+        Contribution::AddOutfit { name, slug, display, wearer, model, donor, retarget, .. } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            if retarget.is_some() {
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: "an inline `retarget:` is the CROSS-RIG path and needs char_skin's \
+                             palette-relative BLENDINDICES + INFO(56) range table; this lowering is \
+                             the rigid one."
+                        .into(),
+                });
+            }
+            let Some(donor_name) = donor else {
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: "donor auto-pick is not implemented — name a `donor:` explicitly. For an \
+                             outfit the donor must be a hero-rigged host, or the model will not \
+                             animate."
+                        .into(),
+                });
+            };
+
+            let donor_hash = pandemic_hash_m2(donor_name);
+            let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+            let donor_blk = donor::donor_block(&paths, donor_hash)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let mesh = mesh_import::external_mesh_from_gltf(&root.join(model))
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+
+            let hash = pandemic_hash_m2(name);
+            let (new_block, stats) = inject_static_into_donor_block(
+                &donor_blk, &mesh, DEFAULT_TARGET_GROUP, &[], hash, false, false, false, false,
+                &[DEFAULT_TARGET_GROUP], 1.0, false,
+            )
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: format!("inject into donor {donor_name}: {m}"),
+            })?;
+
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
+            let block = PatchBlock::from_decompressed(
+                &new_block,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+
+            // The Script half. `Model` is the ASSET name SetOutfit receives; `Name` is the
+            // unlock/tracking key; both are distinct from the display string.
+            let append = link::outfit_row_append(wearer, slug, name, display);
+            log.push(format!(
+                "contributions[{index}] add_outfit {name} 0x{hash:08X} ← donor {donor_name}: \
+                 {} verts, {} tris | wardrobe row {wearer}/{slug}",
+                stats.vertex_count, stats.triangle_count
+            ));
+            Ok(Lowered {
+                block: Some(block),
+                mutation: Some(ScriptMutation {
+                    shipment: String::new(), // filled in by `build`, which knows the Shipment name
+                    target: "wifpmcinterior".into(),
+                    append,
+                }),
+            })
+        }
+
+        Contribution::PatchLua { target, append } => {
+            let source = std::fs::read_to_string(root.join(append)).map_err(|e| {
+                BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("reading {}: {e}", root.join(append).display()),
+                }
+            })?;
+            log.push(format!(
+                "contributions[{index}] patch_lua {target}: {} B of source declared for linking",
+                source.len()
+            ));
+            Ok(Lowered {
+                block: None,
+                mutation: Some(ScriptMutation {
+                    shipment: String::new(),
+                    target: target.clone(),
+                    append: source,
+                }),
+            })
+        }
         Contribution::EditStateMachine { .. } | Contribution::NativeHook { .. }
         | Contribution::Raw { .. } => Err(BuildError::Unsupported {
             index,
@@ -388,6 +486,7 @@ pub fn build(
     mut game: Option<&mut GameStack>,
     names: Option<&NameTable>,
     out_dir: Option<&Path>,
+    corpus_root: Option<&Path>,
 ) -> Result<BuildReport, BuildError> {
     let mut log = Vec::new();
     let manifest = &shipment.manifest;
@@ -417,9 +516,83 @@ pub fn build(
     // the first conflict, hiding the rest.
 
     let mut blocks = Vec::new();
+    let mut mutations: Vec<ScriptMutation> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         let lowered = lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)?;
-        blocks.push(lowered.block);
+        if let Some(b) = lowered.block {
+            blocks.push(b);
+        }
+        if let Some(mut m) = lowered.mutation {
+            // `lower` does not know which Shipment it is lowering; the ordering key is set here.
+            m.shipment = manifest.shipment.name.clone();
+            mutations.push(m);
+        }
+    }
+
+    // ── Link the Script layer ──────────────────────────────────────────────────────────────────
+    //
+    // Linking this Shipment's own mutations produces a `scripts_vz` that is correct for a SOLO
+    // install, which is what keeps each overlay valid standalone and verify-by-hash meaningful.
+    //
+    // ⚠ It is NOT the whole story. When several script-touching Shipments are installed together,
+    // the deploy step must re-link all of their mutations into ONE block — otherwise the last WAD
+    // mounted wins and the others' Lua disappears, which is the failure the linker exists to
+    // prevent. That cross-Shipment relink belongs to deploy (Modkit), and this is deliberately only
+    // its single-Shipment case.
+    if !mutations.is_empty() {
+        let Some(game) = game.as_deref_mut() else {
+            return Err(BuildError::GameRequired { index: 0, kind: "patch_lua" });
+        };
+        let Some(corpus) = corpus_root else {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "patch_lua",
+                message: "linking Lua needs the decompiled corpus (the base source to append to) — \
+                          pass its root; it is vendored at \
+                          crates/mercs2_script/corpus/mercs2-luacd/src"
+                    .into(),
+            });
+        };
+        let raw = game.block_by_path("scripts_vz").ok_or_else(|| BuildError::Lower {
+            index: 0,
+            kind: "patch_lua",
+            message: "no scripts_vz block in the configured game stack".into(),
+        })?;
+        let mut script_block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
+            index: 0,
+            kind: "patch_lua",
+            message: format!("parsing scripts_vz: {m}"),
+        })?;
+        let linked =
+            link::link_into(&mut script_block, corpus, &mutations).map_err(|e| BuildError::Lower {
+                index: 0,
+                kind: "patch_lua",
+                message: e.to_string(),
+            })?;
+        for l in &linked {
+            log.push(format!(
+                "linked {}: {} → {} B source, {} B bytecode, from {:?}",
+                l.target, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes,
+                l.contributors
+            ));
+        }
+
+        let decompressed = script_block.serialize();
+        // Every entry keeps its own ASET row so the block resolves exactly as the base one did.
+        let aset: Vec<AsetEntry> = script_block
+            .entries
+            .iter()
+            .map(|e| AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_SCRIPT))
+            .collect();
+        blocks.push(
+            PatchBlock::from_decompressed(
+                &decompressed,
+                "blocks\\VZ\\scripts_vz_P000_Q3.block".into(),
+                aset,
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index: 0, kind: "patch_lua", message: m })?,
+        );
     }
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I

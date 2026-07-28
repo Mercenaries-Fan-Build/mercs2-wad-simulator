@@ -24,6 +24,7 @@ pub mod blast;
 pub mod build;
 pub mod discover;
 pub mod game;
+pub mod link;
 pub mod lint;
 pub mod manifest;
 pub mod names;
