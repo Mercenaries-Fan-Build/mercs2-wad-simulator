@@ -13,7 +13,7 @@ use mercs2_formats::model_cubeize::{parse_segm, read_model_meshes_segm};
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "vz_veh_tank_amx30_elite".into());
     let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
     let lods = wad::extract_model_lods(&mut w, hash).expect("chain");
     let resident = lods[0].container.clone();
     let segm = parse_segm(&resident);
