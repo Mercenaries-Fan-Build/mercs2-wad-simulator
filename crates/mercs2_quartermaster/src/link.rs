@@ -159,6 +159,73 @@ pub fn linked_source(base: &str, mutations: &[&ScriptMutation]) -> (String, Vec<
     (out, contributors)
 }
 
+/// The `_tOutfits` row for one outfit, as source.
+///
+/// `_tOutfits` is a GLOBAL declared without `local`, so a mod never needs an AST edit — appending a
+/// `table.insert` after the base source is enough, and N of them union by plain concatenation. The
+/// row's three fields are three distinct strings: `Model` is the asset name `Player.SetOutfit`
+/// receives, `Name` is the unlock/tracking key, and `PlayerVisibleName` is what the wardrobe shows.
+///
+/// **Append only, never insert.** Index 2 is reserved for the unlock-code outfit, and a saved
+/// costume is a POSITION into this list — inserting would silently re-dress every existing player.
+pub fn outfit_row_append(wearer: &str, slug: &str, model: &str, display: &str) -> String {
+    format!(
+        "table.insert(_tOutfits.{wearer}, {{ Name = {}, Model = {}, PlayerVisibleName = {} }})\n",
+        lua_string(slug),
+        lua_string(model),
+        lua_string(display),
+    )
+}
+
+/// A Lua string literal with quotes and backslashes escaped, so an author-supplied `display:`
+/// cannot terminate the string and inject code into the block we compile.
+fn lua_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Source the Quartermaster appends ONCE per target, after every Shipment's contribution.
+///
+/// For the wardrobe this is the availability lift. `GetAvailableCostumes()` returns
+/// `_nAvailableCostumes or 1`, and the menu only offers entry `i` when the count is `>= i` — so an
+/// appended outfit is in the WAD, in the table, and **unreachable** unless the count grows too.
+///
+/// It is emitted here rather than by each Shipment precisely because "exactly once" is the
+/// property: two Shipments each hard-coding `shipped + 1` produce the same number, the later
+/// definition wins, and one outfit stays invisible. Deriving it from the final list length is the
+/// only form that survives N contributors.
+///
+/// Curated per target and empty by default, in the same fail-closed spirit as the merge classes.
+pub fn derived_epilogue(target: &str) -> Option<String> {
+    match target {
+        "wifpmcinterior" => Some(
+            "\n-- [Quartermaster] derived: the wardrobe gate is a COUNT, and the menu only offers\n\
+             -- entry i when it is >= i. Derived from the final list length so it is correct for\n\
+             -- any number of appended outfits.\n\
+             function GetAvailableCostumes()\n\
+             \x20 local n = 1\n\
+             \x20 for _, list in pairs(_tOutfits) do\n\
+             \x20   if #list > n then n = #list end\n\
+             \x20 end\n\
+             \x20 return n\n\
+             end\n"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 /// Link every mutation into `block`, returning what changed.
 ///
 /// `block` is the base game's `scripts_vz`, already parsed. Mutations targeting the same script are
@@ -188,7 +255,12 @@ pub fn link_into(
             message: format!("reading base source {}: {e}", source_path.display()),
         })?;
 
-        let (source, contributors) = linked_source(&base, &group);
+        let (mut source, contributors) = linked_source(&base, &group);
+        // Emitted once, AFTER every Shipment's append — see `derived_epilogue`. Putting it here
+        // rather than in each Shipment is what makes "exactly once" structural.
+        if let Some(epilogue) = derived_epilogue(target) {
+            source.push_str(&epilogue);
+        }
         // BARE chunk name — see the module note. `@name.lua` produces a chunk 5 bytes off retail.
         let bytecode = mercs2_luac::compile(&source, target).map_err(|e| LinkError::Compile {
             target: target.to_string(),
