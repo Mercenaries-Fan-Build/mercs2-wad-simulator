@@ -1,5 +1,35 @@
 //! Per-namespace engine binding harness + coverage gate (Wave-0 silo E3).
 //!
+//! # The nil-handle contract — hold this in every binding you write
+//!
+//! **A GUID/handle argument is [`crate::Guid`], never a bare `i64`, and a miss is a silent neutral
+//! answer.**
+//!
+//! `Guid` is the Lua-boundary handle type: it goes out as **lightuserdata** (retail's type tag 2) and
+//! comes back through a `FromLua` that absorbs `nil`, an absent argument and anything unrecognised
+//! into [`crate::Guid::NONE`] — exactly what retail's reader does, and exactly as tolerant as the
+//! `Option<i64>` this section used to prescribe. A handle **return** is a `Guid` too, so `0` pushes
+//! `nil` rather than a truthy `0`. See [`crate::guid`] for the evidence and the pointer-width caveat.
+//!
+//! Retail's argument readers return `0` for anything they do not recognise rather than raising:
+//! `FUN_0059FF50` accepts only the userdata type tags and yields 0 otherwise, and the miss path
+//! `FUN_004B2A50` is literally `push nil; return 1`. Shipped scripts are written against exactly that.
+//! They chain `Vehicle.GetRiders(Pg.GetGuidByName(sName))` and let a failed lookup fall through, or
+//! branch on `if Player.X(u) then`. A binding typed `i64` turns that into a **Lua error**, which aborts
+//! the caller's whole callback chain — and since those chains are how the game advances its state
+//! machines, a single raised argument can stall the boot.
+//!
+//! This was not theoretical. ~160 bindings took a bare `i64` handle; converting them took the corpus
+//! import sweep (`mercs2_engine/tests/corpus_replay.rs`) from 369/370 modules to **370/370**.
+//! `lifestyle_oillif001_table.lua` is the canonical case: a world lookup misses, and everything
+//! downstream of it has to tolerate the nil.
+//!
+//! One distinction the sweep had to respect: an argument that is a **constant**, not a handle, stays
+//! `i64`. `Event.Create(kind, …)`'s event-kind is not a handle, so a nil there is a genuine script bug
+//! and should raise. The same applies to ids, counts, indices and colour channels — and to two ids
+//! that look like handles but are not: the **widget id** (`bindings::hud`) and the **event handle**
+//! (`bindings::event`), each argued in place from the corpus.
+//!
 //! The engine's Lua binding surface is **~1086 cfuncs across 35 engine namespaces** (the live
 //! Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`; the human index is
 //! `docs/reverse_engineer/scripting_host_binding_code_map.md` §3). Program rule: **no stubbed Lua
@@ -47,7 +77,7 @@ mod fade;
 mod fire;
 mod graphics;
 mod gui;
-mod hud;
+pub(crate) mod hud;
 mod human;
 mod inventory;
 mod lti;
@@ -59,7 +89,7 @@ mod object_filter;
 mod object_state;
 mod pg;
 mod pg_world;
-mod player;
+pub(crate) mod player;
 mod report;
 mod socket;
 mod sound;
@@ -99,12 +129,37 @@ pub(crate) fn record_all(
 }
 
 /// Stringify a Lua argument for a recorded command log (string/number/bool/nil → text; other → "").
+/// Unpack a callback's **context table** into positional arguments.
+///
+/// The corpus's engine-callback convention is `fCallback` plus a `tData` *table*, which the engine
+/// invokes as `fCallback(unpack(tData))` — e.g.
+/// `InterpolateWidget(…, _HandleAnimationComplete, {self}, …)` must arrive as
+/// `_HandleAnimationComplete(self)`, and `oMovie:SetEndCallback(HideSlow, {oWidget})` as
+/// `HideSlow(oWidget)`. Passing the table itself instead lands one level of indirection off and the
+/// handler indexes a field that is not there (`MrxGuiBase:678: attempt to index a nil value (field
+/// 'AnimationData')`).
+///
+/// A non-table context is passed through as a single argument, and `None`/`Nil` yields no arguments.
+pub(crate) fn unpack_ctx(v: Option<mlua::Value>) -> Vec<mlua::Value> {
+    match v {
+        Some(mlua::Value::Table(t)) => {
+            t.sequence_values::<mlua::Value>().collect::<mlua::Result<Vec<_>>>().unwrap_or_default()
+        }
+        Some(mlua::Value::Nil) | None => Vec::new(),
+        Some(other) => vec![other],
+    }
+}
+
 pub(crate) fn stringify_arg(v: &mlua::Value) -> String {
     match v {
         mlua::Value::String(s) => s.to_string_lossy().to_string(),
         mlua::Value::Integer(i) => i.to_string(),
         mlua::Value::Number(n) => n.to_string(),
         mlua::Value::Boolean(b) => b.to_string(),
+        // A GUID now arrives as lightuserdata (see [`crate::guid`]), not `Value::Integer`. Render
+        // the handle it carries, so the recorded-command log keeps printing `Ns.Verb(268435456,…)`
+        // instead of silently dropping every handle it used to show.
+        mlua::Value::LightUserData(ud) => crate::guid::stringify_light_userdata(*ud),
         _ => String::new(),
     }
 }

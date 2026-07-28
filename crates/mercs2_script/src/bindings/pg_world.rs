@@ -24,7 +24,7 @@
 use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 /// Registry row 19 (`0x00DFD55C`) names this table **`Junk`** — not `PgWorld`, and not part of `Pg`.
@@ -103,29 +103,31 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "Search",
         lua.create_function(|lua, _: MultiValue| lua.create_table())?,
     )?;
-    // Spawns return a guid; 0 = "no object" until the world seam exists.
+    // Spawns return an object guid; `Guid::NONE` = "no object" until the world seam exists. It pushes
+    // nil rather than the integer 0 the earlier body pushed — 0 is truthy in Lua, so a caller's
+    // `if uSpawned then` used to take the success branch on a failed spawn.
     b.stub(
         "SpawnHomingProjectile",
-        lua.create_function(|_, _: MultiValue| Ok(0i64))?,
+        lua.create_function(|_, _: MultiValue| Ok(Guid::NONE))?,
     )?;
     b.stub(
         "SpawnWithModel",
-        lua.create_function(|_, _: MultiValue| Ok(0i64))?,
+        lua.create_function(|_, _: MultiValue| Ok(Guid::NONE))?,
     )?;
     // CreateRegion(name, x, y, z, radius) → the real trigger-region registry; returns the handle.
     let h = host.clone();
     b.real("CreateRegion", lua.create_function(move |_, (name, x, y, z, radius): (String, f32, f32, f32, Option<f32>)| {
-        Ok(h.borrow_mut().pg_create_region(&name, [x, y, z], radius.unwrap_or(0.0)) as i64)
+        Ok(Guid(h.borrow_mut().pg_create_region(&name, [x, y, z], radius.unwrap_or(0.0))))
     })?)?;
 
     // Alarms → the real alarm state.
     let h = host.clone();
-    b.real("ActivateAlarm", lua.create_function(move |_, (guid, on): (i64, Option<bool>)| {
-        h.borrow_mut().pg_alarm_set(guid as u64, on.unwrap_or(true));
+    b.real("ActivateAlarm", lua.create_function(move |_, (guid, on): (Guid, Option<bool>)| {
+        h.borrow_mut().pg_alarm_set(guid.raw(), on.unwrap_or(true));
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("ToggleAlarm", lua.create_function(move |_, guid: i64| Ok(h.borrow_mut().pg_alarm_toggle(guid as u64)))?)?;
+    b.real("ToggleAlarm", lua.create_function(move |_, guid: Guid| Ok(h.borrow_mut().pg_alarm_toggle(guid.raw())))?)?;
 
     // Install-manager + script/data loaders + misc actions → recorded Pg commands the world/install
     // runtime drains.

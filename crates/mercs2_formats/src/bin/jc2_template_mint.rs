@@ -258,9 +258,13 @@ fn parse_info_name(info: &[u8]) -> Option<String> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
-        "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
-    });
+    let path = std::env::args().nth(1).map(std::path::PathBuf::from)
+        .or_else(mercs2_formats::game_paths::vz_wad_from_env)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            eprintln!("usage: <this> <vz.wad> [...]  — or set MERCS2_GAME_DIR / VZ_WAD");
+            std::process::exit(1)
+        });
     let mut f = File::open(&path).unwrap_or_else(|_| panic!("open {path}"));
     let size = f.metadata().unwrap().len();
     let arch = load_ffcs_archive(&mut f, size).expect("ffcs");

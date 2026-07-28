@@ -16,7 +16,7 @@ fn main() {
     let names: Vec<String> = if args.is_empty() {
         vec!["ch_veh_tank_ztz98".into(), "vz_veh_tank_scorpion90".into(), "civ_veh_car_van_crappy".into()]
     } else { args };
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
 
     for name in &names {
         let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));

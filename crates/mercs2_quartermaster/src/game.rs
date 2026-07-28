@@ -87,6 +87,22 @@ impl std::error::Error for GameStackError {}
 /// Env var holding an explicit `vz.wad` path — the highest-priority override.
 pub const VZ_WAD_ENV: &str = "MERCS2_VZ_WAD";
 
+/// Every environment variable [`discover_from`] consults, in precedence order.
+///
+/// `MERCS2_VZ_WAD` is this crate's own name; the other two are the workspace-wide ones
+/// (`mercs2_formats::game_paths::GAME_DIR_VARS`). All are honoured so a user sets ONE variable and
+/// every tool in the repo finds the same install.
+///
+/// This is a `const` rather than three literals at the use site because the tests below must skip when
+/// **any** of them is set — a guard that named only one silently stopped testing the config walk-up the
+/// moment another was exported.
+pub const ENV_VARS: [&str; 3] = [VZ_WAD_ENV, "MERCS2_GAME_DIR", "VZ_WAD"];
+
+/// True when any [`ENV_VARS`] override is active, i.e. when the lower-priority sources are unreachable.
+pub fn env_override_active() -> bool {
+    ENV_VARS.iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
+}
+
 /// Machine-local, git-ignored config naming the install. Written by `scripts/find-vz-wad.sh`.
 pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
 
@@ -113,14 +129,20 @@ pub struct Discovered {
 /// Shipment build cannot silently pick up an install nobody chose.
 ///
 /// Order, first hit wins:
-/// 1. `MERCS2_VZ_WAD`
+/// 1. [`ENV_VARS`] — `MERCS2_VZ_WAD`, `MERCS2_GAME_DIR`, `VZ_WAD`; each takes the install root, its
+///    `data` folder, or the `vz.wad` file itself
 /// 2. `.mercs2-local.toml` (`vz_wad = "…"`), searched upward from `start`
 /// 3. co-located `Mercenaries2.exe` next to the running binary, then `data/vz.wad`
 /// 4. the EA registry key (Windows only — the other arm returns `None`, which is why 2 and 3 exist)
 pub fn discover_from(start: &Path) -> Option<Discovered> {
-    if let Some(p) = std::env::var_os(VZ_WAD_ENV) {
-        let path = PathBuf::from(p);
-        if path.is_file() {
+    // See [`ENV_VARS`]: the three names had forked, and quartermaster saw neither of the other two.
+    for var in ENV_VARS {
+        let Some(p) = std::env::var_os(var).filter(|s| !s.is_empty()) else { continue };
+        // A folder is accepted as well as a file: the install root or its `data` folder. Requiring the
+        // full `…/data/vz.wad` is the papercut, and a folder is the form users actually have.
+        // The dir-or-file rule is `game_paths`' to own — what "a path to the game" means should have
+        // exactly one definition, and this was a verbatim copy of it.
+        if let Some(path) = mercs2_formats::game_paths::wad_under(&PathBuf::from(p), "vz.wad") {
             return Some(Discovered { path, origin: Origin::Env });
         }
     }
@@ -376,8 +398,8 @@ mod tests {
         let deep = dir.join("a/b/c");
         std::fs::create_dir_all(&deep).unwrap();
 
-        // Only meaningful when the env override is absent — it outranks the config by design.
-        if std::env::var_os(VZ_WAD_ENV).is_none() {
+        // Only meaningful when NO env override is set — every one of them outranks the config by design.
+        if !env_override_active() {
             let found = discover_from(&deep).expect("should walk up to the config");
             assert_eq!(found.origin, Origin::LocalConfig);
             assert_eq!(found.path, wad);
@@ -389,7 +411,7 @@ mod tests {
         let dir = scratch("missing");
         std::fs::write(dir.join(LOCAL_CONFIG), "vz_wad = \"/nope/vz.wad\"\n").unwrap();
         assert_eq!(read_local_config(&dir.join(LOCAL_CONFIG)), Some(PathBuf::from("/nope/vz.wad")));
-        if std::env::var_os(VZ_WAD_ENV).is_none() {
+        if !env_override_active() {
             // discover_from must not return a path that does not exist.
             assert!(discover_from(&dir).is_none_or(|d| d.path.is_file()));
         }

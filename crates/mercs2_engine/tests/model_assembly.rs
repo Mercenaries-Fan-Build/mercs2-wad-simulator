@@ -14,7 +14,7 @@ use mercs2_engine::wad;
 use mercs2_formats::orchestrator as orch;
 
 fn open_wad() -> Option<wad::Wad> {
-    wad::registry_vz_wad().and_then(|p| wad::open(&p).ok())
+    wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok())
 }
 
 /// Triangles the full three-clause gate admits at a LOD rung, at a given health.

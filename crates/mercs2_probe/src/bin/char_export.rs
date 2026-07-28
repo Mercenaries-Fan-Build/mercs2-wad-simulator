@@ -140,7 +140,7 @@ fn main() {
     let want_per_clip = getflag("--per-clip") || !getflag("--combined");
     let want_combined = getflag("--combined") || !getflag("--per-clip");
 
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
     let m = Model::load(&mut w, model_hash).expect("load model");
     let (verts, indices, draws, stats) = m.flatten();
     let rig = &stats.rig;

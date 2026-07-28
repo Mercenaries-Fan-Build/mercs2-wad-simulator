@@ -945,6 +945,314 @@ pub fn c3_cell_centre(cell_id: u32) -> (f32, f32) {
     (x, z)
 }
 
+/// One transit landing pad, as the world data authors it: the `LandingZone` COMP record joined to the
+/// same entity's `Transform` (+ `Name`, when it carries one).
+///
+/// This is what `Pg.GetAllLandingZones(nSlot)` enumerates. `MrxTransit.Reset`
+/// (`corpus/mercs2-luacd/src/resident/mrxtransit.lua:328-342`) calls it twice — once per co-op player
+/// slot — and zips the two returned lists **by table key** into
+/// `{uLocation1 = tZones1[k], uLocation2 = tZones2[k]}`, so the key is the landing-zone number
+/// ([`zone`](LandingZonePad::zone)), not a dense 1..n position: mission Lua hard-codes absolute zone
+/// numbers (`MrxTransit.SetLocationIsNuked(30, true)`, `vz/wifmissionflow.lua:1245`) and `wifhqdata`'s
+/// `nLandingZone`/`nAltLandingZone` fields enumerate 2..30.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandingZonePad {
+    /// Landing-zone number — the Lua's `nIndex` / the key of `_tLandingZones`. Sparse.
+    pub zone: u32,
+    /// Co-op player slot the pad serves (`1` or `2`) — the argument to `Pg.GetAllLandingZones`.
+    pub slot: u32,
+    /// World-data entity key of the pad object.
+    pub key: u32,
+    /// The pad's authored `Name` COMP, lowercased, when it has one. Retail vz names 45 of its 46 pads
+    /// `<zone>_<faction>_<site>_lz_player{one,two}` — the names the shipped Lua also resolves directly
+    /// (`Pg.GetGuidByName("01_pmc_hq_lz_playerone")`, `vz/wifpmcinterior.lua:2108`). Zone 12 slot 1 has
+    /// a `LandingZone` record and a `Transform` but NO `Name` record in the retail block, which is why
+    /// this is optional and why the COMP — not the name convention — is the enumeration authority.
+    pub name: Option<String>,
+    /// Authored world position (native game space, +Y up) from the entity's `Transform`.
+    pub pos: [f32; 3],
+}
+
+/// The highest WAD block index that carries placed entities.
+///
+/// Measured, not guessed: a census over `0..4000` finds **749** placement-bearing blocks and every one
+/// of them lands in `0..=750`. Bounding the scan here keeps the boot cost at a few seconds instead of
+/// the ~14 s a full 12k-block sweep takes; raise it if a future archive places entities higher.
+pub const MAX_PLACEMENT_BLOCK: u16 = 750;
+
+/// The WAD block a **layer** lives in, by layer name.
+///
+/// Layers are ordinary named assets: ASET type **9** (`aset_type_ids.rs` — `0xE6B81A54` = `layer`),
+/// keyed by `pandemic_hash_m2` of the lowercased name, exactly like models and scripts. So
+/// `Pg.LoadLayer("Vz_State_VzaCon001")` is a direct archive lookup, not something needing a side
+/// table: it resolves to **block 179**, which is where `world_name_index` finds
+/// `VzaCon001_StartingBoat`. `vz_state_VzaCon001_Pristine` → 335, `Vz_State_VzaCon001_CP01` → 247.
+///
+/// Name matching is case-insensitive because `pandemic_hash_m2` case-folds; the corpus spells the same
+/// layer `Vz_State_VzaCon001` and `vz_state_vzacon001` in different places and both must resolve.
+pub fn layer_block(w: &wad::Wad, layer_name: &str) -> Option<u16> {
+    const ASET_TYPE_LAYER: u32 = 9;
+    let h = mercs2_formats::hash::pandemic_hash_m2(&layer_name.to_ascii_lowercase());
+    wad::aset_types(w, h)
+        .into_iter()
+        .find(|(ty, _, _)| *ty == ASET_TYPE_LAYER)
+        .map(|(_, _, block)| block)
+}
+
+/// Every **named** entity in a layer, as lowercased names — the objects that "wake" when the layer
+/// streams in.
+///
+/// Returns an empty vec for a layer that does not resolve or whose block holds no placements, so a
+/// caller can treat "no such layer" and "layer with nothing named in it" alike: neither wakes anything.
+pub fn layer_object_names(w: &mut wad::Wad, layer_name: &str) -> Vec<String> {
+    let Some(block) = layer_block(w, layer_name) else { return Vec::new() };
+    let Ok(bytes) = wad::decompress_block_index(w, block) else { return Vec::new() };
+    let Ok(placements) = mercs2_formats::placement::load_placements(&bytes) else { return Vec::new() };
+    placements.into_iter().filter_map(|p| p.name.map(|n| n.to_ascii_lowercase())).collect()
+}
+
+/// Layer name → the objects it contains, precomputed so the **script host needs no WAD at runtime**.
+///
+/// `Pg.LoadLayer` arrives as a name on the Lua thread, in a host that deliberately owns no archive
+/// handle. Resolving it live would mean handing the host a `Wad` (and re-decompressing a block inside
+/// the pump); precomputing at world load keeps the seam and the frame cost where they belong.
+///
+/// Keyed by `pandemic_hash_m2` of the lowercased name rather than the string, because the corpus
+/// spells the same layer several ways (`Vz_State_VzaCon001` at `vzacon001.lua:58` vs
+/// `vz_state_vzacon001` in the layer-manager logs) and the hash is what makes those one key.
+#[derive(Debug, Default, Clone)]
+pub struct LayerIndex {
+    by_hash: std::collections::HashMap<u32, Vec<String>>,
+}
+
+impl LayerIndex {
+    /// The lowercased names of every named object in `layer_name`, or empty if unknown.
+    pub fn objects_in(&self, layer_name: &str) -> &[String] {
+        let h = mercs2_formats::hash::pandemic_hash_m2(&layer_name.to_ascii_lowercase());
+        self.by_hash.get(&h).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Number of layers indexed.
+    pub fn len(&self) -> usize {
+        self.by_hash.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_hash.is_empty()
+    }
+}
+
+/// Build the [`LayerIndex`] by walking every ASET **layer** entry (type 9) and reading that layer's
+/// block once.
+///
+/// Only layer blocks are decompressed — a few hundred, not the full archive — because the ASET table
+/// already says which blocks are layers. This is the same data `world_name_index` reads; the split is
+/// that this one preserves *which layer* each name came from, which is what turns a `Pg.LoadLayer`
+/// into a set of objects to wake.
+pub fn layer_index(w: &mut wad::Wad) -> LayerIndex {
+    const ASET_TYPE_LAYER: u32 = 9;
+    // Distinct (hash, block) layer entries. `all_asets` is already sorted+deduped.
+    let layers: Vec<(u32, u16)> = wad::all_asets(w)
+        .into_iter()
+        .filter(|(_, ty, _)| *ty == ASET_TYPE_LAYER)
+        .filter_map(|(h, _, _)| {
+            wad::aset_types(w, h)
+                .into_iter()
+                .find(|(t, _, _)| *t == ASET_TYPE_LAYER)
+                .map(|(_, _, b)| (h, b))
+        })
+        .collect();
+
+    // Group by block so each is decompressed once — 921 layers occupy only 751 blocks, and a block is
+    // multi-megabyte.
+    let mut by_block: std::collections::HashMap<u16, Vec<u32>> = std::collections::HashMap::new();
+    for (h, b) in layers {
+        by_block.entry(b).or_default().push(h);
+    }
+
+    let mut by_hash: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+    let mut shared_blocks = 0usize;
+    for (block, hashes) in by_block {
+        let Ok(dec) = wad::decompress_block_index(w, block) else { continue };
+        if hashes.len() > 1 {
+            shared_blocks += 1;
+        }
+        // Slice each layer's OWN container out of the block rather than reading the block whole.
+        //
+        // This is the difference between exact and wildly over-firing: a shared block holds several
+        // layers' containers laid end to end, so attributing the whole block to each of its layers made
+        // `vz_sfx_ambience` and `vz_poi_lineregions` each claim 5,315 objects — every named entity in
+        // the block, not the handful each actually owns. Waking objects that did not stream in fires
+        // awake-gates for missions that are not running.
+        //
+        // The block entry table (`ucfx::parse_block_entry_table`) gives `(name_hash, chunk_size)` per
+        // container, laid sequentially after the 4 + 16·N header — so a layer's bytes are addressable
+        // by its own asset hash.
+        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        let mut pos = 4 + (count as usize) * 16;
+        for e in &entries {
+            let size = e.chunk_size as usize;
+            let end = pos.saturating_add(size);
+            if end > dec.len() {
+                break;
+            }
+            if hashes.contains(&e.name_hash) {
+                if let Ok(ps) = mercs2_formats::placement::load_placements(&dec[pos..end]) {
+                    let names: Vec<String> =
+                        ps.into_iter().filter_map(|p| p.name.map(|s| s.to_ascii_lowercase())).collect();
+                    if !names.is_empty() {
+                        by_hash.insert(e.name_hash, names);
+                    }
+                }
+            }
+            pos = end;
+        }
+    }
+    println!(
+        "[world] layer index: {} layers with named objects ({shared_blocks} block(s) hold more than one \
+         layer; each layer reads only its own container)",
+        by_hash.len()
+    );
+    LayerIndex { by_hash }
+}
+
+/// The world's **complete** name → position index, across every placement-bearing block.
+///
+/// # Why this exists
+///
+/// `Pg.GetGuidByName` is the engine's universal object lookup — **1240 corpus call sites**, more than
+/// any other binding. We were building its index from `layers_static` (block 29) alone, which is
+/// 62,143 of the world's 100,535 named entities. The other ~38,000 live in the 748 *streamed-layer*
+/// blocks, and every one of them silently resolved to nil.
+///
+/// That is not an abstract gap. `VzaCon001` gates its `AssetsLoaded` on an `ObjectHibernation` event
+/// for `Pg.GetGuidByName("VzaCon001_StartingBoat")`
+/// (`corpus/mercs2-luacd/src/vz/vzacon001.lua:66-119`); the boat is in **block 179** at
+/// `[-1726.98, -36.35, 2068.80]`, so the boot parked forever on a name the archive had all along.
+///
+/// No new parsing was needed — `placement::load_placements` reads a streamed-layer block unchanged
+/// (block 179: 116 placements, 116 named). The reader was never the gap; the caller was.
+///
+/// # Precedence
+///
+/// `layers_static` wins a name collision: it is the always-resident set, and a streamed layer that
+/// reuses a name is the transient one. Later blocks otherwise do not overwrite earlier ones, so the
+/// index is deterministic regardless of iteration order.
+///
+/// # Case
+///
+/// Keys are lowercased. This is not a convenience — it is what the engine does. `pandemic_hash_m2`
+/// ORs `0x20` into every byte before mixing (`FUN_00824270`), so retail's name lookup cannot tell
+/// `Vza_Boat` from `vza_boat`; they are one name to it. A case-sensitive index would hold two entries
+/// where the engine holds one, and which of them a script reached would depend on the caller's
+/// spelling. Callers key on the lowercase form (`mercs2_game::world` does at the hero-spawn marker
+/// resolve); the authored spelling is not preserved because nothing downstream can act on it.
+pub fn world_name_index(
+    w: &mut wad::Wad,
+    layers_static: &[u8],
+) -> std::collections::HashMap<String, [f32; 3]> {
+    let mut index: std::collections::HashMap<String, [f32; 3]> = std::collections::HashMap::new();
+    let mut blocks = 0usize;
+
+    // Seed from `layers_static` FIRST so it wins every collision — `or_insert` below is
+    // first-writer-wins, and seeding here is what makes the precedence rule true rather than an
+    // accident of block ordering.
+    if let Ok(p) = mercs2_formats::placement::load_placements(layers_static) {
+        for x in p {
+            if let Some(name) = x.name {
+                index.insert(name.to_ascii_lowercase(), x.pos);
+            }
+        }
+        blocks += 1;
+    }
+
+    for idx in 0..=MAX_PLACEMENT_BLOCK {
+        let Ok(b) = wad::decompress_block_index(w, idx) else { continue };
+        // Cheap reject before the (much more expensive) COMP walk.
+        if !b.windows(4).any(|x| x == b"UCFX") {
+            continue;
+        }
+        let Ok(placements) = mercs2_formats::placement::load_placements(&b) else { continue };
+        let mut named_here = 0usize;
+        for p in placements {
+            let Some(name) = p.name else { continue };
+            named_here += 1;
+            index.entry(name.to_ascii_lowercase()).or_insert(p.pos);
+        }
+        if named_here > 0 {
+            blocks += 1;
+        }
+    }
+    println!("[world] name index: {} names across {blocks} placement blocks", index.len());
+    index
+}
+
+/// **TEST FIXTURE ONLY** — the retail `vz` landing pads, from `data/retail_landing_zones.tsv`.
+///
+/// `#[cfg(test)]` deliberately, and it must stay that way: this cannot be compiled into the shipping
+/// game, so extracted world data can never become a route to playing without owning the game. The
+/// game reads its pads from the player's own archive via [`landing_zone_pads`]
+/// (`mercs2_game::world`), and never consults this. If a runtime path ever wants these, read the
+/// WAD — do not reach for this function.
+///
+/// It exists because `Pg.GetAllLandingZones` is answered from WORLD DATA while the Lua corpus holds
+/// only references to it (a zone number, a name to resolve). A test host with the corpus and no
+/// archive therefore cannot get past `MrxTransit.Reset`. See the file header for full provenance.
+///
+/// [`landing_zone_pads_match_the_vendored_table`](self::schema_wire_tests) re-derives the table from
+/// the WAD whenever one is present and fails on any drift, so it cannot silently diverge.
+#[cfg(test)]
+pub fn retail_landing_zone_pads() -> Vec<LandingZonePad> {
+    let mut out: Vec<LandingZonePad> = include_str!("../data/retail_landing_zones.tsv")
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let zone = f.next()?.parse().ok()?;
+            let slot = f.next()?.parse().ok()?;
+            let key = f.next()?.parse().ok()?;
+            let name = f.next()?;
+            let pos = [
+                f.next()?.parse().ok()?,
+                f.next()?.parse().ok()?,
+                f.next()?.parse().ok()?,
+            ];
+            // An EMPTY name is meaningful, not missing: retail zone 12 slot 1 ships without a `Name`
+            // COMP, and collapsing that to `Some("")` would invent a name the archive does not have.
+            let name = (!name.is_empty()).then(|| name.to_string());
+            Some(LandingZonePad { zone, slot, key, name, pos })
+        })
+        .collect();
+    out.sort_by_key(|p| (p.zone, p.slot));
+    out
+}
+
+/// Every transit landing pad in a decompressed `layers_static` block, sorted by `(zone, slot)`.
+///
+/// The `LandingZone` COMP (`mercs2_formats::placement::load_landing_zones`) is the authority on which
+/// entities are pads and what zone/slot each serves; this joins each record to its `Transform`/`Name`
+/// by entity key so the caller can entity-ize it. Records whose key has no `Transform` are dropped —
+/// a pad with no world position is not addressable by `Object.GetPosition`, which every consumer of
+/// `Pg.GetAllLandingZones` reaches for (`mrxtransit.lua:104,189`).
+///
+/// Retail vz yields 46 pads: 23 zones (`1..8, 12, 15..18, 20..25, 27..30`) × 2 player slots.
+pub fn landing_zone_pads(layers_static: &[u8]) -> Vec<LandingZonePad> {
+    let mut xf: std::collections::HashMap<u32, ([f32; 3], Option<String>)> =
+        std::collections::HashMap::new();
+    for p in mercs2_formats::placement::load_placements(layers_static).unwrap_or_default() {
+        xf.entry(p.key).or_insert((p.pos, p.name.map(|n| n.to_ascii_lowercase())));
+    }
+    let mut out: Vec<LandingZonePad> = mercs2_formats::placement::load_landing_zones(layers_static)
+        .into_iter()
+        .filter_map(|r| {
+            let (pos, name) = xf.get(&r.key)?.clone();
+            Some(LandingZonePad { zone: r.zone, slot: r.slot, key: r.key, name, pos })
+        })
+        .collect();
+    out.sort_by_key(|p| (p.zone, p.slot));
+    out
+}
 
 /// Interior STATE/placement overlay (`vz_state_pmcinterior_P000_Q3.block`): 104 Transform records,
 /// authored around the spawn (floor Y≈450.8), each keying a named interior instance (cots, planters,
@@ -965,8 +1273,294 @@ pub const PMC_INTERIOR_ENTITIES: &[(u32, &str)] = &[
 ];
 
 #[cfg(test)]
-mod schema_wire_tests {
+pub(crate) mod schema_wire_tests {
     use super::*;
+
+    /// The retail `layers_static` block, or `None` when the game data isn't on this machine (CI).
+    /// Shared by the live tests below; `VZ_WAD` overrides the default install path.
+    pub(crate) fn retail_layers_static() -> Option<Vec<u8>> {
+        let path = crate::wad::resolve_vz_wad(None)?;
+        if std::fs::metadata(&path).is_err() {
+            return None;
+        }
+        let mut w = crate::wad::open(&path).ok()?;
+        find_terrain_blocks(&mut w).ok().map(|(_low, ls)| ls)
+    }
+
+    /// The transit landing pads read out of the REAL retail `LandingZone` COMP. SKIPS (passes) when
+    /// vz.wad is absent.
+    ///
+    /// Every number here is measured from the shipped block, and each is separately corroborated by the
+    /// vendored Lua, which is what makes them assertable rather than merely observed:
+    /// - 46 records = 23 zones × 2 co-op player slots.
+    /// - The zone set `1..8, 12, 15..18, 20..25, 27..30` is exactly the set `vz/wifhqdata.lua`'s
+    ///   `nLandingZone`/`nAltLandingZone` fields reference (`docs/mercs2-luacd/04_tutorials_wifdata.md`
+    ///   §2.5); the seven gaps appear nowhere in the corpus.
+    /// - 45 of 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
+    ///   names the shipped Lua also resolves by hand (`resident/mrxsupport.lua:606-610`,
+    ///   `vz/wifpmcinterior.lua:2108`). Zone 12 slot 1 ships without one.
+    /// The world name index spans **streamed-layer blocks**, not just `layers_static`.
+    ///
+    /// The regression this pins: `Pg.GetGuidByName("VzaCon001_StartingBoat")` returned nil, which
+    /// parked the boot forever — `VzaCon001` gates `AssetsLoaded` on an `ObjectHibernation` event for
+    /// that boat (`corpus/mercs2-luacd/src/vz/vzacon001.lua:66-119`). The name was in the archive the
+    /// whole time, in block 179; we were only ever reading block 29.
+    ///
+    /// SKIPS (passes) when vz.wad is absent.
+    #[test]
+    fn live_world_name_index_spans_streamed_layers() {
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("[skip] vz.wad not present — name-index test skipped");
+        };
+        let Ok(mut w) = crate::wad::open(&path) else {
+            return eprintln!("[skip] vz.wad would not open");
+        };
+        let Some(ls) = retail_layers_static() else { return };
+        let index = world_name_index(&mut w, &ls);
+
+        // Keys are case-folded the way `pandemic_hash_m2` folds them, so the authored spelling misses
+        // and the lowercase form hits. Pinning both directions keeps the contract from drifting.
+        assert!(index.get("VzaCon001_StartingBoat").is_none(), "keys are lowercased, not as-authored");
+
+        // A `layers_static` name still resolves — the streamed blocks must not displace the resident set.
+        let start = index.get("vzacon001_start1").copied();
+        assert!(start.is_some(), "layers_static names survive the merge");
+
+        // ...and the streamed-layer name that was stalling the boot now resolves, at its authored spot.
+        let boat = index
+            .get("vzacon001_startingboat")
+            .copied()
+            .expect("VzaCon001_StartingBoat lives in block 179 and must be indexed");
+        assert!(
+            (boat[0] - -1726.98).abs() < 1.0
+                && (boat[1] - -36.35).abs() < 1.0
+                && (boat[2] - 2068.80).abs() < 1.0,
+            "the boat's authored position, not a placeholder; got {boat:?}"
+        );
+
+        // The boat sits beside the mission's own start marker — a sanity check that the two blocks'
+        // coordinates share one space rather than being independently plausible.
+        let start = start.unwrap();
+        let d = ((boat[0] - start[0]).powi(2) + (boat[2] - start[2]).powi(2)).sqrt();
+        assert!(d < 50.0, "boat and VzaCon001_Start1 should be adjacent; {d} m apart");
+
+        // Strictly richer than `layers_static` alone. Compare UNIQUE NAMES to unique names: the census
+        // figures (62,143 named placements in block 29, 100,535 across all 749) count *placements*, and
+        // world names repeat heavily across blocks — the merged index is ~10k distinct names, not 100k.
+        let static_only: std::collections::HashSet<String> =
+            mercs2_formats::placement::load_placements(&ls)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| p.name.map(|n| n.to_ascii_lowercase()))
+                .collect();
+        assert!(
+            index.len() > static_only.len(),
+            "merged index ({}) must exceed layers_static alone ({})",
+            index.len(),
+            static_only.len()
+        );
+        assert!(
+            !static_only.contains("vzacon001_startingboat"),
+            "the boat must NOT be in layers_static — that is the whole point of scanning further"
+        );
+    }
+
+    #[test]
+    fn live_landing_zone_pads_if_wad_present() {
+        let Some(ls) = retail_layers_static() else {
+            return eprintln!("skip: vz.wad not present — landing-zone pad test skipped");
+        };
+        let pads = landing_zone_pads(&ls);
+        assert_eq!(pads.len(), 46, "retail vz authors 23 landing zones × 2 player slots");
+
+        let zones: Vec<u32> = {
+            let mut z: Vec<u32> = pads.iter().map(|p| p.zone).collect();
+            z.dedup();
+            z
+        };
+        assert_eq!(
+            zones,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30],
+            "the sparse zone set the shipped Lua indexes by absolute number"
+        );
+
+        // Exactly one pad per (zone, slot); slots are only ever 1 or 2.
+        for z in &zones {
+            let mut slots: Vec<u32> = pads.iter().filter(|p| p.zone == *z).map(|p| p.slot).collect();
+            slots.sort_unstable();
+            assert_eq!(slots, vec![1, 2], "zone {z} must have one pad per player slot");
+        }
+
+        // The name convention, where a name exists: `<zone>_…_lz_player{one,two}`.
+        let named = pads.iter().filter(|p| p.name.is_some()).count();
+        assert_eq!(named, 45, "45 of the 46 retail pads carry a Name COMP");
+        for p in pads.iter().filter(|p| p.name.is_some()) {
+            let n = p.name.as_deref().unwrap();
+            let want_slot = if p.slot == 1 { "_playerone" } else { "_playertwo" };
+            assert!(
+                n.starts_with(&format!("{:02}_", p.zone)),
+                "pad name {n:?} must be prefixed with its zone number ({})",
+                p.zone
+            );
+            // Only the `player{one,two}` tail is asserted: zone 3 slot 1 ships as
+            // `03_mar_airport_llz_playerone` — a typo in the retail data, reproduced not repaired.
+            assert!(n.ends_with(want_slot), "pad name {n:?} must end with {want_slot}");
+        }
+
+        // Every pad has a distinct authored position (they are physical touchdown spots).
+        let mut seen = std::collections::HashSet::new();
+        for p in &pads {
+            let key = (p.pos[0].to_bits(), p.pos[1].to_bits(), p.pos[2].to_bits());
+            assert!(seen.insert(key), "two pads share a position: {p:?}");
+        }
+    }
+
+    /// The landing zones a LIVE RETAIL RUN reports, transcribed from the PMC Blackbox capture
+    /// `game-files/pmc_blackbox-mattias-save-end-game.log` (an ASI loader hooking the shipped build's
+    /// stripped `Debug.Printf`). Each line is `MrxTransit.LoadSingleton` replaying the SAVE's transit
+    /// blob — `mrxtransit.lua:399` in the vendored corpus:
+    ///
+    /// ```text
+    /// [lua] Landing zone 28 affiliated with Pir (nil)  @mrxtransit:669
+    /// ```
+    ///
+    /// so this is the end-game save's faction ownership, not authored world data. It is transcribed
+    /// rather than parsed at test time because the capture is a 500 KB machine-local artifact; the
+    /// zone/faction pairs are the whole of what it contributes.
+    const RETAIL_CAPTURE_AFFILIATIONS: [(u32, &str); 22] = [
+        (1, "Pmc"), (2, "Oil"), (3, "Oil"), (4, "Gur"), (5, "Gur"), (7, "All"), (8, "Pir"),
+        (12, "Chi"), (15, "Oil"), (16, "Oil"), (17, "Gur"), (18, "Gur"), (20, "All"), (21, "All"),
+        (22, "All"), (23, "Chi"), (24, "Chi"), (25, "Chi"), (27, "Pir"), (28, "Pir"), (29, "Oil"),
+        (30, "Chi"),
+    ];
+
+    /// **The vendored pad table is byte-for-byte what the archive holds.**
+    ///
+    /// `retail_landing_zone_pads()` exists so a checkout without vz.wad still boots against REAL
+    /// world data. That is only true while the file actually matches the archive, so this re-derives
+    /// it from the WAD and compares every field of every record — zone, slot, entity key, name and
+    /// authored position. Any drift (a re-extraction, a hand edit, a change in
+    /// `load_landing_zones`) fails here rather than silently turning the vendored copy into fiction.
+    ///
+    /// SKIPS (passes) when vz.wad is absent — which is exactly the situation the table is for.
+    #[test]
+    fn landing_zone_pads_match_the_vendored_table() {
+        let Some(ls) = retail_layers_static() else {
+            return eprintln!("skip: vz.wad not present — vendored landing-zone parity skipped");
+        };
+        let from_wad = landing_zone_pads(&ls);
+        let vendored = retail_landing_zone_pads();
+        assert_eq!(
+            vendored.len(),
+            from_wad.len(),
+            "vendored table has {} pads, the archive has {}",
+            vendored.len(),
+            from_wad.len()
+        );
+        for (v, w) in vendored.iter().zip(from_wad.iter()) {
+            assert_eq!((v.zone, v.slot), (w.zone, w.slot), "pad identity drifted");
+            assert_eq!(v.key, w.key, "zone {} slot {}: entity key drifted", v.zone, v.slot);
+            assert_eq!(v.name, w.name, "zone {} slot {}: name drifted", v.zone, v.slot);
+            // Positions round-trip through 7 significant digits in the TSV, so compare at that
+            // precision rather than demanding exact bit equality of a reparsed float.
+            for k in 0..3 {
+                assert!(
+                    (v.pos[k] - w.pos[k]).abs() <= w.pos[k].abs() * 1e-6 + 1e-3,
+                    "zone {} slot {}: axis {k} drifted ({} vs {})",
+                    v.zone, v.slot, v.pos[k], w.pos[k]
+                );
+            }
+        }
+    }
+
+    /// The vendored table stands on its own without a WAD: it really is the full retail set.
+    ///
+    /// Runs everywhere — this is the invariant the corpus-only boot depends on.
+    #[test]
+    fn vendored_landing_zones_are_the_full_retail_set() {
+        let pads = retail_landing_zone_pads();
+        assert_eq!(pads.len(), 46, "23 zones × 2 co-op player slots");
+        let zones: Vec<u32> = {
+            let mut z: Vec<u32> = pads.iter().map(|p| p.zone).collect();
+            z.dedup();
+            z
+        };
+        assert_eq!(
+            zones,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30],
+            "the sparse zone set the shipped Lua indexes by absolute number"
+        );
+        for z in &zones {
+            let mut slots: Vec<u32> = pads.iter().filter(|p| p.zone == *z).map(|p| p.slot).collect();
+            slots.sort_unstable();
+            assert_eq!(slots, vec![1, 2], "zone {z} must have one pad per player slot");
+        }
+        // 45 of 46 named; zone 12 slot 1 ships without a `Name` COMP.
+        assert_eq!(pads.iter().filter(|p| p.name.is_some()).count(), 45);
+        let unnamed: Vec<(u32, u32)> =
+            pads.iter().filter(|p| p.name.is_none()).map(|p| (p.zone, p.slot)).collect();
+        assert_eq!(unnamed, vec![(12, 1)], "zone 12 slot 1 is the one unnamed retail pad");
+        // Distinct authored positions — they are physical touchdown spots, not placeholders.
+        let mut seen = std::collections::HashSet::new();
+        for p in &pads {
+            assert!(seen.insert(p.pos.map(f32::to_bits)), "two vendored pads share a position: {p:?}");
+        }
+    }
+
+    /// **Cross-check of the `LandingZone` COMP against a live retail run.**
+    ///
+    /// `live_landing_zone_pads_if_wad_present` above proves what the shipped WORLD DATA authors. This
+    /// proves the same set is what the shipped GAME actually enumerates at runtime, from a completely
+    /// independent source: a hooked-log capture of retail play. Two sources that could disagree and
+    /// do not.
+    ///
+    /// The one difference is the interesting part. The capture affiliates 22 zones; the COMP authors
+    /// 23. The missing one is zone **6**, and `mrxtransit.lua`'s `Reset` singles out exactly that zone:
+    ///
+    /// ```lua
+    /// if _tLandingZones[6] then
+    ///   _tLandingZones[6].bFake = true
+    /// end
+    /// ```
+    ///
+    /// A fake pad is never faction-affiliated, so it never reaches the `LoadSingleton` print. The
+    /// capture and the shipped script therefore corroborate each other on the one zone where the two
+    /// enumerations differ, which is what makes 23-vs-22 evidence rather than a discrepancy.
+    ///
+    /// SKIPS (passes) when vz.wad is absent.
+    #[test]
+    fn retail_capture_corroborates_the_authored_landing_zone_set() {
+        let Some(ls) = retail_layers_static() else {
+            return eprintln!("skip: vz.wad not present — retail-capture cross-check skipped");
+        };
+        let authored: std::collections::BTreeSet<u32> =
+            landing_zone_pads(&ls).iter().map(|p| p.zone).collect();
+        let captured: std::collections::BTreeSet<u32> =
+            RETAIL_CAPTURE_AFFILIATIONS.iter().map(|(z, _)| *z).collect();
+
+        const FAKE_ZONE: u32 = 6; // mrxtransit.lua Reset(): `_tLandingZones[6].bFake = true`
+        assert!(
+            !captured.contains(&FAKE_ZONE),
+            "zone {FAKE_ZONE} is the bFake pad; a live run must never affiliate it"
+        );
+        assert_eq!(
+            authored.difference(&captured).copied().collect::<Vec<u32>>(),
+            vec![FAKE_ZONE],
+            "the ONLY authored zone a live run does not affiliate is the fake one"
+        );
+        assert!(
+            captured.is_subset(&authored),
+            "every zone the live game enumerated must exist in the authored COMP; strays: {:?}",
+            captured.difference(&authored).collect::<Vec<_>>()
+        );
+
+        // The affiliations name real factions — the abbreviations `MrxFactionManager.GetFactionAbbrevs`
+        // returns, which the same capture lists as it arms each one's attitude events.
+        const FACTIONS: [&str; 8] = ["All", "Chi", "Civ", "Gur", "Oil", "Pir", "Pmc", "Vza"];
+        for (zone, faction) in RETAIL_CAPTURE_AFFILIATIONS {
+            assert!(FACTIONS.contains(&faction), "zone {zone}: unknown faction {faction:?}");
+        }
+    }
 
     /// Live end-to-end proof that the E1 schema deserializer is wired into the world-load path and
     /// that the S5 RegionCache is populated (seams A + B). SKIPS (passes) when vz.wad is absent so CI
@@ -980,9 +1574,11 @@ mod schema_wire_tests {
     ///      `update_regions` at a region's anchor caches that region IN.
     #[test]
     fn live_schema_and_region_wire_if_wad_present() {
-        let path = std::env::var("VZ_WAD").unwrap_or_else(|_| {
-            "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
-        });
+        // Resolved, never hardcoded: `$VZ_WAD` (a folder or the file) then the registry key. The old
+        // literal install path could not resolve off Windows, so this test silently never ran there.
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found (set VZ_WAD to the install folder or the file)");
+        };
         if std::fs::metadata(&path).is_err() {
             eprintln!("skip: vz.wad not present at {path}");
             return;
@@ -1054,3 +1650,4 @@ mod schema_wire_tests {
         None
     }
 }
+

@@ -9,11 +9,16 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("VO")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, MultiValue, Result as LuaResult, Value};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
+/// A VO line's voice id, `0` → nil.
+///
+/// Deliberately **not** a [`Guid`]: the id is minted by the VO manager, not by the engine's GUID
+/// allocator, and nothing in the corpus round-trips it — `VO.Cancel` addresses a line by
+/// `(speaker, cue)`, not by the value `VO.Cue` returned, and no call site type-checks it.
 fn voice_opt(v: u64) -> Option<i64> {
     if v == 0 { None } else { Some(v as i64) }
 }
@@ -48,18 +53,27 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
     let h = host.clone();
-    b.real("Cue", lua.create_function(move |_, (_speaker, cue, _rest): (i64, String, MultiValue)| {
+    b.real("Cue", lua.create_function(move |_, (_speaker, cue, _rest): (Guid, String, MultiValue)| {
         Ok(voice_opt(h.borrow_mut().vo_cue(&cue)))
     })?)?;
     let h = host.clone();
-    b.real("CueWithoutSubtitles", lua.create_function(move |_, (_speaker, cue, _rest): (i64, String, MultiValue)| {
+    b.real("CueWithoutSubtitles", lua.create_function(move |_, (_speaker, cue, _rest): (Guid, String, MultiValue)| {
         Ok(voice_opt(h.borrow_mut().vo_cue(&cue)))
     })?)?;
 
     // Cancel / pause / cinematic-mode → the real VoManager (via the host AudioEngine).
     let h = host.clone();
-    b.real("Cancel", lua.create_function(move |_, (_speaker, cue): (Option<i64>, String)| {
-        h.borrow_mut().vo_cancel(&cue);
+    // ⚠ `VO.Cancel(uSpeaker, [vCue])` — argument 2 is **not always a cue name**: `mrxfactionmanager.lua:957,1121`
+    // pass `false`, `wifpmcinterior.lua:1775` omits it entirely, and only `gurpodium.lua:109` /
+    // `mrxvosequence.lua:205` pass a cue. A `String` parameter raised on the first two shapes, so this
+    // reads a `Value` and cancels by name only when one was actually given (otherwise: cancel whatever
+    // that speaker is saying — modelled as the no-name cancel the VoManager already has).
+    b.real("Cancel", lua.create_function(move |_, (_speaker, cue): (Guid, Option<Value>)| {
+        let name = match cue {
+            Some(Value::String(s)) => s.to_string_lossy(),
+            _ => String::new(),
+        };
+        h.borrow_mut().vo_cancel(&name);
         Ok(())
     })?)?;
     let h = host.clone();

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 fn main() {
     let name = std::env::args().nth(1).unwrap_or_else(|| "ch_veh_tank_ztz98".into());
     let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
     let lods = wad::extract_model_lods(&mut w, hash).expect("lod chain");
 
     let resident = &lods[0].container;

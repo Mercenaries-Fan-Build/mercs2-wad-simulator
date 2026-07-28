@@ -16,7 +16,7 @@ fn main() {
     };
     let clip_hash = hx(&args.get(1)).unwrap_or(0x8EE5_BA8B);
     let mhash = hx(&args.get(2)).unwrap_or(0xA3C1_FABC);
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     let m = Model::load(&mut w, mhash).expect("load model");
     let (_v, _i, _d, stats) = m.flatten();

@@ -5,8 +5,9 @@
 //! game's Lua `SaveSingleton` state (cash / fuel / faction / mission tables).
 //!
 //! This module reverses the header fields that are grounded either in a
-//! byte-for-byte diff of the six retail saves under
-//! `My Games/Mercenaries 2/SaveGames/*.profile` or in the engine save symbols
+//! byte-for-byte diff of the **eight retail saves vendored at `fixtures/saves`**
+//! (see that directory's README; reached via
+//! [`crate::game_paths::save_fixtures`], never a hardcoded path) or in the engine save symbols
 //! (`docs/mercs2-pdb-analysis/game-systems.md`: `ProfileHash`, `SetLuaSaveVersion`,
 //! `SetProfileCostume`, `saveProfile`, ...). Fields whose *meaning* is not
 //! grounded are named `unknown_<offset>` or flagged `INFERRED`.
@@ -337,11 +338,75 @@ pub struct SaveState {
     /// (`"[vehicle.wz10]"`, `"[support.airstrike.fuelairbomb.name]"`, …), may be
     /// empty. FACT (matches `savefile_parser.py` vehicle/support harvest).
     pub equipped_support: Vec<String>,
+    /// `tTransitData.bEnabled` — whether the transit (fast-travel) system is switched on at all.
+    /// `MrxTransit.LoadSingleton` passes it straight to `SetSystemEnabled`. FACT.
+    pub transit_enabled: bool,
+    /// `tTransitData[n]` — per-landing-zone transit state, sorted by zone. FACT.
+    ///
+    /// Retail vz authors 23 zones (`1..8, 12, 15..18, 20..25, 27..30`), which is exactly the set the
+    /// `LandingZone` COMP enumerates — see
+    /// `mercs2_engine::worldutil`'s `retail_capture_corroborates_the_authored_landing_zone_set`.
+    pub transit_zones: Vec<TransitZone>,
     /// `tStarterData` keys — the UNLOCKED starter/recruit ids in this save. `PmcBoss` (Fiona) is the
     /// always-present HQ boss; `HelPmcBoss`/`MecPmcBoss`/`JetPmcBoss` are the Villa recruits (Ewen/Eva/
     /// Misha), each present only after its unlock mission. `MrxStarterManager.SaveSingleton` writes only
     /// unlocked starters, so this is the source of truth for which PMC-interior recruit layers load. FACT.
     pub unlocked_starters: Vec<String>,
+}
+
+/// One transit landing zone as a save records it.
+///
+/// The field set is `MrxTransit.SaveSingleton` (`resident/mrxtransit.lua:362-376`) verbatim — it
+/// writes exactly `sFactionAbbrev`, `bHasPlayedFanfare`, `bIsNuked`, `bEnabled` per zone — and
+/// `LoadSingleton` (`:378-404`) reads back the same four. A zone the save leaves partly unset (an
+/// early save writes only `bEnabled`) comes back with the remaining flags false / `None`, which is
+/// what Lua's own nil-for-missing does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TransitZone {
+    /// Absolute zone number — the table key. NOT a position: the retail set is sparse.
+    pub zone: u32,
+    /// `sFactionAbbrev` — the faction that owns the zone (`"Pmc"`, `"Oil"`, `"Gur"`, …). `None` on a
+    /// zone the player has not taken, and on the zone-6 `bFake` pad, which is never affiliated.
+    pub faction: Option<String>,
+    /// `bEnabled` — the zone is available for fast travel.
+    pub enabled: bool,
+    /// `bIsNuked` — a mission has nuked the site (`MrxTransit.SetLocationIsNuked`).
+    pub is_nuked: bool,
+    /// `bHasPlayedFanfare` — the capture-fanfare has already played, so a resume must not replay it.
+    pub played_fanfare: bool,
+}
+
+/// Decode a `tTransitData` body into `(bEnabled, zones)`.
+///
+/// Top-level keys are the zone numbers, written by the Lua serializer as floats (`[1.000000]`), plus
+/// the one string key `bEnabled` for the system-wide switch.
+fn parse_transit(body: &str) -> (bool, Vec<TransitZone>) {
+    let mut enabled = false;
+    let mut zones: Vec<TransitZone> = Vec::new();
+    for (key, raw) in parse_table(body) {
+        if key == "bEnabled" {
+            enabled = raw.trim() == "true";
+            continue;
+        }
+        // `[1.000000]` — parse as f64 first; an integer-only parse misses every real save.
+        let Ok(n) = key.trim().parse::<f64>() else { continue };
+        let v = raw.trim();
+        let inner = v.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(v);
+        let mut z = TransitZone { zone: n as u32, ..Default::default() };
+        for (fk, fv) in parse_table(inner) {
+            let is_true = fv.trim() == "true";
+            match fk.as_str() {
+                "bEnabled" => z.enabled = is_true,
+                "bIsNuked" => z.is_nuked = is_true,
+                "bHasPlayedFanfare" => z.played_fanfare = is_true,
+                "sFactionAbbrev" => z.faction = Some(unquote(&fv)),
+                _ => {}
+            }
+        }
+        zones.push(z);
+    }
+    zones.sort_by_key(|z| z.zone);
+    (enabled, zones)
 }
 
 impl SaveState {
@@ -596,6 +661,9 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .map(|b| parse_table(b).into_iter().map(|(k, _)| k).collect())
         .unwrap_or_default();
 
+    let (transit_enabled, transit_zones) =
+        table_body(lua, "tTransitData").map(parse_transit).unwrap_or((false, Vec::new()));
+
     Ok(SaveState {
         flow_chain,
         active_missions,
@@ -604,6 +672,8 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         time_elapsed_secs,
         equipped_support,
         unlocked_starters,
+        transit_enabled,
+        transit_zones,
     })
 }
 
@@ -612,26 +682,149 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const SAVE_DIR: &str = r"C:/Users/Shadow/Documents/My Games/Mercenaries 2/SaveGames";
+    /// The eight retail saves these tests read, **vendored in-tree** at `fixtures/saves`.
+    ///
+    /// They used to be read from a hardcoded `C:/Users/Shadow/Documents/...`, so on any other machine
+    /// these tests failed for a missing file rather than testing the format. They are committed now
+    /// (128 KiB total) and every test below runs unconditionally, everywhere — see
+    /// `fixtures/saves/README.md`.
+    ///
+    /// The set is deliberately varied: three different heroes, upgrade tiers 0 and 3, flow chains from
+    /// 2 to 63 entries, and one non-ASCII slot name that exercises the UTF-16LE `save_name` path.
+    use crate::game_paths::SAVE_FIXTURES as ALL_SAVES;
 
-    const ALL_SAVES: &[&str] = &[
-        "Mattias Nilsson_63430745.profile",
-        "Mattias Nilsson_6A0E523C.profile",
-        "_______ ________48EFABFB.profile",
-        "auto_634304EA.profile",
-        "auto_6A0BE454.profile",
-        "auto_6A447BF8.profile",
-    ];
+    /// The vendored fixtures directory. Never `Option` — these files are committed, so their absence is
+    /// a broken checkout and must fail loudly rather than skip into a false green.
+    fn save_dir() -> std::path::PathBuf {
+        let d = crate::game_paths::save_fixtures();
+        assert!(
+            d.is_dir(),
+            "vendored save fixtures missing at {} — they are committed to the repo; a checkout \
+             without them is broken, not a reason to skip",
+            d.display()
+        );
+        d
+    }
 
-    fn load(name: &str) -> Vec<u8> {
-        std::fs::read(Path::new(SAVE_DIR).join(name))
-            .unwrap_or_else(|e| panic!("read {name}: {e}"))
+    fn load_from(dir: &Path, name: &str) -> Vec<u8> {
+        std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+    }
+
+    /// `tTransitData` decodes out of the REAL saves, and the three progression points disagree in
+    /// exactly the way the game's own logs say they should.
+    ///
+    /// The zone set is the cross-check that matters: every save authors the same 23 zones
+    /// (`1..8, 12, 15..18, 20..25, 27..30`), which is precisely what the `LandingZone` COMP
+    /// enumerates and what a live retail run reports. Three independent sources — world data, save
+    /// data, and a hooked-log capture of retail play — and they agree.
+    #[test]
+    fn transit_data_decodes_from_the_retail_saves() {
+        const AUTHORED_ZONES: [u32; 23] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30,
+        ];
+        let dir = save_dir();
+        let state_of = |name: &str| -> SaveState {
+            let p = parse(&load_from(&dir, name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let lua = p.decompress_lua().unwrap_or_else(|e| panic!("{name}: {e}"));
+            parse_save_state(&String::from_utf8_lossy(&lua))
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
+
+        // Every fixture carries the full authored zone set — the table is written whole, not sparsely.
+        for name in ALL_SAVES {
+            let s = state_of(name);
+            let zones: Vec<u32> = s.transit_zones.iter().map(|z| z.zone).collect();
+            assert_eq!(
+                zones, AUTHORED_ZONES,
+                "{name}: tTransitData must carry all 23 authored landing zones"
+            );
+        }
+
+        // A 0%-completion save: transit not yet unlocked, so every zone is off and unaffiliated.
+        // Matches the capture's `SetSystemEnabled( false, nil, nil  @mrxtransit:418`.
+        let chris = state_of("Chris Jacobs_6A499ED6.profile");
+        assert!(!chris.transit_enabled, "a pre-PMC-takeover save has transit switched off");
+        assert!(
+            chris.transit_zones.iter().all(|z| !z.enabled && z.faction.is_none()),
+            "no zone is enabled or affiliated before the takeover"
+        );
+
+        // A mid-progression save: transit on, but only some zones taken. Proves the parse is reading
+        // per-zone state rather than filling a blanket value.
+        let mid = state_of("Mattias Nilsson_63430745.profile");
+        assert!(mid.transit_enabled, "a late save has transit switched on");
+        let taken = mid.transit_zones.iter().filter(|z| z.faction.is_some()).count();
+        assert!(
+            (1..AUTHORED_ZONES.len()).contains(&taken),
+            "a mid save has SOME zones taken, not none and not all; got {taken}"
+        );
+
+        // **The end-game save, checked pair-for-pair against a live capture of the game loading it.**
+        //
+        // `game-files/pmc_blackbox-mattias-save-end-game.log` records `MrxTransit.LoadSingleton`
+        // replaying this exact blob, one line per affiliated zone:
+        //
+        //     [lua] Landing zone 1 affiliated with Pmc (nil)   @mrxtransit:669
+        //
+        // Those 22 lines and the 22 affiliated zones parsed out of this file agree completely. A save
+        // file we decode and the shipped game reading the same save, cross-checked.
+        const CAPTURED: [(u32, &str); 22] = [
+            (1, "Pmc"), (2, "Oil"), (3, "Oil"), (4, "Gur"), (5, "Gur"), (7, "All"), (8, "Pir"),
+            (12, "Chi"), (15, "Oil"), (16, "Oil"), (17, "Gur"), (18, "Gur"), (20, "All"),
+            (21, "All"), (22, "All"), (23, "Chi"), (24, "Chi"), (25, "Chi"), (27, "Pir"),
+            (28, "Pir"), (29, "Oil"), (30, "Chi"),
+        ];
+        let end = state_of("Mattias Nilsson_6A0E523C.profile");
+        assert!(end.transit_enabled, "the end-game save has transit switched on");
+        let parsed: Vec<(u32, &str)> = end
+            .transit_zones
+            .iter()
+            .filter_map(|z| z.faction.as_deref().map(|f| (z.zone, f)))
+            .collect();
+        assert_eq!(
+            parsed,
+            CAPTURED.to_vec(),
+            "the parsed affiliations must match what the live capture logged, zone for zone"
+        );
+        assert!(
+            end.transit_zones.iter().filter(|z| z.faction.is_some()).all(|z| z.enabled),
+            "an affiliated zone is an enabled zone"
+        );
+
+        // Zone 6 is the `bFake` pad (`mrxtransit.lua` Reset): present in every table, never affiliated
+        // in any of them — which is why the capture logs 22 zones where the world data authors 23.
+        for (name, s) in [("mid", &mid), ("end", &end)] {
+            let fake = s.transit_zones.iter().find(|z| z.zone == 6).expect("zone 6 present");
+            assert_eq!(fake.faction, None, "{name}: the zone-6 fake pad is never affiliated");
+        }
+    }
+
+    /// Every file named in [`ALL_SAVES`] is really present, and nothing in the fixtures directory is
+    /// left out of the list. Without this a fixture could be deleted, or added and never exercised,
+    /// and the suite would stay green — the exact failure mode that let the old hardcoded path hide.
+    #[test]
+    fn the_fixture_set_is_complete_and_fully_covered() {
+        let dir = save_dir();
+        for name in ALL_SAVES {
+            assert!(dir.join(name).is_file(), "fixture {name} is missing from {}", dir.display());
+        }
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("fixtures dir readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".profile"))
+            .collect();
+        on_disk.sort();
+        let mut listed: Vec<String> = ALL_SAVES.iter().map(|s| s.to_string()).collect();
+        listed.sort();
+        assert_eq!(on_disk, listed, "every vendored .profile must be listed in ALL_SAVES");
     }
 
     #[test]
     fn all_six_parse_with_invariants() {
+        let dir = save_dir();
         for name in ALL_SAVES {
-            let bytes = load(name);
+            let bytes = load_from(&dir, name);
             assert_eq!(bytes.len(), PROFILE_SIZE, "{name} size");
             let p = parse(&bytes).unwrap_or_else(|e| panic!("parse {name}: {e}"));
 
@@ -658,7 +851,8 @@ mod tests {
 
     #[test]
     fn target_file_contract_is_pmccon001() {
-        let bytes = load("auto_6A447BF8.profile");
+        let dir = save_dir();
+        let bytes = load_from(&dir, "auto_6A447BF8.profile");
         let p = parse(&bytes).unwrap();
         assert_eq!(p.active_contract(), "PmcCon001");
         assert_eq!(p.checksum, 0xCA2F_06BE); // this file's stored hash
@@ -666,26 +860,107 @@ mod tests {
         assert_eq!(p.timestamp, 0x6A45_586A);
     }
 
+    /// The fixture set spans the game's whole progression, and the parser tracks it monotonically.
+    ///
+    /// This is what makes the eight files worth keeping as a *set* rather than one sample: the flow
+    /// chain grows from 2 entries to 63, so a parser that mis-sized the chain, truncated it, or read a
+    /// fixed count would pass on one save and fail here.
+    ///
+    /// `Chris Jacobs_6A499ED6` is the earliest state we have — **before the player owns the PMC**.
+    /// They have beaten the intro and not yet reached the open world, so the chain is exactly
+    /// `["Start", "VzaCon001"]`: `VzaCon001` is the intro contract itself. That makes it the fixture
+    /// that pins "no progression yet" as distinct from "one contract done", and it is the save state
+    /// the boot path's `VzaCon001` asset gate actually corresponds to.
+    #[test]
+    fn the_set_spans_the_progression_and_flow_chains_grow_with_it() {
+        let dir = save_dir();
+        let chain = |name: &str| -> Vec<String> {
+            parse(&load_from(&dir, name)).unwrap().save_state().unwrap().flow_chain
+        };
+
+        // Pre-PMC-ownership: the intro is done and nothing else. Asserted exactly — a chain that grew
+        // by even one entry would mean we decoded a later save's state into the earliest one.
+        let intro = chain("Chris Jacobs_6A499ED6.profile");
+        assert_eq!(intro, ["Start", "VzaCon001"], "the pre-open-world save has only the intro");
+
+        // Then the ladder. Each rung must be strictly longer than the last.
+        let rungs = [
+            ("Chris Jacobs_6A499ED6.profile", "intro done, PMC not yet owned"),
+            ("auto_6A0BE454.profile", "first PMC contract"),
+            ("auto_634304EA.profile", "mid-game"),
+            ("Mattias Nilsson_6A0E523C.profile", "endgame"),
+        ];
+        let mut prev = 0usize;
+        for (name, stage) in rungs {
+            let n = chain(name).len();
+            assert!(n > prev, "{name} ({stage}): flow chain {n} should exceed the previous rung {prev}");
+            prev = n;
+        }
+
+        // Every rung's chain starts from the same root contract — progression appends, it does not
+        // rewrite history.
+        for (name, _) in rungs {
+            assert!(chain(name).contains(&"Start".to_string()), "{name} retains the Start entry");
+        }
+    }
+
+    /// All three playable heroes appear in the set, so `character_index` is exercised across its whole
+    /// meaningful range rather than only the Mattias value.
+    #[test]
+    fn every_hero_is_represented() {
+        let dir = save_dir();
+        let heroes: std::collections::BTreeSet<u8> = ALL_SAVES
+            .iter()
+            .map(|n| parse(&load_from(&dir, n)).unwrap().character_index)
+            .collect();
+        assert_eq!(
+            heroes,
+            [1u8, 2, 3].into_iter().collect(),
+            "1 = Mattias, 2 = Chris, 3 = Jen — all three must be covered"
+        );
+        assert_eq!(
+            parse(&load_from(&dir, "Chris Jacobs_6A499ED6.profile")).unwrap().character_index,
+            2,
+            "the Chris slot really stores the Chris hero code"
+        );
+    }
+
+    /// Every fixture's stored `ProfileHash` validates. This is the read-side half of the CRC-32/BZIP2
+    /// derivation that `save_write` claims — a claim that, until these files were vendored, had never
+    /// executed outside one developer's machine.
+    #[test]
+    fn every_fixture_has_a_valid_stored_hash() {
+        let dir = save_dir();
+        for name in ALL_SAVES {
+            let p = parse(&load_from(&dir, name)).unwrap();
+            assert!(p.hash_ok(), "{name}: stored ProfileHash does not match CRC-32/BZIP2 over [4:]");
+        }
+    }
+
     #[test]
     fn contracts_match_expected() {
+        let dir = save_dir();
         let cases = [
             ("Mattias Nilsson_63430745.profile", "OilCon001"),
             ("Mattias Nilsson_6A0E523C.profile", "PmcJob001"),
+            ("Chris Jacobs_6A499ED6.profile", "VzaCon001"),
             ("_______ ________48EFABFB.profile", "PmcJob001"),
             ("auto_634304EA.profile", "OilCon003"),
             ("auto_6A0BE454.profile", "PmcCon001"),
             ("auto_6A447BF8.profile", "PmcCon001"),
+            ("auto_6A499D08.profile", "VzaCon001"),
         ];
         for (name, contract) in cases {
-            let p = parse(&load(name)).unwrap();
+            let p = parse(&load_from(&dir, name)).unwrap();
             assert_eq!(p.active_contract(), contract, "{name}");
         }
     }
 
     #[test]
     fn all_six_decode_save_state() {
+        let dir = save_dir();
         for name in ALL_SAVES {
-            let p = parse(&load(name)).unwrap();
+            let p = parse(&load_from(&dir, name)).unwrap();
             let st = p.save_state().unwrap_or_else(|e| panic!("save_state {name}: {e}"));
 
             // Every retail save carries a non-empty world-overlay set, and every
@@ -704,7 +979,8 @@ mod tests {
 
     #[test]
     fn target_file_save_state_decoded() {
-        let p = parse(&load("auto_6A447BF8.profile")).unwrap();
+        let dir = save_dir();
+        let p = parse(&load_from(&dir, "auto_6A447BF8.profile")).unwrap();
         let st = p.save_state().unwrap();
 
         // Mission-flow binding chain, in order.
@@ -743,14 +1019,15 @@ mod tests {
 
     #[test]
     fn layer_sets_differ_across_files() {
+        let dir = save_dir();
         // Cross-file: the overlay sets are genuinely per-save (not a shared
         // constant), and every entry everywhere is a vz_state_* layer.
-        let a = parse(&load("auto_6A447BF8.profile"))
+        let a = parse(&load_from(&dir, "auto_6A447BF8.profile"))
             .unwrap()
             .save_state()
             .unwrap()
             .layers;
-        let b = parse(&load("Mattias Nilsson_6A0E523C.profile"))
+        let b = parse(&load_from(&dir, "Mattias Nilsson_6A0E523C.profile"))
             .unwrap()
             .save_state()
             .unwrap()
@@ -764,8 +1041,9 @@ mod tests {
 
     #[test]
     fn equipped_support_harvested_when_present() {
+        let dir = save_dir();
         // The high-progress save equips support/vehicle tokens.
-        let st = parse(&load("Mattias Nilsson_6A0E523C.profile"))
+        let st = parse(&load_from(&dir, "Mattias Nilsson_6A0E523C.profile"))
             .unwrap()
             .save_state()
             .unwrap();
@@ -783,8 +1061,9 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
+        let dir = save_dir();
         assert!(parse(&[0u8; 16]).is_err(), "short buffer");
-        let mut b = load("auto_6A447BF8.profile");
+        let mut b = load_from(&dir, "auto_6A447BF8.profile");
         b[OFF_VERSION] = 9;
         assert!(parse(&b).is_err(), "bad version");
     }

@@ -37,7 +37,7 @@ fn rows(c: &[u8]) -> Vec<([u8; 4], bool, usize, usize)> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mhash = args.get(1).and_then(|a| a.strip_prefix("0x")).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0x39AF17DC);
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
     let c = wad::extract_container(&mut w, mhash).expect("extract container");
     println!("model 0x{mhash:08X}: {} bytes", c.len());
 

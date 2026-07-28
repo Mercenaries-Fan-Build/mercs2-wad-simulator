@@ -42,6 +42,22 @@ pub fn make_bc_view(
         let h = (td.height >> lvl).max(1);
         (((w + 3) / 4) * block_bytes * ((h + 3) / 4)) as usize
     };
+    // wgpu validates `copy_size.width % block_width == 0` UNCONDITIONALLY (wgpu-core
+    // `validate_texture_copy_range`) — there is NO exemption for a mip whose entire extent is already
+    // narrower than one block, and rounding the copy extent UP instead trips the "exceeds texture
+    // extent" check. So a BC chain can only be uploaded down to its last 4-aligned level; writing the
+    // 2×1 / 1×1 tail is an instant validation PANIC, not a recoverable error. Those levels carry no
+    // visible detail, so capping the chain there costs nothing.
+    let block_aligned = |lvl: u32| -> bool {
+        let w = (td.width >> lvl).max(1);
+        let h = (td.height >> lvl).max(1);
+        w % 4 == 0 && h % 4 == 0
+    };
+    // A mip 0 that is not itself 4-aligned cannot be uploaded at all. Report it as unavailable so the
+    // caller falls back to the white/flat default instead of taking the process down.
+    if !block_aligned(0) {
+        return None;
+    }
     let mip0_need = mip_bytes(0);
     // When the FULL chain (mip 0 first) is present — a hi-res texture assembled from the streaming LOD
     // blocks, or a small fully-resident texture — upload EVERY mip level so the sampler mips down and
@@ -54,7 +70,7 @@ pub fn make_bc_view(
         let mut acc = 0usize;
         for l in 0..td.mip_count.max(1) {
             let mb = mip_bytes(l);
-            if mb > 0 && acc + mb <= td.all_mips.len() {
+            if mb > 0 && acc + mb <= td.all_mips.len() && block_aligned(l) {
                 acc += mb;
                 levels += 1;
             } else {
@@ -110,7 +126,9 @@ pub fn make_bc_view(
         }
     }
     let (base_w, base_h, base_bytes) = match chosen {
-        Some((w, h, sz)) if avail >= sz => (w, h, sz),
+        // Same block-alignment rule as the full-chain branch above: an unaligned resident level is
+        // unuploadable, so fall back rather than panic.
+        Some((w, h, sz)) if avail >= sz && w % 4 == 0 && h % 4 == 0 => (w, h, sz),
         _ => return None,
     };
     let blocks_wide = (base_w + 3) / 4;

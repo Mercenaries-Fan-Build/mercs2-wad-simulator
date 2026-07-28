@@ -29,7 +29,7 @@ fn main() {
             a
         }
     };
-    let Some(mut w) = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()) else {
+    let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
         return eprintln!("no vz.wad (set MERCS2_VZ_WAD)");
     };
 

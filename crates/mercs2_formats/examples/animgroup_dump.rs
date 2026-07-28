@@ -20,15 +20,16 @@ use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_HASH_MODEL};
 use mercs2_formats::ucfx::extract_chunk_body;
 
-const WAD: &str = "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad";
-
 fn main() {
-    let path = std::env::var("VZ_WAD").unwrap_or_else(|_| WAD.to_string());
+    let Some(path) = mercs2_formats::game_paths::vz_wad_from_env() else {
+        eprintln!("vz.wad not found. Set MERCS2_GAME_DIR (or VZ_WAD) to your install folder,");
+        eprintln!("its data folder, or the vz.wad file itself.");
+        return;
+    };
     let mut f = match File::open(&path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("cannot open vz.wad at {path}: {e}");
-            eprintln!("set VZ_WAD=<path> or place the retail WAD at the default location.");
+            eprintln!("cannot open vz.wad at {}: {e}", path.display());
             return;
         }
     };

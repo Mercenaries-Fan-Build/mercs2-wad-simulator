@@ -113,43 +113,68 @@ fn parse_hex_u32(s: &str) -> Result<u32, String> {
     u32::from_str_radix(t, 16).map_err(|e| format!("bad hex u32 '{s}': {e}"))
 }
 
-/// Discover the game's data/vz-patch.wad (sibling of the registry vz.wad).
+/// The install root: `$MERCS2_GAME_DIR`, then `$VZ_WAD`, then the EA Games registry key.
+///
+/// Mirrors `mercs2_engine::paths::resolve_game_dir`. It is reproduced rather than depended upon
+/// because `mercs2_engine` pulls wgpu + winit, far too heavy for a headless patch tool —
+/// `mercs2_quartermaster` reproduces the same lookup for the same reason. Keep the three in step.
+///
+/// Both env vars accept the install root, its `data` folder, or a WAD file inside it; all three
+/// normalise to the root so `vz.wad` and `vz-patch.wad` always come from the SAME install.
+fn game_dir() -> Option<PathBuf> {
+    for var in ["MERCS2_GAME_DIR", "VZ_WAD"] {
+        if let Some(v) = std::env::var_os(var).filter(|s| !s.is_empty()) {
+            let p = PathBuf::from(v);
+            if p.is_file() {
+                // `<root>/data/<file>` → up two.
+                if let Some(root) = p.parent().and_then(|d| d.parent()) {
+                    return Some(root.to_path_buf());
+                }
+            }
+            if p.join("data").join("vz.wad").is_file() {
+                return Some(p);
+            }
+            if p.join("vz.wad").is_file() {
+                // The `data` folder itself.
+                if let Some(root) = p.parent() {
+                    return Some(root.to_path_buf());
+                }
+            }
+        }
+    }
+    registry_game_dir()
+}
+
+/// The EA Games registry key — `HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames`,
+/// value `Install Dir`. The only registry key this project reads, and never the only source: it is
+/// Windows-only, so the other arm returns `None` and the env vars above are what make this tool
+/// runnable off Windows.
 #[cfg(windows)]
-fn registry_vz_patch_wad() -> Option<PathBuf> {
+fn registry_game_dir() -> Option<PathBuf> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
     let key = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey(r"SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames")
         .ok()?;
     let dir: String = key.get_value("Install Dir").ok()?;
-    let mut p = PathBuf::from(dir);
-    p.push("data");
-    p.push("vz-patch.wad");
-    Some(p)
-}
-
-/// Discover the game's data/vz.wad from the EA Games registry key.
-#[cfg(windows)]
-fn registry_vz_wad() -> Option<PathBuf> {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    use winreg::RegKey;
-    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(r"SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames")
-        .ok()?;
-    let dir: String = key.get_value("Install Dir").ok()?;
-    let mut p = PathBuf::from(dir);
-    p.push("data");
-    p.push("vz.wad");
-    p.exists().then_some(p)
+    let p = PathBuf::from(dir);
+    p.is_dir().then_some(p)
 }
 
 #[cfg(not(windows))]
+fn registry_game_dir() -> Option<PathBuf> {
+    None
+}
+
+/// The game's `data/vz-patch.wad` — the OUTPUT path, so it need not exist yet.
 fn registry_vz_patch_wad() -> Option<PathBuf> {
-    None
+    Some(game_dir()?.join("data").join("vz-patch.wad"))
 }
-#[cfg(not(windows))]
+
+/// The game's `data/vz.wad`, if it is really there.
 fn registry_vz_wad() -> Option<PathBuf> {
-    None
+    let p = game_dir()?.join("data").join("vz.wad");
+    p.is_file().then_some(p)
 }
 
 /// Candidate animgroup block indices, from the ASET table (no full decompress).

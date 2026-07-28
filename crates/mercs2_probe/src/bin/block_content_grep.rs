@@ -26,7 +26,7 @@ fn main() {
         .iter()
         .position(|a| a == "--wad")
         .and_then(|i| args.get(i + 1).cloned())
-        .or_else(wad::registry_vz_wad)
+        .or_else(|| wad::resolve_vz_wad(None))
         .unwrap_or_else(|| "game-files/vz.wad".into());
 
     // Console (Xbox/PS3) WAD payloads are 32-bit byte-swapped, so ASCII is scrambled WITHIN each

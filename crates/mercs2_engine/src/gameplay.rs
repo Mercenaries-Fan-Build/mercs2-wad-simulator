@@ -87,10 +87,26 @@ impl GameplaySystems {
     }
 
     /// Run one fixed simulation step of the fleet systems over `world`, in the recovered layer-4 order
-    /// (vehicle → weapons → destruction — `FUN_004c9740`), drain the event bus, then advance audio. No-op over a
-    /// World carrying none of the fleet components yet.
-    pub fn tick(&mut self, world: &mut World, dt: f32) {
+    /// (player roster → vehicle → weapons → destruction — `FUN_004c9740`), drain the event bus, then
+    /// advance audio. No-op over a World carrying none of the fleet components yet.
+    ///
+    /// `player` is threaded in rather than owned here because the **script host** owns the player
+    /// concern — Lua is its primary driver, and this tick only reads/advances it.
+    pub fn tick(&mut self, world: &mut World, player: &mut mercs2_player::PlayerWorld, dt: f32) {
         let phys: &dyn PhysicsQuery = &self.physics;
+        // Player roster passes A and B — `FUN_0062E810` (@0x004C9861) and `FUN_0062E7B0` (@0x004C9900),
+        // both opening `mov eax,[0x00DF9BA8]` (the `Players` live count) and iterating by dense index
+        // with `dt`. They precede the vehicle-control pump `FUN_00532F80` (@0x004C990C) in
+        // `FUN_004C9740`'s byte order.
+        //
+        // ⚠ `player_code_map.md` §1's *diagram* lists the pump first; the recovered call-site addresses
+        // disagree and win, because byte order in the caller is the harder evidence. Recorded as a
+        // map-vs-map tension in `mercs2_player/DEFERRED.md` rather than silently resolved.
+        //
+        // Entity resolution is the caller's (`GuidMap` lives on the script host), so the roster pass is
+        // given a resolver that finds nothing here; the boundary-death condition it reports is consumed
+        // by the game layer, which owns the respawn path.
+        mercs2_player::player_roster_system(world, player, |_| None, dt);
         crate::vehicle::drive_step_system(world, phys, &self.lut, dt);
         // Instance tick (not the static `update`) so the impact channel accumulates for draining.
         self.weapons.tick(world, dt, &mut self.bus, Some(phys));
@@ -112,6 +128,11 @@ impl GameplaySystems {
             &self.destruction,
             mercs2_destruction::DamageBands::default(),
         ));
+        // Reap the deferred weapon-destroy queue **after** everything above, so a script that destroys
+        // and re-applies a loadout inside one frame still sees valid handles — the shipped
+        // snapshot-restore pattern (`mrxplayer.lua:661-724`) depends on that deferral. A weapon
+        // re-attached in the meantime is cancelled rather than reaped.
+        mercs2_combat::inventory::drain_pending_destroy(world);
         self.bus.dispatch_all();
         self.audio.borrow_mut().tick(dt);
     }
@@ -177,11 +198,11 @@ mod tests {
             Destructible::default(),
         ));
 
-        gp.tick(&mut world, 1.0 / 60.0);
+        gp.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         assert!(world.get::<&Destructible>(e).unwrap().draws(0), "healthy: geometry draws");
 
         world.get::<&mut Health>(e).unwrap().cur = 0.0;
-        gp.tick(&mut world, 1.0 / 60.0);
+        gp.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         assert!(
             !world.get::<&Destructible>(e).unwrap().draws(0),
             "destroyed: the governed subtree must be hidden, driven by tick alone"
@@ -234,7 +255,7 @@ mod tests {
 
         let z0 = world.get::<&Transform>(car).unwrap().translation.z;
         for _ in 0..240 {
-            gp.tick(&mut world, 1.0 / 60.0);
+            gp.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         }
         let z1 = world.get::<&Transform>(car).unwrap().translation.z;
         assert!(
@@ -253,7 +274,7 @@ mod tests {
         gp.set_collision(vec![[Vec3::ZERO, Vec3::X, Vec3::Z]]);
         let mut world = World::new();
         for _ in 0..8 {
-            gp.tick(&mut world, 1.0 / 60.0);
+            gp.tick(&mut world, &mut mercs2_player::PlayerWorld::new(), 1.0 / 60.0);
         }
         // The shared audio engine advanced (dynamic-music toggle is observable through the same Rc).
         audio.borrow_mut().set_dynamic_music(true);

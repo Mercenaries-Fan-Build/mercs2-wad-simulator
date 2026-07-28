@@ -8,7 +8,7 @@ use mercs2_formats::anim_select::AnimSelector;
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
 fn main() {
-    let mut w = wad::registry_vz_wad()
+    let mut w = wad::resolve_vz_wad(None)
         .and_then(|p| wad::open(&p).ok())
         .expect("open vz.wad");
     let dec = wad::decompress_block_index(&mut w, 3185).expect("decompress 3185");

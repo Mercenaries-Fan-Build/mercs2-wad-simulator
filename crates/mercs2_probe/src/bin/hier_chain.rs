@@ -7,7 +7,7 @@ fn main() {
     let want: Vec<usize> = std::env::args().skip(2).filter_map(|a| a.parse().ok()).collect();
     let want = if want.is_empty() { vec![18usize, 19] } else { want };
     let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).unwrap();
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).unwrap();
     let c = wad::extract_container(&mut w, hash).unwrap();
     let mut blk = vec![0u8; 20];
     blk[16..20].copy_from_slice(&(c.len() as u32).to_le_bytes());

@@ -792,6 +792,110 @@ fn parse_model_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, u
     out
 }
 
+/// One `LandingZone` COMP record: the world entity that is a transit touchdown pad, which player
+/// slot it serves, and which landing-zone index it belongs to.
+///
+/// `slot` is the `1`/`2` the game's Lua passes to `Pg.GetAllLandingZones(n)`
+/// (`corpus/mercs2-luacd/src/resident/mrxtransit.lua:328-329`) — it is the **co-op player slot**,
+/// not a category: `Reset()` zips the two returned lists index-by-index into
+/// `{uLocation1 = tZones1[i], uLocation2 = tZones2[i]}` (`:334-341`) and the only consumer of
+/// `uLocation2` is `MrxUtil.TeleportHeroesToLocations({uLocation1, uLocation2})` (`:89-90`), i.e.
+/// hero N lands on pad N. Every name/position/blip derives from `uLocation1` alone (`:29,104,189`).
+///
+/// `zone` is the index the Lua uses as `nIndex` — the key of `_tLandingZones` and the number
+/// mission scripts hard-code (`MrxTransit.SetLocationIsNuked(30, true)`,
+/// `corpus/mercs2-luacd/src/vz/wifmissionflow.lua:1245`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandingZoneRecord {
+    /// The u32 world-data entity key of the touchdown-pad object (joins to `Transform`/`Name`).
+    pub key: u32,
+    /// Co-op player slot this pad serves: `1` or `2`.
+    pub slot: u32,
+    /// Landing-zone index (the Lua's `nIndex`). 1-based, sparse — see [`load_landing_zones`].
+    pub zone: u32,
+}
+
+/// Parse a `LandingZone` COMP `data` blob into records. Each record is **12 bytes**:
+/// `{u32 entity_key, u32 Player, u32 Id}` — a 4-byte key plus the component's declared 8-byte
+/// payload, the same `[key][payload]` layout every other keyed COMP in this block uses.
+///
+/// The two payload fields are named by the COMP's own `schm` chunk (2 fields, `payload_stride = 8`,
+/// both type 5 / u32): field 0 hashes to `Player` (`0x600E3B1E`) at offset 0, field 1 to `Id`
+/// (`0xB7D01BFE`) at offset 4. The runtime container agrees on the width — the engine's container
+/// census lists `LandingZone` as type id 120, name-hash `0x2A20B640`, **stride 8**, pool cap 32
+/// (research repo `docs/reverse_engineer/object_entity_core_code_map.md:1506`, and the class
+/// deserializer `FUN_0065C610` in `docs/mercs2-ecs/07_gameplay_state_health_mission.md:194` —
+/// whose field guesses "type/enabled" and "linked entity" the `schm` hashes above correct).
+///
+/// NOTE the research repo's `docs/ecs_components.md:105,136` records this COMP as
+/// `272 (stride 276)` with "2 entities". That is a decoder artifact: the old Python extractor
+/// mis-derived the stride and swallowed each 276-byte `data` chunk as a single record. The real
+/// content is 23 records per chunk, 46 across the two. Three checks pin stride 12 independently of
+/// the `schm`:
+///
+/// 1. Both retail `data` chunks are 276 bytes = 23 × 12 exactly.
+/// 2. Read at stride 12 the entity keys are strictly ascending across both chunks — the invariant
+///    every keyed COMP here obeys; no other stride produces it.
+/// 3. `Player` is only ever 1 or 2 and `Id` yields exactly 23 distinct values —
+///    `1..8, 12, 15..18, 20..25, 27..30` — each appearing once per slot. That set is *precisely*
+///    the set of zone numbers the shipped Lua references, and the seven gaps (9, 10, 11, 13, 14,
+///    19, 26) are precisely the numbers that appear nowhere in the corpus. See
+///    `corpus/mercs2-luacd/src/vz/wifhqdata.lua` `_tHqConfigs`, whose `nLandingZone` /
+///    `nAltLandingZone` fields enumerate 2..30, and `mrxtransit.lua:343`, which flags `Id` 6
+///    (`MecHq`, wifhqdata.lua:548-549) as `bFake`. Every one of the 46 keys also joins to a
+///    `Name` COMP of the form `NN_<region>_<site>_lz_player{one,two}` where `NN` == `Id`.
+fn parse_landing_zone_records(data: &[u8], off: usize, size: usize) -> Vec<LandingZoneRecord> {
+    const STRIDE: usize = 12;
+    let mut out = Vec::new();
+    if off + size > data.len() {
+        return out;
+    }
+    let n = size / STRIDE;
+    for i in 0..n {
+        let r = off + i * STRIDE;
+        if r + STRIDE > data.len() {
+            break;
+        }
+        out.push(LandingZoneRecord {
+            key: read_u32_le(data, r),
+            slot: read_u32_le(data, r + 4),
+            zone: read_u32_le(data, r + 8),
+        });
+    }
+    out
+}
+
+/// Load every `LandingZone` transit-pad record from a decompressed UCFX block (retail vz: the
+/// `layers_static` block 29, sub-block 117, in two `data` chunks of 276 bytes).
+///
+/// Returns the records in on-disk order. Retail vz yields 46: 23 landing zones × 2 player slots.
+/// The index set is sparse — `1..8, 12, 15..18, 20..25, 27..30` — so callers that build the Lua
+/// table must key by [`LandingZoneRecord::zone`], NOT by position: `MrxTransit.Reset` stores
+/// `_tLandingZones[nIndex]` straight from the iteration key
+/// (`corpus/mercs2-luacd/src/resident/mrxtransit.lua:334-342`) and mission scripts index it by
+/// absolute zone number.
+///
+/// `LandingZone` is a first-class ECS component: hash `0x2A20B640`, see the reflection name table
+/// in `crates/ucfx_byteswap/src/convert.rs:762`.
+pub fn load_landing_zones(block: &[u8]) -> Vec<LandingZoneRecord> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out: Vec<LandingZoneRecord> = Vec::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = if si + 1 < ucfx_positions.len() {
+            ucfx_positions[si + 1]
+        } else {
+            block.len()
+        };
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let Some((off, size)) = c.data else { continue };
+            if c.info_name.as_deref() == Some("LandingZone") {
+                out.extend(parse_landing_zone_records(block, off, size));
+            }
+        }
+    }
+    out
+}
+
 /// Load every `ModelName` prop placement from a decompressed UCFX block (exterior
 /// `layers_static` block 29, or an interior `vz_state_*` block such as 667), joined to its
 /// `Transform` (pos + full quat) and `Name` COMP by u32 entity key within each sub-block.
@@ -878,6 +982,27 @@ mod tests {
         assert_eq!(recs[0].1, [12.5, -3.0, 7.0]);
         assert_eq!(recs[0].2, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(recs[1].0, 0x2222_2222);
+    }
+
+    /// A LandingZone record is 12 bytes `{u32 key, u32 slot, u32 zone}`. Bytes are the first three
+    /// REAL retail records, verbatim from the head of the first `LandingZone` `data` chunk in vz
+    /// `layers_static` block 29 / sub-block 117. They encode zone 2's two pads (keys 0x000C7447 and
+    /// 0x000C7448, slots 1 and 2 — note the pair is adjacent in key order) followed by zone 1's
+    /// player-1 pad.
+    #[test]
+    fn landing_zone_record_stride_12() {
+        let d: Vec<u8> = vec![
+            0x47, 0x74, 0x0c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, //
+            0x48, 0x74, 0x0c, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, //
+            0xea, 0x78, 0x0d, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        ];
+        let recs = parse_landing_zone_records(&d, 0, d.len());
+        assert_eq!(recs.len(), 3);
+        assert_eq!(recs[0], LandingZoneRecord { key: 816_199, slot: 1, zone: 2 });
+        assert_eq!(recs[1], LandingZoneRecord { key: 816_200, slot: 2, zone: 2 });
+        assert_eq!(recs[2], LandingZoneRecord { key: 882_922, slot: 1, zone: 1 });
+        // The stride invariant that pins 12: keys ascend monotonically across the whole table.
+        assert!(recs.windows(2).all(|w| w[0].key < w[1].key));
     }
 
     /// Name records are `[u32 key][ascii name 0xHEXID\0]`; the bare name is kept.

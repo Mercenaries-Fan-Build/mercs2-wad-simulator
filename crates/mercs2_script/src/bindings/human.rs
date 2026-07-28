@@ -9,9 +9,9 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Human")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -59,60 +59,60 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real(
         "SetState",
-        lua.create_function(move |_, (guid, stance, action): (i64, String, Option<String>)| {
-            h.borrow_mut().human_set_state(guid as u64, &stance, action.as_deref().unwrap_or(""));
+        lua.create_function(move |_, (guid, stance, action): (Guid, String, Option<String>)| {
+            h.borrow_mut().human_set_state(guid.raw(), &stance, action.as_deref().unwrap_or(""));
             Ok(())
         })?,
     )?;
     let h = host.clone();
     b.real(
         "DoAction",
-        lua.create_function(move |_, (guid, action): (i64, String)| {
-            h.borrow_mut().human_do_action(guid as u64, &action);
+        lua.create_function(move |_, (guid, action): (Guid, String)| {
+            h.borrow_mut().human_do_action(guid.raw(), &action);
             Ok(())
         })?,
     )?;
 
     // --- queries (real: read host state) ---
     let h = host.clone();
-    b.real("IsSwimming", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_swimming(guid as u64)))?)?;
+    b.real("IsSwimming", lua.create_function(move |_, guid: Guid| Ok(h.borrow().human_is_swimming(guid.raw())))?)?;
     let h = host.clone();
-    b.real("IsCarrying", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_carrying(guid as u64)))?)?;
+    b.real("IsCarrying", lua.create_function(move |_, guid: Guid| Ok(h.borrow().human_is_carrying(guid.raw())))?)?;
     let h = host.clone();
-    b.real("IsGrappling", lua.create_function(move |_, guid: i64| Ok(h.borrow().human_is_grappling(guid as u64)))?)?;
+    b.real("IsGrappling", lua.create_function(move |_, guid: Guid| Ok(h.borrow().human_is_grappling(guid.raw())))?)?;
 
     // --- weapon / ragdoll / grapple / carry / jostle flags → the real per-human flag store ---
     let h = host.clone();
-    b.real("EnableWeapons", lua.create_function(move |_, g: i64| { h.borrow_mut().human_enable_weapons(g as u64, true); Ok(()) })?)?;
+    b.real("EnableWeapons", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_enable_weapons(g.raw(), true); Ok(()) })?)?;
     let h = host.clone();
-    b.real("DisableWeapons", lua.create_function(move |_, g: i64| { h.borrow_mut().human_enable_weapons(g as u64, false); Ok(()) })?)?;
+    b.real("DisableWeapons", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_enable_weapons(g.raw(), false); Ok(()) })?)?;
     let h = host.clone();
-    b.real("SetFireLock", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_fire_lock(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    b.real("SetFireLock", lua.create_function(move |_, (g, on): (Guid, Option<bool>)| { h.borrow_mut().human_set_fire_lock(g.raw(), on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Knockdown", lua.create_function(move |_, g: i64| { h.borrow_mut().human_knockdown(g as u64); Ok(()) })?)?;
+    b.real("Knockdown", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_knockdown(g.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("SetPreemptiveRagdoll", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_ragdoll(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    b.real("SetPreemptiveRagdoll", lua.create_function(move |_, (g, on): (Guid, Option<bool>)| { h.borrow_mut().human_set_ragdoll(g.raw(), on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("StopGrappling", lua.create_function(move |_, g: i64| { h.borrow_mut().human_stop_grappling(g as u64); Ok(()) })?)?;
+    b.real("StopGrappling", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_stop_grappling(g.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Drop", lua.create_function(move |_, g: i64| { h.borrow_mut().human_drop_carried(g as u64); Ok(()) })?)?;
+    b.real("Drop", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_drop_carried(g.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("SetJostleEnabled", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_jostle(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    b.real("SetJostleEnabled", lua.create_function(move |_, (g, on): (Guid, Option<bool>)| { h.borrow_mut().human_set_jostle(g.raw(), on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("SetAllowCorpseCleanup", lua.create_function(move |_, (g, on): (i64, Option<bool>)| { h.borrow_mut().human_set_corpse_cleanup(g as u64, on.unwrap_or(true)); Ok(()) })?)?;
+    b.real("SetAllowCorpseCleanup", lua.create_function(move |_, (g, on): (Guid, Option<bool>)| { h.borrow_mut().human_set_corpse_cleanup(g.raw(), on.unwrap_or(true)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("EquipWeapon", lua.create_function(move |_, g: i64| { h.borrow_mut().human_set_weapon_drawn(g as u64, true); Ok(()) })?)?;
+    b.real("EquipWeapon", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_set_weapon_drawn(g.raw(), true); Ok(()) })?)?;
     let h = host.clone();
-    b.real("StowWeapon", lua.create_function(move |_, g: i64| { h.borrow_mut().human_set_weapon_drawn(g as u64, false); Ok(()) })?)?;
+    b.real("StowWeapon", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_set_weapon_drawn(g.raw(), false); Ok(()) })?)?;
     // Emote / raw animation → recorded as the human's current action (drives the anim selector).
     let h = host.clone();
-    b.real("Emote", lua.create_function(move |_, (g, name): (i64, String)| { h.borrow_mut().human_do_action(g as u64, &name); Ok(()) })?)?;
+    b.real("Emote", lua.create_function(move |_, (g, name): (Guid, String)| { h.borrow_mut().human_do_action(g.raw(), &name); Ok(()) })?)?;
     let h = host.clone();
-    b.real("PlayRawAnimation", lua.create_function(move |_, (g, anim): (i64, String)| { h.borrow_mut().human_do_action(g as u64, &anim); Ok(()) })?)?;
+    b.real("PlayRawAnimation", lua.create_function(move |_, (g, anim): (Guid, String)| { h.borrow_mut().human_do_action(g.raw(), &anim); Ok(()) })?)?;
 
     // ForceExitSeatNoSnap → clear the human's seat occupancy (real host state).
     let h = host.clone();
-    b.real("ForceExitSeatNoSnap", lua.create_function(move |_, g: i64| { h.borrow_mut().human_exit_seat(g as u64); Ok(()) })?)?;
+    b.real("ForceExitSeatNoSnap", lua.create_function(move |_, g: Guid| { h.borrow_mut().human_exit_seat(g.raw()); Ok(()) })?)?;
 
     // Transform persistence + scrub → recorded Human commands the transform/cleanup runtime drains.
     super::record_all(&mut b, lua, host, "Human", &["PersistTransform", "Scrub"])?;

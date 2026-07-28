@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "corpus": {
+      "command": "node",
+      "args": ["/Users/austinkregel/src/mercenaries-game/tools/corpus_mcp/src/server.js"]
+    }
+  }
+}

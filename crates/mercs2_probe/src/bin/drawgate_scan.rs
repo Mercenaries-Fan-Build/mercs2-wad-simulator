@@ -11,7 +11,7 @@ use mercs2_formats::model_inject::group_draw_report;
 
 fn main() {
     let limit: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(400);
-    let path = wad::registry_vz_wad().expect("vz.wad");
+    let path = wad::resolve_vz_wad(None).expect("vz.wad");
     let mut w = wad::open(&path).expect("open");
     let hashes: Vec<u32> = wad::model_list_all(&w).into_iter().map(|(h, _)| h).collect();
     println!("scanning {} model assets (limit {limit})", hashes.len());

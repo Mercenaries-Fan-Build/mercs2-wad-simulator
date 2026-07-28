@@ -48,6 +48,55 @@ pub fn registry_vz_wad() -> Option<String> {
     None
 }
 
+/// The name of the environment variable that overrides WAD discovery. Accepts the same file-or-folder
+/// forms [`resolve_vz_wad`] does.
+pub const VZ_WAD_ENV: &str = "VZ_WAD";
+
+/// Turn a user-supplied path into an actual `vz.wad` file path.
+///
+/// Accepts whichever of these the user has in hand — a game *folder* is the form people actually know,
+/// and requiring the full `…/data/vz.wad` is a papercut:
+///
+/// - the install root (`…/Mercenaries 2 World in Flames`) → probes `data/vz.wad`
+/// - the `data` folder itself → probes `vz.wad`
+/// - the `vz.wad` file directly
+///
+/// Returns `None` if nothing on those probes exists, so callers can fall through to the next source.
+pub fn vz_wad_in(path: impl AsRef<std::path::Path>) -> Option<String> {
+    let p = path.as_ref();
+    // A file that exists is taken as-is — this also lets a caller point at a renamed or copied archive
+    // rather than insisting on the shipped filename.
+    if p.is_file() {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    // Retail layout is `<install>/data/vz.wad`; accept either level. `data` first so an install root
+    // that also happens to hold a stray `vz.wad` still prefers the real one.
+    for probe in [p.join("data").join("vz.wad"), p.join("vz.wad")] {
+        if probe.is_file() {
+            return Some(probe.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Resolve `vz.wad` from, in order: an explicit path (CLI flag), `$VZ_WAD`, then the EA Games registry
+/// key. The first two accept a folder or a file (see [`vz_wad_in`]); the registry is Windows-only and
+/// yields nothing elsewhere, which is why an explicit path has to exist at all — a non-Windows host, or
+/// a copied-off `data` folder, has no registry key to read.
+pub fn resolve_vz_wad(explicit: Option<&str>) -> Option<String> {
+    if let Some(p) = explicit.filter(|s| !s.is_empty()) {
+        return vz_wad_in(p);
+    }
+    // Delegate the environment scan so this honours EVERY variable, in the same order, as
+    // `crate::paths::resolve_game_dir` and the headless crates. This used to read `VZ_WAD` alone,
+    // which meant `MERCS2_GAME_DIR` — the documented primary name — silently did nothing here and
+    // WAD-dependent tests reported "no wad" while the install was perfectly well configured.
+    if let Some(p) = mercs2_formats::game_paths::vz_wad_from_env() {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    registry_vz_wad()
+}
+
 pub fn open(path: &str) -> Result<Wad, String> {
     let mut file = File::open(path).map_err(|e| format!("open {path}: {e}"))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
@@ -70,6 +119,22 @@ pub fn aset_types(wad: &Wad, name_hash: u32) -> Vec<(u32, bool, u16)> {
         .filter(|e| e.asset_hash == name_hash)
         .map(|e| (e.type_id, e.is_primary(), e.block_index()))
         .collect()
+}
+
+/// Every block carrying an ASET row of `type_id`, primaries first, in table order, deduped.
+///
+/// The lookup path for the **singleton** asset classes (ASET `type_id` 0 — `watermap`,
+/// `materialtable`, `0x34612F86`). Those cannot be found by name: their ASET row's `asset_hash` names
+/// the *containing* resident group, not the chunk, and the chunk's own `name_hash` is an unrelated
+/// authored hash. The engine finds them the way this does — walk the block's UCFX entry table and take
+/// the row whose `type_hash` is the wanted class.
+pub fn aset_blocks_for_type_id(wad: &Wad, type_id: u32) -> Vec<u16> {
+    let rows = || wad.archive.aset.iter().filter(|e| e.type_id == type_id);
+    let mut v: Vec<u16> = rows().filter(|e| e.is_primary()).map(|e| e.block_index()).collect();
+    v.extend(rows().filter(|e| !e.is_primary()).map(|e| e.block_index()));
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|b| seen.insert(*b));
+    v
 }
 
 /// Every distinct ASET `(name_hash, type_id, is_primary)` in the archive — for reverse-name hunts over
@@ -455,4 +520,37 @@ pub fn extract_container_typed(
         pos = end;
     }
     Err(format!("chunk type 0x{chunk_type:08X} name 0x{name_hash:08X} not found in block {block}"))
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    /// All three shapes a user might hand us resolve to the same file. The install-root form is the
+    /// one people actually have (`--game-dir "C:\...\Mercenaries 2 World in Flames"`); requiring the
+    /// full `data\vz.wad` was the papercut this fixes.
+    #[test]
+    fn folder_or_file_both_resolve() {
+        let tmp = std::env::temp_dir().join("mercs2_wad_resolve_test");
+        let data = tmp.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let wad = data.join("vz.wad");
+        std::fs::write(&wad, b"not a real archive").unwrap();
+
+        let want = wad.to_string_lossy().into_owned();
+        assert_eq!(vz_wad_in(&tmp).as_deref(), Some(want.as_str()), "install root → data/vz.wad");
+        assert_eq!(vz_wad_in(&data).as_deref(), Some(want.as_str()), "data folder → vz.wad");
+        assert_eq!(vz_wad_in(&wad).as_deref(), Some(want.as_str()), "the file itself");
+
+        // A folder with no archive under it resolves to nothing, so the caller falls through to the
+        // next source rather than being handed a path that cannot be opened.
+        assert!(vz_wad_in(tmp.join("nope")).is_none());
+
+        // An explicit path takes precedence over the environment and the registry.
+        assert_eq!(resolve_vz_wad(Some(&want)).as_deref(), Some(want.as_str()));
+        // An explicit *folder* resolves through the same precedence, not just an explicit file.
+        assert_eq!(resolve_vz_wad(Some(&tmp.to_string_lossy())).as_deref(), Some(want.as_str()));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }

@@ -160,7 +160,7 @@ fn main() {
                 let c = cs.cp[vi]; let p = cs.posed[vi];
                 tsv.push_str(&format!("{vi}\t{:.5}\t{:.5}\t{:.5}\t{:.5}\t{:.5}\t{:.5}\t{dom}\n", c[0],c[1],c[2],p[0],p[1],p[2]));
             }
-            std::fs::write("C:/Users/Shadow/AppData/Local/Temp/inv_B_cp_posed.tsv", tsv).unwrap();
+            std::fs::write(std::env::temp_dir().join("inv_B_cp_posed.tsv"), tsv).unwrap();
             println!("     wrote cp/posed/dom TSV");
 
             // Scenario recompute for the WIDE right forearm+wrist region. Substitute sims to see
@@ -194,10 +194,10 @@ fn main() {
                 out
             };
             let base=recompute(None,None);
-            std::fs::write("C:/Users/Shadow/AppData/Local/Temp/sc_base.tsv", base).unwrap();
-            std::fs::write("C:/Users/Shadow/AppData/Local/Temp/sc_roll58.tsv", recompute(s58,None)).unwrap();
-            std::fs::write("C:/Users/Shadow/AppData/Local/Temp/sc_hand58.tsv", recompute(None,s58)).unwrap();
-            std::fs::write("C:/Users/Shadow/AppData/Local/Temp/sc_both58.tsv", recompute(s58,s58)).unwrap();
+            std::fs::write(std::env::temp_dir().join("sc_base.tsv"), base).unwrap();
+            std::fs::write(std::env::temp_dir().join("sc_roll58.tsv"), recompute(s58,None)).unwrap();
+            std::fs::write(std::env::temp_dir().join("sc_hand58.tsv"), recompute(None,s58)).unwrap();
+            std::fs::write(std::env::temp_dir().join("sc_both58.tsv"), recompute(s58,s58)).unwrap();
             println!("     wrote scenario TSVs (base / roll->forearm / hand->forearm / both)");
             // Also compare each arm bone's sim rotation/scale spread vs bone 60
             if let Some(&(s60,_)) = cs.bone_sims.get(&60) {

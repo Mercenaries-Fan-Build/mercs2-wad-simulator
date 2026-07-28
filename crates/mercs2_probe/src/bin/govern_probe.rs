@@ -25,7 +25,7 @@ fn main() {
         args
     };
     let tex_names = load_names();
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("vz.wad");
 
     for name in &names {
         let hash = mercs2_formats::hash::pandemic_hash_m2(name.trim_start_matches('_'));

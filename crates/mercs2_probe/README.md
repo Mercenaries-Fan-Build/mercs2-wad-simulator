@@ -62,6 +62,11 @@ set, exactly as matched in `main()`:
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
   table name fragment).
+* **Water**: `watermap_probe` — resolves the `watr` singleton through `AssetSource::extract_singleton`
+  and reports grid, world extent, wet/dry census, waterline range and the Layer 0 × Layer 1 cross-tab.
+  The cross-tab is the regression guard on the 44-byte header: a wet cell carrying the dry sentinel
+  (or vice versa) means the height field has slipped against the mask, which on retail is silent and
+  costs 4,681 coastline cells. It must read `0` on both misalignment rows.
 
 ## Where it comes from
 
@@ -147,8 +152,11 @@ a failing diagnostic exits 1.
 
 ## Notes / gotchas
 
-* **`--wad` is a main-binary flag only.** Every `src/bin/*` dev bin resolves `vz.wad` through
-  `wad::registry_vz_wad()` and panics if the registry key is absent — they have no override.
+* **`--wad` is a main-binary flag only**, but every `src/bin/*` dev bin now resolves `vz.wad` through
+  `wad::resolve_vz_wad(None)`, so `VZ_WAD` overrides them all. `VZ_WAD` takes the install root, its
+  `data` folder, or the `vz.wad` file itself. The dev bins previously went straight to the EA Games
+  registry key and panicked without it, which made them unrunnable off Windows and after a copied-off
+  install. The main binary's `--wad` accepts the same folder-or-file forms.
 * Flag values are consumed positionally: `flag_val` reads the token *after* `--wad` / `--model` /
   `--index` / `--clip` / `--csv`, and `first_positional` skips exactly those five flags and their
   values. A flag value that itself starts with `--` is rejected.

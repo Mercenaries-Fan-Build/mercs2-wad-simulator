@@ -115,13 +115,14 @@ fn main() {
     // actual shipped base class), and our lessons. Modules are resolved by file stem, which is why
     // the lesson is named, not pathed — exactly how the game imports.
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo = crate_dir.join("..").join("..").join("..").join("..");
-    let corpus = repo.join("docs").join("mercs2-luacd").join("src");
     let lessons = crate_dir.join("examples").join("mission_lessons");
-    if !corpus.exists() {
-        eprintln!("cannot find the decompiled script corpus at {}", corpus.display());
+    // Discovery is shared with the replay suites (`mercs2_script::corpus`) because it has to handle
+    // both the standalone side-by-side checkout and the in-tree `tools/wad_simulator` layout. This
+    // example previously hardcoded the in-tree form and so could not run from a standalone clone.
+    let Some(corpus) = mercs2_script::corpus::root() else {
+        eprintln!("{}", mercs2_script::corpus::skip_notice("mission_lab"));
         std::process::exit(2);
-    }
+    };
     let lesson_path = lessons.join(format!("{lesson}.lua"));
     if !lesson_path.exists() {
         eprintln!("no such lesson: {}", lesson_path.display());

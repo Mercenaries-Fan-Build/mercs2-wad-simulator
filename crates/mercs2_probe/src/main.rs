@@ -338,12 +338,12 @@ fn main() {
     let cmd = all[1].clone();
     let args: Vec<String> = all[2..].to_vec();
 
-    // Resolve vz.wad: explicit --wad, else the EA Games registry key.
-    let wadpath = match flag_val(&args, "--wad").filter(|v| !v.is_empty()).or_else(wad::registry_vz_wad) {
+    // Resolve vz.wad: explicit --wad (a folder or the file), else $VZ_WAD, else the registry key.
+    let wadpath = match wad::resolve_vz_wad(flag_val(&args, "--wad").as_deref()) {
         Some(p) => p,
         None => {
             eprintln!(
-                "no vz.wad found — pass --wad <path>, or install so that\n  \
+                "no vz.wad found — pass --wad <folder-or-file>, set VZ_WAD, or install so that\n  \
                  HKLM\\SOFTWARE\\WOW6432Node\\EA Games\\Mercenaries 2 World in Flames\\Install Dir\n  \
                  resolves to a folder containing data\\vz.wad"
             );

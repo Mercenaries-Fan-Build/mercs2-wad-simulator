@@ -22,7 +22,7 @@
 //! ## Covered surface (code map §7)
 //! - **`Weapon.*`**: `GetClipAmmo`, `SetClipAmmo`, `GetReserveAmmo`, `SetReserveAmmo`, `IsDesignator`,
 //!   `IsPrimary`.
-//! - **`Human.Inventory.*`**: `SetAllWeapons`, `ResetWeapons`; **`Object.SetInfiniteAmmo`**.
+//! - **`Object.SetInfiniteAmmo`**. (`Human.Inventory.*` moved to [`crate::inventory`].)
 //! - **`Airstrike.*`**: `SpawnOrdnance`, `ConeSpawn`, `Flyby`, `SpawnDirectedObject` (the ordnance
 //!   spawns; the mission scripts `mrxstrategicmissile`/`mrxfuelairbomb`/`mrxsatclusterbomb` drive
 //!   these). *Correction from the brief:* `Munitions` is a pickup entity script, not a namespace — the
@@ -31,9 +31,9 @@
 use glam::Vec3;
 use hecs::{Entity, World};
 
-use crate::components::{Inventory, RuntimeProjectile, RuntimeWeapon};
+use crate::components::{RuntimeProjectile, RuntimeWeapon};
 use crate::damage::DamageKey;
-use crate::stats::{ExplosiveStats, WeaponStats};
+use crate::stats::ExplosiveStats;
 
 // ---------------------------------------------------------------------------
 // Weapon.*  (RuntimeWeapon pool read/write — §2.2/§2.3)
@@ -94,48 +94,13 @@ pub fn object_set_infinite_ammo(world: &mut World, weapon: Entity, enable: bool)
 }
 
 // ---------------------------------------------------------------------------
-// Human.Inventory.*  (loadout)
+// Human.Inventory.* (loadout)
 // ---------------------------------------------------------------------------
-
-/// `Human.Inventory.SetAllWeapons(uChar, {…})` — force a loadout (code map §7). Stores the weapon list
-/// as an [`Inventory`] on `character` and equips slot 0 by inserting a [`RuntimeWeapon`] on the same
-/// entity (owner = the character). Returns the equipped weapon entity (the character itself, which now
-/// carries the `RuntimeWeapon`), or `None` for an empty list.
-pub fn human_set_all_weapons(
-    world: &mut World,
-    character: Entity,
-    weapons: Vec<WeaponStats>,
-) -> Option<Entity> {
-    if weapons.is_empty() {
-        let _ = world.insert_one(character, Inventory { weapons, equipped: 0 });
-        return None;
-    }
-    let equipped = weapons[0];
-    let inv = Inventory { weapons, equipped: 0 };
-    let _ = world.insert_one(character, inv);
-    let _ = world.insert_one(character, RuntimeWeapon::new(character, equipped));
-    Some(character)
-}
-
-/// `Human.Inventory.ResetWeapons(uChar)` — strip the loadout (empty inventory, remove the equipped
-/// `RuntimeWeapon`).
-pub fn human_reset_weapons(world: &mut World, character: Entity) {
-    let _ = world.remove_one::<RuntimeWeapon>(character);
-    let _ = world.insert_one(character, Inventory::default());
-}
-
-/// Equip inventory slot `slot` on `character` (swaps the active `RuntimeWeapon`). Returns `true` if the
-/// slot exists.
-pub fn human_equip_slot(world: &mut World, character: Entity, slot: usize) -> bool {
-    let stats = {
-        let Ok(mut inv) = world.get::<&mut Inventory>(character) else { return false };
-        let Some(s) = inv.weapons.get(slot).copied() else { return false };
-        inv.equipped = slot;
-        s
-    };
-    let _ = world.insert_one(character, RuntimeWeapon::new(character, stats));
-    true
-}
+//
+// Moved to `crate::inventory`, which models the real `RuntimeInventory` record: seven GUID slots
+// rather than one index, weapons as ECS **entities** rather than `WeaponStats` by value, and the carry
+// relation as an edge component. See `inventory_equipment_code_map.md` §10 for why each of those was
+// not a stylistic choice.
 
 // ---------------------------------------------------------------------------
 // Airstrike.*  (ordnance spawns → projectile/explosion path)
@@ -255,6 +220,7 @@ pub fn airstrike_spawn_directed_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stats::WeaponStats;
     use mercs2_core::event::EventBus;
 
     #[test]
@@ -277,22 +243,10 @@ mod tests {
         assert!(world.get::<&RuntimeWeapon>(we).unwrap().infinite_ammo);
     }
 
-    #[test]
-    fn set_all_weapons_equips_slot_zero() {
-        let mut world = World::new();
-        let ch = world.spawn(());
-        let loadout = vec![WeaponStats::default(), WeaponStats::rocket_launcher()];
-        let eq = human_set_all_weapons(&mut world, ch, loadout).unwrap();
-        assert_eq!(eq, ch);
-        assert!(world.get::<&RuntimeWeapon>(ch).is_ok());
-        assert_eq!(world.get::<&Inventory>(ch).unwrap().weapons.len(), 2);
-        // Equip the rocket in slot 1.
-        assert!(human_equip_slot(&mut world, ch, 1));
-        assert!(world.get::<&RuntimeWeapon>(ch).unwrap().stats.homing.is_some());
-        // Reset strips it.
-        human_reset_weapons(&mut world, ch);
-        assert!(world.get::<&RuntimeWeapon>(ch).is_err());
-    }
+    // `set_all_weapons_equips_slot_zero` lived here and is gone with the functions it covered. Its
+    // premise — that a loadout equips "slot zero" of a flat list — is exactly the model
+    // `inventory_equipment_code_map.md` §10 rejects. The replacement coverage is in `crate::inventory`,
+    // where the loadout fills the primary *and* secondary slots simultaneously.
 
     #[test]
     fn airstrike_cone_spawns_ordnance() {
