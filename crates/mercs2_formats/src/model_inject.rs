@@ -801,7 +801,9 @@ pub fn extract_group_mesh(
     let si = leaf(ucfx, data_off, &rows[g.strm_info]);
     let stride = read_u32_le(si, 4) as usize;
     if stride != 40 {
-        return Err(format!("group {group_ordinal} stride {stride} != 40 (not DECL64)"));
+        return Err(format!(
+            "group {group_ordinal} stride {stride} != 40 (not DECL64)"
+        ));
     }
     let vc = read_u32_le(si, 8) as usize;
     let body = leaf(ucfx, data_off, &rows[g.strm_data]);
@@ -821,7 +823,8 @@ pub fn extract_group_mesh(
             read_f16_le(body, o + 2),
             read_f16_le(body, o + 4),
         ]);
-        m.uvs.push([read_f16_le(body, o + 8), read_f16_le(body, o + 10)]);
+        m.uvs
+            .push([read_f16_le(body, o + 8), read_f16_le(body, o + 10)]);
         m.joints
             .push([body[o + 16], body[o + 17], body[o + 18], body[o + 19]]);
         m.weights
@@ -831,7 +834,9 @@ pub fn extract_group_mesh(
             read_f16_le(body, o + 26),
             read_f16_le(body, o + 28),
         ];
-        let l = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt().max(1e-8);
+        let l = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2])
+            .sqrt()
+            .max(1e-8);
         m.normals.push([nrm[0] / l, nrm[1] / l, nrm[2] / l]);
     }
     // IBUF: triangle strip (u16). Walk it back to a triangle list, dropping
@@ -1014,7 +1019,9 @@ pub fn inject_parts_into_donor_block(
         let mut targets: Vec<(usize, u32, u32)> = Vec::new();
         for &ord in part.hosts {
             if !drawing.contains(&ord) {
-                return Err(format!("group {ord} is not a donor drawing group; drawing={drawing:?}"));
+                return Err(format!(
+                    "group {ord} is not a donor drawing group; drawing={drawing:?}"
+                ));
             }
             let (vc, ic) = donor_group_caps(ucfx, data_off, &rows, &groups[ord]);
             targets.push((ord, vc, ic));
@@ -1030,7 +1037,10 @@ pub fn inject_parts_into_donor_block(
         let mut chunks: Vec<Chunk> = Vec::new();
         let mut ti = 0usize;
         for (idx, &(_gi, donor_vc, donor_ic)) in targets.iter().enumerate() {
-            let mut c = Chunk { tris: Vec::new(), remap: std::collections::HashMap::new() };
+            let mut c = Chunk {
+                tris: Vec::new(),
+                remap: std::collections::HashMap::new(),
+            };
             let is_last = idx + 1 == targets.len();
             while ti < mesh.tris.len() {
                 if !is_last && c.tris.len() >= balanced_cap {
@@ -1079,7 +1089,14 @@ pub fn inject_parts_into_donor_block(
                 let nrec = leaf(ucfx, data_off, &rows[g.prmt]).len() / 16;
                 new_bodies.insert(g.prmt, vec![0u8; nrec * 16]);
                 stats.emptied_groups.push(*gi);
-                audits.push(GroupBudgetAudit { group: *gi, injected_vc: 0, donor_vc: *donor_vc, injected_ic: 0, donor_ic: *donor_ic, triangles: 0 });
+                audits.push(GroupBudgetAudit {
+                    group: *gi,
+                    injected_vc: 0,
+                    donor_vc: *donor_vc,
+                    injected_ic: 0,
+                    donor_ic: *donor_ic,
+                    triangles: 0,
+                });
                 continue;
             }
             let mut order: Vec<(u32, u32)> = chunk.remap.iter().map(|(&g, &l)| (l, g)).collect();
@@ -1091,8 +1108,16 @@ pub fn inject_parts_into_donor_block(
                 normals: vec![[0.0; 3]; local_n],
                 uvs: vec![[0.0; 2]; local_n],
                 tris: Vec::with_capacity(chunk.tris.len()),
-                joints: if has_skin { vec![[0u8; 4]; local_n] } else { Vec::new() },
-                weights: if has_skin { vec![[0u8; 4]; local_n] } else { Vec::new() },
+                joints: if has_skin {
+                    vec![[0u8; 4]; local_n]
+                } else {
+                    Vec::new()
+                },
+                weights: if has_skin {
+                    vec![[0u8; 4]; local_n]
+                } else {
+                    Vec::new()
+                },
             };
             for (l, gvid) in &order {
                 lm.positions[*l as usize] = mesh.positions[*gvid as usize];
@@ -1104,12 +1129,17 @@ pub fn inject_parts_into_donor_block(
                 }
             }
             for t in &chunk.tris {
-                lm.tris.push([chunk.remap[&t[0]], chunk.remap[&t[1]], chunk.remap[&t[2]]]);
+                lm.tris
+                    .push([chunk.remap[&t[0]], chunk.remap[&t[1]], chunk.remap[&t[2]]]);
             }
             let strip = to_strip_connected(&lm.tris);
             {
                 use std::collections::HashSet;
-                let norm = |t: [u32; 3]| { let mut v = t; v.sort_unstable(); v };
+                let norm = |t: [u32; 3]| {
+                    let mut v = t;
+                    v.sort_unstable();
+                    v
+                };
                 let got: HashSet<[u32; 3]> = strip_to_tris(&strip).into_iter().map(norm).collect();
                 let want: HashSet<[u32; 3]> = lm.tris.iter().map(|&t| norm(t)).collect();
                 if got != want {
@@ -1121,7 +1151,9 @@ pub fn inject_parts_into_donor_block(
             let vc = local_n as u32;
             let ic = strip.len() as u32;
             if !grow && (vc > *donor_vc || ic > *donor_ic) {
-                return Err(format!("host {gi} budget violated: vc {vc}>{donor_vc} or ic {ic}>{donor_ic}"));
+                return Err(format!(
+                    "host {gi} budget violated: vc {vc}>{donor_vc} or ic {ic}>{donor_ic}"
+                ));
             }
             let mut ib = Vec::with_capacity(strip.len() * 2);
             for &x in &strip {
@@ -1141,7 +1173,11 @@ pub fn inject_parts_into_donor_block(
             let nrec = (prmt_old.len() / 16).max(1);
             // PRESERVE the donor group's PRMT field0 (material/group tag) — hardcoding it (was `6`)
             // mis-tags the grown group so the reader skips it as an accessory (the 138-vert bug).
-            let field0 = if prmt_old.len() >= 4 { read_u32_le(prmt_old, 0) } else { 6 };
+            let field0 = if prmt_old.len() >= 4 {
+                read_u32_le(prmt_old, 0)
+            } else {
+                6
+            };
             let mut rec = Vec::with_capacity(16);
             rec.extend_from_slice(&field0.to_le_bytes());
             rec.extend_from_slice(&0u32.to_le_bytes());
@@ -1165,13 +1201,22 @@ pub fn inject_parts_into_donor_block(
                         gbmax[k] = gbmax[k].max(p[k]);
                     }
                 }
-                let gcen = [(gbmin[0] + gbmax[0]) * 0.5, (gbmin[1] + gbmax[1]) * 0.5, (gbmin[2] + gbmax[2]) * 0.5];
+                let gcen = [
+                    (gbmin[0] + gbmax[0]) * 0.5,
+                    (gbmin[1] + gbmax[1]) * 0.5,
+                    (gbmin[2] + gbmax[2]) * 0.5,
+                ];
                 let grad = {
-                    let (dx, dy, dz) = ((gbmax[0] - gbmin[0]) * 0.5, (gbmax[1] - gbmin[1]) * 0.5, (gbmax[2] - gbmin[2]) * 0.5);
+                    let (dx, dy, dz) = (
+                        (gbmax[0] - gbmin[0]) * 0.5,
+                        (gbmax[1] - gbmin[1]) * 0.5,
+                        (gbmax[2] - gbmin[2]) * 0.5,
+                    );
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 };
-                if let Some(pir) =
-                    (0..g.strm_info).rev().find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+                if let Some(pir) = (0..g.strm_info)
+                    .rev()
+                    .find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
                 {
                     let mut pi = leaf(ucfx, data_off, &rows[pir]).to_vec();
                     if pi.len() >= 52 {
@@ -1185,7 +1230,14 @@ pub fn inject_parts_into_donor_block(
                     }
                 }
             }
-            audits.push(GroupBudgetAudit { group: *gi, injected_vc: vc, donor_vc: *donor_vc, injected_ic: ic, donor_ic: *donor_ic, triangles: chunk.tris.len() });
+            audits.push(GroupBudgetAudit {
+                group: *gi,
+                injected_vc: vc,
+                donor_vc: *donor_vc,
+                injected_ic: ic,
+                donor_ic: *donor_ic,
+                triangles: chunk.tris.len(),
+            });
             for p in &lm.positions {
                 for k in 0..3 {
                     all_min[k] = all_min[k].min(p[k]);
@@ -1223,7 +1275,10 @@ pub fn inject_parts_into_donor_block(
     }
 
     // MTRL repoint (all parts, global value-scan)
-    let mtrl_row = rows.iter().position(|r| &r.tag == b"MTRL").ok_or("no MTRL chunk")?;
+    let mtrl_row = rows
+        .iter()
+        .position(|r| &r.tag == b"MTRL")
+        .ok_or("no MTRL chunk")?;
     let mut mtrl = leaf(ucfx, data_off, &rows[mtrl_row]).to_vec();
     for part in parts {
         for rp in part.repoints {
@@ -1254,8 +1309,18 @@ pub fn inject_parts_into_donor_block(
     if top.len() >= 28 {
         if preserve_native_non_host {
             for k in 0..3 {
-                let dmin = f32::from_le_bytes([top[4 + k * 4], top[5 + k * 4], top[6 + k * 4], top[7 + k * 4]]);
-                let dmax = f32::from_le_bytes([top[16 + k * 4], top[17 + k * 4], top[18 + k * 4], top[19 + k * 4]]);
+                let dmin = f32::from_le_bytes([
+                    top[4 + k * 4],
+                    top[5 + k * 4],
+                    top[6 + k * 4],
+                    top[7 + k * 4],
+                ]);
+                let dmax = f32::from_le_bytes([
+                    top[16 + k * 4],
+                    top[17 + k * 4],
+                    top[18 + k * 4],
+                    top[19 + k * 4],
+                ]);
                 let nmin = dmin.min(all_min[k]);
                 let nmax = dmax.max(all_max[k]);
                 top[4 + k * 4..8 + k * 4].copy_from_slice(&nmin.to_le_bytes());
@@ -1277,7 +1342,10 @@ pub fn inject_parts_into_donor_block(
     // host groups draw at the default view-state. SEGM records are 4 bytes {u16 bone, u8 seg_id, u8
     // state_mask}; the mask is byte +3. Draw gate = ANY-bit overlap of state_mask with view_state.
     if !promote_segm.is_empty() {
-        if let Some(segm_row) = rows.iter().position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF) {
+        if let Some(segm_row) = rows
+            .iter()
+            .position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF)
+        {
             let mut segm = new_bodies
                 .get(&segm_row)
                 .cloned()
@@ -1292,7 +1360,15 @@ pub fn inject_parts_into_donor_block(
         }
     }
 
-    let block = reassemble(ucfx, &mut rows, ndesc, data_off, &new_bodies, model_type, new_name_hash);
+    let block = reassemble(
+        ucfx,
+        &mut rows,
+        ndesc,
+        data_off,
+        &new_bodies,
+        model_type,
+        new_name_hash,
+    );
     assert_no_empty_drawing_group(&block)
         .map_err(|e| format!("post-reassemble drawing-group gate FAILED: {e}"))?;
     Ok((block, audits, stats))
@@ -1397,7 +1473,9 @@ fn inject_multi_into_donor_block_ex(
     let mut targets: Vec<(usize, u32, u32)> = Vec::new(); // (gi, donor_vc, donor_ic)
     for &ord in target_group_ordinals {
         if !drawing.contains(&ord) {
-            return Err(format!("group {ord} is not a donor drawing group; drawing={drawing:?}"));
+            return Err(format!(
+                "group {ord} is not a donor drawing group; drawing={drawing:?}"
+            ));
         }
         let (vc, ic) = donor_group_caps(ucfx, data_off, &rows, &groups[ord]);
         let (vc, ic) = if grow { (65534u32, 65534u32) } else { (vc, ic) };
@@ -1420,7 +1498,10 @@ fn inject_multi_into_donor_block_ex(
     // by triangle count.
     let explicit: Option<Vec<Chunk>> = tri_group.map(|map| {
         let mut cs: Vec<Chunk> = (0..n_targets)
-            .map(|_| Chunk { tris: Vec::new(), remap: std::collections::HashMap::new() })
+            .map(|_| Chunk {
+                tris: Vec::new(),
+                remap: std::collections::HashMap::new(),
+            })
             .collect();
         for (i, t) in mesh.tris.iter().enumerate() {
             let slot = map.get(i).copied().unwrap_or(0).min(n_targets - 1);
@@ -1547,8 +1628,16 @@ fn inject_multi_into_donor_block_ex(
             normals: vec![[0.0; 3]; local_n],
             uvs: vec![[0.0; 2]; local_n],
             tris: Vec::with_capacity(chunk.tris.len()),
-            joints: if has_skin { vec![[0u8; 4]; local_n] } else { Vec::new() },
-            weights: if has_skin { vec![[0u8; 4]; local_n] } else { Vec::new() },
+            joints: if has_skin {
+                vec![[0u8; 4]; local_n]
+            } else {
+                Vec::new()
+            },
+            weights: if has_skin {
+                vec![[0u8; 4]; local_n]
+            } else {
+                Vec::new()
+            },
         };
         for (l, gvid) in &order {
             lm.positions[*l as usize] = mesh.positions[*gvid as usize];
@@ -1560,7 +1649,8 @@ fn inject_multi_into_donor_block_ex(
             }
         }
         for t in &chunk.tris {
-            lm.tris.push([chunk.remap[&t[0]], chunk.remap[&t[1]], chunk.remap[&t[2]]]);
+            lm.tris
+                .push([chunk.remap[&t[0]], chunk.remap[&t[1]], chunk.remap[&t[2]]]);
         }
 
         // PER-GROUP palette. A palette belongs to a DRAW GROUP, not to a model: each group's
@@ -1593,8 +1683,10 @@ fn inject_multi_into_donor_block_ex(
                     j[k] = slot_of.get(&(j[k] as u32)).copied().unwrap_or(0);
                 }
             }
-            let ranges: Vec<(u16, u16)> =
-                ranges32.iter().map(|&(b, c)| (b as u16, c as u16)).collect();
+            let ranges: Vec<(u16, u16)> = ranges32
+                .iter()
+                .map(|&(b, c)| (b as u16, c as u16))
+                .collect();
             let info_row = (0..g.strm_info)
                 .rev()
                 .find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
@@ -1744,7 +1836,15 @@ fn inject_multi_into_donor_block_ex(
     stats.avg_normal_len = (tot_nl / tot_v.max(1) as f64) as f32;
     stats.avg_tangent_len = (tot_tl / tot_v.max(1) as f64) as f32;
 
-    let block = reassemble(ucfx, &mut rows, ndesc, data_off, &new_bodies, model_type, new_name_hash);
+    let block = reassemble(
+        ucfx,
+        &mut rows,
+        ndesc,
+        data_off,
+        &new_bodies,
+        model_type,
+        new_name_hash,
+    );
     // BUILD-TIME GATE: a registered drawing group must never point at a zero-size
     // vbuf/ibuf. Fail the build (don't ship a null-vbuf draw -> wardrobe AV).
     assert_no_empty_drawing_group(&block)
@@ -1876,7 +1976,8 @@ pub fn neutralise_lod_rung(ucfx: &[u8], new_name_hash: u32) -> Result<(Vec<u8>, 
         return Err("no descriptor rows".into());
     }
     let groups = find_groups(&rows);
-    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> =
+        std::collections::HashMap::new();
     let mut emptied = 0usize;
     for g in &groups {
         if !group_draws(ucfx, data_off, &rows, g) {
@@ -1916,10 +2017,21 @@ pub fn neutralise_lod_rung(ucfx: &[u8], new_name_hash: u32) -> Result<(Vec<u8>, 
         .find(|r| &r.tag == b"INFO" && r.u0 != 0xFFFF_FFFF)
         .map(|r| read_u32_le(leaf(ucfx, data_off, r), 0))
         .unwrap_or(19);
-    let block = reassemble(ucfx, &mut rows, ndesc, data_off, &new_bodies, model_type, new_name_hash);
+    let block = reassemble(
+        ucfx,
+        &mut rows,
+        ndesc,
+        data_off,
+        &new_bodies,
+        model_type,
+        new_name_hash,
+    );
     // `reassemble` re-wraps in a 20-byte WAD-block header; `smuggler --inject-container` wants the
     // bare UCFX container (that is what the multi-part injector emits). Hand back the container.
-    let ucfx_out = block.get(20..).ok_or("reassembled block too short")?.to_vec();
+    let ucfx_out = block
+        .get(20..)
+        .ok_or("reassembled block too short")?
+        .to_vec();
     if ucfx_out.get(0..4) != Some(b"UCFX") {
         return Err("neutralised rung is not a UCFX container".into());
     }
@@ -2321,7 +2433,11 @@ fn parse_decl(decl: &[u8]) -> Vec<DeclElem> {
         if stream == 0xFF || offset == 0xFF {
             break;
         }
-        out.push(DeclElem { offset: offset as usize, typ, usage });
+        out.push(DeclElem {
+            offset: offset as usize,
+            typ,
+            usage,
+        });
         p += 8;
     }
     out
@@ -2465,13 +2581,16 @@ pub fn inject_static_into_donor_block(
     } else if target_group_ordinal >= RAW_BASE {
         let raw = target_group_ordinal - RAW_BASE;
         if raw >= groups.len() {
-            return Err(format!("raw group {raw} out of range (0..{})", groups.len()));
+            return Err(format!(
+                "raw group {raw} out of range (0..{})",
+                groups.len()
+            ));
         }
         raw
     } else {
-        *drawing
-            .get(target_group_ordinal)
-            .ok_or_else(|| format!("target group {target_group_ordinal} out of range; drawing={drawing:?}"))?
+        *drawing.get(target_group_ordinal).ok_or_else(|| {
+            format!("target group {target_group_ordinal} out of range; drawing={drawing:?}")
+        })?
     };
 
     // Auto-fit: uniform-scale + recenter the novel mesh into the template's REAL
@@ -2518,8 +2637,16 @@ pub fn inject_static_into_donor_block(
             // X/Z: centre on the envelope. Y: BOTTOM-align (mesh min-Y → envelope
             // min-Y) so the prop's feet/skids sit on the ground rather than floating
             // (centre-aligning a mesh shorter than the envelope leaves it hovering).
-            let mcen = [(mmin[0] + mmax[0]) * 0.5, (mmin[1] + mmax[1]) * 0.5, (mmin[2] + mmax[2]) * 0.5];
-            let tcen = [(tmin[0] + tmax[0]) * 0.5, (tmin[1] + tmax[1]) * 0.5, (tmin[2] + tmax[2]) * 0.5];
+            let mcen = [
+                (mmin[0] + mmax[0]) * 0.5,
+                (mmin[1] + mmax[1]) * 0.5,
+                (mmin[2] + mmax[2]) * 0.5,
+            ];
+            let tcen = [
+                (tmin[0] + tmax[0]) * 0.5,
+                (tmin[1] + tmax[1]) * 0.5,
+                (tmin[2] + tmax[2]) * 0.5,
+            ];
             let mut f = mesh.clone();
             for p in f.positions.iter_mut() {
                 p[0] = (p[0] - mcen[0]) * s + tcen[0];
@@ -2570,9 +2697,17 @@ pub fn inject_static_into_donor_block(
             bmax[k] = bmax[k].max(p[k]);
         }
     }
-    let cen = [(bmin[0] + bmax[0]) * 0.5, (bmin[1] + bmax[1]) * 0.5, (bmin[2] + bmax[2]) * 0.5];
+    let cen = [
+        (bmin[0] + bmax[0]) * 0.5,
+        (bmin[1] + bmax[1]) * 0.5,
+        (bmin[2] + bmax[2]) * 0.5,
+    ];
     let rad = {
-        let (dx, dy, dz) = ((bmax[0] - bmin[0]) * 0.5, (bmax[1] - bmin[1]) * 0.5, (bmax[2] - bmin[2]) * 0.5);
+        let (dx, dy, dz) = (
+            (bmax[0] - bmin[0]) * 0.5,
+            (bmax[1] - bmin[1]) * 0.5,
+            (bmax[2] - bmin[2]) * 0.5,
+        );
         (dx * dx + dy * dy + dz * dz).sqrt()
     };
 
@@ -2583,7 +2718,8 @@ pub fn inject_static_into_donor_block(
         triangle_count: mesh.tris.len(),
         ..Default::default()
     };
-    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> =
+        std::collections::HashMap::new();
 
     // Which group(s) receive the geometry:
     //   raw_targets non-empty -> exactly those RAW group ordinals (the engine's
@@ -2599,7 +2735,11 @@ pub fn inject_static_into_donor_block(
     let targets: Vec<usize> = if neutralize_only {
         Vec::new()
     } else if !raw_targets.is_empty() {
-        raw_targets.iter().copied().filter(|&g| g < groups.len()).collect()
+        raw_targets
+            .iter()
+            .copied()
+            .filter(|&g| g < groups.len())
+            .collect()
     } else if all_groups {
         drawing.clone()
     } else {
@@ -2630,7 +2770,11 @@ pub fn inject_static_into_donor_block(
         // PRMT: preserve field[0] (prim-type/matidx unresolved, registry §3).
         let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
         let nrec = (prmt_old.len() / 16).max(1);
-        let field0 = if prmt_old.len() >= 4 { read_u32_le(prmt_old, 0) } else { 6 };
+        let field0 = if prmt_old.len() >= 4 {
+            read_u32_le(prmt_old, 0)
+        } else {
+            6
+        };
         let mut rec = Vec::with_capacity(16);
         rec.extend_from_slice(&field0.to_le_bytes());
         rec.extend_from_slice(&0u32.to_le_bytes());
@@ -2643,8 +2787,9 @@ pub fn inject_static_into_donor_block(
         }
         new_bodies.insert(g.prmt, prmt_body);
         // This group's PRMG INFO cull bounds → fit the injected geometry.
-        if let Some(pir) =
-            (0..g.strm_info).rev().find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+        if let Some(pir) = (0..g.strm_info)
+            .rev()
+            .find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
         {
             let mut pi = leaf(ucfx, data_off, &rows[pir]).to_vec();
             if pi.len() >= 60 {
@@ -2712,7 +2857,11 @@ pub fn inject_static_into_donor_block(
     if !neutralize_only {
         let seg_id = crate::model_cubeize::read_model_meshes(ucfx)
             .ok()
-            .and_then(|ms| ms.iter().find(|m| m.group_index == target_gi).map(|m| m.seg_id));
+            .and_then(|ms| {
+                ms.iter()
+                    .find(|m| m.group_index == target_gi)
+                    .map(|m| m.seg_id)
+            });
         let segm_row = rows
             .iter()
             .position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF);
@@ -2807,7 +2956,11 @@ mod tests {
             hier[o + 8..o + 10]
                 .copy_from_slice(&(if p < 0 { 0xFFFFu16 } else { p as u16 }).to_le_bytes());
             hier[o + 10..o + 12].copy_from_slice(&0xFFFFu16.to_le_bytes());
-            let ppos = if p < 0 { [0.0; 3] } else { positions[p as usize] };
+            let ppos = if p < 0 {
+                [0.0; 3]
+            } else {
+                positions[p as usize]
+            };
             let mut m = [[0.0f32; 4]; 4];
             for d in 0..4 {
                 m[d][d] = 1.0;
@@ -2836,9 +2989,10 @@ mod tests {
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&(ndesc as u32).to_le_bytes());
-        for (tag, off, sz) in
-            [(b"INFO", info_off, top.len() as u32), (b"HIER", hier_off, hier.len() as u32)]
-        {
+        for (tag, off, sz) in [
+            (b"INFO", info_off, top.len() as u32),
+            (b"HIER", hier_off, hier.len() as u32),
+        ] {
             out.extend_from_slice(tag);
             out.extend_from_slice(&off.to_le_bytes());
             out.extend_from_slice(&sz.to_le_bytes());
@@ -2855,8 +3009,10 @@ mod tests {
     #[test]
     fn append_new_bones_grows_hier_and_links() {
         // root(0) -> body(1) at (0,0,0); rotor(2) at (0,8,0)
-        let donor =
-            build_hier_donor(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 8.0, 0.0]], &[-1, 0, 0]);
+        let donor = build_hier_donor(
+            &[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 8.0, 0.0]],
+            &[-1, 0, 0],
+        );
         let base = crate::skeleton::Skeleton::from_block(&wrap_block(&donor, 0)).unwrap();
         assert_eq!(base.bones.len(), 3);
 
@@ -2890,18 +3046,32 @@ mod tests {
         assert_eq!(sk.bones[4].parent, 2);
         let wp3 = sk.bones[3].world_pos();
         let wp4 = sk.bones[4].world_pos();
-        assert!((wp3[0] - 1.0).abs() < 1e-4 && (wp3[1] - 2.0).abs() < 1e-4 && (wp3[2] - 3.0).abs() < 1e-4, "bone3 {wp3:?}");
+        assert!(
+            (wp3[0] - 1.0).abs() < 1e-4
+                && (wp3[1] - 2.0).abs() < 1e-4
+                && (wp3[2] - 3.0).abs() < 1e-4,
+            "bone3 {wp3:?}"
+        );
         assert!((wp4[1] - 9.0).abs() < 1e-4, "bone4 {wp4:?}");
         assert_eq!(sk.bones[3].name_hash, 0xAAAA_0001);
 
         // parent's first-child link now points at the prepended new bone
         let stride = crate::skeleton::HIER_NODE_STRIDE;
-        let hier = rows.iter().position(|r| &r.tag == b"HIER" && r.u0 != 0xFFFF_FFFF).unwrap();
+        let hier = rows
+            .iter()
+            .position(|r| &r.tag == b"HIER" && r.u0 != 0xFFFF_FFFF)
+            .unwrap();
         let hbody = leaf(&out, data_off, &rows[hier]);
         let body_first_child = u16::from_le_bytes([hbody[1 * stride + 6], hbody[1 * stride + 7]]);
-        assert_eq!(body_first_child, 3, "body(1) first-child should be new bone 3");
+        assert_eq!(
+            body_first_child, 3,
+            "body(1) first-child should be new bone 3"
+        );
         let new_sibling = u16::from_le_bytes([hbody[3 * stride + 10], hbody[3 * stride + 11]]);
-        assert_eq!(new_sibling, 0xFFFF, "bone3 next-sibling = body's old (none)");
+        assert_eq!(
+            new_sibling, 0xFFFF,
+            "bone3 next-sibling = body's old (none)"
+        );
     }
 
     #[test]
@@ -2968,7 +3138,12 @@ mod tests {
     fn tangents_are_unit() {
         // simple quad in XY, planar UVs
         let m = ExternalMesh {
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             tris: vec![[0, 1, 2], [0, 2, 3]],
@@ -2999,7 +3174,10 @@ mod tests {
             &block,
             &mesh,
             0, // target drawing group 0
-            &[MtrlRepoint { from: 0xAAAA_AAAA, to: 0xBBBB_BBBB }],
+            &[MtrlRepoint {
+                from: 0xAAAA_AAAA,
+                to: 0xBBBB_BBBB,
+            }],
             0xC15489A1, // pmc_hum_cesium
         )
         .expect("inject");
@@ -3045,7 +3223,7 @@ mod tests {
         // 20→1, 21→2, 22→3.
         let ranges: Vec<(u16, u16)> = vec![(3, 1), (20, 3)];
         let palette = crate::char_skin::expand_ranges(&ranges); // [3,20,21,22]
-        // three verts, each single-influence on a distinct palette SLOT.
+                                                                // three verts, each single-influence on a distinct palette SLOT.
         let vjoint_slots = [[0u8, 0, 0, 0], [2, 0, 0, 0], [3, 0, 0, 0]];
         let mesh = ExternalMesh {
             positions: vec![[0.0, 0.0, 0.0], [0.5, 1.0, 0.1], [-0.5, 0.8, -0.1]],
@@ -3055,21 +3233,19 @@ mod tests {
             joints: vjoint_slots.to_vec(),
             weights: vec![[0xff, 0, 0, 0]; 3],
         };
-        let (out, _stats) = inject_character_into_donor_block(
-            &block,
-            &mesh,
-            &ranges,
-            0,
-            &[],
-            0xC15489A1,
-        )
-        .expect("character inject");
+        let (out, _stats) =
+            inject_character_into_donor_block(&block, &mesh, &ranges, 0, &[], 0xC15489A1)
+                .expect("character inject");
 
         let ulen = read_u32_le(&out, 16) as usize;
         let ucfx = &out[20..20 + ulen];
         // CSUM must still verify after the INFO(56) rewrite
         let body = &ucfx[..ucfx.len() - 8];
-        assert_eq!(crc32_mercs2(body), read_u32_le(ucfx, ucfx.len() - 4), "CSUM");
+        assert_eq!(
+            crc32_mercs2(body),
+            read_u32_le(ucfx, ucfx.len() - 4),
+            "CSUM"
+        );
 
         // The reader expands the INFO(56) palette and returns GLOBAL joints.
         let meshes = crate::model_cubeize::read_model_meshes(ucfx).expect("read back");
@@ -3093,7 +3269,7 @@ mod tests {
     #[test]
     fn inject_multi_splits_across_groups() {
         let block = build_synthetic_donor(); // two groups, each donor vc=3 ic=4
-        // 2 triangles, 4 unique verts -> cannot fit one group (vc cap 3); must split.
+                                             // 2 triangles, 4 unique verts -> cannot fit one group (vc cap 3); must split.
         let mesh = ExternalMesh {
             positions: vec![
                 [0.0, 0.0, 0.0],
@@ -3110,15 +3286,28 @@ mod tests {
             &block,
             &mesh,
             &[0, 1],
-            &[MtrlRepoint { from: 0xAAAA_AAAA, to: 0xBBBB_BBBB }],
+            &[MtrlRepoint {
+                from: 0xAAAA_AAAA,
+                to: 0xBBBB_BBBB,
+            }],
             0xC15489A1,
         )
         .expect("inject multi");
         assert_eq!(audits.len(), 2);
         // every group <= donor original on BOTH counts
         for a in &audits {
-            assert!(a.injected_vc <= a.donor_vc, "vc {} > {}", a.injected_vc, a.donor_vc);
-            assert!(a.injected_ic <= a.donor_ic, "ic {} > {}", a.injected_ic, a.donor_ic);
+            assert!(
+                a.injected_vc <= a.donor_vc,
+                "vc {} > {}",
+                a.injected_vc,
+                a.donor_vc
+            );
+            assert!(
+                a.injected_ic <= a.donor_ic,
+                "ic {} > {}",
+                a.injected_ic,
+                a.donor_ic
+            );
         }
         // both triangles placed
         assert_eq!(audits.iter().map(|a| a.triangles).sum::<usize>(), 2);
@@ -3365,9 +3554,13 @@ pub fn inject_parts_into_template(
     }
     let (data_off, ndesc, mut rows) = parse_rows(ucfx);
     let groups = find_groups(&rows);
-    let drawing: Vec<usize> =
-        (0..groups.len()).filter(|&gi| group_draws(ucfx, data_off, &rows, &groups[gi])).collect();
-    let mut stats = PartsStats { fit_scale: 1.0, ..Default::default() };
+    let drawing: Vec<usize> = (0..groups.len())
+        .filter(|&gi| group_draws(ucfx, data_off, &rows, &groups[gi]))
+        .collect();
+    let mut stats = PartsStats {
+        fit_scale: 1.0,
+        ..Default::default()
+    };
 
     // ---- ONE global fit for the whole model: union bbox of every part -> the template
     // model-space AABB (header INFO +0x04/+0x10). All parts MUST share one transform or they
@@ -3390,8 +3583,10 @@ pub fn inject_parts_into_template(
     if fit_percentile < 100.0 {
         let q = (fit_percentile.clamp(50.0, 100.0) / 100.0) as f64;
         for k in 0..3 {
-            let mut vals: Vec<f32> =
-                parts.iter().flat_map(|p| p.mesh.positions.iter().map(move |v| v[k])).collect();
+            let mut vals: Vec<f32> = parts
+                .iter()
+                .flat_map(|p| p.mesh.positions.iter().map(move |v| v[k]))
+                .collect();
             if vals.len() < 8 {
                 continue;
             }
@@ -3432,7 +3627,11 @@ pub fn inject_parts_into_template(
     // box spans X -2.184..+2.520, so its box centre is +0.168 while every rig node sits at X=0).
     // Centring our tank on +0.168 parked its body a whole 17 cm off the axis the turret rotates about
     // — the body sat to one side of its own turret. Align the centreline to the centreline.
-    let ucen = [(umin[0] + umax[0]) * 0.5, umin[1], (umin[2] + umax[2]) * 0.5];
+    let ucen = [
+        (umin[0] + umax[0]) * 0.5,
+        umin[1],
+        (umin[2] + umax[2]) * 0.5,
+    ];
     let tgt = [0.0, y_offset, 0.0];
     let _ = (tmin[0] + tmax[0]) * 0.5;
     let _ = (tmin[2] + tmax[2]) * 0.5;
@@ -3462,9 +3661,12 @@ pub fn inject_parts_into_template(
     let wrapped = wrap_block(ucfx, new_name_hash);
     let skel = crate::skeleton::Skeleton::from_block(&wrapped).ok();
     let meshes = crate::model_cubeize::read_model_meshes(ucfx).unwrap_or_default();
-    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> =
+        std::collections::HashMap::new();
     let mut segm_body: Option<Vec<u8>> = None;
-    let segm_row = rows.iter().position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF);
+    let segm_row = rows
+        .iter()
+        .position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF);
 
     // ★PHY2 — scale the donor's COLLISION HULLS to match our model.
     //
@@ -3474,7 +3676,10 @@ pub fn inject_parts_into_template(
     // already fills its own hull — so we scale by how much BIGGER we made the model than the donor,
     // i.e. `scale_mult` (1.0 = donor-sized = leave collision alone).
     if (scale_mult - 1.0).abs() > 1e-4 {
-        if let Some(pi) = rows.iter().position(|r| &r.tag == b"PHY2" && r.u0 != 0xFFFF_FFFF) {
+        if let Some(pi) = rows
+            .iter()
+            .position(|r| &r.tag == b"PHY2" && r.u0 != 0xFFFF_FFFF)
+        {
             let mut ph = leaf(ucfx, data_off, &rows[pi]).to_vec();
             match crate::havok::scale_phy2_hulls(&mut ph, scale_mult) {
                 Ok(n) => {
@@ -3497,8 +3702,10 @@ pub fn inject_parts_into_template(
     // Retargeting a node rigidly carries its whole SUBTREE (moving the turret must move the barrel
     // with it), then a later, deeper retarget re-places the child precisely. HIER guarantees
     // parent < child, so applying in index order gives parents-before-children for free.
-    let mut worlds: Vec<[[f32; 4]; 4]> =
-        skel.as_ref().map(|s| s.bones.iter().map(|b| b.world).collect()).unwrap_or_default();
+    let mut worlds: Vec<[[f32; 4]; 4]> = skel
+        .as_ref()
+        .map(|s| s.bones.iter().map(|b| b.world).collect())
+        .unwrap_or_default();
 
     // ★SCALE THE RIG WITH THE MODEL. Scaling the geometry (and PHY2) but not the HIER leaves every
     // hardpoint at DONOR scale: the seat, the exhaust points, the wheel points all stay where the
@@ -3551,7 +3758,10 @@ pub fn inject_parts_into_template(
                 stats.nodes_moved.push((r, want));
             }
             // Re-derive each LOCAL from the new worlds: local = world @ inverse(world_parent).
-            if let Some(hi) = rows.iter().position(|rw| &rw.tag == b"HIER" && rw.u0 != 0xFFFF_FFFF) {
+            if let Some(hi) = rows
+                .iter()
+                .position(|rw| &rw.tag == b"HIER" && rw.u0 != 0xFFFF_FFFF)
+            {
                 let mut h = leaf(ucfx, data_off, &rows[hi]).to_vec();
                 for i in 0..n {
                     let o = i * crate::skeleton::HIER_NODE_STRIDE + 16;
@@ -3580,7 +3790,9 @@ pub fn inject_parts_into_template(
     }
 
     for spec in parts {
-        let g = groups.get(spec.group).ok_or_else(|| format!("group {} out of range", spec.group))?;
+        let g = groups
+            .get(spec.group)
+            .ok_or_else(|| format!("group {} out of range", spec.group))?;
 
         // Fit to model space, then (if node-bound) into that node LOCAL space, because a rigid
         // MESH sub-object is authored bone-local and the engine multiplies it by node.world.
@@ -3636,7 +3848,11 @@ pub fn inject_parts_into_template(
         };
         let strip = to_strip(tris);
         if m.positions.len() > 65534 {
-            return Err(format!("{}: {} verts exceeds u16", spec.label, m.positions.len()));
+            return Err(format!(
+                "{}: {} verts exceeds u16",
+                spec.label,
+                m.positions.len()
+            ));
         }
         if strip.len() > 65534 {
             return Err(format!(
@@ -3674,8 +3890,11 @@ pub fn inject_parts_into_template(
             let n_prim = strip.len().saturating_sub(2);
             let mut area = Vec::with_capacity(n_prim * 2);
             for w in 0..n_prim {
-                let (i0, i1, i2) =
-                    (strip[w] as usize, strip[w + 1] as usize, strip[w + 2] as usize);
+                let (i0, i1, i2) = (
+                    strip[w] as usize,
+                    strip[w + 1] as usize,
+                    strip[w + 2] as usize,
+                );
                 // A degenerate (repeated-index) stitch triangle has zero area — and the donor
                 // stores exactly 0.0 for those.
                 let a = if i0 == i1 || i1 == i2 || i0 == i2 {
@@ -3720,8 +3939,9 @@ pub fn inject_parts_into_template(
                 pmax[k] = pmax[k].max(v[k]);
             }
         }
-        if let Some(pir) =
-            (0..g.strm_info).rev().find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
+        if let Some(pir) = (0..g.strm_info)
+            .rev()
+            .find(|&i| &rows[i].tag == b"INFO" && rows[i].u0 != 0xFFFF_FFFF)
         {
             let mut pi = leaf(ucfx, data_off, &rows[pir]).to_vec();
             if pi.len() >= 60 {
@@ -3754,7 +3974,9 @@ pub fn inject_parts_into_template(
             .map(|mm| mm.seg_id)
             .ok_or_else(|| format!("group {} has no INDX/SEGM binding", spec.group))?;
         let body = segm_body.get_or_insert_with(|| {
-            segm_row.map(|sr| leaf(ucfx, data_off, &rows[sr]).to_vec()).unwrap_or_default()
+            segm_row
+                .map(|sr| leaf(ucfx, data_off, &rows[sr]).to_vec())
+                .unwrap_or_default()
         });
         let o = seg_id * 4;
         if o + 4 > body.len() {
@@ -3834,7 +4056,10 @@ pub fn inject_parts_into_template(
     // shader variant (flags 0x0000 / tex_count 2), so converting one into a copy of a known-good
     // textured material is how we get an extra usable skin slot WITHOUT growing the record set.
     if !mtrl_replaces.is_empty() {
-        if let Some(mi) = rows.iter().position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF) {
+        if let Some(mi) = rows
+            .iter()
+            .position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF)
+        {
             let m = new_bodies
                 .get(&mi)
                 .cloned()
@@ -3872,7 +4097,10 @@ pub fn inject_parts_into_template(
 
     // APPEND cloned materials first, so --set-mtrl indices can refer to them.
     if !mtrl_adds.is_empty() {
-        if let Some(mi) = rows.iter().position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF) {
+        if let Some(mi) = rows
+            .iter()
+            .position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF)
+        {
             let mut m = new_bodies
                 .get(&mi)
                 .cloned()
@@ -3890,7 +4118,9 @@ pub fn inject_parts_into_template(
                 o += stride;
             }
             for &(src, tex) in mtrl_adds {
-                let Some(&(so, stride)) = recs.get(src) else { continue };
+                let Some(&(so, stride)) = recs.get(src) else {
+                    continue;
+                };
                 let mut rec = m[so..so + stride].to_vec();
                 rec[108..112].copy_from_slice(&tex.to_le_bytes());
                 // ★A material record's first u32 is its NAME HASH, and the engine registers
@@ -3912,7 +4142,10 @@ pub fn inject_parts_into_template(
     // MTRL diffuse BY MATERIAL INDEX. Record stride = 116 + tex_count*4; flags@104, tex_count@106,
     // texture hashes from @108 (diffuse = the first). Walk records and rewrite the requested ones.
     if !mtrl_sets.is_empty() {
-        if let Some(mi) = rows.iter().position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF) {
+        if let Some(mi) = rows
+            .iter()
+            .position(|r| &r.tag == b"MTRL" && r.u0 != 0xFFFF_FFFF)
+        {
             let mut m = new_bodies
                 .get(&mi)
                 .cloned()
@@ -4072,7 +4305,11 @@ pub fn append_new_bones(ucfx: &[u8], bones: &[NewBone]) -> Result<(Vec<u8>, Vec<
         .map_err(|e| format!("HIER did not parse for world-rest derivation: {e}"))?;
     let mut worlds: Vec<[[f32; 4]; 4]> = skel.bones.iter().map(|b| b.world).collect();
     if worlds.len() != old_n {
-        return Err(format!("HIER node count mismatch: {} bytes vs {} parsed", old_n, worlds.len()));
+        return Err(format!(
+            "HIER node count mismatch: {} bytes vs {} parsed",
+            old_n,
+            worlds.len()
+        ));
     }
 
     let write_mat = |buf: &mut [u8], o: usize, m: &[[f32; 4]; 4]| {
@@ -4143,7 +4380,8 @@ pub fn append_new_bones(ucfx: &[u8], bones: &[NewBone]) -> Result<(Vec<u8>, Vec<
     top[0x20..0x24].copy_from_slice(&((old_n + bones.len()) as u32).to_le_bytes());
 
     // Reassemble raw UCFX (reflow offsets + CSUM), same emission as inject_parts_into_template.
-    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
+    let mut new_bodies: std::collections::HashMap<usize, Vec<u8>> =
+        std::collections::HashMap::new();
     new_bodies.insert(hi, hier);
     new_bodies.insert(0, top);
     let mut new_data: Vec<u8> = Vec::new();
@@ -4250,10 +4488,13 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
     let segm = leaf(ucfx, data_off, &rows[segm_row]);
     let seg_count = segm.len() / 4;
     let old_indx = leaf(ucfx, data_off, &rows[indx]);
-    let used: std::collections::HashSet<u16> =
-        old_indx.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-    let mut free: Vec<u16> =
-        (0..seg_count as u16).filter(|s| !used.contains(s)).collect();
+    let used: std::collections::HashSet<u16> = old_indx
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let mut free: Vec<u16> = (0..seg_count as u16)
+        .filter(|s| !used.contains(s))
+        .collect();
     if free.len() < n {
         return Err(format!("only {} free SEGM rows, need {n}", free.len()));
     }
@@ -4291,7 +4532,14 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
             }
             body = Some(v);
         }
-        out.push(Out { tag: r.tag, marker, size: r.size, u2: r.u2, u3, body });
+        out.push(Out {
+            tag: r.tag,
+            marker,
+            size: r.size,
+            u2: r.u2,
+            u3,
+            body,
+        });
     }
     // n cloned MESH subtrees (byte-identical descriptors + donor geometry placeholder).
     for _ in 0..n {
@@ -4408,7 +4656,14 @@ fn split_mesh_u16(mesh: &ExternalMesh, tri_cap: usize) -> Vec<ExternalMesh> {
             tris.push(lt);
             ti += 1;
         }
-        out.push(ExternalMesh { positions, normals, uvs, tris, joints: Vec::new(), weights: Vec::new() });
+        out.push(ExternalMesh {
+            positions,
+            normals,
+            uvs,
+            tris,
+            joints: Vec::new(),
+            weights: Vec::new(),
+        });
     }
     out
 }
@@ -4476,8 +4731,10 @@ pub fn inject_fresh_skeleton(
     if fit_percentile < 100.0 {
         let q = (fit_percentile.clamp(50.0, 100.0) / 100.0) as f64;
         for k in 0..3 {
-            let mut vals: Vec<f32> =
-                parts.iter().flat_map(|p| p.mesh.positions.iter().map(move |v| v[k])).collect();
+            let mut vals: Vec<f32> = parts
+                .iter()
+                .flat_map(|p| p.mesh.positions.iter().map(move |v| v[k]))
+                .collect();
             if vals.len() < 8 {
                 continue;
             }
@@ -4498,9 +4755,17 @@ pub fn inject_fresh_skeleton(
         s = 1.0;
     }
     s *= if scale_mult > 0.0 { scale_mult } else { 1.0 };
-    let ucen = [(umin[0] + umax[0]) * 0.5, umin[1], (umin[2] + umax[2]) * 0.5];
+    let ucen = [
+        (umin[0] + umax[0]) * 0.5,
+        umin[1],
+        (umin[2] + umax[2]) * 0.5,
+    ];
     let fit = |p: [f32; 3]| {
-        [(p[0] - ucen[0]) * s, (p[1] - ucen[1]) * s + y_offset, (p[2] - ucen[2]) * s]
+        [
+            (p[0] - ucen[0]) * s,
+            (p[1] - ucen[1]) * s + y_offset,
+            (p[2] - ucen[2]) * s,
+        ]
     };
 
     // ---- author one novel bone per part at its fitted centroid ----
@@ -4514,7 +4779,11 @@ pub fn inject_fresh_skeleton(
                 pmx[k] = pmx[k].max(w[k]);
             }
         }
-        let wp = [(pmn[0] + pmx[0]) * 0.5, (pmn[1] + pmx[1]) * 0.5, (pmn[2] + pmx[2]) * 0.5];
+        let wp = [
+            (pmn[0] + pmx[0]) * 0.5,
+            (pmn[1] + pmx[1]) * 0.5,
+            (pmn[2] + pmx[2]) * 0.5,
+        ];
         // local AABB relative to the bone origin (identity rotation).
         let laabb = (
             [pmn[0] - wp[0], pmn[1] - wp[1], pmn[2] - wp[2]],
@@ -4528,15 +4797,19 @@ pub fn inject_fresh_skeleton(
         });
     }
     // ---- split each part to u16 FIRST so we know how many host groups we need ----
-    let part_subs: Vec<Vec<ExternalMesh>> =
-        parts.iter().map(|p| split_mesh_u16(&p.mesh, 8000)).collect();
+    let part_subs: Vec<Vec<ExternalMesh>> = parts
+        .iter()
+        .map(|p| split_mesh_u16(&p.mesh, 8000))
+        .collect();
     let needed: usize = part_subs.iter().map(|s| s.len()).sum();
 
     // ---- grow the donor's draw-group pool if it can't host one group per sub-part (each group
     // binds exactly one bone, so per-part bones need one group per sub-part) ----
     let base_drawing = {
         let g = find_groups(&rows);
-        (0..g.len()).filter(|&gi| group_draws(ucfx, data_off, &rows, &g[gi])).count()
+        (0..g.len())
+            .filter(|&gi| group_draws(ucfx, data_off, &rows, &g[gi]))
+            .count()
     };
     let mut ucfx_g = std::borrow::Cow::Borrowed(ucfx);
     if needed > base_drawing {
@@ -4568,7 +4841,12 @@ pub fn inject_fresh_skeleton(
             next_host += 1;
             report.push_str(&format!(
                 "  {}[{}] -> group {} node {} mat {} ({} tris)\n",
-                p.label, si, group, bone_indices[pi], p.material_index, sub.tris.len()
+                p.label,
+                si,
+                group,
+                bone_indices[pi],
+                p.material_index,
+                sub.tris.len()
             ));
             specs.push(PartSpec {
                 label: format!("{}[{}]", p.label, si),
@@ -4583,8 +4861,18 @@ pub fn inject_fresh_skeleton(
 
     // ---- conform (the appended template re-fits geometry identically; parts bind to new bones) ----
     let (out_ucfx, stats) = inject_parts_into_template(
-        &grown_ucfx, &specs, &[], mtrl_sets, &[], &[], &[], new_name_hash, scale_mult, flip_winding,
-        y_offset, fit_percentile,
+        &grown_ucfx,
+        &specs,
+        &[],
+        mtrl_sets,
+        &[],
+        &[],
+        &[],
+        new_name_hash,
+        scale_mult,
+        flip_winding,
+        y_offset,
+        fit_percentile,
     )?;
 
     let block = {

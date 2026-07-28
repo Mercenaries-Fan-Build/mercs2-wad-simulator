@@ -66,11 +66,19 @@ fn read_f16_le(b: &[u8], o: usize) -> f32 {
     let val = if exp == 0 {
         (frac as f32 / 1024.0) * 2f32.powi(-14)
     } else if exp == 0x1f {
-        if frac == 0 { f32::INFINITY } else { f32::NAN }
+        if frac == 0 {
+            f32::INFINITY
+        } else {
+            f32::NAN
+        }
     } else {
         (1.0 + frac as f32 / 1024.0) * 2f32.powi(exp as i32 - 15)
     };
-    if sign == 1 { -val } else { val }
+    if sign == 1 {
+        -val
+    } else {
+        val
+    }
 }
 
 fn find_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
@@ -221,8 +229,7 @@ fn read_lrterrain_object_records(layers_static: &[u8]) -> Vec<u32> {
                 let raw = &layers_static[abs_off..abs_off + csz];
                 if let Some(nul) = raw.iter().position(|&b| b == 0) {
                     if nul > 0 {
-                        info_name =
-                            Some(String::from_utf8_lossy(&raw[..nul]).into_owned());
+                        info_name = Some(String::from_utf8_lossy(&raw[..nul]).into_owned());
                     }
                 }
             } else if ctag == b"data" {
@@ -293,7 +300,11 @@ fn iter_ucfx_containers(data: &[u8]) -> Vec<Container> {
             ];
             chunks.push((tag, cu));
         }
-        out.push(Container { ucfx_off, data_base, chunks });
+        out.push(Container {
+            ucfx_off,
+            data_base,
+            chunks,
+        });
     }
     out
 }
@@ -372,7 +383,12 @@ fn parse_prmg_body(body: &[([u8; 4], [u32; 4])]) -> Option<PrmgBody> {
     }
 
     if got_vb && got_ib && vb_len > 0 && ib_len >= 6 {
-        Some(PrmgBody { vb_off, vb_len, ib_off, ib_len })
+        Some(PrmgBody {
+            vb_off,
+            vb_len,
+            ib_off,
+            ib_len,
+        })
     } else {
         None
     }
@@ -425,7 +441,12 @@ fn decode_tile(
     if indices.is_empty() {
         return None;
     }
-    let max_idx = indices.iter().copied().filter(|&x| x != 65535).max().unwrap_or(0) as usize;
+    let max_idx = indices
+        .iter()
+        .copied()
+        .filter(|&x| x != 65535)
+        .max()
+        .unwrap_or(0) as usize;
     let n_verts = max_idx + 1;
     if n_verts == 0 || sub.vb_len % n_verts != 0 {
         return None;
@@ -438,12 +459,20 @@ fn decode_tile(
     // RCA: dump the raw per-vertex stride bytes (esp. the tail beyond pos+w+uv @12) to reveal
     // whether the terrain verts carry splat weights / vertex colour / a 2nd UV. Gated by env.
     if std::env::var("MERCS2_TERRAIN_DBG").is_ok() {
-        eprintln!("[terrain-dbg] tile: {n_verts} verts, stride {stride} B, vb_len {}", sub.vb_len);
+        eprintln!(
+            "[terrain-dbg] tile: {n_verts} verts, stride {stride} B, vb_len {}",
+            sub.vb_len
+        );
         for v in 0..n_verts.min(8) {
             let o = vb_abs + v * stride;
-            let row: Vec<String> = (0..stride).map(|k| format!("{:02x}", data[o + k])).collect();
+            let row: Vec<String> = (0..stride)
+                .map(|k| format!("{:02x}", data[o + k]))
+                .collect();
             let tail: Vec<u8> = (12..stride).map(|k| data[o + k]).collect();
-            eprintln!("[terrain-dbg]   v{v}: {}  | tail@12 = {tail:?}", row.join(" "));
+            eprintln!(
+                "[terrain-dbg]   v{v}: {}  | tail@12 = {tail:?}",
+                row.join(" ")
+            );
         }
     }
 
@@ -460,7 +489,11 @@ fn decode_tile(
         positions.push([x, y, z]);
         // Normal.xyz f16 @8-13 (verified unit-length). Renormalise defensively; fall back to up.
         let n = if stride >= 14 {
-            let (nx, ny, nz) = (read_f16_le(data, o + 8), read_f16_le(data, o + 10), read_f16_le(data, o + 12));
+            let (nx, ny, nz) = (
+                read_f16_le(data, o + 8),
+                read_f16_le(data, o + 10),
+                read_f16_le(data, o + 12),
+            );
             let len = (nx * nx + ny * ny + nz * nz).sqrt();
             if len > 1e-4 && nx.is_finite() && ny.is_finite() && nz.is_finite() {
                 [nx / len, ny / len, nz / len]
@@ -477,7 +510,13 @@ fn decode_tile(
     if tris.is_empty() {
         return None;
     }
-    let need = tris.iter().flat_map(|t| t.iter()).copied().max().unwrap_or(0) as usize + 1;
+    let need = tris
+        .iter()
+        .flat_map(|t| t.iter())
+        .copied()
+        .max()
+        .unwrap_or(0) as usize
+        + 1;
     if need > positions.len() {
         return None;
     }
@@ -529,7 +568,9 @@ fn extract_terrain_texture(data: &[u8]) -> Option<TextureData> {
                 _ => {}
             }
         }
-        let (Some((is, isz)), Some((bs, bsz))) = (info, body) else { continue };
+        let (Some((is, isz)), Some((bs, bsz))) = (info, body) else {
+            continue;
+        };
         if isz < 18 {
             continue;
         }
@@ -552,7 +593,9 @@ fn extract_terrain_texture(data: &[u8]) -> Option<TextureData> {
         let hb = (height as usize).div_ceil(block_px).max(1);
         let mip0_len = (wb * hb * texel_pitch).min(all_mips.len());
         let mip0 = all_mips[..mip0_len].to_vec();
-        let mip_count = declared_mips.max(1).min(dxt_mip_count(width as usize, height as usize) as u32);
+        let mip_count = declared_mips
+            .max(1)
+            .min(dxt_mip_count(width as usize, height as usize) as u32);
         return Some(TextureData {
             width,
             height,
@@ -642,7 +685,9 @@ pub fn load_terrain(
             }
         }
     }
-    let unmatched: Vec<usize> = (0..GRID * GRID).filter(|&i| grid_idx[i].is_none()).collect();
+    let unmatched: Vec<usize> = (0..GRID * GRID)
+        .filter(|&i| grid_idx[i].is_none())
+        .collect();
     if !unmatched.is_empty() {
         let spare: Vec<usize> = (0..tiles_decoded).filter(|i| !used.contains(i)).collect();
         if unmatched.len() == spare.len() {
@@ -819,7 +864,7 @@ mod tests {
         // (0,1,2) even, (1,3->2 has 65535 next? no) let's assert the first two.
         assert_eq!(tris[0], [0, 1, 2]);
         assert_eq!(tris[1], [1, 3, 2]); // odd index -> swapped
-        // Triplets touching 65535 are dropped.
+                                        // Triplets touching 65535 are dropped.
         assert!(tris.iter().all(|t| !t.contains(&65535)));
     }
 

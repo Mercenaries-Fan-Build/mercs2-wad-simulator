@@ -30,7 +30,10 @@ fn retail_block() -> Option<ScriptsBlock> {
     let mut file = std::fs::File::open(&wad).ok()?;
     let size = file.metadata().ok()?.len();
     let archive = load_ffcs_archive(&mut file, size).ok()?;
-    let idx = archive.paths.iter().position(|p| p.to_lowercase().contains("scripts_vz"))?;
+    let idx = archive
+        .paths
+        .iter()
+        .position(|p| p.to_lowercase().contains("scripts_vz"))?;
     let dec = decompress_block(&mut file, &archive.indx, idx as u16).ok()?;
     ScriptsBlock::parse(&dec).ok()
 }
@@ -66,10 +69,18 @@ fn two_script_mods_both_survive_the_link() {
     ];
 
     let linked = link::link_into(&mut block, &corpus, &muts).expect("link must succeed");
-    assert_eq!(linked.len(), 1, "one target, one compile — not one per Shipment");
+    assert_eq!(
+        linked.len(),
+        1,
+        "one target, one compile — not one per Shipment"
+    );
     let l = &linked[0];
     assert_eq!(l.target, "wifpmcinterior");
-    assert_eq!(l.contributors, vec!["roze-skin", "sean-devlin"], "sorted by Shipment name");
+    assert_eq!(
+        l.contributors,
+        vec!["roze-skin", "sean-devlin"],
+        "sorted by Shipment name"
+    );
     assert!(
         l.linked_source_bytes > l.base_source_bytes,
         "the linked source must be longer than the base"
@@ -80,13 +91,21 @@ fn two_script_mods_both_survive_the_link() {
     );
 
     // The block must still be a block: same entry count, CSUMs intact, and it must re-parse.
-    assert_eq!(block.entries.len(), before, "linking must not add or drop entries");
+    assert_eq!(
+        block.entries.len(),
+        before,
+        "linking must not add or drop entries"
+    );
     let rebuilt = block.serialize();
     let reparsed = ScriptsBlock::parse(&rebuilt).expect("the linked block must re-parse");
-    reparsed.verify_csums().expect("CSUMs must verify after linking");
+    reparsed
+        .verify_csums()
+        .expect("CSUMs must verify after linking");
 
     // And the payload really is our compiled chunk, in the game's dialect.
-    let idx = reparsed.find_by_name("wifpmcinterior").expect("still present");
+    let idx = reparsed
+        .find_by_name("wifpmcinterior")
+        .expect("still present");
     let luaq = reparsed.extract_lua(idx).expect("extract");
     assert!(
         luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER),
@@ -134,7 +153,10 @@ fn an_unknown_target_is_reported() {
     }];
     let err = link::link_into(&mut block, &corpus, &muts).expect_err("must not silently skip");
     let msg = err.to_string();
-    assert!(msg.contains("no_such_script") && msg.contains("mod"), "{msg}");
+    assert!(
+        msg.contains("no_such_script") && msg.contains("mod"),
+        "{msg}"
+    );
 }
 
 /// Broken Lua in a mod must fail the link with the compiler's own message — line number included —
@@ -153,7 +175,10 @@ fn a_syntax_error_in_an_append_fails_the_link_with_a_line_number() {
     let err = link::link_into(&mut block, &corpus, &muts).expect_err("must reject broken Lua");
     let msg = err.to_string();
     eprintln!("compile error surfaced: {msg}");
-    assert!(msg.contains("wifpmcinterior"), "must name the script: {msg}");
+    assert!(
+        msg.contains("wifpmcinterior"),
+        "must name the script: {msg}"
+    );
 }
 
 /// Linking with no mutations must leave the block byte-identical — the "did we break it just by
@@ -167,15 +192,26 @@ fn linking_nothing_changes_nothing() {
     let original = block.serialize();
     let linked = link::link_into(&mut block, &corpus, &[]).expect("link");
     assert!(linked.is_empty());
-    assert!(block.serialize() == original, "a no-op link must not touch the block");
+    assert!(
+        block.serialize() == original,
+        "a no-op link must not touch the block"
+    );
 }
 
 #[test]
 fn the_corpus_lookup_finds_a_vz_script_and_reports_what_it_tried() {
     let Some(corpus) = corpus_root() else { return };
-    let found = link::base_source_path(&corpus, "wifpmcinterior").expect("wifpmcinterior is in vz/");
-    assert!(found.ends_with("vz/wifpmcinterior.lua"), "{}", found.display());
+    let found =
+        link::base_source_path(&corpus, "wifpmcinterior").expect("wifpmcinterior is in vz/");
+    assert!(
+        found.ends_with("vz/wifpmcinterior.lua"),
+        "{}",
+        found.display()
+    );
 
     let tried = link::base_source_path(&corpus, "definitely_not_a_script").unwrap_err();
-    assert!(tried.len() >= 3, "should report every location it searched: {tried:?}");
+    assert!(
+        tried.len() >= 3,
+        "should report every location it searched: {tried:?}"
+    );
 }

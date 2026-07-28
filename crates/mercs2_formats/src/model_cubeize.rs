@@ -65,7 +65,9 @@ pub fn cubeize_model_container_with(
     let n_desc = read_u32_le(container, 16) as usize;
     let max_desc = container.len().saturating_sub(20) / 20;
     if n_desc > max_desc {
-        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+        return Err(format!(
+            "descriptor count {n_desc} exceeds capacity {max_desc}"
+        ));
     }
 
     let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
@@ -162,7 +164,9 @@ pub fn read_model_positions(container: &[u8]) -> Result<Vec<Vec<[f32; 3]>>, Stri
     let n_desc = read_u32_le(container, 16) as usize;
     let max_desc = container.len().saturating_sub(20) / 20;
     if n_desc > max_desc {
-        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+        return Err(format!(
+            "descriptor count {n_desc} exceeds capacity {max_desc}"
+        ));
     }
 
     let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
@@ -489,9 +493,17 @@ pub fn prmg_geom_offsets(container: &[u8]) -> Vec<[f32; 3]> {
             let end = (i + 1 + x3(i)).min(n_desc);
             for c in (i + 1)..end {
                 if tag(c) == b"POFF" && !marker(c) {
-                    let base = if data_area_off > 0 { data_area_off + u0(c) as usize } else { 8 + u0(c) as usize };
+                    let base = if data_area_off > 0 {
+                        data_area_off + u0(c) as usize
+                    } else {
+                        8 + u0(c) as usize
+                    };
                     if base + 12 <= container.len() {
-                        cur = [read_f32_le(container, base), read_f32_le(container, base + 4), read_f32_le(container, base + 8)];
+                        cur = [
+                            read_f32_le(container, base),
+                            read_f32_le(container, base + 4),
+                            read_f32_le(container, base + 8),
+                        ];
                     }
                     break;
                 }
@@ -527,7 +539,9 @@ pub fn read_model_meshes_segm(
     let n_desc = read_u32_le(container, 16) as usize;
     let max_desc = container.len().saturating_sub(20) / 20;
     if n_desc > max_desc {
-        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+        return Err(format!(
+            "descriptor count {n_desc} exceeds capacity {max_desc}"
+        ));
     }
     let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
         if u0 == 0xFFFF_FFFF {
@@ -601,13 +615,25 @@ pub fn read_model_meshes_segm(
             match (tag(i), cm) {
                 (b"STRM", true) => state = 1,
                 (b"IBUF", true) => state = 2,
-                (b"INFO", false) if state == 0 && grp_info.is_none() => grp_info = resolve(u0(i), size(i)),
+                (b"INFO", false) if state == 0 && grp_info.is_none() => {
+                    grp_info = resolve(u0(i), size(i))
+                }
                 (b"PRMT", false) if prmt.is_none() => prmt = resolve(u0(i), size(i)),
-                (b"info", false) if state == 1 && strm_info.is_none() => strm_info = resolve(u0(i), size(i)),
-                (b"decl", false) if state == 1 && strm_decl.is_none() => strm_decl = resolve(u0(i), size(i)),
-                (b"data", false) if state == 1 && strm_data.is_none() => strm_data = resolve(u0(i), size(i)),
-                (b"info", false) if state == 2 && ibuf_info.is_none() => ibuf_info = resolve(u0(i), size(i)),
-                (b"data", false) if state == 2 && ibuf_data.is_none() => ibuf_data = resolve(u0(i), size(i)),
+                (b"info", false) if state == 1 && strm_info.is_none() => {
+                    strm_info = resolve(u0(i), size(i))
+                }
+                (b"decl", false) if state == 1 && strm_decl.is_none() => {
+                    strm_decl = resolve(u0(i), size(i))
+                }
+                (b"data", false) if state == 1 && strm_data.is_none() => {
+                    strm_data = resolve(u0(i), size(i))
+                }
+                (b"info", false) if state == 2 && ibuf_info.is_none() => {
+                    ibuf_info = resolve(u0(i), size(i))
+                }
+                (b"data", false) if state == 2 && ibuf_data.is_none() => {
+                    ibuf_data = resolve(u0(i), size(i))
+                }
                 _ => {}
             }
         }
@@ -637,7 +663,14 @@ pub fn read_model_meshes_segm(
         let wgt_el = decl_slice.and_then(|d| find_element(d, USAGE_BLENDWEIGHT));
         let col_el = decl_slice.and_then(|d| find_element(d, USAGE_COLOR));
         let read4 = |o: usize| -> Option<[u8; 4]> {
-            (o + 4 <= sde).then(|| [container[o], container[o + 1], container[o + 2], container[o + 3]])
+            (o + 4 <= sde).then(|| {
+                [
+                    container[o],
+                    container[o + 1],
+                    container[o + 2],
+                    container[o + 3],
+                ]
+            })
         };
 
         // Vertices.
@@ -707,7 +740,11 @@ pub fn read_model_meshes_segm(
         // gates reject it) keep their indices as-is.
         if !joints.is_empty() {
             if let Some((is_, ie_)) = grp_info {
-                let rc = if ie_ - is_ >= 28 { read_u32_le(container, is_ + 20) as usize } else { 0 };
+                let rc = if ie_ - is_ >= 28 {
+                    read_u32_le(container, is_ + 20) as usize
+                } else {
+                    0
+                };
                 if (1..=8).contains(&rc) && 24 + rc * 4 <= ie_ - is_ {
                     let mut palette: Vec<u16> = Vec::new();
                     let mut ok = true;
@@ -715,7 +752,10 @@ pub fn read_model_meshes_segm(
                         let o = is_ + 24 + r * 4;
                         let base = u16::from_le_bytes([container[o], container[o + 1]]);
                         let cnt = u16::from_le_bytes([container[o + 2], container[o + 3]]);
-                        if cnt == 0 || base as usize + cnt as usize > 4096 || palette.len() + cnt as usize > 256 {
+                        if cnt == 0
+                            || base as usize + cnt as usize > 4096
+                            || palette.len() + cnt as usize > 256
+                        {
                             ok = false;
                             break;
                         }
@@ -724,7 +764,11 @@ pub fn read_model_meshes_segm(
                     if ok {
                         for j4 in joints.iter_mut() {
                             for j in j4.iter_mut() {
-                                *j = palette.get(*j as usize).copied().unwrap_or(*j as u16).min(255) as u8;
+                                *j = palette
+                                    .get(*j as usize)
+                                    .copied()
+                                    .unwrap_or(*j as u16)
+                                    .min(255) as u8;
                             }
                         }
                     }
@@ -739,7 +783,8 @@ pub fn read_model_meshes_segm(
         let mut strip = Vec::with_capacity(n);
         let vmax = positions.len() as u32;
         for k in 0..n {
-            let idx = u16::from_le_bytes([container[ids + k * 2], container[ids + k * 2 + 1]]) as u32;
+            let idx =
+                u16::from_le_bytes([container[ids + k * 2], container[ids + k * 2 + 1]]) as u32;
             strip.push(idx);
         }
         // De-strip. A drawing group can hold several strips concatenated in one IBUF, one per
@@ -822,7 +867,11 @@ fn destrip_by_prmt(
                     strip_range_to_tris(strip, start, end, vmax, &mut out);
                     let tri_count = out.len() - tri_start;
                     if tri_count > 0 {
-                        subs.push(SubMesh { material_index: mat, tri_start, tri_count });
+                        subs.push(SubMesh {
+                            material_index: mat,
+                            tri_start,
+                            tri_count,
+                        });
                     }
                 }
                 if !out.is_empty() {
@@ -840,7 +889,13 @@ fn destrip_by_prmt(
 /// De-strip `strip[start..end]` into `out`. Winding parity uses the ABSOLUTE strip index (so a
 /// sub-strip beginning at an odd offset is wound correctly — needed once backface culling is on).
 /// Degenerate and out-of-range triangles are dropped.
-fn strip_range_to_tris(strip: &[u32], start: usize, end: usize, vmax: u32, out: &mut Vec<[u32; 3]>) {
+fn strip_range_to_tris(
+    strip: &[u32],
+    start: usize,
+    end: usize,
+    vmax: u32,
+    out: &mut Vec<[u32; 3]>,
+) {
     let end = end.min(strip.len());
     let mut i = start;
     while i + 2 < end {
@@ -879,7 +934,9 @@ pub fn describe_model_strms(container: &[u8]) -> Result<Vec<StrmInfo>, String> {
     let n_desc = read_u32_le(container, 16) as usize;
     let max_desc = container.len().saturating_sub(20) / 20;
     if n_desc > max_desc {
-        return Err(format!("descriptor count {n_desc} exceeds capacity {max_desc}"));
+        return Err(format!(
+            "descriptor count {n_desc} exceeds capacity {max_desc}"
+        ));
     }
     let resolve = |u0: u32, size: usize| -> Option<(usize, usize)> {
         if u0 == 0xFFFF_FFFF {
@@ -1215,11 +1272,19 @@ fn read_f16_le(d: &[u8], off: usize) -> f32 {
     let val = if exp == 0 {
         (frac as f32 / 1024.0) * 2f32.powi(-14)
     } else if exp == 0x1f {
-        if frac == 0 { f32::INFINITY } else { f32::NAN }
+        if frac == 0 {
+            f32::INFINITY
+        } else {
+            f32::NAN
+        }
     } else {
         (1.0 + frac as f32 / 1024.0) * 2f32.powi(exp as i32 - 15)
     };
-    if sign == 1 { -val } else { val }
+    if sign == 1 {
+        -val
+    } else {
+        val
+    }
 }
 
 /// Encode an f32 to a little-endian IEEE-754 half-float (round-to-nearest-even).
@@ -1241,7 +1306,8 @@ fn write_f16_le(d: &mut [u8], off: usize, value: f32) {
             let shift = (14 - exp) as u32;
             let mut m = mant_with_implicit >> shift;
             let round_bit = 1u32 << (shift - 1);
-            if (mant_with_implicit & (round_bit - 1)) != 0 || (mant_with_implicit & round_bit) != 0 {
+            if (mant_with_implicit & (round_bit - 1)) != 0 || (mant_with_implicit & round_bit) != 0
+            {
                 if (mant_with_implicit & ((round_bit << 1) - 1)) > round_bit || (m & 1) == 1 {
                     m += 1;
                 }

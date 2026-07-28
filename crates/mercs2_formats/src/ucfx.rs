@@ -53,7 +53,10 @@ pub fn parse_block_entry_table(decompressed: &[u8]) -> (u32, Vec<BlockTableEntry
     (count, entries)
 }
 
-pub fn walk_decompressed_block(decompressed: &[u8], label: &str) -> (ParsedBlock, Vec<UcfxWalkIssue>) {
+pub fn walk_decompressed_block(
+    decompressed: &[u8],
+    label: &str,
+) -> (ParsedBlock, Vec<UcfxWalkIssue>) {
     let mut issues = Vec::new();
     let (entry_count, entries) = parse_block_entry_table(decompressed);
     let header_end = 4 + (entry_count as usize) * 16;
@@ -75,7 +78,9 @@ pub fn walk_decompressed_block(decompressed: &[u8], label: &str) -> (ParsedBlock
         let container = decompressed[pos..pos + chunk_size].to_vec();
         pos += chunk_size;
 
-        if let Some(csum_issues) = verify_ucfx_container(&container, &format!("{label}/entry[{i}]"), entry.type_hash) {
+        if let Some(csum_issues) =
+            verify_ucfx_container(&container, &format!("{label}/entry[{i}]"), entry.type_hash)
+        {
             issues.extend(csum_issues);
         }
 
@@ -105,7 +110,11 @@ const SKIP_DESCRIPTOR_WALK: &[u32] = &[
 /// `type_hash` from the block entry table controls whether the descriptor
 /// walk is performed -- container types with non-standard internal layouts
 /// skip it entirely to avoid false positives.
-pub fn verify_ucfx_container(container: &[u8], label: &str, type_hash: u32) -> Option<Vec<UcfxWalkIssue>> {
+pub fn verify_ucfx_container(
+    container: &[u8],
+    label: &str,
+    type_hash: u32,
+) -> Option<Vec<UcfxWalkIssue>> {
     let mut issues = Vec::new();
     if container.len() < 20 {
         issues.push(UcfxWalkIssue {
@@ -141,14 +150,22 @@ pub fn verify_ucfx_container(container: &[u8], label: &str, type_hash: u32) -> O
     }
 
     if SKIP_DESCRIPTOR_WALK.contains(&type_hash) {
-        return if issues.is_empty() { None } else { Some(issues) };
+        return if issues.is_empty() {
+            None
+        } else {
+            Some(issues)
+        };
     }
 
     let data_area_off = read_u32_le(container, 4) as usize;
     let n_desc = read_u32_le(container, 16) as usize;
     let max_desc = container.len().saturating_sub(20) / 20;
     if n_desc > max_desc {
-        return if issues.is_empty() { None } else { Some(issues) };
+        return if issues.is_empty() {
+            None
+        } else {
+            Some(issues)
+        };
     }
 
     for i in 0..n_desc {
@@ -174,7 +191,10 @@ pub fn verify_ucfx_container(container: &[u8], label: &str, type_hash: u32) -> O
         if body_start.saturating_add(body_size) > container.len() {
             let tag = &container[row_off..row_off + 4];
             issues.push(UcfxWalkIssue {
-                context: format!("{label} desc[{i}] {:?}", std::str::from_utf8(tag).unwrap_or("????")),
+                context: format!(
+                    "{label} desc[{i}] {:?}",
+                    std::str::from_utf8(tag).unwrap_or("????")
+                ),
                 detail: format!(
                     "body [{body_start:#X}..+{body_size}] exceeds container {}",
                     container.len()
@@ -288,13 +308,11 @@ pub fn get_container_by_type_hash(
 
 pub fn extract_data_chunk_safe(container: &SafeSlice) -> AccessResult<SafeSlice> {
     let bytes = container.as_bytes();
-    let body = extract_data_chunk(bytes).ok_or_else(|| {
-        crate::safe_slice::AccessViolation {
-            context: format!("{}:no data chunk", container.label()),
-            offset: 0,
-            size: 0,
-            buffer_len: bytes.len(),
-        }
+    let body = extract_data_chunk(bytes).ok_or_else(|| crate::safe_slice::AccessViolation {
+        context: format!("{}:no data chunk", container.label()),
+        offset: 0,
+        size: 0,
+        buffer_len: bytes.len(),
     })?;
     Ok(SafeSlice::new(body, format!("{}::data", container.label())))
 }

@@ -152,7 +152,10 @@ fn parse_stfs_file_table(stfs: &[u8], shift: u32) -> Vec<FileTableEntry> {
         if name_raw[0] == 0 {
             break;
         }
-        let name_end = name_raw.iter().position(|&b| b == 0).unwrap_or(name_raw.len());
+        let name_end = name_raw
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_raw.len());
         let name = String::from_utf8_lossy(&name_raw[..name_end]).into_owned();
         let flags = ft_data[off + 0x28];
         entries.push(FileTableEntry {
@@ -204,7 +207,8 @@ impl StfsReader {
                 break;
             }
             chain.push(block);
-            let (mut next, mut info) = get_block_hash_entry(&self.stfs_data, block, self.table_size_shift, 0);
+            let (mut next, mut info) =
+                get_block_hash_entry(&self.stfs_data, block, self.table_size_shift, 0);
             if self.table_size_shift > 0 && info < 0x80 {
                 let r = get_block_hash_entry(&self.stfs_data, block, self.table_size_shift, 1);
                 next = r.0;
@@ -216,7 +220,12 @@ impl StfsReader {
         chain
     }
 
-    fn read_with_chain(&self, chain: &[u32], doh_offset: usize, length: usize) -> Result<Vec<u8>, String> {
+    fn read_with_chain(
+        &self,
+        chain: &[u32],
+        doh_offset: usize,
+        length: usize,
+    ) -> Result<Vec<u8>, String> {
         let mut out = Vec::with_capacity(length);
         let mut remaining = length;
         let mut chain_idx = doh_offset / STFS_BLOCK_SIZE;
@@ -250,7 +259,9 @@ impl StfsReader {
 
     /// Read the full DOH file (walks its hash chain). Equivalent to Python `reader.read(0, doh_size)`.
     pub fn read_doh(&self) -> Result<Vec<u8>, String> {
-        let entry = self.doh_entry().ok_or("No DOH file found in STFS file table")?;
+        let entry = self
+            .doh_entry()
+            .ok_or("No DOH file found in STFS file table")?;
         let chain = self.build_chain(entry.first_block, entry.alloc_blocks);
         self.read_with_chain(&chain, 0, entry.file_size as usize)
     }
@@ -264,8 +275,7 @@ fn find_unrar() -> Option<PathBuf> {
         }
     }
     // tools/unrar/UnRAR.exe relative to this crate.
-    let rel = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../unrar/UnRAR.exe");
+    let rel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../unrar/UnRAR.exe");
     if rel.exists() {
         return Some(rel);
     }
@@ -317,7 +327,9 @@ pub fn extract_stfs_from_rar(rar_path: &Path, work_dir: &Path) -> Result<StfsRea
         if let Ok(mut f) = std::fs::File::open(&path) {
             use std::io::Read;
             if f.read_exact(&mut magic).is_ok()
-                && (&magic == STFS_MAGIC_CON || &magic == STFS_MAGIC_LIVE || &magic == STFS_MAGIC_PIRS)
+                && (&magic == STFS_MAGIC_CON
+                    || &magic == STFS_MAGIC_LIVE
+                    || &magic == STFS_MAGIC_PIRS)
             {
                 let data = std::fs::read(&path).map_err(|e| format!("read stfs: {e}"))?;
                 return Ok(StfsReader::new(data));
@@ -379,8 +391,14 @@ mod tests {
         // Cross-check the full STFS reader against Python's output on the real
         // container. Reads a cached raw STFS and asserts the recovered DOH equals
         // the cached Python-produced dlc01.doh. Skips if either is absent.
-        let stfs_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../output/_scratch/dlc01.stfs");
-        let doh_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../output/_scratch/dlc01.doh");
+        let stfs_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../output/_scratch/dlc01.stfs"
+        );
+        let doh_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../output/_scratch/dlc01.doh"
+        );
         let (stfs, doh_golden) = match (std::fs::read(stfs_path), std::fs::read(doh_path)) {
             (Ok(a), Ok(b)) => (a, b),
             _ => {

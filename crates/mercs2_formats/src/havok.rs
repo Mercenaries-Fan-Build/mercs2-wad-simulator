@@ -136,7 +136,9 @@ impl RawPackfile {
     /// absolute offset via the local-fixup table (`None` if unrelocated / null).
     #[inline]
     pub fn resolve_ptr(&self, obj_src: usize, field_off: usize) -> Option<usize> {
-        self.lf.get(&(obj_src + field_off)).map(|d| self.data_pk + d)
+        self.lf
+            .get(&(obj_src + field_off))
+            .map(|d| self.data_pk + d)
     }
 }
 
@@ -397,13 +399,25 @@ mod tests {
         let body = include_bytes!("../tests/fixtures/phy2_crate_le.bin");
         let pf = parse_phy2_body(body).expect("parse crate PHY2 body");
 
-        assert!(pf.version.starts_with("Havok-5.5"), "version = {:?}", pf.version);
-        assert_eq!(pf.class_counts.get(CONVEX), Some(&6), "six break-piece hulls");
+        assert!(
+            pf.version.starts_with("Havok-5.5"),
+            "version = {:?}",
+            pf.version
+        );
+        assert_eq!(
+            pf.class_counts.get(CONVEX),
+            Some(&6),
+            "six break-piece hulls"
+        );
 
         let counts: Vec<usize> = pf.hulls().map(|h| h.vertices.len()).collect();
         assert_eq!(counts, vec![19, 24, 35, 12, 36, 10], "hull vertex counts");
         let plane_counts: Vec<usize> = pf.hulls().map(|h| h.planes.len()).collect();
-        assert_eq!(plane_counts, vec![12, 15, 22, 8, 22, 7], "hull plane counts");
+        assert_eq!(
+            plane_counts,
+            vec![12, 15, 22, 8, 22, 7],
+            "hull plane counts"
+        );
 
         // first vertex of hull0 — real coordinates, not a denormal byte-scan hit.
         let v0 = pf.hulls().next().unwrap().vertices[0];

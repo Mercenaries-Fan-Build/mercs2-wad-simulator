@@ -80,7 +80,9 @@ impl Claim {
     /// `(claim, display name)` for a named asset.
     fn asset(name: &str) -> (Claim, Option<String>) {
         (
-            Claim::Asset { hash: pandemic_hash_m2(name) },
+            Claim::Asset {
+                hash: pandemic_hash_m2(name),
+            },
             Some(name.to_string()),
         )
     }
@@ -188,22 +190,40 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
         let kind = c.kind();
         let mut push = |access: Access, (claim, name): (Claim, Option<String>), intent: Intent| {
             let class = merge_class(&claim, access, intent);
-            out.push(ClaimRecord { index, kind, access, claim, class, name });
+            out.push(ClaimRecord {
+                index,
+                kind,
+                access,
+                claim,
+                class,
+                name,
+            });
         };
         let bare = |c: Claim| (c, None);
         match c {
-            Contribution::AddOutfit { name, slug, wearer, donor, .. } => {
+            Contribution::AddOutfit {
+                name,
+                slug,
+                wearer,
+                donor,
+                ..
+            } => {
                 // Additive: a brand-new hash of our own.
                 push(Access::Write, Claim::asset(name), Intent::Additive);
                 push(
                     Access::Write,
-                    bare(Claim::OutfitSlot { wearer: wearer.clone(), slug: slug.clone() }),
+                    bare(Claim::OutfitSlot {
+                        wearer: wearer.clone(),
+                        slug: slug.clone(),
+                    }),
                     Intent::Additive,
                 );
                 // The wardrobe table lives here, so the script is claimed too.
                 push(
                     Access::Write,
-                    bare(Claim::Script { name: "wifpmcinterior".into() }),
+                    bare(Claim::Script {
+                        name: "wifpmcinterior".into(),
+                    }),
                     Intent::Additive,
                 );
                 if let Some(d) = donor {
@@ -221,12 +241,23 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
             Contribution::PatchLua { target, .. } => {
-                push(Access::Write, bare(Claim::Script { name: target.clone() }), Intent::Additive);
+                push(
+                    Access::Write,
+                    bare(Claim::Script {
+                        name: target.clone(),
+                    }),
+                    Intent::Additive,
+                );
             }
             Contribution::EditStateMachine { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
-            Contribution::NativeHook { plugin, symbol, touches, .. } => {
+            Contribution::NativeHook {
+                plugin,
+                symbol,
+                touches,
+                ..
+            } => {
                 for t in touches {
                     push(
                         Access::Write,
@@ -235,13 +266,19 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     );
                 }
                 if let Some(s) = symbol {
-                    push(Access::Write, bare(Claim::NativeHook { at: s.clone() }), Intent::Replace);
+                    push(
+                        Access::Write,
+                        bare(Claim::NativeHook { at: s.clone() }),
+                        Intent::Replace,
+                    );
                 }
                 if let Some(p) = plugin {
                     if let Some(file) = p.file_name().and_then(|f| f.to_str()) {
                         push(
                             Access::Write,
-                            bare(Claim::FileArtifact { name: file.to_string() }),
+                            bare(Claim::FileArtifact {
+                                name: file.to_string(),
+                            }),
                             Intent::Replace,
                         );
                     }
@@ -276,7 +313,11 @@ pub struct SelfConflict {
 
 impl std::fmt::Display for SelfConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let list: Vec<String> = self.indices.iter().map(|i| format!("contributions[{i}]")).collect();
+        let list: Vec<String> = self
+            .indices
+            .iter()
+            .map(|i| format!("contributions[{i}]"))
+            .collect();
         write!(
             f,
             "{} is claimed by {} in one Shipment — only one can take effect",
@@ -289,7 +330,10 @@ impl std::fmt::Display for SelfConflict {
 /// Duplicate WRITE claims within a single manifest that cannot accumulate.
 pub fn self_conflicts(manifest: &Manifest) -> Vec<SelfConflict> {
     let mut by_claim: BTreeMap<Claim, (MergeClass, Vec<usize>, Option<String>)> = BTreeMap::new();
-    for r in claims(manifest).into_iter().filter(|r| r.access == Access::Write) {
+    for r in claims(manifest)
+        .into_iter()
+        .filter(|r| r.access == Access::Write)
+    {
         let entry = by_claim
             .entry(r.claim)
             .or_insert_with(|| (r.class, Vec::new(), r.name.clone()));
@@ -305,10 +349,13 @@ pub fn self_conflicts(manifest: &Manifest) -> Vec<SelfConflict> {
     }
     by_claim
         .into_iter()
-        .filter(|(_, (class, indices, _))| {
-            indices.len() > 1 && *class != MergeClass::OrderedList
+        .filter(|(_, (class, indices, _))| indices.len() > 1 && *class != MergeClass::OrderedList)
+        .map(|(claim, (class, indices, name))| SelfConflict {
+            claim,
+            class,
+            indices,
+            name,
         })
-        .map(|(claim, (class, indices, name))| SelfConflict { claim, class, indices, name })
         .collect()
 }
 
@@ -357,9 +404,13 @@ impl std::fmt::Display for Conflict {
 /// outfit claim different `OutfitSlot`s and share an `OrderedList` script, so they compose. Two
 /// Shipments replacing the same texture are `LastWins` — the user picks with load order.
 pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
-    let mut by_claim: BTreeMap<Claim, (MergeClass, Vec<Claimant>, Option<String>)> = BTreeMap::new();
+    let mut by_claim: BTreeMap<Claim, (MergeClass, Vec<Claimant>, Option<String>)> =
+        BTreeMap::new();
     for (name, manifest) in shipments {
-        for r in claims(manifest).into_iter().filter(|r| r.access == Access::Write) {
+        for r in claims(manifest)
+            .into_iter()
+            .filter(|r| r.access == Access::Write)
+        {
             let entry = by_claim
                 .entry(r.claim)
                 .or_insert_with(|| (r.class, Vec::new(), r.name.clone()));
@@ -372,7 +423,10 @@ pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
             if entry.2.is_none() {
                 entry.2 = r.name.clone();
             }
-            entry.1.push(Claimant { shipment: (*name).to_string(), index: r.index });
+            entry.1.push(Claimant {
+                shipment: (*name).to_string(),
+                index: r.index,
+            });
         }
     }
     by_claim
@@ -382,7 +436,12 @@ pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
                 claimants.iter().map(|c| c.shipment.as_str()).collect();
             // Only ACROSS Shipments — within one, `self_conflicts` already reported it.
             if distinct.len() > 1 && class.collides_when_shared() {
-                Some(Conflict { claim, class, claimants, name })
+                Some(Conflict {
+                    claim,
+                    class,
+                    claimants,
+                    name,
+                })
             } else {
                 None
             }
@@ -415,7 +474,10 @@ pub fn unsatisfied_reads(shipments: &[(&str, &Manifest)]) -> Vec<UnsatisfiedRead
             if !written.contains(&r.claim) {
                 out.push(UnsatisfiedRead {
                     claim: r.claim,
-                    by: Claimant { shipment: (*name).to_string(), index: r.index },
+                    by: Claimant {
+                        shipment: (*name).to_string(),
+                        index: r.index,
+                    },
                 });
             }
         }

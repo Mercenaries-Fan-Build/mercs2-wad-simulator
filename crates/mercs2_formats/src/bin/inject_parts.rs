@@ -30,7 +30,11 @@ fn rd_f32(d: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
 }
 fn parse_hash(s: &str) -> Option<u32> {
-    u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+    u32::from_str_radix(
+        s.trim().trim_start_matches("0x").trim_start_matches("0X"),
+        16,
+    )
+    .ok()
 }
 
 fn load_mesh(path: &str) -> Result<ExternalMesh, String> {
@@ -61,7 +65,14 @@ fn load_mesh(path: &str) -> Result<ExternalMesh, String> {
         tris.push([rd_u32(&d, o), rd_u32(&d, o + 4), rd_u32(&d, o + 8)]);
         o += 12;
     }
-    Ok(ExternalMesh { positions, normals, uvs, tris, joints: vec![], weights: vec![] })
+    Ok(ExternalMesh {
+        positions,
+        normals,
+        uvs,
+        tris,
+        joints: vec![],
+        weights: vec![],
+    })
 }
 
 fn main() {
@@ -88,16 +99,19 @@ fn run() -> i32 {
             "--name-hash" => name_hash = it.next().and_then(|s| parse_hash(s)).unwrap_or(0),
             "--scale" => scale_mult = it.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
             "--y-offset" => y_offset = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            "--fit-percentile" => fit_percentile = it.next().and_then(|s| s.parse().ok()).unwrap_or(100.0),
+            "--fit-percentile" => {
+                fit_percentile = it.next().and_then(|s| s.parse().ok()).unwrap_or(100.0)
+            }
             "--no-flip" => flip = false,
             "--add-mtrl" => {
                 // <clone_from_index>:<0xTEXTURE> — append a copy of a KNOWN-GOOD material with a
                 // new diffuse. Its index is the old material count (printed below).
                 if let Some(v) = it.next() {
                     let mut p = v.split(':');
-                    if let (Some(i), Some(t)) =
-                        (p.next().and_then(|s| s.parse::<usize>().ok()), p.next().and_then(parse_hash))
-                    {
+                    if let (Some(i), Some(t)) = (
+                        p.next().and_then(|s| s.parse::<usize>().ok()),
+                        p.next().and_then(parse_hash),
+                    ) {
                         mtrl_adds.push((i, t));
                     }
                 }
@@ -111,10 +125,14 @@ fn run() -> i32 {
                     let mut p = v.split(':');
                     let node = p.next().and_then(|s| s.parse::<usize>().ok());
                     let xyz: Option<Vec<f32>> = p.next().map(|c| {
-                        c.split(',').filter_map(|t| t.trim().parse::<f32>().ok()).collect()
+                        c.split(',')
+                            .filter_map(|t| t.trim().parse::<f32>().ok())
+                            .collect()
                     });
                     match (node, xyz) {
-                        (Some(n), Some(v)) if v.len() == 3 => node_ats.push((n, [v[0], v[1], v[2]])),
+                        (Some(n), Some(v)) if v.len() == 3 => {
+                            node_ats.push((n, [v[0], v[1], v[2]]))
+                        }
                         _ => {
                             eprintln!("--node-at needs <node>:<x>,<y>,<z>");
                             return 2;
@@ -142,9 +160,10 @@ fn run() -> i32 {
                 // <material_index>:<0xTEXTURE> — set the DIFFUSE (texture slot 0) of one MTRL record.
                 if let Some(v) = it.next() {
                     let mut p = v.split(':');
-                    if let (Some(i), Some(t)) =
-                        (p.next().and_then(|s| s.parse::<usize>().ok()), p.next().and_then(parse_hash))
-                    {
+                    if let (Some(i), Some(t)) = (
+                        p.next().and_then(|s| s.parse::<usize>().ok()),
+                        p.next().and_then(parse_hash),
+                    ) {
                         mtrl_sets.push((i, 0, t));
                     }
                 }
@@ -170,7 +189,9 @@ fn run() -> i32 {
             "--repoint" => {
                 if let Some(v) = it.next() {
                     let mut p = v.split(':');
-                    if let (Some(f), Some(t)) = (p.next().and_then(parse_hash), p.next().and_then(parse_hash)) {
+                    if let (Some(f), Some(t)) =
+                        (p.next().and_then(parse_hash), p.next().and_then(parse_hash))
+                    {
                         repoints.push((f, t));
                     }
                 }
@@ -218,7 +239,20 @@ fn run() -> i32 {
             return 1;
         }
     };
-    let (out, stats) = match inject_parts_into_template(&ucfx, &parts, &repoints, &mtrl_sets, &mtrl_adds, &mtrl_replaces, &node_ats, name_hash, scale_mult, flip, y_offset, fit_percentile) {
+    let (out, stats) = match inject_parts_into_template(
+        &ucfx,
+        &parts,
+        &repoints,
+        &mtrl_sets,
+        &mtrl_adds,
+        &mtrl_replaces,
+        &node_ats,
+        name_hash,
+        scale_mult,
+        flip,
+        y_offset,
+        fit_percentile,
+    ) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("inject_parts: {e}");
@@ -232,23 +266,47 @@ fn run() -> i32 {
     println!(
         "fit: scale {:.4}, model bbox [{:.2},{:.2},{:.2}]..[{:.2},{:.2},{:.2}]",
         stats.fit_scale,
-        stats.bbox_min[0], stats.bbox_min[1], stats.bbox_min[2],
-        stats.bbox_max[0], stats.bbox_max[1], stats.bbox_max[2]
+        stats.bbox_min[0],
+        stats.bbox_min[1],
+        stats.bbox_min[2],
+        stats.bbox_max[0],
+        stats.bbox_max[1],
+        stats.bbox_max[2]
     );
     for p in &stats.parts {
         println!(
             "  {:<16} grp {:>2}  node {:>4}  mtrl {}  seg_id {:>3}  {} verts / {} tris{}",
-            p.label, p.group, p.node, p.material_index, p.seg_id, p.vertex_count, p.triangle_count,
-            if p.node >= 0 { "  [node-local: spins with its node]" } else { "  [model space, all tiers]" }
+            p.label,
+            p.group,
+            p.node,
+            p.material_index,
+            p.seg_id,
+            p.vertex_count,
+            p.triangle_count,
+            if p.node >= 0 {
+                "  [node-local: spins with its node]"
+            } else {
+                "  [model space, all tiers]"
+            }
         );
     }
     if stats.phy2_hulls_scaled > 0 {
-        println!("  PHY2: rescaled {} collision hull(s) by {scale_mult}x", stats.phy2_hulls_scaled);
+        println!(
+            "  PHY2: rescaled {} collision hull(s) by {scale_mult}x",
+            stats.phy2_hulls_scaled
+        );
     }
     for (n, p) in &stats.nodes_moved {
-        println!("  node {n:3} RETARGETED -> ({:.2}, {:.2}, {:.2})  [subtree moved with it]", p[0], p[1], p[2]);
+        println!(
+            "  node {n:3} RETARGETED -> ({:.2}, {:.2}, {:.2})  [subtree moved with it]",
+            p[0], p[1], p[2]
+        );
     }
-    println!("neutralised {} other group(s); MTRL repoints: {}", stats.emptied_groups.len(), stats.mtrl_repoints);
+    println!(
+        "neutralised {} other group(s); MTRL repoints: {}",
+        stats.emptied_groups.len(),
+        stats.mtrl_repoints
+    );
     println!("-> {} ({} bytes)", pos[1], out.len());
     0
 }

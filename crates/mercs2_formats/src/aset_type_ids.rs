@@ -14,7 +14,7 @@ pub fn type_id_for_type_hash(type_hash: u32) -> Option<u32> {
         0x5B724250 => 19, // model
         0x18166555 => 16, // animation
         0x600B904E => 12,
-        0xE6B81A54 => 9, // layer
+        0xE6B81A54 => 9,  // layer
         0x42498680 => 35, // script
         0x6310807F => 30,
         0x7C569307 => 32, // terrainmesh
@@ -28,7 +28,7 @@ pub fn type_id_for_type_hash(type_hash: u32) -> Option<u32> {
         0x1CF649BB => 34,
         0xFA0B8DBC => 18,
         0x207359C7 => 11,
-        0x8F0A54E2 => 3, // binary
+        0x8F0A54E2 => 3,  // binary
         0x99E77ACE => 15, // font
         0xDE982D61 => 14,
         0x39E5E978 => 7, // stringdb

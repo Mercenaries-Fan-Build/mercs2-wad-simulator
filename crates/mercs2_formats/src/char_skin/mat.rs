@@ -388,7 +388,11 @@ pub fn kabsch_rot(h: &[f64; 9]) -> ([f64; 9], [f64; 3]) {
         uc[k] = match k {
             2 => cross(uc[0], uc[1]),
             1 => {
-                let seed = if uc[0][0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+                let seed = if uc[0][0].abs() < 0.9 {
+                    [1.0, 0.0, 0.0]
+                } else {
+                    [0.0, 1.0, 0.0]
+                };
                 norm(cross(uc[0], seed))
             }
             _ => [1.0, 0.0, 0.0],
@@ -429,7 +433,12 @@ pub struct Sim {
 }
 
 impl Sim {
-    pub const IDENTITY: Sim = Sim { sr: EYE3, t: [0.0; 3], scale: 1.0, rank: 3 };
+    pub const IDENTITY: Sim = Sim {
+        sr: EYE3,
+        t: [0.0; 3],
+        scale: 1.0,
+        rank: 3,
+    };
     #[inline]
     pub fn apply(&self, p: V3) -> V3 {
         let q = apply3(&self.sr, p);
@@ -470,11 +479,18 @@ pub fn fit_similarity_weighted(pairs: &[(V3, V3, f64)]) -> Option<Sim> {
         var += w * dot(sc, sc);
     }
     let (r, sig) = kabsch_rot(&h);
-    let rank = sig.iter().filter(|&&s| s > 1e-9 * sig[0].abs().max(1e-300)).count();
+    let rank = sig
+        .iter()
+        .filter(|&&s| s > 1e-9 * sig[0].abs().max(1e-300))
+        .count();
     // optimal scale: tr(Rᵀ h) / Σ w |s-ms|²
     let trace: f64 = (0..3).map(|i| sig[i]).sum();
     let scale = if var > 1e-30 { trace / var } else { 1.0 };
-    let scale = if scale.is_finite() && scale > 1e-12 { scale } else { 1.0 };
+    let scale = if scale.is_finite() && scale > 1e-12 {
+        scale
+    } else {
+        1.0
+    };
     let sr: [f64; 9] = std::array::from_fn(|i| r[i] * scale);
     let t = sub(md, apply3(&sr, ms));
     Some(Sim { sr, t, scale, rank })

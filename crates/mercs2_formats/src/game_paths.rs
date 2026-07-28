@@ -30,7 +30,9 @@ pub fn wad_under(path: &Path, name: &str) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
     }
-    [path.join("data").join(name), path.join(name)].into_iter().find(|c| c.is_file())
+    [path.join("data").join(name), path.join(name)]
+        .into_iter()
+        .find(|c| c.is_file())
 }
 
 /// Resolve a WAD by filename from whichever of [`GAME_DIR_VARS`] is set.
@@ -112,7 +114,9 @@ pub const SAVES_UNDER_HOME: &str = "Documents/My Games/Mercenaries 2/SaveGames";
 /// At 13,404 bytes each the whole set is 128 KiB, which is why vendoring is viable here and is not for
 /// `vz.wad` (2.5 GiB).
 pub fn save_fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures").join("saves")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("saves")
 }
 
 /// Every vendored save, by filename — the single authoritative list.
@@ -178,7 +182,9 @@ mod tests {
             if p.is_file() {
                 return Some(p);
             }
-            [p.join("data").join("vz.wad"), p.join("vz.wad")].into_iter().find(|c| c.is_file())
+            [p.join("data").join("vz.wad"), p.join("vz.wad")]
+                .into_iter()
+                .find(|c| c.is_file())
         };
         let want = root.join("data").join("vz.wad");
         assert_eq!(probe(root.clone()), Some(want.clone()), "install root");

@@ -146,7 +146,14 @@ fn entropy_advance(block_size: usize, bw: u32, preserved: usize, present: usize)
 /// FUN_009fdd50 (general path): dequant one DOF's block. Reads `preserved`
 /// verbatim f32, then unpacks `n` bw-bit codes and maps
 /// `value = ((float)code + ROUND_BIAS) * (2^-bw * mult) + off`.
-fn dequant(stream: &[u8], block_size: usize, bw: u32, preserved: usize, mult: f32, off: f32) -> Vec<f32> {
+fn dequant(
+    stream: &[u8],
+    block_size: usize,
+    bw: u32,
+    preserved: usize,
+    mult: f32,
+    off: f32,
+) -> Vec<f32> {
     let mut out = vec![0.0f32; block_size];
     for i in 0..preserved {
         out[i] = f32_le(stream, i * 4);
@@ -273,8 +280,17 @@ fn stage1_decompress_matches_coeffs_in() {
     eprintln!("frame={frame} frac={frac} (w0={w0}, w1={w1})");
 
     let dec = decode_block(
-        &clip, num_d, block_size, max_bw, preserved, off_arr, mult_arr, bw_arr, block_index,
-        quant_base, frame,
+        &clip,
+        num_d,
+        block_size,
+        max_bw,
+        preserved,
+        off_arr,
+        mult_arr,
+        bw_arr,
+        block_index,
+        quant_base,
+        frame,
     );
     // frame and frame+1 both live in the same block here (frame%bs != bs-1).
     let i0 = frame - dec.block_base_frame;
@@ -310,5 +326,9 @@ fn stage1_decompress_matches_coeffs_in() {
     for (d, g, e) in mism.iter().take(30) {
         eprintln!("  coeff[{d}]: got={g} exp={e}");
     }
-    assert!(ok3 >= num_d, "{} coeff mismatches >1e-3 (see stderr)", mism.len());
+    assert!(
+        ok3 >= num_d,
+        "{} coeff mismatches >1e-3 (see stderr)",
+        mism.len()
+    );
 }

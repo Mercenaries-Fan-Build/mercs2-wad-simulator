@@ -56,7 +56,9 @@ fn main() {
                 }
                 for s in &pf.shapes {
                     match s {
-                        Shape::Box { half_extents } => println!("  box half-extents {half_extents:?}"),
+                        Shape::Box { half_extents } => {
+                            println!("  box half-extents {half_extents:?}")
+                        }
                         Shape::Mopp => println!("  MOPP BV-tree (static non-convex mesh)"),
                         Shape::Mesh => println!("  WpMeshShape16 (16-bit indexed collision mesh)"),
                         Shape::Other(n) => println!("  undecoded shape: {n}"),

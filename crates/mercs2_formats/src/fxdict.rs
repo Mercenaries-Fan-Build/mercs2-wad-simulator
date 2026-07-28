@@ -68,7 +68,10 @@ pub struct FxParam {
 /// Trailing bytes past `count × 20` are ignored (the engine only walks `count`).
 pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
     if info.len() < 4 {
-        return Err(format!("fxdict INFO too short: {} bytes (need 4)", info.len()));
+        return Err(format!(
+            "fxdict INFO too short: {} bytes (need 4)",
+            info.len()
+        ));
     }
     let count = read_u32_le(info, 0) as usize;
     let need = count
@@ -97,7 +100,10 @@ pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
 /// Look up a parameter's default by name hash (linear scan; the engine indexes a hash map but the
 /// table is small enough that callers wanting a one-off lookup can use this).
 pub fn fxparam_default(params: &[FxParam], name_hash: u32) -> Option<f32> {
-    params.iter().find(|p| p.name_hash == name_hash).map(|p| p.default)
+    params
+        .iter()
+        .find(|p| p.name_hash == name_hash)
+        .map(|p| p.default)
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -169,7 +175,11 @@ pub fn parse_poff(body: &[u8]) -> Option<[f32; 3]> {
     if body.len() < 12 {
         return None;
     }
-    Some([read_f32_le(body, 0), read_f32_le(body, 4), read_f32_le(body, 8)])
+    Some([
+        read_f32_le(body, 0),
+        read_f32_le(body, 4),
+        read_f32_le(body, 8),
+    ])
 }
 
 /// `TRFM` — 4×4 transform, 16 f32 row-major (D3D convention). Returns `None` if the body is < 64 B.
@@ -225,7 +235,9 @@ pub struct ColorGradient {
 
 impl Default for ColorGradient {
     fn default() -> Self {
-        ColorGradient { stops: [[255, 255, 255, 255]; COLR_STOPS] }
+        ColorGradient {
+            stops: [[255, 255, 255, 255]; COLR_STOPS],
+        }
     }
 }
 
@@ -241,7 +253,12 @@ impl ColorGradient {
         let a = self.stops[i0];
         let b = self.stops[i1];
         let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) / 255.0;
-        [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2]), lerp(a[3], b[3])]
+        [
+            lerp(a[0], b[0]),
+            lerp(a[1], b[1]),
+            lerp(a[2], b[2]),
+            lerp(a[3], b[3]),
+        ]
     }
 }
 

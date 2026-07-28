@@ -341,7 +341,10 @@ mod tests {
     fn classify_known() {
         assert_eq!(classify(*b"MTRL").unwrap().verify, Verify::Validated);
         assert_eq!(classify(*b"AREA").unwrap().subsystem, Subsystem::UcfxAsset);
-        assert_eq!(classify(*b"CSID").unwrap().subsystem, Subsystem::EntityRuntime);
+        assert_eq!(
+            classify(*b"CSID").unwrap().subsystem,
+            Subsystem::EntityRuntime
+        );
         assert!(classify(*b"ZZZZ").is_none());
     }
     #[test]
@@ -360,22 +363,22 @@ mod tests {
 
     #[test]
     fn investigation_flags_nonwad_but_not_validated() {
-        assert!(needs_investigation(*b"CSID").is_some());   // network/entity
-        assert!(needs_investigation(*b"trns").is_some());   // ucfx, still pending
-        assert!(needs_investigation(*b"DECL").is_none());   // now validated (body % 0x24)
-        assert!(needs_investigation(*b"BSHI").is_none());   // now validated (body % 2)
-        assert!(needs_investigation(*b"ASTO").is_none());   // now validated (body>=4)
-        assert!(needs_investigation(*b"MINF").is_none());   // now validated (body>=6)
-        assert!(needs_investigation(*b"CHAR").is_none());   // reclassified UCFX, registered
-        assert!(needs_investigation(*b"NODE").is_none());   // now validated (body>=8)
-        assert!(needs_investigation(*b"TRFM").is_none());   // now validated (4x4 matrix)
-        assert!(needs_investigation(*b"TREE").is_none());   // now validated (body % 0x34)
-        assert!(needs_investigation(*b"KEYS").is_none());   // now validated (4+N×8)
-        assert!(needs_investigation(*b"MTRL").is_none());   // validated
-        assert!(needs_investigation(*b"GEOM").is_none());   // validated
-        assert!(needs_investigation(*b"PHY2").is_none());   // now validated (Havok magic)
-        assert!(needs_investigation(*b"PTCH").is_none());   // now validated (record align)
-        assert!(needs_investigation(*b"MESH").is_none());   // registered & benign
-        assert!(needs_investigation(*b"NAME").is_none());   // registered & benign
+        assert!(needs_investigation(*b"CSID").is_some()); // network/entity
+        assert!(needs_investigation(*b"trns").is_some()); // ucfx, still pending
+        assert!(needs_investigation(*b"DECL").is_none()); // now validated (body % 0x24)
+        assert!(needs_investigation(*b"BSHI").is_none()); // now validated (body % 2)
+        assert!(needs_investigation(*b"ASTO").is_none()); // now validated (body>=4)
+        assert!(needs_investigation(*b"MINF").is_none()); // now validated (body>=6)
+        assert!(needs_investigation(*b"CHAR").is_none()); // reclassified UCFX, registered
+        assert!(needs_investigation(*b"NODE").is_none()); // now validated (body>=8)
+        assert!(needs_investigation(*b"TRFM").is_none()); // now validated (4x4 matrix)
+        assert!(needs_investigation(*b"TREE").is_none()); // now validated (body % 0x34)
+        assert!(needs_investigation(*b"KEYS").is_none()); // now validated (4+N×8)
+        assert!(needs_investigation(*b"MTRL").is_none()); // validated
+        assert!(needs_investigation(*b"GEOM").is_none()); // validated
+        assert!(needs_investigation(*b"PHY2").is_none()); // now validated (Havok magic)
+        assert!(needs_investigation(*b"PTCH").is_none()); // now validated (record align)
+        assert!(needs_investigation(*b"MESH").is_none()); // registered & benign
+        assert!(needs_investigation(*b"NAME").is_none()); // registered & benign
     }
 }

@@ -7,10 +7,10 @@
 //! * A hash an author wrote by hand is resolved BACK to its name everywhere a human reads it, and
 //!   the author is told to write the name instead.
 
+use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_quartermaster::blast::{self, Claim};
 use mercs2_quartermaster::names::{bare_hash_suggestions, NameTable};
 use mercs2_quartermaster::{from_str, Format, Manifest};
-use mercs2_formats::hash::pandemic_hash_m2;
 
 const DESTROYER: &str = "al_veh_boat_destroyer";
 const DESTROYER_HASH: u32 = 0xE540_47D5;
@@ -45,7 +45,12 @@ fn a_name_and_its_hash_produce_one_claim() {
 
     let claim_of = |m: &Manifest| blast::claims(m).into_iter().next().unwrap().claim;
     assert_eq!(claim_of(&by_name), claim_of(&by_hash));
-    assert_eq!(claim_of(&by_name), Claim::Asset { hash: pandemic_hash_m2(DESTROYER) });
+    assert_eq!(
+        claim_of(&by_name),
+        Claim::Asset {
+            hash: pandemic_hash_m2(DESTROYER)
+        }
+    );
 }
 
 #[test]
@@ -61,7 +66,12 @@ fn hash_spelling_is_case_insensitive() {
 fn a_hexish_name_without_the_prefix_is_hashed_as_a_name() {
     let m = raw_touching("a", "deadbeef");
     let claim = blast::claims(&m).into_iter().next().unwrap().claim;
-    assert_eq!(claim, Claim::Asset { hash: pandemic_hash_m2("deadbeef") });
+    assert_eq!(
+        claim,
+        Claim::Asset {
+            hash: pandemic_hash_m2("deadbeef")
+        }
+    );
     assert_ne!(claim, Claim::Asset { hash: 0xDEAD_BEEF });
 }
 
@@ -88,7 +98,10 @@ fn a_bare_hash_claim_is_named_in_diagnostics() {
     table().enrich(&mut records);
     assert_eq!(records[0].name.as_deref(), Some(DESTROYER));
     assert!(
-        records[0].claim.describe(records[0].name.as_deref()).contains(DESTROYER),
+        records[0]
+            .claim
+            .describe(records[0].name.as_deref())
+            .contains(DESTROYER),
         "the human-readable label must lead with the name"
     );
 }
@@ -123,7 +136,11 @@ fn writing_a_known_hash_is_flagged_with_the_name_to_use() {
     assert_eq!(suggestions[0].written, "0xE54047D5");
     assert_eq!(suggestions[0].name, DESTROYER);
     // Auto-fixable: the message has to carry the replacement text.
-    assert!(suggestions[0].to_string().contains(DESTROYER), "{}", suggestions[0]);
+    assert!(
+        suggestions[0].to_string().contains(DESTROYER),
+        "{}",
+        suggestions[0]
+    );
 }
 
 #[test]
@@ -175,10 +192,17 @@ fn the_committed_table_reverses_a_known_asset() {
         eprintln!("no data/production_names.json found; skipping");
         return;
     };
-    assert!(names.len() > 20_000, "expected the full table, got {}", names.len());
+    assert!(
+        names.len() > 20_000,
+        "expected the full table, got {}",
+        names.len()
+    );
     assert_eq!(names.reverse(DESTROYER_HASH), Some(DESTROYER));
     // And the pairing that motivated names-only `touches` in the first place.
-    assert_eq!(names.reverse(pandemic_hash_m2("ch_veh_boat_destroyer")), Some("ch_veh_boat_destroyer"));
+    assert_eq!(
+        names.reverse(pandemic_hash_m2("ch_veh_boat_destroyer")),
+        Some("ch_veh_boat_destroyer")
+    );
 }
 
 use std::path::Path;

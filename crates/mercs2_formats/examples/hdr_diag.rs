@@ -11,13 +11,24 @@ fn main() {
     let (rows, _endian) = parse_ffcs_header(&hdr).unwrap();
     println!("FFCS chunks ({}):", rows.len());
     for r in &rows {
-        println!("  {:?} offset=0x{:X} meta={}", std::str::from_utf8(&r.tag).unwrap_or("?"), r.offset, r.meta);
+        println!(
+            "  {:?} offset=0x{:X} meta={}",
+            std::str::from_utf8(&r.tag).unwrap_or("?"),
+            r.offset,
+            r.meta
+        );
     }
     let a = load_ffcs_archive(&mut file, size).unwrap();
-    println!("indx entries={} aset entries={}", a.indx.len(), a.aset.len());
+    println!(
+        "indx entries={} aset entries={}",
+        a.indx.len(),
+        a.aset.len()
+    );
     // Count type_ids
     use std::collections::BTreeMap;
     let mut m: BTreeMap<u32, usize> = BTreeMap::new();
-    for e in &a.aset { *m.entry(e.type_id).or_default() += 1; }
+    for e in &a.aset {
+        *m.entry(e.type_id).or_default() += 1;
+    }
     println!("type_id histogram: {:?}", m);
 }

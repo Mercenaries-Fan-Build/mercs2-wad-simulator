@@ -25,8 +25,10 @@ use std::path::Path;
 /// per-material split the Workshop does is not reproduced here.
 pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let gltf::Gltf { document: doc, blob } =
-        gltf::Gltf::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let gltf::Gltf {
+        document: doc,
+        blob,
+    } = gltf::Gltf::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
 
     // Buffer sources, resolved WITHOUT the `import` feature (which would pull `image` + `base64`
     // just to decode embedded textures we never read):
@@ -49,8 +51,7 @@ pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
                 }
                 let sibling = path.parent().unwrap_or(Path::new(".")).join(uri);
                 buffers.push(
-                    std::fs::read(&sibling)
-                        .map_err(|e| format!("{}: {e}", sibling.display()))?,
+                    std::fs::read(&sibling).map_err(|e| format!("{}: {e}", sibling.display()))?,
                 );
             }
         }
@@ -61,11 +62,23 @@ pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut tris: Vec<[u32; 3]> = Vec::new();
 
-    const IDENTITY: Mat4 =
-        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    const IDENTITY: Mat4 = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
     for scene in doc.scenes() {
         for node in scene.nodes() {
-            visit(&node, IDENTITY, &buffers, &mut positions, &mut normals, &mut uvs, &mut tris)?;
+            visit(
+                &node,
+                IDENTITY,
+                &buffers,
+                &mut positions,
+                &mut normals,
+                &mut uvs,
+                &mut tris,
+            )?;
         }
     }
 
@@ -82,7 +95,14 @@ pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
     normals.resize(positions.len(), [0.0, 1.0, 0.0]);
     uvs.resize(positions.len(), [0.0, 0.0]);
 
-    Ok(ExternalMesh { positions, normals, uvs, tris, joints: Vec::new(), weights: Vec::new() })
+    Ok(ExternalMesh {
+        positions,
+        normals,
+        uvs,
+        tris,
+        joints: Vec::new(),
+        weights: Vec::new(),
+    })
 }
 
 type Mat4 = [[f32; 4]; 4];
@@ -142,7 +162,9 @@ fn visit(
                 continue;
             }
             let reader = prim.reader(|b| buffers.get(b.index()).map(|d| &d[..]));
-            let Some(pos) = reader.read_positions() else { continue };
+            let Some(pos) = reader.read_positions() else {
+                continue;
+            };
             let base = positions.len() as u32;
 
             for p in pos {
@@ -195,7 +217,12 @@ mod tests {
 
     #[test]
     fn a_translated_node_moves_its_vertices() {
-        let mut m: Mat4 = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let mut m: Mat4 = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
         m[3] = [10.0, 20.0, 30.0, 1.0];
         assert_eq!(transform_point(&m, [1.0, 2.0, 3.0]), [11.0, 22.0, 33.0]);
         // A direction must ignore the translation, or every normal points at the origin offset.
@@ -204,7 +231,12 @@ mod tests {
 
     #[test]
     fn directions_come_back_normalised() {
-        let mut m: Mat4 = [[2.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0], [0.0, 0.0, 2.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let mut m: Mat4 = [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
         m[3] = [5.0, 5.0, 5.0, 1.0];
         let d = transform_dir(&m, [3.0, 0.0, 0.0]);
         assert!((d[0] - 1.0).abs() < 1e-5 && d[1].abs() < 1e-5, "{d:?}");

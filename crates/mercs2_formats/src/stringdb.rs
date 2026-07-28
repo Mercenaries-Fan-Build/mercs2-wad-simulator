@@ -89,7 +89,11 @@ fn detect(body: &[u8], bytes_per_entry: usize) -> Option<(Endian, u32)> {
     match (fits(Endian::Be), fits(Endian::Le)) {
         // Both readings fit only when one is a small number byte-swapped into a smaller one; the
         // larger count is the tighter — and therefore real — fit.
-        (Some(b), Some(l)) => Some(if b >= l { (Endian::Be, b as u32) } else { (Endian::Le, l as u32) }),
+        (Some(b), Some(l)) => Some(if b >= l {
+            (Endian::Be, b as u32)
+        } else {
+            (Endian::Le, l as u32)
+        }),
         (Some(b), None) => Some((Endian::Be, b as u32)),
         (None, Some(l)) => Some((Endian::Le, l as u32)),
         (None, None) => None,
@@ -107,7 +111,9 @@ fn read_utf16(heap: &[u8], off: usize, e: Endian) -> String {
         }
         units.push(u);
     }
-    char::decode_utf16(units).map(|r| r.unwrap_or('\u{FFFD}')).collect()
+    char::decode_utf16(units)
+        .map(|r| r.unwrap_or('\u{FFFD}'))
+        .collect()
 }
 
 /// How ASCII-like is this decode? Settles heap endianness independently of the header.
@@ -143,12 +149,24 @@ pub fn parse(syek: &[u8], srts: &[u8]) -> Result<StringDb, String> {
         let key_hash = kend.u32(syek, base);
         let offset = kend.u32(syek, base + 4);
         if offset as usize > heap.len() {
-            return Err(format!("SYEK entry {k}: offset {offset} past heap ({})", heap.len()));
+            return Err(format!(
+                "SYEK entry {k}: offset {offset} past heap ({})",
+                heap.len()
+            ));
         }
-        entries.push(StringEntry { key_hash, offset, text: read_utf16(heap, offset as usize, tend) });
+        entries.push(StringEntry {
+            key_hash,
+            offset,
+            text: read_utf16(heap, offset as usize, tend),
+        });
     }
 
-    Ok(StringDb { entries, endian: kend, declared_code_units: declared, heap_bytes: heap.len() })
+    Ok(StringDb {
+        entries,
+        endian: kend,
+        declared_code_units: declared,
+        heap_bytes: heap.len(),
+    })
 }
 
 /// Serialize back to `(SYEK, SRTS)` bodies.
@@ -245,17 +263,32 @@ mod tests {
                 .map(|(h, t)| {
                     let off = heap_len;
                     heap_len += (t.encode_utf16().count() as u32 + 1) * 2;
-                    StringEntry { key_hash: *h, offset: off, text: t.to_string() }
+                    StringEntry {
+                        key_hash: *h,
+                        offset: off,
+                        text: t.to_string(),
+                    }
                 })
                 .collect()
         };
-        let heap_bytes = entries.iter().map(|e| (e.text.encode_utf16().count() + 1) * 2).sum();
-        build(&StringDb { entries, endian, declared_code_units: 0, heap_bytes })
+        let heap_bytes = entries
+            .iter()
+            .map(|e| (e.text.encode_utf16().count() + 1) * 2)
+            .sum();
+        build(&StringDb {
+            entries,
+            endian,
+            declared_code_units: 0,
+            heap_bytes,
+        })
     }
 
     #[test]
     fn roundtrip_le() {
-        let (syek, srts) = synth(Endian::Le, &[(0xAABB_CCDD, "Hello"), (0x1234_5678, "World!")]);
+        let (syek, srts) = synth(
+            Endian::Le,
+            &[(0xAABB_CCDD, "Hello"), (0x1234_5678, "World!")],
+        );
         let db = parse(&syek, &srts).expect("parse");
         assert_eq!(db.endian, Endian::Le);
         assert_eq!(db.entries.len(), 2);
@@ -300,7 +333,11 @@ mod tests {
         assert_eq!(db.entries[0].text, "Same");
         assert_eq!(db.entries[1].text, "Same");
         let (s2, r2) = build(&db);
-        assert_eq!(r2.len(), srts.len(), "shared string must not be duplicated into the heap");
+        assert_eq!(
+            r2.len(),
+            srts.len(),
+            "shared string must not be duplicated into the heap"
+        );
         assert_eq!((s2, r2), (syek, srts));
     }
 
@@ -312,7 +349,10 @@ mod tests {
         let (s2, r2) = build(&db);
         let db2 = parse(&s2, &r2).expect("reparse");
         assert_eq!(db2.entries[0].text, "a considerably longer correction");
-        assert_eq!(db2.entries[1].text, "tail", "the following string must survive re-pointing");
+        assert_eq!(
+            db2.entries[1].text, "tail",
+            "the following string must survive re-pointing"
+        );
         assert_eq!(db2.declared_code_units as usize * 2, r2.len() - 4);
     }
 
@@ -341,14 +381,23 @@ mod tests {
         let (s2, r2) = build(&db);
         let back = parse(&s2, &r2).expect("reparse");
         assert_eq!(back.entries[0].text, "Resume");
-        assert_eq!(back.entries[1].text, "Continue", "the co-located key must be untouched");
-        assert_ne!(back.entries[0].offset, back.entries[1].offset, "they must no longer share");
+        assert_eq!(
+            back.entries[1].text, "Continue",
+            "the co-located key must be untouched"
+        );
+        assert_ne!(
+            back.entries[0].offset, back.entries[1].offset,
+            "they must no longer share"
+        );
     }
 
     #[test]
     fn missing_key_reports_failure() {
         let (syek, srts) = synth(Endian::Le, &[(1, "x")]);
         let mut db = parse(&syek, &srts).expect("parse");
-        assert!(!db.set_by_hash(0xDEAD, "y"), "a fix aimed at a missing key must not silently pass");
+        assert!(
+            !db.set_by_hash(0xDEAD, "y"),
+            "a fix aimed at a missing key must not silently pass"
+        );
     }
 }

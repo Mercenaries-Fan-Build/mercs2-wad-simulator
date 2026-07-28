@@ -42,9 +42,10 @@ fn check(name: &str) {
     };
     let am = automap(&rig);
 
-    let expect: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/expect_automap_{name}.json")).unwrap())
-            .unwrap();
+    let expect: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{dir}/expect_automap_{name}.json")).unwrap(),
+    )
+    .unwrap();
 
     // names in joint order must match
     let exp_names: Vec<String> = expect["names"]
@@ -66,7 +67,10 @@ fn check(name: &str) {
     let exp_inherited = to_map(&expect["inherited"]);
 
     assert_eq!(am.mapped, exp_mapped, "{name}: direct mapping differs");
-    assert_eq!(am.inherited, exp_inherited, "{name}: inherited mapping differs");
+    assert_eq!(
+        am.inherited, exp_inherited,
+        "{name}: inherited mapping differs"
+    );
 }
 
 /// The workshop's UI mapper (`Retarget::remap_via_char_skin`) feeds `char_skin::automap` a
@@ -76,8 +80,11 @@ fn check(name: &str) {
 fn check_joint_space(name: &str) {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
     let (joint_nodes, node_parent, node_name) = load_rig(&format!("{dir}/rig_{name}.json"));
-    let node_to_joint: HashMap<usize, usize> =
-        joint_nodes.iter().enumerate().map(|(j, &n)| (n, j)).collect();
+    let node_to_joint: HashMap<usize, usize> = joint_nodes
+        .iter()
+        .enumerate()
+        .map(|(j, &n)| (n, j))
+        .collect();
     // joint index -> nearest-JOINT-ancestor joint index (-1 = root); collapse spacer nodes.
     let joint_parent: Vec<i32> = joint_nodes
         .iter()
@@ -99,9 +106,10 @@ fn check_joint_space(name: &str) {
         node_parent: &joint_parent,
         node_name: &joint_names,
     });
-    let expect: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/expect_automap_{name}.json")).unwrap())
-            .unwrap();
+    let expect: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{dir}/expect_automap_{name}.json")).unwrap(),
+    )
+    .unwrap();
     let to_map = |v: &serde_json::Value| -> HashMap<usize, u32> {
         v.as_object()
             .unwrap()
@@ -109,8 +117,16 @@ fn check_joint_space(name: &str) {
             .map(|(k, val)| (k.parse::<usize>().unwrap(), val.as_u64().unwrap() as u32))
             .collect()
     };
-    assert_eq!(am.mapped, to_map(&expect["map"]), "{name}: joint-space direct mapping differs");
-    assert_eq!(am.inherited, to_map(&expect["inherited"]), "{name}: joint-space inherited differs");
+    assert_eq!(
+        am.mapped,
+        to_map(&expect["map"]),
+        "{name}: joint-space direct mapping differs"
+    );
+    assert_eq!(
+        am.inherited,
+        to_map(&expect["inherited"]),
+        "{name}: joint-space inherited differs"
+    );
 }
 
 #[test]

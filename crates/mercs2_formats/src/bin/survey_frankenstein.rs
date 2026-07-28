@@ -17,7 +17,11 @@ fn main() {
         let groups = survey_groups(&block).expect("survey");
         eprintln!("==================================================================");
         eprintln!("{path}");
-        eprintln!("  skeleton: {} bones, height {:.4}", skel.bones.len(), skel.height());
+        eprintln!(
+            "  skeleton: {} bones, height {:.4}",
+            skel.bones.len(),
+            skel.height()
+        );
         eprintln!("  {} drawing groups", groups.len());
         for g in &groups {
             if g.stride != 40 {

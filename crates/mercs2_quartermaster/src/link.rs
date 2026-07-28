@@ -54,15 +54,27 @@ pub struct ScriptMutation {
 #[derive(Debug)]
 pub enum LinkError {
     /// The base script is not in the block being linked.
-    UnknownScript { target: String, shipment: String },
+    UnknownScript {
+        target: String,
+        shipment: String,
+    },
     /// The base script has no source in the corpus, so there is nothing to append to.
     ///
     /// Real and expected for some targets: the corpus covers 370 of 382 scripts, and the gaps are
     /// modules `unluac` could not round-trip. Those are structurally un-linkable, and saying so is
     /// better than emitting a block that silently drops the mod.
-    NoBaseSource { target: String, tried: Vec<PathBuf> },
-    Compile { target: String, message: String },
-    Splice { target: String, message: String },
+    NoBaseSource {
+        target: String,
+        tried: Vec<PathBuf>,
+    },
+    Compile {
+        target: String,
+        message: String,
+    },
+    Splice {
+        target: String,
+        message: String,
+    },
     Block(String),
 }
 
@@ -140,7 +152,9 @@ pub fn linked_source(base: &str, mutations: &[&ScriptMutation]) -> (String, Vec<
     let mut ordered: Vec<&&ScriptMutation> = mutations.iter().collect();
     ordered.sort_by(|a, b| a.shipment.cmp(&b.shipment));
 
-    let mut out = String::with_capacity(base.len() + ordered.iter().map(|m| m.append.len()).sum::<usize>() + 256);
+    let mut out = String::with_capacity(
+        base.len() + ordered.iter().map(|m| m.append.len()).sum::<usize>() + 256,
+    );
     out.push_str(base);
     if !base.ends_with('\n') {
         out.push('\n');
@@ -149,7 +163,10 @@ pub fn linked_source(base: &str, mutations: &[&ScriptMutation]) -> (String, Vec<
     for m in &ordered {
         // Attributed in the source itself: when someone decompiles a linked block to work out why
         // their game behaves oddly, the answer should be readable rather than inferred.
-        out.push_str(&format!("\n-- [Quartermaster] appended by Shipment: {}\n", m.shipment));
+        out.push_str(&format!(
+            "\n-- [Quartermaster] appended by Shipment: {}\n",
+            m.shipment
+        ));
         out.push_str(&m.append);
         if !m.append.ends_with('\n') {
             out.push('\n');
@@ -244,12 +261,17 @@ pub fn link_into(
 
     let mut linked = Vec::new();
     for (target, group) in by_target {
-        let idx = block.find_by_name(target).ok_or_else(|| LinkError::UnknownScript {
-            target: target.to_string(),
-            shipment: group[0].shipment.clone(),
-        })?;
-        let source_path = base_source_path(corpus_root, target)
-            .map_err(|tried| LinkError::NoBaseSource { target: target.to_string(), tried })?;
+        let idx = block
+            .find_by_name(target)
+            .ok_or_else(|| LinkError::UnknownScript {
+                target: target.to_string(),
+                shipment: group[0].shipment.clone(),
+            })?;
+        let source_path =
+            base_source_path(corpus_root, target).map_err(|tried| LinkError::NoBaseSource {
+                target: target.to_string(),
+                tried,
+            })?;
         let base = std::fs::read_to_string(&source_path).map_err(|e| LinkError::Compile {
             target: target.to_string(),
             message: format!("reading base source {}: {e}", source_path.display()),
@@ -266,10 +288,12 @@ pub fn link_into(
             target: target.to_string(),
             message: e,
         })?;
-        block.replace_lua(idx, &bytecode).map_err(|e| LinkError::Splice {
-            target: target.to_string(),
-            message: e,
-        })?;
+        block
+            .replace_lua(idx, &bytecode)
+            .map_err(|e| LinkError::Splice {
+                target: target.to_string(),
+                message: e,
+            })?;
 
         linked.push(LinkedScript {
             target: target.to_string(),
@@ -282,7 +306,9 @@ pub fn link_into(
 
     // The block must still verify after every splice. `replace_lua` recomputes each container's
     // CSUM, so a failure here means the block itself was left inconsistent.
-    block.verify_csums().map_err(|e| LinkError::Block(format!("CSUMs after linking: {e}")))?;
+    block
+        .verify_csums()
+        .map_err(|e| LinkError::Block(format!("CSUMs after linking: {e}")))?;
     Ok(linked)
 }
 
@@ -319,7 +345,10 @@ mod tests {
         let m = mutation("mod", "s", "print('x')\n");
         let (src, _) = linked_source("local t = 1", &[&m]);
         assert!(src.starts_with("local t = 1\n"), "{src}");
-        assert!(!src.contains("local t = 1--"), "appended source welded onto the base: {src}");
+        assert!(
+            !src.contains("local t = 1--"),
+            "appended source welded onto the base: {src}"
+        );
     }
 
     #[test]

@@ -37,7 +37,10 @@ struct MovieRow {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| -> Option<String> {
-        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
     };
     // First positional (non-flag) argument = the movies dir, skipping `--md X` / `--json X` pairs.
     let positional = {
@@ -75,9 +78,17 @@ fn main() {
         std::process::exit(2);
     }
     // Repo root = <root>/output/gfx_movies → up two. Falls back to the movies dir if the shape differs.
-    let root = dir.parent().and_then(|p| p.parent()).unwrap_or(&dir).to_path_buf();
-    let md_out = flag("--md").map(PathBuf::from).unwrap_or_else(|| root.join("docs/reverse_engineer/gfx_golden_set.md"));
-    let json_out = flag("--json").map(PathBuf::from).unwrap_or_else(|| root.join("docs/data/gfx_golden_set.json"));
+    let root = dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(&dir)
+        .to_path_buf();
+    let md_out = flag("--md")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("docs/reverse_engineer/gfx_golden_set.md"));
+    let json_out = flag("--json")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("docs/data/gfx_golden_set.json"));
 
     let mut files = Vec::new();
     collect_gfx(&dir, &mut files);
@@ -90,8 +101,15 @@ fn main() {
 
     let mut rows: Vec<MovieRow> = Vec::new();
     for path in &files {
-        let rel = path.strip_prefix(&dir).unwrap_or(path).to_string_lossy().replace('\\', "/");
-        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let rel = path
+            .strip_prefix(&dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
@@ -144,13 +162,18 @@ fn err_row(name: &str, rel: &str, bytes: usize, e: String) -> MovieRow {
 
 /// Recursively collect `.gfx`/`.swf` files.
 fn collect_gfx(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
             collect_gfx(&p, out);
         } else if matches!(
-            p.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+            p.extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
             Some("gfx") | Some("swf")
         ) {
             out.push(p);
@@ -179,21 +202,59 @@ fn find_movies_dir() -> Option<PathBuf> {
 /// `(key, human label, extractor)` — the authorable features the golden set indexes.
 type FeatAxis = (&'static str, &'static str, fn(&Features) -> u32);
 const AXES: &[FeatAxis] = &[
-    ("gradient_fill", "Gradient fill (shape fill 0x10/0x12/0x13)", |f| f.shapes_with_gradient),
-    ("focal_gradient", "Focal-radial gradient (Flash 8, 0x13)", |f| f.shapes_with_focal_gradient),
-    ("bitmap_fill", "Bitmap fill (shape fill 0x40–0x43, texture-backed)", |f| f.shapes_with_bitmap),
-    ("embedded_bitmap", "Embedded bitmap tag (DefineBits*)", |f| f.embedded_bitmaps),
-    ("embedded_font", "Embedded font (DefineFont/2/3)", |f| f.embedded_fonts),
-    ("import_assets", "Imported symbols (ImportAssets/2 — shared-font-lib path)", |f| f.imports),
-    ("export_assets", "Exported symbols (ExportAssets)", |f| f.exports),
-    ("edit_text", "Dynamic text field (DefineEditText)", |f| f.edit_texts),
+    (
+        "gradient_fill",
+        "Gradient fill (shape fill 0x10/0x12/0x13)",
+        |f| f.shapes_with_gradient,
+    ),
+    (
+        "focal_gradient",
+        "Focal-radial gradient (Flash 8, 0x13)",
+        |f| f.shapes_with_focal_gradient,
+    ),
+    (
+        "bitmap_fill",
+        "Bitmap fill (shape fill 0x40–0x43, texture-backed)",
+        |f| f.shapes_with_bitmap,
+    ),
+    (
+        "embedded_bitmap",
+        "Embedded bitmap tag (DefineBits*)",
+        |f| f.embedded_bitmaps,
+    ),
+    ("embedded_font", "Embedded font (DefineFont/2/3)", |f| {
+        f.embedded_fonts
+    }),
+    (
+        "import_assets",
+        "Imported symbols (ImportAssets/2 — shared-font-lib path)",
+        |f| f.imports,
+    ),
+    ("export_assets", "Exported symbols (ExportAssets)", |f| {
+        f.exports
+    }),
+    ("edit_text", "Dynamic text field (DefineEditText)", |f| {
+        f.edit_texts
+    }),
     ("button", "Button (DefineButton/2)", |f| f.buttons),
     ("sprite", "Sprite / MovieClip (DefineSprite)", |f| f.sprites),
-    ("morph_shape", "Morph shape (DefineMorphShape/2)", |f| f.morph_shapes),
+    ("morph_shape", "Morph shape (DefineMorphShape/2)", |f| {
+        f.morph_shapes
+    }),
     ("video", "Video (DefineVideoStream)", |f| f.videos),
-    ("do_action", "AVM1/AS2 script block (DoAction/DoInitAction)", |f| f.do_action),
-    ("do_abc", "AS3 bytecode (DoABC) — expected 0 for GFx 2.x", |f| f.do_abc),
-    ("gfx_ext_tag", "GFx-extension tag (code ≥ 1000)", |f| f.gfx_ext_tags),
+    (
+        "do_action",
+        "AVM1/AS2 script block (DoAction/DoInitAction)",
+        |f| f.do_action,
+    ),
+    (
+        "do_abc",
+        "AS3 bytecode (DoABC) — expected 0 for GFx 2.x",
+        |f| f.do_abc,
+    ),
+    ("gfx_ext_tag", "GFx-extension tag (code ≥ 1000)", |f| {
+        f.gfx_ext_tags
+    }),
 ];
 
 // -- rendering ------------------------------------------------------------------------------------
@@ -202,14 +263,20 @@ fn print_summary(rows: &[MovieRow]) {
     let ok = rows.iter().filter(|r| r.error.is_none()).count();
     println!("gfx_golden: parsed {ok}/{} movies", rows.len());
     for (key, label, get) in AXES {
-        let movies: Vec<&MovieRow> =
-            rows.iter().filter(|r| r.error.is_none() && get(&r.feat) > 0).collect();
+        let movies: Vec<&MovieRow> = rows
+            .iter()
+            .filter(|r| r.error.is_none() && get(&r.feat) > 0)
+            .collect();
         let example = movies
             .iter()
             .max_by_key(|r| get(&r.feat))
             .map(|r| format!("{} (×{})", r.name, get(&r.feat)))
             .unwrap_or_else(|| "— NONE in the retail set".into());
-        println!("  {:<16} {:>3} movies  golden: {label} = {example}", key, movies.len());
+        println!(
+            "  {:<16} {:>3} movies  golden: {label} = {example}",
+            key,
+            movies.len()
+        );
     }
 }
 
@@ -245,7 +312,12 @@ fn render_markdown(rows: &[MovieRow], dir: &Path) -> String {
         let examples = if movies.is_empty() {
             "— **not used by any retail movie**".to_string()
         } else {
-            movies.iter().take(3).map(|(n, c)| format!("`{n}` ({c})")).collect::<Vec<_>>().join(", ")
+            movies
+                .iter()
+                .take(3)
+                .map(|(n, c)| format!("`{n}` ({c})"))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         s.push_str(&format!("| {label} | {} | {examples} |\n", movies.len()));
     }
@@ -265,7 +337,11 @@ fn render_markdown(rows: &[MovieRow], dir: &Path) -> String {
         s.push_str(&format!(
             "| {}{} | {code} | {occ} | {movies} |\n",
             tag_name(*code),
-            if tag_name(*code) == "?" { " (unrecognised)" } else { "" },
+            if tag_name(*code) == "?" {
+                " (unrecognised)"
+            } else {
+                ""
+            },
         ));
     }
 
@@ -275,16 +351,27 @@ fn render_markdown(rows: &[MovieRow], dir: &Path) -> String {
     s.push_str("|---|---|---|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---|\n");
     for r in rows {
         if let Some(e) = &r.error {
-            s.push_str(&format!("| `{}` | — | — | — | — | — | — | — | — | — | — | — | — | ⚠ parse: {e} |\n", r.rel));
+            s.push_str(&format!(
+                "| `{}` | — | — | — | — | — | — | — | — | — | — | — | — | ⚠ parse: {e} |\n",
+                r.rel
+            ));
             continue;
         }
         let f = &r.feat;
         let note = {
             let mut n = Vec::new();
-            if f.do_abc > 0 { n.push("AS3!".to_string()); }
-            if f.shapes_parse_incomplete > 0 { n.push(format!("{} shape(s) partial", f.shapes_parse_incomplete)); }
-            if f.videos > 0 { n.push("video".to_string()); }
-            if f.morph_shapes > 0 { n.push("morph".to_string()); }
+            if f.do_abc > 0 {
+                n.push("AS3!".to_string());
+            }
+            if f.shapes_parse_incomplete > 0 {
+                n.push(format!("{} shape(s) partial", f.shapes_parse_incomplete));
+            }
+            if f.videos > 0 {
+                n.push("video".to_string());
+            }
+            if f.morph_shapes > 0 {
+                n.push("morph".to_string());
+            }
             n.join("; ")
         };
         s.push_str(&format!(
@@ -334,8 +421,11 @@ fn render_json(rows: &[MovieRow]) -> String {
             continue;
         }
         let f = &r.feat;
-        let tags: Vec<String> =
-            f.tag_counts.iter().map(|(c, n)| format!("\"{c}\": {n}")).collect();
+        let tags: Vec<String> = f
+            .tag_counts
+            .iter()
+            .map(|(c, n)| format!("\"{c}\": {n}"))
+            .collect();
         s.push_str(&format!(
             "    {{ \"name\": \"{}\", \"rel\": \"{}\", \"bytes\": {}, \"form\": \"{}\", \
              \"stage\": [{:.1}, {:.1}], \"frames\": {}, \"tag_total\": {}, \

@@ -211,7 +211,11 @@ fn parse_mtrl_body(body: &[u8], out: &mut Vec<MtrlMaterial>) {
         }
         let flags = read_u16_le(body, p + 104);
         let preamble: Vec<f32> = (0..26).map(|k| read_f32_le(body, p + k * 4)).collect();
-        out.push(MtrlMaterial { textures, flags, preamble });
+        out.push(MtrlMaterial {
+            textures,
+            flags,
+            preamble,
+        });
         p += 116 + tex_count * 4;
     }
 }
@@ -287,7 +291,9 @@ pub fn terrain_group_material_index(container: &[u8]) -> Vec<usize> {
     let Some(v) = UcfxView::new(container) else {
         return out;
     };
-    let prmg: Vec<usize> = (0..v.n_desc).filter(|&i| v.tag(i) == b"PRMG" && v.is_marker(i)).collect();
+    let prmg: Vec<usize> = (0..v.n_desc)
+        .filter(|&i| v.tag(i) == b"PRMG" && v.is_marker(i))
+        .collect();
     for (gi, &pr) in prmg.iter().enumerate() {
         let nxt = prmg.get(gi + 1).copied().unwrap_or(v.n_desc);
         let mut mi = 0usize;
@@ -319,7 +325,13 @@ pub fn terrain_group_layers(container: &[u8]) -> Vec<Vec<u32>> {
         .into_iter()
         .map(|mi| {
             mats.get(mi)
-                .map(|m| m.textures.iter().copied().filter(|&h| h != TERRAIN_LAYER_MARKER).collect())
+                .map(|m| {
+                    m.textures
+                        .iter()
+                        .copied()
+                        .filter(|&h| h != TERRAIN_LAYER_MARKER)
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect()
@@ -436,9 +448,10 @@ pub fn build_texture_block(name_hash: u32, td: &TextureData) -> Vec<u8> {
     ucfx.extend_from_slice(&0u32.to_le_bytes());
     ucfx.extend_from_slice(&ndesc.to_le_bytes());
     // INFO leaf @0, BODY leaf @info.len()
-    for (tag, off, len) in
-        [(b"INFO", 0u32, info.len() as u32), (b"BODY", info.len() as u32, body.len() as u32)]
-    {
+    for (tag, off, len) in [
+        (b"INFO", 0u32, info.len() as u32),
+        (b"BODY", info.len() as u32, body.len() as u32),
+    ] {
         ucfx.extend_from_slice(tag);
         ucfx.extend_from_slice(&off.to_le_bytes());
         ucfx.extend_from_slice(&len.to_le_bytes());
@@ -474,8 +487,7 @@ pub fn extract_texture(
 ) -> Result<TextureData, String> {
     let container =
         extract_container(file, archive, name_hash, TYPE_ID_TEXTURE, TYPE_HASH_TEXTURE)?;
-    parse_texture_container(&container)
-        .map_err(|e| format!("texture 0x{name_hash:08X}: {e}"))
+    parse_texture_container(&container).map_err(|e| format!("texture 0x{name_hash:08X}: {e}"))
 }
 
 /// Parse a texture UCFX container (`NAME`/`INFO`/`BODY`) into [`TextureData`].
@@ -522,12 +534,8 @@ pub fn parse_texture_container(container: &[u8]) -> Result<TextureData, String> 
     // instantiates, `texsize::dxt_mip_count`); fall back to the INFO field if the
     // body is a shorter (streamed) resident tail.
     let full_mips = dxt_mip_count(width as usize, height as usize);
-    let full_chain = linear_mip_chain_size(
-        width as usize,
-        height as usize,
-        format.fourcc(),
-        full_mips,
-    );
+    let full_chain =
+        linear_mip_chain_size(width as usize, height as usize, format.fourcc(), full_mips);
     let mip_count = if all_mips.len() >= full_chain {
         full_mips as u32
     } else {
@@ -661,17 +669,9 @@ pub fn build_resident_texture(
     // INFO (34 bytes): w, h, 1, mips, 0, 1, 1 as u16s; fourcc @14; total_size @22;
     // [26..32] = 0 marks fully resident; u16 0xFFFF sentinel @32.
     let mut info = vec![0u8; 34];
-    for (i, v) in [
-        width as u16,
-        height as u16,
-        1,
-        mips as u16,
-        0,
-        1,
-        1,
-    ]
-    .iter()
-    .enumerate()
+    for (i, v) in [width as u16, height as u16, 1, mips as u16, 0, 1, 1]
+        .iter()
+        .enumerate()
     {
         info[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
     }
@@ -738,7 +738,12 @@ pub fn texture_body(container: &[u8]) -> Option<Vec<u8>> {
 /// contiguous mip-chain segment (a lone finer mip, or the resident tail); the geometric 4× mip ratio
 /// guarantees that ordering them by size DESCENDING and concatenating reproduces the full linear
 /// chain mip0..mipN. Duplicate-sized segments are de-duped (the resident block may be scanned twice).
-pub fn assemble_hires(width: u32, height: u32, format: TexFormat, mut bodies: Vec<Vec<u8>>) -> TextureData {
+pub fn assemble_hires(
+    width: u32,
+    height: u32,
+    format: TexFormat,
+    mut bodies: Vec<Vec<u8>>,
+) -> TextureData {
     bodies.sort_by(|a, b| b.len().cmp(&a.len()));
     let mut seen = std::collections::HashSet::new();
     let mut all_mips = Vec::new();
@@ -752,7 +757,12 @@ pub fn assemble_hires(width: u32, height: u32, format: TexFormat, mut bodies: Ve
     let hb = (height as usize).div_ceil(block_px).max(1);
     let mip0_len = (wb * hb * texel_pitch).min(all_mips.len());
     let mip0 = all_mips[..mip0_len].to_vec();
-    let full_chain = linear_mip_chain_size(width as usize, height as usize, format.fourcc(), dxt_mip_count(width as usize, height as usize));
+    let full_chain = linear_mip_chain_size(
+        width as usize,
+        height as usize,
+        format.fourcc(),
+        dxt_mip_count(width as usize, height as usize),
+    );
     let mip_count = if all_mips.len() >= full_chain {
         dxt_mip_count(width as usize, height as usize) as u32
     } else {
@@ -763,11 +773,22 @@ pub fn assemble_hires(width: u32, height: u32, format: TexFormat, mut bodies: Ve
             let wl = (width as usize >> l).div_ceil(block_px).max(1);
             let hl = (height as usize >> l).div_ceil(block_px).max(1);
             acc += wl * hl * texel_pitch;
-            if acc <= all_mips.len() { n += 1; } else { break; }
+            if acc <= all_mips.len() {
+                n += 1;
+            } else {
+                break;
+            }
         }
         n.max(1)
     };
-    TextureData { width, height, format, mip0, all_mips, mip_count }
+    TextureData {
+        width,
+        height,
+        format,
+        mip0,
+        all_mips,
+        mip_count,
+    }
 }
 
 /// Read a texture container's `NAME` leaf (for diagnostics / naming), if present.

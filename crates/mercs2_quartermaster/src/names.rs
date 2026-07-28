@@ -74,12 +74,13 @@ impl NameTable {
                 path: path.to_path_buf(),
                 message: e.to_string(),
             })?;
-        let map = doc.get("pandemic_hash_m2").and_then(|v| v.as_object()).ok_or_else(|| {
-            NameTableError::Parse {
+        let map = doc
+            .get("pandemic_hash_m2")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| NameTableError::Parse {
                 path: path.to_path_buf(),
                 message: "missing a `pandemic_hash_m2` object".into(),
-            }
-        })?;
+            })?;
         let mut by_hash = HashMap::with_capacity(map.len());
         for (key, value) in map {
             let hex = key.trim().trim_start_matches("0x").trim_start_matches("0X");
@@ -178,7 +179,9 @@ pub fn bare_hash_suggestions(manifest: &Manifest, names: &NameTable) -> Vec<Bare
                 continue;
             }
             let hex = t.0.trim().trim_start_matches("0x").trim_start_matches("0X");
-            let Ok(hash) = u32::from_str_radix(hex, 16) else { continue };
+            let Ok(hash) = u32::from_str_radix(hex, 16) else {
+                continue;
+            };
             // A native hook's `touches` are code addresses, not asset hashes — reversing one
             // through the ASSET name table would be nonsense. Only suggest for `raw`.
             if matches!(c, Contribution::NativeHook { .. }) {

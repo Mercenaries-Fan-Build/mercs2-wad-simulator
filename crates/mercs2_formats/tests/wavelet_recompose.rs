@@ -191,13 +191,22 @@ fn stage2_recompose_matches_live_pose() {
     let mut p4 = vec![0.0f32; mask_blk.len() / 4];
 
     let (dyn_used, static_used, sentinel_hits) = st_recompose_w(
-        blocks, static_n, mask, &static_src, &dyn_src, &mut pose, &mut p4,
+        blocks,
+        static_n,
+        mask,
+        &static_src,
+        &dyn_src,
+        &mut pose,
+        &mut p4,
     );
     eprintln!(
         "consumed: {} dynamic coeffs (of 246), {} static floats; W-sentinel taken {} times",
         dyn_used, static_used, sentinel_hits
     );
-    assert_eq!(dyn_used, 246, "must consume exactly the 246 interpolated coeffs");
+    assert_eq!(
+        dyn_used, 246,
+        "must consume exactly the 246 interpolated coeffs"
+    );
 
     // Compare valid region: 60 bones * 48 bytes = 2880 bytes = 720 floats.
     // Lanes left NaN were never written by StRecomposeW (prior-pass lanes) — they
@@ -228,9 +237,15 @@ fn stage2_recompose_matches_live_pose() {
     );
     eprintln!(
         "untouched lane comps (i%12): {:?}",
-        untouched.iter().map(|i| i % 12).collect::<std::collections::BTreeSet<_>>()
+        untouched
+            .iter()
+            .map(|i| i % 12)
+            .collect::<std::collections::BTreeSet<_>>()
     );
-    eprintln!("first {} mismatches (idx: got vs exp):", mismatches.len().min(20));
+    eprintln!(
+        "first {} mismatches (idx: got vs exp):",
+        mismatches.len().min(20)
+    );
     for (i, g, e) in mismatches.iter().take(20) {
         eprintln!(
             "  float[{}] bone={} comp={}: got={} exp={}",

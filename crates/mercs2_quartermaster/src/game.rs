@@ -46,11 +46,19 @@ impl Platform {
 
 #[derive(Debug)]
 pub enum GameStackError {
-    Open { path: PathBuf, message: String },
-    Parse { path: PathBuf, message: String },
+    Open {
+        path: PathBuf,
+        message: String,
+    },
+    Parse {
+        path: PathBuf,
+        message: String,
+    },
     /// A stack mixing a PC bake with a console bake. Resolution walks the whole stack, so a mixed
     /// one would silently read structures of the wrong endianness.
-    MixedPlatforms { paths: Vec<PathBuf> },
+    MixedPlatforms {
+        paths: Vec<PathBuf>,
+    },
     Empty,
 }
 
@@ -61,11 +69,14 @@ impl std::fmt::Display for GameStackError {
                 write!(f, "opening {}: {message}", path.display())
             }
             GameStackError::Parse { path, message } => {
-                write!(f, "parsing {} as an FFCS archive: {message}", path.display())
+                write!(
+                    f,
+                    "parsing {} as an FFCS archive: {message}",
+                    path.display()
+                )
             }
             GameStackError::MixedPlatforms { paths } => {
-                let list: Vec<String> =
-                    paths.iter().map(|p| p.display().to_string()).collect();
+                let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
                 write!(
                     f,
                     "the stack mixes PC and console bakes ({}) — resolution walks the whole stack, \
@@ -100,7 +111,9 @@ pub const ENV_VARS: [&str; 3] = [VZ_WAD_ENV, "MERCS2_GAME_DIR", "VZ_WAD"];
 
 /// True when any [`ENV_VARS`] override is active, i.e. when the lower-priority sources are unreachable.
 pub fn env_override_active() -> bool {
-    ENV_VARS.iter().any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
+    ENV_VARS
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
 }
 
 /// Machine-local, git-ignored config naming the install. Written by `scripts/find-vz-wad.sh`.
@@ -137,13 +150,18 @@ pub struct Discovered {
 pub fn discover_from(start: &Path) -> Option<Discovered> {
     // See [`ENV_VARS`]: the three names had forked, and quartermaster saw neither of the other two.
     for var in ENV_VARS {
-        let Some(p) = std::env::var_os(var).filter(|s| !s.is_empty()) else { continue };
+        let Some(p) = std::env::var_os(var).filter(|s| !s.is_empty()) else {
+            continue;
+        };
         // A folder is accepted as well as a file: the install root or its `data` folder. Requiring the
         // full `…/data/vz.wad` is the papercut, and a folder is the form users actually have.
         // The dir-or-file rule is `game_paths`' to own — what "a path to the game" means should have
         // exactly one definition, and this was a verbatim copy of it.
         if let Some(path) = mercs2_formats::game_paths::wad_under(&PathBuf::from(p), "vz.wad") {
-            return Some(Discovered { path, origin: Origin::Env });
+            return Some(Discovered {
+                path,
+                origin: Origin::Env,
+            });
         }
     }
     let mut dir = Some(start);
@@ -152,7 +170,10 @@ pub fn discover_from(start: &Path) -> Option<Discovered> {
         if candidate.is_file() {
             if let Some(path) = read_local_config(&candidate) {
                 if path.is_file() {
-                    return Some(Discovered { path, origin: Origin::LocalConfig });
+                    return Some(Discovered {
+                        path,
+                        origin: Origin::LocalConfig,
+                    });
                 }
             }
         }
@@ -163,13 +184,18 @@ pub fn discover_from(start: &Path) -> Option<Discovered> {
             if exe_dir.join("Mercenaries2.exe").is_file() {
                 let candidate = exe_dir.join("data").join("vz.wad");
                 if candidate.is_file() {
-                    return Some(Discovered { path: candidate, origin: Origin::CoLocated });
+                    return Some(Discovered {
+                        path: candidate,
+                        origin: Origin::CoLocated,
+                    });
                 }
             }
         }
     }
-    mercs2_engine_registry_vz_wad()
-        .map(|path| Discovered { path, origin: Origin::Registry })
+    mercs2_engine_registry_vz_wad().map(|path| Discovered {
+        path,
+        origin: Origin::Registry,
+    })
 }
 
 /// Discover starting from the current directory.
@@ -237,7 +263,9 @@ pub struct GameStack {
 
 impl std::fmt::Debug for GameStack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GameStack").field("wads", &self.paths()).finish()
+        f.debug_struct("GameStack")
+            .field("wads", &self.paths())
+            .finish()
     }
 }
 
@@ -256,18 +284,27 @@ impl GameStack {
             })?;
             let size = file
                 .metadata()
-                .map_err(|e| GameStackError::Open { path: path.clone(), message: e.to_string() })?
+                .map_err(|e| GameStackError::Open {
+                    path: path.clone(),
+                    message: e.to_string(),
+                })?
                 .len();
             let archive =
                 load_ffcs_archive(&mut file, size).map_err(|e| GameStackError::Parse {
                     path: path.clone(),
                     message: e.to_string(),
                 })?;
-            wads.push(OpenWad { path: path.clone(), file, archive });
+            wads.push(OpenWad {
+                path: path.clone(),
+                file,
+                archive,
+            });
         }
         // A console bake is fine on its own; MIXING is not, because resolution walks the stack.
-        let platforms: std::collections::BTreeSet<Platform> =
-            wads.iter().map(|w| Platform::of(w.archive.endian)).collect();
+        let platforms: std::collections::BTreeSet<Platform> = wads
+            .iter()
+            .map(|w| Platform::of(w.archive.endian))
+            .collect();
         if platforms.len() > 1 {
             return Err(GameStackError::MixedPlatforms {
                 paths: wads.iter().map(|w| w.path.clone()).collect(),
@@ -312,9 +349,12 @@ impl GameStack {
     /// Whether any WAD in the stack carries an ASET row for `(hash, type_id)`. Cheap existence
     /// check that does not decompress a block.
     pub fn has_asset(&self, name_hash: u32, type_id: u32) -> bool {
-        self.wads
-            .iter()
-            .any(|w| w.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == type_id))
+        self.wads.iter().any(|w| {
+            w.archive
+                .aset
+                .iter()
+                .any(|e| e.asset_hash == name_hash && e.type_id == type_id)
+        })
     }
 
     /// The raw `(packed_block_ref, secondary_ref)` of an asset's PRIMARY row, last-mounted-wins.
@@ -331,7 +371,11 @@ impl GameStack {
     pub fn block_by_path(&mut self, needle: &str) -> Option<Vec<u8>> {
         let needle = needle.to_lowercase();
         for wad in self.wads.iter_mut().rev() {
-            let Some(idx) = wad.archive.paths.iter().position(|p| p.to_lowercase().contains(&needle))
+            let Some(idx) = wad
+                .archive
+                .paths
+                .iter()
+                .position(|p| p.to_lowercase().contains(&needle))
             else {
                 continue;
             };
@@ -397,8 +441,11 @@ mod tests {
         let dir = scratch("cfg");
         let wad = dir.join("vz.wad");
         std::fs::write(&wad, b"x").unwrap();
-        std::fs::write(dir.join(LOCAL_CONFIG), format!("vz_wad = \"{}\"\n", wad.display()))
-            .unwrap();
+        std::fs::write(
+            dir.join(LOCAL_CONFIG),
+            format!("vz_wad = \"{}\"\n", wad.display()),
+        )
+        .unwrap();
         assert_eq!(read_local_config(&dir.join(LOCAL_CONFIG)), Some(wad));
 
         // `~/` is expanded so the file can be written by hand.
@@ -414,8 +461,11 @@ mod tests {
         let dir = scratch("walkup");
         let wad = dir.join("vz.wad");
         std::fs::write(&wad, b"x").unwrap();
-        std::fs::write(dir.join(LOCAL_CONFIG), format!("vz_wad = \"{}\"\n", wad.display()))
-            .unwrap();
+        std::fs::write(
+            dir.join(LOCAL_CONFIG),
+            format!("vz_wad = \"{}\"\n", wad.display()),
+        )
+        .unwrap();
         let deep = dir.join("a/b/c");
         std::fs::create_dir_all(&deep).unwrap();
 
@@ -431,7 +481,10 @@ mod tests {
     fn a_config_pointing_at_a_missing_file_is_ignored_rather_than_trusted() {
         let dir = scratch("missing");
         std::fs::write(dir.join(LOCAL_CONFIG), "vz_wad = \"/nope/vz.wad\"\n").unwrap();
-        assert_eq!(read_local_config(&dir.join(LOCAL_CONFIG)), Some(PathBuf::from("/nope/vz.wad")));
+        assert_eq!(
+            read_local_config(&dir.join(LOCAL_CONFIG)),
+            Some(PathBuf::from("/nope/vz.wad"))
+        );
         if !env_override_active() {
             // discover_from must not return a path that does not exist.
             assert!(discover_from(&dir).is_none_or(|d| d.path.is_file()));
@@ -444,7 +497,11 @@ mod tests {
     #[test]
     fn a_console_bake_opens_and_reports_its_platform() {
         let Some(found) = discover() else { return };
-        let dir = found.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let dir = found
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         for name in ["xbox-vz.wad", "ps3-VZ.WAD"] {
             let candidate = dir.join(name);
             if !candidate.is_file() {
@@ -461,7 +518,11 @@ mod tests {
     #[test]
     fn a_mixed_platform_stack_is_rejected() {
         let Some(found) = discover() else { return };
-        let dir = found.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let dir = found
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         let console = dir.join("xbox-vz.wad");
         if !console.is_file() {
             return;

@@ -21,7 +21,11 @@ pub fn crc32_mercs2(data: &[u8]) -> u32 {
     for (i, e) in table.iter_mut().enumerate() {
         let mut c = i as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
         *e = c;
     }
@@ -218,9 +222,11 @@ pub fn box_down(w: usize, h: usize, ch: usize, px: &[f32]) -> (usize, usize, Vec
         for x in 0..nw {
             for k in 0..ch {
                 let s = |xx: usize, yy: usize| px[(yy.min(h - 1) * w + xx.min(w - 1)) * ch + k];
-                out[(y * nw + x) * ch + k] =
-                    (s(2 * x, 2 * y) + s(2 * x + 1, 2 * y) + s(2 * x, 2 * y + 1) + s(2 * x + 1, 2 * y + 1))
-                        * 0.25;
+                out[(y * nw + x) * ch + k] = (s(2 * x, 2 * y)
+                    + s(2 * x + 1, 2 * y)
+                    + s(2 * x, 2 * y + 1)
+                    + s(2 * x + 1, 2 * y + 1))
+                    * 0.25;
             }
         }
     }
@@ -274,15 +280,21 @@ pub fn ucfx_texture(name: &str, w: usize, h: usize, fourcc: &[u8; 4], body: &[u8
     }
     let mips = mip_count(w, h).max(1);
     let mut info = vec![0u8; 34];
-    for (i, v) in [w as u16, h as u16, 1, mips as u16, 0, 1, 1].iter().enumerate() {
+    for (i, v) in [w as u16, h as u16, 1, mips as u16, 0, 1, 1]
+        .iter()
+        .enumerate()
+    {
         info[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
     }
     info[14..18].copy_from_slice(fourcc);
     info[22..26].copy_from_slice(&(body.len() as u32).to_le_bytes());
     info[32..34].copy_from_slice(&0xFFFFu16.to_le_bytes());
 
-    let rows: [(&[u8; 4], &[u8], u32); 3] =
-        [(b"NAME", &name_b[..], 2), (b"INFO", &info[..], 1), (b"BODY", body, 0)];
+    let rows: [(&[u8; 4], &[u8], u32); 3] = [
+        (b"NAME", &name_b[..], 2),
+        (b"INFO", &info[..], 1),
+        (b"BODY", body, 0),
+    ];
     let data_off = 20u32 + 3 * 20;
     let mut blob: Vec<u8> = Vec::new();
     let mut placed: Vec<(&[u8; 4], u32, u32, u32)> = Vec::new();
@@ -346,6 +358,9 @@ mod tests {
         let out = bc1_block(&blk);
         let c0 = u16::from_le_bytes([out[0], out[1]]);
         let c1 = u16::from_le_bytes([out[2], out[3]]);
-        assert!(c0 > c1, "flat block fell into 1-bit-alpha mode: c0={c0} c1={c1}");
+        assert!(
+            c0 > c1,
+            "flat block fell into 1-bit-alpha mode: c0={c0} c1={c1}"
+        );
     }
 }

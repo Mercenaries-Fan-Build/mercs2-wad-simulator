@@ -169,10 +169,7 @@ mod tests {
             type_hash_for_type_id(TYPE_ID_TEXTURE),
             Some(TYPE_HASH_TEXTURE)
         );
-        assert_eq!(
-            type_id_for_type_hash(TYPE_HASH_MODEL),
-            Some(TYPE_ID_MODEL)
-        );
+        assert_eq!(type_id_for_type_hash(TYPE_HASH_MODEL), Some(TYPE_ID_MODEL));
         assert_eq!(
             type_id_for_type_hash(TYPE_HASH_TEXTURE),
             Some(TYPE_ID_TEXTURE)

@@ -228,12 +228,19 @@ impl Contribution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidateError {
     /// The manifest declares a schema version this build does not know.
-    FutureFormat { found: u32, known: u32 },
+    FutureFormat {
+        found: u32,
+        known: u32,
+    },
     /// `target: both` — reserved, rejected in v1.
     TargetBothReserved,
     EmptyName,
-    NameTooLong { len: usize },
-    NameNotSlug { name: String },
+    NameTooLong {
+        len: usize,
+    },
+    NameNotSlug {
+        name: String,
+    },
 }
 
 impl std::fmt::Display for ValidateError {
@@ -270,7 +277,8 @@ fn is_slug(s: &str) -> bool {
     if s.is_empty() || s.starts_with('-') || s.ends_with('-') || s.contains("--") {
         return false;
     }
-    s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    s.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 impl Manifest {

@@ -64,9 +64,9 @@ impl AsetEntry {
     pub fn lod_chain(&self) -> Vec<u16> {
         let mut out = vec![(self.packed_block_ref >> 16) as u16];
         for half in [
-            (self.packed_block_ref & 0xFFFF) as u16,          // _P001
-            (self.secondary_ref >> 16) as u16,                // _P002
-            (self.secondary_ref & 0xFFFF) as u16,             // _P003
+            (self.packed_block_ref & 0xFFFF) as u16, // _P001
+            (self.secondary_ref >> 16) as u16,       // _P002
+            (self.secondary_ref & 0xFFFF) as u16,    // _P003
         ] {
             if half != 0xFFFF {
                 out.push(half);
@@ -103,7 +103,12 @@ pub fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 }
 
 pub fn read_u32_be(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 pub fn read_u16_le(data: &[u8], offset: usize) -> u16 {
@@ -145,7 +150,9 @@ impl Endian {
     }
 }
 
-pub fn parse_ffcs_header(header: &[u8; FFCS_HEADER_SIZE]) -> Result<(Vec<ChunkRow>, Endian), String> {
+pub fn parse_ffcs_header(
+    header: &[u8; FFCS_HEADER_SIZE],
+) -> Result<(Vec<ChunkRow>, Endian), String> {
     let endian = match &header[0..4] {
         b"FFCS" => Endian::Little,
         b"SCFF" => Endian::Big, // console bake: the magic itself is byte-swapped
@@ -179,7 +186,11 @@ pub fn find_chunk<'a>(rows: &'a [ChunkRow], tag: &[u8; 4]) -> Option<&'a ChunkRo
     rows.iter().find(|r| &r.tag == tag)
 }
 
-pub fn parse_indx_entries(file: &mut File, row: &ChunkRow, e: Endian) -> io::Result<Vec<IndxEntry>> {
+pub fn parse_indx_entries(
+    file: &mut File,
+    row: &ChunkRow,
+    e: Endian,
+) -> io::Result<Vec<IndxEntry>> {
     let count = row.meta as usize;
     file.seek(SeekFrom::Start(row.offset as u64))?;
     let mut buf = vec![0u8; count * 12];
@@ -196,7 +207,11 @@ pub fn parse_indx_entries(file: &mut File, row: &ChunkRow, e: Endian) -> io::Res
     Ok(entries)
 }
 
-pub fn parse_aset_entries(file: &mut File, row: &ChunkRow, e: Endian) -> io::Result<Vec<AsetEntry>> {
+pub fn parse_aset_entries(
+    file: &mut File,
+    row: &ChunkRow,
+    e: Endian,
+) -> io::Result<Vec<AsetEntry>> {
     let count = row.meta as usize;
     file.seek(SeekFrom::Start(row.offset as u64))?;
     let mut buf = vec![0u8; count * 16];
@@ -267,7 +282,10 @@ pub fn parse_pths(file: &mut File, row: &ChunkRow, file_size: u64) -> io::Result
     Ok(paths)
 }
 
-pub fn load_ffcs_archive(file: &mut File, file_size: u64) -> Result<FfcsArchive, Box<dyn std::error::Error>> {
+pub fn load_ffcs_archive(
+    file: &mut File,
+    file_size: u64,
+) -> Result<FfcsArchive, Box<dyn std::error::Error>> {
     let mut header = [0u8; FFCS_HEADER_SIZE];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header)?;
@@ -455,8 +473,16 @@ mod tests {
     #[test]
     fn find_chunk_found() {
         let rows = vec![
-            ChunkRow { tag: *b"INDX", offset: 0x100, meta: 10 },
-            ChunkRow { tag: *b"DATA", offset: 0x200, meta: 20 },
+            ChunkRow {
+                tag: *b"INDX",
+                offset: 0x100,
+                meta: 10,
+            },
+            ChunkRow {
+                tag: *b"DATA",
+                offset: 0x200,
+                meta: 20,
+            },
         ];
         let found = find_chunk(&rows, b"DATA");
         assert!(found.is_some());
@@ -465,9 +491,11 @@ mod tests {
 
     #[test]
     fn find_chunk_not_found() {
-        let rows = vec![
-            ChunkRow { tag: *b"INDX", offset: 0x100, meta: 10 },
-        ];
+        let rows = vec![ChunkRow {
+            tag: *b"INDX",
+            offset: 0x100,
+            meta: 10,
+        }];
         let found = find_chunk(&rows, b"XXXX");
         assert!(found.is_none());
     }

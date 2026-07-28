@@ -32,7 +32,13 @@ pub struct DonorTransferOpts {
 }
 impl Default for DonorTransferOpts {
     fn default() -> Self {
-        DonorTransferOpts { k: 8, smooth: 2, lambda: 0.5, reach: 1.15, axial: 3.0 }
+        DonorTransferOpts {
+            k: 8,
+            smooth: 2,
+            lambda: 0.5,
+            reach: 1.15,
+            axial: 3.0,
+        }
     }
 }
 
@@ -63,8 +69,11 @@ pub fn apply_donor_transfer(
         if m.joints.is_empty() || m.weights.is_empty() {
             continue;
         }
-        let mpos: Vec<[f64; 3]> =
-            m.positions.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+        let mpos: Vec<[f64; 3]> = m
+            .positions
+            .iter()
+            .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+            .collect();
         let mut dn = vertex_normals(&mpos, &m.tris);
         if !m.normals.is_empty() {
             let agree: f64 = (0..dn.len().min(m.normals.len()))
@@ -127,7 +136,14 @@ pub fn apply_donor_transfer(
         },
     );
     if opts.reach > 0.0 {
-        clamp_to_donor_reach(&mut t.per_vertex, &cs.posed, &donor, &bone_pos, 0.99, opts.reach);
+        clamp_to_donor_reach(
+            &mut t.per_vertex,
+            &cs.posed,
+            &donor,
+            &bone_pos,
+            0.99,
+            opts.reach,
+        );
     }
     if opts.smooth > 0 {
         let adj = adjacency(cs.posed.len(), tris);
@@ -148,9 +164,13 @@ pub fn apply_donor_transfer(
     {
         let hier_of = |npc: u32| -> Option<u32> {
             let hash = super::npc84_name_hash(npc)?;
-            skel.bones.iter().find(|b| b.name_hash == hash).map(|b| b.index as u32)
+            skel.bones
+                .iter()
+                .find(|b| b.name_hash == hash)
+                .map(|b| b.index as u32)
         };
-        let mut finger_to_hand: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut finger_to_hand: std::collections::HashMap<u32, u32> =
+            std::collections::HashMap::new();
         for (hand_npc, lo, hi) in [(46u32, 48u32, 62u32), (67, 69, 83)] {
             if let Some(hand) = hier_of(hand_npc) {
                 for npc in lo..=hi {
@@ -167,7 +187,8 @@ pub fn apply_donor_transfer(
             }
             let mut acc: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
             for (b, w) in infl.iter() {
-                *acc.entry(finger_to_hand.get(b).copied().unwrap_or(*b)).or_insert(0.0) += *w;
+                *acc.entry(finger_to_hand.get(b).copied().unwrap_or(*b))
+                    .or_insert(0.0) += *w;
             }
             let mut v: Vec<(u32, f64)> = acc.into_iter().collect();
             v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -175,7 +196,9 @@ pub fn apply_donor_transfer(
             folded += 1;
         }
         if folded > 0 {
-            eprintln!("  rigid hand: folded finger influences onto the hand bone for {folded} vertices");
+            eprintln!(
+                "  rigid hand: folded finger influences onto the hand bone for {folded} vertices"
+            );
         }
     }
 
@@ -190,8 +213,10 @@ pub fn apply_donor_transfer(
     let mut multi = 0usize;
     for (vi, infl) in t.per_vertex.iter().enumerate() {
         // Quantise to 255 with the residual on the largest fractional part (build.rs policy).
-        let scaled: Vec<(u8, f64)> =
-            infl.iter().filter_map(|(b, w)| slot_of.get(b).map(|&s| (s, 255.0 * w))).collect();
+        let scaled: Vec<(u8, f64)> = infl
+            .iter()
+            .filter_map(|(b, w)| slot_of.get(b).map(|&s| (s, 255.0 * w)))
+            .collect();
         let mut q: Vec<(u8, i64)> = scaled.iter().map(|&(s, x)| (s, x.floor() as i64)).collect();
         let rem = 255 - q.iter().map(|p| p.1).sum::<i64>();
         let mut order: Vec<usize> = (0..scaled.len()).collect();
@@ -217,7 +242,10 @@ pub fn apply_donor_transfer(
     }
 
     cs.skin_bytes = skin;
-    cs.ranges = ranges32.iter().map(|&(b, c)| (b as u16, c as u16)).collect();
+    cs.ranges = ranges32
+        .iter()
+        .map(|&(b, c)| (b as u16, c as u16))
+        .collect();
     cs.palette_slots = slots;
     Ok(format!(
         "donor transfer: {} donor samples, {} bones / {slots} slots, {:.1}% multi-influence",

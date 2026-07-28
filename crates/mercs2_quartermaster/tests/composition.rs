@@ -117,7 +117,11 @@ contributions:
     let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
     assert_eq!(found.len(), 1, "got {found:?}");
     assert_eq!(found[0].class, MergeClass::Exclusive);
-    assert!(found[0].to_string().contains("no load order resolves"), "{}", found[0]);
+    assert!(
+        found[0].to_string().contains("no load order resolves"),
+        "{}",
+        found[0]
+    );
 }
 
 /// Raw is the open lower bound: we cannot infer anything about the bytes, so the declared blast
@@ -182,7 +186,9 @@ contributions:
     let (a, b) = (mk("mod-a", "0x1000"), mk("mod-b", "0x2000"));
     let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
     assert!(
-        found.iter().any(|c| matches!(&c.claim, Claim::FileArtifact { name } if name == "bridge.asi")),
+        found
+            .iter()
+            .any(|c| matches!(&c.claim, Claim::FileArtifact { name } if name == "bridge.asi")),
         "same .asi filename must collide, got {found:?}"
     );
 }
@@ -219,7 +225,10 @@ fn two_texture_replacements_are_load_order_not_conflict() {
     let a = replace_texture("reskin-a", "al_hum_boss_ub");
     let b = replace_texture("reskin-b", "al_hum_boss_ub");
     let found = blast::conflicts(&[("reskin-a", &a), ("reskin-b", &b)]);
-    assert!(found.is_empty(), "texture replacement is LastWins, got {found:?}");
+    assert!(
+        found.is_empty(),
+        "texture replacement is LastWins, got {found:?}"
+    );
 
     let m = blast::claims(&a);
     assert_eq!(m[0].class, MergeClass::LastWins);
@@ -319,7 +328,10 @@ contributions:
 ",
     );
     let unsat = blast::unsatisfied_reads(&[("consumer", &a), ("provider", &b)]);
-    assert!(unsat.is_empty(), "provider satisfies the read, got {unsat:?}");
+    assert!(
+        unsat.is_empty(),
+        "provider satisfies the read, got {unsat:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +357,11 @@ contributions:
     let selfs = blast::self_conflicts(&m);
     assert_eq!(selfs.len(), 1, "got {selfs:?}");
     assert_eq!(selfs[0].indices, vec![0, 1]);
-    assert!(selfs[0].to_string().contains("al_hum_boss_ub"), "{}", selfs[0]);
+    assert!(
+        selfs[0].to_string().contains("al_hum_boss_ub"),
+        "{}",
+        selfs[0]
+    );
 }
 
 /// Two outfits in ONE Shipment is normal and must not trip the self-conflict check — they share the
@@ -372,7 +388,9 @@ contributions:
     );
     let selfs = blast::self_conflicts(&m);
     assert!(
-        selfs.iter().all(|c| !matches!(&c.claim, Claim::Script { .. })),
+        selfs
+            .iter()
+            .all(|c| !matches!(&c.claim, Claim::Script { .. })),
         "a shared mergeable script claim is not a self-conflict: {selfs:?}"
     );
     assert!(selfs.is_empty(), "got {selfs:?}");
@@ -403,5 +421,9 @@ contributions:
 ",
     );
     let found = blast::conflicts(&[("a", &by_name), ("b", &by_hash)]);
-    assert_eq!(found.len(), 1, "writing the hash must not evade detection: {found:?}");
+    assert_eq!(
+        found.len(),
+        1,
+        "writing the hash must not evade detection: {found:?}"
+    );
 }

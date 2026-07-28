@@ -55,12 +55,7 @@ pub fn watr_payload_size_for_grid(grid_w: u32, grid_h: u32, layer_count: u32) ->
     if layer_count != WATR_LAYER_COUNT {
         return None;
     }
-    Some(
-        WATR_HEADER_BYTES
-            + grid * 4
-            + grid * 3
-            + WATR_FOOTER_BYTES,
-    )
+    Some(WATR_HEADER_BYTES + grid * 4 + grid * 3 + WATR_FOOTER_BYTES)
 }
 
 /// Validate `watr` header and total payload size (retail 257×257 → 495_669 B).
@@ -91,8 +86,8 @@ pub fn validate_watr_payload(payload: &[u8]) -> Option<String> {
         return Some(format!("watr cell_size_m {cell_size} != 32.0"));
     }
 
-    let expected = watr_payload_size_for_grid(grid_w, grid_h, layer_count)
-        .unwrap_or(WATR_EXPECTED_SIZE);
+    let expected =
+        watr_payload_size_for_grid(grid_w, grid_h, layer_count).unwrap_or(WATR_EXPECTED_SIZE);
     if payload.len() != expected {
         return Some(format!(
             "watr payload size {} != formula {}",
@@ -158,7 +153,9 @@ pub fn validate_skin_containers(container: &[u8]) -> Vec<String> {
         let row_u0 = read_u32_le(container, row_off + 4);
         let n_child = read_u32_le(container, row_off + 16) as usize;
         if row_u0 != CONTAINER_SENTINEL {
-            issues.push(format!("SKIN[{di}]: row_u0 0x{row_u0:08X} != container sentinel"));
+            issues.push(format!(
+                "SKIN[{di}]: row_u0 0x{row_u0:08X} != container sentinel"
+            ));
             continue;
         }
         if n_child < 1 {
@@ -232,7 +229,7 @@ mod tests {
     fn validate_deps_body_truncated() {
         let mut body = vec![2u8]; // count = 2
         body.extend_from_slice(&[0, 0, 0, 0]); // hash 1
-        // Missing hash 2 — should error
+                                               // Missing hash 2 — should error
         assert!(validate_deps_body(&body).is_some());
     }
 

@@ -701,14 +701,22 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
     // map to `scale_idx` (QFMT+12 → multiplier) and `offset_idx` (QFMT+8 → offset).
     // Verified live: with this ordering the 3.3366 s oracle clip decodes 64/64
     // rotation tracks (swapping them gives 19/64).
-    let mult: Vec<f32> = (0..num_d).map(|i| f32_le(blob, db + scale_idx + i * 4)).collect();
-    let addend: Vec<f32> = (0..num_d).map(|i| f32_le(blob, db + offset_idx + i * 4)).collect();
-    let bw: Vec<u32> = (0..num_d).map(|i| *blob.get(db + bw_idx + i).unwrap_or(&0) as u32).collect();
+    let mult: Vec<f32> = (0..num_d)
+        .map(|i| f32_le(blob, db + scale_idx + i * 4))
+        .collect();
+    let addend: Vec<f32> = (0..num_d)
+        .map(|i| f32_le(blob, db + offset_idx + i * 4))
+        .collect();
+    let bw: Vec<u32> = (0..num_d)
+        .map(|i| *blob.get(db + bw_idx + i).unwrap_or(&0) as u32)
+        .collect();
 
     // Block index (byte offset of each block's quant data).
     let n_blocks = (n_poses + block_size - 1) / block_size;
     let block_off: Vec<usize> = if bi_size >= n_blocks {
-        (0..n_blocks).map(|i| u32_le(blob, db + bi_idx + i * 4) as usize).collect()
+        (0..n_blocks)
+            .map(|i| u32_le(blob, db + bi_idx + i * 4) as usize)
+            .collect()
     } else {
         vec![0; n_blocks]
     };
@@ -761,7 +769,12 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
                     per_dof_frames[d].push(addend[d]);
                 }
                 let bw1 = bwd.max(1);
-                p += wv_entropy_advance(block_size, bw1, preserved, wv_entropy_n(block_size, bw1, preserved));
+                p += wv_entropy_advance(
+                    block_size,
+                    bw1,
+                    preserved,
+                    wv_entropy_n(block_size, bw1, preserved),
+                );
                 continue;
             }
             // Fill (run) value = the quantized code that dequantizes to ≈ -addend
@@ -774,7 +787,11 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
             } else {
                 0
             };
-            let bias = (if bias_unclamped == ival { ival - 1 } else { bias_unclamped }) as u32;
+            let bias = (if bias_unclamped == ival {
+                ival - 1
+            } else {
+                bias_unclamped
+            }) as u32;
 
             let budget = wv_bit_budget(block_size, bwd, preserved);
             let (stream, is_fill) = wv_entropy_unpack(blob, p, bwd, bias, preserved, budget);
@@ -1020,7 +1037,12 @@ mod tests {
         for f in 0..clip.num_frames {
             for tr in 0..clip.num_tracks {
                 let q = clip.frame(f, tr);
-                for c in q.translation.iter().chain(q.rotation.iter()).chain(q.scale.iter()) {
+                for c in q
+                    .translation
+                    .iter()
+                    .chain(q.rotation.iter())
+                    .chain(q.scale.iter())
+                {
                     assert!(c.is_finite(), "f{f}t{tr} non-finite {c}");
                 }
             }
@@ -1061,7 +1083,10 @@ mod tests {
     /// vz.wad); otherwise it no-ops so CI without the retail WAD stays green.
     #[test]
     fn wavelet_gate_oracle_clip_frame_1_496() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/oracle_clip.bin");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/oracle_clip.bin"
+        );
         let Ok(buf) = std::fs::read(path) else {
             eprintln!("skip: {path} not present (dump from vz.wad block 3362)");
             return;
@@ -1071,7 +1096,11 @@ mod tests {
         assert!(clip.decoded);
         assert_eq!(clip.num_frames, 101);
         assert_eq!(clip.num_tracks, 64, "64 mask entries (61 xform + 3 float)");
-        assert!((clip.duration - 3.3366).abs() < 1e-3, "dur = {}", clip.duration);
+        assert!(
+            (clip.duration - 3.3366).abs() < 1e-3,
+            "dur = {}",
+            clip.duration
+        );
 
         // FUN_009f0ee0: time 1.496 s → g on the [0, numPoses-1] frame timeline.
         let time = 1.496f32;
@@ -1080,10 +1109,21 @@ mod tests {
 
         // track 0 — identity.
         let t0 = pose[0];
-        assert!(t0.translation.iter().all(|c| c.abs() < 1e-3), "t0 T {:?}", t0.translation);
-        assert!((t0.rotation[3] - 1.0).abs() < 1e-3 && t0.rotation[..3].iter().all(|c| c.abs() < 1e-3),
-            "t0 R {:?}", t0.rotation);
-        assert!(t0.scale.iter().all(|s| (s - 1.0).abs() < 1e-3), "t0 S {:?}", t0.scale);
+        assert!(
+            t0.translation.iter().all(|c| c.abs() < 1e-3),
+            "t0 T {:?}",
+            t0.translation
+        );
+        assert!(
+            (t0.rotation[3] - 1.0).abs() < 1e-3 && t0.rotation[..3].iter().all(|c| c.abs() < 1e-3),
+            "t0 R {:?}",
+            t0.rotation
+        );
+        assert!(
+            t0.scale.iter().all(|s| (s - 1.0).abs() < 1e-3),
+            "t0 S {:?}",
+            t0.scale
+        );
 
         // Full-buffer check: compare the rotation quaternion of every track to the
         // captured oracle output buffer and report the exact match count. The
@@ -1116,18 +1156,26 @@ mod tests {
         // track of the captured oracle. (The 2.5673 s live capture validates the
         // decoder even more tightly: stage-1 246/246 in wavelet_decompress.rs,
         // stage-2 660/660 in wavelet_recompose.rs.)
-        assert_eq!(ok, clip.num_tracks, "all rotation tracks must match (see stderr)");
+        assert_eq!(
+            ok, clip.num_tracks,
+            "all rotation tracks must match (see stderr)"
+        );
     }
 
     /// The captured `param_4` output buffer (64 × 48-byte hkQsTransform, 3072 B)
     /// from `wavelet_live_oracle.md`, as raw little-endian bytes.
     fn oracle_output_buffer() -> Vec<u8> {
         let md = include_str!("../tests/fixtures/wavelet_live_oracle.md");
-        let start = md.find("Full raw output buffer").expect("oracle buffer header");
+        let start = md
+            .find("Full raw output buffer")
+            .expect("oracle buffer header");
         let after = &md[start..];
         let b = after.find("```").expect("open fence") + 3;
         let e = after[b..].find("```").expect("close fence");
-        let hex: String = after[b..b + e].chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let hex: String = after[b..b + e]
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect();
         (0..hex.len() / 2)
             .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
             .collect()
@@ -1150,10 +1198,18 @@ mod tests {
 
         let mid = clip.sample_local(clip.duration * 0.5);
         // Track 0 rotation slerps to ~45° about Y: y≈sin(22.5°)=0.3827, w≈0.9239.
-        assert!((mid[0].rotation[1] - 0.3827).abs() < 1e-2, "y = {}", mid[0].rotation[1]);
+        assert!(
+            (mid[0].rotation[1] - 0.3827).abs() < 1e-2,
+            "y = {}",
+            mid[0].rotation[1]
+        );
         assert!((qlen(mid[0].rotation) - 1.0).abs() < 1e-3);
         // Track 1 translation lerps halfway.
-        assert!((mid[1].translation[0] - 0.5).abs() < 1e-4, "tx = {}", mid[1].translation[0]);
+        assert!(
+            (mid[1].translation[0] - 0.5).abs() < 1e-4,
+            "tx = {}",
+            mid[1].translation[0]
+        );
         // Midpoint differs from frame 0.
         assert_ne!(mid[0].rotation, f0[0].rotation);
     }

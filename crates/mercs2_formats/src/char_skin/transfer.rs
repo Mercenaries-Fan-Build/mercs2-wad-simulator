@@ -59,7 +59,12 @@ impl Grid {
             (((max[1] - min[1]) / cell).ceil() as i64).max(1),
             (((max[2] - min[2]) / cell).ceil() as i64).max(1),
         ];
-        let mut g = Grid { cell, min, dims, buckets: HashMap::new() };
+        let mut g = Grid {
+            cell,
+            min,
+            dims,
+            buckets: HashMap::new(),
+        };
         for (i, s) in pts.iter().enumerate() {
             let k = g.key(g.cell_of(s.pos));
             g.buckets.entry(k).or_default().push(i);
@@ -88,7 +93,10 @@ impl Grid {
                         if ring > 0 && dx.abs() != ring && dy.abs() != ring && dz.abs() != ring {
                             continue;
                         }
-                        if let Some(b) = self.buckets.get(&self.key([c[0] + dx, c[1] + dy, c[2] + dz])) {
+                        if let Some(b) =
+                            self.buckets
+                                .get(&self.key([c[0] + dx, c[1] + dy, c[2] + dz]))
+                        {
                             out.extend_from_slice(b);
                         }
                     }
@@ -145,9 +153,12 @@ pub fn clamp_to_donor_reach(
             if w < 0.05 {
                 continue;
             }
-            let Some(p) = bone_pos.get(b as usize) else { continue };
-            let d = ((s.pos[0] - p[0]).powi(2) + (s.pos[1] - p[1]).powi(2) + (s.pos[2] - p[2]).powi(2))
-                .sqrt();
+            let Some(p) = bone_pos.get(b as usize) else {
+                continue;
+            };
+            let d =
+                ((s.pos[0] - p[0]).powi(2) + (s.pos[1] - p[1]).powi(2) + (s.pos[2] - p[2]).powi(2))
+                    .sqrt();
             per_bone.entry(b).or_default().push(d);
         }
     }
@@ -175,7 +186,8 @@ pub fn clamp_to_donor_reach(
                 let (Some(r), Some(p)) = (reach.get(&b), bone_pos.get(b as usize)) else {
                     return true; // no evidence either way - leave it
                 };
-                let d = ((t[0] - p[0]).powi(2) + (t[1] - p[1]).powi(2) + (t[2] - p[2]).powi(2)).sqrt();
+                let d =
+                    ((t[0] - p[0]).powi(2) + (t[1] - p[1]).powi(2) + (t[2] - p[2]).powi(2)).sqrt();
                 d <= *r
             })
             .collect();
@@ -250,7 +262,9 @@ pub fn smooth_weights(
             // Deterministic order: weight desc, then bone index, so a tie never depends on HashMap
             // iteration order (which would make a build unreproducible).
             infl.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.0.cmp(&b.0))
             });
             infl.truncate(4);
             let s: f64 = infl.iter().map(|x| x.1).sum();
@@ -336,7 +350,11 @@ pub fn welded_vertex_normals(positions: &[[f64; 3]], tris: &[[u32; 3]]) -> Vec<[
     for i in 0..positions.len() {
         let n = acc[canon[i]];
         let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        out[i] = if l > 1e-12 { [n[0] / l, n[1] / l, n[2] / l] } else { [0.0, 0.0, 1.0] };
+        out[i] = if l > 1e-12 {
+            [n[0] / l, n[1] / l, n[2] / l]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
     }
     out
 }
@@ -403,7 +421,15 @@ pub fn transfer_weights(
     k: usize,
     body_height: f64,
 ) -> Transferred {
-    transfer_weights_pruned(donor, targets, body_height, &TransferOpts { k, ..Default::default() })
+    transfer_weights_pruned(
+        donor,
+        targets,
+        body_height,
+        &TransferOpts {
+            k,
+            ..Default::default()
+        },
+    )
 }
 
 /// Knobs for [`transfer_weights_pruned`]. A struct rather than positional arguments because every
@@ -475,7 +501,7 @@ pub fn transfer_weights_pruned(
     // Unit limb axis at a bone: from its parent toward it. `None` at a root or a zero-length bone,
     // where "along the bone" is undefined and the constraint should not apply.
     let bone_axis = |b: usize| -> Option<[f64; 3]> {
-        let par = *bone_parent.get(b)? ;
+        let par = *bone_parent.get(b)?;
         if par < 0 {
             return None;
         }
@@ -616,5 +642,9 @@ pub fn transfer_weights_pruned(
 
     dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median_dist = dists.get(dists.len() / 2).copied().unwrap_or(0.0);
-    Transferred { per_vertex, far, median_dist }
+    Transferred {
+        per_vertex,
+        far,
+        median_dist,
+    }
 }

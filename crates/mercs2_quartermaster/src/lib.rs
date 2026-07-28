@@ -33,17 +33,17 @@ pub use blast::{
     claims, conflicts, merge_class, self_conflicts, unsatisfied_reads, Access, Claim, ClaimRecord,
     Claimant, Conflict, MergeClass, SelfConflict, UnsatisfiedRead,
 };
+pub use build::{build, sha256_hex, BuildError, BuildReport, Destination, Placement};
 pub use discover::{
-    check_sources, find_manifest, open as open_shipment, source_refs, DiscoverError, LoadedShipment,
-    OpenError, SourceIssue, SourceRef,
+    check_sources, find_manifest, open as open_shipment, source_refs, DiscoverError,
+    LoadedShipment, OpenError, SourceIssue, SourceRef,
 };
+pub use game::{GameStack, GameStackError};
+pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use manifest::{
     Contribution, Layer, Load, Manifest, Requirement, Retarget, Shipment, Target, Textures, Touch,
     ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
 };
-pub use build::{build, sha256_hex, BuildError, BuildReport, Destination, Placement};
-pub use game::{GameStack, GameStackError};
-pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 
 /// Serialization formats a manifest may be written in. Detection is by EXTENSION; more than one

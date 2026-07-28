@@ -389,10 +389,18 @@ fn parse_transit(body: &str) -> (bool, Vec<TransitZone>) {
             continue;
         }
         // `[1.000000]` — parse as f64 first; an integer-only parse misses every real save.
-        let Ok(n) = key.trim().parse::<f64>() else { continue };
+        let Ok(n) = key.trim().parse::<f64>() else {
+            continue;
+        };
         let v = raw.trim();
-        let inner = v.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(v);
-        let mut z = TransitZone { zone: n as u32, ..Default::default() };
+        let inner = v
+            .strip_prefix('{')
+            .and_then(|s| s.strip_suffix('}'))
+            .unwrap_or(v);
+        let mut z = TransitZone {
+            zone: n as u32,
+            ..Default::default()
+        };
         for (fk, fv) in parse_table(inner) {
             let is_true = fv.trim() == "true";
             match fk.as_str() {
@@ -605,7 +613,12 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
     }
 
     let flow_chain = table_body(lua, "tCulledBindings")
-        .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
+        .map(|b| {
+            parse_table(b)
+                .into_iter()
+                .map(|(_, v)| unquote(&v))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut active_missions = Vec::new();
@@ -644,7 +657,12 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .unwrap_or_default();
 
     let layers = table_body(lua, "tLayerData")
-        .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
+        .map(|b| {
+            parse_table(b)
+                .into_iter()
+                .map(|(_, v)| unquote(&v))
+                .collect()
+        })
         .unwrap_or_default();
 
     let time_elapsed_secs = scalar_value(lua, "nTimeElapsed")
@@ -652,7 +670,12 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .unwrap_or(0.0);
 
     let equipped_support = table_body(lua, "vEquippedSupport")
-        .map(|b| parse_table(b).into_iter().map(|(_, v)| unquote(&v)).collect())
+        .map(|b| {
+            parse_table(b)
+                .into_iter()
+                .map(|(_, v)| unquote(&v))
+                .collect()
+        })
         .unwrap_or_default();
 
     // `tStarterData` = { ["PmcBoss"] = {..}, ["MecPmcBoss"] = {..}, … } — its keys are the unlocked
@@ -661,8 +684,9 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .map(|b| parse_table(b).into_iter().map(|(k, _)| k).collect())
         .unwrap_or_default();
 
-    let (transit_enabled, transit_zones) =
-        table_body(lua, "tTransitData").map(parse_transit).unwrap_or((false, Vec::new()));
+    let (transit_enabled, transit_zones) = table_body(lua, "tTransitData")
+        .map(parse_transit)
+        .unwrap_or((false, Vec::new()));
 
     Ok(SaveState {
         flow_chain,
@@ -743,9 +767,15 @@ mod tests {
         // A 0%-completion save: transit not yet unlocked, so every zone is off and unaffiliated.
         // Matches the capture's `SetSystemEnabled( false, nil, nil  @mrxtransit:418`.
         let chris = state_of("Chris Jacobs_6A499ED6.profile");
-        assert!(!chris.transit_enabled, "a pre-PMC-takeover save has transit switched off");
         assert!(
-            chris.transit_zones.iter().all(|z| !z.enabled && z.faction.is_none()),
+            !chris.transit_enabled,
+            "a pre-PMC-takeover save has transit switched off"
+        );
+        assert!(
+            chris
+                .transit_zones
+                .iter()
+                .all(|z| !z.enabled && z.faction.is_none()),
             "no zone is enabled or affiliated before the takeover"
         );
 
@@ -753,7 +783,11 @@ mod tests {
         // per-zone state rather than filling a blanket value.
         let mid = state_of("Mattias Nilsson_63430745.profile");
         assert!(mid.transit_enabled, "a late save has transit switched on");
-        let taken = mid.transit_zones.iter().filter(|z| z.faction.is_some()).count();
+        let taken = mid
+            .transit_zones
+            .iter()
+            .filter(|z| z.faction.is_some())
+            .count();
         assert!(
             (1..AUTHORED_ZONES.len()).contains(&taken),
             "a mid save has SOME zones taken, not none and not all; got {taken}"
@@ -769,13 +803,34 @@ mod tests {
         // Those 22 lines and the 22 affiliated zones parsed out of this file agree completely. A save
         // file we decode and the shipped game reading the same save, cross-checked.
         const CAPTURED: [(u32, &str); 22] = [
-            (1, "Pmc"), (2, "Oil"), (3, "Oil"), (4, "Gur"), (5, "Gur"), (7, "All"), (8, "Pir"),
-            (12, "Chi"), (15, "Oil"), (16, "Oil"), (17, "Gur"), (18, "Gur"), (20, "All"),
-            (21, "All"), (22, "All"), (23, "Chi"), (24, "Chi"), (25, "Chi"), (27, "Pir"),
-            (28, "Pir"), (29, "Oil"), (30, "Chi"),
+            (1, "Pmc"),
+            (2, "Oil"),
+            (3, "Oil"),
+            (4, "Gur"),
+            (5, "Gur"),
+            (7, "All"),
+            (8, "Pir"),
+            (12, "Chi"),
+            (15, "Oil"),
+            (16, "Oil"),
+            (17, "Gur"),
+            (18, "Gur"),
+            (20, "All"),
+            (21, "All"),
+            (22, "All"),
+            (23, "Chi"),
+            (24, "Chi"),
+            (25, "Chi"),
+            (27, "Pir"),
+            (28, "Pir"),
+            (29, "Oil"),
+            (30, "Chi"),
         ];
         let end = state_of("Mattias Nilsson_6A0E523C.profile");
-        assert!(end.transit_enabled, "the end-game save has transit switched on");
+        assert!(
+            end.transit_enabled,
+            "the end-game save has transit switched on"
+        );
         let parsed: Vec<(u32, &str)> = end
             .transit_zones
             .iter()
@@ -787,15 +842,25 @@ mod tests {
             "the parsed affiliations must match what the live capture logged, zone for zone"
         );
         assert!(
-            end.transit_zones.iter().filter(|z| z.faction.is_some()).all(|z| z.enabled),
+            end.transit_zones
+                .iter()
+                .filter(|z| z.faction.is_some())
+                .all(|z| z.enabled),
             "an affiliated zone is an enabled zone"
         );
 
         // Zone 6 is the `bFake` pad (`mrxtransit.lua` Reset): present in every table, never affiliated
         // in any of them — which is why the capture logs 22 zones where the world data authors 23.
         for (name, s) in [("mid", &mid), ("end", &end)] {
-            let fake = s.transit_zones.iter().find(|z| z.zone == 6).expect("zone 6 present");
-            assert_eq!(fake.faction, None, "{name}: the zone-6 fake pad is never affiliated");
+            let fake = s
+                .transit_zones
+                .iter()
+                .find(|z| z.zone == 6)
+                .expect("zone 6 present");
+            assert_eq!(
+                fake.faction, None,
+                "{name}: the zone-6 fake pad is never affiliated"
+            );
         }
     }
 
@@ -806,7 +871,11 @@ mod tests {
     fn the_fixture_set_is_complete_and_fully_covered() {
         let dir = save_dir();
         for name in ALL_SAVES {
-            assert!(dir.join(name).is_file(), "fixture {name} is missing from {}", dir.display());
+            assert!(
+                dir.join(name).is_file(),
+                "fixture {name} is missing from {}",
+                dir.display()
+            );
         }
         let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
             .expect("fixtures dir readable")
@@ -817,7 +886,10 @@ mod tests {
         on_disk.sort();
         let mut listed: Vec<String> = ALL_SAVES.iter().map(|s| s.to_string()).collect();
         listed.sort();
-        assert_eq!(on_disk, listed, "every vendored .profile must be listed in ALL_SAVES");
+        assert_eq!(
+            on_disk, listed,
+            "every vendored .profile must be listed in ALL_SAVES"
+        );
     }
 
     #[test]
@@ -844,7 +916,9 @@ mod tests {
             );
 
             // Payload decompresses to a non-trivial Lua blob.
-            let lua = p.decompress_lua().unwrap_or_else(|e| panic!("lua {name}: {e}"));
+            let lua = p
+                .decompress_lua()
+                .unwrap_or_else(|e| panic!("lua {name}: {e}"));
             assert!(lua.len() > 10_000, "{name} lua len {}", lua.len());
         }
     }
@@ -875,17 +949,28 @@ mod tests {
     fn the_set_spans_the_progression_and_flow_chains_grow_with_it() {
         let dir = save_dir();
         let chain = |name: &str| -> Vec<String> {
-            parse(&load_from(&dir, name)).unwrap().save_state().unwrap().flow_chain
+            parse(&load_from(&dir, name))
+                .unwrap()
+                .save_state()
+                .unwrap()
+                .flow_chain
         };
 
         // Pre-PMC-ownership: the intro is done and nothing else. Asserted exactly — a chain that grew
         // by even one entry would mean we decoded a later save's state into the earliest one.
         let intro = chain("Chris Jacobs_6A499ED6.profile");
-        assert_eq!(intro, ["Start", "VzaCon001"], "the pre-open-world save has only the intro");
+        assert_eq!(
+            intro,
+            ["Start", "VzaCon001"],
+            "the pre-open-world save has only the intro"
+        );
 
         // Then the ladder. Each rung must be strictly longer than the last.
         let rungs = [
-            ("Chris Jacobs_6A499ED6.profile", "intro done, PMC not yet owned"),
+            (
+                "Chris Jacobs_6A499ED6.profile",
+                "intro done, PMC not yet owned",
+            ),
             ("auto_6A0BE454.profile", "first PMC contract"),
             ("auto_634304EA.profile", "mid-game"),
             ("Mattias Nilsson_6A0E523C.profile", "endgame"),
@@ -893,14 +978,20 @@ mod tests {
         let mut prev = 0usize;
         for (name, stage) in rungs {
             let n = chain(name).len();
-            assert!(n > prev, "{name} ({stage}): flow chain {n} should exceed the previous rung {prev}");
+            assert!(
+                n > prev,
+                "{name} ({stage}): flow chain {n} should exceed the previous rung {prev}"
+            );
             prev = n;
         }
 
         // Every rung's chain starts from the same root contract — progression appends, it does not
         // rewrite history.
         for (name, _) in rungs {
-            assert!(chain(name).contains(&"Start".to_string()), "{name} retains the Start entry");
+            assert!(
+                chain(name).contains(&"Start".to_string()),
+                "{name} retains the Start entry"
+            );
         }
     }
 
@@ -919,7 +1010,9 @@ mod tests {
             "1 = Mattias, 2 = Chris, 3 = Jen — all three must be covered"
         );
         assert_eq!(
-            parse(&load_from(&dir, "Chris Jacobs_6A499ED6.profile")).unwrap().character_index,
+            parse(&load_from(&dir, "Chris Jacobs_6A499ED6.profile"))
+                .unwrap()
+                .character_index,
             2,
             "the Chris slot really stores the Chris hero code"
         );
@@ -933,7 +1026,10 @@ mod tests {
         let dir = save_dir();
         for name in ALL_SAVES {
             let p = parse(&load_from(&dir, name)).unwrap();
-            assert!(p.hash_ok(), "{name}: stored ProfileHash does not match CRC-32/BZIP2 over [4:]");
+            assert!(
+                p.hash_ok(),
+                "{name}: stored ProfileHash does not match CRC-32/BZIP2 over [4:]"
+            );
         }
     }
 
@@ -961,7 +1057,9 @@ mod tests {
         let dir = save_dir();
         for name in ALL_SAVES {
             let p = parse(&load_from(&dir, name)).unwrap();
-            let st = p.save_state().unwrap_or_else(|e| panic!("save_state {name}: {e}"));
+            let st = p
+                .save_state()
+                .unwrap_or_else(|e| panic!("save_state {name}: {e}"));
 
             // Every retail save carries a non-empty world-overlay set, and every
             // entry is a vz_state_* layer (world_streaming_spec §5 overlays).
@@ -1050,7 +1148,11 @@ mod tests {
         assert!(!st.equipped_support.is_empty());
         assert_eq!(st.equipped_support[0], "[vehicle.wz10]");
         // Later-game save advances many flow flags.
-        assert!(st.completed_flow.len() > 100, "flow flags: {}", st.completed_flow.len());
+        assert!(
+            st.completed_flow.len() > 100,
+            "flow flags: {}",
+            st.completed_flow.len()
+        );
     }
 
     #[test]

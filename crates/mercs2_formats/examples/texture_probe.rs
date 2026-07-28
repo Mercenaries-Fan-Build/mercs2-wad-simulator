@@ -26,10 +26,7 @@ fn main() {
     let archive = load_ffcs_archive(&mut file, size).expect("load ffcs");
 
     let model = extract_model(&mut file, &archive, hash).expect("extract model container");
-    println!(
-        "model 0x{hash:08X}: {} byte UCFX container",
-        model.len()
-    );
+    println!("model 0x{hash:08X}: {} byte UCFX container", model.len());
 
     let materials = parse_mtrl(&model);
     println!("\n=== {} materials (MTRL) ===", materials.len());
@@ -44,7 +41,10 @@ fn main() {
     }
 
     let groups = group_prmt_material_indices(&model);
-    println!("\n=== {} drawing groups (PRMG -> material) ===", groups.len());
+    println!(
+        "\n=== {} drawing groups (PRMG -> material) ===",
+        groups.len()
+    );
     for (gi, mats) in groups.iter().enumerate() {
         let mut parts = Vec::new();
         for &mi in mats {
@@ -55,9 +55,7 @@ fn main() {
                 Ok(t) => format!("{}x{} {:?}", t.width, t.height, t.format),
                 Err(_) => "(no texture asset)".into(),
             };
-            parts.push(format!(
-                "mat{mi}->0x{diffuse:08X} {name} [{dims}]"
-            ));
+            parts.push(format!("mat{mi}->0x{diffuse:08X} {name} [{dims}]"));
         }
         println!("  G{gi:2}: {}", parts.join("  |  "));
     }

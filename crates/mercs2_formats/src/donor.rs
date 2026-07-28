@@ -109,7 +109,12 @@ pub fn donor_block<P: AsRef<Path>>(wad_paths: &[P], donor: u32) -> Result<Vec<u8
             );
             continue;
         };
-        return Ok(single_entry_block(donor, TYPE_HASH_MODEL, field_c, &dec[start..end]));
+        return Ok(single_entry_block(
+            donor,
+            TYPE_HASH_MODEL,
+            field_c,
+            &dec[start..end],
+        ));
     }
     Err(last)
 }
@@ -121,10 +126,11 @@ pub fn donor_block<P: AsRef<Path>>(wad_paths: &[P], donor: u32) -> Result<Vec<u8
 /// shape as WADs that are known to load.
 pub fn base_csum<P: AsRef<Path>>(base_wad: P) -> Result<(u32, Option<u32>), String> {
     let path = base_wad.as_ref();
-    let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let archive =
-        load_ffcs_archive(&mut file, size).map_err(|e| format!("base FFCS {}: {e}", path.display()))?;
+    let archive = load_ffcs_archive(&mut file, size)
+        .map_err(|e| format!("base FFCS {}: {e}", path.display()))?;
     let row = find_chunk(&archive.chunks, b"CSUM");
     Ok((row.map(|r| r.offset).unwrap_or(0), row.map(|r| r.meta)))
 }
@@ -138,10 +144,24 @@ mod tests {
         let container = b"UCFX....payload".to_vec();
         let block = single_entry_block(0xDEAD_BEEF, TYPE_HASH_MODEL, 7, &container);
 
-        assert_eq!(u32::from_le_bytes(block[0..4].try_into().unwrap()), 1, "entry count");
-        assert_eq!(u32::from_le_bytes(block[4..8].try_into().unwrap()), 0xDEAD_BEEF);
-        assert_eq!(u32::from_le_bytes(block[8..12].try_into().unwrap()), TYPE_HASH_MODEL);
-        assert_eq!(u32::from_le_bytes(block[12..16].try_into().unwrap()), 7, "field_c");
+        assert_eq!(
+            u32::from_le_bytes(block[0..4].try_into().unwrap()),
+            1,
+            "entry count"
+        );
+        assert_eq!(
+            u32::from_le_bytes(block[4..8].try_into().unwrap()),
+            0xDEAD_BEEF
+        );
+        assert_eq!(
+            u32::from_le_bytes(block[8..12].try_into().unwrap()),
+            TYPE_HASH_MODEL
+        );
+        assert_eq!(
+            u32::from_le_bytes(block[12..16].try_into().unwrap()),
+            7,
+            "field_c"
+        );
         assert_eq!(
             u32::from_le_bytes(block[16..20].try_into().unwrap()) as usize,
             container.len()
@@ -160,7 +180,11 @@ mod tests {
             find_model_container(&block, 0x1234_5678).expect("must find what we just framed");
         assert_eq!(field_c, 3);
         assert_eq!(&block[start..end], &container[..]);
-        assert_eq!(find_model_container(&block, 0xFFFF_0000), None, "wrong hash must miss");
+        assert_eq!(
+            find_model_container(&block, 0xFFFF_0000),
+            None,
+            "wrong hash must miss"
+        );
     }
 
     #[test]

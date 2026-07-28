@@ -24,14 +24,19 @@ pub const SHIPPED_MULTI_INFLUENCE_MIN: f64 = 0.60;
 /// Stale: 65535/6, i.e. the u16 ceiling divided by the flat 6.0 idx/tri the NAIVE
 /// `model_inject::to_strip` costs. It is not a game limit and not a per-model limit. Kept only
 /// so external callers still resolve; the `tris` check now measures the real encoder cost.
-#[deprecated(note = "measure strip_index_cost() instead - the cap is per-group and encoder-dependent")]
+#[deprecated(
+    note = "measure strip_index_cost() instead - the cap is per-group and encoder-dependent"
+)]
 pub const STRIP_TRI_CAP: usize = 10900;
 
 /// Index cost of this triangle set under the adjacency strip encoder actually used to write
 /// dense meshes (`to_strip_connected`), which chains shared-edge runs at ~1 idx/tri inside a run
 /// and measures ~2.8 idx/tri over a whole character.
 pub fn strip_index_cost(indices: &[u32]) -> usize {
-    let tris: Vec<[u32; 3]> = indices.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+    let tris: Vec<[u32; 3]> = indices
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
     if tris.is_empty() {
         return 0;
     }
@@ -302,7 +307,10 @@ pub fn validate(
         // onto this donor by name-hash (else the check silently finds nothing on a HERO target).
         let resolve = |npc: u32| -> Option<u32> {
             let h = super::npc84_name_hash(npc)?;
-            cs.skeleton_bones.iter().find(|b| b.name_hash == h).map(|b| b.i)
+            cs.skeleton_bones
+                .iter()
+                .find(|b| b.name_hash == h)
+                .map(|b| b.i)
         };
         let mut rows: Vec<(&str, f64)> = Vec::new();
         for (label, npc_prox, npc_dist) in LIMBS {
@@ -323,7 +331,8 @@ pub fn validate(
             if len(mesh_dir) < 1e-6 || len(bone_dir) < 1e-6 {
                 continue;
             }
-            let deg = dot(mesh_dir, bone_dir).clamp(-1.0, 1.0).acos() * 180.0 / std::f64::consts::PI;
+            let deg =
+                dot(mesh_dir, bone_dir).clamp(-1.0, 1.0).acos() * 180.0 / std::f64::consts::PI;
             rows.push((label, deg));
         }
         let worst = rows.iter().map(|r| r.1).fold(0.0, f64::max);
@@ -371,7 +380,13 @@ pub fn validate(
             match per_hier.get(&h) {
                 Some(e) if !(is_direct && !e.direct) => {}
                 _ => {
-                    per_hier.insert(h, Entry { pos: p, direct: is_direct });
+                    per_hier.insert(
+                        h,
+                        Entry {
+                            pos: p,
+                            direct: is_direct,
+                        },
+                    );
                 }
             }
         }
@@ -412,7 +427,11 @@ pub fn validate(
         } else if bad.is_empty() {
             format!("all {checked} vertical parent-child steps agree in direction")
         } else {
-            format!("{}/{} parent-child steps run the WRONG WAY", bad.len(), checked)
+            format!(
+                "{}/{} parent-child steps run the WRONG WAY",
+                bad.len(),
+                checked
+            )
         };
         checks.push(Check {
             id: "bind-chain",
@@ -499,7 +518,8 @@ pub fn validate(
             // full 4 influences. An import at 14.6% multi / 85.4% rigid / 0.0% four-influence is
             // FAITHFUL but far too coarse — rigid chunks that survive bind pose and split the
             // moment a joint bends. That is the animation tearing, and the old check called it Ok.
-            ok: SHIPPED_MULTI_INFLUENCE_MIN <= (cs.stats.multi_influence as f64 / cs.stats.verts.max(1) as f64),
+            ok: SHIPPED_MULTI_INFLUENCE_MIN
+                <= (cs.stats.multi_influence as f64 / cs.stats.verts.max(1) as f64),
             text: format!(
                 "{:.1}% of verts have 2+ bones ({} of {}); shipped is {:.0}-{:.0}%. \
                  Retained {:.0}% of the source's multi-influence verts.",

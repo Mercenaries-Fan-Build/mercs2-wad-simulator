@@ -145,11 +145,19 @@ impl ComponentSchema {
 
         let rd_u32 = |o: usize| -> u32 {
             let b = [body[o], body[o + 1], body[o + 2], body[o + 3]];
-            if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+            if big_endian {
+                u32::from_be_bytes(b)
+            } else {
+                u32::from_le_bytes(b)
+            }
         };
         let rd_u16 = |o: usize| -> u16 {
             let b = [body[o], body[o + 1]];
-            if big_endian { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) }
+            if big_endian {
+                u16::from_be_bytes(b)
+            } else {
+                u16::from_le_bytes(b)
+            }
         };
 
         let n_fields = rd_u32(0);
@@ -272,7 +280,10 @@ pub struct ComponentRecord {
 impl ComponentRecord {
     /// Look up a field value by its name-hash (`pandemic_hash_m2(field_name)`).
     pub fn get(&self, name_hash: u32) -> Option<FieldValue> {
-        self.fields.iter().find(|(h, _)| *h == name_hash).map(|(_, v)| *v)
+        self.fields
+            .iter()
+            .find(|(h, _)| *h == name_hash)
+            .map(|(_, v)| *v)
     }
 }
 
@@ -280,7 +291,12 @@ fn rd_u16le(b: &[u8], o: usize) -> Option<u16> {
     Some(u16::from_le_bytes([*b.get(o)?, *b.get(o + 1)?]))
 }
 fn rd_u32le(b: &[u8], o: usize) -> Option<u32> {
-    Some(u32::from_le_bytes([*b.get(o)?, *b.get(o + 1)?, *b.get(o + 2)?, *b.get(o + 3)?]))
+    Some(u32::from_le_bytes([
+        *b.get(o)?,
+        *b.get(o + 1)?,
+        *b.get(o + 2)?,
+        *b.get(o + 3)?,
+    ]))
 }
 fn rd_f32le(b: &[u8], o: usize) -> Option<f32> {
     Some(f32::from_bits(rd_u32le(b, o)?))
@@ -301,9 +317,11 @@ fn read_field(f: &SchemaField, payload: &[u8]) -> Option<FieldValue> {
         | SchemaFieldType::Ref
         | SchemaFieldType::StringRef
         | SchemaFieldType::Flags => FieldValue::U32(rd_u32le(payload, o)?),
-        SchemaFieldType::Vec3 => {
-            FieldValue::Vec3([rd_f32le(payload, o)?, rd_f32le(payload, o + 4)?, rd_f32le(payload, o + 8)?])
-        }
+        SchemaFieldType::Vec3 => FieldValue::Vec3([
+            rd_f32le(payload, o)?,
+            rd_f32le(payload, o + 4)?,
+            rd_f32le(payload, o + 8)?,
+        ]),
         SchemaFieldType::Blob32 => {
             let mut a = [0f32; 8];
             for (i, s) in a.iter_mut().enumerate() {
@@ -351,7 +369,12 @@ pub fn parse_comp_groups(container: &[u8]) -> Vec<CompGroup> {
         return out;
     }
     let rd = |o: usize| -> u32 {
-        u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]])
+        u32::from_le_bytes([
+            container[o],
+            container[o + 1],
+            container[o + 2],
+            container[o + 3],
+        ])
     };
     let data_area_off = rd(4) as usize;
     let n_desc = rd(16) as usize;
@@ -437,10 +460,16 @@ mod tests {
         assert_eq!(SchemaFieldType::from_code(5), Some(SchemaFieldType::F32));
         assert_eq!(SchemaFieldType::from_code(6), Some(SchemaFieldType::U32));
         assert_eq!(SchemaFieldType::from_code(7), Some(SchemaFieldType::Ref));
-        assert_eq!(SchemaFieldType::from_code(8), Some(SchemaFieldType::StringRef));
+        assert_eq!(
+            SchemaFieldType::from_code(8),
+            Some(SchemaFieldType::StringRef)
+        );
         assert_eq!(SchemaFieldType::from_code(9), Some(SchemaFieldType::Flags));
         assert_eq!(SchemaFieldType::from_code(10), Some(SchemaFieldType::Vec3));
-        assert_eq!(SchemaFieldType::from_code(11), Some(SchemaFieldType::Blob32));
+        assert_eq!(
+            SchemaFieldType::from_code(11),
+            Some(SchemaFieldType::Blob32)
+        );
     }
 
     #[test]
@@ -724,8 +753,15 @@ mod tests {
         let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
 
         // Collect the first COMP group (with schm+data) for each target class name.
-        let targets = ["HibernationControl", "ModelName", "FactionMarker", "Road", "Transform"];
-        let mut found: std::collections::HashMap<String, CompGroup> = std::collections::HashMap::new();
+        let targets = [
+            "HibernationControl",
+            "ModelName",
+            "FactionMarker",
+            "Road",
+            "Transform",
+        ];
+        let mut found: std::collections::HashMap<String, CompGroup> =
+            std::collections::HashMap::new();
 
         'outer: for bi in 0..arch.indx.len() {
             if found.len() == targets.len() {
@@ -744,9 +780,12 @@ mod tests {
                 if base + 16 > dec.len() {
                     break;
                 }
-                let chunk_size =
-                    u32::from_le_bytes([dec[base + 12], dec[base + 13], dec[base + 14], dec[base + 15]])
-                        as usize;
+                let chunk_size = u32::from_le_bytes([
+                    dec[base + 12],
+                    dec[base + 13],
+                    dec[base + 14],
+                    dec[base + 15],
+                ]) as usize;
                 if pos + chunk_size > dec.len() {
                     break;
                 }
@@ -772,7 +811,10 @@ mod tests {
         // HibernationControl: stride 6, fields u16@0,u8@2,u8@3,u8@4,bit@5,bit@5 (world_streaming spec).
         if let Some(g) = found.get("HibernationControl") {
             let s = g.schema().expect("hib schema");
-            assert_eq!(s.payload_stride, 6, "HibernationControl descriptor stride is 6");
+            assert_eq!(
+                s.payload_stride, 6,
+                "HibernationControl descriptor stride is 6"
+            );
             assert_eq!(s.record_stride(), 10);
             assert_eq!(s.fields.len(), 6);
             assert_eq!(s.fields[0].field_type, SchemaFieldType::U16);
@@ -780,14 +822,25 @@ mod tests {
             assert_eq!(s.fields[4].field_type, SchemaFieldType::Bit);
             assert_eq!(s.fields[4].byte_offset, 5);
             assert_eq!(s.fields[5].byte_offset, 5);
-            assert_ne!(s.fields[4].bit_index, s.fields[5].bit_index, "two bits packed in byte 5");
-            let recs = s.deserialize_records(g.data.as_ref().unwrap()).expect("hib records");
+            assert_ne!(
+                s.fields[4].bit_index, s.fields[5].bit_index,
+                "two bits packed in byte 5"
+            );
+            let recs = s
+                .deserialize_records(g.data.as_ref().unwrap())
+                .expect("hib records");
             assert!(!recs.is_empty());
             // Every record must yield all 6 typed fields.
             for r in &recs {
                 assert_eq!(r.fields.len(), 6);
-                assert!(matches!(r.get(s.fields[0].name_hash), Some(FieldValue::U16(_))));
-                assert!(matches!(r.get(s.fields[4].name_hash), Some(FieldValue::Bit(_))));
+                assert!(matches!(
+                    r.get(s.fields[0].name_hash),
+                    Some(FieldValue::U16(_))
+                ));
+                assert!(matches!(
+                    r.get(s.fields[4].name_hash),
+                    Some(FieldValue::Bit(_))
+                ));
             }
         } else {
             panic!("HibernationControl not found in retail vz.wad");
@@ -800,7 +853,9 @@ mod tests {
             assert_eq!(s.fields.len(), 1);
             assert_eq!(s.fields[0].field_type, SchemaFieldType::U32);
             assert_eq!(s.fields[0].name_hash, 0x5b72_4250);
-            let recs = s.deserialize_records(g.data.as_ref().unwrap()).expect("modelname records");
+            let recs = s
+                .deserialize_records(g.data.as_ref().unwrap())
+                .expect("modelname records");
             assert!(!recs.is_empty());
             // Each record's model hash is a non-zero u32.
             for r in &recs {
@@ -818,19 +873,36 @@ mod tests {
             let s = g.schema().expect("factionmarker schema");
             assert_eq!(s.payload_stride, 4, "FactionMarker descriptor stride is 4");
             assert_eq!(s.fields.len(), 1);
-            let recs = s.deserialize_records(g.data.as_ref().unwrap()).expect("faction records");
+            let recs = s
+                .deserialize_records(g.data.as_ref().unwrap())
+                .expect("faction records");
             assert!(!recs.is_empty());
-            assert!(matches!(recs[0].get(s.fields[0].name_hash), Some(FieldValue::U32(_))));
+            assert!(matches!(
+                recs[0].get(s.fields[0].name_hash),
+                Some(FieldValue::U32(_))
+            ));
         }
 
         // Road: 4×u32 + 2×vec3, stride 40; the vec3 fields must decode to finite floats.
         if let Some(g) = found.get("Road") {
             let s = g.schema().expect("road schema");
             assert_eq!(s.payload_stride, 40, "Road stride 40 (4×u32 + 2×vec3)");
-            assert_eq!(s.fields.iter().filter(|f| f.field_type == SchemaFieldType::Vec3).count(), 2);
-            let recs = s.deserialize_records(g.data.as_ref().unwrap()).expect("road records");
+            assert_eq!(
+                s.fields
+                    .iter()
+                    .filter(|f| f.field_type == SchemaFieldType::Vec3)
+                    .count(),
+                2
+            );
+            let recs = s
+                .deserialize_records(g.data.as_ref().unwrap())
+                .expect("road records");
             assert!(!recs.is_empty());
-            for f in s.fields.iter().filter(|f| f.field_type == SchemaFieldType::Vec3) {
+            for f in s
+                .fields
+                .iter()
+                .filter(|f| f.field_type == SchemaFieldType::Vec3)
+            {
                 if let Some(FieldValue::Vec3(v)) = recs[0].get(f.name_hash) {
                     assert!(v.iter().all(|c| c.is_finite()), "road vec3 finite");
                 } else {

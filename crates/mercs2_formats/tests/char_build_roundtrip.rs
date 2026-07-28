@@ -12,9 +12,10 @@ use std::collections::HashMap;
 
 fn load_skeleton() -> TargetSkeleton {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-    let j: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/skeleton_npc84.json")).unwrap())
-            .unwrap();
+    let j: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{dir}/skeleton_npc84.json")).unwrap(),
+    )
+    .unwrap();
     let bones = j["bones"]
         .as_array()
         .unwrap()
@@ -74,7 +75,11 @@ fn synth_rig() -> SynthRig {
     let names = rows.iter().map(|r| r.0.to_string()).collect();
     let parents = rows.iter().map(|r| r.1).collect();
     let expect = rows.iter().enumerate().map(|(i, r)| (i, r.2)).collect();
-    SynthRig { names, parents, expect }
+    SynthRig {
+        names,
+        parents,
+        expect,
+    }
 }
 
 /// Row-major translation matrix.
@@ -98,11 +103,11 @@ struct Built {
 fn make_mesh() -> Built {
     // five vertices exercising single + multi influence across body regions.
     let input_joints = vec![
-        [0u16, 0, 0, 0],   // hips
-        [5, 6, 0, 0],      // L upper arm + forearm
-        [4, 0, 0, 0],      // head
-        [7, 10, 0, 0],     // L hand + R hand
-        [11, 12, 13, 0],   // L thigh/shin/foot
+        [0u16, 0, 0, 0], // hips
+        [5, 6, 0, 0],    // L upper arm + forearm
+        [4, 0, 0, 0],    // head
+        [7, 10, 0, 0],   // L hand + R hand
+        [11, 12, 13, 0], // L thigh/shin/foot
     ];
     let input_weights = vec![
         [1.0f64, 0.0, 0.0, 0.0],
@@ -184,8 +189,22 @@ fn index_by_canonical_resolves_onto_shifted_hero() {
     // (composed with the NPC-84 finger-collapse) keeps its 58-bone map under the palette cap.
     let npc = load_skeleton();
     let mut bones = vec![
-        TargetBone { i: 0, pos: [0.0; 3], parent: -1, name: "x_root_a".into(), name_hash: 0xA, rot: None },
-        TargetBone { i: 1, pos: [0.0; 3], parent: 0, name: "x_root_b".into(), name_hash: 0xB, rot: None },
+        TargetBone {
+            i: 0,
+            pos: [0.0; 3],
+            parent: -1,
+            name: "x_root_a".into(),
+            name_hash: 0xA,
+            rot: None,
+        },
+        TargetBone {
+            i: 1,
+            pos: [0.0; 3],
+            parent: 0,
+            name: "x_root_b".into(),
+            name_hash: 0xB,
+            rot: None,
+        },
     ];
     for b in &npc.bones {
         bones.push(TargetBone {
@@ -197,13 +216,20 @@ fn index_by_canonical_resolves_onto_shifted_hero() {
             rot: b.rot,
         });
     }
-    let hero = TargetSkeleton { bones, height: npc.height };
+    let hero = TargetSkeleton {
+        bones,
+        height: npc.height,
+    };
     // NPC skeleton: canonical resolution is the identity.
     assert_eq!(npc.index_by_canonical(3), Some(3), "NPC Bone_Hips");
     // Hero skeleton: every bone re-seats +2 by NAME.
     assert_eq!(hero.index_by_canonical(3), Some(5), "hero Bone_Hips");
     assert_eq!(hero.index_by_canonical(46), Some(48), "hero bone_lhand");
-    assert_eq!(hero.index_by_canonical(48), Some(50), "hero bone_lindex1 (finger)");
+    assert_eq!(
+        hero.index_by_canonical(48),
+        Some(50),
+        "hero bone_lindex1 (finger)"
+    );
     assert_eq!(hero.index_by_canonical(67), Some(69), "hero bone_rhand");
 }
 
@@ -330,9 +356,15 @@ fn hips_collapse_paradox_is_caught() {
     };
     let cs = build_character(&inp).expect("build");
     // palette collapses to a single bone
-    assert_eq!(cs.palette_slots, 1, "all-hips collapse must yield 1 palette slot");
+    assert_eq!(
+        cs.palette_slots, 1,
+        "all-hips collapse must yield 1 palette slot"
+    );
     let report = validate::validate(&cs, &mesh.input_joints, &mesh.input_weights, &mesh.indices);
     // multi-bone influence is destroyed → the influence limit must fail.
     let infl = report.limits.iter().find(|l| l.id == "influence").unwrap();
-    assert!(!infl.ok, "influence check must catch the single-bone collapse");
+    assert!(
+        !infl.ok,
+        "influence check must catch the single-bone collapse"
+    );
 }

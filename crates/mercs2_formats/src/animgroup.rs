@@ -558,7 +558,8 @@ pub fn parse_animgroup(block_bytes: &[u8]) -> Result<AnimGroup, String> {
     // Derived skeleton: the stable union of bone name-hashes across all clips,
     // ordered by the widest clip's track order (the representative rig order).
     let skeleton = binding.as_ref().map(|b| {
-        let mut seen: std::collections::BTreeSet<u32> = b.track_to_bone_hash.iter().copied().collect();
+        let mut seen: std::collections::BTreeSet<u32> =
+            b.track_to_bone_hash.iter().copied().collect();
         let mut bone_name_hashes = b.track_to_bone_hash.clone();
         for c in &clips {
             for &h in &c.binding.track_to_bone_hash {
@@ -678,7 +679,10 @@ mod tests {
         let ag = parse_animgroup(&block).unwrap();
         let skel = ag.skeleton.expect("derived skeleton");
         assert_eq!(skel.bone_name_hashes, vec![0xAA, 0xBB, 0xCC]);
-        assert!(skel.parents.is_empty(), "no hkaSkeleton in retail => no parents");
+        assert!(
+            skel.parents.is_empty(),
+            "no hkaSkeleton in retail => no parents"
+        );
         assert!(skel.reference_pose.is_empty());
     }
 
@@ -709,16 +713,30 @@ mod tests {
         let data = decompress_block(&mut f, &arch.indx, 3315).expect("decompress 3315");
         let ag = parse_animgroup(&data).expect("parse animgroup 3315");
 
-        assert!(ag.clips.len() >= 8, "expected multiple clips, got {}", ag.clips.len());
-        assert!(ag.clips.iter().all(|c| c.class == "wavelet"), "all shipped clips wavelet");
+        assert!(
+            ag.clips.len() >= 8,
+            "expected multiple clips, got {}",
+            ag.clips.len()
+        );
+        assert!(
+            ag.clips.iter().all(|c| c.class == "wavelet"),
+            "all shipped clips wavelet"
+        );
         let binding = ag.binding.as_ref().expect("primary binding");
-        assert!(binding.track_to_bone_hash.len() >= 60, "human rig ≥60 tracks");
+        assert!(
+            binding.track_to_bone_hash.len() >= 60,
+            "human rig ≥60 tracks"
+        );
         // Confirmed absent in retail: no hkaSkeleton / hkaAnimationBinding instances.
         assert!(!ag.class_census.contains_key("hkaSkeleton"));
         assert!(!ag.class_census.contains_key("hkaAnimationBinding"));
         assert!(ag.class_census.contains_key("hkaWaveletSkeletalAnimation"));
         // trnm track count == animation numTransformTracks for the widest clip.
-        let widest = ag.clips.iter().max_by_key(|c| c.binding.track_to_bone_hash.len()).unwrap();
+        let widest = ag
+            .clips
+            .iter()
+            .max_by_key(|c| c.binding.track_to_bone_hash.len())
+            .unwrap();
         assert_eq!(
             widest.binding.track_to_bone_hash.len(),
             widest.num_transform_tracks as usize,

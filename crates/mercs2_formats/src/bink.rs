@@ -152,13 +152,23 @@ impl BinkFile {
 fn u32_at(b: &[u8], off: usize) -> Result<u32, String> {
     b.get(off..off + 4)
         .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-        .ok_or_else(|| format!("truncated at offset {off:#x} (need 4 bytes, have {})", b.len()))
+        .ok_or_else(|| {
+            format!(
+                "truncated at offset {off:#x} (need 4 bytes, have {})",
+                b.len()
+            )
+        })
 }
 
 fn u16_at(b: &[u8], off: usize) -> Result<u16, String> {
     b.get(off..off + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
-        .ok_or_else(|| format!("truncated at offset {off:#x} (need 2 bytes, have {})", b.len()))
+        .ok_or_else(|| {
+            format!(
+                "truncated at offset {off:#x} (need 2 bytes, have {})",
+                b.len()
+            )
+        })
 }
 
 /// Parse a Bink container from a whole file.
@@ -168,7 +178,10 @@ fn u16_at(b: &[u8], off: usize) -> Result<u16, String> {
 /// declared file size, and a frame table that is monotonic and inside the file.
 pub fn parse(bytes: &[u8]) -> Result<BinkFile, String> {
     if bytes.len() < 44 {
-        return Err(format!("too short to be a Bink file ({} bytes)", bytes.len()));
+        return Err(format!(
+            "too short to be a Bink file ({} bytes)",
+            bytes.len()
+        ));
     }
     if &bytes[0..3] != b"BIK" {
         return Err(format!(
@@ -222,7 +235,12 @@ pub fn parse(bytes: &[u8]) -> Result<BinkFile, String> {
             let sample_rate = u16_at(bytes, rates_at + i * 4)? as u32;
             let flags = u16_at(bytes, rates_at + i * 4 + 2)?;
             let id = u32_at(bytes, ids_at + i * 4)?;
-            audio_tracks.push(AudioTrack { sample_rate, flags, id, max_decoded_size });
+            audio_tracks.push(AudioTrack {
+                sample_rate,
+                flags,
+                id,
+                max_decoded_size,
+            });
         }
         cursor = ids_at + track_count * 4;
     }
@@ -245,9 +263,15 @@ pub fn parse(bytes: &[u8]) -> Result<BinkFile, String> {
             return Err(format!("frame {i} offsets go backwards ({start} -> {end})"));
         }
         if end > actual {
-            return Err(format!("frame {i} ends at {end}, past the {actual}-byte file"));
+            return Err(format!(
+                "frame {i} ends at {end}, past the {actual}-byte file"
+            ));
         }
-        frames.push(FrameEntry { offset: start, length: end - start, keyframe });
+        frames.push(FrameEntry {
+            offset: start,
+            length: end - start,
+            keyframe,
+        });
     }
 
     Ok(BinkFile {
@@ -301,9 +325,12 @@ pub fn split_frame<'a>(
 ) -> Result<FramePackets<'a>, String> {
     let start = frame.offset as usize;
     let end = start + frame.length as usize;
-    let data = bytes
-        .get(start..end)
-        .ok_or_else(|| format!("frame at {start}..{end} is outside the {}-byte file", bytes.len()))?;
+    let data = bytes.get(start..end).ok_or_else(|| {
+        format!(
+            "frame at {start}..{end} is outside the {}-byte file",
+            bytes.len()
+        )
+    })?;
 
     let mut cursor = 0usize;
     let mut audio = Vec::with_capacity(file.audio_tracks.len());
@@ -317,19 +344,20 @@ pub fn split_frame<'a>(
             audio.push(None);
             continue;
         }
-        let packet = data
-            .get(cursor..cursor + size)
-            .ok_or_else(|| {
-                format!(
-                    "track {i}: packet claims {size} bytes but only {} remain in the frame",
-                    data.len() - cursor
-                )
-            })?;
+        let packet = data.get(cursor..cursor + size).ok_or_else(|| {
+            format!(
+                "track {i}: packet claims {size} bytes but only {} remain in the frame",
+                data.len() - cursor
+            )
+        })?;
         audio.push(Some(packet));
         cursor += size;
     }
 
-    Ok(FramePackets { audio, video: &data[cursor..] })
+    Ok(FramePackets {
+        audio,
+        video: &data[cursor..],
+    })
 }
 
 /// Read and parse a `.bik` from disk.
@@ -346,7 +374,9 @@ pub fn movies_dir() -> Option<std::path::PathBuf> {
         .filter_map(|v| std::env::var_os(v).filter(|s| !s.is_empty()))
         .map(std::path::PathBuf::from)
         .find_map(|p| {
-            [p.join("data").join("Movies"), p.join("Movies")].into_iter().find(|c| c.is_dir())
+            [p.join("data").join("Movies"), p.join("Movies")]
+                .into_iter()
+                .find(|c| c.is_dir())
         })
 }
 
@@ -397,7 +427,11 @@ mod tests {
         let t = &f.audio_tracks[0];
         assert_eq!(t.sample_rate, 44100);
         assert_eq!(t.channels(), 2, "AUD_STEREO decodes to two channels");
-        assert_eq!(t.codec(), AudioCodec::Dct, "AUD_USE_DCT selects the DCT bitstream");
+        assert_eq!(
+            t.codec(),
+            AudioCodec::Dct,
+            "AUD_USE_DCT selects the DCT bitstream"
+        );
         assert_eq!(t.id, 7);
 
         // Lengths come from the NEXT offset, and the keyframe bit must not leak into them.
@@ -405,7 +439,11 @@ mod tests {
         assert_eq!(f.frames[0].length, 10);
         assert_eq!(f.frames[1].length, 20);
         assert_eq!(f.frames[2].length, 30);
-        assert_eq!(f.frames[0].offset % 2, 0, "the keyframe bit is masked off the offset");
+        assert_eq!(
+            f.frames[0].offset % 2,
+            0,
+            "the keyframe bit is masked off the offset"
+        );
         assert_eq!(
             f.frames.iter().map(|x| x.keyframe).collect::<Vec<_>>(),
             vec![true, false, true]
@@ -415,7 +453,12 @@ mod tests {
     /// A track with neither flag set is mono RDFT — the other corner of the flag word.
     #[test]
     fn mono_rdft_is_the_flagless_case() {
-        let t = AudioTrack { sample_rate: 22050, flags: 0, id: 0, max_decoded_size: 0 };
+        let t = AudioTrack {
+            sample_rate: 22050,
+            flags: 0,
+            id: 0,
+            max_decoded_size: 0,
+        };
         assert_eq!(t.channels(), 1);
         assert_eq!(t.codec(), AudioCodec::Rdft);
     }
@@ -453,7 +496,9 @@ mod tests {
         for path in &files {
             let f = parse_file(path).unwrap_or_else(|e| panic!("{e}"));
             revisions.insert(f.revision as char);
-            *resolutions.entry(format!("{}x{} @{:.2}fps", f.width, f.height, f.fps())).or_default() += 1;
+            *resolutions
+                .entry(format!("{}x{} @{:.2}fps", f.width, f.height, f.fps()))
+                .or_default() += 1;
             total_secs += f.duration_secs();
 
             // Self-consistency: frames tile the file in order and none overflows the declared
@@ -479,19 +524,33 @@ mod tests {
                 "{}: the first frame must be a keyframe",
                 path.display()
             );
-            assert_eq!(f.video_flags, 0, "{}: alpha/extended video flags are unsupported", path.display());
+            assert_eq!(
+                f.video_flags,
+                0,
+                "{}: alpha/extended video flags are unsupported",
+                path.display()
+            );
 
             if f.audio_tracks.is_empty() {
                 trackless += 1;
             }
             for t in &f.audio_tracks {
                 *variants
-                    .entry(format!("{:?} {}ch {}Hz", t.codec(), t.channels(), t.sample_rate))
+                    .entry(format!(
+                        "{:?} {}ch {}Hz",
+                        t.codec(),
+                        t.channels(),
+                        t.sample_rate
+                    ))
                     .or_default() += 1;
             }
         }
 
-        println!("[bink] {} files, {:.1} min total", files.len(), total_secs / 60.0);
+        println!(
+            "[bink] {} files, {:.1} min total",
+            files.len(),
+            total_secs / 60.0
+        );
         println!("[bink] revisions: {revisions:?}");
         for (r, n) in &resolutions {
             println!("[bink] {r}  x{n}");
@@ -507,7 +566,10 @@ mod tests {
             1,
             "the decoder is written for ONE revision; found {revisions:?}"
         );
-        assert!(revisions.contains(&'i'), "expected revision 'i', found {revisions:?}");
+        assert!(
+            revisions.contains(&'i'),
+            "expected revision 'i', found {revisions:?}"
+        );
     }
 
     /// **The frame layout is exact on every frame of every shipped movie.**
@@ -538,7 +600,8 @@ mod tests {
             (0usize, 0u64, 0u64, 0usize);
 
         for path in &files {
-            let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let bytes =
+                std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
             let f = parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
 
             for (i, fr) in f.frames.iter().enumerate() {
@@ -554,8 +617,7 @@ mod tests {
 
                 // The accounting identity: 4-byte size word per track, plus each packet's bytes,
                 // plus the video remainder, equals the frame exactly.
-                let audio_bytes: usize =
-                    p.audio.iter().map(|a| a.map_or(0, |s| s.len())).sum();
+                let audio_bytes: usize = p.audio.iter().map(|a| a.map_or(0, |s| s.len())).sum();
                 let accounted = f.audio_tracks.len() * 4 + audio_bytes + p.video.len();
                 assert_eq!(
                     accounted as u64,
@@ -600,8 +662,14 @@ mod tests {
             total_video as f64 / 1e6,
             total_audio as f64 / 1e6,
         );
-        assert!(total_frames > 10_000, "expected the full shipped set; got {total_frames} frames");
-        assert!(total_video > 0 && total_audio > 0, "both streams must carry data");
+        assert!(
+            total_frames > 10_000,
+            "expected the full shipped set; got {total_frames} frames"
+        );
+        assert!(
+            total_video > 0 && total_audio > 0,
+            "both streams must carry data"
+        );
     }
 
     /// Structural invariants are enforced, so a misread surfaces at parse rather than as bad frames.
@@ -615,11 +683,17 @@ mod tests {
         let mut b = synthetic();
         b[0x10] = 99; // second frame count
         let e = parse(&b).unwrap_err();
-        assert!(e.contains("disagrees"), "frame-count mismatch must be named: {e}");
+        assert!(
+            e.contains("disagrees"),
+            "frame-count mismatch must be named: {e}"
+        );
 
         let mut b = synthetic();
         b.truncate(b.len() - 1);
         let e = parse(&b).unwrap_err();
-        assert!(e.contains("file length"), "declared-size mismatch must be named: {e}");
+        assert!(
+            e.contains("file length"),
+            "declared-size mismatch must be named: {e}"
+        );
     }
 }

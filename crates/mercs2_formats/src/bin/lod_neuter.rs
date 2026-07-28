@@ -30,7 +30,8 @@ fn run() -> i32 {
                 name_hash = it
                     .next()
                     .and_then(|v| {
-                        u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+                        u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                            .ok()
                     })
                     .unwrap_or(0)
             }
@@ -54,7 +55,11 @@ fn run() -> i32 {
                 eprintln!("write {}: {e}", pos[1]);
                 return 1;
             }
-            println!("emptied {n} drawing group(s) -> {} ({} bytes)", pos[1], out.len());
+            println!(
+                "emptied {n} drawing group(s) -> {} ({} bytes)",
+                pos[1],
+                out.len()
+            );
             0
         }
         Err(e) => {

@@ -91,7 +91,12 @@ fn run() -> i32 {
         o += 12;
     }
 
-    let mesh = StaticMesh { positions, normals, uvs, tris };
+    let mesh = StaticMesh {
+        positions,
+        normals,
+        uvs,
+        tris,
+    };
     let built = if skinned {
         build_skinned_model(&mesh, model_hash, diffuse_hash)
     } else {

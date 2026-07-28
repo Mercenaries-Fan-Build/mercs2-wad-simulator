@@ -149,8 +149,8 @@ pub fn side_of(n: &str) -> Option<char> {
     // side glued onto the role token: eyeL_bone, browOutR_bone, handl.
     // /(eye|eyelid|lid|brow|cheek|nose|hand|foot|arm|leg|thigh|calf|toe)(l|r)(?![a-z])/
     const ROLES: [&str; 13] = [
-        "eye", "eyelid", "lid", "brow", "cheek", "nose", "hand", "foot", "arm", "leg",
-        "thigh", "calf", "toe",
+        "eye", "eyelid", "lid", "brow", "cheek", "nose", "hand", "foot", "arm", "leg", "thigh",
+        "calf", "toe",
     ];
     let b = n.as_bytes();
     for pos in 0..b.len() {
@@ -304,16 +304,12 @@ fn role_matches(role: &str, n: &str) -> bool {
     match role {
         "toe" => n.contains("toe") || ball_not_oon(n),
         "foot" => any(n, &["foot", "ankle"]),
-        "calf" => {
-            any(n, &["calf", "shin", "lowerleg", "lowleg"]) || limb_end(n, "leg", false)
-        }
+        "calf" => any(n, &["calf", "shin", "lowerleg", "lowleg"]) || limb_end(n, "leg", false),
         "thigh" => any(n, &["thigh", "upleg", "upperleg", "femur"]) || hip_then_digit(n),
         "clavicle" => any(n, &["clavicle", "collar", "shoulder"]),
         "forearmroll" => any(n, &["forearmtwist", "forearmroll", "lowerarmtwist"]),
         "forearm" => any(n, &["forearm", "lowerarm", "elbow"]),
-        "upperarm" => {
-            any(n, &["upperarm", "bicep", "humerus"]) || limb_end(n, "arm", true)
-        }
+        "upperarm" => any(n, &["upperarm", "bicep", "humerus"]) || limb_end(n, "arm", true),
         "hand" => any(n, &["hand", "wrist", "palm"]),
         "head" => any(n, &["head", "skull"]),
         "neck" => n.contains("neck"),
@@ -333,9 +329,27 @@ fn role_matches(role: &str, n: &str) -> bool {
 
 /// ROLE_PATTERNS order — specific before generic (first match wins).
 const ROLE_ORDER: [&str; 21] = [
-    "toe", "foot", "calf", "thigh", "clavicle", "forearmroll", "forearm", "upperarm",
-    "hand", "head", "neck", "jaw", "tongue", "eyelid", "brow", "eye", "cheek", "nose",
-    "chest", "spine", "hips",
+    "toe",
+    "foot",
+    "calf",
+    "thigh",
+    "clavicle",
+    "forearmroll",
+    "forearm",
+    "upperarm",
+    "hand",
+    "head",
+    "neck",
+    "jaw",
+    "tongue",
+    "eyelid",
+    "brow",
+    "eye",
+    "cheek",
+    "nose",
+    "chest",
+    "spine",
+    "hips",
 ];
 
 /// `HELPER` regex — pure rig helpers with no Mercs2 counterpart.
@@ -412,7 +426,10 @@ pub fn classify(name: &str) -> (Cls, String) {
                 let Some(side) = s else {
                     return (Cls::None, format!("{role} without a side"));
                 };
-                return (Cls::Hier(pair[if side == 'L' { 0 } else { 1 }]), format!("{role}.{side}"));
+                return (
+                    Cls::Hier(pair[if side == 'L' { 0 } else { 1 }]),
+                    format!("{role}.{side}"),
+                );
             }
             if let Some(h) = core(role) {
                 return (Cls::Hier(h), role.to_string());
@@ -501,7 +518,13 @@ pub fn automap(rig: &Rig) -> AutoMap {
     let cod = is_cod_rig(&names);
     let raw: Vec<(Cls, String)> = names
         .iter()
-        .map(|nm| classify(&if cod { normalize_cod_sides(nm) } else { nm.clone() }))
+        .map(|nm| {
+            classify(&if cod {
+                normalize_cod_sides(nm)
+            } else {
+                nm.clone()
+            })
+        })
         .collect();
     let mut mapped: HashMap<usize, u32> = HashMap::new();
     let mut why: HashMap<usize, String> = HashMap::new();
@@ -525,9 +548,7 @@ pub fn automap(rig: &Rig) -> AutoMap {
         }
     };
 
-    let pick = |tag: Cls| -> Vec<usize> {
-        (0..raw.len()).filter(|&i| raw[i].0 == tag).collect()
-    };
+    let pick = |tag: Cls| -> Vec<usize> { (0..raw.len()).filter(|&i| raw[i].0 == tag).collect() };
 
     // A spine-chain root that PARENTS the leg chains is really the pelvis, not spine1.
     let mut spine = pick(Cls::Spine);
@@ -547,11 +568,41 @@ pub fn automap(rig: &Rig) -> AutoMap {
         }
     }
     ladder_assign(&mut spine, &[14, 15, 16], "spine", &mut mapped, &mut why);
-    ladder_assign(&mut pick(Cls::Neck), &[20, 21], "neck", &mut mapped, &mut why);
-    ladder_assign(&mut pick(Cls::LegL), &[6, 7, 8, 9], "leg.L", &mut mapped, &mut why);
-    ladder_assign(&mut pick(Cls::LegR), &[10, 11, 12, 13], "leg.R", &mut mapped, &mut why);
-    ladder_assign(&mut pick(Cls::ArmL), &[43, 44, 46], "arm.L", &mut mapped, &mut why);
-    ladder_assign(&mut pick(Cls::ArmR), &[64, 65, 67], "arm.R", &mut mapped, &mut why);
+    ladder_assign(
+        &mut pick(Cls::Neck),
+        &[20, 21],
+        "neck",
+        &mut mapped,
+        &mut why,
+    );
+    ladder_assign(
+        &mut pick(Cls::LegL),
+        &[6, 7, 8, 9],
+        "leg.L",
+        &mut mapped,
+        &mut why,
+    );
+    ladder_assign(
+        &mut pick(Cls::LegR),
+        &[10, 11, 12, 13],
+        "leg.R",
+        &mut mapped,
+        &mut why,
+    );
+    ladder_assign(
+        &mut pick(Cls::ArmL),
+        &[43, 44, 46],
+        "arm.L",
+        &mut mapped,
+        &mut why,
+    );
+    ladder_assign(
+        &mut pick(Cls::ArmR),
+        &[64, 65, 67],
+        "arm.R",
+        &mut mapped,
+        &mut why,
+    );
 
     for i in 0..raw.len() {
         if let Cls::Hier(h) = raw[i].0 {

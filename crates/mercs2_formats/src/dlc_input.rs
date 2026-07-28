@@ -274,7 +274,7 @@ mod tests {
         d[12..16].copy_from_slice(&0u32.to_be_bytes());
         d[16..18].copy_from_slice(&(body.len() as u16).to_be_bytes()); // csz
         d[18..20].copy_from_slice(&(body.len() as u16).to_be_bytes()); // dsz == csz -> raw
-        // header_size = 16 + align16(8) = 32
+                                                                       // header_size = 16 + align16(8) = 32
         d.resize(32, 0);
         d.extend_from_slice(body);
         let out = decompress_be_sges(&d, 0, d.len()).unwrap();
@@ -303,22 +303,43 @@ mod tests {
         let chunk = |t: &str| rows.iter().find(|r| r.tag == t).unwrap();
         assert_eq!((chunk("INDX").offset, chunk("INDX").meta), (32768, 2196));
         assert_eq!((chunk("DATA").offset, chunk("DATA").meta), (294912, 36));
-        assert_eq!((chunk("CSUM").offset, chunk("CSUM").meta), (3130166264, 933));
+        assert_eq!(
+            (chunk("CSUM").offset, chunk("CSUM").meta),
+            (3130166264, 933)
+        );
         assert_eq!((chunk("ASET").offset, chunk("ASET").meta), (59120, 5341));
         assert_eq!((chunk("PTHS").offset, chunk("PTHS").meta), (144576, 2196));
 
-        let indx = parse_be_indx(&doh, chunk("INDX").offset as usize, chunk("INDX").meta as usize);
+        let indx = parse_be_indx(
+            &doh,
+            chunk("INDX").offset as usize,
+            chunk("INDX").meta as usize,
+        );
         assert_eq!(indx.len(), 2196);
         assert_eq!(
-            (indx[0].page_index, indx[0].packed_field, indx[0].flags, indx[0].page_count),
+            (
+                indx[0].page_index,
+                indx[0].packed_field,
+                indx[0].flags,
+                indx[0].page_count
+            ),
             (9, 1, 32768, 1)
         );
         assert_eq!(
-            (indx[2].page_index, indx[2].packed_field, indx[2].flags, indx[2].page_count),
+            (
+                indx[2].page_index,
+                indx[2].packed_field,
+                indx[2].flags,
+                indx[2].page_count
+            ),
             (11, 5, 32768, 2)
         );
 
-        let aset = parse_be_aset(&doh, chunk("ASET").offset as usize, chunk("ASET").meta as usize);
+        let aset = parse_be_aset(
+            &doh,
+            chunk("ASET").offset as usize,
+            chunk("ASET").meta as usize,
+        );
         assert_eq!(aset.len(), 5341);
         assert_eq!(
             (aset[0].asset_hash, aset[0].u1, aset[0].u2, aset[0].u3),
@@ -329,9 +350,16 @@ mod tests {
             (1843225593, 4294967295, 4294902224, 28)
         );
 
-        let pths = parse_be_pths(&doh, chunk("PTHS").offset as usize, chunk("PTHS").meta as usize);
+        let pths = parse_be_pths(
+            &doh,
+            chunk("PTHS").offset as usize,
+            chunk("PTHS").meta as usize,
+        );
         assert_eq!(pths[0], "blocks\\dlc01\\dlc01_terrain_P000_Q3.block");
-        assert_eq!(pths[1], "blocks\\dlc01\\dlc01_caicara_foliage_P000_Q3.block");
+        assert_eq!(
+            pths[1],
+            "blocks\\dlc01\\dlc01_caicara_foliage_P000_Q3.block"
+        );
         assert_eq!(pths[2], "blocks\\dlc01\\dlc01_dlccon004_P000_Q3.block");
     }
 

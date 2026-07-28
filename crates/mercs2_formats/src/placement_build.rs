@@ -36,7 +36,11 @@ fn ucfx_subblocks(block: &[u8]) -> Vec<(usize, usize)> {
     }
     let mut out = Vec::new();
     for (k, &s) in starts.iter().enumerate() {
-        let e = if k + 1 < starts.len() { starts[k + 1] } else { block.len() };
+        let e = if k + 1 < starts.len() {
+            starts[k + 1]
+        } else {
+            block.len()
+        };
         out.push((s, e));
     }
     out
@@ -53,7 +57,9 @@ struct Row {
 /// the sub-block start `s`). Child `coff` are relative to that data-area start.
 fn parse_sub(block: &[u8], s: usize, e: usize) -> Option<(usize, Vec<Row>, usize)> {
     // CHDR follows the UCFX header.
-    let ci = block[s..e.min(block.len())].windows(4).position(|w| w == b"CHDR")?;
+    let ci = block[s..e.min(block.len())]
+        .windows(4)
+        .position(|w| w == b"CHDR")?;
     let chdr = s + ci;
     if chdr + HDR > block.len() {
         return None;
@@ -80,12 +86,22 @@ fn parse_sub(block: &[u8], s: usize, e: usize) -> Option<(usize, Vec<Row>, usize
             }
             let mut ct = [0u8; 4];
             ct.copy_from_slice(&block[cp..cp + 4]);
-            children.push((ct, rd_u32(block, cp + 4), rd_u32(block, cp + 8), rd_u32(block, cp + 12), rd_u32(block, cp + 16)));
+            children.push((
+                ct,
+                rd_u32(block, cp + 4),
+                rd_u32(block, cp + 8),
+                rd_u32(block, cp + 12),
+                rd_u32(block, cp + 16),
+            ));
             cp += HDR;
         }
         let mut t = [0u8; 4];
         t.copy_from_slice(&block[p..p + 4]);
-        rows.push(Row { hdr, tag: t, children });
+        rows.push(Row {
+            hdr,
+            tag: t,
+            children,
+        });
         p = cp;
     }
     let data_area_start = p; // absolute
@@ -135,7 +151,9 @@ pub fn append_placement(
     quat: [f32; 4],
 ) -> Result<Vec<u8>, String> {
     let subs = ucfx_subblocks(block);
-    let &(s, e) = subs.get(template_sub).ok_or("template sub-block out of range")?;
+    let &(s, e) = subs
+        .get(template_sub)
+        .ok_or("template sub-block out of range")?;
     let (_chdr, rows, das) = parse_sub(block, s, e).ok_or("template CHDR parse failed")?;
 
     // The authored per-COMP data bodies for our single entity.
@@ -167,7 +185,11 @@ pub fn append_placement(
     let mut new_rows: Vec<(Row, Vec<Option<u32>>)> = Vec::new(); // (row, per-child new coff)
 
     for row in &rows {
-        let tname = if &row.tag == b"COMP" { comp_type_name(block, das, row) } else { None };
+        let tname = if &row.tag == b"COMP" {
+            comp_type_name(block, das, row)
+        } else {
+            None
+        };
         let mut new_coffs: Vec<Option<u32>> = Vec::with_capacity(row.children.len());
         for &(ct, coff, csz, _u3, _u4) in &row.children {
             // choose the body: rewritten data for our COMPs, else verbatim.
@@ -190,7 +212,11 @@ pub fn append_placement(
             new_coffs.push(Some(nc));
         }
         // clone row (with possibly-updated child sizes)
-        let mut nr = Row { hdr: row.hdr, tag: row.tag, children: row.children.clone() };
+        let mut nr = Row {
+            hdr: row.hdr,
+            tag: row.tag,
+            children: row.children.clone(),
+        };
         // rewrite child csz for the rewritten data children
         for (i, (ct, _coff, csz, u3, u4)) in row.children.iter().enumerate() {
             let new_sz = if &ct[..] == b"data" {
@@ -220,7 +246,7 @@ pub fn append_placement(
     out.extend_from_slice(&block[s..chdr_abs]);
     let chdr_hdr = &block[chdr_abs..chdr_abs + HDR];
     out.extend_from_slice(chdr_hdr); // CHDR 20-byte header (entries count unchanged)
-    // rows: header (20B) + children descriptors (20B each, with new coff/csz)
+                                     // rows: header (20B) + children descriptors (20B each, with new coff/csz)
     for (nr, _) in &new_rows {
         out.extend_from_slice(&nr.hdr);
         for &(ct, coff, csz, u3, u4) in &nr.children {
@@ -256,7 +282,7 @@ pub fn append_placement(
     let mut result = Vec::with_capacity(block.len() + 16 + out.len());
     result.extend_from_slice(&(count + 1).to_le_bytes()); // bumped sub-block count
     result.extend_from_slice(&block[4..table_end]); // original entries
-    // new entry: name = our entity key (unique), type = LAYER, field_c = 0, size = sub-block len
+                                                    // new entry: name = our entity key (unique), type = LAYER, field_c = 0, size = sub-block len
     result.extend_from_slice(&key.to_le_bytes());
     result.extend_from_slice(&LAYER_TYPE.to_le_bytes());
     result.extend_from_slice(&0u32.to_le_bytes());

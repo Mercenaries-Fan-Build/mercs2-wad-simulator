@@ -39,7 +39,11 @@ fn is_transform(block: &[u8], off: usize, key: u32) -> bool {
     if off + REC > block.len() || rd_u32(block, off) != key || rd_u32(block, off + 16) != 0 {
         return false;
     }
-    let (x, y, z) = (rd_f32(block, off + 4), rd_f32(block, off + 8), rd_f32(block, off + 12));
+    let (x, y, z) = (
+        rd_f32(block, off + 4),
+        rd_f32(block, off + 8),
+        rd_f32(block, off + 12),
+    );
     [x, y, z].iter().all(|v| v.is_finite()) && x.abs() < 1.0e5 && y.abs() < 1.0e4 && z.abs() < 1.0e5
 }
 
@@ -116,7 +120,11 @@ fn run() -> i32 {
             return 1;
         }
         for off in hits {
-            let (x, y0, z) = (rd_f32(&block, off + 4), rd_f32(&block, off + 8), rd_f32(&block, off + 12));
+            let (x, y0, z) = (
+                rd_f32(&block, off + 4),
+                rd_f32(&block, off + 8),
+                rd_f32(&block, off + 12),
+            );
             if list {
                 println!("key=0x{key:08X} @{off} pos=({x:.4}, {y0:.4}, {z:.4})");
                 continue;
@@ -148,6 +156,10 @@ fn run() -> i32 {
         eprintln!("write {}: {e}", pos[1]);
         return 1;
     }
-    println!("patched {patched} Transform record(s) -> {} ({} bytes, size unchanged)", pos[1], block.len());
+    println!(
+        "patched {patched} Transform record(s) -> {} ({} bytes, size unchanged)",
+        pos[1],
+        block.len()
+    );
     0
 }

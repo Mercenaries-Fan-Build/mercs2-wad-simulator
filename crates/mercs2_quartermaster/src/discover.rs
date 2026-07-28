@@ -180,29 +180,75 @@ pub struct SourceRef<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceIssue {
     /// Absolute paths are never portable between machines.
-    Absolute { index: usize, kind: &'static str, field: &'static str, path: PathBuf },
+    Absolute {
+        index: usize,
+        kind: &'static str,
+        field: &'static str,
+        path: PathBuf,
+    },
     /// Resolves outside the Shipment root — via `..`, or via a symlink when the file exists.
-    EscapesRoot { index: usize, kind: &'static str, field: &'static str, path: PathBuf },
+    EscapesRoot {
+        index: usize,
+        kind: &'static str,
+        field: &'static str,
+        path: PathBuf,
+    },
     /// Referenced but not present.
-    Missing { index: usize, kind: &'static str, field: &'static str, path: PathBuf },
+    Missing {
+        index: usize,
+        kind: &'static str,
+        field: &'static str,
+        path: PathBuf,
+    },
     /// Present and contained, but not under `src/`. The spec says sources live under `src/`; this is
     /// reported separately because it is a convention, not a safety property.
-    OutsideSrc { index: usize, kind: &'static str, field: &'static str, path: PathBuf },
+    OutsideSrc {
+        index: usize,
+        kind: &'static str,
+        field: &'static str,
+        path: PathBuf,
+    },
 }
 
 impl std::fmt::Display for SourceIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (what, index, kind, field, path) = match self {
-            SourceIssue::Absolute { index, kind, field, path } => {
-                ("is an absolute path (not portable)", index, kind, field, path)
-            }
-            SourceIssue::EscapesRoot { index, kind, field, path } => {
-                ("resolves outside the Shipment root", index, kind, field, path)
-            }
-            SourceIssue::Missing { index, kind, field, path } => ("does not exist", index, kind, field, path),
-            SourceIssue::OutsideSrc { index, kind, field, path } => {
-                ("is not under src/", index, kind, field, path)
-            }
+            SourceIssue::Absolute {
+                index,
+                kind,
+                field,
+                path,
+            } => (
+                "is an absolute path (not portable)",
+                index,
+                kind,
+                field,
+                path,
+            ),
+            SourceIssue::EscapesRoot {
+                index,
+                kind,
+                field,
+                path,
+            } => (
+                "resolves outside the Shipment root",
+                index,
+                kind,
+                field,
+                path,
+            ),
+            SourceIssue::Missing {
+                index,
+                kind,
+                field,
+                path,
+            } => ("does not exist", index, kind, field, path),
+            SourceIssue::OutsideSrc {
+                index,
+                kind,
+                field,
+                path,
+            } => ("is not under src/", index, kind, field, path),
         };
         write!(
             f,
@@ -217,7 +263,9 @@ impl Contribution {
     pub fn sources(&self) -> Vec<(&'static str, &Path)> {
         let mut out: Vec<(&'static str, &Path)> = Vec::new();
         match self {
-            Contribution::AddOutfit { model, textures, .. } => {
+            Contribution::AddOutfit {
+                model, textures, ..
+            } => {
                 out.push(("model", model.as_path()));
                 if let Some(p) = &textures.diffuse {
                     out.push(("textures.diffuse", p.as_path()));
@@ -252,9 +300,12 @@ pub fn source_refs(manifest: &Manifest) -> Vec<SourceRef<'_>> {
         .enumerate()
         .flat_map(|(index, c)| {
             let kind = c.kind();
-            c.sources()
-                .into_iter()
-                .map(move |(field, path)| SourceRef { index, kind, field, path })
+            c.sources().into_iter().map(move |(field, path)| SourceRef {
+                index,
+                kind,
+                field,
+                path,
+            })
         })
         .collect()
 }
@@ -286,18 +337,39 @@ fn normalize_within(rel: &Path) -> Option<PathBuf> {
 /// never short-circuits, because an author fixing their manifest wants the whole list.
 pub fn check_sources(manifest: &Manifest, root: &Path) -> Vec<SourceIssue> {
     let mut issues = Vec::new();
-    for SourceRef { index, kind, field, path } in source_refs(manifest) {
+    for SourceRef {
+        index,
+        kind,
+        field,
+        path,
+    } in source_refs(manifest)
+    {
         if path.is_absolute() {
-            issues.push(SourceIssue::Absolute { index, kind, field, path: path.to_path_buf() });
+            issues.push(SourceIssue::Absolute {
+                index,
+                kind,
+                field,
+                path: path.to_path_buf(),
+            });
             continue;
         }
         let Some(normalized) = normalize_within(path) else {
-            issues.push(SourceIssue::EscapesRoot { index, kind, field, path: path.to_path_buf() });
+            issues.push(SourceIssue::EscapesRoot {
+                index,
+                kind,
+                field,
+                path: path.to_path_buf(),
+            });
             continue;
         };
         let full = root.join(&normalized);
         if !full.exists() {
-            issues.push(SourceIssue::Missing { index, kind, field, path: path.to_path_buf() });
+            issues.push(SourceIssue::Missing {
+                index,
+                kind,
+                field,
+                path: path.to_path_buf(),
+            });
             continue;
         }
         // The lexical check above cannot see a symlink that points outward; this can.
@@ -314,7 +386,12 @@ pub fn check_sources(manifest: &Manifest, root: &Path) -> Vec<SourceIssue> {
             }
         }
         if !normalized.starts_with("src") {
-            issues.push(SourceIssue::OutsideSrc { index, kind, field, path: path.to_path_buf() });
+            issues.push(SourceIssue::OutsideSrc {
+                index,
+                kind,
+                field,
+                path: path.to_path_buf(),
+            });
         }
     }
     issues
@@ -326,8 +403,14 @@ mod tests {
 
     #[test]
     fn normalize_resolves_dot_and_parent() {
-        assert_eq!(normalize_within(Path::new("src/./a.png")), Some(PathBuf::from("src/a.png")));
-        assert_eq!(normalize_within(Path::new("src/x/../a.png")), Some(PathBuf::from("src/a.png")));
+        assert_eq!(
+            normalize_within(Path::new("src/./a.png")),
+            Some(PathBuf::from("src/a.png"))
+        );
+        assert_eq!(
+            normalize_within(Path::new("src/x/../a.png")),
+            Some(PathBuf::from("src/a.png"))
+        );
     }
 
     #[test]

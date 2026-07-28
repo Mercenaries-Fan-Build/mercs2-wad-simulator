@@ -81,7 +81,10 @@ impl SafeSlice {
                 buffer_len: self.data.len(),
             });
         }
-        Ok(u16::from_le_bytes([self.data[offset], self.data[offset + 1]]))
+        Ok(u16::from_le_bytes([
+            self.data[offset],
+            self.data[offset + 1],
+        ]))
     }
 
     pub fn read_u32_le(&self, offset: usize, field: &str) -> AccessResult<u32> {

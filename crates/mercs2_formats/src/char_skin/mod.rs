@@ -18,9 +18,9 @@
 
 pub mod automap;
 pub mod build;
+pub mod donor_transfer;
 pub mod mat;
 pub mod transfer;
-pub mod donor_transfer;
 pub mod validate;
 
 pub use build::{
@@ -34,10 +34,15 @@ use crate::skeleton::Skeleton;
 pub(crate) fn ortho3_colvec(m: [f64; 9]) -> Option<[f64; 9]> {
     let row = |i: usize| [m[i * 3], m[i * 3 + 1], m[i * 3 + 2]];
     let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    let sub = |a: [f64; 3], b: [f64; 3], s: f64| [a[0] - b[0] * s, a[1] - b[1] * s, a[2] - b[2] * s];
+    let sub =
+        |a: [f64; 3], b: [f64; 3], s: f64| [a[0] - b[0] * s, a[1] - b[1] * s, a[2] - b[2] * s];
     let normed = |a: [f64; 3]| {
         let n = dot(a, a).sqrt();
-        if n < 1e-9 { None } else { Some([a[0] / n, a[1] / n, a[2] / n]) }
+        if n < 1e-9 {
+            None
+        } else {
+            Some([a[0] / n, a[1] / n, a[2] / n])
+        }
     };
     let u0 = normed(row(0))?;
     let mut r1 = row(1);
@@ -47,7 +52,9 @@ pub(crate) fn ortho3_colvec(m: [f64; 9]) -> Option<[f64; 9]> {
     r2 = sub(r2, u0, dot(r2, u0));
     r2 = sub(r2, u1, dot(r2, u1));
     let u2 = normed(r2)?;
-    Some([u0[0], u0[1], u0[2], u1[0], u1[1], u1[2], u2[0], u2[1], u2[2]])
+    Some([
+        u0[0], u0[1], u0[2], u1[0], u1[1], u1[2], u2[0], u2[1], u2[2],
+    ])
 }
 
 impl TargetSkeleton {
@@ -70,9 +77,15 @@ impl TargetSkeleton {
                 // 3x3, then Gram-Schmidt'd to a clean rotation (bind matrices can carry scale).
                 let m = b.bind_world.unwrap_or(b.world);
                 let rot = ortho3_colvec([
-                    m[0][0] as f64, m[1][0] as f64, m[2][0] as f64,
-                    m[0][1] as f64, m[1][1] as f64, m[2][1] as f64,
-                    m[0][2] as f64, m[1][2] as f64, m[2][2] as f64,
+                    m[0][0] as f64,
+                    m[1][0] as f64,
+                    m[2][0] as f64,
+                    m[0][1] as f64,
+                    m[1][1] as f64,
+                    m[2][1] as f64,
+                    m[0][2] as f64,
+                    m[1][2] as f64,
+                    m[2][2] as f64,
                 ]);
                 TargetBone {
                     i: i as u32,
@@ -97,23 +110,90 @@ impl TargetSkeleton {
 /// `Bone_Hips`). Resolve an automap index onto ANY target skeleton BY NAME via [`npc84_bone_name`]
 /// rather than trusting the raw index. Unnamed NPC-84 slots (`hash_*`) are never emitted by automap.
 pub const NPC84_NAMES: [&str; 84] = [
-    "GlobalSRT", "Bone_Attach_Root", "bone_root", "Bone_Hips", "hash_1C2E8837", "hash_629B2990",
-    "Bone_LThigh", "Bone_LShin", "Bone_LFootBone1", "Bone_LFootBone2", "Bone_RThigh", "Bone_RShin",
-    "Bone_RFootBone1", "Bone_RFootBone2", "bone_spine1", "Bone_Spine2", "Bone_Chest",
-    "hash_3846CB35", "hash_DF2D0826", "bone_attach_chest", "bone_neck", "Bone_Head",
-    "bone_nose_right", "bone_nose_left", "bone_mouth_top_right", "bone_mouth_top_left",
-    "bone_mouth_corner_right", "bone_mouth_corner_left", "bone_eyelid_top_right",
-    "bone_eyelid_top_left", "bone_eyebrow_right", "bone_eyebrow_left", "bone_eyebrow_center",
-    "bone_eyeball_right", "bone_eyeball_left", "bone_cheek_left", "bone_cheek_right",
-    "bone_brow_center", "bone_jaw", "bone_tongue_tip", "bone_mouth_bottom_right",
-    "bone_mouth_bottom_left", "bone_lshoulder", "Bone_LBicep", "Bone_LForearm", "bone_lforearmroll",
-    "bone_lhand", "bone_attach_lhand", "bone_lindex1", "bone_lindex2", "bone_lindex3",
-    "bone_lmiddle1", "bone_lmiddle2", "bone_lmiddle3", "bone_lpinky1", "bone_lpinky2", "bone_lpinky3",
-    "bone_lring1", "bone_lring2", "bone_lring3", "bone_lthumb1", "bone_lthumb2", "bone_lthumb3",
-    "bone_rshoulder", "Bone_RBicep", "Bone_RForearm", "bone_rforearmroll", "bone_rhand",
-    "bone_attach_rhand", "bone_rindex1", "bone_rindex2", "bone_rindex3", "bone_rmiddle1",
-    "bone_rmiddle2", "bone_rmiddle3", "bone_rpinky1", "bone_rpinky2", "bone_rpinky3", "bone_rring1",
-    "bone_rring2", "bone_rring3", "bone_rthumb1", "bone_rthumb2", "bone_rthumb3",
+    "GlobalSRT",
+    "Bone_Attach_Root",
+    "bone_root",
+    "Bone_Hips",
+    "hash_1C2E8837",
+    "hash_629B2990",
+    "Bone_LThigh",
+    "Bone_LShin",
+    "Bone_LFootBone1",
+    "Bone_LFootBone2",
+    "Bone_RThigh",
+    "Bone_RShin",
+    "Bone_RFootBone1",
+    "Bone_RFootBone2",
+    "bone_spine1",
+    "Bone_Spine2",
+    "Bone_Chest",
+    "hash_3846CB35",
+    "hash_DF2D0826",
+    "bone_attach_chest",
+    "bone_neck",
+    "Bone_Head",
+    "bone_nose_right",
+    "bone_nose_left",
+    "bone_mouth_top_right",
+    "bone_mouth_top_left",
+    "bone_mouth_corner_right",
+    "bone_mouth_corner_left",
+    "bone_eyelid_top_right",
+    "bone_eyelid_top_left",
+    "bone_eyebrow_right",
+    "bone_eyebrow_left",
+    "bone_eyebrow_center",
+    "bone_eyeball_right",
+    "bone_eyeball_left",
+    "bone_cheek_left",
+    "bone_cheek_right",
+    "bone_brow_center",
+    "bone_jaw",
+    "bone_tongue_tip",
+    "bone_mouth_bottom_right",
+    "bone_mouth_bottom_left",
+    "bone_lshoulder",
+    "Bone_LBicep",
+    "Bone_LForearm",
+    "bone_lforearmroll",
+    "bone_lhand",
+    "bone_attach_lhand",
+    "bone_lindex1",
+    "bone_lindex2",
+    "bone_lindex3",
+    "bone_lmiddle1",
+    "bone_lmiddle2",
+    "bone_lmiddle3",
+    "bone_lpinky1",
+    "bone_lpinky2",
+    "bone_lpinky3",
+    "bone_lring1",
+    "bone_lring2",
+    "bone_lring3",
+    "bone_lthumb1",
+    "bone_lthumb2",
+    "bone_lthumb3",
+    "bone_rshoulder",
+    "Bone_RBicep",
+    "Bone_RForearm",
+    "bone_rforearmroll",
+    "bone_rhand",
+    "bone_attach_rhand",
+    "bone_rindex1",
+    "bone_rindex2",
+    "bone_rindex3",
+    "bone_rmiddle1",
+    "bone_rmiddle2",
+    "bone_rmiddle3",
+    "bone_rpinky1",
+    "bone_rpinky2",
+    "bone_rpinky3",
+    "bone_rring1",
+    "bone_rring2",
+    "bone_rring3",
+    "bone_rthumb1",
+    "bone_rthumb2",
+    "bone_rthumb3",
 ];
 
 /// The canonical NPC-84 bone name for an automap HIER index (see [`NPC84_NAMES`]).
@@ -153,7 +233,10 @@ pub fn patch_skin_info56(info: &mut [u8], ranges: &[(u16, u16)]) -> Result<(), S
         return Err(format!("INFO leaf is {} bytes, need >= 56", info.len()));
     }
     if ranges.is_empty() || ranges.len() > 8 {
-        return Err(format!("range_count {} out of the reader's 1..=8 gate", ranges.len()));
+        return Err(format!(
+            "range_count {} out of the reader's 1..=8 gate",
+            ranges.len()
+        ));
     }
     info[20..24].copy_from_slice(&(ranges.len() as u32).to_le_bytes());
     let mut o = 24;

@@ -19,88 +19,88 @@ pub enum ChunkTag {
     Hier,      // "HIER"
     Prmg,      // "PRMG"
     Mtrl,      // "MTRL"
-    Area,      // "AREA" (mesh sub-area container; consumed by Mesh_ConsumeChunk @0x478366 → 0x4a4ab0)
+    Area, // "AREA" (mesh sub-area container; consumed by Mesh_ConsumeChunk @0x478366 → 0x4a4ab0)
     InfoUpper, // "INFO" (different from lowercase "info")
-    Body,      // "BODY"
-    Chdr,      // "CHDR"
-    Stat,      // "STAT"
+    Body, // "BODY"
+    Chdr, // "CHDR"
+    Stat, // "STAT"
 
     // GEOM internals
-    Swit,      // "SWIT"
-    Prmt,      // "PRMT"
-    Cexe,      // "CEXE"
-    Enum,      // "enum"
-    Flgt,      // "flgt"
-    Indx,      // "INDX" (inside GEOM, not FFCS-level)
+    Swit, // "SWIT"
+    Prmt, // "PRMT"
+    Cexe, // "CEXE"
+    Enum, // "enum"
+    Flgt, // "flgt"
+    Indx, // "INDX" (inside GEOM, not FFCS-level)
 
     // Stringdb — body is natively BE on ALL platforms
-    Syek,      // "SYEK"
-    Srts,      // "SRTS"
+    Syek, // "SYEK"
+    Srts, // "SRTS"
 
     // Sequence / precache / shader
-    Sequ,      // "sequ"
-    Sinf,      // "SINF"
-    Item,      // "ITEM"
-    Cerp,      // "CERP"
-    Scrb,      // "SCRB"
+    Sequ, // "sequ"
+    Sinf, // "SINF"
+    Item, // "ITEM"
+    Cerp, // "CERP"
+    Scrb, // "SCRB"
 
     // ECS / entity metadata
-    Name,      // "NAME"
-    Strs,      // "STRS"
-    Trns,      // "TRNS"
-    Ainf,      // "AINF"
-    Uniq,      // "UNIQ"
+    Name, // "NAME"
+    Strs, // "STRS"
+    Trns, // "TRNS"
+    Ainf, // "AINF"
+    Uniq, // "UNIQ"
 
     // Anim state machine
-    Stns,      // "stns"
-    Actn,      // "actn"
+    Stns, // "stns"
+    Actn, // "actn"
 
     // FX dictionary
-    Dict,      // "DICT"
+    Dict, // "DICT"
 
     // Dependency list
-    Deps,      // "DEPS"
+    Deps, // "DEPS"
 
     // Skinned mesh marker + resident watermap
-    Skin,      // "SKIN"
-    Watr,      // "watr"
+    Skin, // "SKIN"
+    Watr, // "watr"
 
     // UCFX asset chunks dispatched by the engine but previously unregistered
     // (see tag_registry.rs / docs/ucfx_tag_registry.md for handler addresses).
-    Asto, // "ASTO"
-    Atrb, // "ATRB"
-    Binn, // "BINN" (Lua bytecode container; transcoded, not byte-swapped)
-    Bshi, // "BSHI"
-    Bshp, // "BSHP"
-    Char, // "CHAR" (renderable sub-chunk; consumer FUN_004ac8e0)
-    Colr, // "COLR"
-    Damg, // "DAMG"
+    Asto,      // "ASTO"
+    Atrb,      // "ATRB"
+    Binn,      // "BINN" (Lua bytecode container; transcoded, not byte-swapped)
+    Bshi,      // "BSHI"
+    Bshp,      // "BSHP"
+    Char,      // "CHAR" (renderable sub-chunk; consumer FUN_004ac8e0)
+    Colr,      // "COLR"
+    Damg,      // "DAMG"
     DataUpper, // "DATA"
-    Debr, // "DEBR"
+    Debr,      // "DEBR"
     DeclUpper, // "DECL"
-    Emit, // "EMIT"
-    Emtr, // "EMTR"
-    Frce, // "FRCE"
-    Inst, // "INST"
-    Keys, // "KEYS"
-    Manm, // "MANM"
-    Mesh, // "MESH"
-    Minf, // "MINF"
-    Node, // "NODE"
-    Part, // "PART"
-    Phy2, // "PHY2"
-    Poff, // "POFF"
-    Ptch, // "PTCH"
-    Ptms, // "PTMS"
-    Ptyp, // "PTYP"
-    Soun, // "SOUN"
-    Text, // "TEXT"
-    Tiny, // "TINY"
-    Trck, // "TRCK"
-    Tree, // "TREE"
-    Trfm, // "TRFM"
-    Type, // "TYPE"
-    Valu, // "VALU"
+    Emit,      // "EMIT"
+    Emtr,      // "EMTR"
+    Frce,      // "FRCE"
+    Inst,      // "INST"
+    Keys,      // "KEYS"
+    Manm,      // "MANM"
+    Mesh,      // "MESH"
+    Minf,      // "MINF"
+    Node,      // "NODE"
+    Part,      // "PART"
+    Phy2,      // "PHY2"
+    Poff,      // "POFF"
+    Ptch,      // "PTCH"
+    Ptms,      // "PTMS"
+    Ptyp,      // "PTYP"
+    Soun,      // "SOUN"
+    Text,      // "TEXT"
+    Tiny,      // "TINY"
+    Trck,      // "TRCK"
+    Tree,      // "TREE"
+    Trfm,      // "TRFM"
+    Type,      // "TYPE"
+    Valu,      // "VALU"
     TrnsLower, // "trns"
 
     // Unknown tag (carries raw bytes for diagnostics)
@@ -288,9 +288,16 @@ impl ChunkTag {
 impl std::fmt::Display for ChunkTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let bytes = self.as_bytes();
-        let s: String = bytes.iter().map(|&b| {
-            if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' }
-        }).collect();
+        let s: String = bytes
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '?'
+                }
+            })
+            .collect();
         write!(f, "{}", s)
     }
 }

@@ -238,7 +238,11 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
 /// serde feature that formats disagree about. Exercise it everywhere too.
 #[test]
 fn requires_dual_form_agrees_across_formats() {
-    for (text, fmt) in [(YAML, Format::Yaml), (JSON, Format::Json), (TOML, Format::Toml)] {
+    for (text, fmt) in [
+        (YAML, Format::Yaml),
+        (JSON, Format::Json),
+        (TOML, Format::Toml),
+    ] {
         let m = from_str(text, fmt).unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
         assert_eq!(m.load.requires.len(), 2, "{fmt:?}");
         assert!(
@@ -259,7 +263,10 @@ fn requires_dual_form_agrees_across_formats() {
 #[test]
 fn contribution_order_is_preserved() {
     let m = from_str(YAML, Format::Yaml).unwrap();
-    assert_eq!(m.contributions.first().map(|c| c.kind()), Some("add_outfit"));
+    assert_eq!(
+        m.contributions.first().map(|c| c.kind()),
+        Some("add_outfit")
+    );
     assert_eq!(m.contributions.last().map(|c| c.kind()), Some("raw"));
 }
 
@@ -296,10 +303,16 @@ fn minimal(target: &str, name: &str, format: u32) -> String {
 /// Direction matters: NEWER than known is the reject; older is accepted.
 #[test]
 fn a_future_format_version_is_loudly_rejected() {
-    let err = from_str(&minimal("retail", "ok-name", FORMAT_VERSION + 1), Format::Yaml)
-        .expect_err("a future format must be rejected");
+    let err = from_str(
+        &minimal("retail", "ok-name", FORMAT_VERSION + 1),
+        Format::Yaml,
+    )
+    .expect_err("a future format must be rejected");
     let msg = err.to_string();
-    assert!(msg.contains("refusing to guess"), "unhelpful message: {msg}");
+    assert!(
+        msg.contains("refusing to guess"),
+        "unhelpful message: {msg}"
+    );
 }
 
 #[test]
@@ -312,12 +325,22 @@ fn target_both_is_rejected_by_name() {
     let err = from_str(&minimal("both", "ok-name", 1), Format::Yaml)
         .expect_err("target: both is reserved in v1");
     let msg = err.to_string();
-    assert!(msg.contains("reserved"), "should explain, not just fail: {msg}");
+    assert!(
+        msg.contains("reserved"),
+        "should explain, not just fail: {msg}"
+    );
 }
 
 #[test]
 fn shipment_name_must_be_a_slug() {
-    for bad in ["Sean_Devlin", "sean devlin", "-leading", "trailing-", "double--hyphen", ""] {
+    for bad in [
+        "Sean_Devlin",
+        "sean devlin",
+        "-leading",
+        "trailing-",
+        "double--hyphen",
+        "",
+    ] {
         assert!(
             from_str(&minimal("retail", &format!("{bad:?}"), 1), Format::Yaml).is_err(),
             "{bad:?} should not be a valid shipment name"

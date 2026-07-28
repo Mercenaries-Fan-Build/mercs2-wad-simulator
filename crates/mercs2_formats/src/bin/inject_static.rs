@@ -24,7 +24,11 @@ fn rd_f32(d: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]])
 }
 fn parse_hash(s: &str) -> Option<u32> {
-    u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+    u32::from_str_radix(
+        s.trim().trim_start_matches("0x").trim_start_matches("0X"),
+        16,
+    )
+    .ok()
 }
 
 fn main() {
@@ -41,8 +45,8 @@ fn run() -> i32 {
     let mut all = false; // --all-groups: inject the mesh into EVERY drawing group (guarantees visibility)
     let mut raw_targets: Vec<usize> = Vec::new(); // --raw-groups N,M,...: inject into these RAW group ordinals (the engine's rendered set)
     let mut scale_mult = 1.0f32; // --scale S: multiply the auto-fit scale (1.0 = exact fit to real body envelope)
-    // --neutralize-only: host no geometry, empty EVERY drawing group. Used on a vehicle's finer LOD
-    // rungs (_P001_/_P002_) so the template's near-tier geometry can't draw over the conformed mesh.
+                                 // --neutralize-only: host no geometry, empty EVERY drawing group. Used on a vehicle's finer LOD
+                                 // rungs (_P001_/_P002_) so the template's near-tier geometry can't draw over the conformed mesh.
     let mut neutralize_only = false;
     let mut it = argv.iter();
     while let Some(a) = it.next() {
@@ -72,7 +76,11 @@ fn run() -> i32 {
             "--raw-groups" => {
                 raw_targets = it
                     .next()
-                    .map(|s| s.split(',').filter_map(|x| x.trim().parse::<usize>().ok()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .filter_map(|x| x.trim().parse::<usize>().ok())
+                            .collect()
+                    })
                     .unwrap_or_default()
             }
             s => pos.push(s.to_string()),
@@ -86,7 +94,10 @@ fn run() -> i32 {
     // ---- template: raw UCFX -> wrap in a 20-byte WAD block for the injector ----
     let ucfx = match std::fs::read(&pos[0]) {
         Ok(b) => b,
-        Err(e) => { eprintln!("read {}: {e}", pos[0]); return 1; }
+        Err(e) => {
+            eprintln!("read {}: {e}", pos[0]);
+            return 1;
+        }
     };
     if ucfx.len() < 8 || &ucfx[0..4] != b"UCFX" {
         eprintln!("{} is not a raw UCFX container", pos[0]);
@@ -103,7 +114,10 @@ fn run() -> i32 {
     // ---- mesh blob -> ExternalMesh ----
     let d = match std::fs::read(&pos[1]) {
         Ok(b) => b,
-        Err(e) => { eprintln!("read {}: {e}", pos[1]); return 1; }
+        Err(e) => {
+            eprintln!("read {}: {e}", pos[1]);
+            return 1;
+        }
     };
     if d.len() < 12 || &d[0..4] != b"MESH" {
         eprintln!("{} is not a MESH blob", pos[1]);
@@ -113,29 +127,65 @@ fn run() -> i32 {
     let nt = rd_u32(&d, 8) as usize;
     let mut o = 12;
     let mut positions = Vec::with_capacity(nv);
-    for _ in 0..nv { positions.push([rd_f32(&d, o), rd_f32(&d, o + 4), rd_f32(&d, o + 8)]); o += 12; }
+    for _ in 0..nv {
+        positions.push([rd_f32(&d, o), rd_f32(&d, o + 4), rd_f32(&d, o + 8)]);
+        o += 12;
+    }
     let mut normals = Vec::with_capacity(nv);
-    for _ in 0..nv { normals.push([rd_f32(&d, o), rd_f32(&d, o + 4), rd_f32(&d, o + 8)]); o += 12; }
+    for _ in 0..nv {
+        normals.push([rd_f32(&d, o), rd_f32(&d, o + 4), rd_f32(&d, o + 8)]);
+        o += 12;
+    }
     let mut uvs = Vec::with_capacity(nv);
-    for _ in 0..nv { uvs.push([rd_f32(&d, o), rd_f32(&d, o + 4)]); o += 8; }
+    for _ in 0..nv {
+        uvs.push([rd_f32(&d, o), rd_f32(&d, o + 4)]);
+        o += 8;
+    }
     let mut tris = Vec::with_capacity(nt);
-    for _ in 0..nt { tris.push([rd_u32(&d, o), rd_u32(&d, o + 4), rd_u32(&d, o + 8)]); o += 12; }
+    for _ in 0..nt {
+        tris.push([rd_u32(&d, o), rd_u32(&d, o + 4), rd_u32(&d, o + 8)]);
+        o += 12;
+    }
 
-    let mesh = ExternalMesh { positions, normals, uvs, tris, joints: vec![], weights: vec![] };
+    let mesh = ExternalMesh {
+        positions,
+        normals,
+        uvs,
+        tris,
+        joints: vec![],
+        weights: vec![],
+    };
     let repoints: Vec<MtrlRepoint> = match (df, dt) {
         (Some(from), Some(to)) => vec![MtrlRepoint { from, to }],
         _ => vec![],
     };
 
     // ---- inject, then unwrap the block back to raw UCFX ----
-    let (out_block, stats) = match inject_static_into_donor_block(&block, &mesh, group, &repoints, name_hash, fit, flip, keep, all, &raw_targets, scale_mult, neutralize_only) {
+    let (out_block, stats) = match inject_static_into_donor_block(
+        &block,
+        &mesh,
+        group,
+        &repoints,
+        name_hash,
+        fit,
+        flip,
+        keep,
+        all,
+        &raw_targets,
+        scale_mult,
+        neutralize_only,
+    ) {
         Ok(v) => v,
-        Err(e) => { eprintln!("inject_static: {e}"); return 1; }
+        Err(e) => {
+            eprintln!("inject_static: {e}");
+            return 1;
+        }
     };
     let out_ucfx_len = rd_u32(&out_block, 16) as usize;
     let out_ucfx = &out_block[20..20 + out_ucfx_len];
     if let Err(e) = std::fs::write(&pos[2], out_ucfx) {
-        eprintln!("write {}: {e}", pos[2]); return 1;
+        eprintln!("write {}: {e}", pos[2]);
+        return 1;
     }
     if neutralize_only {
         println!(

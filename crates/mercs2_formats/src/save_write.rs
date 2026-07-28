@@ -252,7 +252,11 @@ mod tests {
             assert_eq!(p2.cash, p.cash, "{name}: cash");
             assert_eq!(p2.fuel, p.fuel, "{name}: fuel");
             assert_eq!(p2.timestamp, p.timestamp, "{name}: timestamp");
-            assert_eq!(p2.active_contract(), p.active_contract(), "{name}: contract");
+            assert_eq!(
+                p2.active_contract(),
+                p.active_contract(),
+                "{name}: contract"
+            );
             assert_eq!(p2.save_name(), p.save_name(), "{name}: save_name");
             assert_eq!(p2.character_index, p.character_index, "{name}: hero");
             assert_eq!(p2.upgrade_index, p.upgrade_index, "{name}: upgrade");
@@ -290,7 +294,10 @@ mod tests {
         assert!(p2.hash_ok(), "re-payloaded save must have a valid hash");
         // The inflated Lua is identical, even though the deflate bytes differ.
         assert_eq!(p2.decompress_lua().unwrap(), lua);
-        assert_eq!(p2.save_state().unwrap().layers, p.save_state().unwrap().layers);
+        assert_eq!(
+            p2.save_state().unwrap().layers,
+            p.save_state().unwrap().layers
+        );
     }
 
     #[test]

@@ -91,25 +91,42 @@ pub struct Destruction {
 
 impl Destruction {
     pub fn state_of_node(&self, node: usize) -> Option<DestructionState> {
-        self.nodes.iter().find(|n| n.hier_node == node).map(|n| n.state)
+        self.nodes
+            .iter()
+            .find(|n| n.hier_node == node)
+            .map(|n| n.state)
     }
     /// State of the mesh at MESH-order index `mesh_group` (via INDX → node).
     pub fn state_of_mesh(&self, mesh_group: usize) -> Option<DestructionState> {
-        self.indx.get(mesh_group).and_then(|&n| self.state_of_node(n))
+        self.indx
+            .get(mesh_group)
+            .and_then(|&n| self.state_of_node(n))
     }
 }
 
 #[inline]
 fn u32_le(b: &[u8], o: usize) -> u32 {
-    if o + 4 <= b.len() { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) } else { 0 }
+    if o + 4 <= b.len() {
+        u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+    } else {
+        0
+    }
 }
 #[inline]
 fn u16_le(b: &[u8], o: usize) -> u16 {
-    if o + 2 <= b.len() { u16::from_le_bytes([b[o], b[o + 1]]) } else { 0 }
+    if o + 2 <= b.len() {
+        u16::from_le_bytes([b[o], b[o + 1]])
+    } else {
+        0
+    }
 }
 #[inline]
 fn f32_le(b: &[u8], o: usize) -> f32 {
-    if o + 4 <= b.len() { f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) } else { 0.0 }
+    if o + 4 <= b.len() {
+        f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+    } else {
+        0.0
+    }
 }
 
 /// Flat walk of a UCFX container's 20-byte descriptor table, returning every
@@ -143,7 +160,10 @@ fn leaf_chunks(buf: &[u8]) -> Vec<([u8; 4], usize, usize)> {
 }
 
 fn find_chunk<'a>(chunks: &'a [([u8; 4], usize, usize)], tag: &[u8; 4]) -> Option<(usize, usize)> {
-    chunks.iter().find(|(t, _, _)| t == tag).map(|(_, o, s)| (*o, *s))
+    chunks
+        .iter()
+        .find(|(t, _, _)| t == tag)
+        .map(|(_, o, s)| (*o, *s))
 }
 
 /// Parse the first `HIER` chunk into 176-byte node records.
@@ -168,8 +188,16 @@ pub fn parse_hier(buf: &[u8]) -> Vec<HierNode> {
                 hash: u32_le(buf, o),
                 parent: (parent != 0xFFFF).then_some(parent as usize),
                 local,
-                bbox_min: [f32_le(buf, o + 144), f32_le(buf, o + 148), f32_le(buf, o + 152)],
-                bbox_max: [f32_le(buf, o + 160), f32_le(buf, o + 164), f32_le(buf, o + 168)],
+                bbox_min: [
+                    f32_le(buf, o + 144),
+                    f32_le(buf, o + 148),
+                    f32_le(buf, o + 152),
+                ],
+                bbox_max: [
+                    f32_le(buf, o + 160),
+                    f32_le(buf, o + 164),
+                    f32_le(buf, o + 168),
+                ],
             }
         })
         .collect()
@@ -260,9 +288,8 @@ pub fn parse_state_machine(buf: &[u8]) -> Option<StateMachine> {
         out
     };
     // The family parent: the container whose immediate children include a NODE row.
-    let parent = (0..rows.len()).find(|&p| {
-        rows[p].u3 > 0 && children_of(p).iter().any(|&c| &rows[c].tag == b"NODE")
-    })?;
+    let parent = (0..rows.len())
+        .find(|&p| rows[p].u3 > 0 && children_of(p).iter().any(|&c| &rows[c].tag == b"NODE"))?;
 
     let mut sm = StateMachine::default();
     let mut switch_count = 0usize;
@@ -292,7 +319,10 @@ pub fn parse_state_machine(buf: &[u8]) -> Option<StateMachine> {
             }
             b"STAT" if d.len() >= 4 => {
                 if let Some(n) = sm.nodes.last_mut() {
-                    n.states.push(StateDef { name_hash: u32_le(d, 0), ..Default::default() });
+                    n.states.push(StateDef {
+                        name_hash: u32_le(d, 0),
+                        ..Default::default()
+                    });
                 }
             }
             b"CHDR" if d.len() >= 8 => {
@@ -318,7 +348,11 @@ pub fn parse_state_machine(buf: &[u8]) -> Option<StateMachine> {
                 }
             }
             b"SWIT" => {
-                let n = if switch_count > 0 { switch_count.min(d.len() / 4) } else { d.len() / 4 };
+                let n = if switch_count > 0 {
+                    switch_count.min(d.len() / 4)
+                } else {
+                    d.len() / 4
+                };
                 sm.switch_slots = (0..n).map(|i| u32_le(d, i * 4)).collect();
             }
             _ => {}
@@ -366,7 +400,9 @@ pub fn decode_script(list: &[u32], resolve: impl Fn(u32) -> String) -> String {
 /// Falls back to state 0 when the pattern is absent.
 pub fn default_state_index(node: &SwitchNodeDef) -> usize {
     let setstate = crate::hash::pandemic_hash_m2("setstate");
-    let Some(first) = node.states.first() else { return 0 };
+    let Some(first) = node.states.first() else {
+        return 0;
+    };
     let mut args: Vec<u32> = Vec::new();
     let l = &first.enter;
     let mut i = 0;
@@ -445,7 +481,9 @@ fn simulate_node_state(node: &SwitchNodeDef, delivered: &std::collections::HashS
     let find = |t: u32| node.states.iter().position(|s| s.name_hash == t);
     let mut cur = default_state_index(node);
     for _ in 0..node.states.len() * 2 + 4 {
-        let Some(state) = node.states.get(cur) else { break };
+        let Some(state) = node.states.get(cur) else {
+            break;
+        };
         let (mut terminal, mut passthrough, mut minor) = (None, None, None);
         for (cmd, args) in commands(&state.enter) {
             if cmd == setstate {
@@ -483,7 +521,9 @@ pub fn damage_messages(sm: &StateMachine) -> (Vec<u32>, Vec<u32>) {
     let mut terminal: Vec<u32> = Vec::new();
     let mut minor: Vec<u32> = Vec::new();
     for node in &sm.nodes {
-        let Some(pristine) = node.states.get(default_state_index(node)) else { continue };
+        let Some(pristine) = node.states.get(default_state_index(node)) else {
+            continue;
+        };
         for (cmd, args) in commands(&pristine.enter) {
             if cmd != setstateonmsg {
                 continue;
@@ -535,7 +575,10 @@ pub fn node_states_for_delivered(
     sm: &StateMachine,
     delivered: &std::collections::HashSet<u32>,
 ) -> Vec<usize> {
-    sm.nodes.iter().map(|n| simulate_node_state(n, delivered)).collect()
+    sm.nodes
+        .iter()
+        .map(|n| simulate_node_state(n, delivered))
+        .collect()
 }
 
 /// The `(command_hash, args)` pairs of a state's **enter** script, in order.
@@ -604,7 +647,10 @@ pub fn machine_node_enable_seeded(
     seed: NodeSeed,
     scope: NodeScope,
 ) -> Vec<bool> {
-    machine_node_hidden(sm, hier, chosen, seed, scope).into_iter().map(|h| !h).collect()
+    machine_node_hidden(sm, hier, chosen, seed, scope)
+        .into_iter()
+        .map(|h| !h)
+        .collect()
 }
 
 /// Per-mesh-group visibility: [`machine_node_enable`] resolved through `INDX` (mesh group → HIER
@@ -616,7 +662,9 @@ pub fn machine_group_visibility(
     chosen: &[usize],
 ) -> Vec<bool> {
     let hidden = machine_node_hidden(sm, hier, chosen, NodeSeed::default(), NodeScope::default());
-    indx.iter().map(|&n| hidden.get(n).map(|h| !h).unwrap_or(true)).collect()
+    indx.iter()
+        .map(|&n| hidden.get(n).map(|h| !h).unwrap_or(true))
+        .collect()
 }
 
 fn machine_node_hidden(
@@ -667,7 +715,9 @@ fn machine_node_hidden(
             .copied()
             .unwrap_or(0)
             .min(node.states.len().saturating_sub(1));
-        let Some(st) = node.states.get(si) else { continue };
+        let Some(st) = node.states.get(si) else {
+            continue;
+        };
         let mut args: Vec<u32> = Vec::new();
         let l = &st.enter;
         let mut i = 0;
@@ -723,7 +773,9 @@ pub fn parse_indx(buf: &[u8]) -> Vec<usize> {
     let Some((off, size)) = find_chunk(&chunks, b"INDX") else {
         return Vec::new();
     };
-    (0..size / 2).map(|i| u16_le(buf, off + i * 2) as usize).collect()
+    (0..size / 2)
+        .map(|i| u16_le(buf, off + i * 2) as usize)
+        .collect()
 }
 
 /// Parse `SEGM` → the **collision/segment node indices** in first-appearance
@@ -805,15 +857,26 @@ pub fn grounded_hulls(buf: &[u8]) -> Vec<GroundedHull> {
     let mut hi = 0;
     for (_, pf) in &packfiles {
         for hull in pf.hulls() {
-            let node = collision.get(hi).copied().unwrap_or(0).min(hier.len().saturating_sub(1));
+            let node = collision
+                .get(hi)
+                .copied()
+                .unwrap_or(0)
+                .min(hier.len().saturating_sub(1));
             let m = world.get(node).copied().unwrap_or_else(|| {
                 let mut id = [0.0; 16];
-                id[0] = 1.0; id[5] = 1.0; id[10] = 1.0; id[15] = 1.0;
+                id[0] = 1.0;
+                id[5] = 1.0;
+                id[10] = 1.0;
+                id[15] = 1.0;
                 id
             });
             out.push(GroundedHull {
                 node,
-                vertices: hull.vertices.iter().map(|v| transform_point(*v, &m)).collect(),
+                vertices: hull
+                    .vertices
+                    .iter()
+                    .map(|v| transform_point(*v, &m))
+                    .collect(),
             });
             hi += 1;
         }
@@ -843,8 +906,10 @@ pub fn classify(buf: &[u8]) -> Option<Destruction> {
         }
     }
     // SWIT node indices present in this HIER.
-    let swit_idx: std::collections::HashSet<usize> =
-        swit.iter().filter_map(|w| hash_to_idx.get(w).copied()).collect();
+    let swit_idx: std::collections::HashSet<usize> = swit
+        .iter()
+        .filter_map(|w| hash_to_idx.get(w).copied())
+        .collect();
 
     let subtree = |root: usize| -> Vec<usize> {
         let mut out = Vec::new();
@@ -867,10 +932,12 @@ pub fn classify(buf: &[u8]) -> Option<Destruction> {
     let mut state = vec![(DestructionState::Static, None::<usize>); n];
     for (group, (_parent, roots)) in by_parent.iter().enumerate() {
         // Break root = the one with the most descendants also in SWIT.
-        let break_root = roots
-            .iter()
-            .copied()
-            .max_by_key(|&r| subtree(r).into_iter().filter(|x| *x != r && swit_idx.contains(x)).count());
+        let break_root = roots.iter().copied().max_by_key(|&r| {
+            subtree(r)
+                .into_iter()
+                .filter(|x| *x != r && swit_idx.contains(x))
+                .count()
+        });
         for &r in roots {
             let s = if Some(r) == break_root {
                 DestructionState::BreakPiece
@@ -905,9 +972,14 @@ pub fn classify(buf: &[u8]) -> Option<Destruction> {
         .iter()
         .map(|(_, pf)| pf.hulls().count())
         .sum();
-    let break_nodes = state.iter().filter(|(s, _)| *s == DestructionState::BreakPiece).count();
+    let break_nodes = state
+        .iter()
+        .filter(|(s, _)| *s == DestructionState::BreakPiece)
+        .count();
     if hull_count > 0 && break_nodes == 0 {
-        warnings.push(format!("{hull_count} PHY2 hulls but no break_piece nodes classified"));
+        warnings.push(format!(
+            "{hull_count} PHY2 hulls but no break_piece nodes classified"
+        ));
     }
 
     Some(Destruction {
@@ -941,11 +1013,19 @@ mod tests {
         assert_eq!(st(1), DestructionState::Static);
         assert_eq!(st(2), DestructionState::Intact);
         for i in [9, 10, 11, 12] {
-            assert_eq!(st(i), DestructionState::Intact, "node{i} (node2 subtree) is intact");
+            assert_eq!(
+                st(i),
+                DestructionState::Intact,
+                "node{i} (node2 subtree) is intact"
+            );
         }
         assert_eq!(st(3), DestructionState::BreakPiece);
         for i in [4, 5, 6, 7, 8] {
-            assert_eq!(st(i), DestructionState::BreakPiece, "node{i} (node3 subtree) is a break piece");
+            assert_eq!(
+                st(i),
+                DestructionState::BreakPiece,
+                "node{i} (node3 subtree) is a break piece"
+            );
         }
         // every intact/break node carries the same switch group; static carries none.
         assert_eq!(d.nodes[4].switch_group, Some(0));
@@ -972,13 +1052,28 @@ mod tests {
         let g = grounded_hulls(buf);
         assert_eq!(g.len(), 6, "6 grounded hulls");
         // hull[i] → descending collision node: 8,7,6,5,4,2
-        assert_eq!(g.iter().map(|h| h.node).collect::<Vec<_>>(), vec![8, 7, 6, 5, 4, 2]);
+        assert_eq!(
+            g.iter().map(|h| h.node).collect::<Vec<_>>(),
+            vec![8, 7, 6, 5, 4, 2]
+        );
         // every grounded vertex sits within the crate render AABB (±small margin)
         for h in &g {
             for v in &h.vertices {
-                assert!(v[0] >= -0.98 && v[0] <= 0.98, "x out (node {}): {v:?}", h.node);
-                assert!(v[1] >= -0.12 && v[1] <= 1.2, "y out (node {}): {v:?}", h.node);
-                assert!(v[2] >= -0.62 && v[2] <= 0.62, "z out (node {}): {v:?}", h.node);
+                assert!(
+                    v[0] >= -0.98 && v[0] <= 0.98,
+                    "x out (node {}): {v:?}",
+                    h.node
+                );
+                assert!(
+                    v[1] >= -0.12 && v[1] <= 1.2,
+                    "y out (node {}): {v:?}",
+                    h.node
+                );
+                assert!(
+                    v[2] >= -0.62 && v[2] <= 0.62,
+                    "z out (node {}): {v:?}",
+                    h.node
+                );
             }
         }
     }

@@ -71,7 +71,11 @@ pub fn linear_mip_chain_size(width: usize, height: usize, fourcc: &[u8; 4], mips
         Some(v) => v,
         None => return 0,
     };
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
+    let n = if mips > 0 {
+        mips
+    } else {
+        tex_mip_levels(width, height)
+    };
     let mut total = 0;
     for m in 0..n {
         let wpx = (width >> m).max(1);
@@ -102,7 +106,10 @@ mod tests {
         // 64x64 DXT1 resident tail = 2728 bytes (mips 64,32,16,8,4 = 2048+512+128+32+8).
         assert_eq!(linear_mip_chain_size(64, 64, b"DXT1", 5), 2728);
         // 32x32 DXT5 = 1360 bytes (mips 32,16,8,4 = 1024+256+64+16).
-        assert_eq!(linear_mip_chain_size(32, 32, b"DXT5", dxt_mip_count(32, 32)), 1360);
+        assert_eq!(
+            linear_mip_chain_size(32, 32, b"DXT5", dxt_mip_count(32, 32)),
+            1360
+        );
     }
 
     #[test]

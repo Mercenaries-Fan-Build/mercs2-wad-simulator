@@ -294,7 +294,11 @@ impl GfxMovie {
                 off += 4;
             }
             if off + len > body.len() {
-                return Err(format!("tag {code} body overruns ({} > {})", off + len, body.len()));
+                return Err(format!(
+                    "tag {code} body overruns ({} > {})",
+                    off + len,
+                    body.len()
+                ));
             }
             tags.push((code, len));
             tag_body_offsets.push(off);
@@ -383,7 +387,11 @@ struct ShapeFills {
 /// Layout: `u16 shape_id`, bounds `RECT`, then `FILLSTYLEARRAY` (count `u8`, or `0xFF`→`u16` for
 /// DefineShape2+). Each `FILLSTYLE`: type `u8`; solid = RGB(A); gradient (0x10/0x12/0x13) = `MATRIX`
 /// + gradient records; bitmap (0x40–0x43) = `u16 id` + `MATRIX`.
-fn scan_shape_fills(tag: &[u8], has_alpha: bool, extended_count: bool) -> Result<ShapeFills, String> {
+fn scan_shape_fills(
+    tag: &[u8],
+    has_alpha: bool,
+    extended_count: bool,
+) -> Result<ShapeFills, String> {
     let color_len = if has_alpha { 4 } else { 3 };
     let mut cur = Cursor::new(tag, 0);
     let _shape_id = cur.u16()?;
@@ -393,7 +401,11 @@ fn scan_shape_fills(tag: &[u8], has_alpha: bool, extended_count: bool) -> Result
     if extended_count && count == 0xFF {
         count = cur.u16()? as usize;
     }
-    let mut out = ShapeFills { gradient: false, bitmap: false, focal: false };
+    let mut out = ShapeFills {
+        gradient: false,
+        bitmap: false,
+        focal: false,
+    };
     for _ in 0..count {
         let ty = cur.u8()?;
         match ty {
@@ -444,7 +456,7 @@ mod tests {
         shape.extend_from_slice(&1u16.to_le_bytes()); // shape id
         shape.push(0b00000_000); // RECT: nbits=0 → 0-length bounds, byte-aligned
         shape.push(2); // fill style count = 2
-        // fill 1: solid RGBA
+                       // fill 1: solid RGBA
         shape.push(0x00);
         shape.extend_from_slice(&[10, 20, 30, 255]);
         // fill 2: linear gradient (0x10): identity MATRIX (0x00 = no scale/rotate, nt=0) + 2 records
@@ -461,7 +473,7 @@ mod tests {
         body.extend_from_slice(&1u16.to_le_bytes()); // frame count
         let tag = |code: u16, b: &[u8], out: &mut Vec<u8>| {
             assert!(b.len() < 0x3F);
-            out.extend_from_slice(&(((code << 6) | b.len() as u16)).to_le_bytes());
+            out.extend_from_slice(&((code << 6) | b.len() as u16).to_le_bytes());
             out.extend_from_slice(b);
         };
         tag(32, &shape, &mut body);

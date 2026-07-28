@@ -36,30 +36,118 @@ const CALLS: [(&str, &str); 5] = [
 /// Category substrings (lowercase) — same spirit as the placement-category
 /// vehicle matcher in tools/analyze_placement_categories.py.
 const VEHICLE_TOKENS: [&str; 25] = [
-    "veh_", "_veh", "truck", "jeep", "tank", "apc", "heli", "chopper", "boat",
-    "ship", "humvee", "motorcycle", "buggy", "technical", "ambulance",
-    "blackhawk", "huey", "apache", "gunship", "gunboat", "destroyer",
-    "carrier", "dinghy", "hovercraft", "forklift",
+    "veh_",
+    "_veh",
+    "truck",
+    "jeep",
+    "tank",
+    "apc",
+    "heli",
+    "chopper",
+    "boat",
+    "ship",
+    "humvee",
+    "motorcycle",
+    "buggy",
+    "technical",
+    "ambulance",
+    "blackhawk",
+    "huey",
+    "apache",
+    "gunship",
+    "gunboat",
+    "destroyer",
+    "carrier",
+    "dinghy",
+    "hovercraft",
+    "forklift",
 ];
 
 /// Model-name tokens (lowercase) harvested from the resident-block
 /// "Vehicle Entrance (Action Hijack) (X)" list and the support-store cargo set.
 const MODEL_TOKENS: [&str; 60] = [
-    "ah1z", "ah64", "alouette", "amx30", "anaconda", "armored bank", "bell47",
-    "bmp", "bora", "brutus", "btr", "c130", "coanda", "cobra", "corrida",
-    "duster", "ee11", "f35", "fav", "fiero", "gaz", "harrier", "havoc",
-    "hind", "huang", "hummer", "ka29", "ka50", "kruk", "lav", "landstalker",
-    "m1025", "m113", "m151", "m1a2", "m2a3", "m35", "m551", "md500", "mh53",
-    "mi17", "mi24", "mi26", "mi35", "mirage", "montador", "mule", "neco",
-    "nervoso", "patrol boat", "pavelow", "pgz95", "piranha", "plz45",
-    "scorpion", "seahorse", "stingray", "uh1", "wz551", "ztz",
+    "ah1z",
+    "ah64",
+    "alouette",
+    "amx30",
+    "anaconda",
+    "armored bank",
+    "bell47",
+    "bmp",
+    "bora",
+    "brutus",
+    "btr",
+    "c130",
+    "coanda",
+    "cobra",
+    "corrida",
+    "duster",
+    "ee11",
+    "f35",
+    "fav",
+    "fiero",
+    "gaz",
+    "harrier",
+    "havoc",
+    "hind",
+    "huang",
+    "hummer",
+    "ka29",
+    "ka50",
+    "kruk",
+    "lav",
+    "landstalker",
+    "m1025",
+    "m113",
+    "m151",
+    "m1a2",
+    "m2a3",
+    "m35",
+    "m551",
+    "md500",
+    "mh53",
+    "mi17",
+    "mi24",
+    "mi26",
+    "mi35",
+    "mirage",
+    "montador",
+    "mule",
+    "neco",
+    "nervoso",
+    "patrol boat",
+    "pavelow",
+    "pgz95",
+    "piranha",
+    "plz45",
+    "scorpion",
+    "seahorse",
+    "stingray",
+    "uh1",
+    "wz551",
+    "ztz",
 ];
 
 /// Spawned-but-not-a-vehicle noise (lowercase substrings / prefixes).
 const EXCLUDE_TOKENS: [&str; 18] = [
-    "particle", "explosion", "munitions", "supply drop", "soldier", "civilian",
-    "sailor", "shell", "missile", "rocket", "smoke", "crate", "weapon",
-    "destroy_", "_target", "vz_state", "wpn", "ordnance",
+    "particle",
+    "explosion",
+    "munitions",
+    "supply drop",
+    "soldier",
+    "civilian",
+    "sailor",
+    "shell",
+    "missile",
+    "rocket",
+    "smoke",
+    "crate",
+    "weapon",
+    "destroy_",
+    "_target",
+    "vz_state",
+    "wpn",
+    "ordnance",
 ];
 const EXCLUDE_PREFIXES: [&str; 7] = ["loc_", "pth_", "pa_", "path", "lnrg", "rgn_", "hp_"];
 
@@ -102,7 +190,9 @@ fn quoted_arg(text: &str, after: usize) -> Option<&str> {
 }
 
 fn walk_lua(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -128,7 +218,9 @@ struct Entry {
 }
 
 fn main() {
-    let out_path = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_OUT.to_string());
+    let out_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_OUT.to_string());
 
     let mut files = Vec::new();
     for corpus in CORPORA {
@@ -141,14 +233,18 @@ fn main() {
 
     let mut rows: BTreeMap<String, Entry> = BTreeMap::new();
     for path in &files {
-        let Ok(text) = fs::read_to_string(path) else { continue };
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
         let rel = path.to_string_lossy().replace('\\', "/");
         for (needle, kind) in CALLS {
             let mut from = 0;
             while let Some(hit) = text[from..].find(needle) {
                 let call_end = from + hit + needle.len();
                 from = call_end;
-                let Some(raw) = quoted_arg(&text, call_end) else { continue };
+                let Some(raw) = quoted_arg(&text, call_end) else {
+                    continue;
+                };
                 let (name, placed) = strip_instance_suffix(raw);
                 if name.is_empty() {
                     continue;
@@ -158,7 +254,11 @@ fn main() {
                         if !is_vehicle(name) {
                             continue;
                         }
-                        if placed { "placed" } else { "named" }
+                        if placed {
+                            "placed"
+                        } else {
+                            "named"
+                        }
                     }
                     "spawn" if !is_vehicle(name) => continue,
                     // Cargo/delivery/flyby are vehicles by contract, but the

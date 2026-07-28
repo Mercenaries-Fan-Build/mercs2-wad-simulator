@@ -93,7 +93,9 @@ fn main() {
             let pv = if !mk {
                 let o = data_off + u0 as usize;
                 let n = (sz / 4).min(6);
-                let w: Vec<String> = (0..n).map(|k| format!("{}", rd_u32(&ucfx, o + k * 4))).collect();
+                let w: Vec<String> = (0..n)
+                    .map(|k| format!("{}", rd_u32(&ucfx, o + k * 4)))
+                    .collect();
                 format!("u32={:?}", w)
             } else {
                 String::new()
@@ -112,7 +114,10 @@ fn main() {
         for i in 0..ndesc {
             let ro = 20 + i * 20;
             if &ucfx[ro..ro + 4] == b"MTRL" && rd_u32(&ucfx, ro + 4) != 0xFFFF_FFFF {
-                mtrl = Some((data_off + rd_u32(&ucfx, ro + 4) as usize, rd_u32(&ucfx, ro + 8) as usize));
+                mtrl = Some((
+                    data_off + rd_u32(&ucfx, ro + 4) as usize,
+                    rd_u32(&ucfx, ro + 8) as usize,
+                ));
             }
         }
         let (mo, msz) = mtrl.expect("no MTRL");
@@ -128,7 +133,10 @@ fn main() {
             for k in 0..tc {
                 hs.push(format!("0x{:08X}", rd_u32(&ucfx, o + 108 + k * 4)));
             }
-            println!("MTRL[{mi:2}] flags=0x{flags:04X} tex_count={tc} hashes={:?}", hs);
+            println!(
+                "MTRL[{mi:2}] flags=0x{flags:04X} tex_count={tc} hashes={:?}",
+                hs
+            );
             o += 116 + tc * 4;
             mi += 1;
         }
@@ -291,7 +299,10 @@ fn main() {
                 .and_then(|s| s.bones.get(f0 as usize))
                 .map(|bn| {
                     let p = bn.world_pos();
-                    format!("hash=0x{:08X} pos=[{:6.2},{:6.2},{:6.2}]", bn.name_hash, p[0], p[1], p[2])
+                    format!(
+                        "hash=0x{:08X} pos=[{:6.2},{:6.2},{:6.2}]",
+                        bn.name_hash, p[0], p[1], p[2]
+                    )
                 })
                 .unwrap_or_default();
             println!("{r:3}  {f0:5}  {f2:4}  {f3:4}   {info}");
@@ -320,7 +331,11 @@ fn main() {
             let u0 = rd_u32(&ucfx, ro + 4);
             let sz = rd_u32(&ucfx, ro + 8) as usize;
             let mk = u0 == 0xFFFF_FFFF;
-            tags.push_str(&format!("{}{} ", String::from_utf8_lossy(tag), if mk { "*" } else { "" }));
+            tags.push_str(&format!(
+                "{}{} ",
+                String::from_utf8_lossy(tag),
+                if mk { "*" } else { "" }
+            ));
             if mk {
                 // a marker chunk begins a sub-object; remember its tag for following leaf INFO
                 cur_owner = String::from_utf8_lossy(tag).to_string();
@@ -358,8 +373,12 @@ fn main() {
         println!("     {prmt_hex}");
         for (owner, o, sz) in &infos {
             let n = (sz / 4).min(15);
-            let u: Vec<String> = (0..n).map(|k| format!("{}", rd_u32(&ucfx, o + k * 4))).collect();
-            let ff: Vec<String> = (0..n).map(|k| format!("{:.4}", fbits(rd_u32(&ucfx, o + k * 4)))).collect();
+            let u: Vec<String> = (0..n)
+                .map(|k| format!("{}", rd_u32(&ucfx, o + k * 4)))
+                .collect();
+            let ff: Vec<String> = (0..n)
+                .map(|k| format!("{:.4}", fbits(rd_u32(&ucfx, o + k * 4))))
+                .collect();
             println!("     [{owner}].INFO[{sz}B] u32={:?}", u);
             println!("                       f32={:?}", ff);
         }
@@ -367,7 +386,9 @@ fn main() {
         for (o, sz) in &mesh_infos {
             print!("     MESH.INFO raw[{sz}B]:");
             for k in 0..(*sz).min(64) {
-                if k % 16 == 0 { print!("\n       "); }
+                if k % 16 == 0 {
+                    print!("\n       ");
+                }
                 print!("{:02X} ", ucfx[o + k]);
             }
             println!();
@@ -375,7 +396,9 @@ fn main() {
         for (o, sz) in &skin_infos {
             print!("     SKIN.INFO raw[{sz}B]:");
             for k in 0..(*sz).min(64) {
-                if k % 16 == 0 { print!("\n       "); }
+                if k % 16 == 0 {
+                    print!("\n       ");
+                }
                 print!("{:02X} ", ucfx[o + k]);
             }
             println!();

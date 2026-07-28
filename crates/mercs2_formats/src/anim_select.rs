@@ -58,7 +58,11 @@ impl AnimTable {
         self.cols.iter().position(|c| c.eq_ignore_ascii_case(name))
     }
     fn row_count(&self) -> usize {
-        if self.total_dims == 0 { 0 } else { self.rows.len() / self.total_dims }
+        if self.total_dims == 0 {
+            0
+        } else {
+            self.rows.len() / self.total_dims
+        }
     }
 
     /// Parse a UCFX `animationtable` container (`INFO → TYPE → [ASTO] → VALU`).
@@ -123,7 +127,12 @@ impl AnimTable {
         let asto: Vec<u32> = asto_body
             .map(|ab| (0..ab.len() / 4).map(|i| r_u32(ab, i * 4)).collect())
             .unwrap_or_default();
-        Some(AnimTable { cols, total_dims, rows, asto })
+        Some(AnimTable {
+            cols,
+            total_dims,
+            rows,
+            asto,
+        })
     }
 }
 
@@ -198,7 +207,14 @@ impl AnimSelector {
                 };
                 Some((t, cols))
             });
-        Some(AnimSelector { lookup, h, cn, an, lk_ext, actions })
+        Some(AnimSelector {
+            lookup,
+            h,
+            cn,
+            an,
+            lk_ext,
+            actions,
+        })
     }
 
     /// `CharacterName` hash for a merc — `pandemic_hash_m2(name)` ("mattias"/"chris"/"jennifer").
@@ -212,7 +228,9 @@ impl AnimSelector {
         let td = self.lookup.total_dims;
         for row in 0..self.lookup.row_count() {
             let base = row * td;
-            if self.lookup.rows[base + self.h] == handle && self.lookup.rows[base + self.cn] == character {
+            if self.lookup.rows[base + self.h] == handle
+                && self.lookup.rows[base + self.cn] == character
+            {
                 let idx = self.lookup.rows[base + self.an] as usize;
                 return self.lookup.asto.get(idx).copied();
             }
@@ -245,7 +263,9 @@ impl AnimSelector {
     /// The AnimationHandles the ActionTable assigns to a `(stance, action)` state key (there may be
     /// several rows). Empty when no ActionTable is loaded or the state is absent.
     pub fn handles_for_state(&self, stance: u32, action: u32) -> Vec<u32> {
-        let Some((t, c)) = self.actions.as_ref() else { return Vec::new() };
+        let Some((t, c)) = self.actions.as_ref() else {
+            return Vec::new();
+        };
         let td = t.total_dims;
         let mut out = Vec::new();
         for row in 0..t.row_count() {
@@ -260,7 +280,9 @@ impl AnimSelector {
     /// Every distinct `(Stance, Action)` pair present in the ActionTable — for probing the state
     /// vocabulary (reverse the hashes via the rainbow table). Empty when no ActionTable is loaded.
     pub fn action_states(&self) -> Vec<(u32, u32)> {
-        let Some((t, c)) = self.actions.as_ref() else { return Vec::new() };
+        let Some((t, c)) = self.actions.as_ref() else {
+            return Vec::new();
+        };
         let td = t.total_dims;
         let mut seen = std::collections::BTreeSet::new();
         for row in 0..t.row_count() {
@@ -301,7 +323,10 @@ impl AnimSelector {
             if self.lookup.rows[base + self.cn] == character {
                 let idx = self.lookup.rows[base + self.an] as usize;
                 if let Some(&clip) = self.lookup.asto.get(idx) {
-                    out.push(CharacterClip { handle: self.lookup.rows[base + self.h], clip });
+                    out.push(CharacterClip {
+                        handle: self.lookup.rows[base + self.h],
+                        clip,
+                    });
                 }
             }
         }
@@ -312,7 +337,9 @@ impl AnimSelector {
     /// Action/AimState/ActionDirection/…) that play this handle. Empty if the block carried no
     /// ActionTable.
     pub fn handle_actions(&self, handle: u32) -> Vec<ActionRow> {
-        let Some((t, c)) = &self.actions else { return Vec::new() };
+        let Some((t, c)) = &self.actions else {
+            return Vec::new();
+        };
         let td = t.total_dims;
         let mut out = Vec::new();
         for row in 0..t.row_count() {
@@ -343,7 +370,9 @@ impl AnimSelector {
     /// timescale range — how the SAME Handle resolves to different clips per loadout. Empty when
     /// the retail extended columns are absent.
     pub fn lookup_context(&self, handle: u32, character: u32) -> Vec<LookupContext> {
-        let Some((g, pec, pen, iec, ien, mints, maxts)) = self.lk_ext else { return Vec::new() };
+        let Some((g, pec, pen, iec, ien, mints, maxts)) = self.lk_ext else {
+            return Vec::new();
+        };
         let td = self.lookup.total_dims;
         let mut out = Vec::new();
         for row in 0..self.lookup.row_count() {
@@ -663,17 +692,31 @@ mod tests {
         assert_eq!(ctx[0].primary_equipment_class, 0xCAFE_0001);
         assert_eq!(ctx[0].min_time_scale, -1.0);
         // Wrong character → no rows.
-        assert!(sel.lookup_context(PRIMARY_IDLE_HANDLE, 0xF314_4C8E).is_empty());
+        assert!(sel
+            .lookup_context(PRIMARY_IDLE_HANDLE, 0xF314_4C8E)
+            .is_empty());
 
         // State-key resolution: (Upright, Fidget) → PRIMARY_IDLE_HANDLE → mattias → asto[1] = 0xBBBB.
         // This is the path the swim-clip resolver uses with (Swim, <action>) under the NONE character.
-        assert_eq!(sel.handles_for_state(0x12C0_7B18, 0x0C0A_7FA6), vec![PRIMARY_IDLE_HANDLE]);
-        assert_eq!(sel.resolve_state(0x12C0_7B18, 0x0C0A_7FA6, 0x030E_6C38), Some(0xBBBB));
+        assert_eq!(
+            sel.handles_for_state(0x12C0_7B18, 0x0C0A_7FA6),
+            vec![PRIMARY_IDLE_HANDLE]
+        );
+        assert_eq!(
+            sel.resolve_state(0x12C0_7B18, 0x0C0A_7FA6, 0x030E_6C38),
+            Some(0xBBBB)
+        );
         // Unknown state → nothing.
         assert!(sel.handles_for_state(0xDEAD_0000, 0x0C0A_7FA6).is_empty());
-        assert_eq!(sel.resolve_state(0x12C0_7B18, 0x0C0A_7FA6, 0xF314_4C8E), None); // wrong character
-        // handle_clips exposes the shared/character key a handle resolves under (here mattias).
-        assert_eq!(sel.handle_clips(PRIMARY_IDLE_HANDLE), vec![(0x030E_6C38, 0xBBBB)]);
+        assert_eq!(
+            sel.resolve_state(0x12C0_7B18, 0x0C0A_7FA6, 0xF314_4C8E),
+            None
+        ); // wrong character
+           // handle_clips exposes the shared/character key a handle resolves under (here mattias).
+        assert_eq!(
+            sel.handle_clips(PRIMARY_IDLE_HANDLE),
+            vec![(0x030E_6C38, 0xBBBB)]
+        );
     }
 
     #[test]

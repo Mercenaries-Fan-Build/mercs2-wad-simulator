@@ -382,8 +382,14 @@ impl WorldIndex {
             let (base, p, q) = split_pq_suffix(stem);
             let base_lc = base.to_lowercase();
 
-            let by_type = by_block_types.get(&block_index).cloned().unwrap_or_default();
-            let model_hashes = by_block_models.get(&block_index).cloned().unwrap_or_default();
+            let by_type = by_block_types
+                .get(&block_index)
+                .cloned()
+                .unwrap_or_default();
+            let model_hashes = by_block_models
+                .get(&block_index)
+                .cloned()
+                .unwrap_or_default();
 
             // Name-driven flags.
             let is_lrterrain = base_lc.contains("low_res_terrain");
@@ -402,15 +408,11 @@ impl WorldIndex {
             // baked model geometry without a model-type ASET row).
             let mut has_model_geometry = *by_type.get(&TYPE_ID_MODEL).unwrap_or(&0) > 0;
             if is_c3 && !has_model_geometry {
-                if let Ok(head) = crate::sges::decompress_block_head(
-                    file,
-                    &archive.indx,
-                    block_index,
-                    16384,
-                ) {
+                if let Ok(head) =
+                    crate::sges::decompress_block_head(file, &archive.indx, block_index, 16384)
+                {
                     let (_c, entries) = parse_block_entry_table(&head);
-                    has_model_geometry =
-                        entries.iter().any(|e| e.type_hash == MODEL_TYPE_HASH);
+                    has_model_geometry = entries.iter().any(|e| e.type_hash == MODEL_TYPE_HASH);
                 }
             }
 
@@ -486,11 +488,7 @@ impl WorldIndex {
         for row in 0..LRT_GRID {
             for col in 0..LRT_GRID {
                 let (cx, cz) = lrterrain_tile_centre(row, col);
-                lrterrain_tiles.push(Aabb::from_center_half(
-                    cx,
-                    cz,
-                    LRT_TILE_SPAN_M * 0.5,
-                ));
+                lrterrain_tiles.push(Aabb::from_center_half(cx, cz, LRT_TILE_SPAN_M * 0.5));
             }
         }
 
@@ -549,8 +547,10 @@ impl WorldIndex {
         let s = state.map(|s| s.to_lowercase());
         self.blocks.iter().filter(move |b| {
             let Some(ov) = &b.state else { return false };
-            f.as_ref().map_or(true, |ff| ov.faction.as_deref() == Some(ff.as_str()))
-                && s.as_ref().map_or(true, |ss| ov.state.as_deref() == Some(ss.as_str()))
+            f.as_ref()
+                .map_or(true, |ff| ov.faction.as_deref() == Some(ff.as_str()))
+                && s.as_ref()
+                    .map_or(true, |ss| ov.state.as_deref() == Some(ss.as_str()))
         })
     }
 
@@ -672,10 +672,7 @@ mod tests {
     #[test]
     fn parse_full_c3_chain() {
         let cells = parse_cell_chain("c30015-c20105-c11222-c00939");
-        assert_eq!(
-            cells,
-            vec![(3, 30015), (2, 20105), (1, 11222), (0, 939)]
-        );
+        assert_eq!(cells, vec![(3, 30015), (2, 20105), (1, 11222), (0, 939)]);
         // Finest tier reached = last token's tier (0 = c0). Leading c3 id anchors the cell.
         assert_eq!(cells.last().unwrap().0, 0);
         assert_eq!(cells.first().unwrap().0, 3);
@@ -695,8 +692,14 @@ mod tests {
 
     #[test]
     fn path_stem_strips() {
-        assert_eq!(path_stem("blocks\\VZ\\c30010_P000_Q3.block"), "c30010_P000_Q3");
-        assert_eq!(path_stem("blocks/vz/resident_P000_Q3.block"), "resident_P000_Q3");
+        assert_eq!(
+            path_stem("blocks\\VZ\\c30010_P000_Q3.block"),
+            "c30010_P000_Q3"
+        );
+        assert_eq!(
+            path_stem("blocks/vz/resident_P000_Q3.block"),
+            "resident_P000_Q3"
+        );
     }
 
     #[test]

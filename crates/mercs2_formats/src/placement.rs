@@ -100,11 +100,7 @@ struct CompChildFull {
     data: Option<(usize, usize)>,
 }
 
-fn walk_sub_block_comps_full(
-    data: &[u8],
-    ucfx_pos: usize,
-    block_end: usize,
-) -> Vec<CompChildFull> {
+fn walk_sub_block_comps_full(data: &[u8], ucfx_pos: usize, block_end: usize) -> Vec<CompChildFull> {
     let mut out = Vec::new();
     if ucfx_pos + 8 > data.len() {
         return out;
@@ -174,7 +170,11 @@ fn walk_sub_block_comps_full(
                 data_child = Some((abs_off, *csz));
             }
         }
-        out.push(CompChildFull { info_name, payload_stride, data: data_child });
+        out.push(CompChildFull {
+            info_name,
+            payload_stride,
+            data: data_child,
+        });
     }
     out
 }
@@ -183,11 +183,7 @@ fn walk_sub_block_comps_full(
 /// + data span. Generalises `terrain::read_lrterrain_object_records`: instead of
 /// stopping at `LowResTerrainObject`, it collects ALL COMPs. COMP child offsets
 /// are relative to `data_area_start` (the end of the chunk descriptor table).
-fn walk_sub_block_comps(
-    data: &[u8],
-    ucfx_pos: usize,
-    block_end: usize,
-) -> Vec<CompChild> {
+fn walk_sub_block_comps(data: &[u8], ucfx_pos: usize, block_end: usize) -> Vec<CompChild> {
     let mut out = Vec::new();
     if ucfx_pos + 8 > data.len() {
         return out;
@@ -257,7 +253,10 @@ fn walk_sub_block_comps(
                 data_child = Some((abs_off, *csz));
             }
         }
-        out.push(CompChild { info_name, data: data_child });
+        out.push(CompChild {
+            info_name,
+            data: data_child,
+        });
     }
     out
 }
@@ -439,7 +438,12 @@ fn parse_hibernation_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, 
         let key = read_u32_le(data, r);
         let dist0 = u16::from_le_bytes([data[r + 4], data[r + 5]]);
         let h = Hibernation {
-            dist: [dist0, data[r + 6] as u16, data[r + 7] as u16, data[r + 8] as u16],
+            dist: [
+                dist0,
+                data[r + 6] as u16,
+                data[r + 7] as u16,
+                data[r + 8] as u16,
+            ],
             flag: data[r + 9],
         };
         out.push((key, h));
@@ -509,8 +513,15 @@ pub fn load_terrain_tiles(block: &[u8]) -> Vec<TerrainTile> {
             }
         }
         for (key, terrainmesh_hash) in terr {
-            let Some(&(pos, quat)) = xform.get(&key) else { continue };
-            out.push(TerrainTile { key, terrainmesh_hash, pos, quat });
+            let Some(&(pos, quat)) = xform.get(&key) else {
+                continue;
+            };
+            out.push(TerrainTile {
+                key,
+                terrainmesh_hash,
+                pos,
+                quat,
+            });
         }
     }
     out
@@ -636,7 +647,11 @@ impl PlacedLight {
         let q = self.quat;
         let (u, w) = ([q[0], q[1], q[2]], q[3]);
         let cross = |a: [f32; 3], b: [f32; 3]| {
-            [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
         };
         let v = [0.0f32, -1.0, 0.0]; // local down
         let c1 = cross(u, v);
@@ -670,7 +685,14 @@ fn parse_light_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, LightO
         for (j, p) in params.iter_mut().enumerate() {
             *p = read_f32_le(data, r + 20 + j * 4);
         }
-        out.push((key, LightObject { light_type, color, params }));
+        out.push((
+            key,
+            LightObject {
+                light_type,
+                color,
+                params,
+            },
+        ));
     }
     out
 }
@@ -737,7 +759,9 @@ pub fn light_inventory(block: &[u8]) -> Vec<PlacedLight> {
         }
 
         for (key, light) in lights {
-            let Some(&(pos, quat)) = transforms.get(&key) else { continue };
+            let Some(&(pos, quat)) = transforms.get(&key) else {
+                continue;
+            };
             out.push(PlacedLight {
                 key,
                 name: names.get(&key).cloned(),
@@ -947,7 +971,9 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
         }
 
         for (key, model_hash) in models {
-            let Some(&(pos, quat)) = xform.get(&key) else { continue };
+            let Some(&(pos, quat)) = xform.get(&key) else {
+                continue;
+            };
             out.push(ModelPlacement {
                 key,
                 model_hash,
@@ -998,9 +1024,30 @@ mod tests {
         ];
         let recs = parse_landing_zone_records(&d, 0, d.len());
         assert_eq!(recs.len(), 3);
-        assert_eq!(recs[0], LandingZoneRecord { key: 816_199, slot: 1, zone: 2 });
-        assert_eq!(recs[1], LandingZoneRecord { key: 816_200, slot: 2, zone: 2 });
-        assert_eq!(recs[2], LandingZoneRecord { key: 882_922, slot: 1, zone: 1 });
+        assert_eq!(
+            recs[0],
+            LandingZoneRecord {
+                key: 816_199,
+                slot: 1,
+                zone: 2
+            }
+        );
+        assert_eq!(
+            recs[1],
+            LandingZoneRecord {
+                key: 816_200,
+                slot: 2,
+                zone: 2
+            }
+        );
+        assert_eq!(
+            recs[2],
+            LandingZoneRecord {
+                key: 882_922,
+                slot: 1,
+                zone: 1
+            }
+        );
         // The stride invariant that pins 12: keys ascend monotonically across the whole table.
         assert!(recs.windows(2).all(|w| w[0].key < w[1].key));
     }
@@ -1071,7 +1118,7 @@ mod tests {
         d[36..40].copy_from_slice(&0.262f32.to_le_bytes()); // params[4] = inner cone half-angle (rad)
         d[40..44].copy_from_slice(&0.524f32.to_le_bytes()); // params[5] = outer cone half-angle (rad)
         d[52..56].copy_from_slice(&0.75f32.to_le_bytes()); // params[8] (last float, at +32)
-        // rec1 key must be read exactly at +56.
+                                                           // rec1 key must be read exactly at +56.
         d[56..60].copy_from_slice(&0x0009_5c11u32.to_le_bytes());
         d[60..64].copy_from_slice(&2u32.to_le_bytes());
 
@@ -1180,7 +1227,11 @@ mod tests {
         block.extend_from_slice(&data_area);
 
         let placed = light_inventory(&block);
-        assert_eq!(placed.len(), 1, "only the light with a matching Transform survives");
+        assert_eq!(
+            placed.len(),
+            1,
+            "only the light with a matching Transform survives"
+        );
         assert_eq!(placed[0].key, 0x10);
         assert_eq!(placed[0].pos, [100.0, 0.0, 0.0]);
         assert_eq!(placed[0].light.intensity(), 5.0);

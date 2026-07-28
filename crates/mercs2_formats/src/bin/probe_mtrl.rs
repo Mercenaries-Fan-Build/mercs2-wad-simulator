@@ -15,7 +15,11 @@ fn main() {
         let ro = 20 + i * 20;
         let mut t = [0u8; 4];
         t.copy_from_slice(&ucfx[ro..ro + 4]);
-        (data_off + read_u32_le(ucfx, ro + 4) as usize, read_u32_le(ucfx, ro + 8) as usize, t)
+        (
+            data_off + read_u32_le(ucfx, ro + 4) as usize,
+            read_u32_le(ucfx, ro + 8) as usize,
+            t,
+        )
     };
     let cont = |i: usize| read_u32_le(ucfx, 20 + i * 20 + 4) == 0xFFFF_FFFF;
 
@@ -29,7 +33,11 @@ fn main() {
         }
     }
     let (mo, msz) = mtrl.expect("MTRL");
-    eprintln!("MTRL @ {mo} size {msz} ({} x116 = {})", msz / 116, (msz / 116) * 116);
+    eprintln!(
+        "MTRL @ {mo} size {msz} ({} x116 = {})",
+        msz / 116,
+        (msz / 116) * 116
+    );
     let m = &ucfx[mo..mo + msz];
     let nmat = msz / 116;
     let mut mat_diffuse = vec![0u32; nmat];
@@ -53,12 +61,22 @@ fn main() {
     // Per PRMG group: find a material index. The PRMG INFO leaf (first info after
     // PRMG marker, but the GROUP-level info) often carries a u32 material index.
     // Print each group's leading INFO u32s so we can spot the material index.
-    let prmg: Vec<usize> = (0..ndesc).filter(|&i| {
-        let ro = 20 + i * 20; &ucfx[ro..ro + 4] == b"PRMG" && read_u32_le(ucfx, ro + 4) == 0xFFFF_FFFF
-    }).collect();
-    eprintln!("--- {} PRMG groups: field[5]=matidx -> diffuse ---", prmg.len());
+    let prmg: Vec<usize> = (0..ndesc)
+        .filter(|&i| {
+            let ro = 20 + i * 20;
+            &ucfx[ro..ro + 4] == b"PRMG" && read_u32_le(ucfx, ro + 4) == 0xFFFF_FFFF
+        })
+        .collect();
+    eprintln!(
+        "--- {} PRMG groups: field[5]=matidx -> diffuse ---",
+        prmg.len()
+    );
     for (gi, &pr) in prmg.iter().enumerate() {
-        let nxt = if gi + 1 < prmg.len() { prmg[gi + 1] } else { ndesc };
+        let nxt = if gi + 1 < prmg.len() {
+            prmg[gi + 1]
+        } else {
+            ndesc
+        };
         for i in (pr + 1)..nxt {
             let (o, sz, t) = leaf_at(i);
             if &t == b"INFO" && !cont(i) {

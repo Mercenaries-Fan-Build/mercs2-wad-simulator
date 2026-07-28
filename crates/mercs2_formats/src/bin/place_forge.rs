@@ -10,7 +10,11 @@ use mercs2_formats::placement_build::append_placement;
 
 fn parse_vec3(s: &str) -> [f32; 3] {
     let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-    [v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0)]
+    [
+        v.first().copied().unwrap_or(0.0),
+        v.get(1).copied().unwrap_or(0.0),
+        v.get(2).copied().unwrap_or(0.0),
+    ]
 }
 
 fn main() {
@@ -30,17 +34,33 @@ fn list_mode(argv: &[String]) -> i32 {
         match a.as_str() {
             "--list" => {}
             "--near" => {
-                let v: Vec<f32> = it.next().cloned().unwrap_or_default().split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                if v.len() == 2 { near = Some([v[0], v[1]]); }
+                let v: Vec<f32> = it
+                    .next()
+                    .cloned()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                if v.len() == 2 {
+                    near = Some([v[0], v[1]]);
+                }
             }
-            "--radius" => radius = it.next().and_then(|s| s.parse().ok()).unwrap_or(f32::INFINITY),
+            "--radius" => {
+                radius = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(f32::INFINITY)
+            }
             s if !s.starts_with("--") => path = s.to_string(),
             _ => {}
         }
     }
     let block = match std::fs::read(&path) {
         Ok(b) => b,
-        Err(e) => { eprintln!("read {path}: {e}"); return 1; }
+        Err(e) => {
+            eprintln!("read {path}: {e}");
+            return 1;
+        }
     };
     let ps = load_model_placements(&block);
     let mut shown = 0;
@@ -48,14 +68,23 @@ fn list_mode(argv: &[String]) -> i32 {
         if let Some([nx, nz]) = near {
             let dx = p.pos[0] - nx;
             let dz = p.pos[2] - nz;
-            if (dx * dx + dz * dz).sqrt() > radius { continue; }
+            if (dx * dx + dz * dz).sqrt() > radius {
+                continue;
+            }
         }
-        println!("key=0x{:08X} model=0x{:08X} pos=({:.2}, {:.2}, {:.2}) name={:?}",
-            p.key, p.model_hash, p.pos[0], p.pos[1], p.pos[2], p.name);
+        println!(
+            "key=0x{:08X} model=0x{:08X} pos=({:.2}, {:.2}, {:.2}) name={:?}",
+            p.key, p.model_hash, p.pos[0], p.pos[1], p.pos[2], p.name
+        );
         shown += 1;
-        if shown >= 2000 { println!("... ({} total)", ps.len()); break; }
+        if shown >= 2000 {
+            println!("... ({} total)", ps.len());
+            break;
+        }
     }
-    if shown == 0 { println!("(no model placements matched; {} total in block)", ps.len()); }
+    if shown == 0 {
+        println!("(no model placements matched; {} total in block)", ps.len());
+    }
     0
 }
 
@@ -66,8 +95,13 @@ fn run() -> i32 {
     }
     let mut args = std::env::args().skip(1);
     let mut pos_args: Vec<String> = Vec::new();
-    let (mut template, mut name, mut model, mut pos, mut quat) =
-        (15usize, String::new(), 0u32, [0.0f32; 3], [0.0f32, 0.0, 0.0, 1.0]);
+    let (mut template, mut name, mut model, mut pos, mut quat) = (
+        15usize,
+        String::new(),
+        0u32,
+        [0.0f32; 3],
+        [0.0f32, 0.0, 0.0, 1.0],
+    );
     while let Some(a) = args.next() {
         match a.as_str() {
             "--template" => template = args.next().and_then(|s| s.parse().ok()).unwrap_or(15),
@@ -80,7 +114,12 @@ fn run() -> i32 {
             }
             "--pos" => pos = parse_vec3(&args.next().unwrap_or_default()),
             "--quat" => {
-                let v: Vec<f32> = args.next().unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                let v: Vec<f32> = args
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|x| x.trim().parse().ok())
+                    .collect();
                 if v.len() == 4 {
                     quat = [v[0], v[1], v[2], v[3]];
                 }
@@ -114,7 +153,9 @@ fn run() -> i32 {
     };
     // round-trip verify: our (key -> model) must now parse.
     let placements = load_model_placements(&out);
-    let found = placements.iter().find(|p| p.key == key && p.model_hash == model);
+    let found = placements
+        .iter()
+        .find(|p| p.key == key && p.model_hash == model);
     match found {
         Some(p) => {
             if let Err(e) = std::fs::write(&pos_args[1], &out) {

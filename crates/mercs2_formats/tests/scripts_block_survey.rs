@@ -42,7 +42,9 @@ fn script_blocks(wad: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
 #[test]
 fn no_retail_script_container_carries_metadata_after_its_bytecode() {
     let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR or run scripts/find-vz-wad.sh --write)");
+        eprintln!(
+            "SKIPPING: no vz.wad (set MERCS2_GAME_DIR or run scripts/find-vz-wad.sh --write)"
+        );
         return;
     };
     let blocks = script_blocks(&wad).expect("read the script blocks");
@@ -86,7 +88,10 @@ fn no_retail_script_container_carries_metadata_after_its_bytecode() {
         unparseable.len()
     );
     for (name, binn, luaq) in metadata_bearing.iter().take(20) {
-        eprintln!("   METADATA {name}: BINN body {binn} B vs LuaQ {luaq} B (+{})", binn - luaq);
+        eprintln!(
+            "   METADATA {name}: BINN body {binn} B vs LuaQ {luaq} B (+{})",
+            binn - luaq
+        );
     }
     for (hash, why) in unparseable.iter().take(10) {
         eprintln!("   UNPARSEABLE 0x{hash:08X}: {why}");
@@ -117,11 +122,16 @@ fn replacing_bytecode_with_itself_round_trips_the_block() {
     let blocks = script_blocks(&wad).expect("read the script blocks");
     for (path, dec) in &blocks {
         let mut block = ScriptsBlock::parse(dec).expect("parse");
-        assert!(block.verify_csums().is_ok(), "{path}: retail CSUMs must verify as shipped");
+        assert!(
+            block.verify_csums().is_ok(),
+            "{path}: retail CSUMs must verify as shipped"
+        );
 
         for i in 0..block.entries.len() {
             let original = block.extract_lua(i).expect("extract");
-            block.replace_lua(i, &original).expect("replace with identical bytes");
+            block
+                .replace_lua(i, &original)
+                .expect("replace with identical bytes");
         }
         let rebuilt = block.serialize();
         assert_eq!(
@@ -129,8 +139,14 @@ fn replacing_bytecode_with_itself_round_trips_the_block() {
             dec.len(),
             "{path}: rebuilt block changed length after a no-op replace"
         );
-        assert!(rebuilt == *dec, "{path}: rebuilt block differs from the original bytes");
+        assert!(
+            rebuilt == *dec,
+            "{path}: rebuilt block differs from the original bytes"
+        );
         // And it must still verify after the round trip.
-        ScriptsBlock::parse(&rebuilt).expect("re-parse").verify_csums().expect("CSUMs after rebuild");
+        ScriptsBlock::parse(&rebuilt)
+            .expect("re-parse")
+            .verify_csums()
+            .expect("CSUMs after rebuild");
     }
 }

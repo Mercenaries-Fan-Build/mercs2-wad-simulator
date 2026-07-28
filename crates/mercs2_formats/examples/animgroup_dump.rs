@@ -47,7 +47,9 @@ fn main() {
     let block_hash = anim_block_hash(&arch, anim_blk);
     println!(
         "animgroup block[{anim_blk}]  (an ASET asset_hash referencing it = {})",
-        block_hash.map(|h| format!("0x{h:08X}")).unwrap_or_else(|| "?".into())
+        block_hash
+            .map(|h| format!("0x{h:08X}"))
+            .unwrap_or_else(|| "?".into())
     );
 
     let data = decompress_block(&mut f, &arch.indx, anim_blk).expect("decompress animgroup");
@@ -61,7 +63,10 @@ fn main() {
     }
 
     println!("\n-- clips ({}) --", ag.clips.len());
-    println!("  {:<12} {:<12} {:>6} {:>6} {:>8} {:>7}", "name", "class", "tracks", "float", "duration", "poses");
+    println!(
+        "  {:<12} {:<12} {:>6} {:>6} {:>8} {:>7}",
+        "name", "class", "tracks", "float", "duration", "poses"
+    );
     for c in ag.clips.iter().take(40) {
         println!(
             "  {:<12} {:<12} {:>6} {:>6} {:>8.3} {:>7}",
@@ -72,8 +77,16 @@ fn main() {
         println!("  … {} more clips", ag.clips.len() - 40);
     }
 
-    let skel_bones = ag.skeleton.as_ref().map(|s| s.bone_name_hashes.len()).unwrap_or(0);
-    let track_count = ag.binding.as_ref().map(|b| b.track_to_bone_hash.len()).unwrap_or(0);
+    let skel_bones = ag
+        .skeleton
+        .as_ref()
+        .map(|s| s.bone_name_hashes.len())
+        .unwrap_or(0);
+    let track_count = ag
+        .binding
+        .as_ref()
+        .map(|b| b.track_to_bone_hash.len())
+        .unwrap_or(0);
     println!("\n-- skeleton / binding --");
     println!("  derived skeleton bone-name-hash count = {skel_bones}");
     println!("  primary binding transform-track count = {track_count}");
@@ -100,8 +113,14 @@ fn main() {
     let Some(binding) = &ag.binding else { return };
 
     println!("\n================ OPEN Q#1: HIER vs animgroup bone order ================");
-    println!("  model block[{model_blk}] HIER node count = {}", hier.len());
-    println!("  animgroup rig track count             = {}", binding.track_to_bone_hash.len());
+    println!(
+        "  model block[{model_blk}] HIER node count = {}",
+        hier.len()
+    );
+    println!(
+        "  animgroup rig track count             = {}",
+        binding.track_to_bone_hash.len()
+    );
 
     let hset: BTreeSet<u32> = hier.iter().copied().collect();
     let tset: BTreeSet<u32> = binding.track_to_bone_hash.iter().copied().collect();
@@ -110,10 +129,15 @@ fn main() {
     let mapped = resolved.iter().filter(|r| r.is_some()).count();
 
     let n = binding.track_to_bone_hash.len().min(hier.len());
-    let same_order = (0..n).filter(|&i| binding.track_to_bone_hash[i] == hier[i]).count();
+    let same_order = (0..n)
+        .filter(|&i| binding.track_to_bone_hash[i] == hier[i])
+        .count();
 
     println!("  name-hash set intersection            = {inter}");
-    println!("  tracks resolvable to a HIER bone       = {mapped}/{}", binding.track_to_bone_hash.len());
+    println!(
+        "  tracks resolvable to a HIER bone       = {mapped}/{}",
+        binding.track_to_bone_hash.len()
+    );
     println!("  index-order identical positions        = {same_order}/{n}");
 
     let verdict = if same_order == n && n == hier.len() {
@@ -136,7 +160,10 @@ fn main() {
             None => println!("    track[{t:>2}] 0x{th:08X} -> (not in this model's HIER)"),
         }
     }
-    let _ = AnimBinding { track_to_bone: vec![], track_to_bone_hash: vec![] };
+    let _ = AnimBinding {
+        track_to_bone: vec![],
+        track_to_bone_hash: vec![],
+    };
 }
 
 /// Auto-discover the widest human animgroup and the best-matching HIER model.
@@ -148,19 +175,27 @@ fn discover(f: &mut File, arch: &FfcsArchive) -> (u16, Option<u16>) {
     let mut best_anim: Option<(u16, usize)> = None; // (blk, track count)
     let mut big_hiers: Vec<(u16, Vec<u32>)> = Vec::new();
     for &blk in &blocks {
-        let Ok(data) = decompress_block(f, &arch.indx, blk) else { continue };
+        let Ok(data) = decompress_block(f, &arch.indx, blk) else {
+            continue;
+        };
         let ents = entries(&data);
         let mut pos = 4 + ents.len() * 16;
         let mut has_anim = false;
         for (_, th, _, sz) in &ents {
             let sz = *sz as usize;
-            if pos + sz > data.len() { break; }
+            if pos + sz > data.len() {
+                break;
+            }
             let cont = &data[pos..pos + sz];
             pos += sz;
-            if *th == TYPE_HASH_ANIMATION { has_anim = true; }
+            if *th == TYPE_HASH_ANIMATION {
+                has_anim = true;
+            }
             if *th == TYPE_HASH_MODEL {
                 if let Some(h) = hier_hashes(cont) {
-                    if h.len() >= 60 { big_hiers.push((blk, h)); }
+                    if h.len() >= 60 {
+                        big_hiers.push((blk, h));
+                    }
                 }
             }
         }
@@ -180,36 +215,51 @@ fn discover(f: &mut File, arch: &FfcsArchive) -> (u16, Option<u16>) {
     // pick the HIER model with the highest name-hash intersection with this rig
     let rig: BTreeSet<u32> = {
         let d = decompress_block(f, &arch.indx, anim).unwrap();
-        parse_animgroup(&d).unwrap().binding
+        parse_animgroup(&d)
+            .unwrap()
+            .binding
             .map(|b| b.track_to_bone_hash.into_iter().collect())
             .unwrap_or_default()
     };
-    let model = big_hiers.into_iter()
+    let model = big_hiers
+        .into_iter()
         .max_by_key(|(_, h)| h.iter().filter(|x| rig.contains(x)).count())
         .map(|(b, _)| b);
     (anim, model)
 }
 
 fn anim_block_hash(arch: &FfcsArchive, blk: u16) -> Option<u32> {
-    arch.aset.iter()
+    arch.aset
+        .iter()
         .find(|e| e.block_index() == blk && e.type_id == mercs2_formats::types::TYPE_ID_ANIMATION)
         .map(|e| e.asset_hash)
 }
 
 fn entries(data: &[u8]) -> Vec<(u32, u32, u32, u32)> {
-    if data.len() < 4 { return vec![]; }
+    if data.len() < 4 {
+        return vec![];
+    }
     let c = read_u32_le(data, 0) as usize;
     let mx = (data.len() - 4) / 16;
     let c = c.min(mx);
-    (0..c).map(|i| {
-        let b = 4 + i * 16;
-        (read_u32_le(data, b), read_u32_le(data, b + 4), read_u32_le(data, b + 8), read_u32_le(data, b + 12))
-    }).collect()
+    (0..c)
+        .map(|i| {
+            let b = 4 + i * 16;
+            (
+                read_u32_le(data, b),
+                read_u32_le(data, b + 4),
+                read_u32_le(data, b + 8),
+                read_u32_le(data, b + 12),
+            )
+        })
+        .collect()
 }
 
 fn hier_hashes(c: &[u8]) -> Option<Vec<u32>> {
     let h = extract_chunk_body(c, b"HIER")?;
-    if h.len() < 176 || h.len() % 176 != 0 { return None; }
+    if h.len() < 176 || h.len() % 176 != 0 {
+        return None;
+    }
     let n = h.len() / 176;
     Some((0..n).map(|i| read_u32_le(&h, i * 176)).collect())
 }
@@ -219,11 +269,15 @@ fn first_hier(block: &[u8]) -> Option<Vec<u32>> {
     let mut pos = 4 + ents.len() * 16;
     for (_, th, _, sz) in &ents {
         let sz = *sz as usize;
-        if pos + sz > block.len() { break; }
+        if pos + sz > block.len() {
+            break;
+        }
         let cont = &block[pos..pos + sz];
         pos += sz;
         if *th == TYPE_HASH_MODEL {
-            if let Some(h) = hier_hashes(cont) { return Some(h); }
+            if let Some(h) = hier_hashes(cont) {
+                return Some(h);
+            }
         }
     }
     None

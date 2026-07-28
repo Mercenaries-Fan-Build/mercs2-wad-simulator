@@ -326,7 +326,11 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             for k in 0..4 {
                 if inp.vweights[vi][k] > 0.0 {
                     if let Some(&h) = full.get(&(inp.vjoints[vi][k] as usize)) {
-                        let h = if collapse { finger_to_hand(h).unwrap_or(h) } else { h };
+                        let h = if collapse {
+                            finger_to_hand(h).unwrap_or(h)
+                        } else {
+                            h
+                        };
                         set.insert(h);
                     }
                 }
@@ -422,7 +426,11 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                 cv.len()
             ));
         }
-        let a: Vec<Vec<f64>> = inp.positions.iter().map(|p| vec![p[0], p[1], p[2], 1.0]).collect();
+        let a: Vec<Vec<f64>> = inp
+            .positions
+            .iter()
+            .map(|p| vec![p[0], p[1], p[2], 1.0])
+            .collect();
         let b: Vec<Vec<f64>> = cv.iter().map(|p| vec![p[0], p[1], p[2]]).collect();
         let f = lstsq(&a, &b)?;
         t = fit_from_lstsq(&f.x);
@@ -441,7 +449,8 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         // DOMINATE it and skew the whole-body scale (mesh came out ~12% short). Fit only from the
         // well-spread BODY/LIMB bones (canonical NPC-84: hips/legs/spine/neck/head 0..21 + upper-arm/
         // forearm/hand 42..46 & 63..67), excluding the face (22..41) and fingers (48..62, 69..83).
-        let is_fit_bone = |npc: u32| npc <= 21 || (42..=46).contains(&npc) || (63..=67).contains(&npc);
+        let is_fit_bone =
+            |npc: u32| npc <= 21 || (42..=46).contains(&npc) || (63..=67).contains(&npc);
         let mut src = Vec::new();
         let mut dst = Vec::new();
         // deterministic order (sorted joints) so the estimate is reproducible
@@ -455,7 +464,8 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             for &j in &keys {
                 let h = full[&j];
                 if spread_only
-                    && (!full_npc.get(&j).is_some_and(|&npc| is_fit_bone(npc)) || !used_tgt.insert(h))
+                    && (!full_npc.get(&j).is_some_and(|&npc| is_fit_bone(npc))
+                        || !used_tgt.insert(h))
                 {
                     continue;
                 }
@@ -576,7 +586,10 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         }
         let tot: f64 = pairs.iter().map(|p| p.1).sum();
         let scaled: Vec<(u8, f64)> = pairs.iter().map(|&(sl, w)| (sl, 255.0 * w / tot)).collect();
-        let mut q: Vec<(u8, i64)> = scaled.iter().map(|&(sl, x)| (sl, x.floor() as i64)).collect();
+        let mut q: Vec<(u8, i64)> = scaled
+            .iter()
+            .map(|&(sl, x)| (sl, x.floor() as i64))
+            .collect();
         let rem = 255 - q.iter().map(|p| p.1).sum::<i64>();
         // indices sorted by fractional part desc (stable)
         let mut order: Vec<usize> = (0..scaled.len()).collect();
@@ -595,7 +608,9 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         }
         let sum: i64 = (0..4).map(|i| skin_bytes[vi * 8 + 4 + i] as i64).sum();
         if sum != 255 {
-            return Err(format!("vertex {vi}: weights sum to {sum}, must be exactly 255"));
+            return Err(format!(
+                "vertex {vi}: weights sum to {sum}, must be exactly 255"
+            ));
         }
     }
 
@@ -731,43 +746,61 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     // plus the source->target bone mapping, so a renderer can show how the imported rig lands on the
     // donor. Gated on an env var so it costs nothing in normal builds.
     if let Ok(path) = std::env::var("CHARSKIN_SKELDUMP") {
-        let mut out = String::from("{
-");
+        let mut out = String::from(
+            "{
+",
+        );
         // source joints, placed in container space via the same model->container transform.
-        out.push_str("  \"source\": [
-");
+        out.push_str(
+            "  \"source\": [
+",
+        );
         let mut first = true;
         for j in 0..names.len() {
-            let Some(mp) = ibm_raw.get(&j).copied() else { continue };
+            let Some(mp) = ibm_raw.get(&j).copied() else {
+                continue;
+            };
             let c = to_container(mp);
             let par = joint_parent[j].map(|p| p as i64).unwrap_or(-1);
             let tgt = full.get(&j).map(|&h| h as i64).unwrap_or(-1);
-            if !first { out.push_str(",
-"); }
+            if !first {
+                out.push_str(
+                    ",
+",
+                );
+            }
             first = false;
             out.push_str(&format!(
                 "    {{\"j\":{j},\"name\":\"{}\",\"pos\":[{:.5},{:.5},{:.5}],\"parent\":{par},\"tgt\":{tgt}}}",
                 names[j].replace('"', ""), c[0], c[1], c[2]
             ));
         }
-        out.push_str("
+        out.push_str(
+            "
   ],
   \"target\": [
-");
+",
+        );
         first = true;
         for b in &sk.bones {
-            if !first { out.push_str(",
-"); }
+            if !first {
+                out.push_str(
+                    ",
+",
+                );
+            }
             first = false;
             out.push_str(&format!(
                 "    {{\"h\":{},\"pos\":[{:.5},{:.5},{:.5}],\"parent\":{}}}",
                 b.i, b.pos[0], b.pos[1], b.pos[2], b.parent
             ));
         }
-        out.push_str("
+        out.push_str(
+            "
   ]
 }
-");
+",
+        );
         let _ = std::fs::write(&path, out);
     }
 
@@ -841,7 +874,10 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     /// not sensitive; every metric moves the right way.
     const W_CROWN: f64 = 6.0;
     let mut crown_note: Option<(f64, f64)> = None;
-    if let (Some(head_h), Some(head_t)) = (sk.index_by_canonical(21), sk.index_by_canonical(21).and_then(|h| sk.tgt(h))) {
+    if let (Some(head_h), Some(head_t)) = (
+        sk.index_by_canonical(21),
+        sk.index_by_canonical(21).and_then(|h| sk.tgt(h)),
+    ) {
         if let Some(&hj) = primary.get(&head_h) {
             if let Some(&head_s) = srcp.get(&hj) {
                 // topmost container-space vertex whose dominant influence is the head bone
@@ -885,7 +921,9 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     let two_sig2 = 2.0 * sigma * sigma;
     for &h in &bone_order {
         let p = primary[&h];
-        let Some(&anchor_s) = srcp.get(&p) else { continue };
+        let Some(&anchor_s) = srcp.get(&p) else {
+            continue;
+        };
         let Some(anchor_d) = sk.tgt(h) else { continue };
         let mut pairs: Vec<(V3, V3, f64)> = Vec::with_capacity(control.len());
         for &(ch, cs_, cd, wextra) in &control {
@@ -929,7 +967,12 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                     let k = s / f.scale;
                     let sr: [f64; 9] = std::array::from_fn(|i| f.sr[i] * k);
                     // keep the anchor fixed under the clamped scale
-                    Sim { sr, t: sub(f.apply(anchor_s), apply3(&sr, anchor_s)), scale: s, rank: f.rank }
+                    Sim {
+                        sr,
+                        t: sub(f.apply(anchor_s), apply3(&sr, anchor_s)),
+                        scale: s,
+                        rank: f.rank,
+                    }
                 } else {
                     f
                 }
@@ -955,17 +998,27 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                     })
                     .copied();
                 let (r, s) = match far {
-                    Some((s_n, d_n, _)) if len(sub(s_n, anchor_s)) > 1e-6 && len(sub(d_n, anchor_d)) > 1e-6 => {
+                    Some((s_n, d_n, _))
+                        if len(sub(s_n, anchor_s)) > 1e-6 && len(sub(d_n, anchor_d)) > 1e-6 =>
+                    {
                         let u_s = norm(apply3(&r_par, sub(s_n, anchor_s)));
                         let u_d = norm(sub(d_n, anchor_d));
                         let corr = align_rot(u_s, u_d);
                         let ratio = len(sub(d_n, anchor_d)) / len(sub(s_n, anchor_s));
-                        (mul3(&corr, &r_par), ratio.clamp(SCALE_CLAMP.0, SCALE_CLAMP.1))
+                        (
+                            mul3(&corr, &r_par),
+                            ratio.clamp(SCALE_CLAMP.0, SCALE_CLAMP.1),
+                        )
                     }
                     _ => (r_par, s_par),
                 };
                 let sr: [f64; 9] = std::array::from_fn(|i| r[i] * s);
-                Sim { sr, t: sub(anchor_d, apply3(&sr, anchor_s)), scale: s, rank: other.map_or(0, |f| f.rank) }
+                Sim {
+                    sr,
+                    t: sub(anchor_d, apply3(&sr, anchor_s)),
+                    scale: s,
+                    rank: other.map_or(0, |f| f.rank),
+                }
             }
         };
         let inv = 1.0 / sim.scale.max(1e-12);
@@ -995,7 +1048,12 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     let rescale = |sim: &Sim, new_scale: f64, anchor: [f64; 3]| -> Sim {
         let inv = 1.0 / sim.scale.max(1e-12);
         let sr: [f64; 9] = std::array::from_fn(|i| sim.sr[i] * inv * new_scale); // same rotation, new scale
-        Sim { sr, t: sub(anchor, apply3(&sr, anchor)), scale: new_scale, rank: sim.rank }
+        Sim {
+            sr,
+            t: sub(anchor, apply3(&sr, anchor)),
+            scale: new_scale,
+            rank: sim.rank,
+        }
     };
     // (roll NPC, forearm/parent NPC, hand NPC) for each arm; forearm = roll - 1, hand = roll + 1.
     for &(roll_npc, fore_npc, hand_npc) in &[(45u32, 44u32, 46u32), (66, 65, 67)] {
@@ -1075,7 +1133,12 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         let mut chain: Vec<u32> = bone_order
             .iter()
             .copied()
-            .filter(|&h| full_npc.get(&primary[&h]).copied().is_some_and(is_hand_chain))
+            .filter(|&h| {
+                full_npc
+                    .get(&primary[&h])
+                    .copied()
+                    .is_some_and(is_hand_chain)
+            })
             .collect();
         chain.sort_by_key(|&h| tdepth(h));
         let mut fk = 0usize;
@@ -1090,10 +1153,14 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                     None => break None,
                 }
             };
-            let (Some(parent), Some(rt_h)) = (base, trot(h)) else { continue };
-            let (Some(rt_p), Some(par_sim), Some(hsim)) =
-                (trot(parent), xform.get(&parent).copied(), xform.get(&h).copied())
-            else {
+            let (Some(parent), Some(rt_h)) = (base, trot(h)) else {
+                continue;
+            };
+            let (Some(rt_p), Some(par_sim), Some(hsim)) = (
+                trot(parent),
+                xform.get(&parent).copied(),
+                xform.get(&h).copied(),
+            ) else {
                 continue;
             };
             let (_, _) = (rt_p, rt_h);
@@ -1110,7 +1177,11 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             // fully 3D cloud, so the fit is well conditioned (measured rank 3, not the rank<2 this
             // pass originally assumed). Measured palm error: 155.8 -> 10.8 deg.
             let npc_h = full_npc.get(&primary[&h]).copied().unwrap_or(0);
-            let (lo, hi) = if npc_h == 46 { (48u32, 62u32) } else { (69u32, 83u32) };
+            let (lo, hi) = if npc_h == 46 {
+                (48u32, 62u32)
+            } else {
+                (69u32, 83u32)
+            };
             let mut hp: Vec<(V3, V3, f64)> = Vec::new();
             for npc in std::iter::once(npc_h).chain(lo..=hi) {
                 if let Some(hx) = sk.index_by_canonical(npc) {
@@ -1139,14 +1210,26 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             let sr: [f64; 9] = std::array::from_fn(|i| r_new[i] * s);
             let anchor_s = *srcp.get(&primary[&h]).unwrap_or(&[0.0; 3]);
             let anchor_d = sk.tgt(h).unwrap_or(anchor_s);
-            xform.insert(h, Sim { sr, t: sub(anchor_d, apply3(&sr, anchor_s)), scale: s, rank: hsim.rank });
+            xform.insert(
+                h,
+                Sim {
+                    sr,
+                    t: sub(anchor_d, apply3(&sr, anchor_s)),
+                    scale: s,
+                    rank: hsim.rank,
+                },
+            );
             fk += 1;
         }
         // RIGID: every finger inherits its hand's transform, so the hand cannot shear internally.
         let mut rigid = 0usize;
         for (hand_npc, lo, hi) in [(46u32, 48u32, 62u32), (67, 69, 83)] {
-            let Some(hand_h) = sk.index_by_canonical(hand_npc) else { continue };
-            let Some(hand_sim) = xform.get(&hand_h).copied() else { continue };
+            let Some(hand_h) = sk.index_by_canonical(hand_npc) else {
+                continue;
+            };
+            let Some(hand_sim) = xform.get(&hand_h).copied() else {
+                continue;
+            };
             for npc in lo..=hi {
                 if let Some(fh) = sk.index_by_canonical(npc) {
                     if xform.insert(fh, hand_sim).is_some() {
@@ -1247,7 +1330,9 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                 continue;
             }
             let Some(t_pos) = sk.tgt(h) else { continue };
-            let Some(hi) = sk.bones.iter().position(|b| b.i == h) else { continue };
+            let Some(hi) = sk.bones.iter().position(|b| b.i == h) else {
+                continue;
+            };
             // Axis = toward the child that CONTINUES the chain, taken as the child with the largest
             // subtree. For a limb that is the only child (thigh -> shin); for the pelvis it picks
             // `bone_spine1` over the two thighs, so the radial plane is the horizontal one that hip
@@ -1287,13 +1372,24 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
                 mt[2] + t_pos[2] - mtp[2],
             ];
             nrm_lin.insert(h, mul3(&m_inv, &sim.sr));
-            xform.insert(h, Sim { sr, t, scale: sim.scale, rank: sim.rank });
+            xform.insert(
+                h,
+                Sim {
+                    sr,
+                    t,
+                    scale: sim.scale,
+                    rank: sim.rank,
+                },
+            );
             fixed.push((sk.bones[hi].name.clone(), k));
         }
         if !fixed.is_empty() {
             fixed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top: Vec<String> =
-                fixed.iter().take(4).map(|(n, k)| format!("{n} x{k:.3}")).collect();
+            let top: Vec<String> = fixed
+                .iter()
+                .take(4)
+                .map(|(n, k)| format!("{n} x{k:.3}"))
+                .collect();
             notes.push(format!(
                 "girth: body scale {body_scale:.3}, {} bone(s) expanded radially ({})",
                 fixed.len(),
@@ -1333,7 +1429,9 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     let lin_inv: Option<[f64; 9]> = if inp.normals.is_empty() {
         None
     } else {
-        let l = [t[0][0], t[0][1], t[0][2], t[1][0], t[1][1], t[1][2], t[2][0], t[2][1], t[2][2]];
+        let l = [
+            t[0][0], t[0][1], t[0][2], t[1][0], t[1][1], t[1][2], t[2][0], t[2][1], t[2][2],
+        ];
         inv3(&l)
     };
     let mut nrm: Vec<[f32; 3]> = Vec::new();
@@ -1474,8 +1572,11 @@ struct Similarity {
 /// residual 0.185 m vs 0.094 m optimal). That tilt and shrink were the whole model's error
 /// budget before any per-bone work started.
 fn fit_similarity(src: &[[f64; 3]], dst: &[[f64; 3]]) -> Result<Similarity, String> {
-    let pairs: Vec<([f64; 3], [f64; 3], f64)> =
-        src.iter().zip(dst.iter()).map(|(&s, &d)| (s, d, 1.0)).collect();
+    let pairs: Vec<([f64; 3], [f64; 3], f64)> = src
+        .iter()
+        .zip(dst.iter())
+        .map(|(&s, &d)| (s, d, 1.0))
+        .collect();
     let sim = fit_similarity_weighted(&pairs).ok_or("fit_similarity: empty correspondence set")?;
     let sr = sim.sr;
     let t: Fit = [

@@ -40,7 +40,11 @@ fn finds_a_single_manifest_and_reports_its_format() {
         ("manifest.json", Format::Json),
     ] {
         let dir = scratch(&format!("single_{}", name.replace('.', "_")));
-        let body = if expected == Format::Json { MINIMAL_JSON } else { MINIMAL_YAML };
+        let body = if expected == Format::Json {
+            MINIMAL_JSON
+        } else {
+            MINIMAL_YAML
+        };
         write(&dir, name, body);
 
         let (path, format) = discover::find_manifest(&dir).expect("should find one manifest");
@@ -85,8 +89,14 @@ fn missing_manifest_lists_what_was_expected() {
     let dir = scratch("empty");
     let err = discover::find_manifest(&dir).expect_err("no manifest");
     let msg = err.to_string();
-    assert!(msg.contains("manifest.yaml"), "should list accepted names: {msg}");
-    assert!(msg.contains("manifest.toml"), "should list accepted names: {msg}");
+    assert!(
+        msg.contains("manifest.yaml"),
+        "should list accepted names: {msg}"
+    );
+    assert!(
+        msg.contains("manifest.toml"),
+        "should list accepted names: {msg}"
+    );
 }
 
 #[test]
@@ -124,7 +134,11 @@ fn open_reads_parses_and_validates() {
 #[test]
 fn open_surfaces_validation_failures() {
     let dir = scratch("open_bad");
-    write(&dir, "manifest.yaml", &MINIMAL_YAML.replace("format: 1", "format: 99"));
+    write(
+        &dir,
+        "manifest.yaml",
+        &MINIMAL_YAML.replace("format: 1", "format: 99"),
+    );
     let err = discover::open(&dir).expect_err("future format");
     assert!(err.to_string().contains("refusing to guess"), "{err}");
 }
@@ -189,12 +203,18 @@ fn a_missing_source_is_reported_with_its_position() {
     let shipment = discover::open(&dir).unwrap();
     let issues = discover::check_sources(&shipment.manifest, &shipment.root);
     match issues.as_slice() {
-        [SourceIssue::Missing { index, kind, field, .. }] => {
+        [SourceIssue::Missing {
+            index, kind, field, ..
+        }] => {
             assert_eq!((*index, *kind, *field), (0, "replace_texture", "image"));
         }
         other => panic!("expected one Missing, got {other:?}"),
     }
-    assert!(issues[0].to_string().contains("contributions[0]"), "{}", issues[0]);
+    assert!(
+        issues[0].to_string().contains("contributions[0]"),
+        "{}",
+        issues[0]
+    );
 }
 
 /// The Quartermaster reads and copies these files; climbing out of the Shipment must be rejected
@@ -295,5 +315,8 @@ contributions:
     assert_eq!(issues.len(), 3, "got {issues:?}");
     assert!(matches!(issues[0], SourceIssue::Missing { index: 0, .. }));
     assert!(matches!(issues[1], SourceIssue::Absolute { index: 1, .. }));
-    assert!(matches!(issues[2], SourceIssue::EscapesRoot { index: 2, .. }));
+    assert!(matches!(
+        issues[2],
+        SourceIssue::EscapesRoot { index: 2, .. }
+    ));
 }

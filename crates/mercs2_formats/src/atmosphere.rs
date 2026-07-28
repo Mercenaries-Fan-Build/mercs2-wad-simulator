@@ -30,17 +30,23 @@ use std::f32::consts::PI;
 /// `SetDefaultAtmosphere` (the base non-VZ "afternoon" look).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScatterParams {
-    pub beta_ray: f32,          // SetBetaRayMultiplier    (Rayleigh; blue-biased)  default 0.001
-    pub beta_mie: f32,          // SetBetaMieMultiplier     (Mie; haze/sun glow)     default 0.01
+    pub beta_ray: f32, // SetBetaRayMultiplier    (Rayleigh; blue-biased)  default 0.001
+    pub beta_mie: f32, // SetBetaMieMultiplier     (Mie; haze/sun glow)     default 0.01
     pub henyey_greenstein: f32, // SetHenyeyGreensteinConst (Mie phase asymmetry g)  default 0.9
-    pub inscattering: f32,      // SetInscatteringMultiplier                          default 50.0
-    pub extinction: f32,        // SetExtinctionMultiplier                            default 0.8
+    pub inscattering: f32, // SetInscatteringMultiplier                          default 50.0
+    pub extinction: f32, // SetExtinctionMultiplier                            default 0.8
 }
 
 impl Default for ScatterParams {
     fn default() -> Self {
         // mrxbootstrap SetDefaultAtmosphere (base game, non-VZ).
-        ScatterParams { beta_ray: 0.001, beta_mie: 0.01, henyey_greenstein: 0.9, inscattering: 50.0, extinction: 0.8 }
+        ScatterParams {
+            beta_ray: 0.001,
+            beta_mie: 0.01,
+            henyey_greenstein: 0.9,
+            inscattering: 50.0,
+            extinction: 0.8,
+        }
     }
 }
 
@@ -49,14 +55,14 @@ impl Default for ScatterParams {
 /// these read well and are trivially overridden by any world's `SetValue` calls).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BloomParams {
-    pub amount: f32,               // fBloomAmount
-    pub multiplier: f32,           // fBloomMultiplier
-    pub threshold: f32,            // fBloomThreshold          (bright-pass cutoff)
-    pub blur_radius: f32,          // fBloomBlurRadius          (0..1 → gaussian sigma scale)
-    pub target_luminance: f32,     // fBloomTargetLuminance     (auto-exposure target)
-    pub contrast_multiplier: f32,  // fBloomContastMultiplier   (sic — verbatim binary misspelling)
-    pub contrast_limit: f32,       // fBloomContastLimit        (sic)
-    pub adaptive_luminance_scale: f32,   // fBloomAdaptiveLuminanceScale
+    pub amount: f32,                     // fBloomAmount
+    pub multiplier: f32,                 // fBloomMultiplier
+    pub threshold: f32,                  // fBloomThreshold          (bright-pass cutoff)
+    pub blur_radius: f32,                // fBloomBlurRadius          (0..1 → gaussian sigma scale)
+    pub target_luminance: f32,           // fBloomTargetLuminance     (auto-exposure target)
+    pub contrast_multiplier: f32, // fBloomContastMultiplier   (sic — verbatim binary misspelling)
+    pub contrast_limit: f32,      // fBloomContastLimit        (sic)
+    pub adaptive_luminance_scale: f32, // fBloomAdaptiveLuminanceScale
     pub adaptive_luminance_percent: f32, // fBloomAdaptiveLuminancePercent
 }
 
@@ -80,17 +86,17 @@ impl Default for BloomParams {
 /// the namespace; unknown keys are ignored on parse so the model is forward-compatible.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Atmosphere {
-    pub time: f32,              // SetTime           0..1 time of day (0.3 = afternoon default)
-    pub time_speed: f32,        // SetTimeSpeed      day/night advance rate (0 = frozen)
-    pub time_restore: f32,      // fTimeRestore      seconds to lerp back after an FX override
-    pub light_intensity: f32,   // SetLightIntensity / fLightIntensity  (global sun/key scale)
-    pub ambient_color: [f32; 3],    // SetAmbientColor / uiAmbientColor
-    pub ambient_cube: [[f32; 3]; 6],// SetAmbientCube (6 faces ×RGB) — irradiance environment
-    pub atmosphere_force: f32,  // fAtmosphereForce  (particulate/ash density force)
-    pub atmosphere_limit: f32,  // fAtmosphereLimit  (max scatter distance)
+    pub time: f32,         // SetTime           0..1 time of day (0.3 = afternoon default)
+    pub time_speed: f32,   // SetTimeSpeed      day/night advance rate (0 = frozen)
+    pub time_restore: f32, // fTimeRestore      seconds to lerp back after an FX override
+    pub light_intensity: f32, // SetLightIntensity / fLightIntensity  (global sun/key scale)
+    pub ambient_color: [f32; 3], // SetAmbientColor / uiAmbientColor
+    pub ambient_cube: [[f32; 3]; 6], // SetAmbientCube (6 faces ×RGB) — irradiance environment
+    pub atmosphere_force: f32, // fAtmosphereForce  (particulate/ash density force)
+    pub atmosphere_limit: f32, // fAtmosphereLimit  (max scatter distance)
     pub gradient0_color2: [f32; 4], // uiGradient0_Color2  (sky gradient band)
     pub gradient1_color1: [f32; 4], // uiGradient1_Color1  (sky gradient band)
-    pub rim_color: [f32; 4],        // uiRimColor
+    pub rim_color: [f32; 4], // uiRimColor
     pub scatter: ScatterParams,
     pub bloom: BloomParams,
     pub sky_preset: Option<String>, // SetSky("afternoon" | "Maracaibo" | …)
@@ -186,12 +192,22 @@ impl Atmosphere {
     /// Apply a single line if it is a `Graphics.Atmosphere.<Method>(args)` call. Returns true if the
     /// line was a recognised setter that changed state.
     pub fn apply_line(&mut self, line: &str) -> bool {
-        let Some(rest) = line.trim().strip_prefix("Graphics.Atmosphere.") else { return false };
-        let Some(open) = rest.find('(') else { return false };
+        let Some(rest) = line.trim().strip_prefix("Graphics.Atmosphere.") else {
+            return false;
+        };
+        let Some(open) = rest.find('(') else {
+            return false;
+        };
         let method = rest[..open].trim();
-        let Some(close) = rest.rfind(')') else { return false };
+        let Some(close) = rest.rfind(')') else {
+            return false;
+        };
         let args = parse_args(&rest[open + 1..close]);
-        let f = |i: usize| -> f32 { args.get(i).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0) };
+        let f = |i: usize| -> f32 {
+            args.get(i)
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(0.0)
+        };
         match method {
             "SetValue" if args.len() >= 2 => return self.set_value(unquote(&args[0]), f(1)),
             "SetColorValue" if args.len() >= 5 => {
@@ -250,12 +266,22 @@ pub fn tonemap_reinhard(x: f32) -> f32 {
 /// Bright-pass used by the bloom bright extract: soft-knee threshold with a contrast lift, matching
 /// the shader's CPU-side reference. `luma` is the pixel luminance, `color` the linear rgb.
 /// Returns the rgb contribution kept for bloom.
-pub fn bright_pass(color: [f32; 3], luma: f32, threshold: f32, contrast_mult: f32, contrast_limit: f32) -> [f32; 3] {
+pub fn bright_pass(
+    color: [f32; 3],
+    luma: f32,
+    threshold: f32,
+    contrast_mult: f32,
+    contrast_limit: f32,
+) -> [f32; 3] {
     // Soft knee around the threshold, then a contrast lift clamped by contrast_limit.
     let knee = (luma - threshold).max(0.0);
     let w = knee / (knee + 0.25); // 0 at threshold, →1 well above it (soft shoulder)
     let lift = 1.0 + (contrast_mult - 1.0).clamp(-contrast_limit, contrast_limit);
-    [color[0] * w * lift, color[1] * w * lift, color[2] * w * lift]
+    [
+        color[0] * w * lift,
+        color[1] * w * lift,
+        color[2] * w * lift,
+    ]
 }
 
 /// Rec.709 luminance of a linear rgb color.
@@ -356,7 +382,13 @@ mod tests {
             time: 9.0,
             light_intensity: 9.0,
             ambient_color: [9.0, 9.0, 9.0],
-            scatter: ScatterParams { beta_ray: 9.0, beta_mie: 9.0, henyey_greenstein: 9.0, inscattering: 9.0, extinction: 9.0 },
+            scatter: ScatterParams {
+                beta_ray: 9.0,
+                beta_mie: 9.0,
+                henyey_greenstein: 9.0,
+                inscattering: 9.0,
+                extinction: 9.0,
+            },
             ..Atmosphere::default()
         };
         a.apply_script(src);

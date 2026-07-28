@@ -50,5 +50,9 @@ fn main() {
         off = end;
     }
     std::fs::write(&a[1], &blk).expect("write out");
-    println!("collapsed {total} drawing group(s) -> {} ({} bytes)", a[1], blk.len());
+    println!(
+        "collapsed {total} drawing group(s) -> {} ({} bytes)",
+        a[1],
+        blk.len()
+    );
 }
