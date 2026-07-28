@@ -27,6 +27,7 @@
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
+use crate::link::{self, ScriptMutation};
 use crate::lint::{self, Diagnostic};
 use crate::manifest::Contribution;
 use crate::names::NameTable;
@@ -35,11 +36,10 @@ use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::mesh_import;
 use mercs2_formats::model_inject::inject_static_into_donor_block;
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
+use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
-use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_TEXTURE};
-use crate::link::{self, ScriptMutation};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,29 @@ pub struct Placement {
     pub destination: Destination,
 }
 
+/// Read the assembled WAD back and run [`crate::lint::artifact_checks`] on it.
+///
+/// Deliberately re-parses the bytes rather than checking the in-memory `Vec<PatchBlock>` that went
+/// in. Those blocks have not been through `build_patch_wad_multi`'s LOD-rung remap, so their rungs
+/// are still source-relative — checking them would answer the wrong question. More usefully, this
+/// verifies what will actually be on disk, so a serializer bug is in scope too.
+///
+/// Fails the build on any blocking finding. That is the whole value: both structural bugs this
+/// crate has shipped were invisible in the manifest and plain in the bytes.
+fn verify_emitted(wad: &[u8]) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
+    let contents =
+        mercs2_formats::patch_wad::read_patch_wad(wad).map_err(|m| BuildError::Lower {
+            index: 0,
+            kind: "verify",
+            message: format!("the WAD we just wrote does not read back: {m}"),
+        })?;
+    let found = crate::lint::artifact_checks(&contents.blocks);
+    if crate::lint::blocks_build(&found) {
+        return Err(BuildError::Artifact { diagnostics: found });
+    }
+    Ok(found)
+}
+
 #[derive(Debug, Clone)]
 pub struct BuildReport {
     /// Everything the linter said, including non-blocking warnings.
@@ -77,13 +100,33 @@ pub enum BuildError {
     /// The linter found something at `Error` or above.
     Blocked(Vec<Diagnostic>),
     /// A contribution needed the retail WADs and none were configured.
-    GameRequired { index: usize, kind: &'static str },
+    GameRequired {
+        index: usize,
+        kind: &'static str,
+    },
     /// The configured stack is a console bake and we cannot yet EMIT for one.
     ConsoleOutputUnsupported,
     /// A kind whose lowering is not implemented yet, with the reason.
-    Unsupported { index: usize, kind: &'static str, reason: String },
-    Lower { index: usize, kind: &'static str, message: String },
-    Io { path: PathBuf, message: String },
+    Unsupported {
+        index: usize,
+        kind: &'static str,
+        reason: String,
+    },
+    Lower {
+        index: usize,
+        kind: &'static str,
+        message: String,
+    },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
+    /// The WAD we just assembled failed its own self-check. Always a builder bug rather than an
+    /// author one, and fatal on purpose: the whole point of a HANG-class rule is that the game will
+    /// not tell anybody what went wrong.
+    Artifact {
+        diagnostics: Vec<crate::lint::Diagnostic>,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -109,13 +152,31 @@ impl std::fmt::Display for BuildError {
                  RE-tiling, XMA/Xbox-ADPCM audio encoding, big-endian Lua bytecode and Xbox vertex \
                  declarations. Reading a console WAD is supported; writing one is not."
             ),
-            BuildError::Unsupported { index, kind, reason } => {
-                write!(f, "contributions[{index}] ({kind}) cannot be lowered yet: {reason}")
+            BuildError::Unsupported {
+                index,
+                kind,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "contributions[{index}] ({kind}) cannot be lowered yet: {reason}"
+                )
             }
-            BuildError::Lower { index, kind, message } => {
+            BuildError::Lower {
+                index,
+                kind,
+                message,
+            } => {
                 write!(f, "contributions[{index}] ({kind}): {message}")
             }
             BuildError::Io { path, message } => write!(f, "{}: {message}", path.display()),
+            BuildError::Artifact { diagnostics } => {
+                write!(f, "the assembled WAD failed its self-check:")?;
+                for d in diagnostics {
+                    write!(f, "\n  {d}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -151,7 +212,13 @@ pub fn script_mutations(
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
-            Contribution::AddOutfit { name, slug, display, wearer, .. } => {
+            Contribution::AddOutfit {
+                name,
+                slug,
+                display,
+                wearer,
+                ..
+            } => {
                 out.push(ScriptMutation {
                     shipment: shipment.clone(),
                     target: "wifpmcinterior".into(),
@@ -268,11 +335,20 @@ fn lower(
                 vec![aset],
                 None,
             )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
             Ok(Some(block))
         }
 
-        Contribution::AddModel { name, model, donor, retarget } => {
+        Contribution::AddModel {
+            name,
+            model,
+            donor,
+            retarget,
+        } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
@@ -303,11 +379,20 @@ fn lower(
 
             let donor_hash = pandemic_hash_m2(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
-            let donor_blk = donor::donor_block(&paths, donor_hash)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let donor_blk =
+                donor::donor_block(&paths, donor_hash).map_err(|m| BuildError::Lower {
+                    index,
+                    kind,
+                    message: m,
+                })?;
 
-            let mesh = mesh_import::external_mesh_from_gltf(&root.join(model))
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let mesh = mesh_import::external_mesh_from_gltf(&root.join(model)).map_err(|m| {
+                BuildError::Lower {
+                    index,
+                    kind,
+                    message: m,
+                }
+            })?;
 
             let hash = pandemic_hash_m2(name);
             // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
@@ -345,7 +430,11 @@ fn lower(
                 vec![aset],
                 None,
             )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
             Ok(Some(block))
         }
 
@@ -357,7 +446,15 @@ fn lower(
         // `display` is the SCRIPT half's field and is consumed by `script_mutations`; only the Data
         // half is lowered here. `slug` is kept for the log line, which is how an author confirms the
         // wardrobe row they expected is the one that was generated.
-        Contribution::AddOutfit { name, slug, wearer, model, donor, retarget, .. } => {
+        Contribution::AddOutfit {
+            name,
+            slug,
+            wearer,
+            model,
+            donor,
+            retarget,
+            ..
+        } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
@@ -375,24 +472,44 @@ fn lower(
                 return Err(BuildError::Unsupported {
                     index,
                     kind,
-                    reason: "donor auto-pick is not implemented — name a `donor:` explicitly. For an \
+                    reason:
+                        "donor auto-pick is not implemented — name a `donor:` explicitly. For an \
                              outfit the donor must be a hero-rigged host, or the model will not \
                              animate."
-                        .into(),
+                            .into(),
                 });
             };
 
             let donor_hash = pandemic_hash_m2(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
-            let donor_blk = donor::donor_block(&paths, donor_hash)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            let mesh = mesh_import::external_mesh_from_gltf(&root.join(model))
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let donor_blk =
+                donor::donor_block(&paths, donor_hash).map_err(|m| BuildError::Lower {
+                    index,
+                    kind,
+                    message: m,
+                })?;
+            let mesh = mesh_import::external_mesh_from_gltf(&root.join(model)).map_err(|m| {
+                BuildError::Lower {
+                    index,
+                    kind,
+                    message: m,
+                }
+            })?;
 
             let hash = pandemic_hash_m2(name);
             let (new_block, stats) = inject_static_into_donor_block(
-                &donor_blk, &mesh, DEFAULT_TARGET_GROUP, &[], hash, false, false, false, false,
-                &[DEFAULT_TARGET_GROUP], 1.0, false,
+                &donor_blk,
+                &mesh,
+                DEFAULT_TARGET_GROUP,
+                &[],
+                hash,
+                false,
+                false,
+                false,
+                false,
+                &[DEFAULT_TARGET_GROUP],
+                1.0,
+                false,
             )
             .map_err(|m| BuildError::Lower {
                 index,
@@ -407,7 +524,11 @@ fn lower(
                 vec![aset],
                 None,
             )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
 
             // The Script half. `Model` is the ASSET name SetOutfit receives; `Name` is the
             // unlock/tracking key; both are distinct from the display string.
@@ -422,7 +543,8 @@ fn lower(
         // Contributes no block: its whole effect is a declared mutation, collected by
         // `script_mutations` and realised at link time.
         Contribution::PatchLua { .. } => Ok(None),
-        Contribution::EditStateMachine { .. } | Contribution::NativeHook { .. }
+        Contribution::EditStateMachine { .. }
+        | Contribution::NativeHook { .. }
         | Contribution::Raw { .. } => Err(BuildError::Unsupported {
             index,
             kind,
@@ -441,9 +563,13 @@ struct Rgba {
 fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoder = png::Decoder::new(file);
-    let mut reader = decoder.read_info().map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let (w, h) = (info.width as usize, info.height as usize);
     let channels = info.color_type.samples();
     if info.bit_depth != png::BitDepth::Eight {
@@ -463,11 +589,17 @@ fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
         pixels[i * 4 + 2] = b as f32;
         pixels[i * 4 + 3] = a as f32;
     }
-    Ok(Rgba { width: w, height: h, pixels })
+    Ok(Rgba {
+        width: w,
+        height: h,
+        pixels,
+    })
 }
 
 fn drop_alpha(rgba: &[f32]) -> Vec<f32> {
-    rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
+    rgba.chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect()
 }
 
 /// Byte length of mip level 0 for a BC-compressed surface: 4x4 blocks, 8 bytes for BC1, 16 for BC3.
@@ -505,7 +637,10 @@ pub fn build(
     }
     // Reading a console bake is fine and supported; EMITTING for one is not. Checked before any
     // lowering so the failure names the real reason rather than surfacing as a texture-encode error.
-    if game.as_deref().is_some_and(|g| g.platform() != Platform::Pc) {
+    if game
+        .as_deref()
+        .is_some_and(|g| g.platform() != Platform::Pc)
+    {
         return Err(BuildError::ConsoleOutputUnsupported);
     }
     log.push(format!(
@@ -538,38 +673,48 @@ pub fn build(
     // its single-Shipment case.
     if !mutations.is_empty() {
         let Some(game) = game.as_deref_mut() else {
-            return Err(BuildError::GameRequired { index: 0, kind: "patch_lua" });
+            return Err(BuildError::GameRequired {
+                index: 0,
+                kind: "patch_lua",
+            });
         };
         let Some(corpus) = corpus_root else {
             return Err(BuildError::Lower {
                 index: 0,
                 kind: "patch_lua",
-                message: "linking Lua needs the decompiled corpus (the base source to append to) — \
+                message:
+                    "linking Lua needs the decompiled corpus (the base source to append to) — \
                           pass its root; it is vendored at \
                           crates/mercs2_script/corpus/mercs2-luacd/src"
-                    .into(),
+                        .into(),
             });
         };
-        let raw = game.block_by_path("scripts_vz").ok_or_else(|| BuildError::Lower {
-            index: 0,
-            kind: "patch_lua",
-            message: "no scripts_vz block in the configured game stack".into(),
-        })?;
+        let raw = game
+            .block_by_path("scripts_vz")
+            .ok_or_else(|| BuildError::Lower {
+                index: 0,
+                kind: "patch_lua",
+                message: "no scripts_vz block in the configured game stack".into(),
+            })?;
         let mut script_block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
             index: 0,
             kind: "patch_lua",
             message: format!("parsing scripts_vz: {m}"),
         })?;
-        let linked =
-            link::link_into(&mut script_block, corpus, &mutations).map_err(|e| BuildError::Lower {
+        let linked = link::link_into(&mut script_block, corpus, &mutations).map_err(|e| {
+            BuildError::Lower {
                 index: 0,
                 kind: "patch_lua",
                 message: e.to_string(),
-            })?;
+            }
+        })?;
         for l in &linked {
             log.push(format!(
                 "linked {}: {} → {} B source, {} B bytecode, from {:?}",
-                l.target, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes,
+                l.target,
+                l.base_source_bytes,
+                l.linked_source_bytes,
+                l.bytecode_bytes,
                 l.contributors
             ));
         }
@@ -588,14 +733,21 @@ pub fn build(
                 aset,
                 None,
             )
-            .map_err(|m| BuildError::Lower { index: 0, kind: "patch_lua", message: m })?,
+            .map_err(|m| BuildError::Lower {
+                index: 0,
+                kind: "patch_lua",
+                message: m,
+            })?,
         );
     }
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
     // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
     // known to load — it costs one header read to match them.
-    let csum = match game.as_deref().and_then(|g| g.paths().first().map(|p| p.to_path_buf())) {
+    let csum = match game
+        .as_deref()
+        .and_then(|g| g.paths().first().map(|p| p.to_path_buf()))
+    {
         Some(base) => mercs2_formats::donor::base_csum(&base).map_err(|m| BuildError::Lower {
             index: 0,
             kind: "assemble",
@@ -604,7 +756,9 @@ pub fn build(
         None => (0, None),
     };
 
-    let out_dir = out_dir.map(|p| p.to_path_buf()).unwrap_or_else(|| shipment.root.join("build"));
+    let out_dir = out_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| shipment.root.join("build"));
     std::fs::create_dir_all(&out_dir).map_err(|e| BuildError::Io {
         path: out_dir.clone(),
         message: e.to_string(),
@@ -614,8 +768,20 @@ pub fn build(
     let mut wad_path = None;
     if !blocks.is_empty() {
         let wad = build_patch_wad_multi(&blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
-            BuildError::Lower { index: 0, kind: "assemble", message: m }
+            BuildError::Lower {
+                index: 0,
+                kind: "assemble",
+                message: m,
+            }
         })?;
+        // Self-check BEFORE writing: a WAD that would hang the game should not reach the disk at
+        // all, where a later step could mistake its presence for success.
+        let found = verify_emitted(&wad)?;
+        for d in &found {
+            log.push(format!("self-check: {d}"));
+        }
+        diagnostics.extend(found);
+
         let name = format!("{}.wad", manifest.shipment.name);
         let path = out_dir.join(&name);
         std::fs::write(&path, &wad).map_err(|e| BuildError::Io {
@@ -623,9 +789,18 @@ pub fn build(
             message: e.to_string(),
         })?;
         let digest = sha256_hex(&wad);
-        std::fs::write(out_dir.join(format!("{name}.sha256")), format!("{digest}  {name}\n"))
-            .map_err(|e| BuildError::Io { path: path.clone(), message: e.to_string() })?;
-        log.push(format!("wrote {name}: {} bytes, sha256 {digest}", wad.len()));
+        std::fs::write(
+            out_dir.join(format!("{name}.sha256")),
+            format!("{digest}  {name}\n"),
+        )
+        .map_err(|e| BuildError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        log.push(format!(
+            "wrote {name}: {} bytes, sha256 {digest}",
+            wad.len()
+        ));
         placements.push(Placement {
             name,
             bytes: wad.len(),
@@ -649,7 +824,12 @@ pub fn build(
         message: e.to_string(),
     })?;
 
-    Ok(BuildReport { diagnostics, wad: wad_path, placements, log })
+    Ok(BuildReport {
+        diagnostics,
+        wad: wad_path,
+        placements,
+        log,
+    })
 }
 
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
@@ -694,7 +874,12 @@ pub fn link_installed(
     }
     if mutations.is_empty() {
         log.push("no installed Shipment touches a script — nothing to link".into());
-        return Ok(LinkReport { wad: None, placements: Vec::new(), linked: Vec::new(), log });
+        return Ok(LinkReport {
+            wad: None,
+            placements: Vec::new(),
+            linked: Vec::new(),
+            log,
+        });
     }
     log.push(format!(
         "linking {} mutation(s) from {} Shipment(s)",
@@ -702,11 +887,13 @@ pub fn link_installed(
         shipments.len()
     ));
 
-    let raw = game.block_by_path("scripts_vz").ok_or_else(|| BuildError::Lower {
-        index: 0,
-        kind: "link",
-        message: "no scripts_vz block in the configured game stack".into(),
-    })?;
+    let raw = game
+        .block_by_path("scripts_vz")
+        .ok_or_else(|| BuildError::Lower {
+            index: 0,
+            kind: "link",
+            message: "no scripts_vz block in the configured game stack".into(),
+        })?;
     let mut block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
         index: 0,
         kind: "link",
@@ -737,12 +924,30 @@ pub fn link_installed(
         aset,
         None,
     )
-    .map_err(|m| BuildError::Lower { index: 0, kind: "link", message: m })?;
+    .map_err(|m| BuildError::Lower {
+        index: 0,
+        kind: "link",
+        message: m,
+    })?;
 
-    let csum = mercs2_formats::donor::base_csum(game.paths()[0])
-        .map_err(|m| BuildError::Lower { index: 0, kind: "link", message: m })?;
-    let wad_bytes = build_patch_wad_multi(&[patch], csum.0, csum.1, &FFCS_CERT_BLOB)
-        .map_err(|m| BuildError::Lower { index: 0, kind: "link", message: m })?;
+    let csum =
+        mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
+            index: 0,
+            kind: "link",
+            message: m,
+        })?;
+    let wad_bytes =
+        build_patch_wad_multi(&[patch], csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+            BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: m,
+            }
+        })?;
+
+    // The link WAD is mounted LAST and so wins outright. It gets the same self-check as any other,
+    // and for the same reason: nothing downstream would notice a defect here.
+    let self_check = verify_emitted(&wad_bytes)?;
 
     std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
         path: out_dir.to_path_buf(),
@@ -754,7 +959,13 @@ pub fn link_installed(
         message: e.to_string(),
     })?;
     let digest = sha256_hex(&wad_bytes);
-    log.push(format!("wrote {LINK_WAD_NAME}: {} bytes, sha256 {digest}", wad_bytes.len()));
+    log.push(format!(
+        "wrote {LINK_WAD_NAME}: {} bytes, sha256 {digest}",
+        wad_bytes.len()
+    ));
+    for d in &self_check {
+        log.push(format!("self-check: {d}"));
+    }
 
     Ok(LinkReport {
         wad: Some(path),
