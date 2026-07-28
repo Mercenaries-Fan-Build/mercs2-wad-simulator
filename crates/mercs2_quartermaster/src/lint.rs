@@ -428,7 +428,9 @@ pub fn lint(
             out.push(Diagnostic {
                 rule,
                 severity,
-                message: issue.to_string(),
+                // `detail()`, not `to_string()` — `at` already carries the index and `Diagnostic`
+                // prints it, so the full Display would name the contribution twice.
+                message: issue.detail(),
                 at: Some(at),
                 fix: None,
             });
