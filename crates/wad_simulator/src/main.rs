@@ -68,24 +68,13 @@
 //! non-primary entries, i.e. it false-flagged ~10,788 valid rows. It has been removed. The
 //! `--oob-only` flag it drove is retained on the CLI for compatibility but is no longer read.
 
-mod action_table;
-mod animation;
-mod aset_validate;
-mod audio;
-mod blocks;
-mod chunk_invariants;
-mod consume;
-mod material;
-mod model;
-mod resident;
-pub mod names;
-mod overlay;
-mod placement;
-mod progress;
-mod pws;
-mod simulate;
-mod script;
-mod texture;
+// The simulation modules live in the crate's `[lib]` (`src/lib.rs`) so a linter or another tool can
+// call these checks instead of shelling out to this binary. Consumed from there rather than
+// re-declared here, so there is one copy compiled once.
+use wad_simulator::{
+    action_table, animation, aset_validate, audio, blocks, chunk_invariants, consume, material,
+    model, names, overlay, placement, progress, pws, resident, script, simulate, texture,
+};
 
 use clap::Parser;
 use colored::*;
