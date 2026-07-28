@@ -374,10 +374,108 @@ One genuine gap: **`docs/modding/manifest_format.md` is not written yet.** Plan 
 as the freeze deliverable ("when frozen, it graduates to the template repo README +
 `docs/modding/manifest_format.md`"), so this is scheduled work, not a loose end.
 
-## G. Remaining lowering
+## G. Remaining lowering — `raw` and `native_hook` DONE; `edit_state_machine` BLOCKED (2026-07-28)
 
-`edit_state_machine`, `native_hook` (place the `.asi` + the placement record), `raw`. Each currently
-returns `Unsupported`.
+Two of the three lower. The third does not, and that is a finding rather than a deferral.
+
+### `raw` — ✅ DONE
+
+Opaque bytes into the overlay, with the author's declared `touches` minting the ASET rows. The
+load-bearing decision is that the declaration must match the payload's own entry table **exactly, in
+both directions**, because nothing downstream can infer a raw block's radius:
+
+- a claim the payload does not carry publishes a row pointing at a block with no such asset in it —
+  the lookup resolves, the block loads, and the asset is simply absent;
+- an asset the payload carries but does not claim gets no row at all (M0004's silent wedge) **and**
+  is invisible to the conflict system, so two Shipments could overwrite one asset with neither being
+  told.
+
+The ASET **type id comes from the payload's entry table**, never from the author: it decides which
+loader is dispatched, so there is nothing safe to guess, and an unknown type hash is named and
+refused. Two non-block payloads are refused *by name* rather than by a generic parse error — a bare
+`UCFX` container (the bug this crate has already shipped once, arriving now as author input) and an
+already-`sges` payload (M0002 from the author's side).
+
+**Only the Data layer lowers.** The overlay is a WAD and that is the only layer a WAD holds; the
+other three are refused with the kind to use instead. The script case is the one that matters — a
+finished `scripts_vz` block would be shadowed last-mounted-wins over every other installed
+Shipment's Lua, including the wardrobe rows `add_outfit` generates. No declared radius makes that
+safe, which is exactly why `patch_lua` ships a mutation.
+
+`raw` needs **no game stack**, so it is the first path that exercises the whole emission contract
+hermetically — the shape template CI runs in. Verified against retail as well: a real
+`oc_veh_helicopter_md500` block carried through comes back out of `read_patch_wad` byte-identical,
+and `wad_simulator` reports `issues=0` on all 34 asset types with `VERDICT: Full consumption path
+completed without violations`.
+
+### `native_hook` — ✅ DONE
+
+The kind that breaks "output is always the overlay WAD", and therefore the one the placement record
+exists for: an overlay is undone by deleting a file, an `.asi` in the game folder is not.
+
+**The builder chooses the destination, and that is the security property.** There is no `dest`
+field, so no spelling of a Shipment writes next to `Mercenaries2.exe` or into `data/vz.wad` — those
+stay unreachable by construction rather than by a suppressible rule. `scripts/` is picked from the
+four roots `pmc_bb.dll` actually globs, **read out of the binary** (`%s*.asi`, `%sscripts\`,
+`%splugins\`, `%supdate\` — present and identical in both copies of the DLL that disagree
+elsewhere), and a test pins the constant inside that set.
+
+Four refusals, all of them failures the loader reports quietly or not at all: a non-`*.asi` file is
+never globbed (refused rather than renamed — the filename is also the `FileArtifact` claim, so
+renaming would make claim and placement disagree); `pmc_bb.asi` is the loader's own name and is
+skipped, with nothing logged because nothing was tried; a PE header that cannot load (the game is a
+32-bit process, and an image without `IMAGE_FILE_DLL` is not a DLL — offsets pinned against
+`pmc_bb.dll` v3.0.0, `e_lfanew=0x80 machine=0x014C chars=0x230E`); and a `symbol` with no `plugin`,
+which asks the Quartermaster to produce native code it does not compile.
+
+The digest is taken from the bytes **read back off the disk**, not from the buffer the builder held:
+a digest of the intended bytes would still verify after a truncated write. The log states plainly
+that an ASI is unrestricted native code, because a green digest reads as "safe" to a Tier-1 user
+when it only means "unmodified".
+
+### `edit_state_machine` — ❌ BLOCKED, with evidence
+
+**The destruction machine can be READ and cannot be WRITTEN**, and three of the four gaps are
+outside this crate. Left `Unsupported` on purpose; the reason now names the gaps and points at the
+escape hatch instead of saying "not implemented in this increment".
+
+1. **No serializer.** `mercs2_formats::orchestrator::parse_state_machine` decodes the
+   SWIT/NODE/STAT/CHDR/CEXE family and is validated against retail — re-measured while writing this,
+   `al_veh_boat_destroyer` parses to 59 switch slots and 47 switch nodes with six named states each
+   — but `StateMachine` is a decoded **view**: no descriptor indices, no data offsets, no container
+   position, so it cannot even round-trip. Nothing in the workspace writes those tags, and
+   `mercs2_workshop`'s bundler lists exactly this set under `preserved_only_in_raw`, which is the
+   ecosystem carrying them verbatim because it cannot author them either.
+2. **The family is a NESTED container inside the model container.** Writing one means rebuilding
+   that container's descriptor table (tag / offset / size / descendant count per row), re-basing
+   every following sibling's data offset, recomputing the CSUM and re-emitting the whole model
+   block. `model_inject` rewrites geometry groups, not an arbitrary sibling subtree.
+3. **`states:` has no schema.** The manifest declares `states: PathBuf` and *nothing anywhere says
+   what that file contains*. Defining it is a Plan 04 format change, not a lowering.
+4. **There would be no way to check the result.** The closest known corruption of this kind —
+   collapsing a group's PRMT records so the machine reads off the end — faults at model
+   instantiation, and the field guide records that `wad_simulator` does **not** catch it: it appears
+   only in-game. Every structural bug this crate has shipped was caught by that simulator and none
+   by a digest, so a lowering it cannot see would ship with no safety net at all. That, more than
+   the missing code, is the argument against a speculative implementation.
+
+**What would unblock it, in order:** (a) an `orchestrator::serialize_state_machine` plus a
+container-subtree splice in `mercs2_formats`, proven by a byte-identical round-trip of every
+destructible in retail `vz.wad` — the same shape as the `scripts_block` survey that unblocked the
+Lua linker; (b) an authoring schema for `states:`, which is a format decision; (c) a check
+`wad_simulator` can run, since without one (a) and (b) buy a build that cannot be verified.
+
+Good news found while measuring: the **state-name vocabulary is cracked** (`InitState`,
+`InitDestroyedState`, `PristineState`, `DamagedState`, `StartDestroyedState`, `DestroyedState`,
+`GoneState` — `docs/modernization/vehicle_model_spec.md` §5), so `destruction_orchestrator_format.md`'s
+"not yet reversed" is stale. Exactly **one** command verb is still unresolved — `0xB4DBE473`,
+observed zero-arg in the destroyer's `StartDestroyedState`. So the vocabulary is *not* the blocker
+it would have been a month ago; the missing writer is.
+
+Also worth recording: **`raw` is the honest workaround today.** A modder who has hand-built the
+block already can ship it as `kind: raw` / `target_layer: data`, which carries a declared blast
+radius. That is the open lower bound doing the job it exists for, and it is what the refusal points
+at.
 
 ## H. Format gaps recorded but unresolved
 
@@ -437,7 +535,9 @@ not blocking.
 
 - **B**: M0006 (reassess — M0009 may already suffice), then M0005 and M0008, both of which are
   research rather than implementation. M0001–M0004 are all implemented.
-- **G**, the unimplemented lowering: `edit_state_machine`, `native_hook`, `raw`.
+- **G**: `raw` and `native_hook` are done. `edit_state_machine` is BLOCKED on a missing serializer,
+  a missing `states:` schema and a missing way to verify the result — see section G for what would
+  unblock it and in what order.
 - **H**, format gaps (`add_model` `group:`, donor auto-pick, Open-Q7, Open-Q10).
 - Making `qm` carry its own name table (see I).
 
