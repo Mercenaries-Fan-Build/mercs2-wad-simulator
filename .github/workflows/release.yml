@@ -23,11 +23,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             suffix: "-linux-x86_64"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop qm"
           # 32-bit builds the ENGINE-FREE tools only: mercs2_engine — and mercs2_game/workshop with
           # it — is 64-bit by design, and its gilrs/cpal deps link C system libs (libudev, alsa)
           # that would need a full i386 multiarch sysroot to cross-build. The six crates below are
           # engine-free and link no C libs, so they cross-compile clean.
+          #
+          # `qm` is deliberately NOT here. It is authoring tooling — it reads a Shipment and writes a
+          # WAD — and never runs inside the game's 32-bit process, so it has no reason to match the
+          # game's bitness the way an injected tool would. Adding it would also mean cross-compiling
+          # mercs2_luac's vendored C Lua for i686, which nothing has exercised. Add it if a 32-bit
+          # consumer ever appears; the omission is a decision, not an oversight.
           - os: ubuntu-22.04
             target: i686-unknown-linux-gnu
             suffix: "-linux-i686"
@@ -37,7 +43,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             suffix: "-windows-x86_64.exe"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop qm"
           - os: windows-latest
             target: i686-pc-windows-msvc
             suffix: "-windows-i686.exe"
@@ -57,12 +63,12 @@ jobs:
             target: aarch64-apple-darwin
             suffix: "-macos-arm64"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop qm"
           - os: macos-latest
             target: x86_64-apple-darwin
             suffix: "-macos-x86_64"
             build: "--workspace"
-            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop qm"
 
     runs-on: ${{ matrix.os }}
 
