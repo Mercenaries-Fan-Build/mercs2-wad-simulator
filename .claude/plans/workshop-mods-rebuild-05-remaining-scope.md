@@ -104,8 +104,11 @@ source-append onto the base script, compile once, emit one block.
    not each Shipment — emit the availability-count lift exactly once.
 
 **Known hazards to design around:**
-- `replace_lua` hard-errors on a metadata-bearing `BINN` (`scripts_block.rs:117`). Unknown whether
-  any of the 114 containers has one. **Survey this first** — it decides whether the approach works.
+- ~~`replace_lua` hard-errors on a metadata-bearing `BINN`.~~ **CLEARED 2026-07-28** by
+  `mercs2_formats/tests/scripts_block_survey.rs`: all **114 containers surveyed — 0 metadata-bearing,
+  0 unparseable, 0 with a non-script `type_hash`**. The restriction is theoretical for `scripts_vz`.
+  The same file also pins that splicing identical bytecode back in reproduces the block **byte for
+  byte** with CSUMs intact, so the rebuild path loses nothing before a mod is even involved.
 - The corpus has 12 gaps plus goto-heavy scripts `unluac` could not round-trip. Those are scripts
   the linker structurally cannot target, and it should say so loudly rather than fail obscurely.
 - A brand-new script name needs a script-UCFX-container builder, which does not exist. Defer.
