@@ -152,30 +152,41 @@ fn load(root: &Path) -> Result<LoadedShipment, ExitCode> {
 /// quietly runs one rule short is exactly the "clean bill of health" failure this crate is built to
 /// avoid, so a missing table says so.
 fn resolve_names(explicit: Option<&Path>) -> Option<NameTable> {
-    let path = match explicit {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .map(|root| root.join(mercs2_quartermaster::names::PRODUCTION_NAMES))?;
-            if !p.is_file() {
-                eprintln!(
-                    "note: no name table found; M0130 (bare hash where a name is known) will not run. \
-                     Pass --names <file> to enable it."
-                );
-                return None;
+    if let Some(p) = explicit {
+        return match NameTable::load(p) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("warning: {}: {e} — M0130 will not run", p.display());
+                None
             }
-            p
-        }
-    };
-    match NameTable::load(&path) {
-        Ok(t) => Some(t),
-        Err(e) => {
-            eprintln!("warning: {}: {e} — M0130 will not run", path.display());
-            None
-        }
+        };
     }
+
+    // Walk up from the EXECUTABLE first, then from the working directory.
+    //
+    // Emphatically NOT `CARGO_MANIFEST_DIR`: that bakes the path of whatever machine built the
+    // binary into the binary, so a released `qm` would look for the table on a CI runner's
+    // filesystem and never find it. This crate exists partly because that class of bug — a path
+    // that worked on one dev machine — shipped before.
+    //
+    // The executable comes first because that is where a managed install puts its data; the working
+    // directory covers running inside a checkout.
+    let from_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().and_then(NameTable::find_from));
+    let found = from_exe.or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| NameTable::find_from(&cwd))
+    });
+
+    if found.is_none() {
+        eprintln!(
+            "note: no name table found next to qm or under the working directory; M0130 (bare hash \
+             where a name is known) will not run. Pass --names <file> to enable it."
+        );
+    }
+    found
 }
 
 /// Resolve the game stack: an explicit path wins, otherwise host discovery.
