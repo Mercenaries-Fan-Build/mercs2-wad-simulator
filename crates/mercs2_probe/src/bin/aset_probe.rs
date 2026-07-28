@@ -19,7 +19,7 @@ fn main() {
         .filter_map(|h| u32::from_str_radix(h, 16).ok())
         .collect();
 
-    let w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     // ---- Per-hash detail ----
     for want in &wants {
