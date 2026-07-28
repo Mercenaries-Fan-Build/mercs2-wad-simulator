@@ -32,7 +32,6 @@ use crate::lint::{self, Diagnostic};
 use crate::manifest::Contribution;
 use crate::names::NameTable;
 use mercs2_formats::donor;
-use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::mesh_import;
 use mercs2_formats::model_inject::inject_static_into_donor_block;
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
@@ -258,7 +257,7 @@ fn lower(
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
-            let hash = pandemic_hash_m2(target);
+            let hash = crate::manifest::asset_hash(target);
 
             // The target's OWN dimensions and format are the spec: a replacement is same-hash and
             // fully resident, so it must match what the engine already expects to read.
@@ -377,7 +376,7 @@ fn lower(
                 });
             };
 
-            let donor_hash = pandemic_hash_m2(donor_name);
+            let donor_hash = crate::manifest::asset_hash(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
             let donor_blk =
                 donor::donor_block(&paths, donor_hash).map_err(|m| BuildError::Lower {
@@ -394,7 +393,7 @@ fn lower(
                 }
             })?;
 
-            let hash = pandemic_hash_m2(name);
+            let hash = crate::manifest::asset_hash(name);
             // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
             // transform), target the raw rendered group, neutralise the rest.
             let (new_block, stats) = inject_static_into_donor_block(
@@ -480,7 +479,7 @@ fn lower(
                 });
             };
 
-            let donor_hash = pandemic_hash_m2(donor_name);
+            let donor_hash = crate::manifest::asset_hash(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
             let donor_blk =
                 donor::donor_block(&paths, donor_hash).map_err(|m| BuildError::Lower {
@@ -496,7 +495,7 @@ fn lower(
                 }
             })?;
 
-            let hash = pandemic_hash_m2(name);
+            let hash = crate::manifest::asset_hash(name);
             let (new_block, stats) = inject_static_into_donor_block(
                 &donor_blk,
                 &mesh,

@@ -224,7 +224,7 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         if let Contribution::ReplaceTexture { target, .. } = c {
-            let hash = mercs2_formats::hash::pandemic_hash_m2(target);
+            let hash = crate::manifest::asset_hash(target);
             // Use EVERY row, not just the primary one: a shared texture may have no primary row at
             // all, and looking only for one would silently skip exactly those assets.
             let rows = game.aset_rows(hash, mercs2_formats::types::TYPE_ID_TEXTURE);
@@ -614,7 +614,7 @@ pub fn lint(
             out.push(Diagnostic {
                 rule: M0130_BARE_HASH,
                 severity: Severity::Warning,
-                message: s.to_string(),
+                message: s.detail(),
                 at: Some(s.index),
                 fix: Some(s.name.clone()),
             });
