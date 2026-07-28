@@ -73,6 +73,15 @@ pub struct BootSaveState {
     pub active_missions: Vec<String>,
     /// `tLayerData` — the active `vz_state_*` world-overlay layer names.
     pub layers: Vec<String>,
+    /// `tTransitData.bEnabled` — the transit (fast-travel) system's master switch.
+    pub transit_enabled: bool,
+    /// `tTransitData[n]` — per-landing-zone transit state, sorted by zone.
+    ///
+    /// This used to go in as an EMPTY table, so a resumed game came back with every zone at its
+    /// `MrxTransit.Reset` default: no faction, disabled, fanfare unplayed. The shape is measured from
+    /// the vendored retail saves and cross-checked against a live capture — see
+    /// `mercs2_formats::save`'s `transit_data_decodes_from_the_retail_saves`.
+    pub transit_zones: Vec<mercs2_formats::save::TransitZone>,
 }
 
 /// The engine side of the script seam: Lua drives it; it records [`SpawnRequest`]s for the render loop
@@ -1934,7 +1943,6 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
         "tSupportData",        // :796  MrxSupportData.LoadSingleton
         "tRewardData",         // :797  MrxRewardData.LoadSingleton
         "tFactionData",        // :798  MrxFactionManager.LoadSingleton
-        "tTransitData",        // :798  MrxTransit.LoadSingleton
         "tPmcInteriorData",    // :799  WifPmcInterior.LoadSingleton  <- the one that first threw
         "tActiveHint",         // :800  WifHints.LoadSingleton
         "tActiveBio",          // :801  WifBios.LoadSingleton
@@ -1955,6 +1963,27 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
     root.set("nAvailableCostumes", 1)?;
     root.set("tFlowData", flow)?;
     root.set("tLayerData", layers)?;
+
+    // `tTransitData` — the shape `MrxTransit.LoadSingleton` (`mrxtransit.lua:378-404`) reads back:
+    // the `bEnabled` master switch plus one sub-table per zone, keyed by ABSOLUTE zone number (the
+    // set is sparse, so the key is not a position). `LoadSingleton` iterates with `pairs` and skips
+    // non-number keys, and it indexes `_tLandingZones[nIndex]` unguarded — so a zone that is not in
+    // the world's pad set must not appear here.
+    let transit = lua.create_table()?;
+    transit.set("bEnabled", save.transit_enabled)?;
+    for z in &save.transit_zones {
+        let t = lua.create_table()?;
+        t.set("bEnabled", z.enabled)?;
+        t.set("bIsNuked", z.is_nuked)?;
+        t.set("bHasPlayedFanfare", z.played_fanfare)?;
+        // Left NIL when the zone is unaffiliated, not written as a placeholder: `LoadSingleton`
+        // branches on `if tData.sFactionAbbrev then` before touching the attitude test.
+        if let Some(f) = &z.faction {
+            t.set("sFactionAbbrev", f.as_str())?;
+        }
+        transit.set(z.zone, t)?;
+    }
+    root.set("tTransitData", transit)?;
     lua.globals().set("__boot_save_state", root)?;
     Ok(true)
 }
@@ -1988,7 +2017,7 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
 /// that (with `<contract>_Start1`) is what previously made every New Game start inside the PMC interior,
 /// because it overwrote the master script's answer a few lines after it was computed.
 ///
-/// Errors are logged, not fatal.
+/// A script error anywhere in this flow is FATAL — see [`lua_fatal`].
 pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, character: &str) {
     println!("[world] ===== vanilla boot Lua flow: MrxBootstrap.Start() =====");
     // Publish the save (or nothing) for the `Pg.LoadGame` seam below to hand to `LoadSingleton`.
@@ -2059,7 +2088,7 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, charac
     );
     match sh.exec(&src, "@boot_flow") {
         Ok(()) => println!("[world] ===== boot flow started (Start + spawn); servicing state machine ====="),
-        Err(e) => println!("[world] ===== boot flow error (first divergence): {e} ====="),
+        Err(e) => lua_fatal(format_args!("boot flow (first divergence): {e}")),
     }
 
     // Service the world-load state machine: pump the Lua timer/event system and fire the
@@ -2076,11 +2105,15 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, charac
             // Firing the "exit" phase runs the state's ReadyToExit callbacks — for WaitForStreaming that
             // is `_SecondaryStreamComplete → _StartPlayerVisibleGameplay → WifMissionFlow.Refresh(Exit,
             // WAITFORGAME)`, the chain that reaches GlobalExit. Surface any error (don't swallow it).
+            // `{e:?}` deliberately, not `{e}`: a runtime error's Display carries the Lua traceback,
+            // but a binding ARGUMENT-conversion failure (`Error::BadArgument`) prints only its cause
+            // — "bad argument #1: error converting Lua nil to f64" with no hint which binding, which
+            // is unactionable. The Debug form keeps the wrapper, naming the function.
             if let Err(e) = sh.fire_state_change(&st, "enter") {
-                println!("[script] GameStateChange({st}, enter) error: {e}");
+                lua_fatal(format_args!("GameStateChange({st}, enter): {e:?}"));
             }
             if let Err(e) = sh.fire_state_change(&st, "exit") {
-                println!("[script] GameStateChange({st}, exit) error: {e}");
+                lua_fatal(format_args!("GameStateChange({st}, exit): {e:?}"));
             }
         }
         // Progress = a state was serviced OR the Lua produced new output (a timer/callback fired).
@@ -2097,9 +2130,27 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, charac
     println!("[world] ===== boot flow settled =====");
 }
 
+/// A Lua error is a BLOCKER: report it and take the process down. No opt-out.
+///
+/// These used to be printed and stepped over. That was worse than it looked: a script that errors
+/// mid-callback has left the state machine part-way through a transition — gates stay armed, the
+/// callbacks behind them never fire, and the world limps on in a state no shipped build ever reaches.
+/// The run then *appears* to boot, so the failure reads as ugly logging rather than the blocker it is,
+/// and it survives into every later session because nothing forces it to be dealt with.
+fn lua_fatal(context: std::fmt::Arguments<'_>) -> ! {
+    eprintln!("\n[script] FATAL: {context}");
+    eprintln!(
+        "[script] A mission script errored, so the state machine is stranded part-way through a\n\
+         [script] transition. Continuing would run the world in a state no shipped build reaches."
+    );
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    panic!("lua script error: {context}");
+}
+
 /// Advance the resident script host one fixed step: pump the Lua event/timer system (`Event.__pump(dt)`)
 /// so `TimerRelative` fires and posted events dispatch. A no-op if `Event`/`__pump` aren't present.
-/// Errors are logged, not fatal (a mission-script bug must not kill the render loop).
+///
+/// Script errors raised in here are FATAL — see [`lua_fatal`].
 pub fn pump_resident(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, dt: f32) {
     // Objects whose layer completed LAST tick wake now — before this tick's flush, so the gates armed
     // by that flush's callback cascade are already registered. See `GameScriptHost::queue_layer_wakes`
@@ -2113,7 +2164,7 @@ pub fn pump_resident(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, dt: f3
     let wakes = host.borrow_mut().take_pending_wakes();
     for guid in wakes {
         if let Err(e) = sh.fire_object_hibernation(guid, mercs2_script::PHASE_AWAKE) {
-            println!("[script] object-wake callback error (guid {guid:#x}): {e:?}");
+            lua_fatal(format_args!("object-wake callback (guid {guid:#x}): {e:?}"));
         }
     }
 
@@ -2138,7 +2189,7 @@ pub fn pump_resident(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, dt: f3
         }
         for (occupant, vehicle, seat, action) in seat_events {
             if let Err(e) = sh.fire_object_in_seat(occupant, vehicle, &seat, action) {
-                println!("[script] seat callback error (occupant {occupant:#x} {action}): {e:?}");
+                lua_fatal(format_args!("seat callback (occupant {occupant:#x} {action}): {e:?}"));
             }
         }
         if round == MAX_SEAT_CASCADE - 1 && !host.borrow().pending_seat_events.is_empty() {
@@ -2158,7 +2209,7 @@ pub fn pump_resident(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, dt: f3
         ),
         "@resident_pump",
     ) {
-        println!("[script] resident pump error: {e:?}");
+        lua_fatal(format_args!("resident pump: {e:?}"));
     }
 
     // Collect the layers that just streamed in and queue their objects for next tick's wake.
@@ -2176,7 +2227,7 @@ pub fn pump_resident(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, dt: f3
     // what kept the world-load machine parked in `STATE_WAITFORGAME` behind the intro cinematic.
     let shared: mercs2_script::SharedHost = host.clone();
     if let Err(e) = sh.pump_callbacks(&shared, dt) {
-        println!("[script] callback pump error: {e:?}");
+        lua_fatal(format_args!("callback pump: {e:?}"));
     }
 }
 
@@ -2916,6 +2967,14 @@ mod tests {
     #[test]
     fn boot_flow_runs_real_game_lua() {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        // The world's transit pads, from the VENDORED retail table — no vz.wad needed. They are the
+        // archive's own records (`worldutil::landing_zone_pads_match_the_vendored_table` pins that),
+        // so this host is corpus-only WITHOUT being world-less: `Pg.GetAllLandingZones` answers from
+        // world data, and the Lua corpus contains no pads to answer from.
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids);
+        register_landing_zones(&host, &world, &crate::worldutil::retail_landing_zone_pads());
         let Some(sh) = resident_script_host(host.clone()) else {
             eprintln!("[skip] decompiled Lua corpus not present — boot-flow regression skipped");
             return;
@@ -3170,6 +3229,149 @@ mod tests {
         assert!(lines > 3_000, "a real load runs the game's Lua deep; got {lines} `[lua]` lines");
     }
 
+    /// A REAL retail save, parsed: the vendored chris 0%-completion (pre-PMC-takeover) profile.
+    ///
+    /// Read from the actual `.profile` rather than reconstructed, so this is the whole save — flow
+    /// keys, transit blob and all — not just the parts a log happens to print. The same save is
+    /// visible in `game-files/pmc_blackbox-chris-save-0-percent-pre-pmc-takeover.log`, and the two
+    /// agree on every field the capture shows:
+    ///
+    /// ```text
+    /// [lua] Culling binding "Start"        @mrxmissionflow:1079   -> flow_chain ["Start", "VzaCon001"]
+    /// [lua] Culling binding "VzaCon001"    @mrxmissionflow:1079
+    /// [lua] -- sSelectedMission = PmcCon001                       -> active_missions ["PmcCon001"]
+    /// [lua]   ----=== # ... save data: 250  @mrxlayermanager:560  -> 250 layers
+    /// [lua] SetSystemEnabled( false, nil, nil  @mrxtransit:418    -> transit_enabled false
+    /// ```
+    fn retail_resume_save() -> Option<BootSaveState> {
+        let path = mercs2_formats::game_paths::save_fixtures().join("Chris Jacobs_6A499ED6.profile");
+        let bytes = std::fs::read(path).ok()?;
+        let profile = mercs2_formats::save::parse(&bytes).ok()?;
+        let lua = profile.decompress_lua().ok()?;
+        let s = mercs2_formats::save::parse_save_state(&String::from_utf8_lossy(&lua)).ok()?;
+        Some(BootSaveState {
+            flow_keys: s.completed_flow.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            culled_bindings: s.flow_chain.clone(),
+            active_missions: s.active_missions.iter().map(|m| m.id.clone()).collect(),
+            layers: s.layers.clone(),
+            transit_enabled: s.transit_enabled,
+            transit_zones: s.transit_zones.clone(),
+        })
+    }
+
+    /// **The RESUME counterpart to [`boot_flow_against_a_populated_world`].**
+    ///
+    /// That test drives the NEW-GAME branch (`Pg.LoadGame` false → `VzaCon001_Start1`). Every retail
+    /// capture we have is a save RESUME, so this is the like-for-like: same populated world, but with
+    /// a save installed so `xQ!L.LoadSingleton` takes its `_bPmcRequired` branch and starts the hero
+    /// at the PMC HQ entrance instead of the opening contract.
+    ///
+    /// The save is measured from the chris 0% capture ([`retail_resume_save`]) rather than invented.
+    ///
+    /// This is also what gives the two worldless boot tests their landing zones: `MrxTransit.Reset`
+    /// bails when `Pg.GetAllLandingZones` is empty, leaving `_tLandingZones = false` for
+    /// `SaveSingleton` to iterate. With the real pads registered, `Reset` completes exactly as all
+    /// three retail captures show it doing (each reaches `@mrxtransit:563`, past the population loop).
+    ///
+    /// SKIPS (passes) without the retail vz.wad or the Lua corpus.
+    #[test]
+    fn boot_flow_resume_against_a_populated_world() {
+        let Some(ls) = crate::worldutil::schema_wire_tests::retail_layers_static() else {
+            return eprintln!("[skip] vz.wad not present — populated-world resume skipped");
+        };
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("[skip] vz.wad path unavailable");
+        };
+        let Ok(mut wad) = crate::wad::open(&path) else {
+            return eprintln!("[skip] vz.wad would not open");
+        };
+        let index = crate::worldutil::world_name_index(&mut wad, &ls);
+        let pads = crate::worldutil::landing_zone_pads(&ls);
+        let layers = crate::worldutil::layer_index(&mut wad);
+
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids.clone());
+        register_named_markers(&host, &world, &index);
+        register_landing_zones(&host, &world, &pads);
+        host.borrow_mut().set_layer_index(layers);
+
+        // THE difference from the new-game test: a save is installed, so `Pg.LoadGame` answers true.
+        let Some(save) = retail_resume_save() else {
+            return eprintln!("[skip] save fixture unreadable — populated-world resume skipped");
+        };
+        let save_zone_count = save.transit_zones.len();
+        host.borrow_mut().set_boot_save_state(Some(save));
+
+        let Some(sh) = resident_script_host(host.clone()) else {
+            return eprintln!("[skip] decompiled Lua corpus not present — populated-world resume skipped");
+        };
+        host.borrow_mut().set_boot_context("chris");
+        run_boot_flow(&sh, &host, "chris");
+
+        // The resume branch was taken. `xQ!L.LoadSingleton` (`:626-686`) picks
+        // `{"Pmc_Entry1", "Pmc_Entry2"}` when it got a save, versus `VzaCon001_Start1` when it did not
+        // — the single observable that separates the two branches.
+        let marker: Option<String> = sh
+            .exec(
+                "__resume_marker = MrxPlayer and MrxPlayer._tSpawnLocations and MrxPlayer._tSpawnLocations[1]",
+                "@probe",
+            )
+            .ok()
+            .and_then(|()| sh.lua().globals().get::<Option<String>>("__resume_marker").ok().flatten());
+        assert_eq!(
+            marker.as_deref(),
+            Some("Pmc_Entry1"),
+            "a save must send the hero to the PMC HQ entrance, not the opening contract"
+        );
+
+        // `MrxTransit.Reset` completed, so the shipped `SaveSingleton` bug cannot fire. Asserted
+        // through the Lua rather than our own index: what matters is what the SCRIPT ended up with.
+        let zones: Option<i64> = sh
+            .exec(
+                "__zone_count = 0\n\
+                 if MrxTransit and type(MrxTransit._tLandingZones) == \"table\" then\n\
+                 for _ in pairs(MrxTransit._tLandingZones) do __zone_count = __zone_count + 1 end\n\
+                 end",
+                "@probe",
+            )
+            .ok()
+            .and_then(|()| sh.lua().globals().get::<Option<i64>>("__zone_count").ok().flatten());
+        assert_eq!(
+            zones,
+            Some(23),
+            "MrxTransit.Reset must populate all 23 authored zones (22 affiliated + the zone-6 bFake \
+             pad); see worldutil's retail_capture_corroborates_the_authored_landing_zone_set"
+        );
+
+        // THE SAVE'S TRANSIT BLOB REACHED THE SCRIPT. `tTransitData` used to be handed over as an
+        // empty table, so a resumed game came back with every zone at its `Reset` default. The save
+        // carries all 23; `MrxTransit.LoadSingleton` must have applied them.
+        assert_eq!(save_zone_count, 23, "the vendored save carries the full authored zone set");
+        let restored: Option<i64> = sh
+            .exec(
+                "__restored = 0\n\
+                 if MrxTransit and type(MrxTransit._tLandingZones) == \"table\" then\n\
+                 for _, z in pairs(MrxTransit._tLandingZones) do\n\
+                 if z.bEnabled ~= nil then __restored = __restored + 1 end\n\
+                 end end",
+                "@probe",
+            )
+            .ok()
+            .and_then(|()| sh.lua().globals().get::<Option<i64>>("__restored").ok().flatten());
+        assert_eq!(
+            restored,
+            Some(23),
+            "every zone in the save's tTransitData must land on `_tLandingZones`; an empty blob \
+             leaves them at the Reset default and this reads 0"
+        );
+
+        let lines = host.borrow().lua_log_lines;
+        println!("[boot] populated-world RESUME: {lines} `[lua]` lines, spawn {marker:?}");
+        assert!(lines > 1_000, "a real resume runs the game's Lua deep; got {lines} `[lua]` lines");
+    }
+
     /// `VzaCon001`'s boat gate arms against a REAL guid, through the real binding.
     ///
     /// This is the acceptance test for the whole name-index path. `VzaCon001.StandardSetup`
@@ -3357,6 +3559,8 @@ mod tests {
             culled_bindings: vec!["Start".into(), "VzaCon001".into()],
             active_missions: vec!["OilCon020".into()],
             layers: vec!["vz_state_pmcinterior".into()],
+            transit_enabled: false,
+            transit_zones: Vec::new(),
         }));
         assert!(install_boot_save_state(&sh, &host).unwrap(), "a save = resume");
         sh.exec(
@@ -3382,14 +3586,40 @@ mod tests {
     /// `MrxPlayer.SetSpawnLocations({"<contract>_Start1"})` right after the master script had already
     /// decided, overwriting the answer. Asserting on `MrxPlayer._tSpawnLocations` pins the master
     /// script's decision itself, upstream of any world/marker resolution.
+    /// SKIPS (passes) without the retail vz.wad — see the world-data note inside.
     #[test]
     fn new_game_and_resume_take_different_boot_branches() {
+        // WHY THIS ONE NEEDS THE ARCHIVE. The RESUME branch enters the PMC HQ interior, and
+        // `WifPmcInterior._EnablePortals` (`vz/wifpmcinterior.lua:1000-1006`) resolves each portal by
+        // NAME — `Pg.GetGuidByName(tPortalData.sExterior_Entrance)` — then indexes `_tPortals[uGuid]`
+        // unguarded, so an unresolved name is a hard `table index is nil`.
+        //
+        // Those names are the world's whole named object graph (10,290 placements, ~345 KB), not a
+        // bounded table like the 46 landing pads that `retail_landing_zone_pads` vendors. Extracting
+        // the pads is a specific record set; extracting this would be redistributing the world, which
+        // this repo deliberately does not do. So it is read from the archive, and the test skips
+        // without one — the convention every other world-dependent test here follows.
+        let world_data = (|| {
+            let ls = crate::worldutil::schema_wire_tests::retail_layers_static()?;
+            let path = crate::wad::resolve_vz_wad(None)?;
+            let mut wad = crate::wad::open(&path).ok()?;
+            Some(crate::worldutil::world_name_index(&mut wad, &ls))
+        })();
+        let Some(names) = world_data else {
+            return eprintln!("[skip] vz.wad not present — boot-branch test skipped");
+        };
+
         // The marker name the master script settled on, for a given boot save state.
         let spawn_marker_for = |save: Option<BootSaveState>| -> Option<String> {
             let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
             let world = Rc::new(RefCell::new(World::new()));
             let guids = Rc::new(RefCell::new(GuidMap::new()));
-            host.borrow_mut().attach_world(world, guids);
+            host.borrow_mut().attach_world(world.clone(), guids);
+            // Names first, pads second: a pad carrying a `Name` must reuse the one entity, not twin it.
+            register_named_markers(&host, &world, &names);
+            // Real transit pads from the vendored retail table — `MrxTransit.Reset` needs them on
+            // BOTH branches, and the resume branch reaches `SaveSingleton` through `UnlockMission`.
+            register_landing_zones(&host, &world, &crate::worldutil::retail_landing_zone_pads());
             host.borrow_mut().set_boot_save_state(save);
             let sh = resident_script_host(host.clone())?;
             host.borrow_mut().set_boot_context("mattias");
