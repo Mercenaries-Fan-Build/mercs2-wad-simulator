@@ -58,7 +58,10 @@ fn a_blocking_diagnostic_fails_the_build() {
         }
         other => panic!("expected Blocked, got {other:?}"),
     }
-    assert!(!dir.join("build").join("test-shipment.wad").exists(), "nothing may be emitted");
+    assert!(
+        !dir.join("build").join("test-shipment.wad").exists(),
+        "nothing may be emitted"
+    );
 }
 
 /// A build that needs the WADs must say so plainly, and point at where to configure them.
@@ -77,8 +80,14 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
     match build::build(&s, None, None, None, None) {
         Err(e @ BuildError::GameRequired { .. }) => {
             let msg = e.to_string();
-            assert!(msg.contains("qm lint"), "should say lint still works: {msg}");
-            assert!(msg.contains("game folder"), "should point at configuration: {msg}");
+            assert!(
+                msg.contains("qm lint"),
+                "should say lint still works: {msg}"
+            );
+            assert!(
+                msg.contains("game folder"),
+                "should point at configuration: {msg}"
+            );
         }
         other => panic!("expected GameRequired, got {other:?}"),
     }
@@ -169,7 +178,6 @@ fn the_placement_record_is_well_formed_json() {
     assert!(doc["placements"].is_array());
 }
 
-
 /// Open the discovered game stack, or skip with a message that says how to fix it.
 ///
 /// Skipping rather than failing keeps CI green where the retail WADs will never exist, but the
@@ -178,7 +186,11 @@ fn the_placement_record_is_well_formed_json() {
 fn discovered_game() -> Option<mercs2_quartermaster::GameStack> {
     match mercs2_quartermaster::game::discover() {
         Some(found) => {
-            eprintln!("game stack: {} (via {:?})", found.path.display(), found.origin);
+            eprintln!(
+                "game stack: {} (via {:?})",
+                found.path.display(),
+                found.origin
+            );
             match mercs2_quartermaster::GameStack::open(&[found.path]) {
                 Ok(g) => Some(g),
                 Err(e) => panic!("discovered a WAD but could not open it: {e}"),
@@ -204,12 +216,16 @@ fn discovered_game() -> Option<mercs2_quartermaster::GameStack> {
 /// SKIPS loudly otherwise — see `discovered_game`.
 #[test]
 fn a_texture_replacement_builds_end_to_end() {
-    let Some(mut game) = discovered_game() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
 
     // Read the target's real dimensions so the fixture matches; a replacement is same-hash and
     // fully resident, so mismatched dimensions are a legitimate hard error.
     let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
-    let existing = game.texture(hash).expect("al_hum_boss_ub must exist in vz.wad");
+    let existing = game
+        .texture(hash)
+        .expect("al_hum_boss_ub must exist in vz.wad");
 
     let dir = scratch("real");
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -232,8 +248,14 @@ fn a_texture_replacement_builds_end_to_end() {
     // game-aware rules fire — and the build still completes, because they are warnings. That pairing
     // is the point: the author is told what changed without being blocked from shipping it.
     let codes: Vec<&str> = report.diagnostics.iter().map(|d| d.rule.code).collect();
-    assert!(codes.contains(&"M0007") && codes.contains(&"M0009"), "{codes:?}");
-    assert!(report.diagnostics.iter().all(|d| d.severity < mercs2_quartermaster::Severity::Error));
+    assert!(
+        codes.contains(&"M0007") && codes.contains(&"M0009"),
+        "{codes:?}"
+    );
+    assert!(report
+        .diagnostics
+        .iter()
+        .all(|d| d.severity < mercs2_quartermaster::Severity::Error));
 
     let wad_path = report.wad.expect("a WAD must be emitted");
     assert!(wad_path.is_file());
@@ -264,8 +286,7 @@ fn a_texture_replacement_builds_end_to_end() {
     // (2) A patch block is `[entry table][containers…]`, NOT a bare container. Handing over a raw
     // container makes the loader read the `UCFX` magic as an entry-table field — the WAD hashes
     // fine and is structurally nonsense.
-    let decompressed =
-        mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let decompressed = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
     let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&decompressed);
     assert_eq!(count, 1, "expected a single-entry block table");
     assert_eq!(entries.len(), 1);
@@ -317,7 +338,9 @@ fn solid_png(width: u32, height: u32) -> Vec<u8> {
 ///   `al_hum_boss_ub`         NON-primary, 4-rung streamed  -> M0007 + M0009
 #[test]
 fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
-    let Some(game) = discovered_game() else { return };
+    let Some(game) = discovered_game() else {
+        return;
+    };
     use mercs2_formats::hash::pandemic_hash_m2;
     use mercs2_quartermaster::lint::{self, aset_row_is_single_block};
     const TEX: u32 = mercs2_formats::types::TYPE_ID_TEXTURE;
@@ -327,7 +350,10 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
         .aset_rows(pandemic_hash_m2("pmc_hum_mattias_v3_ub"), TEX)
         .first()
         .expect("mattias_v3_ub row");
-    assert!(primary && aset_row_is_single_block(p, s), "packed 0x{p:08X} secondary 0x{s:08X}");
+    assert!(
+        primary && aset_row_is_single_block(p, s),
+        "packed 0x{p:08X} secondary 0x{s:08X}"
+    );
 
     let dir = scratch("m0007_quiet");
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -349,10 +375,18 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
         &dir2,
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
-    let codes: Vec<&str> =
-        lint::game_checks(&fires.manifest, &game).iter().map(|d| d.rule.code).collect();
-    assert!(codes.contains(&"M0007"), "streamed target must warn: {codes:?}");
-    assert!(codes.contains(&"M0009"), "shared target must warn: {codes:?}");
+    let codes: Vec<&str> = lint::game_checks(&fires.manifest, &game)
+        .iter()
+        .map(|d| d.rule.code)
+        .collect();
+    assert!(
+        codes.contains(&"M0007"),
+        "streamed target must warn: {codes:?}"
+    );
+    assert!(
+        codes.contains(&"M0009"),
+        "shared target must warn: {codes:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -392,18 +426,37 @@ fn cube_glb() -> Vec<u8> {
     }
 
     let mut bin: Vec<u8> = Vec::new();
-    for p in &pos { for c in p { bin.extend_from_slice(&c.to_le_bytes()); } }
+    for p in &pos {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
     let n_off = bin.len();
-    for p in &nrm { for c in p { bin.extend_from_slice(&c.to_le_bytes()); } }
+    for p in &nrm {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
     let t_off = bin.len();
-    for p in &uv { for c in p { bin.extend_from_slice(&c.to_le_bytes()); } }
+    for p in &uv {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
     let i_off = bin.len();
-    for i in &idx { bin.extend_from_slice(&i.to_le_bytes()); }
-    while !bin.len().is_multiple_of(4) { bin.push(0); }
+    for i in &idx {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
 
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for p in &pos {
-        for c in 0..3 { lo[c] = lo[c].min(p[c]); hi[c] = hi[c].max(p[c]); }
+        for c in 0..3 {
+            lo[c] = lo[c].min(p[c]);
+            hi[c] = hi[c].max(p[c]);
+        }
     }
     let vcount = pos.len();
     let json = format!(
@@ -420,13 +473,23 @@ fn cube_glb() -> Vec<u8> {
 {{"buffer":0,"byteOffset":{t_off},"byteLength":{}}},
 {{"buffer":0,"byteOffset":{i_off},"byteLength":{}}}],
 "buffers":[{{"byteLength":{}}}]}}"#,
-        lo[0], lo[1], lo[2], hi[0], hi[1], hi[2],
+        lo[0],
+        lo[1],
+        lo[2],
+        hi[0],
+        hi[1],
+        hi[2],
         idx.len(),
-        n_off, t_off - n_off, i_off - t_off, idx.len() * 2,
+        n_off,
+        t_off - n_off,
+        i_off - t_off,
+        idx.len() * 2,
         bin.len()
     );
     let mut json = json.into_bytes();
-    while !json.len().is_multiple_of(4) { json.push(b' '); }
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
 
     let mut glb = Vec::new();
     glb.extend_from_slice(b"glTF");
@@ -444,7 +507,9 @@ fn cube_glb() -> Vec<u8> {
 /// `add_model` end to end: glTF in, donor resolved from the real WAD, overlay out.
 #[test]
 fn add_model_builds_end_to_end() {
-    let Some(mut game) = discovered_game() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
     let dir = scratch("add_model");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
@@ -463,27 +528,42 @@ fn add_model_builds_end_to_end() {
     // The same two structural properties the texture path has to hold.
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
     let block = &contents.blocks[0];
-    assert_eq!(block.aset_entries[0].u32_2 & 0xFFFF, 0xFFFF, "must register as primary");
+    assert_eq!(
+        block.aset_entries[0].u32_2 & 0xFFFF,
+        0xFFFF,
+        "must register as primary"
+    );
     let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
     let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
     assert_eq!(count, 1);
-    assert_eq!(entries[0].name_hash, mercs2_formats::hash::pandemic_hash_m2("qm_test_prop"));
+    assert_eq!(
+        entries[0].name_hash,
+        mercs2_formats::hash::pandemic_hash_m2("qm_test_prop")
+    );
 
     // The log records what was injected, so a silently-empty mesh cannot pass unnoticed.
     let log = report.log.join("\n");
     assert!(log.contains("add_model qm_test_prop"), "{log}");
-    assert!(!log.contains("0 verts"), "geometry must have survived the import: {log}");
+    assert!(
+        !log.contains("0 verts"),
+        "geometry must have survived the import: {log}"
+    );
 }
 
 /// Auto-pick is not implemented, so an omitted donor must ASK rather than guess — a wrong host
 /// silently produces a prop with the wrong rig and materials.
 #[test]
 fn add_model_without_a_donor_asks_rather_than_guessing() {
-    let Some(mut game) = discovered_game() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
     let dir = scratch("add_model_nodonor");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
-    let s = shipment(&dir, "  - kind: add_model\n    name: qm_x\n    model: src/prop.glb\n");
+    let s = shipment(
+        &dir,
+        "  - kind: add_model\n    name: qm_x\n    model: src/prop.glb\n",
+    );
     match build::build(&s, Some(&mut game), None, None, None) {
         Err(e @ BuildError::Unsupported { .. }) => {
             assert!(e.to_string().contains("auto-pick"), "{e}");
@@ -492,7 +572,6 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
     }
 }
 
-
 /// ★ `add_outfit` end to end — the recipe Plan 01 phase 5 is defined by.
 ///
 /// It is the composed case: a Data half (the model, injected into a hero-rigged donor) and a Script
@@ -500,7 +579,9 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
 /// rather than shipping its own block.
 #[test]
 fn add_outfit_builds_model_and_wardrobe_row_together() {
-    let Some(mut game) = discovered_game() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
     let Some(corpus) = corpus_for_tests() else {
         eprintln!("SKIPPING: no Lua corpus");
         return;
@@ -523,12 +604,19 @@ fn add_outfit_builds_model_and_wardrobe_row_together() {
     // Both halves must appear: the model injected, and the wardrobe script linked.
     assert!(log.contains("add_outfit qm_sean_devlin"), "{log}");
     assert!(log.contains("wardrobe row mattias/SeanDevlin"), "{log}");
-    assert!(log.contains("linked wifpmcinterior"), "the Script half must go through the linker: {log}");
+    assert!(
+        log.contains("linked wifpmcinterior"),
+        "the Script half must go through the linker: {log}"
+    );
 
     // The overlay carries BOTH blocks — the model and the relinked scripts_vz.
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
-    assert_eq!(contents.blocks.len(), 2, "expected a model block and a scripts_vz block");
+    assert_eq!(
+        contents.blocks.len(),
+        2,
+        "expected a model block and a scripts_vz block"
+    );
 
     // And the linked script really contains our row plus the derived availability lift.
     let script_blk = contents
@@ -539,14 +627,25 @@ fn add_outfit_builds_model_and_wardrobe_row_together() {
     let dec = mercs2_formats::sges::decompress_sges(&script_blk.compressed_data).expect("sges");
     let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
     parsed.verify_csums().expect("CSUMs must verify");
-    let idx = parsed.find_by_name("wifpmcinterior").expect("wifpmcinterior present");
+    let idx = parsed
+        .find_by_name("wifpmcinterior")
+        .expect("wifpmcinterior present");
     let luaq = parsed.extract_lua(idx).expect("extract");
-    assert!(luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER), "game dialect");
+    assert!(
+        luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER),
+        "game dialect"
+    );
 
     // The strings we appended survive into the compiled chunk's constant table.
     let hay = String::from_utf8_lossy(&luaq);
-    assert!(hay.contains("SeanDevlin"), "the outfit Name must be in the constants");
-    assert!(hay.contains("qm_sean_devlin"), "the Model name must be in the constants");
+    assert!(
+        hay.contains("SeanDevlin"),
+        "the outfit Name must be in the constants"
+    );
+    assert!(
+        hay.contains("qm_sean_devlin"),
+        "the Model name must be in the constants"
+    );
     assert!(
         hay.contains("GetAvailableCostumes"),
         "the derived availability lift must be present, or the outfit is unreachable"
@@ -576,7 +675,10 @@ fn the_availability_lift_is_emitted_exactly_once() {
         1,
         "two hard-coded counts is exactly the bug the derived lift removes"
     );
-    assert!(full.contains("\"One\"") && full.contains("\"Two\""), "both rows must survive");
+    assert!(
+        full.contains("\"One\"") && full.contains("\"Two\""),
+        "both rows must survive"
+    );
 }
 
 /// An author-supplied display string cannot escape its Lua literal and inject code.
@@ -642,8 +744,12 @@ fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover:
 /// silently. `link_installed` sees all of them at once and emits one overlay that supersedes both.
 #[test]
 fn two_installed_shipments_both_survive_the_deploy_link() {
-    let Some(mut game) = discovered_game() else { return };
-    let Some(corpus) = corpus_for_tests() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
     let root = scratch("deploy_link");
 
     let a = outfit_shipment(&root.join("sean"), "sean-devlin", "qm_sean", "SeanDevlin");
@@ -654,14 +760,21 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
         let muts = build::script_mutations(&s.manifest, &s.root).expect("mutations");
         assert_eq!(muts.len(), 1);
         assert!(muts[0].append.contains(mine));
-        assert!(!muts[0].append.contains(theirs), "a Shipment must not know about the other");
+        assert!(
+            !muts[0].append.contains(theirs),
+            "a Shipment must not know about the other"
+        );
     }
 
     let report = build::link_installed(&[&a, &b], &mut game, &corpus, &root.join("deploy"))
         .expect("deploy link");
     eprintln!("{}", report.log.join("\n"));
 
-    assert_eq!(report.linked.len(), 1, "one target, compiled once for both Shipments");
+    assert_eq!(
+        report.linked.len(),
+        1,
+        "one target, compiled once for both Shipments"
+    );
     assert_eq!(
         report.linked[0].contributors,
         vec!["roze-skin", "sean-devlin"],
@@ -670,12 +783,20 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
 
     // The emitted overlay must carry BOTH rows.
     let wad = report.wad.expect("a link WAD");
-    assert!(wad.ends_with(build::LINK_WAD_NAME), "must be named to mount last: {}", wad.display());
+    assert!(
+        wad.ends_with(build::LINK_WAD_NAME),
+        "must be named to mount last: {}",
+        wad.display()
+    );
     let bytes = std::fs::read(&wad).unwrap();
     assert_eq!(report.placements[0].sha256, build::sha256_hex(&bytes));
 
     let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
-    let blk = contents.blocks.iter().find(|b| b.path_string.contains("scripts_vz")).expect("block");
+    let blk = contents
+        .blocks
+        .iter()
+        .find(|b| b.path_string.contains("scripts_vz"))
+        .expect("block");
     let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
     let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
     parsed.verify_csums().expect("CSUMs");
@@ -683,17 +804,30 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     let luaq = parsed.extract_lua(idx).unwrap();
     let hay = String::from_utf8_lossy(&luaq);
 
-    assert!(hay.contains("SeanDevlin"), "the first Shipment's outfit must survive");
-    assert!(hay.contains("Roze"), "the SECOND Shipment's outfit must survive — this is the bug");
-    assert!(hay.contains("qm_sean") && hay.contains("qm_roze"), "both models must be referenced");
+    assert!(
+        hay.contains("SeanDevlin"),
+        "the first Shipment's outfit must survive"
+    );
+    assert!(
+        hay.contains("Roze"),
+        "the SECOND Shipment's outfit must survive — this is the bug"
+    );
+    assert!(
+        hay.contains("qm_sean") && hay.contains("qm_roze"),
+        "both models must be referenced"
+    );
 }
 
 /// Deploy order must not change the bytes, or verify-by-hash is meaningless and a saved costume
 /// index can shift under a player between deploys.
 #[test]
 fn the_deploy_link_is_order_independent() {
-    let Some(mut game) = discovered_game() else { return };
-    let Some(corpus) = corpus_for_tests() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
     let root = scratch("deploy_order");
     let a = outfit_shipment(&root.join("a"), "aaa-mod", "qm_a", "Aaa");
     let b = outfit_shipment(&root.join("b"), "zzz-mod", "qm_b", "Zzz");
@@ -710,8 +844,12 @@ fn the_deploy_link_is_order_independent() {
 /// user would have to reason about.
 #[test]
 fn a_set_with_no_script_mods_emits_no_link_wad() {
-    let Some(mut game) = discovered_game() else { return };
-    let Some(corpus) = corpus_for_tests() else { return };
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
     let root = scratch("deploy_none");
     std::fs::create_dir_all(root.join("tex/src")).unwrap();
     std::fs::write(root.join("tex/src/t.png"), fake_png()).unwrap();
@@ -719,8 +857,84 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
         &root.join("tex"),
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
-    let report =
-        build::link_installed(&[&s], &mut game, &corpus, &root.join("out")).expect("link");
+    let report = build::link_installed(&[&s], &mut game, &corpus, &root.join("out")).expect("link");
     assert!(report.wad.is_none());
     assert!(report.linked.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The emitted-artifact self-check
+// ---------------------------------------------------------------------------
+
+/// Every WAD the builder writes must have been read back and checked first.
+///
+/// This asserts the WIRING, which is the part that can silently rot: `artifact_checks` has its own
+/// unit tests, but a self-check nobody calls is worth nothing. A real build's log must therefore
+/// show the WAD came back out of `read_patch_wad` cleanly.
+#[test]
+fn a_built_wad_is_read_back_and_self_checked() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let existing = game
+        .texture(hash)
+        .expect("al_hum_boss_ub must exist in vz.wad");
+    let dir = scratch("selfcheck");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/t.png"),
+        solid_png(existing.width, existing.height),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture
+    target: al_hum_boss_ub
+    image: src/t.png
+",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("build");
+    let wad = report.wad.expect("a WAD must be emitted");
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&std::fs::read(&wad).unwrap())
+        .expect("the WAD we wrote must read back — verify_emitted already required this");
+
+    // The self-check must be CLEAN on our own output. A finding here is a builder bug: this is the
+    // exact shape (single-entry block, sentinel rungs, honest packed_field) our lowering emits.
+    let found = mercs2_quartermaster::lint::artifact_checks(&contents.blocks);
+    assert_eq!(
+        found,
+        vec![],
+        "our own lowering must not trip the artifact rules"
+    );
+
+    // And the build recorded that it ran, so a future refactor that drops the call is visible.
+    assert!(
+        report.log.iter().any(|l| l.contains("wrote")),
+        "the build log must record the emit it verified: {:?}",
+        report.log
+    );
+}
+
+/// The self-check must REFUSE, not warn. A HANG-class defect that still writes a file is worse than
+/// no check, because the file's presence reads as success to everything downstream.
+#[test]
+fn a_hang_class_defect_fails_the_build_rather_than_warning() {
+    use mercs2_formats::patch_wad::{AsetEntry, PatchBlock};
+    // A rung naming block 9 in a one-block WAD — the M0001 trap, built directly because no manifest
+    // can express it (the lowering paths all emit sentinels).
+    let blk = PatchBlock::from_decompressed(
+        b"payload",
+        "blocks\\a.block".into(),
+        vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_0009, 19)],
+        None,
+    )
+    .unwrap();
+    let found = mercs2_quartermaster::lint::artifact_checks(&[blk]);
+    assert!(
+        mercs2_quartermaster::lint::blocks_build(&found),
+        "a dangling rung must BLOCK: the game gives the modder a frozen loading screen, not an error"
+    );
 }
