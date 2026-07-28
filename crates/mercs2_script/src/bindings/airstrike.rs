@@ -11,7 +11,7 @@
 
 use mlua::{Lua, MultiValue, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -43,22 +43,24 @@ pub const REQUIRED: &[Required] = &[
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // FindDesignatorOwner → the real per-player designator registry (0 → nil).
+    // FindDesignatorOwner → the real per-player designator registry. The owner is a player handle, so
+    // it leaves as lightuserdata; `0` becomes nil, which is what `mrxsupportmanager.lua:138`'s
+    // `if uPlayerGuid then` guard needs before it indexes `CurrentlyEquippedSupport[uPlayerGuid]`
+    // (:139) — the same table other call sites key with a `"userdata"`-checked player handle.
     let h = host.clone();
     b.real("FindDesignatorOwner", lua.create_function(move |_, _: MultiValue| {
-        let o = h.borrow().airstrike_designator_owner();
-        Ok(if o == 0 { None } else { Some(o as i64) })
+        Ok(Guid(h.borrow().airstrike_designator_owner()))
     })?)?;
-    // No exit-point pathing yet.
-    b.real("FindExitPoint", lua.create_function(|_, _: MultiValue| Ok(Option::<i64>::None))?)?;
+    // No exit-point pathing yet. This returns a *position*, not a handle, so it stays a plain nil.
+    b.real("FindExitPoint", lua.create_function(|_, _: MultiValue| Ok(Option::<f32>::None))?)?;
 
     // Designator lifecycle → the real per-player designator state.
     let h = host.clone();
-    b.real("EquipDesignator", lua.create_function(move |_, p: i64| { h.borrow_mut().airstrike_equip_designator(p as u64); Ok(()) })?)?;
+    b.real("EquipDesignator", lua.create_function(move |_, p: Guid| { h.borrow_mut().airstrike_equip_designator(p.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("RemoveDesignator", lua.create_function(move |_, p: i64| { h.borrow_mut().airstrike_remove_designator(p as u64); Ok(()) })?)?;
+    b.real("RemoveDesignator", lua.create_function(move |_, p: Guid| { h.borrow_mut().airstrike_remove_designator(p.raw()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("RefillDesignator", lua.create_function(move |_, p: i64| { h.borrow_mut().airstrike_refill_designator(p as u64); Ok(()) })?)?;
+    b.real("RefillDesignator", lua.create_function(move |_, p: Guid| { h.borrow_mut().airstrike_refill_designator(p.raw()); Ok(()) })?)?;
 
     // Ordnance/plane spawns → recorded airstrike requests (kind + position) the runtime realizes.
     for (name, kind) in [
