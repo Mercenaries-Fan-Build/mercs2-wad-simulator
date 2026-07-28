@@ -76,10 +76,24 @@ or TOML reports a value-after-table error. Worth stating in author docs; it does
    shipment. (An optional `contribs/` include is a future affordance for huge shipments.)
 2. **Blast radius is COMPUTED, not authored** — for every typed kind the Quartermaster derives what it
    touches. Only `[[raw]]` carries an author-declared `touches`. (Plan 01.)
-3. **Identity is a NAME, never a hash.** Every asset name → `pandemic_hash_m2(name)`
-   (`mercs2_formats::hash`, hash.rs:27). No free-text hash field anywhere (mandate
-   `no-arbitrary-hashes`) — **including `touches`** (see the correction under Known Kinds). The
-   Quartermaster shows the resulting hash; the author never types one.
+3. **A name is PREFERRED; a bare hash is legal.** ~~Identity is a NAME, never a hash… the author
+   never types one.~~ **Corrected 2026-07-28.** Anywhere an existing asset is referenced, a bare
+   `0xHHHHHHHH` resolves to that hash and anything else is hashed as a name
+   (`manifest::asset_hash`). The linter offers the name when it can reverse one (M0130), as a
+   warning that never blocks.
+
+   The original wording mis-cited `no-arbitrary-hashes`. That mandate is about **not fabricating**
+   names or hashes — compute them from real sources, never guess a name from a brute-force match
+   ("false positives are *guaranteed* and would produce a confidently-wrong name, the exact failure
+   [[no-arbitrary-hashes]] exists to prevent", `human_character_controller_code_map.md:1140`). It
+   says nothing about which spelling an *author* may write, and reading it as "authors must write
+   names" forbids referring to any asset the name table does not cover — a rule the base game's own
+   data does not follow, since it ships hashes.
+
+   This was not a harmless doc slip: the builder was written to match it, so `target: "0x6F84F6A3"`
+   was hashed as a *string* to `0xC6B71C1F` and failed with "not in the configured game stack —
+   check the spelling". What the linter actually guards is a wrong **pairing**, which is what the
+   `ch_veh_boat_destroyer` / `0xE54047D5` example below really demonstrates.
 4. **Novel assets are ADDITIVE** (own new hash); replacements are same-hash and must be FULLY
    RESIDENT. "Non-destructive" means **the base WAD is never modified** — the change ships as an
    overlay and is reversible by removing that WAD. It does NOT mean the asset's appearance is
@@ -262,12 +276,13 @@ auto-picks a valid host. `retarget_rig` is NOT a standalone kind in v1; it exist
 `retarget:` sub-block on `add_outfit` / `add_model` (resolved Q6). It wraps workshop `retarget.rs`
 (the only `retarget.rs` in the workspace as of `d609592`).
 
-**⚠ `touches` takes NAMES.** Accepting free-text hashes contradicts decision 3, and the previous draft
-proved the hazard in its own example: it paired `ch_veh_boat_destroyer` with `0xE54047D5`, but that
-hash is `al_veh_boat_destroyer` (destruction_orchestrator_format.md:50; `ch_veh_boat_destroyer` is
-`0x25FE00A7` — both computed and confirmed). A bare hash is legal ONLY when no name is known for it,
-and the Quartermaster must warn and offer the name when it can reverse one via the 23,110-entry
-`data/production_names.json`.
+**⚠ `touches` takes a name OR a hash**, like every other asset reference — see the corrected
+decision 3. The hazard the earlier wording pointed at is real but is about *mismatched pairs*, not
+about hashes being illegitimate: this document's own draft paired `ch_veh_boat_destroyer` with
+`0xE54047D5`, but that hash is `al_veh_boat_destroyer` (destruction_orchestrator_format.md:50;
+`ch_veh_boat_destroyer` is `0x25FE00A7` — both computed and confirmed). Writing the name, **where
+you have one**, is what makes that drift impossible; the Quartermaster warns and offers the name when
+it can reverse one via the 23,110-entry `data/production_names.json`.
 
 Each `Easy`/`Core`/`Raw` tier (Plan 01, from Ess) is the SAME kind at different guard-rail levels.
 
