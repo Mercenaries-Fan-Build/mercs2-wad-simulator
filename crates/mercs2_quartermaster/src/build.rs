@@ -13,7 +13,12 @@
 //!
 //! ## Lowering status
 //!
-//! `replace_texture`, `add_model`, `add_outfit` and `patch_lua` all lower here.
+//! `replace_texture`, `add_model`, `add_outfit`, `patch_lua` and `raw` all lower here.
+//!
+//! `raw` is the open lower bound: opaque bytes plus an author-DECLARED blast radius. It is the one
+//! kind with no encoder behind it, so the lowering checks everything structural it can and refuses
+//! rather than warns — and it requires the declared `touches` to match the payload's own entry
+//! table exactly, because that declaration is the only thing that can mint the ASET rows.
 //!
 //! `add_outfit` is the composed case and the reason [`Lowered`] carries an `Option` of each half: a
 //! Data half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script
@@ -29,7 +34,7 @@ use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
 use crate::link::{self, ScriptMutation};
 use crate::lint::{self, Diagnostic};
-use crate::manifest::Contribution;
+use crate::manifest::{Contribution, Layer};
 use crate::names::NameTable;
 use mercs2_formats::donor;
 use mercs2_formats::mesh_import;
@@ -542,13 +547,258 @@ fn lower(
         // Contributes no block: its whole effect is a declared mutation, collected by
         // `script_mutations` and realised at link time.
         Contribution::PatchLua { .. } => Ok(None),
-        Contribution::EditStateMachine { .. }
-        | Contribution::NativeHook { .. }
-        | Contribution::Raw { .. } => Err(BuildError::Unsupported {
-            index,
-            kind,
-            reason: "not implemented in this increment".into(),
-        }),
+
+        // The OPEN LOWER BOUND: bytes we cannot interpret, plus a radius the author DECLARED.
+        //
+        // Every other kind has a second line of defence — an encoder that knows the shape, a donor
+        // to conform to. `raw` has none, so everything structural that CAN be checked is checked
+        // here, and a failure is a hard error rather than a warning. The declared `touches` is not
+        // decoration either: it is the only thing that can mint the ASET rows, so it must agree
+        // with the payload's own entry table exactly, in BOTH directions. A hash in `touches` that
+        // the payload does not carry mints a row resolving to a block that does not contain it; a
+        // hash the payload carries that `touches` omits is M0004's silent wedge, and it would also
+        // mean the conflict system never saw the claim.
+        Contribution::Raw {
+            description,
+            payload,
+            target_layer,
+            touches,
+        } => {
+            // The overlay is a WAD, and the Data layer is the only one a WAD holds. The other
+            // three are refused by NAME rather than lowered into something plausible.
+            match target_layer {
+                Layer::Data => {}
+                Layer::Script => {
+                    return Err(BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason:
+                            "a raw payload on the SCRIPT layer would ship a finished scripts_vz \
+                             block. WAD resolution is last-mounted-wins, so it would silently \
+                             delete every other installed Shipment's Lua — including the wardrobe \
+                             rows `add_outfit` generates. That is the exact annihilation \
+                             `patch_lua` exists to prevent by shipping a MUTATION instead of a \
+                             block, and no declared blast radius can make it safe. Use `patch_lua`."
+                                .into(),
+                    });
+                }
+                Layer::Code => {
+                    return Err(BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason:
+                            "a raw payload on the CODE layer has nowhere to go: `raw` carries no \
+                             destination field, and inventing one would hand the author a way to \
+                             name Mercenaries2.exe or data/vz.wad — which is precisely what \
+                             `native_hook` omitting `dest` keeps unreachable. Use `native_hook`, \
+                             which places the file in the loader's search path for you."
+                                .into(),
+                    });
+                }
+                Layer::Runtime => {
+                    return Err(BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason:
+                            "the RUNTIME layer has no artifact. Nothing in the format says what a \
+                             runtime payload is or where it would be placed, so there is no \
+                             lowering to write — only a guess, and a guess here emits a WAD that \
+                             looks fine and does nothing."
+                                .into(),
+                    });
+                }
+            }
+
+            let path = root.join(payload);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+
+            // Two shapes an author plausibly hands us that are NOT a block. Both are named
+            // explicitly, because the generic "does not parse" message sends them looking in the
+            // wrong place.
+            if bytes.len() >= 4 && &bytes[0..4] == b"sges" {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} starts with the `sges` magic, so it is a COMPRESSED block. Supply the \
+                         DECOMPRESSED bytes — the builder compresses and computes `packed_field` \
+                         from their length, and a pre-compressed payload would be compressed twice \
+                         while claiming the wrong decompressed page count.",
+                        path.display()
+                    ),
+                });
+            }
+            if bytes.len() >= 4 && &bytes[0..4] == b"UCFX" {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} starts with `UCFX`, so it is a bare CONTAINER, not a block. A patch \
+                         block is `[entry table][containers…]`: the loader reads the first word as \
+                         an entry count, so it would read the `UCFX` magic as one. Prepend the \
+                         table — `[u32 count][count × (name_hash, type_hash, field_c, chunk_size)]`.",
+                        path.display()
+                    ),
+                });
+            }
+
+            // Coherence, in the same sense `lint::coherent_block` means it: the declared count must
+            // be honoured and every container must fit. `parse_block_entry_table` reads the first
+            // word as a count unconditionally, so anything else yields confident nonsense.
+            let (parsed, issues) =
+                mercs2_formats::ucfx::walk_decompressed_block(&bytes, "raw payload");
+            if parsed.entry_count == 0
+                || parsed.entries.len() != parsed.entry_count as usize
+                || parsed.containers.len() != parsed.entries.len()
+            {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} does not read as a patch block: its first word declares {} entr(ies) \
+                         but only {} row(s) and {} container(s) fit in {} bytes. A block is \
+                         `[u32 count][count × 16-byte rows][containers…]`.",
+                        path.display(),
+                        parsed.entry_count,
+                        parsed.entries.len(),
+                        parsed.containers.len(),
+                        bytes.len()
+                    ),
+                });
+            }
+            if !issues.is_empty() {
+                let detail: Vec<String> = issues
+                    .iter()
+                    .map(|i| format!("{}: {}", i.context, i.detail))
+                    .collect();
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} is structurally invalid — {}. These are the checks the engine's own \
+                         reader performs; a payload that fails them loads as garbage rather than \
+                         failing loudly.",
+                        path.display(),
+                        detail.join("; ")
+                    ),
+                });
+            }
+
+            // `touches` are asset REFERENCES: a bare `0x…` is that hash, anything else is a name.
+            let declared: std::collections::BTreeSet<u32> = touches
+                .iter()
+                .map(|t| crate::manifest::asset_hash(&t.0))
+                .collect();
+            let carried: std::collections::BTreeSet<u32> =
+                parsed.entries.iter().map(|e| e.name_hash).collect();
+            let hexes = |set: std::collections::BTreeSet<u32>| {
+                set.iter()
+                    .map(|h| format!("0x{h:08X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let missing: std::collections::BTreeSet<u32> =
+                declared.difference(&carried).copied().collect();
+            if !missing.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "`touches` claims {} which the payload's entry table does not carry. The \
+                         claim is what mints the ASET row, so this would publish a row pointing at \
+                         a block that has no such asset in it — the lookup resolves, the block \
+                         loads, and the asset is simply absent.",
+                        hexes(missing)
+                    ),
+                });
+            }
+            let extra: std::collections::BTreeSet<u32> =
+                carried.difference(&declared).copied().collect();
+            if !extra.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "the payload carries {} which `touches` does not claim. Nothing else can \
+                         infer a raw block's radius, so an unclaimed asset gets no ASET row (the \
+                         M0004 silent wedge) and the conflict system never sees the claim at all — \
+                         two Shipments could overwrite one asset without either being told.",
+                        hexes(extra)
+                    ),
+                });
+            }
+
+            // The TYPE comes from the bytes, never from the author: the ASET row's type id decides
+            // which loader the engine dispatches, and a guess there resolves the asset into the
+            // wrong subsystem.
+            let mut aset = Vec::new();
+            for e in &parsed.entries {
+                let type_id = mercs2_formats::types::type_id_for_type_hash(e.type_hash)
+                    .ok_or_else(|| BuildError::Lower {
+                        index,
+                        kind,
+                        message: format!(
+                            "entry 0x{:08X} declares type hash 0x{:08X}, which is not one of the \
+                             {} types the retail census found. The ASET row's type id is derived \
+                             from it and decides which loader is dispatched, so there is nothing \
+                             safe to guess.",
+                            e.name_hash,
+                            e.type_hash,
+                            mercs2_formats::types::TYPE_HASH_REGISTRY.len()
+                        ),
+                    })?;
+                // Sentinel rungs. A `0x0000` low-16 is the dangling-rung HANG, not "no rung".
+                aset.push(AsetEntry::new(
+                    e.name_hash,
+                    0xFFFF_FFFF,
+                    0x0000_FFFF,
+                    type_id,
+                ));
+            }
+
+            let first = parsed.entries[0].name_hash;
+            log.push(format!(
+                "contributions[{index}] raw {} {} bytes, {} entr(ies): {}",
+                description.as_deref().unwrap_or("(no description)"),
+                bytes.len(),
+                parsed.entries.len(),
+                parsed
+                    .entries
+                    .iter()
+                    .map(|e| format!(
+                        "0x{:08X} {}",
+                        e.name_hash,
+                        mercs2_formats::types::type_name_from_hash(e.type_hash)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            let block = PatchBlock::from_decompressed(
+                &bytes,
+                format!("blocks\\VZ\\mod_{first:08x}.block"),
+                aset,
+                None,
+            )
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            Ok(Some(block))
+        }
+
+        Contribution::EditStateMachine { .. } | Contribution::NativeHook { .. } => {
+            Err(BuildError::Unsupported {
+                index,
+                kind,
+                reason: "not implemented in this increment".into(),
+            })
+        }
     }
 }
 
