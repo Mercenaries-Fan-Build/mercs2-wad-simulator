@@ -69,7 +69,7 @@ impl Stats {
 }
 
 fn main() {
-    let mut w = match wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()) {
+    let mut w = match wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) {
         Some(w) => w,
         None => {
             eprintln!("could not open vz.wad (registry lookup failed) — is the game installed?");
