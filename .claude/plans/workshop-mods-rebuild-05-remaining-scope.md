@@ -69,7 +69,25 @@ Consequences to design around:
   independently confirms the design note below that the linker should take the corpus root as a
   parameter.
 
-## A. The Lua linker — blocks `add_outfit`, `patch_lua`, and Plan 01 phase 5
+## A. The Lua linker — ★ DONE for the single-Shipment case (2026-07-28)
+
+`add_outfit` and `patch_lua` both lower. Verified against retail: model `consumed=2776 issues=0`,
+script `consumed=644 issues=0`, no violations. **Plan 01 phase 5's recipe builds.**
+
+The Quartermaster generates the `_tOutfits` row (append-only — index 2 is reserved and a saved
+costume is a *position*) and emits the availability lift **once**, derived from the final list
+length. That once-ness is structural rather than conventional: two Shipments each hard-coding
+`shipped + 1` produce the same number, the later definition wins, and one outfit is in the WAD, in
+the table, and invisible.
+
+⚠ **What remains is the cross-Shipment relink.** `build` links a Shipment's *own* mutations so its
+overlay is valid standalone. When several script-touching Shipments are installed together, deploy
+must re-link all of their mutations into ONE block — otherwise the last WAD mounted wins and the
+rest of the Lua disappears, which is the failure this design exists to prevent. `link_into` already
+takes N mutations from N Shipments and is tested that way; what is missing is the deploy-side caller
+that collects them across installed Shipments. That is Modkit's side of the seam.
+
+### Original scope, for reference
 
 The highest-value item. Scripts load from the **block**, not per-hash, so editing one means
 re-emitting all 114 — and two mods each shipping their own `scripts_vz` silently annihilate each

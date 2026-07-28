@@ -13,12 +13,17 @@
 //!
 //! ## Lowering status
 //!
-//! `replace_texture` lowers end-to-end here. **The other kinds do not yet**, and the reason is
-//! structural rather than missing work: the proven lowering code for models and outfits lives in
-//! `mercs2_workshop` (`publish.rs`, donor resolution + model inject) and `wad_builder`
-//! (`build-skin`), and **both are binary-only crates with no `src/lib.rs`** — so Plan 01's "wrap
-//! the existing building blocks, don't reimplement them" is not currently possible for them. They
-//! need extracting into a library first. [`lower`] says so out loud rather than quietly skipping.
+//! `replace_texture`, `add_model`, `add_outfit` and `patch_lua` all lower here.
+//!
+//! `add_outfit` is the composed case and the reason [`Lowered`] carries an `Option` of each half: a
+//! Data half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script
+//! half that cannot, because Lua links across the installed set rather than per Shipment. Linking a
+//! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
+//! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
+//!
+//! `edit_state_machine`, `native_hook` and `raw` still return `Unsupported` — with the reason,
+//! rather than being quietly skipped, because a dropped contribution produces a WAD that looks fine
+//! and does nothing.
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
@@ -414,14 +419,6 @@ fn lower(
                 }),
             })
         }
-        Contribution::PatchLua { .. } => Err(BuildError::Unsupported {
-            index,
-            kind,
-            reason: "patch_lua lowers at LINK time, not build time: it ships a declared mutation \
-                     and the block is compiled once across the whole installed set. The linker is \
-                     not written yet."
-                .into(),
-        }),
         Contribution::EditStateMachine { .. } | Contribution::NativeHook { .. }
         | Contribution::Raw { .. } => Err(BuildError::Unsupported {
             index,
