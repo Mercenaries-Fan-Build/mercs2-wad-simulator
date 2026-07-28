@@ -21,10 +21,15 @@
 //! | xorout | `0xFFFFFFFF` |
 //! | covered range | `[4:]` (13,400 bytes) |
 //!
-//! Verified **byte-exact against all 8 retail `.profile` files** in
-//! `My Games/Mercenaries 2/SaveGames` (e.g. `auto_6A447BF8` → `0xCA2F06BE`).
-//! Matching eight independent 32-bit values makes a coincidental fit ~`2^-256`,
-//! so this is a conclusive derivation, not a guess.
+//! Verified **byte-exact against all 8 retail `.profile` files**, now vendored at
+//! `fixtures/saves` (e.g. `auto_6A447BF8` → `0xCA2F06BE`). Matching eight
+//! independent 32-bit values makes a coincidental fit ~`2^-256`, so this is a
+//! conclusive derivation, not a guess.
+//!
+//! That verification runs on **every** test run now. It previously read the saves
+//! from a hardcoded `C:/Users/Shadow/Documents/...` via `.ok()`, so on any other
+//! machine each test looped zero times and passed while asserting nothing — the
+//! claim above was true when written and unchecked from then on.
 //!
 //! The earlier "not crc32" ruling in `SAVE_FORMAT.md` tested only the
 //! **reflected** CRC-32/ISO-HDLC (zlib) model. The **non-reflected** variant is
@@ -187,22 +192,22 @@ pub fn set_lua_payload(p: &mut Profile, lua_source: &[u8]) -> Result<(), String>
 mod tests {
     use super::*;
     use crate::save::{parse, PROFILE_SIZE};
-    use std::path::Path;
 
-    const SAVE_DIR: &str = r"C:/Users/Shadow/Documents/My Games/Mercenaries 2/SaveGames";
-    const ALL_SAVES: &[&str] = &[
-        "Mattias Nilsson_63430745.profile",
-        "Mattias Nilsson_6A0E523C.profile",
-        "_______ ________48EFABFB.profile",
-        "auto_634304EA.profile",
-        "auto_6A0BE454.profile",
-        "auto_6A447BF8.profile",
-    ];
+    /// The same eight vendored fixtures the reader uses — see `crate::save`'s `ALL_SAVES` and
+    /// `fixtures/saves/README.md`.
+    ///
+    /// The module header claims the `ProfileHash` derivation is "verified byte-exact against all 8
+    /// retail `.profile` files". Until these were vendored that verification ran on exactly one
+    /// machine: the loader was `.ok()` over a hardcoded `C:/Users/Shadow/Documents/...`, so everywhere
+    /// else each test looped zero times and **passed while asserting nothing**. The header's claim was
+    /// true when written and unchecked ever since. It is now checked on every run.
+    use crate::game_paths::SAVE_FIXTURES as ALL_SAVES;
 
-    /// Load a retail save, or `None` if the sample dir is unavailable (CI etc.),
-    /// mirroring the read-side live tests' skip-gracefully behavior.
-    fn try_load(name: &str) -> Option<Vec<u8>> {
-        std::fs::read(Path::new(SAVE_DIR).join(name)).ok()
+    /// Load a vendored fixture. Panics if absent: the files are committed, so a missing one is a broken
+    /// checkout and must fail loudly rather than skip into a false green.
+    fn load(name: &str) -> Vec<u8> {
+        let p = crate::game_paths::save_fixtures().join(name);
+        std::fs::read(&p).unwrap_or_else(|e| panic!("vendored fixture {}: {e}", p.display()))
     }
 
     #[test]
@@ -213,10 +218,8 @@ mod tests {
 
     #[test]
     fn hash_matches_every_retail_save() {
-        let mut seen = 0;
         for name in ALL_SAVES {
-            let Some(bytes) = try_load(name) else { continue };
-            seen += 1;
+            let bytes = load(name);
             let stored = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             assert_eq!(
                 profile_hash(&bytes[4..]),
@@ -228,17 +231,12 @@ mod tests {
             assert!(p.hash_ok(), "{name}: Profile::hash_ok");
             assert_eq!(p.computed_hash(), stored, "{name}: computed_hash");
         }
-        if seen == 0 {
-            eprintln!("no retail saves present — skipping hash_matches_every_retail_save");
-        }
     }
 
     #[test]
     fn write_round_trips_byte_exact() {
-        let mut seen = 0;
         for name in ALL_SAVES {
-            let Some(orig) = try_load(name) else { continue };
-            seen += 1;
+            let orig = load(name);
             let p = parse(&orig).unwrap();
             let out = write_profile(&p);
             assert_eq!(out.len(), PROFILE_SIZE, "{name}: size");
@@ -260,17 +258,11 @@ mod tests {
             assert_eq!(p2.upgrade_index, p.upgrade_index, "{name}: upgrade");
             assert_eq!(p2.fuel_capacity, p.fuel_capacity, "{name}: fuel_cap");
         }
-        if seen == 0 {
-            eprintln!("no retail saves present — skipping write_round_trips_byte_exact");
-        }
     }
 
     #[test]
     fn mutated_field_produces_valid_hash() {
-        let Some(orig) = try_load("auto_6A447BF8.profile") else {
-            eprintln!("sample save absent — skipping mutated_field_produces_valid_hash");
-            return;
-        };
+        let orig = load("auto_6A447BF8.profile");
         let mut p = parse(&orig).unwrap();
         p.cash = 999_999;
         p.fuel = 4200;
@@ -287,10 +279,7 @@ mod tests {
 
     #[test]
     fn set_lua_payload_round_trips_through_inflate() {
-        let Some(orig) = try_load("auto_6A447BF8.profile") else {
-            eprintln!("sample save absent — skipping set_lua_payload_round_trips_through_inflate");
-            return;
-        };
+        let orig = load("auto_6A447BF8.profile");
         let mut p = parse(&orig).unwrap();
         // Re-deflate the profile's own inflated Lua text back into the container.
         let lua = p.decompress_lua().unwrap();
@@ -306,10 +295,7 @@ mod tests {
 
     #[test]
     fn oversized_payload_is_rejected() {
-        let Some(orig) = try_load("auto_6A447BF8.profile") else {
-            eprintln!("sample save absent — skipping oversized_payload_is_rejected");
-            return;
-        };
+        let orig = load("auto_6A447BF8.profile");
         let mut p = parse(&orig).unwrap();
         // Genuinely high-entropy data (xorshift32) that will not deflate below the
         // payload capacity, larger than the whole file for good measure.
