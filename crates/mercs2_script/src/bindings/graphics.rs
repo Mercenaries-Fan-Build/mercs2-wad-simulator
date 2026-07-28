@@ -71,5 +71,40 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "ScreenShot", "SetNumFrameSync", "ReloadShaders", "InitTinyGeometry", "ShowTinyGeometryObject",
     ])?;
 
+    // `Graphics.Camera` — a NESTED table, and a SEPARATE luaL_Reg from this one, so it is installed
+    // via `value` (not coverage-tracked here; it needs its own namespace module once its table VA is
+    // identified). The six members below are every one the corpus calls:
+    //
+    //     Graphics.Camera.SetNearFar / RestoreNearFar          (3 / 3 call sites)
+    //     Graphics.Camera.SetFovParams / RestoreFovParams      (2 / 3)
+    //     Graphics.Camera.SetFocusParams / RestoreFocusParams  (5 / 5)
+    //
+    // Each is a Set/Restore pair for a camera parameter the fixed-function renderer does not yet
+    // model (near-far planes, FOV, depth-of-field focus), and none returns a value the game reads —
+    // so they record like the rest of the presentation surface.
+    //
+    // The absence of this table was a hard stop, not a cosmetic gap: `WifPmcInterior._CompleteOnEnter`
+    // ends with `Graphics.Camera.SetNearFar(0, 0.3, 500, 0)` (`vz/wifpmcinterior.lua:423`), so every
+    // RESUME boot — which enters the PMC HQ interior — died there on "attempt to index a nil value
+    // (field 'Camera')".
+    let camera = lua.create_table()?;
+    for name in [
+        "SetNearFar", "RestoreNearFar",
+        "SetFovParams", "RestoreFovParams",
+        "SetFocusParams", "RestoreFocusParams",
+    ] {
+        let h = host.clone();
+        let verb: std::rc::Rc<str> = std::rc::Rc::from(format!("Graphics.Camera.{name}").as_str());
+        camera.set(
+            name,
+            lua.create_function(move |_, args: mlua::MultiValue| {
+                let sa: Vec<String> = args.iter().map(super::stringify_arg).collect();
+                h.borrow_mut().script_cmd(&verb, sa);
+                Ok(())
+            })?,
+        )?;
+    }
+    b.value("Camera", camera)?;
+
     b.install_global(GLOBAL)
 }
