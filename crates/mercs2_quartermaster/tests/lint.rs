@@ -42,14 +42,20 @@ fn outfit(wearer: &str) -> Manifest {
 fn a_clean_shipment_produces_nothing_and_does_not_block() {
     let m = outfit("mattias");
     let diags = lint::lint(&m, None, None);
-    assert!(diags.is_empty(), "clean shipment should be silent, got {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean shipment should be silent, got {diags:?}"
+    );
     assert!(!lint::blocks_build(&diags));
 }
 
 #[test]
 fn errors_block_the_build_and_warnings_do_not() {
     let blocking = lint::lint(&outfit("bulldog"), None, None);
-    assert!(lint::blocks_build(&blocking), "an unknown wearer must block");
+    assert!(
+        lint::blocks_build(&blocking),
+        "an unknown wearer must block"
+    );
 
     let warning_only = shipment_with(
         "  - kind: patch_lua
@@ -74,13 +80,20 @@ fn an_unknown_wearer_is_an_error_with_a_suggested_spelling() {
     let diags = lint::lint(&outfit("mattius"), None, None);
     assert_eq!(codes(&diags), vec!["M0140"]);
     assert_eq!(diags[0].severity, Severity::Error);
-    assert_eq!(diags[0].fix.as_deref(), Some("mattias"), "a typo should be auto-fixable");
+    assert_eq!(
+        diags[0].fix.as_deref(),
+        Some("mattias"),
+        "a typo should be auto-fixable"
+    );
 }
 
 #[test]
 fn every_real_hero_is_accepted() {
     for hero in lint::WARDROBE_HEROES {
-        assert!(lint::lint(&outfit(hero), None, None).is_empty(), "{hero} must be valid");
+        assert!(
+            lint::lint(&outfit(hero), None, None).is_empty(),
+            "{hero} must be valid"
+        );
     }
 }
 
@@ -190,21 +203,32 @@ const GOOD_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b
 /// An unusable pin is worse than none: it reads as verified.
 #[test]
 fn a_malformed_digest_is_an_error() {
-    let diags = lint::lint(&with_requirement("https://example.com/x.asi", "deadbeef"), None, None);
+    let diags = lint::lint(
+        &with_requirement("https://example.com/x.asi", "deadbeef"),
+        None,
+        None,
+    );
     assert!(codes(&diags).contains(&"M0170"));
     assert!(lint::blocks_build(&diags));
 }
 
 #[test]
 fn a_well_formed_pin_over_https_is_quiet() {
-    let m = with_requirement("https://github.com/o/r/releases/download/v1/x.asi", GOOD_SHA);
+    let m = with_requirement(
+        "https://github.com/o/r/releases/download/v1/x.asi",
+        GOOD_SHA,
+    );
     assert!(lint::lint(&m, None, None).is_empty());
 }
 
 /// The digest still protects integrity over plain http, so this is a warning rather than fatal.
 #[test]
 fn an_http_requirement_warns_but_does_not_block() {
-    let diags = lint::lint(&with_requirement("http://example.com/x.asi", GOOD_SHA), None, None);
+    let diags = lint::lint(
+        &with_requirement("http://example.com/x.asi", GOOD_SHA),
+        None,
+        None,
+    );
     assert_eq!(codes(&diags), vec!["M0171"]);
     assert_eq!(diags[0].severity, Severity::Warning);
     assert!(!lint::blocks_build(&diags));
@@ -227,7 +251,10 @@ fn a_bare_hash_becomes_an_auto_fixable_warning() {
     let diags = lint::lint(&m, None, Some(&names));
     assert_eq!(codes(&diags), vec!["M0130"]);
     assert_eq!(diags[0].fix.as_deref(), Some("al_veh_boat_destroyer"));
-    assert!(!lint::blocks_build(&diags), "a nameable hash is a warning, not a blocker");
+    assert!(
+        !lint::blocks_build(&diags),
+        "a nameable hash is a warning, not a blocker"
+    );
 }
 
 /// Without a table we cannot suggest a name, so the rule must not fire at all rather than emit a
@@ -270,7 +297,11 @@ fn source_checks_only_run_when_a_root_is_supplied() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let diags = lint::lint(&m, Some(&dir), None);
-    assert_eq!(codes(&diags), vec!["M0110"], "with a root, the missing model is found");
+    assert_eq!(
+        codes(&diags),
+        vec!["M0110"],
+        "with a root, the missing model is found"
+    );
     assert!(lint::blocks_build(&diags));
 }
 
@@ -279,17 +310,33 @@ fn source_checks_only_run_when_a_root_is_supplied() {
 // ---------------------------------------------------------------------------
 
 /// A linter that silently omits its most important rules reads as a clean bill of health. The
-/// HANG-class checks that need the WAD stack must stay VISIBLE until they are implemented.
+/// HANG-class checks must stay VISIBLE — either implemented, or registered as a known gap.
+///
+/// Asserts against BOTH lists on purpose. Which list a rule sits in is allowed to change as one
+/// gets implemented (M0001 and M0002 have already moved); a rule vanishing from both is the actual
+/// regression, and pinning the location would have made this test block that implementation work
+/// instead of guarding against the disappearance it exists to catch.
 #[test]
-fn the_pending_hang_rules_are_registered_not_hidden() {
+fn the_hang_rules_are_registered_not_hidden() {
     assert!(!lint::PENDING.is_empty());
-    for r in lint::PENDING {
-        assert!(!r.title.is_empty() && !r.doc.is_empty(), "{} needs a title and doc", r.code);
+    for r in lint::PENDING.iter().chain(lint::ARTIFACT_RULES) {
+        assert!(
+            !r.title.is_empty() && !r.doc.is_empty(),
+            "{} needs a title and doc",
+            r.code
+        );
     }
     // The three named in Plan 01 as silent-and-catastrophic.
-    let codes: Vec<&str> = lint::PENDING.iter().map(|r| r.code).collect();
+    let codes: Vec<&str> = lint::PENDING
+        .iter()
+        .chain(lint::ARTIFACT_RULES)
+        .map(|r| r.code)
+        .collect();
     for expected in ["M0001", "M0002", "M0003"] {
-        assert!(codes.contains(&expected), "{expected} must stay registered");
+        assert!(
+            codes.contains(&expected),
+            "{expected} must stay registered somewhere"
+        );
     }
 }
 
