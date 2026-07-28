@@ -14,10 +14,14 @@
 //! them together would make the hermetic set impossible to run on its own, and CI is the place the
 //! linter matters most.
 //!
-//! Several of the worst traps still cannot be checked at all yet — a short texture BODY needs the
-//! target's resident mip-chain size, and a dangling LOD rung needs the built block. Those are
-//! registered in [`PENDING`] rather than silently absent, so the gap is visible instead of being
-//! mistaken for a clean bill of health.
+//! [`artifact_checks`] is the third stage, and runs against the WAD the builder just emitted. It is
+//! the only stage that can catch a defect the LOWERING introduced rather than one the author wrote,
+//! which is the class of bug that has actually shipped here.
+//!
+//! Several of the worst traps still cannot be checked at all — a short texture BODY needs the
+//! target's resident mip-chain size, and the non-resident-costume wedge needs a residency
+//! predicate that does not exist yet. Those are registered in [`PENDING`] rather than silently
+//! absent, so the gap is visible instead of being mistaken for a clean bill of health.
 //!
 //! ## Gating
 //!
@@ -25,8 +29,8 @@
 //! standing mandate is that a build is gated on EXIT CODE, never on a printed count.
 
 use crate::blast::{self, MergeClass};
-use crate::game::GameStack;
 use crate::discover::{self, SourceIssue};
+use crate::game::GameStack;
 use crate::manifest::{Contribution, Manifest, Requirement, Target};
 use crate::names::{self, NameTable};
 use std::path::Path;
@@ -158,16 +162,7 @@ pub const RULES: &[Rule] = &[
 /// clean bill of health, which is worse than no linter. These land with the builder (increment 5),
 /// where the WAD stack is in hand.
 pub const PENDING: &[Rule] = &[
-    Rule {
-        code: "M0001",
-        title: "dangling _P001/2/3 LOD rungs — 549 GB buffer request, open-world stream HANG",
-        doc: "docs/modding/field_guide.md#trap-7",
-    },
-    Rule {
-        code: "M0002",
-        title: "packed_field under-claims decompressed size — heap overrun",
-        doc: "docs/modding/field_guide.md#trap-8",
-    },
+    // M0001 and M0002 have moved to `ARTIFACT_RULES` — both are answerable against the emitted WAD.
     Rule {
         code: "M0003",
         title: "texture BODY shorter than linear_mip_chain_size — BUFFER_TOO_SMALL, world-load livelock",
@@ -224,7 +219,9 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
             // Use EVERY row, not just the primary one: a shared texture may have no primary row at
             // all, and looking only for one would silently skip exactly those assets.
             let rows = game.aset_rows(hash, mercs2_formats::types::TYPE_ID_TEXTURE);
-            let Some(&(packed, secondary, _)) = rows.first() else { continue };
+            let Some(&(packed, secondary, _)) = rows.first() else {
+                continue;
+            };
 
             if !aset_row_is_single_block(packed, secondary) {
                 let rungs = [packed & 0xFFFF, secondary >> 16, secondary & 0xFFFF]
@@ -270,6 +267,91 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
     out
 }
 
+/// M0001, promoted out of [`PENDING`]. Answerable only against an emitted WAD.
+pub const M0001_DANGLING_RUNG: Rule = Rule {
+    code: "M0001",
+    title: "dangling _P001/2/3 LOD rungs — 549 GB buffer request, open-world stream HANG",
+    doc: "docs/modding/field_guide.md#trap-7",
+};
+
+/// M0002, promoted out of [`PENDING`]. Answerable only against an emitted WAD.
+pub const M0002_PACKED_FIELD_UNDER_CLAIM: Rule = Rule {
+    code: "M0002",
+    title: "packed_field under-claims decompressed size — heap overrun",
+    doc: "docs/modding/field_guide.md#trap-8",
+};
+
+/// M0180: a hash claimed by two blocks. Not HANG-class — the registry is first-writer-wins, so the
+/// outcome is defined — but one of the two contributions silently does nothing.
+pub const M0180_DUPLICATE_PRIMARY: Rule = Rule {
+    code: "M0180",
+    title: "two blocks claim one asset hash — the later one is silently dropped",
+    doc: "docs/modding/manifest_format.md#composition",
+};
+
+/// M0181: the WAD's header region outgrew the 2 MB below DATA.
+pub const M0181_HEADER_OVERFLOW: Rule = Rule {
+    code: "M0181",
+    title: "INDX+ASET+PTHS overflow the patch-WAD header region",
+    doc: "docs/modding/manifest_format.md#limits",
+};
+
+/// M0182: a block the builder emitted will not inflate. Always a builder bug, never an author one.
+pub const M0182_BLOCK_UNREADABLE: Rule = Rule {
+    code: "M0182",
+    title: "an emitted block does not decompress",
+    doc: "docs/modding/manifest_format.md#limits",
+};
+
+/// Every rule answerable only against an emitted WAD — see [`artifact_checks`].
+pub const ARTIFACT_RULES: &[Rule] = &[
+    M0001_DANGLING_RUNG,
+    M0002_PACKED_FIELD_UNDER_CLAIM,
+    M0180_DUPLICATE_PRIMARY,
+    M0181_HEADER_OVERFLOW,
+    M0182_BLOCK_UNREADABLE,
+];
+
+/// Rules that can only be answered against the WAD the builder just emitted.
+///
+/// A third stage, after [`lint`] (hermetic) and [`game_checks`] (needs the retail stack). These are
+/// the checks that catch a defect the LOWERING introduced rather than one the author wrote — the
+/// class of bug that has actually shipped here twice (a bare container emitted where an entry-table
+/// block was required, and an ASET rung left at `0x0000` instead of the `0xFFFF` sentinel). Neither
+/// was visible in the manifest; both were visible in the bytes.
+///
+/// Pass the blocks as read back by `read_patch_wad`, whose rungs are in the emitted WAD's own index
+/// space — that is what makes the M0001 answer meaningful. See `patch_wad::BlockStage`.
+pub fn artifact_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> Vec<Diagnostic> {
+    use mercs2_formats::patch_wad::{validate_blocks_all, BlockFinding, BlockStage};
+
+    validate_blocks_all(blocks, BlockStage::Emitted)
+        .into_iter()
+        .map(|finding| {
+            let (rule, severity) = match &finding {
+                BlockFinding::DanglingLodRung { .. } => (M0001_DANGLING_RUNG, Severity::Hang),
+                BlockFinding::PackedFieldUnderClaim { .. } => {
+                    (M0002_PACKED_FIELD_UNDER_CLAIM, Severity::Hang)
+                }
+                BlockFinding::DuplicatePrimary { .. } => {
+                    (M0180_DUPLICATE_PRIMARY, Severity::Warning)
+                }
+                BlockFinding::HeaderOverflow { .. } => (M0181_HEADER_OVERFLOW, Severity::Error),
+                BlockFinding::Sges { .. } => (M0182_BLOCK_UNREADABLE, Severity::Error),
+            };
+            Diagnostic {
+                rule,
+                severity,
+                message: finding.to_string(),
+                // A block cannot be traced back to the contribution that produced it: lowering may
+                // merge several into one (the linked scripts block) or split one into several.
+                at: None,
+                fix: None,
+            }
+        })
+        .collect()
+}
+
 /// One finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -311,7 +393,11 @@ pub const WARDROBE_HEROES: [&str; 3] = ["chris", "jennifer", "mattias"];
 /// `root` enables the source-file checks; pass `None` to lint manifest text alone. `names` enables
 /// hash→name suggestions; without it those simply do not fire, because suggesting a name we cannot
 /// look up is impossible rather than merely unhelpful.
-pub fn lint(manifest: &Manifest, root: Option<&Path>, names: Option<&NameTable>) -> Vec<Diagnostic> {
+pub fn lint(
+    manifest: &Manifest,
+    root: Option<&Path>,
+    names: Option<&NameTable>,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
     if let Err(e) = manifest.validate() {
@@ -391,8 +477,11 @@ pub fn lint(manifest: &Manifest, root: Option<&Path>, names: Option<&NameTable>)
                 }
             }
             Contribution::PatchLua { target, .. } => {
-                let claim = blast::Claim::Script { name: target.clone() };
-                let class = blast::merge_class(&claim, blast::Access::Write, blast::Intent::Additive);
+                let claim = blast::Claim::Script {
+                    name: target.clone(),
+                };
+                let class =
+                    blast::merge_class(&claim, blast::Access::Write, blast::Intent::Additive);
                 if class == MergeClass::Exclusive {
                     out.push(Diagnostic {
                         rule: M0141_UNMERGEABLE_SCRIPT,
@@ -423,7 +512,12 @@ pub fn lint(manifest: &Manifest, root: Option<&Path>, names: Option<&NameTable>)
                     });
                 }
             }
-            Contribution::NativeHook { target, plugin, symbol, .. } => {
+            Contribution::NativeHook {
+                target,
+                plugin,
+                symbol,
+                ..
+            } => {
                 if *target == Target::Reimpl && plugin.is_some() {
                     out.push(Diagnostic {
                         rule: M0160_ASI_ON_REIMPL,
@@ -491,9 +585,7 @@ pub fn lint(manifest: &Manifest, root: Option<&Path>, names: Option<&NameTable>)
 ///
 /// Gate on this, never on a printed count (standing mandate).
 pub fn blocks_build(diagnostics: &[Diagnostic]) -> bool {
-    diagnostics
-        .iter()
-        .any(|d| d.severity >= Severity::Error)
+    diagnostics.iter().any(|d| d.severity >= Severity::Error)
 }
 
 /// Cheap edit-distance-1-ish suggestion for a misspelled key. Deliberately conservative: it only
@@ -521,7 +613,11 @@ mod tests {
     #[test]
     fn rule_codes_are_unique() {
         let mut seen = std::collections::BTreeSet::new();
-        for r in RULES.iter().chain(PENDING.iter()) {
+        for r in RULES
+            .iter()
+            .chain(PENDING.iter())
+            .chain(ARTIFACT_RULES.iter())
+        {
             assert!(seen.insert(r.code), "duplicate rule code {}", r.code);
         }
     }
@@ -531,5 +627,116 @@ mod tests {
         assert_eq!(closest("mattius", &WARDROBE_HEROES), Some("mattias"));
         assert_eq!(closest("Mattias", &WARDROBE_HEROES), Some("mattias"));
         assert_eq!(closest("bulldog", &WARDROBE_HEROES), None);
+    }
+}
+
+#[cfg(test)]
+mod artifact_check_tests {
+    use super::*;
+    use mercs2_formats::patch_wad::{AsetEntry, PatchBlock};
+
+    fn block(path: &str, rows: Vec<AsetEntry>) -> PatchBlock {
+        PatchBlock::from_decompressed(b"payload", path.into(), rows, None).unwrap()
+    }
+
+    /// M0001 fires. The rung names block 9 in a one-block WAD; the streamer sizes a buffer from
+    /// that index and the open-world load hangs — silently, which is why this rule exists.
+    #[test]
+    fn m0001_fires_on_a_dangling_rung() {
+        let blocks = [block(
+            "blocks\\a.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_0009, 19)],
+        )];
+        let d = artifact_checks(&blocks);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].rule.code, "M0001");
+        assert_eq!(
+            d[0].severity,
+            Severity::Hang,
+            "a hang must outrank an error"
+        );
+    }
+
+    /// M0001 stays quiet on a fully-sentinel row — the shape every fully-resident character
+    /// texture has, and the one our own lowering emits. A rule that fired here would fire on
+    /// everything we build.
+    #[test]
+    fn m0001_is_quiet_on_a_sentinel_row() {
+        let blocks = [block(
+            "blocks\\a.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 19)],
+        )];
+        assert_eq!(artifact_checks(&blocks), vec![]);
+    }
+
+    /// M0002 fires when `packed_field` under-claims. Built by hand because
+    /// `PatchBlock::from_decompressed` makes this state unrepresentable — which is the point of
+    /// that constructor, and why the rule is a backstop for the paths that do not use it.
+    #[test]
+    fn m0002_fires_when_packed_field_under_claims() {
+        let raw = vec![0xABu8; mercs2_formats::patch_wad::PAGE_SIZE * 3];
+        let mut blk = block(
+            "blocks\\a.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 19)],
+        );
+        blk.compressed_data = mercs2_formats::sges::compress_sges(&raw).unwrap();
+        blk.packed_field = 1; // claims one page; needs three
+        let d = artifact_checks(&[blk]);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].rule.code, "M0002");
+        assert_eq!(d[0].severity, Severity::Hang);
+        assert!(
+            d[0].message.contains("overrun the heap"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    /// M0002 stays quiet on a multi-page block whose count was computed honestly.
+    #[test]
+    fn m0002_is_quiet_when_packed_field_is_honest() {
+        let raw = vec![0xABu8; mercs2_formats::patch_wad::PAGE_SIZE * 3];
+        let blk = PatchBlock::from_decompressed(
+            &raw,
+            "blocks\\a.block".into(),
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 19)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(artifact_checks(&[blk]), vec![]);
+    }
+
+    /// M0180 fires but does not block: the registry is first-writer-wins, so this is a defined
+    /// outcome, not a hang. It matters because one contribution silently does nothing.
+    #[test]
+    fn m0180_warns_on_a_duplicate_claim_without_blocking() {
+        let row = || vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 19)];
+        let d = artifact_checks(&[
+            block("blocks\\a.block", row()),
+            block("blocks\\b.block", row()),
+        ]);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].rule.code, "M0180");
+        assert!(
+            !blocks_build(&d),
+            "retail ships this shape; it must not fail a build"
+        );
+    }
+
+    /// Every artifact rule is registered, so `qm` can list what it checks.
+    #[test]
+    fn artifact_rules_are_registered() {
+        for code in ["M0001", "M0002", "M0180", "M0181", "M0182"] {
+            assert!(
+                ARTIFACT_RULES.iter().any(|r| r.code == code),
+                "{code} unregistered"
+            );
+        }
+        for code in ["M0001", "M0002"] {
+            assert!(
+                !PENDING.iter().any(|r| r.code == code),
+                "{code} is implemented, not pending"
+            );
+        }
     }
 }
