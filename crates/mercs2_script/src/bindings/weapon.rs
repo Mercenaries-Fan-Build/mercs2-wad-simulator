@@ -9,9 +9,9 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Weapon")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult};
 
-use crate::SharedHost;
+use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -42,27 +42,27 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // Ammo getters → the real per-weapon ammo state.
     let h = host.clone();
-    b.real("GetClipAmmo", lua.create_function(move |_, w: i64| Ok(h.borrow().weapon_clip(w as u64) as i64))?)?;
+    b.real("GetClipAmmo", lua.create_function(move |_, w: Guid| Ok(h.borrow().weapon_clip(w.raw()) as i64))?)?;
     let h = host.clone();
-    b.real("GetMaxClipAmmo", lua.create_function(move |_, w: i64| Ok(h.borrow().weapon_max_clip(w as u64) as i64))?)?;
+    b.real("GetMaxClipAmmo", lua.create_function(move |_, w: Guid| Ok(h.borrow().weapon_max_clip(w.raw()) as i64))?)?;
     let h = host.clone();
-    b.real("GetReserveAmmo", lua.create_function(move |_, w: i64| Ok(h.borrow().weapon_reserve(w as u64) as i64))?)?;
+    b.real("GetReserveAmmo", lua.create_function(move |_, w: Guid| Ok(h.borrow().weapon_reserve(w.raw()) as i64))?)?;
     let h = host.clone();
-    b.real("GetMaxReserveAmmo", lua.create_function(move |_, w: i64| Ok(h.borrow().weapon_max_reserve(w as u64) as i64))?)?;
+    b.real("GetMaxReserveAmmo", lua.create_function(move |_, w: Guid| Ok(h.borrow().weapon_max_reserve(w.raw()) as i64))?)?;
 
     // Classification predicates → the real weapon flags.
     let h = host.clone();
-    b.real("IsDesignator", lua.create_function(move |_, w: i64| Ok(h.borrow().weapon_is_designator(w as u64)))?)?;
+    b.real("IsDesignator", lua.create_function(move |_, w: Guid| Ok(h.borrow().weapon_is_designator(w.raw())))?)?;
     let h = host.clone();
-    b.real("IsPrimary", lua.create_function(move |_, w: i64| Ok(h.borrow().weapon_is_primary(w as u64)))?)?;
+    b.real("IsPrimary", lua.create_function(move |_, w: Guid| Ok(h.borrow().weapon_is_primary(w.raw())))?)?;
 
     // Ammo/reload setters → the real ammo state.
     let h = host.clone();
-    b.real("SetClipAmmo", lua.create_function(move |_, (w, n): (i64, i64)| { h.borrow_mut().weapon_set_ammo(w as u64, Some(n as i32), None); Ok(()) })?)?;
+    b.real("SetClipAmmo", lua.create_function(move |_, (w, n): (Guid, i64)| { h.borrow_mut().weapon_set_ammo(w.raw(), Some(n as i32), None); Ok(()) })?)?;
     let h = host.clone();
-    b.real("SetReserveAmmo", lua.create_function(move |_, (w, n): (i64, i64)| { h.borrow_mut().weapon_set_ammo(w as u64, None, Some(n as i32)); Ok(()) })?)?;
+    b.real("SetReserveAmmo", lua.create_function(move |_, (w, n): (Guid, i64)| { h.borrow_mut().weapon_set_ammo(w.raw(), None, Some(n as i32)); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Reload", lua.create_function(move |_, w: i64| { h.borrow_mut().weapon_reload(w as u64); Ok(()) })?)?;
+    b.real("Reload", lua.create_function(move |_, w: Guid| { h.borrow_mut().weapon_reload(w.raw()); Ok(()) })?)?;
 
     b.install_global(GLOBAL)
 }
