@@ -1676,9 +1676,11 @@ mod prop_anim_tests {
     /// absent so `cargo test` stays green in CI.
     #[test]
     fn live_known_animated_model_yields_clips() {
-        let path = std::env::var("VZ_WAD").unwrap_or_else(|_| {
-            "C:/Program Files (x86)/EA Games/Mercenaries 2 World in Flames/data/vz.wad".into()
-        });
+        // Resolved, never hardcoded: `$VZ_WAD` (a folder or the file) then the registry key. The old
+        // literal install path could not resolve off Windows, so this test silently never ran there.
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found (set VZ_WAD to the install folder or the file)");
+        };
         let Ok(mut w) = wad::open(&path) else {
             eprintln!("skip: vz.wad not present at {path}");
             return;
