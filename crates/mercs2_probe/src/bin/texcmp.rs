@@ -39,7 +39,7 @@ fn main() {
         .and_then(|a| a.strip_prefix("0x"))
         .and_then(|h| u32::from_str_radix(h, 16).ok())
         .unwrap_or(0xF88147A1); // ch_veh_tank_ztz98
-    let mut w = wad::registry_vz_wad().and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
+    let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     let container = wad::extract_container(&mut w, mhash).expect("extract container");
     let mats = mercs2_formats::texture::parse_mtrl(&container);
