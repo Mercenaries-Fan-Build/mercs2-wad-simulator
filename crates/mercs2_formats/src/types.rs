@@ -23,6 +23,14 @@ pub const TYPE_ID_MUSIC_CUE_TABLE: u32 = 4;
 pub const TYPE_ID_ANIM_STATE_MACHINE: u32 = 31;
 pub const TYPE_ID_WORLD_ENTITY_DATA: u32 = 8;
 pub const TYPE_ID_FX_DICTIONARY: u32 = 25;
+/// Scaleform GFx movie (`cfx_pack`). Retail ships 64 of them in `vz.wad`; every one is a UCFX
+/// container with a single `data` leaf holding the whole `.gfx` movie verbatim.
+///
+/// The name is the engine's, not Scaleform's — and it is slightly misleading. `CFX` is the
+/// *compressed* GFx magic, but "pack" does not mean several movies: measured across all 64 retail
+/// assets, the leaf holds exactly one movie, and three of them are uncompressed `GFX` rather than
+/// `CFX`. So the type carries a movie whichever way it is encoded.
+pub const TYPE_ID_CFX_PACK: u32 = 23;
 /// Singleton `watermap` in resident block (`pandemic_hash_m2("watermap")`).
 pub const TYPE_ID_WATERMAP: u32 = 0;
 
@@ -53,6 +61,8 @@ pub const TYPE_HASH_GUIDMAP: u32 = 0x140E8728;
 /// 1024-slot table in FUN_0067cfb0 (world-load livelock @0x67D130).
 pub const TYPE_HASH_STANCE: u32 = 0x207359C7;
 pub const TYPE_HASH_FX_DICTIONARY: u32 = 0xFA46D8A8;
+/// Scaleform GFx movie — see [`TYPE_ID_CFX_PACK`].
+pub const TYPE_HASH_CFX_PACK: u32 = 0xFE0E8320;
 pub const TYPE_HASH_WATERMAP: u32 = 0x4D7D30C4;
 
 /// All known type_hash → type_id mappings from retail census.
@@ -174,6 +184,18 @@ mod tests {
             type_id_for_type_hash(TYPE_HASH_TEXTURE),
             Some(TYPE_ID_TEXTURE)
         );
+        // The pair the GFx injector resolves through. Pinned because the constants were added long
+        // after the registry row, and a constant that disagreed with the row would send a movie to
+        // the wrong loader without anything failing.
+        assert_eq!(
+            type_hash_for_type_id(TYPE_ID_CFX_PACK),
+            Some(TYPE_HASH_CFX_PACK)
+        );
+        assert_eq!(
+            type_id_for_type_hash(TYPE_HASH_CFX_PACK),
+            Some(TYPE_ID_CFX_PACK)
+        );
+        assert_eq!(type_name(TYPE_ID_CFX_PACK), "cfx_pack");
     }
 
     #[test]
@@ -200,6 +222,7 @@ mod tests {
             TYPE_ID_ANIM_STATE_MACHINE,
             TYPE_ID_WORLD_ENTITY_DATA,
             TYPE_ID_FX_DICTIONARY,
+            TYPE_ID_CFX_PACK,
         ];
         for type_id in known_ids {
             let name = type_name(type_id);
