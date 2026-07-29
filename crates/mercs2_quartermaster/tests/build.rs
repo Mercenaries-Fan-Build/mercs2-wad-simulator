@@ -1492,7 +1492,7 @@ fn a_hang_class_defect_fails_the_build_rather_than_warning() {
 /// read makes harder to believe, not easier.
 fn tiny_gfx_movie() -> Vec<u8> {
     let mut body = Vec::new();
-    body.push(0b00000_000); // stage RECT, nbits = 0
+    body.push(0); // stage RECT: nbits = 0 in the top 5 bits, so the bounds are empty
     body.extend_from_slice(&(30u16 << 8).to_le_bytes()); // 30 fps
     body.extend_from_slice(&1u16.to_le_bytes()); // one frame
     let mut tag = |code: u16, b: &[u8]| {

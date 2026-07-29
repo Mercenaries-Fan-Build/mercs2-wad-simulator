@@ -449,7 +449,7 @@ fn a_named_hash_is_suggested_and_an_unnamed_one_is_left_alone() {
 /// can read in a diff.
 fn movie_with(tags: &[(u16, Vec<u8>)]) -> Vec<u8> {
     let mut body = Vec::new();
-    body.push(0b00000_000); // stage RECT, nbits = 0
+    body.push(0); // stage RECT: nbits = 0 in the top 5 bits, so the bounds are empty
     body.extend_from_slice(&(30u16 << 8).to_le_bytes()); // 30 fps
     body.extend_from_slice(&1u16.to_le_bytes()); // one frame
     for (code, tag_body) in tags {
