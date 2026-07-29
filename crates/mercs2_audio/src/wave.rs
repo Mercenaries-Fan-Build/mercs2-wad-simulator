@@ -182,7 +182,13 @@ pub struct DecodedClip {
     pub sample_rate: u32,
     /// Interleaved int16 PCM (empty when the clip streams from an external `.pws`).
     pub samples: Vec<i16>,
-    /// True when the clip's audio is external (codec `0x04`) — no embedded samples decoded.
+    /// True when the clip's samples are NOT in this bank body — they live in an external `.pws`.
+    ///
+    /// Decided by residency, not by the codec byte: the record declares a size but its data does
+    /// not land inside the body (sentinel offset `0xFFFFFFFF`, or a range running past the end).
+    /// `CODEC_STREAM` is the byte such records usually carry, but it is not what makes the audio
+    /// external — a record pointing outside the body has no embedded samples whatever it claims to
+    /// be encoded as.
     pub streaming: bool,
 }
 
@@ -290,8 +296,15 @@ impl Wavebank {
                     _ => {}
                 }
             } else if data_size > 0 {
-                // Audio is external (streamed .pws) — the slot exists, samples are not embedded.
-                streaming = codec == CODEC_STREAM || true;
+                // The record declares a size, but `embedded` above already established the data is
+                // not in this body — sentinel offset, or a range past the end. So the samples are
+                // external and the slot stands with none decoded.
+                //
+                // NOT gated on `codec == CODEC_STREAM`. Residency is what makes the audio external:
+                // a record pointing outside the body has nothing to decode whatever its codec byte
+                // claims, and reporting `streaming: false` there would hand back a clip with no
+                // samples and no reason — indistinguishable from a decoded silent one.
+                streaming = true;
             }
 
             bank.clips.push(DecodedClip {
@@ -407,5 +420,62 @@ mod tests {
         assert_eq!(bank.clips.len(), 1);
         assert!(bank.clips[0].streaming);
         assert!(bank.clips[0].samples.is_empty());
+    }
+
+    /// A record pointing outside the body is external EVEN WITH AN EMBEDDED CODEC BYTE.
+    ///
+    /// The sibling test above sets `CODEC_STREAM`, so it passes whether `streaming` is decided by
+    /// residency or by the codec byte — which is exactly how `streaming = codec == CODEC_STREAM ||
+    /// true` survived: the `|| true` made the comparison dead, and no test could tell.
+    ///
+    /// This one uses `CODEC_PCM` with an out-of-range offset, so it fails if the codec byte is ever
+    /// allowed to decide again. There is nothing to decode at that offset regardless of what the
+    /// record claims to be encoded as.
+    #[test]
+    fn an_out_of_range_record_is_streaming_whatever_its_codec_byte_says() {
+        let records_off = HEADER_SIZE;
+        let mut body = vec![0u8; records_off + RECORD_SIZE];
+        body[0..4].copy_from_slice(&1u32.to_le_bytes());
+        body[8..10].copy_from_slice(&1u16.to_le_bytes());
+        body[16..20].copy_from_slice(&(records_off as u32).to_le_bytes());
+        let roff = records_off;
+        body[roff..roff + 4].copy_from_slice(&0x3333_4444u32.to_le_bytes());
+        body[roff + 5] = 1; // mono
+        body[roff + 6] = CODEC_PCM; // an EMBEDDED codec, not CODEC_STREAM
+        body[roff + 8..roff + 12].copy_from_slice(&22050u32.to_le_bytes());
+        body[roff + 12..roff + 16].copy_from_slice(&0x0020_0000u32.to_le_bytes()); // size @+12
+        body[roff + 32..roff + 36].copy_from_slice(&0x0010_0000u32.to_le_bytes()); // offset past end
+
+        let bank = Wavebank::parse(&body);
+        assert_eq!(bank.clips.len(), 1);
+        assert!(
+            bank.clips[0].streaming,
+            "samples are not in the body, so the clip is external no matter the codec byte"
+        );
+        assert!(bank.clips[0].samples.is_empty());
+    }
+
+    /// The counterpart: a record whose data IS inside the body is not streaming. Without this, the
+    /// pair above would be satisfied by hard-coding `streaming = true` everywhere.
+    #[test]
+    fn an_embedded_record_is_not_streaming() {
+        let records_off = HEADER_SIZE;
+        let pcm_bytes = 8usize;
+        let mut body = vec![0u8; records_off + RECORD_SIZE + pcm_bytes];
+        body[0..4].copy_from_slice(&1u32.to_le_bytes());
+        body[8..10].copy_from_slice(&1u16.to_le_bytes());
+        body[16..20].copy_from_slice(&(records_off as u32).to_le_bytes());
+        let roff = records_off;
+        let data_off = records_off + RECORD_SIZE;
+        body[roff..roff + 4].copy_from_slice(&0x5555_6666u32.to_le_bytes());
+        body[roff + 5] = 1;
+        body[roff + 6] = CODEC_PCM;
+        body[roff + 8..roff + 12].copy_from_slice(&22050u32.to_le_bytes());
+        body[roff + 12..roff + 16].copy_from_slice(&(pcm_bytes as u32).to_le_bytes());
+        body[roff + 32..roff + 36].copy_from_slice(&(data_off as u32).to_le_bytes());
+
+        let bank = Wavebank::parse(&body);
+        assert_eq!(bank.clips.len(), 1);
+        assert!(!bank.clips[0].streaming, "the data is inside the body");
     }
 }
