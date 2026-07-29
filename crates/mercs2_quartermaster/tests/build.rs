@@ -1479,3 +1479,258 @@ fn a_hang_class_defect_fails_the_build_rather_than_warning() {
         "a dangling rung must BLOCK: the game gives the modder a frozen loading screen, not an error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// add_movie
+// ---------------------------------------------------------------------------
+
+/// A small, valid, uncompressed `GFX` movie: an AVM1 `DoAction` and a `GFx_ExporterInfo`, which is
+/// the shape a GFx 2.x authoring tool emits.
+///
+/// Synthetic on purpose. A checked-in `.gfx` would be an opaque blob in the tree, and the property
+/// under test is that whatever bytes go in come out again unchanged — which a fixture nobody can
+/// read makes harder to believe, not easier.
+fn tiny_gfx_movie() -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(0b00000_000); // stage RECT, nbits = 0
+    body.extend_from_slice(&(30u16 << 8).to_le_bytes()); // 30 fps
+    body.extend_from_slice(&1u16.to_le_bytes()); // one frame
+    let mut tag = |code: u16, b: &[u8]| {
+        assert!(b.len() < 0x3F);
+        body.extend_from_slice(&((code << 6) | b.len() as u16).to_le_bytes());
+        body.extend_from_slice(b);
+    };
+    tag(1000, &[0x07, 0x02, 0x00, 0x00]); // GFx_ExporterInfo
+    tag(12, &[0x00]); // DoAction: a bare End-of-actions
+    tag(1, &[]); // ShowFrame
+    tag(0, &[]); // End
+    let mut file = Vec::new();
+    file.extend_from_slice(b"GFX");
+    file.push(8);
+    file.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+    file.extend_from_slice(&body);
+    file
+}
+
+/// Pull the `cfx_pack` container back out of an emitted WAD and return `(name_hash, movie bytes)`.
+fn read_back_movie(wad: &[u8]) -> (u32, Vec<u8>) {
+    let contents = mercs2_formats::patch_wad::read_patch_wad(wad).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+
+    // (1) The ASET row must be PRIMARY — low-16 `0xFFFF`. Any other value names a `_P001` rung one
+    // level finer, and a movie has no LOD chain for such a rung to be, so it would dangle. `0x0000`
+    // in particular is the M0001 HANG rather than "no rung".
+    let row = &block.aset_entries[0];
+    assert_eq!(
+        row.u32_2 & 0xFFFF,
+        0xFFFF,
+        "a new movie must register as primary, not as a dangling LOD rung"
+    );
+    // `patch_wad::AsetEntry` names its words positionally; `u32_3` is the type id the reader side
+    // dispatches on. It is what picks the loader, so a movie must resolve to the GFx one.
+    assert_eq!(
+        row.u32_3,
+        mercs2_formats::types::TYPE_ID_CFX_PACK,
+        "the row's type id is what picks the loader; a movie must dispatch to the GFx one"
+    );
+
+    // (2) A patch block is `[entry table][containers…]`, NOT a bare container. Handing over a raw
+    // container makes the loader read the `UCFX` magic as an entry-table field: the WAD hashes fine
+    // and is structurally nonsense.
+    let decompressed = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&decompressed);
+    assert_eq!(count, 1, "expected a single-entry block table");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].type_hash,
+        mercs2_formats::types::TYPE_HASH_CFX_PACK
+    );
+    assert_eq!(
+        &decompressed[20..24],
+        b"UCFX",
+        "the container must start AFTER the 20-byte entry table"
+    );
+    assert_eq!(
+        entries[0].name_hash, row.asset_hash,
+        "the row and the block must be talking about the same asset, or the lookup resolves to a \
+         block that does not contain it"
+    );
+
+    let container = &decompressed[20..];
+    let movie = mercs2_formats::ucfx::extract_chunk_body(container, b"data")
+        .expect("the container must carry a `data` leaf");
+    (entries[0].name_hash, movie)
+}
+
+/// ★ `add_movie` end to end against the retail WADs — the injector the Scaleform work was missing.
+///
+/// Runs automatically when a PC `vz.wad` is discoverable and SKIPS loudly otherwise.
+#[test]
+fn add_movie_builds_end_to_end() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("add_movie");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let movie = tiny_gfx_movie();
+    std::fs::write(dir.join("src/ui.gfx"), &movie).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_movie\n    name: qm_test_hud\n    movie: src/ui.gfx\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("add_movie must build");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity < mercs2_quartermaster::Severity::Error),
+        "{:?}",
+        report.diagnostics
+    );
+
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
+
+    let (hash, carried) = read_back_movie(&on_disk);
+    assert_eq!(
+        hash,
+        mercs2_formats::hash::pandemic_hash_m2("qm_test_hud"),
+        "the asset must be reachable under the name the author wrote"
+    );
+
+    // (3) The movie survives verbatim. Not "the same length" — the same bytes, and still a movie:
+    // an injector that mangled the payload would still produce a WAD that loads and a container
+    // that checksums, and the only symptom would be `GFxLoader read failed` in-game.
+    assert_eq!(carried, movie, "the movie must be carried byte for byte");
+    let reparsed = mercs2_formats::gfx::GfxMovie::parse(&carried).expect("still a movie");
+    assert_eq!(&reparsed.magic, b"GFX");
+    assert_eq!(reparsed.version, 8, "retail movies are all version 8");
+
+    // The log records the tag census, so a movie that arrived empty cannot pass unnoticed.
+    let log = report.log.join("\n");
+    assert!(log.contains("add_movie qm_test_hud"), "{log}");
+    assert!(log.contains("4 tag(s)"), "{log}");
+
+    // Determinism: the verify-by-hash mandate only means something if two builds agree byte for byte.
+    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None)
+        .expect("second build");
+    assert_eq!(
+        report.placements[0].sha256, again.placements[0].sha256,
+        "two builds of one Shipment must be byte-identical"
+    );
+}
+
+/// The property that separates this kind from every other Data lowering: it needs NO game stack.
+///
+/// `replace_texture` reads the target's dimensions and `add_model` borrows a donor's rig, so both
+/// fail with `GameRequired`. A movie is self-contained, so this one builds in template CI — where
+/// the retail WADs will never exist — and that is worth pinning rather than rediscovering.
+#[test]
+fn add_movie_needs_no_game_stack() {
+    let dir = scratch("add_movie_nogame");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let movie = tiny_gfx_movie();
+    std::fs::write(dir.join("src/ui.gfx"), &movie).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_movie\n    name: qm_ci_hud\n    movie: src/ui.gfx\n",
+    );
+
+    let report = build::build(&s, None, None, None, None).expect("must build with no game");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let (hash, carried) = read_back_movie(&on_disk);
+    assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("qm_ci_hud"));
+    assert_eq!(carried, movie);
+}
+
+/// A compressed `CFX` movie is injected exactly as an uncompressed one is.
+///
+/// Retail ships 61 `CFX` and 3 `GFX`, so the loader takes either and there is nothing to normalise
+/// to. The temptation is to zlib everything "because that is what retail does"; doing so would
+/// replace bytes the author verified with bytes nobody has run.
+#[test]
+fn a_compressed_movie_is_not_re_encoded() {
+    let dir = scratch("add_movie_cfx");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // Deflate the body of the same movie into the `CFX` container form: magic, version, declared
+    // length, then the zlib stream.
+    let plain = tiny_gfx_movie();
+    let deflated = {
+        use std::io::Write;
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(&plain[8..]).unwrap();
+        e.finish().unwrap()
+    };
+    let mut cfx = b"CFX\x08".to_vec();
+    cfx.extend_from_slice(&(plain.len() as u32).to_le_bytes());
+    cfx.extend_from_slice(&deflated);
+    std::fs::write(dir.join("src/ui.gfx"), &cfx).unwrap();
+
+    let s = shipment(
+        &dir,
+        "  - kind: add_movie\n    name: qm_cfx_hud\n    movie: src/ui.gfx\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("a CFX movie must build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let (_, carried) = read_back_movie(&on_disk);
+    assert_eq!(
+        carried, cfx,
+        "a CFX movie must ship as the CFX it arrived as"
+    );
+    assert!(
+        mercs2_formats::gfx::GfxMovie::parse(&carried)
+            .expect("still a movie")
+            .compressed
+    );
+}
+
+/// A payload that is not a movie is refused with a message naming what a `.gfx` looks like.
+///
+/// The alternative is the quiet one: the container would still checksum, the ASET row would still
+/// resolve, and the only sign would be a `GFxLoader read failed` line in-game that names no asset.
+#[test]
+fn a_payload_that_is_not_a_movie_is_refused() {
+    let dir = scratch("add_movie_notamovie");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/ui.gfx"),
+        b"\x89PNG\r\n\x1a\n this is a texture",
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_movie\n    name: qm_bad\n    movie: src/ui.gfx\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let text = e.to_string();
+            assert!(text.contains("Scaleform"), "{text}");
+            assert!(text.contains("GFX"), "{text}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// Two movies under one name in one Shipment is a self-conflict, not a load-order question: the
+/// chunk registry is first-writer-wins, so the second one simply is not there.
+#[test]
+fn two_movies_under_one_name_are_a_self_conflict() {
+    let dir = scratch("add_movie_dup");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.gfx"), tiny_gfx_movie()).unwrap();
+    std::fs::write(dir.join("src/b.gfx"), tiny_gfx_movie()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_movie\n    name: qm_dup\n    movie: src/a.gfx\n\
+         \x20 - kind: add_movie\n    name: qm_dup\n    movie: src/b.gfx\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => {
+            assert!(d.iter().any(|x| x.rule.code == "M0120"), "{d:?}");
+        }
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}
