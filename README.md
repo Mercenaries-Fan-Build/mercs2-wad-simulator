@@ -4,6 +4,25 @@ A Rust workspace for Mercenaries 2 WAD analysis, asset extraction, and Xbox-to-P
 
 ## Binaries
 
+### `qm` — the Quartermaster
+Lints and builds **Shipments**: the mod package format (a `manifest.yaml` plus a `src/` directory).
+This is the tool a *mod author* uses; everything else here is for analysing and converting game data.
+
+```bash
+qm lint  ./my-shipment                  # check it — no game install needed
+qm build ./my-shipment --out build      # produce the overlay WAD
+qm link  ./mod-a ./mod-b --out deploy   # compose several mods' Lua into one WAD
+qm rules                                # every check, and the ones not implemented yet
+```
+
+`qm lint` is hermetic — manifest text plus the Shipment directory, no game and no network — which is
+what lets it run in a public CI job. `qm build` and `qm link` need the retail WADs.
+
+Gated on the **exit code**: `0` clean, `1` findings at error or above, `2` could not run at all.
+
+Start from the [Shipment template](https://github.com/Mercenaries-Fan-Build/mercs2-shipment-template),
+which has a runnable example for every contribution kind.
+
 ### `wad_simulator`
 Engine-accurate consumption simulator for WAD archives. Validates WAD structure, detects out-of-bounds ASET entries, and runs every asset through a consumption pipeline (meshes, textures, sounds, scripts, etc.). Useful for validating WAD conversions and catching data corruption before runtime.
 
@@ -43,6 +62,7 @@ cargo build --release
 ```
 
 Binaries land at `target/release/`:
+- `qm` / `qm.exe`
 - `wad_simulator` / `wad_simulator.exe`
 - `ucfx_byteswap` / `ucfx_byteswap.exe`
 - `loadprobe` / `loadprobe.exe`
