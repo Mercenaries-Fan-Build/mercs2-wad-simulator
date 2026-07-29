@@ -229,6 +229,13 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Read, Claim::asset(d), Intent::Replace);
                 }
             }
+            // A movie mints a new hash and borrows nothing — one write claim, no read claim. The
+            // `Additive` intent is what makes two Shipments choosing the same movie name a hard
+            // conflict rather than a load-order question: the chunk registry is first-writer-wins,
+            // so the loser does not lose visibly, it simply is not there.
+            Contribution::AddMovie { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
             Contribution::AddModel { name, donor, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
                 if let Some(d) = donor {

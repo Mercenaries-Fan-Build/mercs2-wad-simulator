@@ -26,6 +26,10 @@
 //! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
 //! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
 //!
+//! `add_movie` is the only kind that needs NO game stack: a Scaleform movie is self-contained, so
+//! unlike a texture (whose dimensions come from the target) or a model (whose rig comes from a
+//! donor) there is nothing to read out of retail. It therefore lowers in template CI as well.
+//!
 //! `native_hook` is the kind that produces no WAD content at all — an `.asi` file placed in the
 //! loader's search path, plus the [`Placement`] record that makes the drop reversible.
 //!
@@ -49,7 +53,7 @@ use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FF
 use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
-use mercs2_formats::types::{TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_TEXTURE};
+use mercs2_formats::types::{TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_TEXTURE};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -626,6 +630,87 @@ fn lower(
                  {} verts, {} tris | wardrobe row {wearer}/{slug}",
                 stats.vertex_count, stats.triangle_count
             ));
+            Ok(Lowering::Block(block))
+        }
+
+        // A Scaleform GFx movie, added as a new `cfx_pack` asset.
+        //
+        // The one lowering here that needs NO game stack: `replace_texture` reads the target's
+        // dimensions and `add_model` borrows a donor's rig, but a movie is self-contained — the
+        // container holds the whole asset and nothing is conformed to anything. So this builds in
+        // template CI, where the retail WADs will never exist.
+        //
+        // The movie is validated and then copied VERBATIM. `GfxMovie::parse` is the check that the
+        // bytes are a movie at all; it is deliberately not followed by a re-encode, because retail
+        // ships both compressed `CFX` (61 assets) and uncompressed `GFX` (3), so there is no
+        // encoding to normalise TO, and swapping an author's verified bytes for ones nobody has run
+        // is exactly the kind of helpfulness that produces a WAD that looks fine and does nothing.
+        Contribution::AddMovie { name, movie } => {
+            let path = root.join(movie);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+
+            // Parse before wrapping. A container whose `data` leaf is not a movie still checksums,
+            // still walks, and still resolves — the loader is the first thing that finds out, and it
+            // reports `GFxLoader read failed` with no reference to which asset.
+            let parsed =
+                mercs2_formats::gfx::GfxMovie::parse(&bytes).map_err(|m| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} is not a Scaleform movie this build can read: {m}. Expected a `.gfx` \
+                         beginning with `GFX` or `CFX` (or the SWF spellings `FWS`/`CWS`) — retail \
+                         ships 61 `CFX` and 3 `GFX`, so either is fine, but a project file, an \
+                         already-wrapped container or a truncated export is not.",
+                        path.display()
+                    ),
+                })?;
+
+            let hash = crate::manifest::asset_hash(name);
+            let block_bytes = mercs2_formats::gfx::build_cfx_pack_block(hash, &bytes);
+
+            // The tag census is logged rather than merely counted: an emitter that silently dropped
+            // the movie's content still produces a valid header, and "0 tags" in the log is the only
+            // place that would show.
+            let features = parsed.features();
+            let [w, h] = parsed.stage_px();
+            log.push(format!(
+                "contributions[{index}] add_movie {name} 0x{hash:08X} ← {} \
+                 {} v{} {}x{} px, {} tag(s): {} shape(s), {} sprite(s), {} button(s), \
+                 {} edit-text, {} DoAction, {} import(s), {} GFx-ext → {} bytes",
+                path.display(),
+                String::from_utf8_lossy(&parsed.magic),
+                parsed.version,
+                w,
+                h,
+                parsed.tags.len(),
+                features.shapes,
+                features.sprites,
+                features.buttons,
+                features.edit_texts,
+                features.do_action,
+                features.imports,
+                features.gfx_ext_tags,
+                block_bytes.len()
+            ));
+
+            // ADDITIVE and PRIMARY. A movie has no LOD chain at all, so both rung halves stay at
+            // their sentinels — `0x0000` in the low 16 is the dangling-rung HANG, not "no rung".
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_CFX_PACK);
+            let block = PatchBlock::from_decompressed(
+                &block_bytes,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
             Ok(Lowering::Block(block))
         }
 

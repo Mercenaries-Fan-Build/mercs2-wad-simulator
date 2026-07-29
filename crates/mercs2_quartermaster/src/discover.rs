@@ -295,6 +295,7 @@ impl Contribution {
                 }
             }
             Contribution::AddModel { model, .. } => out.push(("model", model.as_path())),
+            Contribution::AddMovie { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),

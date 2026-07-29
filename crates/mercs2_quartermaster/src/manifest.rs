@@ -205,6 +205,30 @@ pub enum Contribution {
         #[serde(default)]
         retarget: Option<Retarget>,
     },
+    /// Data, new-hash additive. A Scaleform GFx movie (`cfx_pack`, type_id 23) added as a WAD asset,
+    /// so Lua can point `SetSwfFile` at it.
+    ///
+    /// Shaped on [`Contribution::AddModel`] — `name` plus the artifact — rather than on the
+    /// community `gfx_tool` manifest that first described this workflow. Three fields that manifest
+    /// carries are deliberately absent, because each of them is a decision the author should not be
+    /// making:
+    ///
+    /// * no `type`, because the kind IS the type. A movie is always `cfx_pack`; a `type:` field
+    ///   would be a way to spell the wrong one, and the ASET row's type id decides which loader the
+    ///   engine dispatches.
+    /// * no `target_patch`, because the Quartermaster always emits its own overlay block. There is
+    ///   no "auto" to resolve and no shipped block for an author to name.
+    /// * no `donor`. `add_model` needs one because it borrows a rig and materials; a movie is
+    ///   self-contained, so there is nothing to borrow and nothing to pick wrong.
+    AddMovie {
+        /// ASSET identity → `pandemic_hash_m2`. This is what a Lua caller passes to `SetSwfFile` /
+        /// `GetShellGfxFilename`, so it is a name and not a filename — retail's are bare
+        /// (`topbar`, `pause_menu`, `minimap`), with no extension and no path.
+        name: String,
+        /// The `.gfx` movie, `src/`-relative. Copied into the WAD **verbatim**: compressed `CFX` and
+        /// uncompressed `GFX` both ship in retail, so neither is converted to the other.
+        movie: PathBuf,
+    },
     /// Data, same-hash, FULLY RESIDENT. Non-destructive means the base WAD is never modified — not
     /// that the asset's appearance is preserved.
     ReplaceTexture { target: String, image: PathBuf },
@@ -243,6 +267,7 @@ impl Contribution {
         match self {
             Contribution::AddOutfit { .. } => "add_outfit",
             Contribution::AddModel { .. } => "add_model",
+            Contribution::AddMovie { .. } => "add_movie",
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
