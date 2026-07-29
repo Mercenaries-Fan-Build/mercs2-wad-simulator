@@ -182,6 +182,116 @@ fn a_hook_with_nothing_to_install_is_an_error() {
 }
 
 // ---------------------------------------------------------------------------
+// M0162 / M0163 — placed companion files
+// ---------------------------------------------------------------------------
+
+fn placed(file: &str, dest: &str) -> Manifest {
+    shipment_with(&format!(
+        "  - kind: place_file
+    file: src/{file}
+    dest: {dest}
+"
+    ))
+}
+
+/// The exe and the WADs, reached through the one destination that could touch them. The lowering
+/// refuses these too; the rule exists so template CI — which runs `qm lint` and never has a game —
+/// says so on the push instead of leaving it to somebody's machine.
+#[test]
+fn a_placed_file_that_would_clobber_the_game_is_an_error() {
+    for name in ["Mercenaries2.exe", "vz.wad", "pmc_bb.dll", "pmc_bb.asi"] {
+        let diags = lint::lint(&placed(name, "game_root"), None, None);
+        assert!(codes(&diags).contains(&"M0162"), "{name}: {diags:?}");
+        assert!(lint::blocks_build(&diags), "{name} must block");
+    }
+}
+
+/// A plugin is not a companion: allowing one here would route around `native_hook`'s PE checks, its
+/// reserved-name refusal and its hooked-address claims.
+#[test]
+fn a_placed_asi_is_an_error_that_names_the_kind_to_use() {
+    let diags = lint::lint(&placed("evil.asi", "scripts"), None, None);
+    let hit = diags
+        .iter()
+        .find(|d| d.rule.code == "M0162")
+        .expect("M0162 must fire");
+    assert!(hit.message.contains("native_hook"), "{hit}");
+}
+
+/// The companions real mods actually ship. A rule that fired on these would be a rule everyone
+/// turns off.
+#[test]
+fn an_ordinary_companion_is_quiet() {
+    for (file, dest) in [
+        ("quiet_freeplay_vo.ini", "scripts"),
+        ("lua_console.py", "scripts"),
+        ("00_core.lua", "on_boot"),
+        ("keys.lua", "on_key"),
+        ("readme.txt", "game_root"),
+    ] {
+        let diags = lint::lint(&placed(file, dest), None, None);
+        assert!(diags.is_empty(), "{file} -> {dest}: {diags:?}");
+    }
+}
+
+/// M0163. These plugins resolve config with `m2_module_path(g_hModule, "x.ini", …)` — that is
+/// `GetModuleFileNameA` truncated at the last separator, so the file is looked up beside the loaded
+/// module and nowhere else. A companion sent anywhere else is never opened, and the plugin falls
+/// back to its defaults with the file sitting there looking installed.
+#[test]
+fn a_companion_away_from_its_plugin_is_a_warning() {
+    for dest in ["game_root", "plugins", "update", "on_boot"] {
+        let m = shipment_with(&format!(
+            "  - kind: native_hook
+    target: retail
+    plugin: src/quiet_freeplay_vo.asi
+    touches: [\"0x004CF340\"]
+  - kind: place_file
+    file: src/quiet_freeplay_vo.ini
+    dest: {dest}
+"
+        ));
+        let diags = lint::lint(&m, None, None);
+        assert!(codes(&diags).contains(&"M0163"), "{dest}: {diags:?}");
+        // A heuristic that blocked the build over a filename coincidence would be worse than the
+        // trap it catches.
+        assert!(!lint::blocks_build(&diags), "{dest} must not block");
+    }
+}
+
+/// Quiet when the companion is beside its plugin — and quiet when the name is nobody's companion,
+/// because the rule is a claim about a specific plugin's config lookup, not about `.ini` files.
+#[test]
+fn a_companion_beside_its_plugin_or_belonging_to_no_plugin_is_quiet() {
+    let beside = shipment_with(
+        "  - kind: native_hook
+    target: retail
+    plugin: src/quiet_freeplay_vo.asi
+    touches: [\"0x004CF340\"]
+  - kind: place_file
+    file: src/quiet_freeplay_vo.ini
+    dest: scripts
+",
+    );
+    assert!(lint::lint(&beside, None, None).is_empty());
+
+    let unrelated = shipment_with(
+        "  - kind: native_hook
+    target: retail
+    plugin: src/quiet_freeplay_vo.asi
+    touches: [\"0x004CF340\"]
+  - kind: place_file
+    file: src/something_else.ini
+    dest: game_root
+",
+    );
+    assert!(
+        !codes(&lint::lint(&unrelated, None, None)).contains(&"M0163"),
+        "a file that is nobody's companion is not this rule's business"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // M0170 / M0171 — pinned external requirements
 // ---------------------------------------------------------------------------
 
