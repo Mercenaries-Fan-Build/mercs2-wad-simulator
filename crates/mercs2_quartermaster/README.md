@@ -93,6 +93,15 @@ Every kind lowers end-to-end against retail WADs except `edit_state_machine`, wh
 produces a WAD that looks fine and does nothing. (`raw` and `native_hook` used to be in that
 sentence too; both lower now.)
 
+The Code layer is two kinds, and the split is about who chooses the destination. `native_hook`
+places one `.asi` and chooses the directory itself; `place_file` places the companions that `.asi`
+reads — the `.ini` beside it, a Lua framework's `.lua` files — and lets the author pick a
+destination **name** from a closed set (`game_root`, `scripts`, `plugins`, `update`, `on_boot`,
+`on_load`, `on_key`). Neither takes a path, so `Mercenaries2.exe` and `data/vz.wad` stay unreachable
+by construction rather than by a rule that could be suppressed: a path-shaped `dest:` does not
+parse, and the filename comes from the source file, with `.wad`, `.exe`, `.dll` and the loader's own
+reserved name refused outright. Both need no game stack, so both lower in template CI.
+
 `add_movie` is the odd one out in a useful way: it is the only Data kind that needs no game stack.
 A Scaleform GFx movie is self-contained — no donor to borrow a rig from, no target whose dimensions
 it must match — so it builds where the retail WADs do not exist, which is where template CI runs.
