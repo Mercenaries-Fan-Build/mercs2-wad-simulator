@@ -1,10 +1,15 @@
 //! The Lua linker — the thing that lets two script mods coexist.
 //!
-//! Script entries load from the **block**, not per-hash, so editing one script means re-emitting all
-//! 114. Under one-overlay-per-Shipment plus last-mounted-wins, two Shipments that each ship a
-//! finished `scripts_vz` do not merge and do not error: the later one wins and the earlier one's Lua
-//! vanishes — model, wardrobe row and all — with nothing reported. That single failure is why
-//! `patch_lua` declares a *mutation* instead of shipping a block, and why this module exists.
+//! Script entries load from the **block**, not per-hash, so editing one script means re-emitting
+//! every script in that block. Under one-overlay-per-Shipment plus last-mounted-wins, two Shipments
+//! that each ship a finished `scripts_vz` do not merge and do not error: the later one wins and the
+//! earlier one's Lua vanishes — model, wardrobe row and all — with nothing reported. That single
+//! failure is why `patch_lua` declares a *mutation* instead of shipping a block, and why this module
+//! exists.
+//!
+//! Targets resolve across every block in [`SCRIPT_BLOCKS`] — `scripts_vz` and `resident` — because
+//! the framework modules most worth patching (`mrxplayer`, `mrxguipda`, the `MrxTask*` family) are
+//! resident, not `vz`.
 //!
 //! So linking happens across the **installed set**, not per build:
 //!
@@ -38,6 +43,25 @@
 use mercs2_formats::scripts_block::ScriptsBlock;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// Every block a `patch_lua` target may live in, as `(PTHS needle, PTHS path)`.
+///
+/// Game scripts are split across blocks: `scripts_vz` holds the 114 content scripts (contracts,
+/// jobs, tutorials) and `resident` holds the ~240 framework modules (`Mrx*`, world-entity scripts)
+/// that are always loaded. A fix targeting `mrxplayer` is unreachable without the second.
+///
+/// Searched in order, so a name present in both resolves to `scripts_vz`. No shipped script name
+/// appears in both, and the type-aware lookup makes a cross-type collision impossible; the order is
+/// fixed so the outcome stays deterministic if that ever stops being true.
+///
+/// ⚠ **The resident needle is ANCHORED on purpose.** `block_by_path` matches a substring, and
+/// unanchored `resident_P000_Q3` also matches `sound_resident_P000_Q3.block` — a completely
+/// different block. `shell` is absent deliberately: it lives in `shell.wad`, which never shares a
+/// mount slot with `vz.wad`, so it needs its own overlay rather than a row here.
+pub const SCRIPT_BLOCKS: &[(&str, &str)] = &[
+    ("scripts_vz", r"blocks\VZ\scripts_vz_P000_Q3.block"),
+    (r"\resident_P000_Q3.block", r"blocks\VZ\resident_P000_Q3.block"),
+];
 
 /// One Shipment's declared edit to one script.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +139,21 @@ pub struct LinkedScript {
     pub base_source_bytes: usize,
     pub linked_source_bytes: usize,
     pub bytecode_bytes: usize,
+    /// Index into the `blocks` slice handed to [`link_into_blocks`] — which block this script was
+    /// spliced into, so the caller emits only the blocks that actually changed.
+    pub block: usize,
+}
+
+/// One candidate scripts block, with the PTHS path the overlay must carry for it.
+///
+/// Game scripts live in more than one block and a `patch_lua` target may be in any of them, so the
+/// linker takes the set and resolves each target against it rather than being told which block to
+/// use.
+pub struct TargetBlock<'a> {
+    /// The block's own PTHS path, e.g. `blocks\VZ\scripts_vz_P000_Q3.block`. Carried through to the
+    /// emitted `PatchBlock` so the overlay shadows the right base block.
+    pub path: String,
+    pub block: &'a mut ScriptsBlock,
 }
 
 /// Find a script's decompiled source under the corpus.
@@ -247,8 +286,31 @@ pub fn derived_epilogue(target: &str) -> Option<String> {
 ///
 /// `block` is the base game's `scripts_vz`, already parsed. Mutations targeting the same script are
 /// merged; mutations targeting different scripts are independent.
+///
+/// The single-block convenience case of [`link_into_blocks`].
 pub fn link_into(
     block: &mut ScriptsBlock,
+    corpus_root: &Path,
+    mutations: &[ScriptMutation],
+) -> Result<Vec<LinkedScript>, LinkError> {
+    let mut blocks = [TargetBlock {
+        path: String::new(),
+        block,
+    }];
+    link_into_blocks(&mut blocks, corpus_root, mutations)
+}
+
+/// Link every mutation into whichever of `blocks` actually carries its target script.
+///
+/// Mutations targeting the same script are merged; mutations targeting different scripts are
+/// independent, **including when they land in different blocks**. Blocks are searched in the order
+/// given and the first script-typed match wins.
+///
+/// Only blocks that were spliced come back in the results (via [`LinkedScript::block`]) — a block
+/// nothing targeted must not be re-emitted, or the overlay would shadow a base block with a
+/// byte-identical copy for no reason.
+pub fn link_into_blocks(
+    blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
     mutations: &[ScriptMutation],
 ) -> Result<Vec<LinkedScript>, LinkError> {
@@ -261,12 +323,17 @@ pub fn link_into(
 
     let mut linked = Vec::new();
     for (target, group) in by_target {
-        let idx = block
-            .find_by_name(target)
+        // Type-aware lookup: the resident block carries ~240 Lua chunks among ~7,000 entries of
+        // other types, so a name-hash-only match could resolve to a texture.
+        let (bi, idx) = blocks
+            .iter()
+            .enumerate()
+            .find_map(|(bi, tb)| tb.block.find_script_by_name(target).map(|idx| (bi, idx)))
             .ok_or_else(|| LinkError::UnknownScript {
                 target: target.to_string(),
                 shipment: group[0].shipment.clone(),
             })?;
+        let block = &mut *blocks[bi].block;
         let source_path =
             base_source_path(corpus_root, target).map_err(|tried| LinkError::NoBaseSource {
                 target: target.to_string(),
@@ -301,14 +368,18 @@ pub fn link_into(
             base_source_bytes: base.len(),
             linked_source_bytes: source.len(),
             bytecode_bytes: bytecode.len(),
+            block: bi,
         });
     }
 
-    // The block must still verify after every splice. `replace_lua` recomputes each container's
-    // CSUM, so a failure here means the block itself was left inconsistent.
-    block
-        .verify_csums()
-        .map_err(|e| LinkError::Block(format!("CSUMs after linking: {e}")))?;
+    // Every block we touched must still verify. `replace_lua` recomputes each container's CSUM, so
+    // a failure here means the block itself was left inconsistent.
+    for bi in linked.iter().map(|l| l.block).collect::<std::collections::BTreeSet<_>>() {
+        blocks[bi]
+            .block
+            .verify_csums()
+            .map_err(|e| LinkError::Block(format!("CSUMs after linking {}: {e}", blocks[bi].path)))?;
+    }
     Ok(linked)
 }
 
