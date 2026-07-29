@@ -61,6 +61,104 @@ use mercs2_formats::types::{TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYP
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// One scripts block read out of the game stack, with the ASET rows it publishes.
+struct LoadedScriptBlock {
+    /// The block's own PTHS path, carried through to the emitted `PatchBlock`.
+    path: String,
+    block: ScriptsBlock,
+    /// `asset_hash -> (packed_block_ref, secondary_ref, type_id)`, as the base WAD had them.
+    rows: std::collections::HashMap<u32, (u32, u32, u32)>,
+}
+
+/// Load every scripts block a `patch_lua` target could live in.
+///
+/// A block missing from the stack is **skipped, not fatal**. A synthetic or overlay-only stack may
+/// carry `scripts_vz` and nothing else, and if a mutation actually needed the absent block the
+/// linker already reports `UnknownScript` naming the target — which tells the author what to fix,
+/// where "no resident block in the game stack" would not.
+fn load_script_blocks(
+    game: &mut GameStack,
+    kind: &'static str,
+) -> Result<Vec<LoadedScriptBlock>, BuildError> {
+    let mut out = Vec::new();
+    for (needle, path) in link::SCRIPT_BLOCKS {
+        let Some((raw, rows)) = game.block_and_rows_by_path(needle) else {
+            continue;
+        };
+        let block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
+            index: 0,
+            kind,
+            message: format!("parsing {path}: {m}"),
+        })?;
+        out.push(LoadedScriptBlock {
+            path: (*path).to_string(),
+            block,
+            rows,
+        });
+    }
+    if out.is_empty() {
+        return Err(BuildError::Lower {
+            index: 0,
+            kind,
+            message: "no scripts block in the configured game stack".into(),
+        });
+    }
+    Ok(out)
+}
+
+/// Emit a `PatchBlock` for each scripts block the link actually spliced.
+///
+/// **Only the touched blocks.** Re-emitting an untouched block would shadow the base with a
+/// byte-identical copy — harmless in isolation, but it puts the whole ~7,000-entry resident block
+/// into every overlay that patches one `vz` script, and makes the overlay's contents stop meaning
+/// "what this Shipment changed".
+///
+/// ★ **A row for EVERY entry the block carries, taken from the base WAD.** Not just the scripts:
+/// an asset present in a block with no ASET row naming it in the same WAD is the **M0004 HANG** —
+/// nothing can resolve it by hash, and the world load stops completing with no error. Retail never
+/// ships that shape; all 30,006 asset hashes in `vz.wad`'s blocks have a row.
+///
+/// The rows are **copied from the block's own rows in the base WAD** rather than synthesised,
+/// because `type_id` selects which loader is dispatched and the type-hash→id tables are known wrong
+/// for 12 of 36 ids. For `scripts_vz` this is a no-op restatement (114 script rows); for the
+/// resident block it preserves ~6,800 rows this code has no business inventing — get one wrong and
+/// the validator reports the container as unreadable by the loader it was handed to.
+///
+/// A hash with no row in the base falls back to a sentinel script row. That should not happen for a
+/// block read out of the stack — retail gives every carried asset a row — and a row that exists
+/// beats the M0004 hang of no row at all.
+fn script_patch_blocks(
+    loaded: &[LoadedScriptBlock],
+    linked: &[link::LinkedScript],
+    kind: &'static str,
+) -> Result<Vec<PatchBlock>, BuildError> {
+    let touched: std::collections::BTreeSet<usize> = linked.iter().map(|l| l.block).collect();
+    let mut out = Vec::new();
+    for bi in touched {
+        let lb = &loaded[bi];
+        let aset: Vec<AsetEntry> = lb
+            .block
+            .entries
+            .iter()
+            .map(|e| match lb.rows.get(&e.name_hash) {
+                Some(&(packed, secondary, type_id)) => {
+                    AsetEntry::new(e.name_hash, secondary, packed, type_id)
+                }
+                None => AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_SCRIPT),
+            })
+            .collect();
+        out.push(
+            PatchBlock::from_decompressed(&lb.block.serialize(), lb.path.clone(), aset, None)
+                .map_err(|m| BuildError::Lower {
+                    index: 0,
+                    kind,
+                    message: m,
+                })?,
+        );
+    }
+    Ok(out)
+}
+
 /// Where a built artifact has to end up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
@@ -1449,56 +1547,35 @@ pub fn build(
                         .into(),
             });
         };
-        let raw = game
-            .block_by_path("scripts_vz")
-            .ok_or_else(|| BuildError::Lower {
-                index: 0,
-                kind: "patch_lua",
-                message: "no scripts_vz block in the configured game stack".into(),
+        let mut loaded = load_script_blocks(game, "patch_lua")?;
+        let mut targets: Vec<link::TargetBlock<'_>> = loaded
+            .iter_mut()
+            .map(|lb| link::TargetBlock {
+                path: lb.path.clone(),
+                block: &mut lb.block,
+            })
+            .collect();
+        let linked =
+            link::link_into_blocks(&mut targets, corpus, &mutations).map_err(|e| {
+                BuildError::Lower {
+                    index: 0,
+                    kind: "patch_lua",
+                    message: e.to_string(),
+                }
             })?;
-        let mut script_block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
-            index: 0,
-            kind: "patch_lua",
-            message: format!("parsing scripts_vz: {m}"),
-        })?;
-        let linked = link::link_into(&mut script_block, corpus, &mutations).map_err(|e| {
-            BuildError::Lower {
-                index: 0,
-                kind: "patch_lua",
-                message: e.to_string(),
-            }
-        })?;
+        drop(targets);
         for l in &linked {
             log.push(format!(
-                "linked {}: {} → {} B source, {} B bytecode, from {:?}",
+                "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
                 l.target,
+                loaded[l.block].path,
                 l.base_source_bytes,
                 l.linked_source_bytes,
                 l.bytecode_bytes,
                 l.contributors
             ));
         }
-
-        let decompressed = script_block.serialize();
-        // Every entry keeps its own ASET row so the block resolves exactly as the base one did.
-        let aset: Vec<AsetEntry> = script_block
-            .entries
-            .iter()
-            .map(|e| AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_SCRIPT))
-            .collect();
-        blocks.push(
-            PatchBlock::from_decompressed(
-                &decompressed,
-                "blocks\\VZ\\scripts_vz_P000_Q3.block".into(),
-                aset,
-                None,
-            )
-            .map_err(|m| BuildError::Lower {
-                index: 0,
-                kind: "patch_lua",
-                message: m,
-            })?,
-        );
+        blocks.extend(script_patch_blocks(&loaded, &linked, "patch_lua")?);
     }
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
@@ -1687,48 +1764,34 @@ pub fn link_installed(
         shipments.len()
     ));
 
-    let raw = game
-        .block_by_path("scripts_vz")
-        .ok_or_else(|| BuildError::Lower {
-            index: 0,
-            kind: "link",
-            message: "no scripts_vz block in the configured game stack".into(),
-        })?;
-    let mut block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
-        index: 0,
-        kind: "link",
-        message: format!("parsing scripts_vz: {m}"),
-    })?;
-    let linked =
-        link::link_into(&mut block, corpus_root, &mutations).map_err(|e| BuildError::Lower {
+    let mut loaded = load_script_blocks(game, "link")?;
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|lb| link::TargetBlock {
+            path: lb.path.clone(),
+            block: &mut lb.block,
+        })
+        .collect();
+    let linked = link::link_into_blocks(&mut targets, corpus_root, &mutations).map_err(|e| {
+        BuildError::Lower {
             index: 0,
             kind: "link",
             message: e.to_string(),
-        })?;
+        }
+    })?;
+    drop(targets);
     for l in &linked {
         log.push(format!(
-            "linked {}: {} → {} B source, {} B bytecode, from {:?}",
-            l.target, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes, l.contributors
+            "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
+            l.target,
+            loaded[l.block].path,
+            l.base_source_bytes,
+            l.linked_source_bytes,
+            l.bytecode_bytes,
+            l.contributors
         ));
     }
-
-    let decompressed = block.serialize();
-    let aset: Vec<AsetEntry> = block
-        .entries
-        .iter()
-        .map(|e| AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_SCRIPT))
-        .collect();
-    let patch = PatchBlock::from_decompressed(
-        &decompressed,
-        "blocks\\VZ\\scripts_vz_P000_Q3.block".into(),
-        aset,
-        None,
-    )
-    .map_err(|m| BuildError::Lower {
-        index: 0,
-        kind: "link",
-        message: m,
-    })?;
+    let patches = script_patch_blocks(&loaded, &linked, "link")?;
 
     let csum =
         mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
@@ -1737,7 +1800,7 @@ pub fn link_installed(
             message: m,
         })?;
     let wad_bytes =
-        build_patch_wad_multi(&[patch], csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+        build_patch_wad_multi(&patches, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
             BuildError::Lower {
                 index: 0,
                 kind: "link",
