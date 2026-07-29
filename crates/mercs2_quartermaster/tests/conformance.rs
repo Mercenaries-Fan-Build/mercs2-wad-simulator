@@ -67,6 +67,10 @@ contributions:
     plugin: src/native/mybridge.asi
     touches: ["0x004CF340"]
 
+  - kind: place_file
+    file: src/native/mybridge.ini
+    dest: scripts
+
   - kind: raw
     description: hand-tuned destruction states for the destroyer
     payload: src/destroyer_states.block
@@ -137,6 +141,11 @@ const JSON: &str = r#"
       "target": "retail",
       "plugin": "src/native/mybridge.asi",
       "touches": ["0x004CF340"]
+    },
+    {
+      "kind": "place_file",
+      "file": "src/native/mybridge.ini",
+      "dest": "scripts"
     },
     {
       "kind": "raw",
@@ -213,6 +222,11 @@ plugin = "src/native/mybridge.asi"
 touches = ["0x004CF340"]
 
 [[contributions]]
+kind = "place_file"
+file = "src/native/mybridge.ini"
+dest = "scripts"
+
+[[contributions]]
 kind = "raw"
 description = "hand-tuned destruction states for the destroyer"
 payload = "src/destroyer_states.block"
@@ -244,9 +258,103 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_movie",
             "patch_lua",
             "native_hook",
+            "place_file",
             "raw"
         ]
     );
+}
+
+/// `dest:` is the first field in the format whose value set is CLOSED, so it is the first place the
+/// three serializations could disagree about how an author spells one. All three must map the same
+/// snake_case name onto the same destination — a format that read `on_boot` as anything else would
+/// place a file in a different directory depending on which extension the manifest happened to use.
+#[test]
+fn every_destination_spells_the_same_in_all_three_formats() {
+    for (yaml_name, expected) in [
+        ("game_root", PlaceIn::GameRoot),
+        ("scripts", PlaceIn::Scripts),
+        ("plugins", PlaceIn::Plugins),
+        ("update", PlaceIn::Update),
+        ("on_boot", PlaceIn::OnBoot),
+        ("on_load", PlaceIn::OnLoad),
+        ("on_key", PlaceIn::OnKey),
+    ] {
+        let head = "\"format\":1,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
+        let cases = [
+            (
+                format!(
+                    "format: 1\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
+                     contributions:\n  - kind: place_file\n    file: src/x.ini\n    dest: {yaml_name}\n"
+                ),
+                Format::Yaml,
+            ),
+            (
+                format!(
+                    "{{{head},\"contributions\":[{{\"kind\":\"place_file\",\
+                     \"file\":\"src/x.ini\",\"dest\":\"{yaml_name}\"}}]}}"
+                ),
+                Format::Json,
+            ),
+            (
+                format!(
+                    "format = 1\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                     [[contributions]]\nkind = \"place_file\"\nfile = \"src/x.ini\"\n\
+                     dest = \"{yaml_name}\"\n"
+                ),
+                Format::Toml,
+            ),
+        ];
+        for (text, fmt) in cases {
+            let m = from_str(&text, fmt).unwrap_or_else(|e| panic!("{fmt:?} {yaml_name}: {e}"));
+            match &m.contributions[0] {
+                Contribution::PlaceFile { dest, .. } => {
+                    assert_eq!(*dest, expected, "{fmt:?} {yaml_name}")
+                }
+                other => panic!("{fmt:?}: expected place_file, got {other:?}"),
+            }
+        }
+    }
+}
+
+/// A destination is a NAME out of a closed set, so anything path-shaped is not rejected — it does
+/// not parse. Checked in all three formats, because "unreachable by construction" is a property of
+/// the SCHEMA and would be worth nothing if one serializer were laxer than the others.
+#[test]
+fn a_path_shaped_destination_parses_in_no_format() {
+    for attempt in ["..", "../..", "/etc", "C:\\\\Windows", "data", "scripts/.."] {
+        let head =
+            "\"format\":1,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
+        let cases = [
+            (
+                format!(
+                    "format: 1\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
+                     contributions:\n  - kind: place_file\n    file: src/x.ini\n    dest: '{attempt}'\n"
+                ),
+                Format::Yaml,
+            ),
+            (
+                format!(
+                    "{{{head},\"contributions\":[{{\"kind\":\"place_file\",\
+                     \"file\":\"src/x.ini\",\"dest\":\"{attempt}\"}}]}}"
+                ),
+                Format::Json,
+            ),
+            (
+                format!(
+                    "format = 1\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                     [[contributions]]\nkind = \"place_file\"\nfile = \"src/x.ini\"\n\
+                     dest = \"{attempt}\"\n"
+                ),
+                Format::Toml,
+            ),
+        ];
+        for (text, fmt) in cases {
+            assert!(
+                from_str(&text, fmt).is_err(),
+                "{fmt:?}: dest {attempt:?} must not parse"
+            );
+        }
+    }
 }
 
 /// The `requires` dual form (bare name | pinned external artifact) is an UNTAGGED enum — the other
