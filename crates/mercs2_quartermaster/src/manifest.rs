@@ -153,6 +153,84 @@ pub enum Layer {
     Runtime,
 }
 
+/// Where a `place_file` contribution puts its file — a **closed set of named destinations**, never
+/// a path.
+///
+/// This enum IS the design of [`Contribution::PlaceFile`]. `native_hook` has no destination field
+/// at all, which is what makes `Mercenaries2.exe` and `data\vz.wad` unreachable by CONSTRUCTION
+/// rather than by a lint somebody could suppress. A kind that places companion files had to keep
+/// that property while admitting more than one destination, and the only way to hold both is to let
+/// the author pick a NAME out of a fixed list instead of writing a path.
+///
+/// So there is no spelling of `dest:` that is a path. `..`, `/etc/passwd`, `C:\Windows`,
+/// `\\host\share` and a symlink are not *rejected* — they do not parse, and serde says which
+/// variants exist. The destination half of a placement carries no author bytes whatsoever; only the
+/// filename does, and that comes from the source file (see `build::game_folder_name_refusal`).
+///
+/// **The four ASI roots are measured, not assumed.** `pmc_bb.dll` v3.0.0 carries the format strings
+/// `%s*.asi`, `%sscripts\`, `%splugins\` and `%supdate\`, so the loader globs the game directory
+/// itself plus exactly those three subfolders. A destination outside that set would put a plugin's
+/// companion where nothing looks for it.
+///
+/// ⚠ **The three `scripts/On*` rungs rest on weaker evidence, and are recorded as weaker.** They
+/// come from Plan 03's write-up of Wally's Lua bridge — "script loader (`OnBoot/`/`OnLoad/`
+/// (world-load-triggered)/`OnKey/`)" — which is prose about a repo this workspace does not vendor.
+/// Nobody here has read the directory scan that consumes them, so the exact spelling and the parent
+/// directory are inferred. They sit under `scripts/` because that is where the bridge `.asi` itself
+/// goes, and because every companion path measured in this ecosystem so far resolves against the
+/// loading module's OWN directory rather than the game root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceIn {
+    /// The game directory itself — where `Mercenaries2.exe` lives. The loader globs `%s*.asi` here.
+    GameRoot,
+    /// `scripts\` — where the ecosystem already puts plugins and their companions.
+    Scripts,
+    /// `plugins\`.
+    Plugins,
+    /// `update\`.
+    Update,
+    /// The Lua bridge's boot-time script rung.
+    OnBoot,
+    /// The Lua bridge's world-load script rung.
+    OnLoad,
+    /// The Lua bridge's key-binding script rung.
+    OnKey,
+}
+
+impl PlaceIn {
+    /// The directory this destination names, relative to the game folder, with forward slashes.
+    ///
+    /// Forward slashes on purpose: the loader's own literals are backslashed (`%sscripts\`), but
+    /// this is a filesystem path a deploy tool joins, not an engine path like a backslashed `PTHS`
+    /// entry. The game root is the empty string, so joining is uniform.
+    ///
+    /// Every arm is a literal. Nothing an author writes reaches this string.
+    pub const fn relative_dir(self) -> &'static str {
+        match self {
+            PlaceIn::GameRoot => "",
+            PlaceIn::Scripts => "scripts",
+            PlaceIn::Plugins => "plugins",
+            PlaceIn::Update => "update",
+            PlaceIn::OnBoot => "scripts/OnBoot",
+            PlaceIn::OnLoad => "scripts/OnLoad",
+            PlaceIn::OnKey => "scripts/OnKey",
+        }
+    }
+
+    /// Every destination, so a test can assert a property of the whole set rather than of the
+    /// arms somebody remembered to list.
+    pub const ALL: [PlaceIn; 7] = [
+        PlaceIn::GameRoot,
+        PlaceIn::Scripts,
+        PlaceIn::Plugins,
+        PlaceIn::Update,
+        PlaceIn::OnBoot,
+        PlaceIn::OnLoad,
+        PlaceIn::OnKey,
+    ];
+}
+
 /// Optional cross-rig retarget on an import that is not already hero-rigged. Inline rather than a
 /// standalone kind so v1 avoids inter-contribution reference machinery entirely (Plan 04 Q6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +328,25 @@ pub enum Contribution {
         #[serde(default)]
         touches: Vec<Touch>,
     },
+    /// Code. A companion FILE placed in the game folder beside the plugins that read it.
+    ///
+    /// The gap this closes: an `.asi` whose `.ini` cannot ship is useless. Every real Code-layer
+    /// mod measured here is a plugin PLUS companions — `quiet_freeplay_vo.asi` +
+    /// `quiet_freeplay_vo.ini`, `multiplayer_restore.asi` + `multiplayer_restore.ini` — and a Lua
+    /// framework ships only `.lua` files, with no `.asi` of its own at all. Neither was expressible.
+    ///
+    /// Two fields, and neither is a path into the game:
+    ///
+    /// * `file` is a `src/`-relative source path, checked by exactly the same rules as every other
+    ///   source (absolute, `..` and outward symlinks are all M0111 errors). It supplies the BYTES
+    ///   and the FILENAME; an author cannot rename on the way out, so the reserved-name refusal
+    ///   `native_hook` already carries applies unchanged.
+    /// * `dest` is a [`PlaceIn`] — a name from a closed set, never a path.
+    ///
+    /// An `.asi` is deliberately NOT placeable this way: it goes through
+    /// [`Contribution::NativeHook`], which reads the PE headers the loader will `LoadLibrary` and
+    /// records the hooked addresses. Letting a companion be a plugin would be a way around both.
+    PlaceFile { file: PathBuf, dest: PlaceIn },
     /// The OPEN LOWER BOUND — opaque payload plus a DECLARED blast radius, so the linter and the
     /// conflict system can reason without understanding the bytes.
     Raw {
@@ -272,6 +369,7 @@ impl Contribution {
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::NativeHook { .. } => "native_hook",
+            Contribution::PlaceFile { .. } => "place_file",
             Contribution::Raw { .. } => "raw",
         }
     }

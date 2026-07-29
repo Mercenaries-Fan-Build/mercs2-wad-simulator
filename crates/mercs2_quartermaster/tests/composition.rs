@@ -186,9 +186,9 @@ contributions:
     let (a, b) = (mk("mod-a", "0x1000"), mk("mod-b", "0x2000"));
     let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
     assert!(
-        found
-            .iter()
-            .any(|c| matches!(&c.claim, Claim::FileArtifact { name } if name == "bridge.asi")),
+        found.iter().any(
+            |c| matches!(&c.claim, Claim::FileArtifact { path } if path == "scripts/bridge.asi")
+        ),
         "same .asi filename must collide, got {found:?}"
     );
 }

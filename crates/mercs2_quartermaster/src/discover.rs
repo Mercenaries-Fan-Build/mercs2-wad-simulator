@@ -304,6 +304,12 @@ impl Contribution {
                     out.push(("plugin", p.as_path()));
                 }
             }
+            // `place_file` is the kind with the most to lose here, because its source path is also
+            // the OUTPUT filename: the file lands in the game folder under whatever it is called in
+            // `src/`. Routing it through the same checks as every other source is what makes
+            // `../../etc/passwd`, `/etc/passwd` and a symlink pointing out of the Shipment M0111
+            // errors rather than a bespoke rule that could drift from this one.
+            Contribution::PlaceFile { file, .. } => out.push(("file", file.as_path())),
             Contribution::Raw { payload, .. } => out.push(("payload", payload.as_path())),
         }
         out

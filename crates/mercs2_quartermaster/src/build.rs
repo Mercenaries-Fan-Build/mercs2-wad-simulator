@@ -30,8 +30,12 @@
 //! unlike a texture (whose dimensions come from the target) or a model (whose rig comes from a
 //! donor) there is nothing to read out of retail. It therefore lowers in template CI as well.
 //!
-//! `native_hook` is the kind that produces no WAD content at all — an `.asi` file placed in the
-//! loader's search path, plus the [`Placement`] record that makes the drop reversible.
+//! `native_hook` and `place_file` are the kinds that produce no WAD content at all — a file placed
+//! in the game folder, plus the [`Placement`] record that makes the drop reversible. `native_hook`
+//! places the `.asi` and chooses its directory outright; `place_file` places the companions that
+//! `.asi` reads, and lets the author pick a destination NAME from a closed set
+//! ([`crate::manifest::PlaceIn`]) rather than write a path. Neither can be pointed at the game
+//! executable or a WAD, and neither needs a game stack, so both lower in template CI.
 //!
 //! `edit_state_machine` returns `Unsupported`, and is expected to keep doing so for a while: the
 //! destruction machine can be read and cannot be written, and three of the four things blocking it
@@ -62,13 +66,19 @@ use std::path::{Path, PathBuf};
 pub enum Destination {
     /// Inside the Shipment's overlay WAD.
     Overlay,
-    /// A file placed in the game folder, relative to it (an `.asi` in the loader's search path).
+    /// A file placed in the game folder, at this path relative to it — an `.asi` in the loader's
+    /// search path, or a companion beside it.
     GameFolder { relative: String },
 }
 
 /// One emitted artifact and its digest.
+///
+/// For a [`Destination::GameFolder`] artifact, `relative` names the file BOTH under the build
+/// directory and under the game folder — the output mirrors the tree it will be copied into, so a
+/// deploy step never has to reconstruct one from the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
+    /// The bare filename, for messages. The path is on the [`Destination`].
     pub name: String,
     pub bytes: usize,
     pub sha256: String,
@@ -96,6 +106,119 @@ pub const ASI_SUBDIR: &str = "scripts";
 /// hash correctly, and never load — with the loader logging nothing at all, because it never
 /// considered the file.
 pub const RESERVED_ASI: &str = "pmc_bb.asi";
+
+/// Join a game-folder directory and a filename into the relative path a deploy tool writes.
+///
+/// One function so the PLACEMENT and the [`crate::blast::Claim::FileArtifact`] that guards it can
+/// never disagree — a claim computed one way and a path emitted another is a conflict system that
+/// quietly stops matching. Forward slashes, and the game root is the empty string so joining is
+/// uniform.
+pub fn place_path(dir: &str, file: &str) -> String {
+    if dir.is_empty() {
+        file.to_string()
+    } else {
+        format!("{dir}/{file}")
+    }
+}
+
+/// Extensions no Shipment may write into the game folder, whatever destination it names.
+///
+/// This is the second half of "the exe and the WADs are unreachable". [`crate::manifest::PlaceIn`]
+/// takes the DESTINATION out of the author's hands; this takes the parts of the FILENAME that could
+/// still clobber something load-bearing. Both halves are needed: `dest: game_root` is a legitimate
+/// destination the loader really globs, and it is also where `Mercenaries2.exe` lives.
+const FORBIDDEN_PLACEMENT_EXT: &[(&str, &str)] = &[
+    (
+        "wad",
+        "a WAD is the base game's data (`data\\vz.wad`) or a Shipment's own overlay. The overlay is \
+         emitted as `build/<name>.wad` and mounted by the deploy step — it is never placed by an \
+         author, and the format cannot express a write into the base WAD at all",
+    ),
+    (
+        "exe",
+        "`Mercenaries2.exe` is the game. An exe edit stays unrepresentable rather than merely \
+         linted, and that is only true if no file placement can write one",
+    ),
+    (
+        "dll",
+        "the DLLs in the game folder are the game's own, and `pmc_bb.dll` is the LOADER — Modkit \
+         installs and manages it, and a Shipment never ships it (N Shipments carrying their own \
+         copies would collide on one filename with no arbitration). The sanctioned way to add \
+         native code is an `.asi` through `native_hook`",
+    ),
+];
+
+/// Reject a filename that must not be written into the game folder, for any destination.
+///
+/// Everything here is about the NAME, because the name is the only part of a placement an author
+/// influences — it comes from the source file, so `src/../..` is already an M0111 error before this
+/// runs. What is left is a filename that is not a single path component (a deploy tool joining
+/// `scripts/` + `..\..\Mercenaries2.exe`, or + `C:\evil`, or + `\\host\share\x` escapes the game
+/// folder on the Windows machine that consumes the record, even though every one of those is a
+/// perfectly ordinary filename on the macOS machine that built it), and a name that would clobber
+/// something load-bearing.
+///
+/// Applies to `native_hook` too. Its extension check is narrower — it REQUIRES `.asi` — but the
+/// component and reserved-name rules are the same file-in-the-game-folder rules.
+pub fn game_folder_name_refusal(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("it has no filename at all".into());
+    }
+    if name == "." || name == ".." {
+        return Some(format!(
+            "{name:?} names a directory, not a file. A placement is a single file written into the \
+             game folder"
+        ));
+    }
+    if let Some(bad) = name.chars().find(|c| matches!(c, '/' | '\\' | ':')) {
+        return Some(format!(
+            "it contains {bad:?}, so it is not a single filename. A deploy tool joins this onto a \
+             game-folder directory ON WINDOWS, where a separator, a drive letter (`C:\\…`) or a UNC \
+             prefix (`\\\\host\\share`) would leave the game folder entirely — while on the \
+             machine that built the Shipment all three are ordinary characters in a filename"
+        ));
+    }
+    if name.eq_ignore_ascii_case(RESERVED_ASI) {
+        return Some(format!(
+            "{RESERVED_ASI} is reserved: the loader skips its own name, so a file shipped under it \
+             is never loaded and nothing is logged, because the file is never considered"
+        ));
+    }
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if let Some(ext) = ext {
+        for (denied, why) in FORBIDDEN_PLACEMENT_EXT {
+            if ext == *denied {
+                return Some(format!("it is a `.{denied}`, and {why}"));
+            }
+        }
+    }
+    None
+}
+
+/// Reject a filename a `place_file` may not use: everything [`game_folder_name_refusal`] rejects,
+/// plus an `.asi`.
+///
+/// An `.asi` is a plugin, not a companion. Refusing it here rather than quietly placing it is what
+/// stops `place_file` being a way around `native_hook`: that kind reads the PE headers
+/// `LoadLibrary` will reject, refuses the loader's reserved name, and records the addresses the
+/// plugin hooks so two plugins fighting over one is a conflict rather than whichever the filesystem
+/// enumerated first. A companion route that also produced a loadable `*.asi` would skip all three
+/// and still yield a file the loader globs.
+///
+/// One function, called by both the linter (M0162, so template CI says so on the push) and the
+/// lowering (so the refusal survives a rule being suppressed).
+pub fn companion_name_refusal(name: &str) -> Option<String> {
+    if name.to_ascii_lowercase().ends_with(".asi") {
+        return Some(
+            "it is an `.asi`, which the loader globs and loads as native code. Ship it as a \
+             `native_hook` instead: that reads the PE headers `LoadLibrary` will reject, refuses \
+             the loader's own reserved name, and records the addresses it hooks so two plugins \
+             fighting over one is a conflict rather than whichever the filesystem enumerated first"
+                .into(),
+        );
+    }
+    game_folder_name_refusal(name)
+}
 
 /// `IMAGE_FILE_MACHINE_I386`. The game is a 32-bit process, so a 64-bit plugin cannot load into it.
 const PE_MACHINE_I386: u16 = 0x014C;
@@ -1036,15 +1159,14 @@ fn lower(
                     ),
                 });
             }
-            if name.eq_ignore_ascii_case(RESERVED_ASI) {
+            // The shared file-in-the-game-folder rules: a single path component, and not the
+            // loader's own reserved name. `place_file` runs the same check, so the two kinds cannot
+            // drift into disagreeing about what a placeable filename is.
+            if let Some(why) = game_folder_name_refusal(&name) {
                 return Err(BuildError::Lower {
                     index,
                     kind,
-                    message: format!(
-                        "{RESERVED_ASI} is reserved: the loader skips its own name, so a plugin \
-                         shipped under it is never loaded and nothing is logged, because the file \
-                         is never considered. Rename it."
-                    ),
+                    message: format!("{name} cannot be placed: {why}. Rename it."),
                 });
             }
             if let Some(why) = asi_load_blocker(&bytes) {
@@ -1059,7 +1181,7 @@ fn lower(
                 });
             }
 
-            let relative = format!("{ASI_SUBDIR}/{name}");
+            let relative = place_path(ASI_SUBDIR, &name);
             // The digest is recorded plainly and claims only INTEGRITY. A hash of malware is a
             // correct hash, and a Shipment recording its own payload's digest proves internal
             // consistency and nothing else — so the log says what an ASI is rather than letting a
@@ -1079,6 +1201,56 @@ fn lower(
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
+            ));
+
+            Ok(Lowering::File {
+                name,
+                relative,
+                bytes,
+            })
+        }
+
+        // A companion file. Mechanically this is `native_hook` minus the PE checks and plus a
+        // destination the author named — but the destination is a NAME out of a closed set, so the
+        // property that matters is unchanged: no author input reaches the directory half of the
+        // path, and the filename half comes from the source file rather than from a field.
+        //
+        // Needs no game stack, so it lowers in template CI.
+        Contribution::PlaceFile { file, dest } => {
+            let path = root.join(file);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+
+            let name = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{} has no usable file name", path.display()),
+                })?
+                .to_string();
+
+            // M0162 already blocks every one of these as an Error, so this is the belt to its
+            // braces — the same shape M0160/M0161 have with `native_hook`'s lowering. A refusal
+            // that lives only in a lint rule is a refusal that stops existing the moment somebody
+            // adds a way to suppress rules.
+            if let Some(why) = companion_name_refusal(&name) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{name} cannot be placed: {why}."),
+                });
+            }
+
+            let relative = place_path(dest.relative_dir(), &name);
+            log.push(format!(
+                "contributions[{index}] place_file {name} → {relative}: {} bytes, sha256 {}",
+                bytes.len(),
+                sha256_hex(&bytes),
             ));
 
             Ok(Lowering::File {
@@ -1398,12 +1570,25 @@ pub fn build(
         wad_path = Some(path);
     }
 
-    // Code-layer artifacts. The digest is taken from the bytes that were WRITTEN, read back off the
-    // disk, rather than from the buffer we happen to hold: the record's whole job is to describe
-    // what is actually there, and a digest of the intended bytes would still verify after a
-    // truncated write.
+    // Code-layer artifacts. The build directory MIRRORS the tree these will be copied into, so
+    // `destination.relative` names the file both here and in the game folder and a deploy step can
+    // copy the tree wholesale. Writing them flat was fine while the only destination was `scripts/`
+    // and stopped being fine the moment there were seven: two placements differing only in
+    // destination — `scripts/OnBoot/init.lua` and `scripts/OnLoad/init.lua` — are not a conflict,
+    // they are two files, and flattening them would have one silently overwrite the other in the
+    // output while both records claimed the same digest.
+    //
+    // The digest is taken from the bytes that were WRITTEN, read back off the disk, rather than
+    // from the buffer we happen to hold: the record's whole job is to describe what is actually
+    // there, and a digest of the intended bytes would still verify after a truncated write.
     for (name, relative, bytes) in files {
-        let path = out_dir.join(&name);
+        let path = out_dir.join(&relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| BuildError::Io {
+                path: parent.to_path_buf(),
+                message: e.to_string(),
+            })?;
+        }
         std::fs::write(&path, &bytes).map_err(|e| BuildError::Io {
             path: path.clone(),
             message: e.to_string(),

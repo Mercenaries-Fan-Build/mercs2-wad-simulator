@@ -71,8 +71,13 @@ pub enum Claim {
     OutfitSlot { wearer: String, slug: String },
     /// A hooked native address or symbol.
     NativeHook { at: String },
-    /// A file placed in the game folder (an `.asi`), by filename.
-    FileArtifact { name: String },
+    /// A file placed in the game folder, keyed on its PATH relative to that folder.
+    ///
+    /// The path, not the filename: `scripts/config.ini` and `plugins/config.ini` are two different
+    /// files and do not fight, while two Shipments both writing `scripts/config.ini` overwrite each
+    /// other. Keying on the bare name would have called the first pair a conflict and been right
+    /// about the second by accident.
+    FileArtifact { path: String },
 }
 
 impl Claim {
@@ -108,7 +113,7 @@ impl Claim {
             Claim::Script { name } => format!("script {name}"),
             Claim::OutfitSlot { wearer, slug } => format!("outfit {wearer}/{slug}"),
             Claim::NativeHook { at } => format!("native hook at {at}"),
-            Claim::FileArtifact { name } => format!("file artifact {name}"),
+            Claim::FileArtifact { path } => format!("file artifact {path}"),
         }
     }
 
@@ -165,6 +170,16 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // No arbitration exists: ASI discovery is filesystem order across four directories, so
         // there is no load order that resolves two plugins hooking one address.
         Claim::NativeHook { .. } => MergeClass::Exclusive,
+        // A file placement is a claim on a filesystem PATH, and the filesystem is the one layer
+        // here with no arbitration of any kind: no WAD stack to reorder, no first-writer registry,
+        // no load order. Whichever deploy step runs last simply overwrites.
+        //
+        // It is `Exclusive` rather than `LastWins` because of what losing MEANS. When a texture
+        // loses at the WAD stack the base asset shows and the user fixes it by reordering; when a
+        // companion file loses, the plugin that reads it does not fall back — it reads somebody
+        // else's config, with the file sitting right there looking installed and nothing logged.
+        // And it is not `KeyedSet`, because there is no key: the bytes are opaque, so there is
+        // nothing to union on. Same reasoning as `raw`, reached from the other direction.
         Claim::FileArtifact { .. } => MergeClass::Exclusive,
     }
 }
@@ -283,11 +298,28 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                         push(
                             Access::Write,
                             bare(Claim::FileArtifact {
-                                name: file.to_string(),
+                                // Built with the SAME joiner the lowering uses, so the claim and
+                                // the emitted placement cannot describe different paths.
+                                path: crate::build::place_path(crate::build::ASI_SUBDIR, file),
                             }),
                             Intent::Replace,
                         );
                     }
+                }
+            }
+            // The destination is a closed-set NAME, so the directory half of this path is a
+            // literal; only the filename comes from the author, and it comes from their source
+            // file. That is the same shape as the `native_hook` claim above, which is the point —
+            // a companion and the plugin it belongs to must be able to collide with each other.
+            Contribution::PlaceFile { file, dest } => {
+                if let Some(name) = file.file_name().and_then(|f| f.to_str()) {
+                    push(
+                        Access::Write,
+                        bare(Claim::FileArtifact {
+                            path: crate::build::place_path(dest.relative_dir(), name),
+                        }),
+                        Intent::Replace,
+                    );
                 }
             }
             Contribution::Raw { touches, .. } => {

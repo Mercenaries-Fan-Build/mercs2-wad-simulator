@@ -1229,8 +1229,13 @@ fn a_native_hook_places_a_file_and_records_its_digest() {
         "the builder chooses the path; there is no manifest field that could name the exe"
     );
 
-    // Verified BY HASH against what is on disk, not against the buffer the builder held.
-    let written = std::fs::read(dir.join("build/mybridge.asi")).expect("the .asi must be emitted");
+    // Verified BY HASH against what is on disk, not against the buffer the builder held. The output
+    // directory MIRRORS the tree this is copied into, so the same relative path names it in both.
+    let written = std::fs::read(
+        dir.join("build")
+            .join(format!("{}/mybridge.asi", build::ASI_SUBDIR)),
+    )
+    .expect("the .asi must be emitted");
     assert_eq!(written, asi, "the plugin must be copied verbatim");
     assert_eq!(p.sha256, build::sha256_hex(&written));
     assert_eq!(p.bytes, written.len());
@@ -1360,7 +1365,9 @@ fn an_asi_on_a_reimpl_target_never_reaches_lowering() {
         other => panic!("expected Blocked, got {other:?}"),
     }
     assert!(
-        !dir.join("build/mybridge.asi").exists(),
+        !dir.join("build")
+            .join(format!("{}/mybridge.asi", build::ASI_SUBDIR))
+            .exists(),
         "nothing may be placed"
     );
 }
