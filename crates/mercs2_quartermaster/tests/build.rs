@@ -819,6 +819,104 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     );
 }
 
+/// ★ A `patch_lua` on a RESIDENT module builds end-to-end into a valid overlay.
+///
+/// Every script the fix pack needs (`mrxplayer`, `mrxguipda`, `mrxtaskjobcollecttype`) lives in the
+/// resident block, which the linker could not reach at all before. This drives the whole path:
+/// discover the block, splice, emit, and re-read the emitted WAD.
+///
+/// It also pins the two properties that make the resident case different from `scripts_vz`:
+/// **only the touched block is republished**, and **only SCRIPT rows are claimed** — the resident
+/// block's ~6,800 non-script entries must not get sentinel-rung ASET rows, which would republish
+/// streaming assets as single-block and stop them streaming.
+#[test]
+fn a_resident_patch_lua_builds_into_a_valid_overlay() {
+    const TYPE_ID_SCRIPT: u32 = 35;
+
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    let root = scratch("resident_lua");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // A string LITERAL, not a comment: comments do not survive compilation, so a `-- marker` append
+    // would leave nothing to assert on in the emitted bytecode.
+    std::fs::write(
+        root.join("src/append.lua"),
+        "_QM_RESIDENT_MARKER = \"fixpack-resident-marker\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("manifest.yaml"),
+        "format: 1\nshipment: { name: resident-lua, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: patch_lua\n    target: mrxplayer\n    append: src/append.lua\n",
+    )
+    .unwrap();
+    let s = discover::open(&root).expect("open shipment");
+
+    let out = root.join("build");
+    let report =
+        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus)).expect("build");
+    eprintln!("{}", report.log.join("\n"));
+
+    let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+
+    // Only the resident block is republished — patching a resident script must not drag
+    // `scripts_vz` along.
+    assert_eq!(
+        contents.blocks.len(),
+        1,
+        "expected only the touched block, got {:?}",
+        contents
+            .blocks
+            .iter()
+            .map(|b| b.path_string.clone())
+            .collect::<Vec<_>>()
+    );
+    let blk = &contents.blocks[0];
+    assert!(
+        blk.path_string.to_lowercase().contains(r"\resident_p000_q3.block"),
+        "wrong block: {}",
+        blk.path_string
+    );
+
+    // ★ A row for EVERY entry. Claiming only the scripts is the M0004 HANG: an asset carried in a
+    // block with no row naming it cannot be resolved by hash, and the world load silently never
+    // completes. The build refuses that shape, so this assertion is what keeps it refused.
+    let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+    parsed.verify_csums().expect("CSUMs");
+    assert_eq!(
+        blk.aset_entries.len(),
+        parsed.entries.len(),
+        "every entry the block carries needs a row, or the loader wedges (M0004)"
+    );
+
+    // And the rows are the BASE WAD's, not synthesised: a mixed block must carry mixed type ids.
+    // All-script here would mean we had guessed, and a wrong type_id dispatches the wrong loader.
+    let script_rows = blk
+        .aset_entries
+        .iter()
+        .filter(|e| e.u32_3 == TYPE_ID_SCRIPT)
+        .count();
+    assert!(
+        script_rows > 0 && script_rows < blk.aset_entries.len(),
+        "expected mixed type ids from the base WAD, got {script_rows}/{} script rows",
+        blk.aset_entries.len()
+    );
+
+    // And the payload really is our append, compiled.
+    let idx = parsed.find_script_by_name("mrxplayer").expect("mrxplayer present");
+    let luaq = parsed.extract_lua(idx).unwrap();
+    assert!(
+        String::from_utf8_lossy(&luaq).contains("fixpack-resident-marker"),
+        "the appended source must be in the compiled chunk"
+    );
+}
+
 /// Deploy order must not change the bytes, or verify-by-hash is meaningless and a saved costume
 /// index can shift under a player between deploys.
 #[test]
