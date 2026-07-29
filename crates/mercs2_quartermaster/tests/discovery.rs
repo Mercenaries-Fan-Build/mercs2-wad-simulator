@@ -166,6 +166,9 @@ contributions:
     payload: src/raw/blob.bin
     target_layer: data
     touches: [\"al_veh_boat_destroyer\"]
+  - kind: place_file
+    file: src/native/mybridge.ini
+    dest: scripts
 ";
     let m = mercs2_quartermaster::from_str(text, Format::Yaml).unwrap();
     let refs = discover::source_refs(&m);
@@ -177,6 +180,9 @@ contributions:
             (0, "textures.diffuse"),
             (0, "textures.normal"),
             (1, "payload"),
+            // `place_file` matters most here: its source path is also its OUTPUT filename, so a
+            // kind that skipped this list would place a file the escape checks never looked at.
+            (2, "file"),
         ]
     );
     // An omitted optional texture contributes nothing.
