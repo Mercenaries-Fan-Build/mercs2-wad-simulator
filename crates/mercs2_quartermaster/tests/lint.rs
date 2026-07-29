@@ -360,3 +360,80 @@ fn single_block_requires_both_lod_halves_to_be_sentinel() {
     // _P002 present, _P001 absent.
     assert!(!lint::aset_row_is_single_block(0x0000_FFFF, 0x2093_FFFF));
 }
+
+// ---------------------------------------------------------------------------
+// Bare hashes are legal
+// ---------------------------------------------------------------------------
+
+/// A bare `0x…` reference IS the hash, not a string to be hashed.
+///
+/// The base game ships hashes, so a modder working on an asset our name table does not cover has
+/// nothing else to write. Hashing the string `"0x6F84F6A3"` yields `0xC6B71C1F` — a different asset
+/// — so this is the difference between a target that resolves and one that reports "not in the
+/// configured game stack" while looking like a spelling mistake.
+#[test]
+fn a_bare_hash_resolves_to_itself_not_to_a_hash_of_its_text() {
+    use mercs2_quartermaster::manifest::asset_hash;
+    assert_eq!(asset_hash("0x6F84F6A3"), 0x6F84_F6A3);
+    assert_eq!(
+        asset_hash("0X6f84f6a3"),
+        0x6F84_F6A3,
+        "case must not matter"
+    );
+    assert_eq!(
+        asset_hash("  0x6F84F6A3  "),
+        0x6F84_F6A3,
+        "surrounding space must not matter"
+    );
+
+    // A name is hashed, and must NOT collide with the parse path.
+    let by_name = asset_hash("global_4x4_nm");
+    assert_eq!(by_name, 0x6F84_F6A3, "this name hashes to that asset");
+    assert_ne!(
+        asset_hash("0x6F84F6A3"),
+        mercs2_formats::hash::pandemic_hash_m2("0x6F84F6A3"),
+        "hashing the TEXT of a hash is the bug this exists to prevent"
+    );
+}
+
+/// Hex too long to be a u32 is not an asset hash, whatever else it is.
+#[test]
+fn overlong_hex_is_treated_as_a_name() {
+    use mercs2_quartermaster::manifest::bare_hash;
+    assert_eq!(bare_hash("0xDEADBEEFCAFE"), None);
+    assert_eq!(bare_hash("0x"), None);
+    assert_eq!(bare_hash("0xZZZZ"), None);
+    assert_eq!(bare_hash("global_4x4_nm"), None);
+}
+
+/// The preference is expressed where it applies — `target:`, not only `touches:` — and only when a
+/// name can actually be offered.
+#[test]
+fn a_named_hash_is_suggested_and_an_unnamed_one_is_left_alone() {
+    let names = NameTable::from_pairs([(0x6F84_F6A3u32, "global_4x4_nm")]);
+    let manifest_for = |target: &str| {
+        shipment_with(&format!(
+            "  - kind: replace_texture
+    target: \"{target}\"
+    image: src/t.png
+"
+        ))
+    };
+
+    let known = lint::lint(&manifest_for("0x6F84F6A3"), None, Some(&names));
+    let m0130: Vec<_> = known.iter().filter(|d| d.rule.code == "M0130").collect();
+    assert_eq!(
+        m0130.len(),
+        1,
+        "a hash we can name must be surfaced: {known:?}"
+    );
+    assert_eq!(m0130[0].severity, Severity::Warning, "never blocking");
+    assert_eq!(m0130[0].fix.as_deref(), Some("global_4x4_nm"));
+
+    // No name known: the hash is the only thing the author COULD write, so saying nothing is right.
+    let unknown = lint::lint(&manifest_for("0xDEADBEEF"), None, Some(&names));
+    assert!(
+        !unknown.iter().any(|d| d.rule.code == "M0130"),
+        "nagging about a hash with no known name asks for something impossible: {unknown:?}"
+    );
+}

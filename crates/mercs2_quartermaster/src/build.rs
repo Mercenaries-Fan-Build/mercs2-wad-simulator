@@ -13,26 +13,36 @@
 //!
 //! ## Lowering status
 //!
-//! `replace_texture`, `add_model`, `add_outfit` and `patch_lua` all lower here.
+//! Every kind lowers here except `edit_state_machine`.
 //!
-//! `add_outfit` is the composed case and the reason [`Lowered`] carries an `Option` of each half: a
-//! Data half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script
-//! half that cannot, because Lua links across the installed set rather than per Shipment. Linking a
+//! `raw` is the open lower bound: opaque bytes plus an author-DECLARED blast radius. It is the one
+//! kind with no encoder behind it, so the lowering checks everything structural it can and refuses
+//! rather than warns — and it requires the declared `touches` to match the payload's own entry
+//! table exactly, because that declaration is the only thing that can mint the ASET rows.
+//!
+//! `add_outfit` is the composed case, and the reason [`Lowering`] has more than one outcome: a Data
+//! half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script half
+//! that cannot, because Lua links across the installed set rather than per Shipment. Linking a
 //! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
 //! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
 //!
-//! `edit_state_machine`, `native_hook` and `raw` still return `Unsupported` — with the reason,
-//! rather than being quietly skipped, because a dropped contribution produces a WAD that looks fine
-//! and does nothing.
+//! `native_hook` is the kind that produces no WAD content at all — an `.asi` file placed in the
+//! loader's search path, plus the [`Placement`] record that makes the drop reversible.
+//!
+//! `edit_state_machine` returns `Unsupported`, and is expected to keep doing so for a while: the
+//! destruction machine can be read and cannot be written, and three of the four things blocking it
+//! live outside this crate. The reason it returns says which, so the refusal is actionable rather
+//! than a deferral — and it points the author at `raw`, which can carry a hand-built block today
+//! with a declared blast radius. A kind that returns `Unsupported` with a reason is honest; one
+//! that is quietly skipped produces a WAD that looks fine and does nothing.
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
 use crate::link::{self, ScriptMutation};
 use crate::lint::{self, Diagnostic};
-use crate::manifest::Contribution;
+use crate::manifest::{Contribution, Layer};
 use crate::names::NameTable;
 use mercs2_formats::donor;
-use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::mesh_import;
 use mercs2_formats::model_inject::inject_static_into_donor_block;
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
@@ -59,6 +69,85 @@ pub struct Placement {
     pub bytes: usize,
     pub sha256: String,
     pub destination: Destination,
+}
+
+/// Where the Quartermaster puts an `.asi`, relative to the game folder.
+///
+/// **The author never names this**, which is the whole point: `native_hook` has no `dest` field, so
+/// there is no spelling of a Shipment that writes next to `Mercenaries2.exe` or into `data\vz.wad`.
+/// Those stay unreachable by construction rather than by a lint rule somebody could suppress.
+///
+/// `pmc_bb.dll` (v3.0.0, read directly: the format strings `%s*.asi`, `%sscripts\`, `%splugins\`,
+/// `%supdate\`) globs four roots — the game directory itself and these three subfolders. `scripts\`
+/// is chosen because it is where the ecosystem already puts them (`cruise.asi`, `dlc_enable.asi`)
+/// and because keeping mod files out of the game root makes an uninstall obvious.
+///
+/// A forward slash on purpose: the loader's own literal is `scripts\`, but this string is a
+/// filesystem path a deploy tool joins, not an engine path like the backslashed PTHS entries.
+pub const ASI_SUBDIR: &str = "scripts";
+
+/// The one `.asi` name the loader refuses to load: it skips its own.
+///
+/// Read from the binary, not assumed. A plugin shipped under this name would be placed correctly,
+/// hash correctly, and never load — with the loader logging nothing at all, because it never
+/// considered the file.
+pub const RESERVED_ASI: &str = "pmc_bb.asi";
+
+/// `IMAGE_FILE_MACHINE_I386`. The game is a 32-bit process, so a 64-bit plugin cannot load into it.
+const PE_MACHINE_I386: u16 = 0x014C;
+/// `IMAGE_FILE_DLL`. The loader calls `LoadLibrary`, which will not run an executable image.
+const PE_CHARACTERISTICS_DLL: u16 = 0x2000;
+
+/// What lowering one contribution produced.
+///
+/// Three outcomes rather than `Option<PatchBlock>`, because the Code layer genuinely does not
+/// produce a block: an `.asi` is a file in the game folder, and a format that could only express
+/// WAD content could not describe our own live bridge.
+enum Lowering {
+    /// Nothing to emit here. The contribution's effect is realised elsewhere — a `patch_lua`
+    /// declares a mutation that the linker applies later.
+    Nothing,
+    Block(PatchBlock),
+    /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
+    /// next to the digest it records for them.
+    File {
+        name: String,
+        relative: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Reject a plugin the game's loader could not load, by reading its PE header.
+///
+/// Both failures are observable in `pmc_blackbox.log` as `[FAILED] … (error: …)` — which is rare
+/// good news for this codebase — but only to a modder who knows to look. Neither is recoverable at
+/// deploy time, and both are cheap to see here.
+fn asi_load_blocker(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+        return Some("it is not a PE image at all (no `MZ` header)".into());
+    }
+    let pe_at = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    if pe_at + 24 > bytes.len() || &bytes[pe_at..pe_at + 4] != b"PE\0\0" {
+        return Some("its `e_lfanew` does not point at a `PE\\0\\0` signature".into());
+    }
+    let coff = pe_at + 4;
+    let machine = u16::from_le_bytes([bytes[coff], bytes[coff + 1]]);
+    let characteristics = u16::from_le_bytes([bytes[coff + 18], bytes[coff + 19]]);
+    if machine != PE_MACHINE_I386 {
+        return Some(format!(
+            "it is built for machine 0x{machine:04X}, not i386 (0x{PE_MACHINE_I386:04X}). \
+             Mercenaries2.exe is a 32-bit process and `LoadLibrary` refuses a foreign architecture"
+        ));
+    }
+    if characteristics & PE_CHARACTERISTICS_DLL == 0 {
+        return Some(
+            "its COFF characteristics do not set `IMAGE_FILE_DLL`, so it is an executable image \
+             rather than a DLL. An `.asi` is a DLL with a different extension; the loader calls \
+             `LoadLibrary` on it"
+                .into(),
+        );
+    }
+    None
 }
 
 /// Read the assembled WAD back and run [`crate::lint::artifact_checks`] on it.
@@ -251,14 +340,14 @@ fn lower(
     root: &Path,
     game: Option<&mut GameStack>,
     log: &mut Vec<String>,
-) -> Result<Option<PatchBlock>, BuildError> {
+) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
     match contribution {
         Contribution::ReplaceTexture { target, image } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
-            let hash = pandemic_hash_m2(target);
+            let hash = crate::manifest::asset_hash(target);
 
             // The target's OWN dimensions and format are the spec: a replacement is same-hash and
             // fully resident, so it must match what the engine already expects to read.
@@ -340,7 +429,7 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
         Contribution::AddModel {
@@ -377,7 +466,7 @@ fn lower(
                 });
             };
 
-            let donor_hash = pandemic_hash_m2(donor_name);
+            let donor_hash = crate::manifest::asset_hash(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
             let donor_blk =
                 donor::donor_block(&paths, donor_hash).map_err(|m| BuildError::Lower {
@@ -394,7 +483,7 @@ fn lower(
                 }
             })?;
 
-            let hash = pandemic_hash_m2(name);
+            let hash = crate::manifest::asset_hash(name);
             // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
             // transform), target the raw rendered group, neutralise the rest.
             let (new_block, stats) = inject_static_into_donor_block(
@@ -435,7 +524,7 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
         // `add_outfit` is a FIXED composition of add_model + a patch_lua on `_tOutfits`. The Data
@@ -480,7 +569,7 @@ fn lower(
                 });
             };
 
-            let donor_hash = pandemic_hash_m2(donor_name);
+            let donor_hash = crate::manifest::asset_hash(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
             let donor_blk =
                 donor::donor_block(&paths, donor_hash).map_err(|m| BuildError::Lower {
@@ -496,7 +585,7 @@ fn lower(
                 }
             })?;
 
-            let hash = pandemic_hash_m2(name);
+            let hash = crate::manifest::asset_hash(name);
             let (new_block, stats) = inject_static_into_donor_block(
                 &donor_blk,
                 &mesh,
@@ -537,18 +626,425 @@ fn lower(
                  {} verts, {} tris | wardrobe row {wearer}/{slug}",
                 stats.vertex_count, stats.triangle_count
             ));
-            Ok(Some(block))
+            Ok(Lowering::Block(block))
         }
 
         // Contributes no block: its whole effect is a declared mutation, collected by
         // `script_mutations` and realised at link time.
-        Contribution::PatchLua { .. } => Ok(None),
-        Contribution::EditStateMachine { .. }
-        | Contribution::NativeHook { .. }
-        | Contribution::Raw { .. } => Err(BuildError::Unsupported {
+        Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
+
+        // The OPEN LOWER BOUND: bytes we cannot interpret, plus a radius the author DECLARED.
+        //
+        // Every other kind has a second line of defence — an encoder that knows the shape, a donor
+        // to conform to. `raw` has none, so everything structural that CAN be checked is checked
+        // here, and a failure is a hard error rather than a warning. The declared `touches` is not
+        // decoration either: it is the only thing that can mint the ASET rows, so it must agree
+        // with the payload's own entry table exactly, in BOTH directions. A hash in `touches` that
+        // the payload does not carry mints a row resolving to a block that does not contain it; a
+        // hash the payload carries that `touches` omits is M0004's silent wedge, and it would also
+        // mean the conflict system never saw the claim.
+        Contribution::Raw {
+            description,
+            payload,
+            target_layer,
+            touches,
+        } => {
+            // The overlay is a WAD, and the Data layer is the only one a WAD holds. The other
+            // three are refused by NAME rather than lowered into something plausible.
+            match target_layer {
+                Layer::Data => {}
+                Layer::Script => {
+                    return Err(BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason:
+                            "a raw payload on the SCRIPT layer would ship a finished scripts_vz \
+                             block. WAD resolution is last-mounted-wins, so it would silently \
+                             delete every other installed Shipment's Lua — including the wardrobe \
+                             rows `add_outfit` generates. That is the exact annihilation \
+                             `patch_lua` exists to prevent by shipping a MUTATION instead of a \
+                             block, and no declared blast radius can make it safe. Use `patch_lua`."
+                                .into(),
+                    });
+                }
+                Layer::Code => {
+                    return Err(BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason:
+                            "a raw payload on the CODE layer has nowhere to go: `raw` carries no \
+                             destination field, and inventing one would hand the author a way to \
+                             name Mercenaries2.exe or data/vz.wad — which is precisely what \
+                             `native_hook` omitting `dest` keeps unreachable. Use `native_hook`, \
+                             which places the file in the loader's search path for you."
+                                .into(),
+                    });
+                }
+                Layer::Runtime => {
+                    return Err(BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason:
+                            "the RUNTIME layer has no artifact. Nothing in the format says what a \
+                             runtime payload is or where it would be placed, so there is no \
+                             lowering to write — only a guess, and a guess here emits a WAD that \
+                             looks fine and does nothing."
+                                .into(),
+                    });
+                }
+            }
+
+            let path = root.join(payload);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+
+            // Two shapes an author plausibly hands us that are NOT a block. Both are named
+            // explicitly, because the generic "does not parse" message sends them looking in the
+            // wrong place.
+            if bytes.len() >= 4 && &bytes[0..4] == b"sges" {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} starts with the `sges` magic, so it is a COMPRESSED block. Supply the \
+                         DECOMPRESSED bytes — the builder compresses and computes `packed_field` \
+                         from their length, and a pre-compressed payload would be compressed twice \
+                         while claiming the wrong decompressed page count.",
+                        path.display()
+                    ),
+                });
+            }
+            if bytes.len() >= 4 && &bytes[0..4] == b"UCFX" {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} starts with `UCFX`, so it is a bare CONTAINER, not a block. A patch \
+                         block is `[entry table][containers…]`: the loader reads the first word as \
+                         an entry count, so it would read the `UCFX` magic as one. Prepend the \
+                         table — `[u32 count][count × (name_hash, type_hash, field_c, chunk_size)]`.",
+                        path.display()
+                    ),
+                });
+            }
+
+            // Coherence, in the same sense `lint::coherent_block` means it: the declared count must
+            // be honoured and every container must fit. `parse_block_entry_table` reads the first
+            // word as a count unconditionally, so anything else yields confident nonsense.
+            let (parsed, issues) =
+                mercs2_formats::ucfx::walk_decompressed_block(&bytes, "raw payload");
+            if parsed.entry_count == 0
+                || parsed.entries.len() != parsed.entry_count as usize
+                || parsed.containers.len() != parsed.entries.len()
+            {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} does not read as a patch block: its first word declares {} entr(ies) \
+                         but only {} row(s) and {} container(s) fit in {} bytes. A block is \
+                         `[u32 count][count × 16-byte rows][containers…]`.",
+                        path.display(),
+                        parsed.entry_count,
+                        parsed.entries.len(),
+                        parsed.containers.len(),
+                        bytes.len()
+                    ),
+                });
+            }
+            if !issues.is_empty() {
+                let detail: Vec<String> = issues
+                    .iter()
+                    .map(|i| format!("{}: {}", i.context, i.detail))
+                    .collect();
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} is structurally invalid — {}. These are the checks the engine's own \
+                         reader performs; a payload that fails them loads as garbage rather than \
+                         failing loudly.",
+                        path.display(),
+                        detail.join("; ")
+                    ),
+                });
+            }
+
+            // `touches` are asset REFERENCES: a bare `0x…` is that hash, anything else is a name.
+            let declared: std::collections::BTreeSet<u32> = touches
+                .iter()
+                .map(|t| crate::manifest::asset_hash(&t.0))
+                .collect();
+            let carried: std::collections::BTreeSet<u32> =
+                parsed.entries.iter().map(|e| e.name_hash).collect();
+            let hexes = |set: std::collections::BTreeSet<u32>| {
+                set.iter()
+                    .map(|h| format!("0x{h:08X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let missing: std::collections::BTreeSet<u32> =
+                declared.difference(&carried).copied().collect();
+            if !missing.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "`touches` claims {} which the payload's entry table does not carry. The \
+                         claim is what mints the ASET row, so this would publish a row pointing at \
+                         a block that has no such asset in it — the lookup resolves, the block \
+                         loads, and the asset is simply absent.",
+                        hexes(missing)
+                    ),
+                });
+            }
+            let extra: std::collections::BTreeSet<u32> =
+                carried.difference(&declared).copied().collect();
+            if !extra.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "the payload carries {} which `touches` does not claim. Nothing else can \
+                         infer a raw block's radius, so an unclaimed asset gets no ASET row (the \
+                         M0004 silent wedge) and the conflict system never sees the claim at all — \
+                         two Shipments could overwrite one asset without either being told.",
+                        hexes(extra)
+                    ),
+                });
+            }
+
+            // The TYPE comes from the bytes, never from the author: the ASET row's type id decides
+            // which loader the engine dispatches, and a guess there resolves the asset into the
+            // wrong subsystem.
+            let mut aset = Vec::new();
+            for e in &parsed.entries {
+                let type_id = mercs2_formats::types::type_id_for_type_hash(e.type_hash)
+                    .ok_or_else(|| BuildError::Lower {
+                        index,
+                        kind,
+                        message: format!(
+                            "entry 0x{:08X} declares type hash 0x{:08X}, which is not one of the \
+                             {} types the retail census found. The ASET row's type id is derived \
+                             from it and decides which loader is dispatched, so there is nothing \
+                             safe to guess.",
+                            e.name_hash,
+                            e.type_hash,
+                            mercs2_formats::types::TYPE_HASH_REGISTRY.len()
+                        ),
+                    })?;
+                // Sentinel rungs. A `0x0000` low-16 is the dangling-rung HANG, not "no rung".
+                aset.push(AsetEntry::new(
+                    e.name_hash,
+                    0xFFFF_FFFF,
+                    0x0000_FFFF,
+                    type_id,
+                ));
+            }
+
+            let first = parsed.entries[0].name_hash;
+            log.push(format!(
+                "contributions[{index}] raw {} {} bytes, {} entr(ies): {}",
+                description.as_deref().unwrap_or("(no description)"),
+                bytes.len(),
+                parsed.entries.len(),
+                parsed
+                    .entries
+                    .iter()
+                    .map(|e| format!(
+                        "0x{:08X} {}",
+                        e.name_hash,
+                        mercs2_formats::types::type_name_from_hash(e.type_hash)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+
+            let block = PatchBlock::from_decompressed(
+                &bytes,
+                format!("blocks\\VZ\\mod_{first:08x}.block"),
+                aset,
+                None,
+            )
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            Ok(Lowering::Block(block))
+        }
+
+        // The Code layer. This is the ONE kind that emits no WAD content: on retail a plugin is an
+        // `.asi` — a plain Windows DLL under a different extension — dropped where `pmc_bb.dll`
+        // globs for it. So it lowers to a placement, and the placement record is what makes it
+        // reversible: an overlay is undone by deleting one file, but a file dropped into the game
+        // folder cannot be backed out unless something wrote down what was put where.
+        Contribution::NativeHook {
+            target,
+            plugin,
+            symbol,
+            touches,
+        } => {
+            let Some(plugin) = plugin else {
+                // M0161 already blocks the both-absent case, so reaching here means a `symbol` with
+                // no payload.
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: format!(
+                        "this contribution names the symbol {} but ships no `plugin:`, and the \
+                         Quartermaster does not compile native code — there is no binary for it to \
+                         produce. Build the hook into an `.asi` and ship that, or, if the plugin is \
+                         somebody else's, depend on it through `load.requires` with a pinned \
+                         sha256 rather than vendoring their binary.",
+                        symbol.as_deref().unwrap_or("(none)")
+                    ),
+                });
+            };
+            if *target != crate::manifest::Target::Retail {
+                // M0160 already blocks reimpl+plugin as an Error, so this is the belt to its
+                // braces: if that rule is ever relaxed, the lowering must still not place an ASI
+                // into a runtime that has no loader for one.
+                return Err(BuildError::Unsupported {
+                    index,
+                    kind,
+                    reason: "an `.asi` is a RETAIL mechanism — `pmc_bb.dll` loads it into the \
+                             retail exe. The reimpl Code layer is a Rust/wasm/Lua plugin and has no \
+                             consumer yet, so there is nothing to place."
+                        .into(),
+                });
+            }
+
+            let path = root.join(plugin);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+
+            let name = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{} has no usable file name", path.display()),
+                })?
+                .to_string();
+
+            // The loader globs `*.asi`. A plugin under any other extension is placed correctly and
+            // never even considered — the quietest possible failure, and the file is right there
+            // looking installed. The name is also the FileArtifact claim the conflict system keys
+            // on, so renaming here would make the claim and the placement disagree.
+            if !name.to_ascii_lowercase().ends_with(".asi") {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{name} is not an `.asi`. The loader globs `*.asi` across the game folder \
+                         and scripts/plugins/update, so a file under any other extension is never \
+                         considered — it would sit in the right place, hashing correctly, doing \
+                         nothing. Rename the built DLL to `.asi`."
+                    ),
+                });
+            }
+            if name.eq_ignore_ascii_case(RESERVED_ASI) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{RESERVED_ASI} is reserved: the loader skips its own name, so a plugin \
+                         shipped under it is never loaded and nothing is logged, because the file \
+                         is never considered. Rename it."
+                    ),
+                });
+            }
+            if let Some(why) = asi_load_blocker(&bytes) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{name} cannot be loaded by the game: {why}. The loader reports this as \
+                         `[FAILED] … (error: …)` in pmc_blackbox.log rather than silently, but only \
+                         to someone who reads it."
+                    ),
+                });
+            }
+
+            let relative = format!("{ASI_SUBDIR}/{name}");
+            // The digest is recorded plainly and claims only INTEGRITY. A hash of malware is a
+            // correct hash, and a Shipment recording its own payload's digest proves internal
+            // consistency and nothing else — so the log says what an ASI is rather than letting a
+            // green digest read as a safety check.
+            log.push(format!(
+                "contributions[{index}] native_hook {name} → {relative}: {} bytes, sha256 {} \
+                 (hooks: {}) — UNRESTRICTED NATIVE CODE in the game process; the digest proves the \
+                 bytes are unmodified, not that they are safe",
+                bytes.len(),
+                sha256_hex(&bytes),
+                if touches.is_empty() {
+                    "none declared".to_string()
+                } else {
+                    touches
+                        .iter()
+                        .map(|t| t.0.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ));
+
+            Ok(Lowering::File {
+                name,
+                relative,
+                bytes,
+            })
+        }
+
+        // NOT implemented, and the reason is worth stating precisely rather than deferring: the
+        // destruction machine can be READ and cannot be WRITTEN, and three of the four gaps are
+        // outside this crate.
+        //
+        // 1. No serializer. `orchestrator::parse_state_machine` decodes the family (validated on
+        //    retail: al_veh_boat_destroyer 0xE54047D5 parses to 59 switch slots and 47 nodes), but
+        //    `StateMachine` is a VIEW — no descriptor indices, no data offsets, no container
+        //    position — so it cannot even round-trip. Nothing in the workspace writes SWIT / NODE /
+        //    STAT / CHDR / CEXE; `mercs2_workshop`'s bundler lists exactly these tags under
+        //    `preserved_only_in_raw`, which is the ecosystem carrying them verbatim because it
+        //    cannot author them either.
+        // 2. The family is a NESTED container inside the model container, so writing one means
+        //    rebuilding that container's descriptor table (tag / offset / size / descendant count
+        //    per row), re-basing every following sibling's data offset, recomputing the CSUM, and
+        //    re-emitting the whole model block. `model_inject` rewrites geometry groups, not an
+        //    arbitrary sibling subtree.
+        // 3. `states:` has no schema. Nothing in the manifest format says what that file contains,
+        //    so defining one is a format change (Plan 04), not a lowering.
+        // 4. There would be no way to check the result. The closest known destructible-model
+        //    corruption — collapsing a group's PRMT records so the machine reads off the end — is
+        //    an access violation at model instantiation that `wad_simulator` does NOT catch; it
+        //    shows up only in-game. Every structural bug this crate has shipped was caught by that
+        //    simulator, so a lowering it cannot see is a lowering with no safety net at all.
+        Contribution::EditStateMachine { target, .. } => Err(BuildError::Unsupported {
             index,
             kind,
-            reason: "not implemented in this increment".into(),
+            reason: format!(
+                "the destruction state machine can be READ but not WRITTEN. \
+                 `orchestrator::parse_state_machine` decodes the SWIT/NODE/STAT/CHDR/CEXE family \
+                 and is validated against retail, but it returns a decoded VIEW with no descriptor \
+                 indices or data offsets, and no serializer for the family exists anywhere in the \
+                 workspace — mercs2_workshop's bundler lists exactly these tags as preserved only \
+                 in raw bytes. The family is also a nested container INSIDE the model container, so \
+                 writing one means rebuilding that container's descriptor table and re-emitting the \
+                 whole model block. On top of that, `states:` has no schema: nothing in the manifest \
+                 format says what that file contains, so defining one is a format change rather \
+                 than a lowering. Shipping a guess would be worse than refusing, because the \
+                 closest known corruption of this kind faults at model instantiation and \
+                 wad_simulator does not catch it — it only appears in-game. \
+                 If you have already hand-built the block for {target:?}, ship it as `kind: raw` \
+                 with `target_layer: data`: that at least carries a declared blast radius."
+            ),
         }),
     }
 }
@@ -654,9 +1150,16 @@ pub fn build(
     // the first conflict, hiding the rest.
 
     let mut blocks = Vec::new();
+    let mut files = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        if let Some(b) = lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)? {
-            blocks.push(b);
+        match lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)? {
+            Lowering::Nothing => {}
+            Lowering::Block(b) => blocks.push(b),
+            Lowering::File {
+                name,
+                relative,
+                bytes,
+            } => files.push((name, relative, bytes)),
         }
     }
     let mutations = script_mutations(manifest, &shipment.root)?;
@@ -808,6 +1311,33 @@ pub fn build(
             destination: Destination::Overlay,
         });
         wad_path = Some(path);
+    }
+
+    // Code-layer artifacts. The digest is taken from the bytes that were WRITTEN, read back off the
+    // disk, rather than from the buffer we happen to hold: the record's whole job is to describe
+    // what is actually there, and a digest of the intended bytes would still verify after a
+    // truncated write.
+    for (name, relative, bytes) in files {
+        let path = out_dir.join(&name);
+        std::fs::write(&path, &bytes).map_err(|e| BuildError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        let written = std::fs::read(&path).map_err(|e| BuildError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        let digest = sha256_hex(&written);
+        log.push(format!(
+            "wrote {name}: {} bytes, sha256 {digest} → place at {relative}",
+            written.len()
+        ));
+        placements.push(Placement {
+            name,
+            bytes: written.len(),
+            sha256: digest,
+            destination: Destination::GameFolder { relative },
+        });
     }
 
     // The placement record: what goes where, each with its digest. Deploy/undo consumes this — a

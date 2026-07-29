@@ -99,32 +99,33 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 
 /// A kind we cannot lower yet must FAIL LOUDLY with the reason, never be skipped — a silently
 /// dropped contribution produces a WAD that looks fine and does nothing.
+///
+/// `add_outfit`, `patch_lua`, `raw` and `native_hook` all used to be here. `edit_state_machine` is
+/// what is left, and it is the one kind still genuinely unlowerable.
+///
+/// The refusal is asserted for CONTENT, not just for its variant. "Not implemented" tells an author
+/// nothing they can act on; what they need is which of the four gaps they hit, and that a
+/// hand-built block can ship through `raw` today.
 #[test]
-fn unsupported_kinds_fail_loudly_with_a_reason() {
-    // add_outfit and patch_lua used to live here; both lower now. What remains genuinely
-    // unimplemented is the rest of the kind set.
-    for (contribution, expect) in [
-        (
-            "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/a.bin\n",
-            "not implemented",
-        ),
-        (
-            "  - kind: raw\n    payload: src/a.bin\n    target_layer: data\n    touches: [\"al_veh_boat_destroyer\"]\n",
-            "not implemented",
-        ),
-    ] {
-        let dir = scratch("unsupported");
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("src/m.glb"), b"x").unwrap();
-        std::fs::write(dir.join("src/a.lua"), b"x").unwrap();
-        std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
-        let s = shipment(&dir, contribution);
-        match build::build(&s, None, None, None, None) {
-            Err(e @ BuildError::Unsupported { .. }) => {
-                assert!(e.to_string().contains(expect), "unhelpful reason: {e}");
-            }
-            other => panic!("expected Unsupported, got {other:?}"),
+fn edit_state_machine_refuses_with_the_reason_and_a_way_forward() {
+    let dir = scratch("unsupported");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/a.bin\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Unsupported { .. }) => {
+            let m = e.to_string();
+            // What is missing: no writer for the chunk family, and no schema for `states:`.
+            assert!(m.contains("no serializer"), "{m}");
+            assert!(m.contains("`states:` has no schema"), "{m}");
+            // And the escape hatch that exists today.
+            assert!(m.contains("kind: raw"), "{m}");
+            assert!(m.contains("al_veh_boat_destroyer"), "{m}");
         }
+        other => panic!("expected Unsupported, got {other:?}"),
     }
 }
 
@@ -860,6 +861,546 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
     let report = build::link_installed(&[&s], &mut game, &corpus, &root.join("out")).expect("link");
     assert!(report.wad.is_none());
     assert!(report.linked.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// raw — the open lower bound
+// ---------------------------------------------------------------------------
+//
+// `raw` is the only kind with no encoder behind it, so its tests are mostly about REFUSALS. The
+// declared `touches` is the sole source of the ASET rows, which is why it has to agree with the
+// payload's own entry table in both directions — and why each disagreement gets its own fixture.
+
+/// A payload shaped exactly as a patch block: `[u32 count][count × 16-byte rows][containers…]`.
+///
+/// Built with `build_texture_block` rather than hand-rolled bytes so the container carries a real
+/// UCFX header and a verifying CSUM — the raw lowering runs the engine's own reader over it, and a
+/// fixture that could not survive that check would only be testing the check.
+fn raw_payload(hash: u32) -> Vec<u8> {
+    const DIM: usize = 64;
+    const MIPS: usize = 5;
+    let body = mercs2_formats::texsize::linear_mip_chain_size(DIM, DIM, b"DXT1", MIPS);
+    let td = mercs2_formats::texture::TextureData {
+        width: DIM as u32,
+        height: DIM as u32,
+        format: mercs2_formats::texture::TexFormat::Bc1,
+        mip0: Vec::new(),
+        all_mips: vec![0u8; body],
+        mip_count: MIPS as u32,
+    };
+    mercs2_formats::texture::build_texture_block(hash, &td)
+}
+
+/// Two single-entry payloads spliced into one two-entry block. Splicing by hand is what makes the
+/// `[count][rows…][containers…]` layout visible, and a two-entry payload is the only way to pose
+/// "the payload carries something `touches` does not claim" WITHOUT also posing the converse.
+fn two_entry_payload(a: u32, b: u32) -> Vec<u8> {
+    let (pa, pb) = (raw_payload(a), raw_payload(b));
+    let mut out = 2u32.to_le_bytes().to_vec();
+    out.extend_from_slice(&pa[4..20]);
+    out.extend_from_slice(&pb[4..20]);
+    out.extend_from_slice(&pa[20..]);
+    out.extend_from_slice(&pb[20..]);
+    out
+}
+
+fn raw_shipment(
+    dir: &Path,
+    payload: &[u8],
+    touches: &str,
+    layer: &str,
+) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/state.block"), payload).unwrap();
+    shipment(
+        dir,
+        &format!(
+            "  - kind: raw\n    description: hand-built block\n    payload: src/state.block\n\
+             \x20   target_layer: {layer}\n    touches: [{touches}]\n"
+        ),
+    )
+}
+
+/// `raw` lowers with NO game stack — nothing about opaque bytes needs the retail WADs. That makes
+/// this the one end-to-end emission path template CI can exercise, so it asserts the full structural
+/// contract rather than just "it returned Ok".
+#[test]
+fn a_raw_block_lowers_into_the_overlay_as_a_primary_single_entry_block() {
+    const HASH: u32 = 0x00C0_FFEE;
+    let dir = scratch("raw_ok");
+    // A BARE HASH in `touches` — legal, and the spelling that exercises `asset_hash`: `0x00C0FFEE`
+    // must resolve to that hash, not to the hash of the string "0x00C0FFEE".
+    let s = raw_shipment(&dir, &raw_payload(HASH), "\"0x00C0FFEE\"", "data");
+
+    let report = build::build(&s, None, None, None, None).expect("raw must build without a game");
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
+
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+
+    // The row must be PRIMARY: low-16 `0xFFFF`. `0x0000` is not "no rung", it is a rung naming
+    // block 0 — the dangling-rung HANG.
+    let row = &block.aset_entries[0];
+    assert_eq!(row.asset_hash, HASH, "the bare hash IS the hash");
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "must register as primary");
+    assert_eq!(row.u32_1, 0xFFFF_FFFF, "_P002/_P003 must both be sentinel");
+    // The type id is derived from the payload's own entry table, never from the author.
+    assert_eq!(row.u32_3, mercs2_formats::types::TYPE_ID_TEXTURE);
+
+    // A patch block is `[entry table][containers…]`, never a bare container.
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1, "expected a single-entry block table");
+    assert_eq!(entries[0].name_hash, HASH);
+    assert_eq!(
+        &dec[20..24],
+        b"UCFX",
+        "container starts after the entry table"
+    );
+
+    // The bytes must be carried VERBATIM — `raw` promising opaque passthrough and then re-encoding
+    // would be the worst of both worlds.
+    assert_eq!(
+        dec,
+        raw_payload(HASH),
+        "the payload must survive byte for byte"
+    );
+
+    let log = report.log.join("\n");
+    assert!(log.contains("raw hand-built block"), "{log}");
+    assert!(log.contains("0x00C0FFEE"), "{log}");
+
+    // Determinism: verify-by-hash means nothing if two builds disagree.
+    let again =
+        build::build(&s, None, None, Some(&dir.join("second")), None).expect("second build");
+    assert_eq!(report.placements[0].sha256, again.placements[0].sha256);
+}
+
+/// The bug that has actually shipped from this crate, now posed as author input: a bare container
+/// where a block was required. The loader reads the `UCFX` magic as an entry count, so the WAD
+/// hashes fine and is structural nonsense — the message has to name the shape, not just refuse.
+#[test]
+fn a_bare_container_payload_is_refused_by_name() {
+    let dir = scratch("raw_bare_container");
+    let container = raw_payload(0x00C0_FFEE)[20..].to_vec();
+    assert_eq!(
+        &container[0..4],
+        b"UCFX",
+        "fixture must be a bare container"
+    );
+    let s = raw_shipment(&dir, &container, "\"0x00C0FFEE\"", "data");
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("bare CONTAINER"), "{m}");
+            assert!(m.contains("entry table"), "must say what to add: {m}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// An already-compressed payload would be compressed twice AND carry a `packed_field` computed from
+/// the wrong length — M0002's heap overrun, arrived at from the author's side.
+#[test]
+fn an_sges_compressed_payload_is_refused() {
+    let dir = scratch("raw_sges");
+    let packed = mercs2_formats::sges::compress_sges(&raw_payload(0x00C0_FFEE)).unwrap();
+    let s = raw_shipment(&dir, &packed, "\"0x00C0FFEE\"", "data");
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            assert!(e.to_string().contains("DECOMPRESSED"), "{e}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// `touches` claiming something the payload does not carry publishes an ASET row pointing at a block
+/// with no such asset in it. The lookup resolves, the block loads, and the asset is simply absent.
+#[test]
+fn a_touch_the_payload_does_not_carry_is_refused() {
+    let dir = scratch("raw_missing");
+    let s = raw_shipment(
+        &dir,
+        &raw_payload(0x00C0_FFEE),
+        "\"0x00C0FFEE\", \"0xDEADBEEF\"",
+        "data",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("0xDEADBEEF"), "must name the hash: {m}");
+            assert!(m.contains("does not carry"), "{m}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// The converse, and the more dangerous direction: an asset in the payload that `touches` omits gets
+/// no ASET row (M0004's silent wedge) and is invisible to the conflict system, so two Shipments
+/// could overwrite one asset with neither being told.
+#[test]
+fn an_asset_the_payload_carries_but_does_not_claim_is_refused() {
+    let dir = scratch("raw_extra");
+    let s = raw_shipment(
+        &dir,
+        &two_entry_payload(0x00C0_FFEE, 0x0000_BEEF),
+        "\"0x00C0FFEE\"",
+        "data",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("0x0000BEEF"), "must name the hash: {m}");
+            assert!(m.contains("does not claim"), "{m}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// Both entries claimed: a multi-entry raw payload is legal and mints one row per entry.
+#[test]
+fn a_multi_entry_payload_mints_a_row_for_every_entry() {
+    let dir = scratch("raw_two");
+    let s = raw_shipment(
+        &dir,
+        &two_entry_payload(0x00C0_FFEE, 0x0000_BEEF),
+        "\"0x00C0FFEE\", \"0x0000BEEF\"",
+        "data",
+    );
+    let report = build::build(&s, None, None, None, None).expect("build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let rows = &contents.blocks[0].aset_entries;
+    assert_eq!(rows.len(), 2);
+    let mut hashes: Vec<u32> = rows.iter().map(|r| r.asset_hash).collect();
+    hashes.sort_unstable();
+    assert_eq!(hashes, vec![0x0000_BEEF, 0x00C0_FFEE]);
+    assert!(
+        rows.iter().all(|r| r.u32_2 & 0xFFFF == 0xFFFF),
+        "every row must be primary"
+    );
+}
+
+/// The overlay is a WAD, and only the Data layer lives in one. The other three are refused BY NAME
+/// with what to use instead — the script case in particular, where lowering the obvious thing would
+/// silently delete every other installed Shipment's Lua.
+#[test]
+fn the_non_data_layers_are_refused_with_the_kind_to_use_instead() {
+    for (layer, expect) in [
+        ("script", "patch_lua"),
+        ("code", "native_hook"),
+        ("runtime", "no artifact"),
+    ] {
+        let dir = scratch(&format!("raw_layer_{layer}"));
+        let s = raw_shipment(&dir, &raw_payload(0x00C0_FFEE), "\"0x00C0FFEE\"", layer);
+        match build::build(&s, None, None, None, None) {
+            Err(e @ BuildError::Unsupported { .. }) => {
+                assert!(e.to_string().contains(expect), "{layer}: {e}");
+            }
+            other => panic!("expected Unsupported for {layer}, got {other:?}"),
+        }
+    }
+}
+
+/// ★ A real retail block carried through `raw` verbatim, against the real `vz.wad`.
+///
+/// The synthetic fixtures above prove the checks; this proves the passthrough on bytes we did not
+/// author. A donor block is the right subject because it is a shape the engine demonstrably loads,
+/// so anything the lowering breaks shows up as a difference from something known-good.
+#[test]
+fn a_retail_block_survives_being_carried_through_raw() {
+    let Some(game) = discovered_game() else {
+        return;
+    };
+    let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let hash = mercs2_formats::hash::pandemic_hash_m2("oc_veh_helicopter_md500");
+    let donor = mercs2_formats::donor::donor_block(&paths, hash).expect("donor block");
+
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&donor);
+    assert!(count >= 1);
+    let touches = entries
+        .iter()
+        .map(|e| format!("\"0x{:08X}\"", e.name_hash))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let dir = scratch("raw_retail");
+    let s = raw_shipment(&dir, &donor, &touches, "data");
+    let report = build::build(&s, None, None, None, None).expect("a retail block must carry");
+    eprintln!("{}", report.log.join("\n"));
+
+    let wad = report.wad.expect("a WAD");
+    let on_disk = std::fs::read(&wad).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let block = &contents.blocks[0];
+    assert_eq!(block.aset_entries.len(), entries.len());
+    assert!(block
+        .aset_entries
+        .iter()
+        .all(|r| r.u32_2 & 0xFFFF == 0xFFFF));
+
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    assert_eq!(dec, donor, "retail bytes must survive verbatim");
+
+    // The self-check must be clean on our own output, and `verify_emitted` already required it
+    // before the write — this asserts the same thing from outside, so a regression in that call
+    // site is visible here too.
+    assert_eq!(
+        mercs2_quartermaster::lint::artifact_checks(&contents.blocks),
+        vec![]
+    );
+    eprintln!(
+        "wad_simulator subject: cargo run --bin wad_simulator -- --wad {} --base-wad {} \
+         --skip-audio",
+        wad.display(),
+        paths[0].display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// native_hook — the Code layer, which emits no WAD at all
+// ---------------------------------------------------------------------------
+
+/// A PE image carrying only the headers the loadability check reads.
+///
+/// Deliberately header-only. `asi_load_blocker` inspects exactly four things — `MZ`, `e_lfanew`,
+/// the `PE\0\0` signature, and the COFF `Machine`/`Characteristics` words — so a fixture with a
+/// real body would add bytes no assertion depends on. The offsets are pinned against the real
+/// `pmc_bb.dll` v3.0.0, which reads `e_lfanew=0x80, machine=0x014C, characteristics=0x230E`.
+fn fake_asi(machine: u16, characteristics: u16) -> Vec<u8> {
+    let pe_at = 0x80usize;
+    let mut out = vec![0u8; pe_at + 24];
+    out[0..2].copy_from_slice(b"MZ");
+    out[0x3C..0x40].copy_from_slice(&(pe_at as u32).to_le_bytes());
+    out[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+    let coff = pe_at + 4;
+    out[coff..coff + 2].copy_from_slice(&machine.to_le_bytes());
+    out[coff + 18..coff + 20].copy_from_slice(&characteristics.to_le_bytes());
+    // A distinguishable tail, so "the bytes that were written are the bytes we supplied" is a real
+    // assertion rather than one two all-zero buffers would also satisfy.
+    out.extend_from_slice(b"quartermaster-asi-fixture");
+    out
+}
+
+/// A 32-bit DLL, the shape the loader can actually load.
+fn loadable_asi() -> Vec<u8> {
+    fake_asi(0x014C, 0x230E)
+}
+
+fn hook_shipment(dir: &Path, file: &str, bytes: &[u8], extra: &str) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join(file), bytes).unwrap();
+    shipment(
+        dir,
+        &format!("  - kind: native_hook\n    target: retail\n    plugin: src/{file}\n{extra}"),
+    )
+}
+
+/// ★ `native_hook` produces a PLACEMENT, not a block — and the record is what makes the drop
+/// reversible. An overlay is undone by deleting one file; an `.asi` in the game folder is not
+/// backable-out unless something wrote down what was put where.
+#[test]
+fn a_native_hook_places_a_file_and_records_its_digest() {
+    let dir = scratch("hook_ok");
+    let asi = loadable_asi();
+    let s = hook_shipment(
+        &dir,
+        "mybridge.asi",
+        &asi,
+        "    touches: [\"0x004CF340\"]\n",
+    );
+
+    let report = build::build(&s, None, None, None, None).expect("native_hook must build");
+    assert!(
+        report.wad.is_none(),
+        "the Code layer contributes nothing to a WAD"
+    );
+    assert_eq!(report.placements.len(), 1);
+    let p = &report.placements[0];
+    assert_eq!(p.name, "mybridge.asi");
+    assert_eq!(
+        p.destination,
+        Destination::GameFolder {
+            relative: format!("{}/mybridge.asi", build::ASI_SUBDIR)
+        },
+        "the builder chooses the path; there is no manifest field that could name the exe"
+    );
+
+    // Verified BY HASH against what is on disk, not against the buffer the builder held.
+    let written = std::fs::read(dir.join("build/mybridge.asi")).expect("the .asi must be emitted");
+    assert_eq!(written, asi, "the plugin must be copied verbatim");
+    assert_eq!(p.sha256, build::sha256_hex(&written));
+    assert_eq!(p.bytes, written.len());
+
+    // The record deploy consumes has to carry all three, or an undo cannot verify what it removes.
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+            .unwrap();
+    let entry = &doc["placements"][0];
+    assert_eq!(entry["name"], "mybridge.asi");
+    assert_eq!(entry["sha256"], p.sha256);
+    assert_eq!(entry["destination"]["kind"], "game_folder");
+    assert_eq!(
+        entry["destination"]["relative"],
+        format!("{}/mybridge.asi", build::ASI_SUBDIR)
+    );
+
+    // The log must state what an ASI is. A recorded digest proves the bytes are unmodified and
+    // nothing else, and a green "verified" reads as "safe" to someone installing by clicking.
+    let log = report.log.join("\n");
+    assert!(log.contains("UNRESTRICTED NATIVE CODE"), "{log}");
+    assert!(log.contains(&p.sha256), "{log}");
+    assert!(
+        log.contains("0x004CF340"),
+        "the hooks must be recorded: {log}"
+    );
+}
+
+/// The chosen destination must be one the loader actually searches. `pmc_bb.dll` v3.0.0 globs
+/// `%s*.asi`, `%sscripts\`, `%splugins\` and `%supdate\` — read from the binary, not assumed — so a
+/// subdir outside that set would place the file where nothing looks for it.
+#[test]
+fn the_chosen_subdir_is_one_the_loader_searches() {
+    assert!(
+        ["", "scripts", "plugins", "update"].contains(&build::ASI_SUBDIR),
+        "{} is not a directory pmc_bb.dll globs",
+        build::ASI_SUBDIR
+    );
+}
+
+/// The loader skips its own name, so a plugin shipped as `pmc_bb.asi` is placed correctly, hashes
+/// correctly, and is never even considered — nothing is logged, because nothing was tried.
+#[test]
+fn the_loaders_own_name_is_refused() {
+    let dir = scratch("hook_reserved");
+    let s = hook_shipment(&dir, "pmc_bb.asi", &loadable_asi(), "");
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            assert!(e.to_string().contains("reserved"), "{e}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// The loader globs `*.asi`. Any other extension is placed and never considered — the quietest
+/// failure available, with the file sitting there looking installed.
+#[test]
+fn a_plugin_that_is_not_an_asi_is_refused() {
+    let dir = scratch("hook_ext");
+    let s = hook_shipment(&dir, "mybridge.dll", &loadable_asi(), "");
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            assert!(e.to_string().contains("globs `*.asi`"), "{e}");
+        }
+        other => panic!("expected Lower, got {other:?}"),
+    }
+}
+
+/// A plugin the game could not load, caught by its PE header. Both cases fail at `LoadLibrary` —
+/// the game is a 32-bit process, and an executable image is not a DLL — and both are visible only
+/// in a log the modder has to know to read.
+#[test]
+fn a_plugin_the_game_cannot_load_is_refused() {
+    for (bytes, expect) in [
+        (fake_asi(0x8664, 0x230E), "32-bit process"),
+        (fake_asi(0x014C, 0x010E), "IMAGE_FILE_DLL"),
+        (
+            b"not a pe image at all, just some bytes here".to_vec(),
+            "PE image",
+        ),
+    ] {
+        let dir = scratch("hook_badpe");
+        let s = hook_shipment(&dir, "mybridge.asi", &bytes, "");
+        match build::build(&s, None, None, None, None) {
+            Err(e @ BuildError::Lower { .. }) => {
+                assert!(e.to_string().contains(expect), "{e}");
+            }
+            other => panic!("expected Lower for {expect}, got {other:?}"),
+        }
+    }
+}
+
+/// A `symbol` with no payload asks the Quartermaster to produce native code, which it does not do.
+/// The reason has to point at both real options rather than just refusing.
+#[test]
+fn a_symbol_without_a_plugin_says_what_to_do_instead() {
+    let dir = scratch("hook_symbol");
+    let s = shipment(
+        &dir,
+        "  - kind: native_hook\n    target: retail\n    symbol: MyDetour\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e @ BuildError::Unsupported { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("MyDetour"), "{m}");
+            assert!(m.contains("load.requires"), "{m}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+/// An ASI on a reimpl target is blocked by M0160 before lowering is reached — asserted here so the
+/// two mechanisms cannot both be removed on the assumption the other covers it.
+#[test]
+fn an_asi_on_a_reimpl_target_never_reaches_lowering() {
+    let dir = scratch("hook_reimpl");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/mybridge.asi"), loadable_asi()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: native_hook\n    target: reimpl\n    plugin: src/mybridge.asi\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => {
+            assert!(d.iter().any(|x| x.rule.code == "M0160"), "{d:?}");
+        }
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+    assert!(
+        !dir.join("build/mybridge.asi").exists(),
+        "nothing may be placed"
+    );
+}
+
+/// A Shipment may carry both layers at once, and both must appear in one record — that is the
+/// composite case Modkit's deploy has to handle.
+#[test]
+fn a_shipment_can_emit_a_wad_and_a_file_together() {
+    let dir = scratch("hook_and_wad");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/state.block"), raw_payload(0x00C0_FFEE)).unwrap();
+    std::fs::write(dir.join("src/mybridge.asi"), loadable_asi()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: raw\n    payload: src/state.block\n    target_layer: data\n\
+         \x20   touches: [\"0x00C0FFEE\"]\n\
+         \x20 - kind: native_hook\n    target: retail\n    plugin: src/mybridge.asi\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("build");
+    assert_eq!(report.placements.len(), 2);
+    assert_eq!(report.placements[0].destination, Destination::Overlay);
+    assert!(matches!(
+        report.placements[1].destination,
+        Destination::GameFolder { .. }
+    ));
+    // Determinism covers the file half too: a placement record whose digests move between builds
+    // cannot be verified at deploy.
+    let again = build::build(&s, None, None, Some(&dir.join("second")), None).expect("second");
+    assert_eq!(
+        report
+            .placements
+            .iter()
+            .map(|p| p.sha256.clone())
+            .collect::<Vec<_>>(),
+        again
+            .placements
+            .iter()
+            .map(|p| p.sha256.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 // ---------------------------------------------------------------------------

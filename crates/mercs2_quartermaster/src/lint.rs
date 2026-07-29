@@ -18,10 +18,10 @@
 //! the only stage that can catch a defect the LOWERING introduced rather than one the author wrote,
 //! which is the class of bug that has actually shipped here.
 //!
-//! Several of the worst traps still cannot be checked at all — a short texture BODY needs the
-//! target's resident mip-chain size, and the non-resident-costume wedge needs a residency
-//! predicate that does not exist yet. Those are registered in [`PENDING`] rather than silently
-//! absent, so the gap is visible instead of being mistaken for a clean bill of health.
+//! Several of the worst traps still cannot be checked at all — the non-resident-costume wedge needs
+//! a residency predicate that does not exist yet, and the non-square `page_count` livelock rests on
+//! RE that is still open. Those are registered in [`PENDING`] rather than silently absent, so the
+//! gap is visible instead of being mistaken for a clean bill of health.
 //!
 //! ## Gating
 //!
@@ -180,17 +180,8 @@ pub const RULES: &[Rule] = &[
 /// clean bill of health, which is worse than no linter. These land with the builder (increment 5),
 /// where the WAD stack is in hand.
 pub const PENDING: &[Rule] = &[
-    // M0001 and M0002 have moved to `ARTIFACT_RULES` — both are answerable against the emitted WAD.
-    Rule {
-        code: "M0003",
-        title: "texture BODY shorter than linear_mip_chain_size — BUFFER_TOO_SMALL, world-load livelock",
-        doc: "docs/modding/field_guide.md#trap-7--your-reskin-makes-the-game-hang-on-the-loading-screen-not-crash--hang",
-    },
-    Rule {
-        code: "M0004",
-        title: "new asset hash minted without an ASET row — loader wedges silently at world-load",
-        doc: "docs/modding/field_guide.md#trap-1--your-mod-didnt-load-and-there-is-no-error",
-    },
+    // M0001, M0002, M0003 and M0004 have moved to `ARTIFACT_RULES` — all four are answerable
+    // against the emitted WAD.
     Rule {
         code: "M0005",
         title: "non-resident costume on the on-demand path — STATE_WAITFORGAME wedge",
@@ -233,7 +224,7 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         if let Contribution::ReplaceTexture { target, .. } = c {
-            let hash = mercs2_formats::hash::pandemic_hash_m2(target);
+            let hash = crate::manifest::asset_hash(target);
             // Use EVERY row, not just the primary one: a shared texture may have no primary row at
             // all, and looking only for one would silently skip exactly those assets.
             let rows = game.aset_rows(hash, mercs2_formats::types::TYPE_ID_TEXTURE);
@@ -299,6 +290,22 @@ pub const M0002_PACKED_FIELD_UNDER_CLAIM: Rule = Rule {
     doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packedfield-bug",
 };
 
+/// M0003, promoted out of [`PENDING`]. Answerable only against an emitted WAD: the INFO/BODY pair
+/// this rule compares does not exist until lowering has encoded one.
+pub const M0003_TEXTURE_BODY_SHORT: Rule = Rule {
+    code: "M0003",
+    title: "texture BODY shorter than linear_mip_chain_size — BUFFER_TOO_SMALL, world-load livelock",
+    doc: "docs/modding/field_guide.md#trap-7--your-reskin-makes-the-game-hang-on-the-loading-screen-not-crash--hang",
+};
+
+/// M0004, promoted out of [`PENDING`]. Answerable only against an emitted WAD: it is a set
+/// difference between two tables that only both exist once the WAD is assembled.
+pub const M0004_NO_ASET_ROW: Rule = Rule {
+    code: "M0004",
+    title: "new asset hash minted without an ASET row — loader wedges silently at world-load",
+    doc: "docs/modding/field_guide.md#trap-1--your-mod-didnt-load-and-there-is-no-error",
+};
+
 /// M0180: a hash claimed by two blocks. Not HANG-class — the registry is first-writer-wins, so the
 /// outcome is defined — but one of the two contributions silently does nothing.
 pub const M0180_DUPLICATE_PRIMARY: Rule = Rule {
@@ -325,6 +332,8 @@ pub const M0182_BLOCK_UNREADABLE: Rule = Rule {
 pub const ARTIFACT_RULES: &[Rule] = &[
     M0001_DANGLING_RUNG,
     M0002_PACKED_FIELD_UNDER_CLAIM,
+    M0003_TEXTURE_BODY_SHORT,
+    M0004_NO_ASET_ROW,
     M0180_DUPLICATE_PRIMARY,
     M0181_HEADER_OVERFLOW,
     M0182_BLOCK_UNREADABLE,
@@ -343,7 +352,7 @@ pub const ARTIFACT_RULES: &[Rule] = &[
 pub fn artifact_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> Vec<Diagnostic> {
     use mercs2_formats::patch_wad::{validate_blocks_all, BlockFinding, BlockStage};
 
-    validate_blocks_all(blocks, BlockStage::Emitted)
+    let mut out: Vec<Diagnostic> = validate_blocks_all(blocks, BlockStage::Emitted)
         .into_iter()
         .map(|finding| {
             let (rule, severity) = match &finding {
@@ -367,7 +376,142 @@ pub fn artifact_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> Vec<
                 fix: None,
             }
         })
-        .collect()
+        .collect();
+
+    out.extend(texture_body_checks(blocks));
+    out.extend(unreachable_hash_checks(blocks));
+    out
+}
+
+/// A block's payload as the engine sees it after inflation.
+///
+/// `None` when it will not inflate — that is M0182's finding, already reported by
+/// [`mercs2_formats::patch_wad::validate_blocks_all`], so the entry-table rules stay quiet on it
+/// rather than adding a second, less informative complaint about the same block.
+fn inflated(blk: &mercs2_formats::patch_wad::PatchBlock) -> Option<Vec<u8>> {
+    if blk.compressed_data.len() >= 4 && &blk.compressed_data[0..4] == b"sges" {
+        mercs2_formats::sges::decompress_sges(&blk.compressed_data).ok()
+    } else {
+        // A stored block: the engine does not inflate it, so its bytes are the payload.
+        Some(blk.compressed_data.clone())
+    }
+}
+
+/// Walk a block as `[entry table][containers…]`, but only when it actually IS one.
+///
+/// Every block this crate emits and every block it carries out of retail has that shape, and
+/// `parse_block_entry_table` reads the first word as a count unconditionally — so handing it an
+/// opaque payload yields a garbage count and, from there, confidently wrong findings. Requiring the
+/// walk to complete (every declared entry parsed, every container in bounds) is what makes the
+/// difference between "this block has no unreachable hashes" and "this block is not an entry-table
+/// block", and only the first is something to report on.
+fn coherent_block(raw: &[u8], label: &str) -> Option<mercs2_formats::ucfx::ParsedBlock> {
+    let (parsed, _issues) = mercs2_formats::ucfx::walk_decompressed_block(raw, label);
+    let complete = parsed.entries.len() == parsed.entry_count as usize
+        && parsed.containers.len() == parsed.entries.len();
+    complete.then_some(parsed)
+}
+
+/// M0003 — a texture BODY shorter than the mip chain the engine will read out of it.
+///
+/// The predicate is [`wad_simulator::texture::check_embedded_texture_buffers`], which pairs each
+/// `INFO` descriptor with the `BODY`/`DXT1` that follows it and defers to
+/// `texture_buffer_too_small`. It is **wrapped, not reimplemented**: that function carries two
+/// gates verified against retail — streamed textures legitimately ship a short resident tail
+/// (9,562 of them in `vz.wad`), and the chain is sized from the CLAIMED mip count rather than the
+/// full dimension chain — and a second copy of the predicate is a second copy of those gates to
+/// keep in step. Without them the rule fires on almost every texture in the game.
+///
+/// The artifact stage is the only one that can answer this. The hermetic stage has a PNG and a
+/// target name; `INFO` and `BODY` do not exist until lowering has encoded them, and the defect this
+/// catches is one the ENCODER introduces — a claimed mip count the body does not cover.
+fn texture_body_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for blk in blocks {
+        let Some(raw) = inflated(blk) else { continue };
+        let Some(parsed) = coherent_block(&raw, &blk.path_string) else {
+            continue;
+        };
+        for (i, container) in parsed.containers.iter().enumerate() {
+            let label = format!("{} entry[{i}]", blk.path_string);
+            // Runs over EVERY container, not just `type_hash == TEXTURE`: a model or layer
+            // container that embeds a texture never gets a texture dispatch of its own, so gating
+            // on the entry's type would skip exactly the case that has no other check.
+            let (issues, _violations) =
+                wad_simulator::texture::check_embedded_texture_buffers(container, &label);
+            for message in issues {
+                out.push(Diagnostic {
+                    rule: M0003_TEXTURE_BODY_SHORT,
+                    severity: Severity::Hang,
+                    message,
+                    at: None,
+                    fix: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// M0004 — an asset in a block that no ASET row names, so nothing can ask for it.
+///
+/// The forward direction of the question `aset_validate` answers backwards: that one asks whether
+/// every ASET row has a block behind it, this one asks whether every asset in a block has a row in
+/// front of it. `block_internal_hashes − aset_hashes`.
+///
+/// **The invariant is retail-verified, not assumed.** Across `vz.wad`'s 11,370 blocks there are
+/// 55,429 entry-table rows covering 30,006 distinct hashes, and **every one of them has an ASET
+/// row** — 30,645 rows, zero orphans. Sub-resources meant to be reached through their parent are
+/// not the exception: they get a row too, a non-primary one. So an entry with no row anywhere is a
+/// shape the shipping game never takes.
+///
+/// It is HANG-class because of what happens next: the field guide's Trap 1 records the heli
+/// experiment, where a minted asset without its row (block index + sub `0xFFFF` + type id) made the
+/// world load simply never complete — no crash, no log line.
+///
+/// Scoped to the emitted WAD on purpose. An overlay's rows shadow retail's per hash, so "no row in
+/// this WAD" is the answerable question; whether retail happens to carry a row for the same hash
+/// would need the game stack, and a carried-donor hash that retail still names resolves to retail's
+/// copy rather than wedging. In practice this does not weaken the rule: the blocks this crate
+/// carries out of retail are single-entry, and the linked scripts block mints a row per entry.
+fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> Vec<Diagnostic> {
+    let aset_hashes: std::collections::HashSet<u32> = blocks
+        .iter()
+        .flat_map(|b| b.aset_entries.iter().map(|e| e.asset_hash))
+        .collect();
+
+    let mut out = Vec::new();
+    let mut reported = std::collections::HashSet::new();
+    for blk in blocks {
+        let Some(raw) = inflated(blk) else { continue };
+        let Some(parsed) = coherent_block(&raw, &blk.path_string) else {
+            continue;
+        };
+        for entry in &parsed.entries {
+            // A zero name_hash is padding, never an asset.
+            if entry.name_hash == 0 || aset_hashes.contains(&entry.name_hash) {
+                continue;
+            }
+            if !reported.insert(entry.name_hash) {
+                continue;
+            }
+            out.push(Diagnostic {
+                rule: M0004_NO_ASET_ROW,
+                severity: Severity::Hang,
+                message: format!(
+                    "block {} carries asset 0x{:08X} (type 0x{:08X}) but no ASET row in this WAD \
+                     names it, so nothing can resolve it by hash. Retail never ships this shape — \
+                     all 30,006 asset hashes in vz.wad's blocks have a row. An asset minted without \
+                     one does not fail loudly: the world load stops completing and the game sits on \
+                     the loading screen.",
+                    blk.path_string, entry.name_hash, entry.type_hash
+                ),
+                at: None,
+                fix: None,
+            });
+        }
+    }
+    out
 }
 
 /// One finding.
@@ -470,7 +614,7 @@ pub fn lint(
             out.push(Diagnostic {
                 rule: M0130_BARE_HASH,
                 severity: Severity::Warning,
-                message: s.to_string(),
+                message: s.detail(),
                 at: Some(s.index),
                 fix: Some(s.name.clone()),
             });
@@ -726,6 +870,135 @@ mod artifact_check_tests {
         assert_eq!(artifact_checks(&[blk]), vec![]);
     }
 
+    // --- M0003 / M0004 fixtures ------------------------------------------------
+    //
+    // Both rules read a block as `[entry table][containers…]`, so their fixtures are REAL texture
+    // blocks built by `build_texture_block` rather than the `b"payload"` stand-in above. That
+    // stand-in is not an entry-table block at all, which is exactly why the existing fixtures stay
+    // silent under the new rules.
+
+    /// A fully-resident DXT1 texture block: `claimed_mips` in INFO, `written_mips` levels of body.
+    /// Equal counts is what the lowering emits; a claim larger than the body is the defect.
+    fn texture_block(
+        name_hash: u32,
+        dim: usize,
+        claimed_mips: u32,
+        written_mips: usize,
+    ) -> Vec<u8> {
+        let body_len =
+            mercs2_formats::texsize::linear_mip_chain_size(dim, dim, b"DXT1", written_mips);
+        let td = mercs2_formats::texture::TextureData {
+            width: dim as u32,
+            height: dim as u32,
+            format: mercs2_formats::texture::TexFormat::Bc1,
+            mip0: Vec::new(),
+            all_mips: vec![0u8; body_len],
+            mip_count: claimed_mips,
+        };
+        mercs2_formats::texture::build_texture_block(name_hash, &td)
+    }
+
+    fn block_from(raw: &[u8], path: &str, rows: Vec<AsetEntry>) -> PatchBlock {
+        PatchBlock::from_decompressed(raw, path.into(), rows, None).unwrap()
+    }
+
+    /// M0003 fires when INFO claims more mip levels than BODY carries. The engine sizes its read
+    /// from the CLAIM, over-reads the surface array, and `STATUS_BUFFER_TOO_SMALL` leaves the page
+    /// short of ready state — the world load then never completes.
+    #[test]
+    fn m0003_fires_when_the_body_is_short_for_the_claimed_chain() {
+        // 64x64 DXT1: retail's convention is 5 levels (2,728 B). Claim all 5, write only mip 0.
+        let raw = texture_block(0xBEEF, 64, 5, 1);
+        let blk = block_from(
+            &raw,
+            "blocks\\VZ\\mod_short.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 27)],
+        );
+        let d = artifact_checks(&[blk]);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].rule.code, "M0003");
+        assert_eq!(d[0].severity, Severity::Hang);
+        assert!(d[0].message.contains("2728"), "{}", d[0].message);
+    }
+
+    /// M0003 stays quiet on the shape our own lowering emits — a claim the body covers exactly.
+    /// A rule that fired here would fire on every texture this crate builds.
+    #[test]
+    fn m0003_is_quiet_on_a_complete_mip_chain() {
+        let raw = texture_block(0xBEEF, 64, 5, 5);
+        let blk = block_from(
+            &raw,
+            "blocks\\VZ\\mod_full.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 27)],
+        );
+        assert_eq!(artifact_checks(&[blk]), vec![]);
+    }
+
+    /// The gate that makes M0003 usable at all: a STREAMED texture ships a short resident tail by
+    /// design, and retail has 9,562 of them. Pinned here because the gate lives in `wad_simulator`
+    /// and this crate now depends on it — if that predicate ever loses the residency check, the
+    /// rule starts firing on almost every texture in the game and this test says so.
+    #[test]
+    fn m0003_is_quiet_on_a_streamed_texture_with_a_short_tail() {
+        let mut raw = texture_block(0xBEEF, 64, 5, 1);
+        // INFO is the first leaf of the single container: [4 count][16 entry][20 UCFX hdr]
+        // [2 x 20 descriptors] = 80 bytes in. Bytes 26..32 of INFO are the partial-residency
+        // descriptor; a non-zero value there is what marks the body a streamed tail.
+        let info_at = 4 + 16 + 20 + 2 * 20;
+        raw[info_at + 26..info_at + 32].copy_from_slice(&[0x01, 0x00, 0x0e, 0x00, 0x10, 0x00]);
+        let blk = block_from(
+            &raw,
+            "blocks\\VZ\\mod_streamed.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 27)],
+        );
+        assert_eq!(artifact_checks(&[blk]), vec![]);
+    }
+
+    /// M0004 fires on an asset no ASET row names. The block is well-formed and the payload is
+    /// intact — it is simply unreachable, which is the whole reason this failure is silent.
+    #[test]
+    fn m0004_fires_when_a_block_asset_has_no_aset_row() {
+        let raw = texture_block(0xC0FFEE, 64, 5, 5);
+        // The row names a DIFFERENT hash, so the block's own asset is unnamed.
+        let blk = block_from(
+            &raw,
+            "blocks\\VZ\\mod_orphan.block",
+            vec![AsetEntry::new(0xBEEF, 0xFFFF_FFFF, 0x0000_FFFF, 27)],
+        );
+        let d = artifact_checks(&[blk]);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].rule.code, "M0004");
+        assert_eq!(d[0].severity, Severity::Hang);
+        assert!(d[0].message.contains("0x00C0FFEE"), "{}", d[0].message);
+    }
+
+    /// M0004 stays quiet when the row names the asset — the shape every lowering path emits.
+    #[test]
+    fn m0004_is_quiet_when_every_block_asset_is_named() {
+        let raw = texture_block(0xC0FFEE, 64, 5, 5);
+        let blk = block_from(
+            &raw,
+            "blocks\\VZ\\mod_named.block",
+            vec![AsetEntry::new(0xC0FFEE, 0xFFFF_FFFF, 0x0000_FFFF, 27)],
+        );
+        assert_eq!(artifact_checks(&[blk]), vec![]);
+    }
+
+    /// A row may live in ANOTHER block of the same WAD and still name the asset — the ASET table is
+    /// per-archive, not per-block, and the linked-scripts path relies on that. Checking rows
+    /// block-locally would report a WAD the engine loads fine as a hang.
+    #[test]
+    fn m0004_accepts_a_row_carried_by_a_sibling_block() {
+        let raw = texture_block(0xC0FFEE, 64, 5, 5);
+        let carrier = block_from(&raw, "blocks\\VZ\\mod_a.block", vec![]);
+        let rows = block_from(
+            b"payload",
+            "blocks\\VZ\\mod_b.block",
+            vec![AsetEntry::new(0xC0FFEE, 0xFFFF_FFFF, 0x0000_FFFF, 27)],
+        );
+        assert_eq!(artifact_checks(&[carrier, rows]), vec![]);
+    }
+
     /// M0180 fires but does not block: the registry is first-writer-wins, so this is a defined
     /// outcome, not a hang. It matters because one contribution silently does nothing.
     #[test]
@@ -746,13 +1019,15 @@ mod artifact_check_tests {
     /// Every artifact rule is registered, so `qm` can list what it checks.
     #[test]
     fn artifact_rules_are_registered() {
-        for code in ["M0001", "M0002", "M0180", "M0181", "M0182"] {
+        for code in [
+            "M0001", "M0002", "M0003", "M0004", "M0180", "M0181", "M0182",
+        ] {
             assert!(
                 ARTIFACT_RULES.iter().any(|r| r.code == code),
                 "{code} unregistered"
             );
         }
-        for code in ["M0001", "M0002"] {
+        for code in ["M0001", "M0002", "M0003", "M0004"] {
             assert!(
                 !PENDING.iter().any(|r| r.code == code),
                 "{code} is implemented, not pending"

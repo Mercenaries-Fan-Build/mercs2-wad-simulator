@@ -172,14 +172,14 @@ is a small addition, three need real work.
 |---|---|---|
 | M0002 | `packed_field` under-claim → heap overrun | ✅ **DONE** — `patch_wad::validate_blocks_all` + `lint::artifact_checks` |
 | M0001 | Dangling `_P001/2/3` rungs → 549 GB request, stream hang | ✅ **DONE** — same pair. Written fresh in `mercs2_formats` rather than lifted from `mercs2_probe`: the rung walk is trivial, and the hard part turned out to be *when* it may run, not how |
-| M0003 | BODY < `linear_mip_chain_size` → BUFFER_TOO_SMALL livelock | **Most mature** — `wad_simulator::texture::texture_buffer_too_small:109`, with two retail-verified false-positive gates (9,562 legitimately-short streamed bodies). Do **not** reimplement |
-| M0004 | New hash minted with no ASET row → silent wedge | **Inverse only.** `aset_validate` answers the opposite question. The forward direction is a set difference (`block_internal_hashes − aset_hashes`) whose two halves sit adjacent in `simulate.rs:618-628` and is never taken |
+| M0003 | BODY < `linear_mip_chain_size` → BUFFER_TOO_SMALL livelock | ✅ **DONE** — `lint::artifact_checks` wraps `wad_simulator::texture::check_embedded_texture_buffers` |
+| M0004 | New hash minted with no ASET row → silent wedge | ✅ **DONE** — same stage. The set difference, with the invariant behind it measured against retail rather than assumed |
 | M0006 | `replace_texture` target shared by several materials | **No refcount anywhere.** Primitives exist (`parse_mtrl`, `mtrl_diffuse_hashes`); `simulate.rs:276` `xref_sources` keeps only the *first* referrer — making it a `Vec` yields the fan-in map nearly free. **M0009 already ships ~70% of this rule's real blast radius** |
 | M0005 | Non-resident costume → `STATE_WAITFORGAME` wedge | **Nothing.** Captured only in a doc comment in `override_base_blocks.rs:1-13`. Needs a residency predicate and a costume classifier |
 | M0008 | Small/non-square `page_count` livelock | **Nothing.** No code branches on `width != height`. The RE it rests on is `render_core_code_map.md` in the notes repo, which records the buffer-sizing livelock as a **known-open** converter fidelity issue — so this rule is blocked on research, not just implementation |
 
-Suggested order: ~~M0002 → M0001~~ → M0003 → M0004, then reassess M0006 (M0009 may already suffice)
-and treat M0005/M0008 as research, not implementation.
+Suggested order: ~~M0002 → M0001 → M0003 → M0004~~ — all four done. Next is reassessing M0006
+(M0009 may already suffice); M0005/M0008 stay research, not implementation.
 
 **Blocker:** M0003 needs `wad_simulator`'s `[lib]` — which now exists, so this is unblocked.
 
@@ -223,6 +223,49 @@ reaches the disk where its presence would read as success.
 
 Tests: 122 in `mercs2_quartermaster`, 280 in `mercs2_formats`, all green, none ignored. Every new
 rule ships the firing/quiet fixture pair this document requires.
+
+### Step complete — M0003 + M0004 (2026-07-28)
+
+Both landed in `artifact_checks` alongside M0001/M0002, which makes four of the seven HANG-class
+rules answerable in one stage. That is not a coincidence: every one of them is a property of the
+BYTES, and the manifest is silent about all four.
+
+**M0003 is wrapped, not written.** `wad_simulator` got its `[lib]` in step C, and `[workspace.
+dependencies]` got a `wad_simulator` row so the linter could actually name it — that row was the
+only thing still missing. The linter calls `texture::check_embedded_texture_buffers`, which pairs
+each `INFO` descriptor with the `BODY` after it and defers to `texture_buffer_too_small`. It runs
+over **every** container rather than only entries typed `TYPE_HASH_TEXTURE`: a model or layer
+container that embeds a texture never receives a texture dispatch, so type-gating would skip exactly
+the case with no other check. A third fixture pins the **streamed-texture gate** itself — that gate
+now sits behind a crate boundary, and losing it turns the rule into one that fires on nearly every
+texture in the game.
+
+**M0004's invariant was measured, not derived.** Before writing it, the whole retail `vz.wad` was
+swept: 11,370 blocks, 55,429 entry-table rows, 30,006 distinct hashes, 30,645 ASET rows — and
+**zero** entry hashes without a row. Sub-resources reached through their parent are not an
+exception; they get a non-primary row. The concern that motivated the sweep was the M0003 shape,
+where a naive predicate fires on 9,562 legitimate cases; here there are none, so the plain set
+difference is the correct rule. `dlc_port.py`'s "ASET fix" pass (found via `corpus_search`, not by
+reading code) is the same repair applied selectively, which is the third-party confirmation.
+
+Three things worth recording:
+
+1. **The rule is scoped to the emitted WAD, and that is a deliberate narrowing.** "New" is not
+   answerable without the game stack — retail may already name the hash, in which case the overlay's
+   copy resolves to retail's block rather than wedging. Scoping to "no row in *this* WAD" keeps the
+   rule in the hermetic-of-the-artifact stage and costs nothing measurable: donor blocks turn out to
+   be **single-entry** (`oc_veh_helicopter_md500` and `pmc_hum_mattias` both carry exactly one), and
+   the linked scripts block already mints a row per entry.
+2. **Reading a block as an entry table needs a guard.** `parse_block_entry_table` reads the first
+   word as a count unconditionally, so an opaque payload yields a garbage count and, from there,
+   confident nonsense. Requiring the walk to *complete* separates "this block has no unreachable
+   hashes" from "this block is not an entry-table block". The pre-existing `b"payload"` fixtures are
+   the second kind, which is why they stayed silent under both new rules without being touched.
+3. A block that will not inflate is left to M0182 rather than being complained about twice.
+
+Tests: 134 → **140** in `mercs2_quartermaster`, all green, none ignored. Verified past `cargo test`:
+a real 512×512 `replace_texture` against retail `vz.wad` builds clean, and `wad_simulator` reports
+`issues=0` on all 34 asset types with `VERDICT: Full consumption path completed without violations`.
 
 ---
 
@@ -331,10 +374,108 @@ One genuine gap: **`docs/modding/manifest_format.md` is not written yet.** Plan 
 as the freeze deliverable ("when frozen, it graduates to the template repo README +
 `docs/modding/manifest_format.md`"), so this is scheduled work, not a loose end.
 
-## G. Remaining lowering
+## G. Remaining lowering — `raw` and `native_hook` DONE; `edit_state_machine` BLOCKED (2026-07-28)
 
-`edit_state_machine`, `native_hook` (place the `.asi` + the placement record), `raw`. Each currently
-returns `Unsupported`.
+Two of the three lower. The third does not, and that is a finding rather than a deferral.
+
+### `raw` — ✅ DONE
+
+Opaque bytes into the overlay, with the author's declared `touches` minting the ASET rows. The
+load-bearing decision is that the declaration must match the payload's own entry table **exactly, in
+both directions**, because nothing downstream can infer a raw block's radius:
+
+- a claim the payload does not carry publishes a row pointing at a block with no such asset in it —
+  the lookup resolves, the block loads, and the asset is simply absent;
+- an asset the payload carries but does not claim gets no row at all (M0004's silent wedge) **and**
+  is invisible to the conflict system, so two Shipments could overwrite one asset with neither being
+  told.
+
+The ASET **type id comes from the payload's entry table**, never from the author: it decides which
+loader is dispatched, so there is nothing safe to guess, and an unknown type hash is named and
+refused. Two non-block payloads are refused *by name* rather than by a generic parse error — a bare
+`UCFX` container (the bug this crate has already shipped once, arriving now as author input) and an
+already-`sges` payload (M0002 from the author's side).
+
+**Only the Data layer lowers.** The overlay is a WAD and that is the only layer a WAD holds; the
+other three are refused with the kind to use instead. The script case is the one that matters — a
+finished `scripts_vz` block would be shadowed last-mounted-wins over every other installed
+Shipment's Lua, including the wardrobe rows `add_outfit` generates. No declared radius makes that
+safe, which is exactly why `patch_lua` ships a mutation.
+
+`raw` needs **no game stack**, so it is the first path that exercises the whole emission contract
+hermetically — the shape template CI runs in. Verified against retail as well: a real
+`oc_veh_helicopter_md500` block carried through comes back out of `read_patch_wad` byte-identical,
+and `wad_simulator` reports `issues=0` on all 34 asset types with `VERDICT: Full consumption path
+completed without violations`.
+
+### `native_hook` — ✅ DONE
+
+The kind that breaks "output is always the overlay WAD", and therefore the one the placement record
+exists for: an overlay is undone by deleting a file, an `.asi` in the game folder is not.
+
+**The builder chooses the destination, and that is the security property.** There is no `dest`
+field, so no spelling of a Shipment writes next to `Mercenaries2.exe` or into `data/vz.wad` — those
+stay unreachable by construction rather than by a suppressible rule. `scripts/` is picked from the
+four roots `pmc_bb.dll` actually globs, **read out of the binary** (`%s*.asi`, `%sscripts\`,
+`%splugins\`, `%supdate\` — present and identical in both copies of the DLL that disagree
+elsewhere), and a test pins the constant inside that set.
+
+Four refusals, all of them failures the loader reports quietly or not at all: a non-`*.asi` file is
+never globbed (refused rather than renamed — the filename is also the `FileArtifact` claim, so
+renaming would make claim and placement disagree); `pmc_bb.asi` is the loader's own name and is
+skipped, with nothing logged because nothing was tried; a PE header that cannot load (the game is a
+32-bit process, and an image without `IMAGE_FILE_DLL` is not a DLL — offsets pinned against
+`pmc_bb.dll` v3.0.0, `e_lfanew=0x80 machine=0x014C chars=0x230E`); and a `symbol` with no `plugin`,
+which asks the Quartermaster to produce native code it does not compile.
+
+The digest is taken from the bytes **read back off the disk**, not from the buffer the builder held:
+a digest of the intended bytes would still verify after a truncated write. The log states plainly
+that an ASI is unrestricted native code, because a green digest reads as "safe" to a Tier-1 user
+when it only means "unmodified".
+
+### `edit_state_machine` — ❌ BLOCKED, with evidence
+
+**The destruction machine can be READ and cannot be WRITTEN**, and three of the four gaps are
+outside this crate. Left `Unsupported` on purpose; the reason now names the gaps and points at the
+escape hatch instead of saying "not implemented in this increment".
+
+1. **No serializer.** `mercs2_formats::orchestrator::parse_state_machine` decodes the
+   SWIT/NODE/STAT/CHDR/CEXE family and is validated against retail — re-measured while writing this,
+   `al_veh_boat_destroyer` parses to 59 switch slots and 47 switch nodes with six named states each
+   — but `StateMachine` is a decoded **view**: no descriptor indices, no data offsets, no container
+   position, so it cannot even round-trip. Nothing in the workspace writes those tags, and
+   `mercs2_workshop`'s bundler lists exactly this set under `preserved_only_in_raw`, which is the
+   ecosystem carrying them verbatim because it cannot author them either.
+2. **The family is a NESTED container inside the model container.** Writing one means rebuilding
+   that container's descriptor table (tag / offset / size / descendant count per row), re-basing
+   every following sibling's data offset, recomputing the CSUM and re-emitting the whole model
+   block. `model_inject` rewrites geometry groups, not an arbitrary sibling subtree.
+3. **`states:` has no schema.** The manifest declares `states: PathBuf` and *nothing anywhere says
+   what that file contains*. Defining it is a Plan 04 format change, not a lowering.
+4. **There would be no way to check the result.** The closest known corruption of this kind —
+   collapsing a group's PRMT records so the machine reads off the end — faults at model
+   instantiation, and the field guide records that `wad_simulator` does **not** catch it: it appears
+   only in-game. Every structural bug this crate has shipped was caught by that simulator and none
+   by a digest, so a lowering it cannot see would ship with no safety net at all. That, more than
+   the missing code, is the argument against a speculative implementation.
+
+**What would unblock it, in order:** (a) an `orchestrator::serialize_state_machine` plus a
+container-subtree splice in `mercs2_formats`, proven by a byte-identical round-trip of every
+destructible in retail `vz.wad` — the same shape as the `scripts_block` survey that unblocked the
+Lua linker; (b) an authoring schema for `states:`, which is a format decision; (c) a check
+`wad_simulator` can run, since without one (a) and (b) buy a build that cannot be verified.
+
+Good news found while measuring: the **state-name vocabulary is cracked** (`InitState`,
+`InitDestroyedState`, `PristineState`, `DamagedState`, `StartDestroyedState`, `DestroyedState`,
+`GoneState` — `docs/modernization/vehicle_model_spec.md` §5), so `destruction_orchestrator_format.md`'s
+"not yet reversed" is stale. Exactly **one** command verb is still unresolved — `0xB4DBE473`,
+observed zero-arg in the destroyer's `StartDestroyedState`. So the vocabulary is *not* the blocker
+it would have been a month ago; the missing writer is.
+
+Also worth recording: **`raw` is the honest workaround today.** A modder who has hand-built the
+block already can ship it as `kind: raw` / `target_layer: data`, which carries a declared blast
+radius. That is the open lower bound doing the job it exists for, and it is what the refusal points
+at.
 
 ## H. Format gaps recorded but unresolved
 
@@ -390,16 +531,21 @@ not blocking.
 
 ~~**Revised next step: D, ahead of the rest of B.**~~ Done — `qm` exists, so I is unblocked.
 
-**A–E and I are done.** What is left:
+**A–F and I are done, and B is down to its research tail.** What is left:
 
-- **B**, the remaining HANG rules: M0003 → M0004, then reassess M0006. M0005/M0008 stay research.
-- **G**, the unimplemented lowering: `edit_state_machine`, `native_hook`, `raw`.
+- **B**: M0006 (reassess — M0009 may already suffice), then M0005 and M0008, both of which are
+  research rather than implementation. M0001–M0004 are all implemented.
+- **G**: `raw` and `native_hook` are done. `edit_state_machine` is BLOCKED on a missing serializer,
+  a missing `states:` schema and a missing way to verify the result — see section G for what would
+  unblock it and in what order.
 - **H**, format gaps (`add_model` `group:`, donor auto-pick, Open-Q7, Open-Q10).
 - Making `qm` carry its own name table (see I).
 
-**Next: B.** With A–F and I done, the remaining HANG rules are what is left that changes outcomes for
-a modder. M0003 first — `wad_simulator::texture::texture_buffer_too_small` already implements it with
-two retail-verified false-positive gates, and the library extraction that blocked it is done.
+**Next: M0006, and it should start as a measurement rather than an implementation.** The predicate is
+cheap — `simulate.rs:276` `xref_sources` keeps only the first referrer, and making it a `Vec` yields
+the fan-in map — but the question worth answering first is how much of the rule M0009 already covers
+in practice. The M0003/M0004 step is the argument for doing it that way round: the retail sweep took
+minutes and decided the shape of both rules before a line was written.
 
 **A note on the sibling repo.** The reversed knowledge this crate encodes lives in
 `~/src/mercenaries-game` — the decompiled Lua, the ASET/texture format docs, the Ghidra corpus, and

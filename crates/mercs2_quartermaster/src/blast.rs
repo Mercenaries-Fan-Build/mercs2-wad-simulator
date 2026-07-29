@@ -17,7 +17,6 @@
 //! answered without a game — "no Shipment in this set provides it."
 
 use crate::manifest::{Contribution, Manifest, Touch};
-use mercs2_formats::hash::pandemic_hash_m2;
 use std::collections::BTreeMap;
 
 /// Read or write. `donor:` is the reason this distinction exists.
@@ -81,7 +80,7 @@ impl Claim {
     fn asset(name: &str) -> (Claim, Option<String>) {
         (
             Claim::Asset {
-                hash: pandemic_hash_m2(name),
+                hash: crate::manifest::asset_hash(name),
             },
             Some(name.to_string()),
         )

@@ -8,9 +8,12 @@
 //!   `manifest.yaml`, `.json` and `.toml`. That is why `Contribution` is internally tagged by
 //!   `kind` — a shape that serializes identically across all three — rather than per-kind
 //!   top-level arrays.
-//! * **Identity is a NAME, never a hash** (mandate `no-arbitrary-hashes`). There is no free-text
-//!   hash field in this model. `Touch` accepts a bare hash ONLY as the documented escape for a
-//!   hash with no known name, and [`Touch::is_bare_hash`] exists so the linter can say so.
+//! * **A name is preferred; a bare hash is legal.** Anywhere an existing asset is referenced,
+//!   `0xHHHHHHHH` resolves to that hash and anything else is hashed as a name — see [`asset_hash`],
+//!   which every such site must route through. The base game ships hashes, so requiring names would
+//!   forbid referring to assets our name table does not cover. The linter still offers the name when
+//!   it can reverse one (M0130), because a hash is one-way and a manifest full of them cannot be
+//!   read or reviewed — but that is a suggestion, not a gate.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -97,21 +100,47 @@ pub enum Requirement {
     External { url: String, sha256: String },
 }
 
-/// A declared blast-radius entry. Names, not hashes (mandate `no-arbitrary-hashes`).
+/// Parse a bare `0xHHHHHHHH` asset reference into the hash it names.
+///
+/// `None` when this is a name rather than a hash — including hex too long to be a `u32`, which
+/// cannot be an asset hash whatever else it is.
+pub fn bare_hash(reference: &str) -> Option<u32> {
+    let s = reference.trim();
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    if hex.is_empty() || hex.len() > 8 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok()
+}
+
+/// Resolve an asset reference to the hash the engine will look up.
+///
+/// A bare `0x…` **is** the hash; anything else is a name and gets hashed. Both spellings are legal:
+/// the game itself ships hashes, so a modder working on an asset our name table does not cover has
+/// nothing else to write. The linter still prefers names (M0130) — a hash is one-way, so a manifest
+/// full of them is unreadable and undiffable — but that is a preference, not a mandate.
+///
+/// **Every** site that turns a reference into a hash must come through here. Hashing the *string*
+/// `"0x56130E64"` yields `0xC6B71C1F`, so a builder that parsed it while the conflict system hashed
+/// it would claim one asset and write another, and conflict detection would silently stop matching.
+pub fn asset_hash(reference: &str) -> u32 {
+    bare_hash(reference).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(reference.trim()))
+}
+
+/// A declared blast-radius entry. A name, or a bare hash where no name is known.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Touch(pub String);
 
 impl Touch {
-    /// True when the author wrote a bare hash instead of a name. Legal ONLY when no name is known
-    /// for that hash; the linter warns and offers the name when it can reverse one.
+    /// True when the author wrote a bare hash instead of a name. Legal — the base game ships hashes
+    /// — but the linter offers the name when it can reverse one, because a hash is one-way and a
+    /// manifest full of them cannot be read or reviewed.
     ///
     /// The draft spec's own example paired `ch_veh_boat_destroyer` with `0xE54047D5` — which is
     /// actually `al_veh_boat_destroyer`. That drift is the reason this predicate exists.
     pub fn is_bare_hash(&self) -> bool {
-        let s = self.0.trim();
-        let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"));
-        matches!(hex, Some(h) if !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
+        bare_hash(&self.0).is_some()
     }
 }
 
