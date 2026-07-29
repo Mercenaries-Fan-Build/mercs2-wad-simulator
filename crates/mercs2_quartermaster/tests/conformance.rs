@@ -54,6 +54,10 @@ contributions:
     name: my_custom_helipad
     model: src/helipad/pad.glb
 
+  - kind: add_movie
+    name: my_hud_widgets
+    movie: src/ui/widgets.gfx
+
   - kind: patch_lua
     target: wifpmcinterior
     append: src/scripts/my_append.lua
@@ -117,6 +121,11 @@ const JSON: &str = r#"
       "kind": "add_model",
       "name": "my_custom_helipad",
       "model": "src/helipad/pad.glb"
+    },
+    {
+      "kind": "add_movie",
+      "name": "my_hud_widgets",
+      "movie": "src/ui/widgets.gfx"
     },
     {
       "kind": "patch_lua",
@@ -188,6 +197,11 @@ name = "my_custom_helipad"
 model = "src/helipad/pad.glb"
 
 [[contributions]]
+kind = "add_movie"
+name = "my_hud_widgets"
+movie = "src/ui/widgets.gfx"
+
+[[contributions]]
 kind = "patch_lua"
 target = "wifpmcinterior"
 append = "src/scripts/my_append.lua"
@@ -227,6 +241,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_outfit",
             "replace_texture",
             "add_model",
+            "add_movie",
             "patch_lua",
             "native_hook",
             "raw"
