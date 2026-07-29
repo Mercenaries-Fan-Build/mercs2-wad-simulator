@@ -193,6 +193,87 @@ contributions:
     );
 }
 
+/// A placed companion is a claim on a DESTINATION PATH, and the filesystem has no arbitration of
+/// any kind — no stack to reorder, no first-writer registry, no load order. Whichever deploy step
+/// runs last simply overwrites, and the loser does not degrade to the base game: the plugin goes on
+/// reading the file and gets somebody else's config, with nothing logged.
+#[test]
+fn two_shipments_writing_one_companion_path_collide() {
+    let mk = |name: &str| {
+        parse(&format!(
+            "format: 1
+shipment: {{ name: {name}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: place_file
+    file: src/config.ini
+    dest: scripts
+"
+        ))
+    };
+    let (a, b) = (mk("mod-a"), mk("mod-b"));
+    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].class, MergeClass::Exclusive);
+    assert!(
+        matches!(&found[0].claim, Claim::FileArtifact { path } if path == "scripts/config.ini")
+    );
+}
+
+/// ...but the same FILENAME in two different destinations is two files, and they must not fight.
+/// This is why the claim is keyed on the path rather than the name: keying on the name would have
+/// called this a conflict and been right about the previous test by accident.
+#[test]
+fn one_filename_in_two_destinations_does_not_collide() {
+    let mk = |name: &str, dest: &str| {
+        parse(&format!(
+            "format: 1
+shipment: {{ name: {name}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: place_file
+    file: src/config.ini
+    dest: {dest}
+"
+        ))
+    };
+    let (a, b) = (mk("mod-a", "scripts"), mk("mod-b", "plugins"));
+    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
+    assert!(found.is_empty(), "two paths, two files: {found:?}");
+}
+
+/// A companion and the plugin it belongs to are different paths, so a Shipment shipping both is not
+/// conflicting with itself — the case every real Code-layer mod is.
+#[test]
+fn a_plugin_and_its_companion_are_not_a_self_conflict() {
+    let m = parse(
+        "format: 1
+shipment: { name: bridge, version: 1.0.0, target: retail }
+contributions:
+  - kind: native_hook
+    target: retail
+    plugin: src/lua_bridge_DEV.asi
+    touches: [\"0x004CF340\"]
+  - kind: place_file
+    file: src/lua_bridge_DEV.ini
+    dest: scripts
+",
+    );
+    let found = blast::self_conflicts(&m);
+    assert!(found.is_empty(), "got {found:?}");
+    let paths: Vec<String> = blast::claims(&m)
+        .into_iter()
+        .filter(|r| r.access == Access::Write)
+        .filter_map(|r| match r.claim {
+            Claim::FileArtifact { path } => Some(path),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["scripts/lua_bridge_DEV.asi", "scripts/lua_bridge_DEV.ini"],
+        "the plugin and its companion each claim their own path, in the same directory"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Additive vs replacement.
 // ---------------------------------------------------------------------------
