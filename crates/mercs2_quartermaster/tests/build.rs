@@ -1411,6 +1411,349 @@ fn a_shipment_can_emit_a_wad_and_a_file_together() {
 }
 
 // ---------------------------------------------------------------------------
+// place_file — companion files, and the escapes that must not be expressible
+// ---------------------------------------------------------------------------
+//
+// Every test here is hermetic. A companion needs no donor, no target dimensions and no base block,
+// so this kind lowers where the retail WADs will never exist — which is where template CI runs, and
+// therefore where an author actually finds out.
+
+/// A Shipment with one `place_file`. `file` is written under `src/` and may carry subdirectories.
+fn place_shipment(dir: &Path, file: &str, dest: &str, bytes: &[u8]) -> discover::LoadedShipment {
+    let path = dir.join("src").join(file);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    shipment(
+        dir,
+        &format!("  - kind: place_file\n    file: src/{file}\n    dest: {dest}\n"),
+    )
+}
+
+/// ★ The gap this kind exists to close: an `.asi` whose `.ini` cannot ship is useless. A companion
+/// is placed, and the record carries its digest so the drop can be backed out and verified.
+#[test]
+fn a_place_file_places_a_companion_and_records_its_digest() {
+    let dir = scratch("place_ok");
+    let ini = b"[GlobalSets]\nmode=quiet\n";
+    let s = place_shipment(&dir, "quiet_freeplay_vo.ini", "scripts", ini);
+
+    let report = build::build(&s, None, None, None, None).expect("place_file must build");
+    assert!(
+        report.wad.is_none(),
+        "a companion contributes nothing to a WAD"
+    );
+    assert_eq!(report.placements.len(), 1);
+    let p = &report.placements[0];
+    assert_eq!(p.name, "quiet_freeplay_vo.ini");
+    assert_eq!(
+        p.destination,
+        Destination::GameFolder {
+            relative: "scripts/quiet_freeplay_vo.ini".into()
+        }
+    );
+
+    // The digest must match the bytes actually on disk, not the buffer the builder held — a digest
+    // of the intended bytes would still verify after a truncated write.
+    let written = std::fs::read(dir.join("build/scripts/quiet_freeplay_vo.ini"))
+        .expect("the companion must be emitted, mirroring the tree it is copied into");
+    assert_eq!(written, ini, "the companion is copied verbatim");
+    assert_eq!(p.sha256, build::sha256_hex(&written));
+    assert_eq!(p.bytes, written.len());
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+            .unwrap();
+    let entry = &doc["placements"][0];
+    assert_eq!(entry["name"], "quiet_freeplay_vo.ini");
+    assert_eq!(entry["sha256"], p.sha256);
+    assert_eq!(entry["destination"]["kind"], "game_folder");
+    assert_eq!(
+        entry["destination"]["relative"],
+        "scripts/quiet_freeplay_vo.ini"
+    );
+}
+
+/// ★ No destination, for any spelling of `dest:`, can name anything outside the game folder.
+///
+/// Asserted over `PlaceIn::ALL` rather than over the arms somebody remembered to list, so a
+/// destination added later cannot quietly skip the check. Each emitted path must be relative and
+/// made only of ordinary components — no root, no `..`, no drive prefix.
+#[test]
+fn every_destination_stays_inside_the_game_folder() {
+    for (i, dest) in mercs2_quartermaster::PlaceIn::ALL.iter().enumerate() {
+        let yaml_name = [
+            "game_root",
+            "scripts",
+            "plugins",
+            "update",
+            "on_boot",
+            "on_load",
+            "on_key",
+        ][i];
+        let dir = scratch(&format!("place_dest_{yaml_name}"));
+        let s = place_shipment(&dir, "config.ini", yaml_name, b"x");
+        let report =
+            build::build(&s, None, None, None, None).expect("every destination must build");
+        let Destination::GameFolder { relative } = &report.placements[0].destination else {
+            panic!("a companion is always a game-folder placement");
+        };
+
+        assert_eq!(
+            *relative,
+            build::place_path(dest.relative_dir(), "config.ini"),
+            "the emitted path must be the destination's own literal plus the source filename"
+        );
+        let p = Path::new(relative);
+        assert!(p.is_relative(), "{relative} is not relative");
+        assert!(
+            p.components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+            "{relative} has a component that is not a plain name"
+        );
+        assert!(!relative.contains(".."), "{relative}");
+        assert!(!relative.contains(':'), "{relative}");
+        assert!(!relative.contains('\\'), "{relative}");
+        // And the file really lands there, under the build directory that mirrors the game folder.
+        assert!(dir.join("build").join(relative).is_file(), "{relative}");
+    }
+}
+
+/// A destination is a NAME, not a path — so a path is not "rejected", it does not parse. This is
+/// the property that makes the exe and the WADs unreachable by construction: there is no field a
+/// path could go in.
+#[test]
+fn a_destination_that_is_a_path_does_not_parse() {
+    for attempt in [
+        "'..'",
+        "'../..'",
+        "'/etc'",
+        "'C:\\Windows'",
+        "'\\\\host\\share'",
+        "'scripts/../..'",
+        "'data'",
+        "'.'",
+    ] {
+        let dir = scratch("place_dest_path");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/config.ini"), b"x").unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            format!(
+                "format: 1
+shipment: {{ name: test-shipment, version: 1.0.0, target: retail }}
+contributions:
+  - kind: place_file
+    file: src/config.ini
+    dest: {attempt}
+"
+            ),
+        )
+        .unwrap();
+        assert!(
+            discover::open(&dir).is_err(),
+            "dest: {attempt} must not parse"
+        );
+    }
+}
+
+/// The source path goes through the same checks as every other source, so climbing out of the
+/// Shipment is an M0111 error rather than a bespoke rule that could drift from that one.
+#[test]
+fn a_source_path_that_leaves_the_shipment_is_refused() {
+    for file in [
+        "../../../etc/passwd",
+        "/etc/passwd",
+        "src/../../secrets.ini",
+    ] {
+        let dir = scratch("place_escape");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let s = shipment(
+            &dir,
+            &format!("  - kind: place_file\n    file: {file}\n    dest: scripts\n"),
+        );
+        match build::build(&s, None, None, None, None) {
+            Err(BuildError::Blocked(d)) => {
+                assert!(d.iter().any(|x| x.rule.code == "M0111"), "{file}: {d:?}")
+            }
+            other => panic!("{file}: expected Blocked, got {other:?}"),
+        }
+    }
+}
+
+/// The lexical check cannot see a symlink; canonicalization can. Without this a Shipment could
+/// place `/etc/passwd` into the game folder while every path in the manifest looked local.
+#[cfg(unix)]
+#[test]
+fn a_symlink_out_of_the_shipment_is_refused() {
+    let dir = scratch("place_symlink");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let outside = dir.parent().unwrap().join("qm_outside_secret.ini");
+    std::fs::write(&outside, b"secret").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("src/config.ini")).unwrap();
+
+    let s = shipment(
+        &dir,
+        "  - kind: place_file\n    file: src/config.ini\n    dest: scripts\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0111"), "{d:?}"),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(outside);
+}
+
+/// ★ The exe and the WADs. `dest: game_root` is a real destination the loader really globs, and it
+/// is also where `Mercenaries2.exe` lives — so the destination being closed is only half the
+/// guarantee, and the filename is the other half.
+#[test]
+fn the_game_executable_and_the_wads_cannot_be_written() {
+    for name in [
+        "Mercenaries2.exe",
+        "Mercenaries2.EXE",
+        "vz.wad",
+        "shell.WAD",
+        "pmc_bb.dll",
+        "d3d9.dll",
+    ] {
+        let dir = scratch("place_forbidden");
+        let s = place_shipment(&dir, name, "game_root", b"x");
+        match build::build(&s, None, None, None, None) {
+            Err(BuildError::Blocked(d)) => {
+                assert!(d.iter().any(|x| x.rule.code == "M0162"), "{name}: {d:?}")
+            }
+            other => panic!("{name}: expected Blocked, got {other:?}"),
+        }
+    }
+}
+
+/// The loader skips its own name, so a file shipped under it is placed correctly and never even
+/// considered. The refusal is the one `native_hook` already carries — the same function, so the two
+/// kinds cannot drift into disagreeing about what is reserved.
+#[test]
+fn the_loaders_own_name_cannot_be_placed_as_a_companion() {
+    let dir = scratch("place_reserved");
+    let s = place_shipment(&dir, build::RESERVED_ASI, "scripts", b"x");
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => {
+            assert!(d.iter().any(|x| x.rule.code == "M0162"), "{d:?}");
+        }
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}
+
+/// A plugin is not a companion. Allowing one here would route around `native_hook`'s PE checks, its
+/// reserved-name refusal and its hooked-address claims, while still producing a file the loader
+/// globs and `LoadLibrary`s.
+#[test]
+fn a_plugin_cannot_be_smuggled_in_as_a_companion() {
+    let dir = scratch("place_asi");
+    let s = place_shipment(&dir, "evil.asi", "scripts", &loadable_asi());
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => {
+            let hit = d.iter().find(|x| x.rule.code == "M0162").expect("M0162");
+            assert!(hit.message.contains("native_hook"), "{hit}");
+        }
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}
+
+/// A filename that is not a single path component. Every one of these is an ordinary filename on
+/// the macOS box that builds the Shipment and an escape on the Windows box that deploys it, which
+/// is exactly why it cannot be left to the host filesystem to notice.
+#[test]
+fn a_filename_that_is_not_one_component_is_refused() {
+    for name in [
+        "..\\..\\Mercenaries2.exe",
+        "../../Mercenaries2.exe",
+        "C:\\evil.ini",
+        "\\\\host\\share\\evil.ini",
+        "sub/dir.ini",
+        ".",
+        "..",
+        "",
+    ] {
+        assert!(
+            build::companion_name_refusal(name).is_some(),
+            "{name:?} must be refused"
+        );
+    }
+    // ...and an ordinary companion is not.
+    assert_eq!(build::companion_name_refusal("lua_bridge_DEV.ini"), None);
+    assert_eq!(build::companion_name_refusal("lua_console.py"), None);
+    assert_eq!(build::companion_name_refusal("00_core.lua"), None);
+}
+
+/// ★ The real shape: a plugin and the companion it reads, in one Shipment, landing in one record.
+#[test]
+fn a_plugin_and_its_companion_build_together() {
+    let dir = scratch("place_with_hook");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lua_bridge_DEV.asi"), loadable_asi()).unwrap();
+    std::fs::write(dir.join("src/lua_bridge_DEV.ini"), b"port=27050\n").unwrap();
+    std::fs::write(dir.join("src/lua_console.py"), b"# client\n").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: native_hook\n    target: retail\n    plugin: src/lua_bridge_DEV.asi\n\
+         \x20 - kind: place_file\n    file: src/lua_bridge_DEV.ini\n    dest: scripts\n\
+         \x20 - kind: place_file\n    file: src/lua_console.py\n    dest: scripts\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("build");
+    let paths: Vec<String> = report
+        .placements
+        .iter()
+        .map(|p| match &p.destination {
+            Destination::GameFolder { relative } => relative.clone(),
+            Destination::Overlay => "overlay".into(),
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            format!("{}/lua_bridge_DEV.asi", build::ASI_SUBDIR),
+            "scripts/lua_bridge_DEV.ini".to_string(),
+            "scripts/lua_console.py".to_string(),
+        ],
+        "the companion has to land in the directory the plugin reads it from"
+    );
+    // No warning: the .ini is beside its plugin, which is the whole point of M0163.
+    assert!(
+        !report.diagnostics.iter().any(|d| d.rule.code == "M0163"),
+        "{:?}",
+        report.diagnostics
+    );
+}
+
+/// One filename in two destinations is TWO files, not a conflict — and the output mirrors that, so
+/// neither can overwrite the other while both records claim their own digest.
+#[test]
+fn one_filename_in_two_destinations_is_two_files() {
+    let dir = scratch("place_two_rungs");
+    std::fs::create_dir_all(dir.join("src/boot")).unwrap();
+    std::fs::create_dir_all(dir.join("src/load")).unwrap();
+    std::fs::write(dir.join("src/boot/init.lua"), b"-- boot\n").unwrap();
+    std::fs::write(dir.join("src/load/init.lua"), b"-- load\n").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: place_file\n    file: src/boot/init.lua\n    dest: on_boot\n\
+         \x20 - kind: place_file\n    file: src/load/init.lua\n    dest: on_load\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("two rungs must build");
+    assert_eq!(report.placements.len(), 2);
+    assert_ne!(
+        report.placements[0].sha256, report.placements[1].sha256,
+        "each record must describe its own file"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("build/scripts/OnBoot/init.lua")).unwrap(),
+        b"-- boot\n"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("build/scripts/OnLoad/init.lua")).unwrap(),
+        b"-- load\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The emitted-artifact self-check
 // ---------------------------------------------------------------------------
 
