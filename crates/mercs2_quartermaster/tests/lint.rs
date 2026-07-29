@@ -437,3 +437,102 @@ fn a_named_hash_is_suggested_and_an_unnamed_one_is_left_alone() {
         "nagging about a hash with no known name asks for something impossible: {unknown:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M0190 — a movie the runtime cannot script
+// ---------------------------------------------------------------------------
+
+/// Build a minimal uncompressed `GFX` movie carrying `tags`, each `(code, body)`.
+///
+/// Hand-rolled rather than fixture-checked-in so the AS3 case and the clean case differ by exactly
+/// one tag. A binary fixture would leave "is this movie actually clean?" resting on a file nobody
+/// can read in a diff.
+fn movie_with(tags: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.push(0b00000_000); // stage RECT, nbits = 0
+    body.extend_from_slice(&(30u16 << 8).to_le_bytes()); // 30 fps
+    body.extend_from_slice(&1u16.to_le_bytes()); // one frame
+    for (code, tag_body) in tags {
+        // Long form for anything that will not fit the 6-bit inline length.
+        if tag_body.len() < 0x3F {
+            body.extend_from_slice(&((code << 6) | tag_body.len() as u16).to_le_bytes());
+        } else {
+            body.extend_from_slice(&((code << 6) | 0x3F).to_le_bytes());
+            body.extend_from_slice(&(tag_body.len() as u32).to_le_bytes());
+        }
+        body.extend_from_slice(tag_body);
+    }
+    body.extend_from_slice(&0u16.to_le_bytes()); // End
+    let mut file = Vec::new();
+    file.extend_from_slice(b"GFX");
+    file.push(8);
+    file.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+    file.extend_from_slice(&body);
+    file
+}
+
+/// Write a movie into a scratch Shipment root and lint it.
+fn lint_movie(label: &str, movie: Vec<u8>) -> Vec<lint::Diagnostic> {
+    let root = std::env::temp_dir().join(format!("qm_lint_movie_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("scratch");
+    std::fs::write(root.join("src/ui.gfx"), movie).expect("write movie");
+    let m = shipment_with("  - kind: add_movie\n    name: qm_test_ui\n    movie: src/ui.gfx\n");
+    lint::lint(&m, Some(&root), None)
+}
+
+/// M0190 fires on a movie carrying AS3. It BLOCKS: GFx 2.0.48 has no DoABC loader, so the tag is
+/// skipped as unknown and the movie loads perfectly with none of its logic running — the failure is
+/// invisible from inside the game.
+#[test]
+fn a_movie_carrying_as3_is_an_error() {
+    // DoABC (82): u32 flags, NUL-terminated name, then ABC. The body is never parsed — the tag's
+    // presence is the finding — but it is shaped correctly so the fixture is not nonsense.
+    let mut abc = 1u32.to_le_bytes().to_vec();
+    abc.extend_from_slice(b"widget\0");
+    abc.extend_from_slice(&[0x10, 0x00, 0x2E, 0x00]);
+    let diags = lint_movie("as3", movie_with(&[(82, abc)]));
+
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0190").collect();
+    assert_eq!(found.len(), 1, "{diags:?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    assert!(lint::blocks_build(&diags), "a silent no-op must not ship");
+    assert!(
+        found[0].message.contains("DoABC"),
+        "the message must name the tag: {}",
+        found[0].message
+    );
+}
+
+/// M0190 stays quiet on an AS2 movie — the shape a GFx 2.x authoring tool emits and the shape all
+/// 64 retail movies have. A rule that fired here would fire on every movie anyone could ship.
+#[test]
+fn an_as2_movie_is_left_alone() {
+    // DoAction (12) is AVM1 — the bytecode this runtime DOES execute. Its presence must not be
+    // mistaken for scripting the runtime cannot run.
+    let diags = lint_movie("as2", movie_with(&[(12, vec![0x00])]));
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0190"),
+        "an AVM1 movie is the supported case: {diags:?}"
+    );
+    assert!(!lint::blocks_build(&diags), "{diags:?}");
+}
+
+/// A payload that is not a movie is NOT M0190's problem. Reporting "no AS3 found" about a PNG would
+/// be answering a question nobody asked; the lowering refuses it with a message that names what a
+/// `.gfx` is.
+#[test]
+fn a_payload_that_is_not_a_movie_is_left_to_the_lowering() {
+    let diags = lint_movie(
+        "notamovie",
+        b"\x89PNG\r\n\x1a\n not a movie at all".to_vec(),
+    );
+    assert!(!diags.iter().any(|d| d.rule.code == "M0190"), "{diags:?}");
+}
+
+/// The rule is registered, so `qm` can list it among what it checks. An unregistered rule is one a
+/// modder cannot look up after seeing its code in CI output.
+#[test]
+fn m0190_is_registered() {
+    assert!(lint::RULES.iter().any(|r| r.code == "M0190"));
+}
