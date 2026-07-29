@@ -130,6 +130,16 @@ pub const M0161_HOOK_DOES_NOTHING: Rule = Rule {
     title: "a native_hook supplies neither a plugin nor a symbol",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
+pub const M0162_PLACED_FILE_REFUSED: Rule = Rule {
+    code: "M0162",
+    title: "a placed file's name is one no Shipment may write into the game folder",
+    doc: "docs/modding/manifest_format.md#the-code-layer",
+};
+pub const M0163_COMPANION_NOT_BESIDE_PLUGIN: Rule = Rule {
+    code: "M0163",
+    title: "a companion file is not in the directory the plugin will look for it in",
+    doc: "docs/modding/manifest_format.md#the-code-layer",
+};
 pub const M0170_BAD_DIGEST: Rule = Rule {
     code: "M0170",
     title: "an external requirement's sha256 is not a 64-character hex digest",
@@ -173,6 +183,8 @@ pub const RULES: &[Rule] = &[
     M0150_RAW_NO_TOUCHES,
     M0160_ASI_ON_REIMPL,
     M0161_HOOK_DOES_NOTHING,
+    M0162_PLACED_FILE_REFUSED,
+    M0163_COMPANION_NOT_BESIDE_PLUGIN,
     M0170_BAD_DIGEST,
     M0171_INSECURE_URL,
     M0190_MOVIE_CARRIES_AS3,
@@ -605,6 +617,84 @@ impl std::fmt::Display for Diagnostic {
 /// other key sits in a table nothing ever reads.
 pub const WARDROBE_HEROES: [&str; 3] = ["chris", "jennifer", "mattias"];
 
+/// M0162 and M0163 — the two things that can be wrong with a `place_file`.
+///
+/// **M0162 (Error) — a name no Shipment may write.** The lowering refuses these too, and
+/// deliberately: this is the same belt-and-braces shape M0160/M0161 already have with
+/// `native_hook`'s lowering. The reason to say it HERE as well is that `qm lint` is what template CI
+/// runs, and a Shipment that will not build is worth hearing about on the push rather than on
+/// somebody's machine. [`crate::build::companion_name_refusal`] is called rather than
+/// reimplemented, because two copies of "which filenames are dangerous" is one copy that will
+/// eventually be shorter than the other.
+///
+/// **M0163 (Warning) — a companion the plugin will not find.** This one encodes a MEASURED fact
+/// about how these mods read their config, not a guess. In the community QoL mods the pattern is
+/// `m2_module_path(g_hModule, "quiet_freeplay_vo.ini", …)`, and `m2_module_path` is
+/// `GetModuleFileNameA(module)` truncated at the last separator — so the file is looked up beside
+/// the LOADED MODULE, which is wherever the `.asi` was placed, and nowhere else. Since the
+/// Quartermaster puts every `.asi` in [`crate::build::ASI_SUBDIR`], a companion sent to any other
+/// destination is simply not found: the plugin falls back to its defaults and logs, at most, "no
+/// such .ini — using defaults", to a file nobody reads.
+///
+/// It is a WARNING rather than an error because the stem match is a heuristic and the plugin's
+/// source is not ours to inspect. A plugin may legitimately read something from the game root, and
+/// a rule that blocked the build over a filename coincidence would be worse than the trap. It fires
+/// only when the two stems match, which is exactly the naming convention every measured example
+/// follows.
+fn placed_file_checks(
+    index: usize,
+    file: &Path,
+    dest: crate::manifest::PlaceIn,
+    plugin_stems: &[String],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+        return out;
+    };
+
+    if let Some(why) = crate::build::companion_name_refusal(name) {
+        out.push(Diagnostic {
+            rule: M0162_PLACED_FILE_REFUSED,
+            severity: Severity::Error,
+            message: format!("{name} cannot be placed in the game folder: {why}."),
+            at: Some(index),
+            fix: None,
+        });
+    }
+
+    let stem = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    let is_companion = stem.is_some_and(|s| plugin_stems.contains(&s));
+    if is_companion && dest.relative_dir() != crate::build::ASI_SUBDIR {
+        out.push(Diagnostic {
+            rule: M0163_COMPANION_NOT_BESIDE_PLUGIN,
+            severity: Severity::Warning,
+            message: format!(
+                "{name} shares its name with a plugin this Shipment ships, but it is placed in \
+                 {:?} while the plugin goes in {:?}. These plugins resolve their config against \
+                 their OWN module directory (`GetModuleFileNameA` truncated at the last \
+                 separator), so a companion anywhere else is never opened — the plugin silently \
+                 falls back to its defaults with the file sitting there looking installed.",
+                display_dest(dest),
+                crate::build::ASI_SUBDIR
+            ),
+            at: Some(index),
+            fix: None,
+        });
+    }
+    out
+}
+
+/// The game root prints as `<game folder>`; an empty string in a diagnostic reads as a bug.
+fn display_dest(dest: crate::manifest::PlaceIn) -> String {
+    match dest.relative_dir() {
+        "" => "<game folder>".to_string(),
+        d => d.to_string(),
+    }
+}
+
 /// Run every hermetic rule.
 ///
 /// `root` enables the source-file checks; pass `None` to lint manifest text alone. `names` enables
@@ -675,6 +765,20 @@ pub fn lint(
             });
         }
     }
+
+    // Every plugin filename stem this Shipment ships, for M0163. Collected up front because the
+    // rule is about a RELATIONSHIP between two contributions, and the companion may be listed
+    // before the plugin it belongs to.
+    let plugin_stems: Vec<String> = manifest
+        .contributions
+        .iter()
+        .filter_map(|c| match c {
+            Contribution::NativeHook { plugin, .. } => plugin.as_ref(),
+            _ => None,
+        })
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
 
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
@@ -766,6 +870,9 @@ pub fn lint(
                         fix: None,
                     });
                 }
+            }
+            Contribution::PlaceFile { file, dest } => {
+                out.extend(placed_file_checks(index, file, *dest, &plugin_stems));
             }
             _ => {}
         }
