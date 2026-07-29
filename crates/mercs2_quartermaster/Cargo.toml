@@ -40,6 +40,13 @@ png = "0.17"  # decode source images for texture lowering (same version the work
 wad_simulator = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 
+[dev-dependencies]
+# Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
+# it back unchanged — retail carries 61 CFX movies against 3 uncompressed GFX — and asserting that
+# needs a real zlib stream, not a plausible-looking one. Nothing in `src/` compresses a movie; that
+# is the whole point of the test.
+flate2 = "1"
+
 [[bin]]
 name = "qm"
 path = "src/bin/qm.rs"
