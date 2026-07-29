@@ -41,8 +41,8 @@ pub use discover::{
 pub use game::{GameStack, GameStackError};
 pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use manifest::{
-    Contribution, Layer, Load, Manifest, Requirement, Retarget, Shipment, Target, Textures, Touch,
-    ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
+    Contribution, Layer, Load, Manifest, PlaceIn, Requirement, Retarget, Shipment, Target,
+    Textures, Touch, ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
 };
 pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 
