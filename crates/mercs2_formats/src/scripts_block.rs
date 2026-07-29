@@ -91,6 +91,20 @@ impl ScriptsBlock {
         self.entries.iter().position(|e| e.name_hash == h)
     }
 
+    /// Like [`Self::find_by_name`], but only matches an entry that is actually a **script**.
+    ///
+    /// `scripts_vz` is 114 containers that are all Lua, so there the type check is redundant. The
+    /// **resident** block is not: it carries ~240 Lua chunks among ~7,000 entries of other types.
+    /// Matching on `name_hash` alone there would let a 32-bit collision splice compiled Lua into a
+    /// texture — which produces a corrupt block rather than an error, so it must be impossible by
+    /// construction rather than merely unlikely.
+    pub fn find_script_by_name(&self, name: &str) -> Option<usize> {
+        let h = pandemic_hash_m2(name);
+        self.entries
+            .iter()
+            .position(|e| e.name_hash == h && e.type_hash == crate::types::TYPE_HASH_SCRIPT)
+    }
+
     /// Verify every container's trailing CSUM == JAMCRC over `[UCFX..pre-CSUM]`.
     /// Returns the count verified, or the first mismatch.
     pub fn verify_csums(&self) -> Result<usize, String> {
