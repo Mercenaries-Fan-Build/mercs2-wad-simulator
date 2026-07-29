@@ -24,18 +24,167 @@ fn corpus_root() -> Option<PathBuf> {
     None
 }
 
-/// The retail `scripts_vz` block, or `None` so the test skips loudly rather than failing on CI.
-fn retail_block() -> Option<ScriptsBlock> {
+/// A retail block's raw decompressed bytes, located by a PTHS substring.
+fn retail_block_bytes(needle: &str) -> Option<Vec<u8>> {
     let wad = mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))?;
     let mut file = std::fs::File::open(&wad).ok()?;
     let size = file.metadata().ok()?.len();
     let archive = load_ffcs_archive(&mut file, size).ok()?;
+    let needle = needle.to_lowercase();
     let idx = archive
         .paths
         .iter()
-        .position(|p| p.to_lowercase().contains("scripts_vz"))?;
-    let dec = decompress_block(&mut file, &archive.indx, idx as u16).ok()?;
-    ScriptsBlock::parse(&dec).ok()
+        .position(|p| p.to_lowercase().contains(&needle))?;
+    decompress_block(&mut file, &archive.indx, idx as u16).ok()
+}
+
+/// The retail `scripts_vz` block, or `None` so the test skips loudly rather than failing on CI.
+fn retail_block() -> Option<ScriptsBlock> {
+    ScriptsBlock::parse(&retail_block_bytes("scripts_vz")?).ok()
+}
+
+/// ★ The gate for resident-block linking: the resident block is NOT scripts-only.
+///
+/// `scripts_vz` is 114 containers that are all Lua. `resident_P000_Q3` is a MIXED block — Lua
+/// chunks alongside animation tables and other assets — so before any `patch_lua` may target it we
+/// have to know that `ScriptsBlock` carries the non-script entries through untouched. The
+/// byte-identical re-serialize is what proves that: anything the parser failed to model would show
+/// up as a diff here rather than as a corrupt block in someone's game.
+///
+/// ⚠ The needle is ANCHORED (`\resident_P000_Q3.block`). Unanchored, `resident_P000_Q3` also
+/// matches `sound_resident_P000_Q3` — a different block entirely.
+#[test]
+fn the_resident_block_parses_and_round_trips_byte_identically() {
+    const SCRIPT_TYPE_HASH: u32 = 0x4249_8680;
+
+    let Some(raw) = retail_block_bytes("\\resident_P000_Q3.block") else {
+        eprintln!("SKIPPING: need a vz.wad");
+        return;
+    };
+    let block = ScriptsBlock::parse(&raw).expect("the resident block must parse as a UCFX table");
+
+    let total = block.entries.len();
+    let scripts = block
+        .entries
+        .iter()
+        .filter(|e| e.type_hash == SCRIPT_TYPE_HASH)
+        .count();
+    eprintln!("resident block: {total} entries, {scripts} of them Lua ({} other)", total - scripts);
+    assert!(scripts > 0, "the resident block must carry Lua chunks");
+    assert!(
+        scripts < total,
+        "expected a MIXED block — if this fires, the block is scripts-only and this test's \
+         premise is wrong"
+    );
+
+    block.verify_csums().expect("every container's CSUM must verify as shipped");
+    assert_eq!(
+        block.serialize(),
+        raw,
+        "re-serializing an unedited resident block must be byte-identical"
+    );
+}
+
+/// Both retail scripts blocks, in `SCRIPT_BLOCKS` order, or `None` to skip.
+fn retail_blocks() -> Option<Vec<(String, ScriptsBlock)>> {
+    let mut out = Vec::new();
+    for (needle, path) in link::SCRIPT_BLOCKS {
+        let raw = retail_block_bytes(needle)?;
+        out.push(((*path).to_string(), ScriptsBlock::parse(&raw).ok()?));
+    }
+    Some(out)
+}
+
+/// ★ The capability the fix pack needs: a `patch_lua` whose target lives in the RESIDENT block.
+///
+/// Every framework module the bug register touches — `mrxplayer`, `mrxguipda`,
+/// `mrxtaskjobcollecttype` — is resident, not `vz`. Before this, `link_into` searched only
+/// `scripts_vz` and every one of them failed as `UnknownScript`.
+#[test]
+fn a_resident_script_links_into_the_resident_block() {
+    let (Some(mut loaded), Some(corpus)) = (retail_blocks(), corpus_root()) else {
+        eprintln!("SKIPPING: need a vz.wad and the Lua corpus");
+        return;
+    };
+    let counts: Vec<usize> = loaded.iter().map(|(_, b)| b.entries.len()).collect();
+
+    let muts = vec![ScriptMutation {
+        shipment: "fixpack".into(),
+        target: "mrxplayer".into(),
+        append: "-- [fixpack] resident reach\n".into(),
+    }];
+
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|(path, block)| link::TargetBlock {
+            path: path.clone(),
+            block,
+        })
+        .collect();
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts).expect("link must succeed");
+    drop(targets);
+
+    assert_eq!(linked.len(), 1);
+    let l = &linked[0];
+    assert_eq!(l.target, "mrxplayer");
+    assert_eq!(
+        loaded[l.block].0, r"blocks\VZ\resident_P000_Q3.block",
+        "a resident module must resolve to the RESIDENT block, not scripts_vz"
+    );
+    assert!(l.linked_source_bytes > l.base_source_bytes);
+
+    // The untouched block must be reported as untouched, so the overlay does not republish it.
+    assert_ne!(l.block, 0, "mrxplayer is not a scripts_vz script");
+
+    for ((path, block), before) in loaded.iter().zip(counts) {
+        assert_eq!(block.entries.len(), before, "{path} gained or lost entries");
+    }
+    let (_, resident) = &loaded[l.block];
+    let reparsed = ScriptsBlock::parse(&resident.serialize()).expect("resident block must re-parse");
+    reparsed.verify_csums().expect("CSUMs must verify");
+    let idx = reparsed.find_script_by_name("mrxplayer").expect("still present");
+    assert!(reparsed
+        .extract_lua(idx)
+        .expect("extract")
+        .starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER));
+}
+
+/// A `vz` target and a `resident` target in one Shipment must each land in their own block.
+#[test]
+fn vz_and_resident_targets_split_across_two_blocks() {
+    let (Some(mut loaded), Some(corpus)) = (retail_blocks(), corpus_root()) else {
+        eprintln!("SKIPPING: need a vz.wad and the Lua corpus");
+        return;
+    };
+    let muts = vec![
+        ScriptMutation {
+            shipment: "fixpack".into(),
+            target: "wifpmcinterior".into(),
+            append: "-- vz\n".into(),
+        },
+        ScriptMutation {
+            shipment: "fixpack".into(),
+            target: "mrxtaskjobcollecttype".into(),
+            append: "-- resident\n".into(),
+        },
+    ];
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|(path, block)| link::TargetBlock {
+            path: path.clone(),
+            block,
+        })
+        .collect();
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts).expect("link");
+    drop(targets);
+
+    assert_eq!(linked.len(), 2);
+    let by_target = |t: &str| linked.iter().find(|l| l.target == t).expect(t).block;
+    assert_eq!(loaded[by_target("wifpmcinterior")].0, r"blocks\VZ\scripts_vz_P000_Q3.block");
+    assert_eq!(
+        loaded[by_target("mrxtaskjobcollecttype")].0,
+        r"blocks\VZ\resident_P000_Q3.block"
+    );
 }
 
 fn outfit_append(slug: &str, model: &str) -> String {
