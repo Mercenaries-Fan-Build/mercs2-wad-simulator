@@ -88,9 +88,17 @@ and emits a single WAD mounted last.
 
 ## Status
 
-`replace_texture`, `add_model`, `add_outfit` and `patch_lua` lower end-to-end against retail WADs.
-`edit_state_machine`, `native_hook` and `raw` return `Unsupported` **with the reason** rather than
-being quietly skipped — a dropped contribution produces a WAD that looks fine and does nothing.
+Every kind lowers end-to-end against retail WADs except `edit_state_machine`, which returns
+`Unsupported` **with the reason** rather than being quietly skipped — a dropped contribution
+produces a WAD that looks fine and does nothing. (`raw` and `native_hook` used to be in that
+sentence too; both lower now.)
+
+`add_movie` is the odd one out in a useful way: it is the only Data kind that needs no game stack.
+A Scaleform GFx movie is self-contained — no donor to borrow a rig from, no target whose dimensions
+it must match — so it builds where the retail WADs do not exist, which is where template CI runs.
+The movie is validated by parsing it and then injected **verbatim**; retail ships 61 compressed
+`CFX` movies and 3 uncompressed `GFX`, so there is no encoding to normalise to and nothing is
+re-encoded in either direction.
 
 ## License
 
