@@ -82,9 +82,20 @@ resolves conflicts before anything is built. The default is fail-closed: a contr
 cannot be reasoned about is treated as exclusive rather than assumed safe.
 
 Lua is the case that forced the design. Scripts load from a *block*, not per-hash, so editing one
-script means re-emitting all 114 — and two script-touching Shipments cannot both win. `qm link`
-therefore composes the installed set's declared source-appends onto the base script, compiles once,
-and emits a single WAD mounted last.
+script means re-emitting every script in that block — and two script-touching Shipments cannot both
+win. `qm link` therefore composes the installed set's declared source-appends onto the base script,
+compiles once, and emits a single WAD mounted last.
+
+`patch_lua` reaches **two** blocks: `scripts_vz` (114 content scripts — contracts, jobs, tutorials)
+and `resident` (~240 always-loaded framework modules, `Mrx*` and the world-entity scripts). A target
+is resolved against both, and only the block it lands in is republished.
+
+The resident block is **mixed** — those ~240 Lua chunks sit among ~7,000 entries of other types — so
+two things there are not optional. The lookup is type-aware, or a 32-bit name-hash collision would
+splice compiled Lua into a texture. And the republished block carries an ASET row for **every**
+entry, copied from the base WAD: an asset in a block with no row naming it is the M0004 hang, and
+`type_id` selects the loader, so it has to come from the WAD rather than from a type-hash table
+(ours is wrong for 12 of 36 ids).
 
 ## Status
 
