@@ -556,7 +556,7 @@ mod tests {
     /// The smallest thing [`GfxMovie::parse`] accepts: header, stage, and a lone `End` tag.
     fn tiny_movie() -> Vec<u8> {
         let mut body = Vec::new();
-        body.push(0b00000_000); // frame RECT, nbits = 0
+        body.push(0); // frame RECT: nbits = 0 in the top 5 bits, so the bounds are empty
         body.extend_from_slice(&(24u16 << 8).to_le_bytes()); // 24 fps
         body.extend_from_slice(&1u16.to_le_bytes()); // one frame
         body.extend_from_slice(&0u16.to_le_bytes()); // End tag: code 0, length 0
