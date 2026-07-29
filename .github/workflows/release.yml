@@ -39,6 +39,21 @@ jobs:
             suffix: "-linux-i686"
             build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder -p mercs2_formats"
             bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static"
+          # Linux on ARM, on a native arm64 runner at the same 22.04 glibc floor. Full workspace,
+          # like the other 64-bit rows: the engine's C deps are the same libudev/alsa packages the
+          # x86_64 row installs, and apt has them for arm64 — nothing here needs a sysroot, which is
+          # what kept the i686 rows engine-free.
+          #
+          # The modkit maps this host (`commands/toolchain.rs::platform_suffix` -> `-linux-arm64`)
+          # and publishes a linux-aarch64 AppImage, but nothing built the assets — so every tool on
+          # its Workshop page reported "no build for this machine". That file's own comment named
+          # this exact failure: "a suffix with no publisher makes every tool report 'no build for
+          # this machine'".
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: "-linux-arm64"
+            build: "--workspace"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop qm"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: "-windows-x86_64.exe"
@@ -49,6 +64,17 @@ jobs:
             suffix: "-windows-i686.exe"
             build: "-p wad_simulator -p ucfx_byteswap -p loadprobe -p mercs2_smuggler -p securom_unwrap -p wad_builder -p mercs2_formats"
             bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static"
+          # Windows on ARM, on a native arm64 runner — the counterpart to the linux-arm64 row, and
+          # the last host the modkit ships an installer for that published no tools. Full workspace:
+          # the engine's two C deps are Windows APIs here (gilrs -> XInput, cpal -> WASAPI), both of
+          # which ARM64 Windows provides. Native runner rather than cross-compiling so MSVC targets
+          # ARM64 directly — which also covers mercs2_luac's vendored C Lua, the one piece of this
+          # workspace that goes through `cc` and has never been built for this triple.
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            suffix: "-windows-arm64.exe"
+            build: "--workspace"
+            bins: "wad_simulator ucfx_byteswap loadprobe smuggler:mercs2_smuggler securom_unwrap wad_builder model_forge inject_parts inject_static mercs2_game mercs2_workshop qm"
           # macOS builds the FULL workspace, like the other 64-bit rows. The two C-library deps that
           # forced the i686 rows to stay engine-free resolve to system frameworks here — gilrs uses
           # IOKit and cpal uses CoreAudio — so there is nothing to install and no sysroot to assemble.
@@ -84,9 +110,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib
 
       # mercs2_engine links two C system libraries on Linux: gilrs -> libudev-sys
-      # (gamepad hotplug via evdev) and cpal -> alsa-sys (audio output).
+      # (gamepad hotplug via evdev) and cpal -> alsa-sys (audio output). Both
+      # 64-bit Linux rows build the engine, so both need them; the i686 row does
+      # not, which is exactly why it stays engine-free.
       - name: Install engine system libraries
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libasound2-dev
 
       # `--message-format=json` makes cargo report the path of every executable it produced, which is

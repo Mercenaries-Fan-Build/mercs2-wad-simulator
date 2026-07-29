@@ -47,12 +47,30 @@ pub enum Severity {
     Hang,
 }
 
+/// Where the modding docs are published.
+///
+/// Diagnostics print a URL rather than a path. The paths in [`Rule::doc`] resolve against a checkout
+/// of the notes repo, which a modder reading `qm lint` output in CI does not have and has no reason
+/// to — so `— see docs/aset_format.md` was an instruction to go find a file that, for them, does not
+/// exist anywhere.
+pub const DOC_BASE: &str =
+    "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/";
+
 /// A rule: stable code, one-line title, and where the trap is written up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rule {
     pub code: &'static str,
     pub title: &'static str,
+    /// Path within the notes repo, with an optional `#anchor`. Use [`Rule::url`] to show it to
+    /// anyone — the raw path is only meaningful to someone who has that repo checked out.
     pub doc: &'static str,
+}
+
+impl Rule {
+    /// The published URL for this rule's write-up.
+    pub fn url(&self) -> String {
+        format!("{DOC_BASE}{}", self.doc)
+    }
 }
 
 // --- Implemented, hermetic -------------------------------------------------
@@ -80,22 +98,22 @@ pub const M0112_SOURCE_OUTSIDE_SRC: Rule = Rule {
 pub const M0120_SELF_CONFLICT: Rule = Rule {
     code: "M0120",
     title: "two contributions in one Shipment claim the same target",
-    doc: "docs/modding/field_guide.md#trap-14",
+    doc: "docs/modding/field_guide.md#trap-14--mods-fight-each-other-and-produce-a-chimera",
 };
 pub const M0130_BARE_HASH: Rule = Rule {
     code: "M0130",
     title: "a hash was written where a name is known",
-    doc: "docs/modding/field_guide.md#trap-1",
+    doc: "docs/modding/field_guide.md#trap-1--your-mod-didnt-load-and-there-is-no-error",
 };
 pub const M0140_UNKNOWN_WEARER: Rule = Rule {
     code: "M0140",
     title: "outfit targets a hero the wardrobe has no list for",
-    doc: "docs/modding/field_guide.md#trap-15",
+    doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
 };
 pub const M0141_UNMERGEABLE_SCRIPT: Rule = Rule {
     code: "M0141",
     title: "patching a script whose composition is not reversed makes the Shipment exclusive",
-    doc: "docs/modding/field_guide.md#trap-15",
+    doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
 };
 pub const M0150_RAW_NO_TOUCHES: Rule = Rule {
     code: "M0150",
@@ -166,22 +184,22 @@ pub const PENDING: &[Rule] = &[
     Rule {
         code: "M0003",
         title: "texture BODY shorter than linear_mip_chain_size — BUFFER_TOO_SMALL, world-load livelock",
-        doc: "docs/modding/field_guide.md#trap-7",
+        doc: "docs/modding/field_guide.md#trap-7--your-reskin-makes-the-game-hang-on-the-loading-screen-not-crash--hang",
     },
     Rule {
         code: "M0004",
         title: "new asset hash minted without an ASET row — loader wedges silently at world-load",
-        doc: "docs/modding/field_guide.md#trap-1",
+        doc: "docs/modding/field_guide.md#trap-1--your-mod-didnt-load-and-there-is-no-error",
     },
     Rule {
         code: "M0005",
         title: "non-resident costume on the on-demand path — STATE_WAITFORGAME wedge",
-        doc: "docs/modding/field_guide.md#trap-12",
+        doc: "docs/modding/field_guide.md#trap-12--your-character-skin-hangs-the-wardrobe-preview-a-count-field-not-a-crash",
     },
     Rule {
         code: "M0006",
         title: "replace_texture target is shared by several materials — collateral reskin",
-        doc: "docs/modding/field_guide.md#trap-6",
+        doc: "docs/modding/field_guide.md#trap-6--a-surface-renders-the-wrong-texture-or-props-look-missing",
     },
     // Found via corpus_search 2026-07-25, not from first principles.
     Rule {
@@ -271,14 +289,14 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
 pub const M0001_DANGLING_RUNG: Rule = Rule {
     code: "M0001",
     title: "dangling _P001/2/3 LOD rungs — 549 GB buffer request, open-world stream HANG",
-    doc: "docs/modding/field_guide.md#trap-7",
+    doc: "docs/modding/field_guide.md#trap-7--your-reskin-makes-the-game-hang-on-the-loading-screen-not-crash--hang",
 };
 
 /// M0002, promoted out of [`PENDING`]. Answerable only against an emitted WAD.
 pub const M0002_PACKED_FIELD_UNDER_CLAIM: Rule = Rule {
     code: "M0002",
     title: "packed_field under-claims decompressed size — heap overrun",
-    doc: "docs/modding/field_guide.md#trap-8",
+    doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packedfield-bug",
 };
 
 /// M0180: a hash claimed by two blocks. Not HANG-class — the registry is first-writer-wins, so the
@@ -380,7 +398,7 @@ impl std::fmt::Display for Diagnostic {
         if let Some(fix) = &self.fix {
             write!(f, " (fix: {fix})")?;
         }
-        write!(f, " — see {}", self.rule.doc)
+        write!(f, " — see {}", self.rule.url())
     }
 }
 

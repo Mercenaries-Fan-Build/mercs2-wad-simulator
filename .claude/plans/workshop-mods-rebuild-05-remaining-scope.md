@@ -299,7 +299,25 @@ which is what `GUARDRAIL 2` in that file exists to prevent.
 Consequence for I: the template repo's CI installs a **pinned released `qm`** and verifies its
 sha256, rather than building anything.
 
-## F. Rule doc links are repo-relative to the *notes* repo
+## F. Rule doc links — ✅ DONE (2026-07-28)
+
+Diagnostics print a URL now (`Rule::url()` over `DOC_BASE`), and `qm rules` with them.
+
+**Seven of the anchors were broken and nobody had noticed.** The field guide's headings read
+`## Trap 7 — Your reskin makes the game hang…`, so GitHub generates
+`trap-7--your-reskin-makes-the-game-hang-on-the-loading-screen-not-crash--hang` — `#trap-7` landed
+every reader at the top of a 17-trap document. Fixed, and `tests/doc_links.rs` now derives anchors
+the way GitHub does and checks each against the real headings, which is what makes anchors this ugly
+maintainable at all: a reworded heading fails a test instead of silently breaking a link.
+
+`docs/modding/manifest_format.md` is written — Plan 04's freeze deliverable, and the target of ten
+rules that pointed at a file which did not exist. It lives in the **notes repo** (committed locally,
+`4e6652b`), alongside the other modding docs.
+
+⚠ **The URLs 404 until that commit is pushed.** The link test passes off the local checkout, so
+nothing here catches it — the only signal is pushing.
+
+### Original scope, for reference
 
 The linter's `Rule.doc` paths resolve against `~/src/mercenaries-game`, not against this repo —
 `docs/modding/field_guide.md`, `docs/aset_format.md`,
@@ -376,14 +394,12 @@ not blocking.
 
 - **B**, the remaining HANG rules: M0003 → M0004, then reassess M0006. M0005/M0008 stay research.
 - **G**, the unimplemented lowering: `edit_state_machine`, `native_hook`, `raw`.
-- **F**, doc links — now the most visible gap. `Diagnostic::Display` prints `— see docs/…` paths that
-  resolve against the *notes* repo, and a modder reading template CI output has neither repo checked
-  out. These want to be URLs, and `docs/modding/manifest_format.md` still is not written.
 - **H**, format gaps (`add_model` `group:`, donor auto-pick, Open-Q7, Open-Q10).
 - Making `qm` carry its own name table (see I).
 
-**F is the natural next item.** The template repo is live, so its CI output is now the first thing a
-new modder reads — and every rule link in it currently points at a path they do not have.
+**Next: B.** With A–F and I done, the remaining HANG rules are what is left that changes outcomes for
+a modder. M0003 first — `wad_simulator::texture::texture_buffer_too_small` already implements it with
+two retail-verified false-positive gates, and the library extraction that blocked it is done.
 
 **A note on the sibling repo.** The reversed knowledge this crate encodes lives in
 `~/src/mercenaries-game` — the decompiled Lua, the ASET/texture format docs, the Ghidra corpus, and
