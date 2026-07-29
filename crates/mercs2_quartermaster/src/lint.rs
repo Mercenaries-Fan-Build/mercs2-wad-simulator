@@ -140,6 +140,11 @@ pub const M0171_INSECURE_URL: Rule = Rule {
     title: "an external requirement is fetched over an untrusted transport",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
+pub const M0190_MOVIE_CARRIES_AS3: Rule = Rule {
+    code: "M0190",
+    title: "an added movie carries AS3 bytecode, which the GFx 2.0.48 runtime cannot execute",
+    doc: "docs/reverse_engineer/scaleform_gfx_class_map.md#1-sdk-version--settled",
+};
 
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
@@ -170,6 +175,7 @@ pub const RULES: &[Rule] = &[
     M0161_HOOK_DOES_NOTHING,
     M0170_BAD_DIGEST,
     M0171_INSECURE_URL,
+    M0190_MOVIE_CARRIES_AS3,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -514,6 +520,55 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
     out
 }
 
+/// M0190 — an `add_movie` payload carrying ActionScript 3.
+///
+/// **The runtime is AVM1 only.** The embedded middleware is Scaleform GFx **2.0.48**, targeting
+/// Flash 8 / AS2, proven three ways in the unpacked exe: the `gfxVersion` property returns the
+/// literal `"2.0.48"`, the loader carries `incompatible GFX file, version 2.x expected`, and the
+/// builtin class registrar installs the AS2 class table with no AVM2 anywhere. GFx 2.x has no
+/// `DoABC` tag loader at all.
+///
+/// So an AS3 movie does not fail — it **loads**. The tag is unknown, so it is skipped; the shapes,
+/// text and timeline all render, and not one line of the movie's logic ever runs. Nothing is logged,
+/// because from the loader's point of view nothing went wrong. That is the exact silent-no-op class
+/// this linter exists for, which is why it blocks rather than warns.
+///
+/// Retail corroborates the direction: across all 64 `cfx_pack` assets in `vz.wad`, `DoABC` appears
+/// zero times.
+///
+/// A movie that cannot be read at all stays silent HERE on purpose. The lowering refuses it with a
+/// message about what a `.gfx` is supposed to look like, and that is a better place to say so than a
+/// rule about AS3 — a rule that reported "no AS3 found" for a file that is not a movie would be
+/// answering a question nobody asked.
+fn movie_checks(index: usize, name: &str, path: &Path) -> Vec<Diagnostic> {
+    let Ok(bytes) = std::fs::read(path) else {
+        // M0110 already reports a missing source; an unreadable one is not this rule's business.
+        return Vec::new();
+    };
+    let Ok(movie) = mercs2_formats::gfx::GfxMovie::parse(&bytes) else {
+        return Vec::new();
+    };
+    let features = movie.features();
+    if features.do_abc == 0 {
+        return Vec::new();
+    }
+    vec![Diagnostic {
+        rule: M0190_MOVIE_CARRIES_AS3,
+        severity: Severity::Error,
+        message: format!(
+            "{} carries {} DoABC tag(s) — ActionScript 3. The game embeds Scaleform GFx 2.0.48, \
+             which is AVM1/AS2 only and has no DoABC loader, so the tag is skipped as unknown: the \
+             movie loads, {name} renders, and none of its script ever runs. Nothing is logged, \
+             because as far as the loader is concerned nothing failed. None of the 64 movies retail \
+             ships carries AS3. Re-author the logic as AS2 (AVM1).",
+            path.display(),
+            features.do_abc
+        ),
+        at: Some(index),
+        fix: None,
+    }]
+}
+
 /// One finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -638,6 +693,11 @@ pub fn lint(
                         at: Some(index),
                         fix: suggestion.map(|s| s.to_string()),
                     });
+                }
+            }
+            Contribution::AddMovie { name, movie } => {
+                if let Some(root) = root {
+                    out.extend(movie_checks(index, name, &root.join(movie)));
                 }
             }
             Contribution::PatchLua { target, .. } => {
