@@ -410,6 +410,59 @@ impl GameStack {
         out
     }
 
+    /// A block located by PTHS substring, plus **the rows that block itself publishes**, keyed by
+    /// asset hash: `hash -> (packed_block_ref, secondary_ref, type_id)`.
+    ///
+    /// For republishing a block whole. Its assets have to keep the rows they already had, and both
+    /// halves of "which row" matter:
+    ///
+    /// - **`type_id` decides which loader is dispatched**, so it must come from the WAD, not from a
+    ///   type-hash lookup table — `docs/type_hash_registry.md` and `aset_type_ids` are wrong for 12
+    ///   of 36 ids (`0xC122545A` is id 8, not 26).
+    /// - The row must be **the one naming THIS block**. An asset hash can appear in rows belonging
+    ///   to several blocks, so picking any row for the hash can hand back another block's type
+    ///   entirely. ⚠ Nor can it be `AsetEntry::is_primary()`: that means "has no `_P001` rung", so
+    ///   it silently skips every asset that *does* stream — which is precisely the set whose rows
+    ///   most need preserving.
+    ///
+    /// Rows come from the same WAD the block came from, so an overlay cannot mix its block with a
+    /// different WAD's rows.
+    pub fn block_and_rows_by_path(
+        &mut self,
+        needle: &str,
+    ) -> Option<(Vec<u8>, std::collections::HashMap<u32, (u32, u32, u32)>)> {
+        let needle = needle.to_lowercase();
+        for wad in self.wads.iter_mut().rev() {
+            let Some(idx) = wad
+                .archive
+                .paths
+                .iter()
+                .position(|p| p.to_lowercase().contains(&needle))
+            else {
+                continue;
+            };
+            let Ok(dec) =
+                mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
+            else {
+                continue;
+            };
+            let rows = wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.block_index() as usize == idx)
+                .map(|e| {
+                    (
+                        e.asset_hash,
+                        (e.packed_block_ref, e.secondary_ref, e.type_id),
+                    )
+                })
+                .collect();
+            return Some((dec, rows));
+        }
+        None
+    }
+
     pub fn primary_lod_chain(&self, name_hash: u32, type_id: u32) -> Option<(u32, u32)> {
         for wad in self.wads.iter().rev() {
             if let Some(e) = wad
