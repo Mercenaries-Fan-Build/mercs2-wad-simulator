@@ -443,6 +443,62 @@ fn scan_shape_fills(
     Ok(out)
 }
 
+// -- write side ------------------------------------------------------------------------------------
+
+/// Wrap a `.gfx`/`.swf` movie as a **patch block** carrying one `cfx_pack` asset.
+///
+/// The returned bytes are a whole block — `[entry table][container]` — not a bare container. That
+/// distinction is the one that has actually bitten this codebase: the loader reads the block's first
+/// word as an entry count, so handing it a container makes it read the `UCFX` magic as one. Callers
+/// hand the result straight to `patch_wad::PatchBlock::from_decompressed`, exactly as they do with
+/// [`crate::texture::build_texture_block`].
+///
+/// The shape is not invented. All 64 `cfx_pack` containers in retail `vz.wad` were measured and
+/// every one of them is byte-for-byte this layout:
+///
+/// ```text
+/// UCFX | data_area_off = 40 | 0 | 0 | ndesc = 1
+/// desc[0]: "data", off 0, size = movie.len(), 0, 0
+/// <movie bytes>
+/// CSUM <crc32_mercs2 of everything above>
+/// ```
+///
+/// **The movie is copied verbatim.** No recompression, in either direction. Retail ships 61 zlib
+/// `CFX` movies and 3 uncompressed `GFX` ones, so the loader demonstrably takes both, and re-encoding
+/// would replace bytes the author verified with bytes nobody has. Validate the movie with
+/// [`GfxMovie::parse`] *before* calling this — it is the check that the thing being wrapped is a
+/// movie at all.
+pub fn build_cfx_pack_block(name_hash: u32, movie: &[u8]) -> Vec<u8> {
+    const HEADER: u32 = 20;
+    const DESC_ROW: u32 = 20;
+    let data_area_off = HEADER + DESC_ROW;
+
+    let mut ucfx = Vec::with_capacity(data_area_off as usize + movie.len() + 8);
+    ucfx.extend_from_slice(b"UCFX");
+    ucfx.extend_from_slice(&data_area_off.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&1u32.to_le_bytes()); // one descriptor
+    ucfx.extend_from_slice(b"data");
+    ucfx.extend_from_slice(&0u32.to_le_bytes()); // body offset, relative to the data area
+    ucfx.extend_from_slice(&(movie.len() as u32).to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(movie);
+    let csum = crate::crc32::crc32_mercs2(&ucfx);
+    ucfx.extend_from_slice(b"CSUM");
+    ucfx.extend_from_slice(&csum.to_le_bytes());
+
+    let mut block = Vec::with_capacity(20 + ucfx.len());
+    block.extend_from_slice(&1u32.to_le_bytes()); // entry count
+    block.extend_from_slice(&name_hash.to_le_bytes());
+    block.extend_from_slice(&crate::types::TYPE_HASH_CFX_PACK.to_le_bytes());
+    block.extend_from_slice(&0u32.to_le_bytes());
+    block.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
+    block.extend_from_slice(&ucfx);
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +551,99 @@ mod tests {
         assert_eq!(f.shapes_with_bitmap, 0);
         assert_eq!(f.shapes_parse_incomplete, 0);
         assert_eq!(*f.tag_counts.get(&32).unwrap(), 1);
+    }
+
+    /// The smallest thing [`GfxMovie::parse`] accepts: header, stage, and a lone `End` tag.
+    fn tiny_movie() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.push(0b00000_000); // frame RECT, nbits = 0
+        body.extend_from_slice(&(24u16 << 8).to_le_bytes()); // 24 fps
+        body.extend_from_slice(&1u16.to_le_bytes()); // one frame
+        body.extend_from_slice(&0u16.to_le_bytes()); // End tag: code 0, length 0
+        let mut file = Vec::new();
+        file.extend_from_slice(b"GFX");
+        file.push(8);
+        file.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+        file.extend_from_slice(&body);
+        file
+    }
+
+    /// The block walks as `[entry table][container]` and gives the movie back byte for byte.
+    ///
+    /// `walk_decompressed_block` is the engine's own reader shape — it re-derives the container
+    /// bounds from the entry table and verifies the CSUM, so a wrong `chunk_size` or a checksum
+    /// computed over the wrong span fails here rather than in the game.
+    #[test]
+    fn a_wrapped_movie_walks_back_out_unchanged() {
+        let movie = tiny_movie();
+        let block = build_cfx_pack_block(0xC0FF_EE01, &movie);
+
+        // A BLOCK, not a bare container: the first word is a count. Reading `UCFX` as one is the
+        // exact defect this shape exists to avoid.
+        assert_eq!(&block[0..4], &1u32.to_le_bytes());
+        assert_ne!(&block[0..4], b"UCFX");
+
+        let (parsed, issues) = crate::ucfx::walk_decompressed_block(&block, "cfx test");
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(parsed.entry_count, 1);
+        assert_eq!(parsed.entries[0].name_hash, 0xC0FF_EE01);
+        assert_eq!(
+            parsed.entries[0].type_hash,
+            crate::types::TYPE_HASH_CFX_PACK
+        );
+        assert_eq!(
+            crate::types::type_id_for_type_hash(parsed.entries[0].type_hash),
+            Some(crate::types::TYPE_ID_CFX_PACK)
+        );
+
+        let container = &parsed.containers[0];
+        let data = crate::ucfx::extract_chunk_body(container, b"data").expect("a `data` leaf");
+        assert_eq!(data, movie, "the movie must be carried verbatim");
+        // And it is still a movie after the round trip, not merely the same length.
+        assert_eq!(&GfxMovie::parse(&data).expect("re-parse").magic, b"GFX");
+    }
+
+    /// A compressed `CFX` movie is wrapped exactly as an uncompressed one is — the container does
+    /// not care, and retail ships both. Nothing here may recompress or inflate the payload: the
+    /// bytes an author verified are the bytes that ship.
+    #[test]
+    fn compression_of_the_movie_is_not_this_layers_business() {
+        let opaque = b"CFX\x08\x00\x00\x00\x00 pretend zlib".to_vec();
+        let block = build_cfx_pack_block(0x1234_5678, &opaque);
+        let (parsed, issues) = crate::ucfx::walk_decompressed_block(&block, "cfx test");
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(
+            crate::ucfx::extract_chunk_body(&parsed.containers[0], b"data").unwrap(),
+            opaque
+        );
+    }
+
+    /// The exact layout every retail `cfx_pack` container has, pinned field by field. Measured
+    /// across all 64 in `vz.wad`: 64 matches, 0 exceptions. If any of these words drifts, the
+    /// container still checksums and still walks — it just stops looking like the ones the game
+    /// loads, and nothing downstream would say so.
+    #[test]
+    fn the_container_matches_the_retail_layout_word_for_word() {
+        let movie = tiny_movie();
+        let block = build_cfx_pack_block(0xBEEF, &movie);
+        let c = &block[20..]; // past the single 20-byte entry-table row + count
+        let w = |at: usize| u32::from_le_bytes(c[at..at + 4].try_into().unwrap());
+
+        assert_eq!(&c[0..4], b"UCFX");
+        assert_eq!(
+            w(4),
+            40,
+            "data area starts after header + one descriptor row"
+        );
+        assert_eq!(w(8), 0);
+        assert_eq!(w(12), 0);
+        assert_eq!(w(16), 1, "exactly one leaf — a pack holds one movie");
+        assert_eq!(&c[20..24], b"data");
+        assert_eq!(w(24), 0, "leaf body sits at the start of the data area");
+        assert_eq!(w(28) as usize, movie.len());
+        assert_eq!(w(32), 0);
+        assert_eq!(w(36), 0);
+        assert_eq!(&c[c.len() - 8..c.len() - 4], b"CSUM");
+        assert_eq!(c.len(), 40 + movie.len() + 8);
     }
 }
