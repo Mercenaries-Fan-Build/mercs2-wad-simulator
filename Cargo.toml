@@ -44,7 +44,7 @@ mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "1.0.0"
 # bodies). Reimplementing that predicate in the linter is how the two copies drift; depending on it
 # is how they cannot. Safe to link anywhere: this crate pulls no Lua runtime, so it does not collide
 # with `mercs2_luac` (see the warning on `mercs2_quartermaster`'s dependency list).
-wad_simulator = { path = "crates/wad_simulator", version = "2.1.0" }
+wad_simulator = { path = "crates/wad_simulator", version = "2.2.0" }
 
 # The load path is CPU-bound `sges`/zlib block decompression + mesh assembly. In a plain `dev` build
 # those run UNOPTIMIZED, making the PMC-interior boot ~134s (vs ~15s optimized) — a ~9x tax purely from
