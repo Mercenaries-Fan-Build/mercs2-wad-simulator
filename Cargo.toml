@@ -14,7 +14,7 @@ repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-gam
 # NOTE: mercs2_formats crossed to 3.0.0, so every dependent's `workspace = true` requirement moved
 # with it — a `^2.1` consumer (e.g. mercs2-modkit) will NOT pick 3.0.0 up until it is edited too.
 [workspace.dependencies]
-mercs2_formats = { path = "crates/mercs2_formats", version = "3.1.0" }
+mercs2_formats = { path = "crates/mercs2_formats", version = "3.2.0" }
 mercs2_luac = { path = "crates/mercs2_luac", version = "1.0.0" }
 mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.0.1" }
 ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.1.0" }

@@ -919,13 +919,66 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     }
     let sigma = (sk.height.abs().max(0.1)) * MLS_SIGMA_FRAC;
     let two_sig2 = 2.0 * sigma * sigma;
+    // ---- Skeletal-graph locality, alongside the Euclidean one ------------------------------------
+    //
+    // §6's locality is a Gaussian in SOURCE space ONLY, so it cannot separate two bones that sit
+    // close together in space but far apart on the skeleton. The legs are the worst case, and it is
+    // measurable: on `RuMerc1.glb` -> `pmc_hum_jen_chickensuit` the SOURCE ankles are 0.21 m apart
+    // against the target's 0.434 m, while `sigma = 0.16 * height ~ 0.30 m`. So ~29% of each foot's
+    // fit is voted by the OPPOSITE foot, and those control points demand lateral displacement of the
+    // opposite SIGN. Measured result: both boots land ~5 cm medial of the ankle bone that drives
+    // them — `Bone_LFootBone1` (x = +0.217) ends up 94% of the way across a boot spanning
+    // +0.097..+0.234, against 31% across the donor's +0.153..+0.360 — and the feet keep 0.192 m of
+    // clearance where the donor has 0.305 m. Each boot then pivots about its own outer margin.
+    //
+    // Fix: multiply the Euclidean kernel by a Gaussian in SKELETAL HOP DISTANCE between the bone
+    // being fitted and the bone each control point belongs to. A contralateral pair is 6 hops away
+    // (foot->shin->thigh->hips->thigh->shin->foot) and is suppressed; the bone's own chain is 1-3
+    // hops and is preserved, so the smoothness the wide spatial kernel buys — and the deliberate
+    // limb-vs-torso locality — are untouched. This is the minimal expression of the
+    // chain-correspondence idea (Havok `hkaSkeletonMapperData::ChainMapping`, UE IK Rig chains):
+    // it restricts the kernel's SUPPORT to the chain without restructuring the fit.
+    const HOP_SIGMA: f64 = 2.5;
+    let two_hop2 = 2.0 * HOP_SIGMA * HOP_SIGMA;
+    // Undirected adjacency over target bones, from the parent links. Built once.
+    let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
+    for b in &sk.bones {
+        if let Some(pi) = sk.parent_of(b.i) {
+            if pi >= 0 {
+                adj.entry(b.i).or_default().push(pi as u32);
+                adj.entry(pi as u32).or_default().push(b.i);
+            }
+        }
+    }
     for &h in &bone_order {
         let p = primary[&h];
         let Some(&anchor_s) = srcp.get(&p) else {
             continue;
         };
         let Some(anchor_d) = sk.tgt(h) else { continue };
+        // BFS hop distance from `h`. A bone we cannot reach (disconnected, or absent from the rig)
+        // is treated as maximally distant, which suppresses it rather than trusting it.
+        let hop: HashMap<u32, u32> = {
+            let mut d: HashMap<u32, u32> = HashMap::new();
+            d.insert(h, 0);
+            let mut q: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+            q.push_back(h);
+            while let Some(x) = q.pop_front() {
+                let dx = d[&x];
+                for &y in adj.get(&x).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    if !d.contains_key(&y) {
+                        d.insert(y, dx + 1);
+                        q.push_back(y);
+                    }
+                }
+            }
+            d
+        };
         let mut pairs: Vec<(V3, V3, f64)> = Vec::with_capacity(control.len());
+        // `plain` keeps the pre-gate weights so a bone the hop gate would starve can fall back
+        // rather than drop into the degenerate branch — the same "only substitute a filtered set
+        // when it is non-empty" discipline the donor-transfer normal filter uses.
+        let mut plain: Vec<(V3, V3, f64)> = Vec::with_capacity(control.len());
         for &(ch, cs_, cd, wextra) in &control {
             let d2 = {
                 let v = sub(cs_, anchor_s);
@@ -937,8 +990,16 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
             }
             w *= wextra;
             if w > 1e-6 {
-                pairs.push((cs_, cd, w));
+                plain.push((cs_, cd, w));
             }
+            let hd = hop.get(&ch).copied().unwrap_or(u32::MAX / 2) as f64;
+            let wh = w * (-(hd * hd) / two_hop2).exp();
+            if wh > 1e-6 {
+                pairs.push((cs_, cd, wh));
+            }
+        }
+        if pairs.len() < 3 {
+            pairs = plain;
         }
         // the bone whose transform anchors a degenerate fit: nearest mapped ancestor's bone.
         let up_bone = {

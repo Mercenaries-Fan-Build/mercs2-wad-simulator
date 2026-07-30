@@ -862,6 +862,73 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             "--faithful: conformed bbox  x {:.3}..{:.3}  y {:.3}..{:.3}  z {:.3}..{:.3}   height {:.3} m",
             lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], hi[1] - lo[1]
         );
+        // ── CONFORM AUDIT: per-band LATERAL extents ─────────────────────────────────────────────
+        // The whole-body bbox above cannot see a stance collapse: the arms dominate X, so a body
+        // whose FEET landed 6 cm medial of the ankle bones that drive them still reports a normal
+        // x-range. Measure each anatomical band's lateral extent on ONE side (x > 0.02 excludes the
+        // midline) and print the target rig's own joint x beside it. A band whose extent is inboard
+        // of its driving bone will be thrown across the midline by any rotation of that bone —
+        // invisible at bind, gross under a clip.
+        {
+            let band = |y0: f32, y1: f32| -> Option<(f32, f32)> {
+                let xs: Vec<f32> = im
+                    .verts
+                    .iter()
+                    .filter(|v| v.pos[1] >= y0 && v.pos[1] < y1 && v.pos[0] > 0.02)
+                    .map(|v| v.pos[0])
+                    .collect();
+                (!xs.is_empty()).then(|| {
+                    (
+                        xs.iter().cloned().fold(f32::MAX, f32::min),
+                        xs.iter().cloned().fold(f32::MIN, f32::max),
+                    )
+                })
+            };
+            // Target joint x at each band, by name, so the comparison is against the real rig.
+            let tx = |n: &str| -> Option<f32> {
+                target_rig
+                    .iter()
+                    .find(|b| b.name_hash == mercs2_formats::hash::pandemic_hash_m2(n))
+                    .map(|b| b.world_bind[3][0])
+            };
+            println!("--faithful: conform audit — lateral extents, x>0.02 side only");
+            println!(
+                "  {:16}{:>9}{:>10}{:>8}   {:>10}",
+                "band", "medial", "lateral", "span", "tgt bone x"
+            );
+            for (nm, y0, y1, bone) in [
+                ("foot", 0.00f32, 0.13f32, "Bone_LFootBone1"),
+                ("ankle/low shin", 0.13, 0.30, "Bone_LFootBone1"),
+                ("knee", 0.40, 0.55, "Bone_LShin"),
+                ("thigh", 0.60, 0.90, "Bone_LThigh"),
+                ("hip", 0.95, 1.10, "Bone_Hips"),
+                ("chest", 1.15, 1.35, "Bone_Chest"),
+            ] {
+                match band(y0, y1) {
+                    None => println!("  {nm:16}   (no verts)"),
+                    Some((med, lat)) => println!(
+                        "  {:16}{:+9.3}{:+10.3}{:8.3}   {:>10}",
+                        nm,
+                        med,
+                        lat,
+                        lat - med,
+                        tx(bone).map(|x| format!("{x:+.3}")).unwrap_or_else(|| "?".into())
+                    ),
+                }
+            }
+            // The number that predicts mid-stride interpenetration: how much clear air is left
+            // between the two feet at bind. The donor's is the specification.
+            let lf = im.verts.iter().filter(|v| v.pos[1] < 0.13 && v.pos[0] > 0.02).map(|v| v.pos[0]);
+            let rf = im.verts.iter().filter(|v| v.pos[1] < 0.13 && v.pos[0] < -0.02).map(|v| v.pos[0]);
+            let l_inner = lf.fold(f32::MAX, f32::min);
+            let r_inner = rf.fold(f32::MIN, f32::max);
+            if l_inner.is_finite() && r_inner.is_finite() {
+                println!(
+                    "  medial gap between feet: {:.4} m   (L inner {:+.4}, R inner {:+.4})",
+                    l_inner - r_inner, l_inner, r_inner
+                );
+            }
+        }
         shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
         return;
     }
