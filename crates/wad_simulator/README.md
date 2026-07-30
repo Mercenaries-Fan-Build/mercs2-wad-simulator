@@ -153,9 +153,76 @@ Besides `wad_simulator` itself, the crate ships focused RE tools (`cargo run -p 
 | `soundbank_probe` | Parse a VO character soundbank and find its wave table into `vo_stream.<lang>.pws` |
 | `wavebank_scan` | Find every wavebank container in a WAD by walking blocks rather than trusting ASET |
 | `wavebank_layout_probe` | Decide the wavebank clip-record layout against every shipped bank |
+| `sfx_namecrack` | Brute-force SFX cue names from the `<bank>_<action>` grammar; recovered names go into `tools/rainbow_table.json` |
+| `sfx_route_probe` | Dump one block's full cue → track → sound-group → wave routing |
+
+## SFX banks
+
+Unlike VO — codec-`0x04` wavebank records that only *index* `vo_stream.<lang>.pws`, so reading them
+needs the WAD **and** the stream file — every weapon/vehicle/ambience bank ships its samples
+**inside its own block** as IMA-ADPCM or PCM16, nothing external. 95 banks / 1316 clips in
+`vz.wad`; the 26 `wpn_*` banks alone hold 211 waves / 237.9 s.
+
+```bash
+cargo run --release -p wad_simulator --bin sfx_route_probe -- --block wpn_pistol
+cargo run --release -p wad_simulator --bin sfx_namecrack -- --wad game-files/vz.wad --filter wpn_
+```
+
+### The routing chain (why `sounddb` alone is not enough)
+
+`sounddb` looks like the cue → wave table but is a **red herring for SFX**: `wpn_pistol` has ten
+waves and exactly **one** `sounddb` cue, yet all ten play. The real chain lives in the `soundbank`
+(`0x9F8BCA10`), matching the engine's own `PgSoundDb` dump (`Sound Groups (%d)`, `Track %d — …
+Sounds: %d`):
+
+> **cue → tracks → sound GROUP → N waves with selection weights**
+
+One `wpn_pistol_fire` cue fans out to five groups covering all ten waves (layers, plus weighted
+random takes at 0.5/0.5 and 0.333×3). Reading `sounddb` alone names 53 of 211 waves; adding the
+group table takes it to **210 of 211**.
+
+```text
++0x04 self_hash  +0x08 group_count(u16)  +0x0A cue_count(u16)
++0x10 data_start  +0x14 sec_b  +0x18 sec_c  +0x1C sec_end
+  A [data_start..sec_b)  group records, VARIABLE length
+  B [sec_b..sec_c)       group_count u32 offsets (rel. data_start)  -> locates A
+  C [sec_c..sec_end)     cue records, VARIABLE length
+  tail [sec_end..]       cue_count u32 offsets (rel. sec_c)         -> locates C
+```
+
+Three things that will bite a reimplementation:
+
+* **Section A holds two record kinds** — a 104+12n multi-take record and a 64-byte single-wave one
+  — so a fixed field offset or a count byte reads garbage on one of them (observed counts of 232
+  and 179). Scan each record for `{self_hash, wave_index, weight}` triples instead; that covers
+  every wave index exactly once on every shipped weapon bank.
+* **Section C records are variable-length too**, so `(sec_end - sec_c) / cue_count` is wrong — on a
+  4-cue bank it divides to 211, not even 4-byte aligned, and misreads three of the four cue guids
+  as zero. Use the tail offset table, exactly as B locates A.
+* **Groups are claimed by several cues** (a `_fire` cue sweeps nearly all of them while
+  `_dryfire` / `_reload` take one each), so apply the **narrowest** cue first or the catch-all wins
+  every wave.
+
+### Naming
+
+A wavebank record carries only `pandemic_hash_m2(name)`, and a wave has no name of its own — it is
+named through whichever cue reaches it. A whole-WAD string sweep yields just **two** cue names
+(`wpn_covertpistol_fire_npc`, `wpn_tankgun_fire_npc`, plus `wpn_bomb_timer_01_armed`), but they
+expose the grammar `<bank>_<action>[_nn][_npc]`, which `sfx_namecrack` uses to recover 33 of 48
+unresolved weapon cue guids (26 distinct cue names). Verified: `wpn_pistol_fire` == `0x8BC8ABF3`.
+**Recovered names belong in `tools/rainbow_table.json`** — they are validated preimages, so once
+merged every tool that loads the table resolves them without re-running the cracker.
+
+Do **not** point the cracker at wave hashes: 11.8M candidates across perspective/distance/layer
+variants recovered exactly one extra name. Wave hashes are not `<bank>_<action>`-shaped — a wave
+is named *through its cue*, which is why the group table above is what mattered.
 
 ## Notes / gotchas
 
+* **ASET rows key on a small `type_id`, not the type hash.** Filtering `arch.aset` by
+  `0xE5273C14` matches *nothing, silently* — `sounddb` is `type_id == 13`, `wavebank` is `6`
+  (the hashes are what appear on the UCFX *entries* inside a block). This read a 1198-route cue
+  catalog as zero routes with no error anywhere.
 * **`--oob-only` is vestigial.** It is still accepted on the command line but nothing reads it. The
   OOB validator it drove (`run_aset_oob`) has been removed: it treated `packed_ref`'s low 16 bits as
   an index into the 16-byte entry table and flagged `sub >= entry_count` as heap corruption. On

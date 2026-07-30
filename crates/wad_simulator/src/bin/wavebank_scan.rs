@@ -44,6 +44,9 @@ struct Cli {
     /// Dump the header + first bytes of the container with this name hash.
     #[arg(long, default_value_t = 0)]
     dump: u32,
+    /// Max rows to print before summarising the tail. Raise it to see the whole inventory.
+    #[arg(long, default_value_t = 40)]
+    limit: usize,
 }
 
 fn rd32(b: &[u8], o: usize) -> u32 {
@@ -191,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             short
         );
         shown += 1;
-        if shown > 40 {
+        if shown > cli.limit {
             println!("  … ({} more)", banks.len() - shown);
             break;
         }
