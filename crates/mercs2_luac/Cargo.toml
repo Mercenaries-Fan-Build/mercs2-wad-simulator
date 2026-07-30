@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_luac"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 Lua 5.1 bytecode compiler — emits LuaQ chunks the game's VM accepts (float lua_Number, 32-bit size_t), from any host."
 license.workspace = true
