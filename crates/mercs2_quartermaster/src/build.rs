@@ -334,6 +334,10 @@ enum Lowering {
     /// declares a mutation that the linker applies later.
     Nothing,
     Block(PatchBlock),
+    /// Several blocks from one contribution. A skinned outfit with `textures:` emits the model
+    /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
+    /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
+    Blocks(Vec<PatchBlock>),
     /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
     /// next to the digest it records for them.
     File {
@@ -559,6 +563,82 @@ pub fn script_mutations(
     Ok(out)
 }
 
+/// Encode one authored map into a `TYPE_ID_TEXTURE` patch block, and say what to repoint onto it.
+///
+/// Returns `(block, to_hash)`. The caller pairs `to_hash` with each donor hash the model currently
+/// names at that slot to build the [`MtrlRepoint`]s.
+///
+/// Format policy, from `character_kit.md`: a NORMAL map is BC3/DXT5nm — this project's swizzle is
+/// `R=1, G=ny, B=1, A=nx` (matching `mercs2_workshop::texenc::encode_normal_full_chain`, so preview
+/// and shipped agree). Diffuse and specular are BC1 unless the source carries real alpha, which
+/// needs BC3. Textures are fully resident: the whole mip chain ships, because a short BODY makes the
+/// engine over-read and the world-load livelocks.
+fn build_outfit_texture(
+    index: usize,
+    kind: &'static str,
+    outfit: &str,
+    suffix: &str,
+    path: &Path,
+    is_normal: bool,
+) -> Result<(PatchBlock, u32), BuildError> {
+    let err = |m: String| BuildError::Lower {
+        index,
+        kind,
+        message: m,
+    };
+    let img = read_png_rgba(path).map_err(err)?;
+    let (w, h) = (img.width, img.height);
+    if w == 0 || h == 0 || w % 4 != 0 || h % 4 != 0 {
+        return Err(err(format!(
+            "{}: {w}x{h} — a block-compressed texture needs both dimensions to be multiples of 4",
+            path.display()
+        )));
+    }
+
+    // Swizzle first, then decide the format from what the pixels actually contain.
+    let pixels: Vec<f32> = if is_normal {
+        img.pixels
+            .chunks_exact(4)
+            .flat_map(|p| [255.0, p[1], 255.0, p[0]])
+            .collect()
+    } else {
+        img.pixels.clone()
+    };
+    let has_alpha = !is_normal && pixels.chunks_exact(4).any(|p| p[3] < 254.0);
+    let format = if is_normal || has_alpha {
+        TexFormat::Bc3
+    } else {
+        TexFormat::Bc1
+    };
+    let body = match format {
+        TexFormat::Bc1 => {
+            let rgb = drop_alpha(&pixels);
+            texture_encode::mip_chain(w, h, 3, &rgb, texture_encode::encode_bc1)
+        }
+        TexFormat::Bc3 => texture_encode::mip_chain(w, h, 4, &pixels, texture_encode::encode_bc3),
+    };
+
+    let to = mercs2_formats::hash::pandemic_hash_m2(&format!("{outfit}_{suffix}"));
+    let td = TextureData {
+        width: w as u32,
+        height: h as u32,
+        format,
+        mip0: body[..mip0_len(w, h, format).min(body.len())].to_vec(),
+        all_mips: body,
+        mip_count: texture_encode::mip_count(w, h) as u32,
+    };
+    let block_bytes = build_texture_block(to, &td);
+    let aset = AsetEntry::new(to, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_TEXTURE);
+    let block = PatchBlock::from_decompressed(
+        &block_bytes,
+        format!("blocks\\VZ\\mod_{to:08x}.block"),
+        vec![aset],
+        None,
+    )
+    .map_err(err)?;
+    Ok((block, to))
+}
+
 /// Lower a rigged `.glb` onto a donor — the SKINNED path, shared by `add_model` and `add_outfit`.
 ///
 /// This used to be a flat refusal (`BuildError::Unsupported`), because everything it needs lived in
@@ -575,8 +655,10 @@ fn lower_skinned(
     root: &Path,
     game: &mut GameStack,
     names: Option<&NameTable>,
+    // The author's own skin. Empty for `add_model`, which has no `textures:` field.
+    textures: &crate::manifest::Textures,
     log: &mut Vec<String>,
-) -> Result<Vec<u8>, BuildError> {
+) -> Result<(Vec<u8>, Vec<PatchBlock>), BuildError> {
     let lower_err = |m: String| BuildError::Lower {
         index,
         kind,
@@ -726,12 +808,62 @@ fn lower_skinned(
         }
     }
 
+    // ── The author's skin ────────────────────────────────────────────────────────────────────
+    //
+    // `textures:` was parsed and used by nothing: `lower_skinned` passed `repoints: Vec::new()`, so
+    // an outfit shipped wearing the DONOR's materials whatever the author supplied. Each supplied
+    // map becomes its own resident texture block, and every donor hash currently sitting at that
+    // MTRL slot is repointed onto it.
+    //
+    // The `from` set comes from every material in the container rather than from the host groups:
+    // hosts are chosen inside the lowering, after this has to run. Repointing all of them is also
+    // the honest reading of one `textures:` block for one outfit, and non-hosts are neutralised.
+    let donor_ucfx = {
+        let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap_or([0; 4])) as usize;
+        donor_blk.get(20..20 + n).unwrap_or(&[])
+    };
+    let mut tex_blocks: Vec<PatchBlock> = Vec::new();
+    let mut repoints: Vec<mercs2_formats::model_inject::MtrlRepoint> = Vec::new();
+    for (slot, suffix, src, is_normal) in [
+        (0usize, "dm", &textures.diffuse, false),
+        (1, "sm", &textures.specular, false),
+        (2, "nm", &textures.normal, true),
+    ] {
+        let Some(rel) = src else { continue };
+        let (block, to) =
+            build_outfit_texture(index, kind, name, suffix, &root.join(rel), is_normal)?;
+        let froms = mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot);
+        if froms.is_empty() {
+            // Nothing to bind it to. Shipping the texture anyway would look like it worked.
+            return Err(lower_err(format!(
+                "`textures.{}` was supplied, but donor {donor_name} names no texture at MTRL slot \
+                 {slot} ({}) for any material — there is nothing to repoint onto it.",
+                match slot {
+                    0 => "diffuse",
+                    1 => "specular",
+                    _ => "normal",
+                },
+                suffix
+            )));
+        }
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: {}_{suffix} 0x{to:08X} replaces {} donor hash(es) \
+             at slot {slot}",
+            name,
+            froms.len()
+        ));
+        for from in froms {
+            repoints.push(mercs2_formats::model_inject::MtrlRepoint { from, to });
+        }
+        tex_blocks.push(block);
+    }
+
     let opts = char_lower::LowerOpts {
         overrides,
         // A model already on the game's own rig keeps the author's weights: there is no fuzzy map
         // to repair, and resampling would discard everything painted on new geometry.
         native_rig: detected == mercs2_formats::retarget::SourceRig::Pandemic,
-        repoints: Vec::new(),
+        repoints,
     };
 
     let hash = crate::manifest::asset_hash(name);
@@ -762,7 +894,24 @@ fn lower_skinned(
         ));
     }
 
-    Ok(out.block)
+    // A repoint that matched nothing means the author's skin is in the WAD and nothing wears it.
+    // xfer_apply warns here; a Shipment must not ship a silent substitution.
+    let dead: Vec<String> = out
+        .stats
+        .mtrl_repoints
+        .iter()
+        .filter(|(_, _, n)| *n == 0)
+        .map(|(f, t, _)| format!("0x{f:08X} -> 0x{t:08X}"))
+        .collect();
+    if !dead.is_empty() {
+        return Err(lower_err(format!(
+            "{} MTRL repoint(s) matched nothing in donor {donor_name}: {}. The texture blocks would              ship and nothing would reference them.",
+            dead.len(),
+            dead.join(", ")
+        )));
+    }
+
+    Ok((out.block, tex_blocks))
 }
 
 /// Lower a single contribution into a patch block.
@@ -896,8 +1045,11 @@ fn lower(
             // INFO(56) range table. Without it this stays the rigid lowering, which leaves joints
             // empty — correct for a prop, wrong for anything that animates.
             if let Some(rt) = retarget {
-                let new_block = lower_skinned(
-                    index, kind, name, model, donor_name, rt, root, game, names, log,
+                // `add_model` has no `textures:` field — a prop wears the donor's materials by
+                // design. Only `add_outfit` carries a skin.
+                let (new_block, _no_textures) = lower_skinned(
+                    index, kind, name, model, donor_name, rt, root, game, names,
+                    &crate::manifest::Textures::default(), log,
                 )?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
@@ -997,27 +1149,22 @@ fn lower(
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
-            // `textures:` is parsed and then used by nothing. It was originally dropped on the
-            // floor by the `..` in this pattern; a first fix refused it only when `retarget` was
-            // absent, on the stated grounds that "the skinned lowering performs the per-group MTRL
-            // repoint" — which it does not. `lower_skinned` takes no textures argument and passes
-            // `repoints: Vec::new()`. So the refusal steered authors toward `retarget:`, where the
-            // silent drop was still waiting.
-            //
-            // Refuse on BOTH branches until the repoint path actually exists. An honest refusal is
-            // worth more than a fix that only moves where the skin goes missing.
-            if textures.diffuse.is_some()
+            // `textures:` binds through the SKINNED lowering's MTRL repoints. The rigid path has
+            // no repoint step, so an outfit built without `retarget:` wears the donor's materials —
+            // which is what silently happened to every `textures:` block before this refusal
+            // existed. Refuse rather than substitute.
+            if (textures.diffuse.is_some()
                 || textures.normal.is_some()
-                || textures.specular.is_some()
+                || textures.specular.is_some())
+                && retarget.is_none()
             {
                 return Err(BuildError::Unsupported {
                     index,
                     kind,
-                    reason: "`textures:` is not wired up yet, on either the rigid or the skinned \
-                             path — the lowering passes no MTRL repoints, so an outfit built now \
-                             wears the DONOR's materials whatever you put here. Refusing rather \
-                             than shipping a silent substitution. Remove `textures:` to build the \
-                             geometry alone."
+                    reason: "`textures:` needs the skinned lowering, which is selected by \
+                             `retarget:`. The rigid path hosts geometry on the donor and performs \
+                             no MTRL repoint, so the outfit would wear the DONOR's skin whatever \
+                             you put here. Add `retarget:`, or drop `textures:`."
                         .into(),
                 });
             }
@@ -1035,8 +1182,9 @@ fn lower(
 
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
             if let Some(rt) = retarget {
-                let new_block =
-                    lower_skinned(index, kind, name, model, donor_name, rt, root, game, names, log)?;
+                let (new_block, tex_blocks) = lower_skinned(
+                    index, kind, name, model, donor_name, rt, root, game, names, textures, log,
+                )?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -1053,7 +1201,11 @@ fn lower(
                 log.push(format!(
                     "contributions[{index}] add_outfit {name}: wardrobe row {wearer}/{slug}"
                 ));
-                return Ok(Lowering::Block(block));
+                // Model block first, then its textures — they must ship together, since the
+                // model's MTRL repoints name hashes only these blocks resolve.
+                let mut out = vec![block];
+                out.extend(tex_blocks);
+                return Ok(Lowering::Blocks(out));
             }
 
             let donor_hash = crate::manifest::asset_hash(donor_name);
@@ -1772,6 +1924,7 @@ pub fn build(
         match lower(index, c, &shipment.root, game.as_deref_mut(), names, &mut log)? {
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
+            Lowering::Blocks(bs) => blocks.extend(bs),
             Lowering::File {
                 name,
                 relative,

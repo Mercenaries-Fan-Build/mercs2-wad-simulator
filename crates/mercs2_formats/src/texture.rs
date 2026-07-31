@@ -176,6 +176,33 @@ impl<'a> UcfxView<'a> {
 /// stride `116 + tex_count*4`. `tex_count` (1..=10, high byte 0) is the reliable
 /// record-boundary signature; on an out-of-range count the walk stops (rather
 /// than mis-reading float props as hashes).
+/// Every distinct texture hash sitting at `slot` across all of a container's materials.
+///
+/// This is the `from` set for repointing a whole model onto one skin: [`MtrlRepoint`] is a
+/// value-scan over the MTRL blob, so replacing each distinct hash at slot 0 with one new hash makes
+/// every material in the container name the same diffuse.
+///
+/// [`MtrlRepoint`]: crate::model_inject::MtrlRepoint
+///
+/// Deliberately NOT keyed on the host groups. Host selection is decided inside the lowering, after
+/// the caller has had to build its texture blocks, and a repoint set that depended on it would have
+/// to be computed twice or guessed. Repointing every material is also the honest reading of one
+/// `textures:` block for one outfit — and the groups that are not hosts get neutralised anyway.
+///
+/// Slot order is `0 = diffuse, 1 = SPECULAR, 2 = NORMAL` (see [`MtrlMaterial::specular`]) — not the
+/// intuitive d/n/s.
+pub fn material_slot_hashes(container: &[u8], slot: usize) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for m in parse_mtrl(container) {
+        if let Some(&h) = m.textures.get(slot) {
+            if h != 0 && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+    }
+    out
+}
+
 pub fn parse_mtrl(container: &[u8]) -> Vec<MtrlMaterial> {
     let mut out = Vec::new();
     let Some(v) = UcfxView::new(container) else {
