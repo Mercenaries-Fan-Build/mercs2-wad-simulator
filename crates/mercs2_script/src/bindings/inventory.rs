@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_child("Human", "Inventory")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult, Value};
+use mercs2_luac::rt::{Lua, Result as LuaResult, Value};
 
 use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};

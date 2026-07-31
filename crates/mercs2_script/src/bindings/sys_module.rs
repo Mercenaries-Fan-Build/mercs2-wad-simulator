@@ -13,7 +13,7 @@
 //! real body (returns the environment table); the five module-loader primitives are faithful no-ops
 //! (`b.stub`) — the native module system, not these cfuncs, resolves imports in this build.
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Value};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;

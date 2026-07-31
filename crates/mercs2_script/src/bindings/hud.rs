@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use mlua::{Function, Lua, MultiValue, Result as LuaResult, Value};
+use mercs2_luac::rt::{Function, Lua, MultiValue, Result as LuaResult, Value};
 
 use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
@@ -61,7 +61,7 @@ pub fn pump_hud_callbacks(lua: &Lua, host: &SharedHost, dt: f32) -> LuaResult<()
     for id in fires {
         let entry = cbs.borrow().fns.get(&id).cloned();
         if let Some((f, ctx)) = entry {
-            f.call::<()>(mlua::MultiValue::from_vec(ctx))?;
+            f.call::<()>(mercs2_luac::rt::MultiValue::from_vec(ctx))?;
         }
     }
     Ok(())
@@ -470,12 +470,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // (MrxGuiBase) names its parameter `sJustification`, and the Hungarian `s` is the engine telling
     // us the type. Typing it `i64` hard-errored on every text widget in a layout file. Accept either:
     // a number passes straight through, a name maps to its slot.
-    wset!("SetTextJustification", mlua::Value, |w, v| {
+    wset!("SetTextJustification", mercs2_luac::rt::Value, |w, v| {
         if let Some(x) = w.text.as_mut() {
             x.justification = match &v {
-                mlua::Value::Integer(n) => *n as u8,
-                mlua::Value::Number(n) => *n as u8,
-                mlua::Value::String(s) => match s.to_string_lossy().to_ascii_lowercase().as_str() {
+                mercs2_luac::rt::Value::Number(n) => *n as u8,
+                mercs2_luac::rt::Value::String(s) => match s.to_string_lossy().to_ascii_lowercase().as_str() {
                     "center" | "centre" | "middle" => 1,
                     "right" => 2,
                     _ => 0, // "left" and anything unrecognised
@@ -538,7 +537,6 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         let a: Vec<Value> = args.into_vec();
         let num = |i: usize| -> Option<f32> {
             match a.get(i) {
-                Some(Value::Integer(n)) => Some(*n as f32),
                 Some(Value::Number(n)) => Some(*n as f32),
                 _ => None,
             }
@@ -715,7 +713,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // through it — identical method set). Bind the alias to the installed table. `nVersion` marks the
     // newer engine that handles widget-tree recursion (child visibility etc.) natively, so `MrxGuiBase`
     // skips its Lua child-walk fallbacks (the final PC build sets it).
-    if let Ok(hud) = lua.globals().get::<mlua::Table>(GLOBAL) {
+    if let Ok(hud) = lua.globals().get::<mercs2_luac::rt::Table>(GLOBAL) {
         let _ = hud.set("nVersion", 1i64);
         let _ = lua.globals().set("_GuiInternal", hud);
     }

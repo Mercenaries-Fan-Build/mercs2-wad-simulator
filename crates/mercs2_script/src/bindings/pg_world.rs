@@ -21,7 +21,7 @@
 //! → false, `Search` → empty table) so callers don't fault on a nil. A later world/asset silo backs
 //! these once the host exposes the streaming + asset DB.
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Value};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::{Guid, SharedHost};
@@ -143,8 +143,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // `Pg` is a SHARED global: `pg.rs` installs the core surface (Spawn / GetGuidByName / …) earlier,
     // and `install_global` below replaces the global table. Copy the existing `Pg` entries into ours
     // first so both coexist (no name overlap) — otherwise this clobbers Pg.GetGuidByName/Spawn.
-    if let Ok(existing) = lua.globals().get::<mlua::Table>(GLOBAL) {
-        for pair in existing.pairs::<String, mlua::Function>() {
+    if let Ok(existing) = lua.globals().get::<mercs2_luac::rt::Table>(GLOBAL) {
+        for pair in existing.pairs::<String, mercs2_luac::rt::Function>() {
             let (k, f) = pair?;
             b.extra(&k, f)?;
         }

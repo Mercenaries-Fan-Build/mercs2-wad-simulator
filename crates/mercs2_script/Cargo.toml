@@ -1,8 +1,8 @@
 [package]
 name = "mercs2_script"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2021"
-description = "The engine's Lua script host: VM + module system (import/inherit) + the Sys.*/engine binding mechanism. Asset-agnostic; the game's Mercenaries Lua runs ON it. Charter Phase 3 (embed Lua 5.4, Surface-B gated)."
+description = "The engine's Lua script host: VM + module system (import/inherit) + the Sys.*/engine binding mechanism. Asset-agnostic; the game's Mercenaries Lua runs ON it. Runs the game's OWN Lua 5.1.5 VM (float lua_Number), so the shipped corpus executes as authored."
 readme = "README.md"
 license.workspace = true
 repository.workspace = true
@@ -12,9 +12,20 @@ name = "mercs2_script"
 path = "src/lib.rs"
 
 [dependencies]
-# Lua 5.4 per charter D5 (5.1 = conservative fallback). Vendored builds Lua from source via the
-# MSVC `cc` toolchain (same one wgpu uses), so no system Lua is required.
-mlua = { version = "0.10", features = ["lua54", "vendored"] }
+# THE game's Lua — 5.1.5 with Pandemic's three patches, vendored by `mercs2_luac` and shared with the
+# bytecode compiler. One Lua in the workspace, deliberately: two builds export the same unprefixed
+# `lua_*` symbols and put one implementation's `lua_State` through the other's functions, which is a
+# SIGSEGV rather than a link error.
+#
+# It replaced `mlua` (5.4) rather than wrapping it, for two reasons that are not preferences:
+#   * `mlua-sys` hardcodes `lua_Number = c_double`; this VM is built `LUA_NUMBER float`, so mlua
+#     would push 8 bytes everywhere the VM reads 4.
+#   * 5.4 cannot run the shipped corpus. `resident/mrxtaskjob{destroy,verify}set.lua` use the
+#     implicit vararg `arg` table, which is a hidden local the 5.1 VM materialises per call and no
+#     Lua-level shim can synthesise. On 5.4 those scripts throw when executed.
+# The 5.1→5.4 compat prelude that used to live in `lib.rs` is gone with it: `unpack`, `table.getn`,
+# `getfenv`/`setfenv` and friends are all native here.
+mercs2_luac = { workspace = true }
 # The HUD widget tree + marker set the `Hud.*`/`Gui.*` bindings drive (via the EngineHost seam).
 mercs2_ui = { workspace = true }
 # The player roster + profile singleton the 107 `Player.*` bindings drive (same seam shape as

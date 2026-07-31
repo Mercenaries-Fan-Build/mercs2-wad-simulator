@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Ai")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Value};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::{Guid, SharedHost};
@@ -32,7 +32,7 @@ fn guid_of(v: &Value) -> Guid {
 
 /// Pull the spawner-adjust fields the host cares about out of a `TweakAttachedSpawners` options table:
 /// `(SpawnerState, forceRespawn)`. `ForceRespawn`/`Respawn` truthy ⇒ force an immediate respawn.
-fn spawner_opts(opts: &Option<mlua::Table>) -> (Option<String>, bool) {
+fn spawner_opts(opts: &Option<mercs2_luac::rt::Table>) -> (Option<String>, bool) {
     match opts {
         Some(t) => {
             let state = t.get::<String>("SpawnerState").ok();
@@ -237,7 +237,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Ai.TweakAttachedSpawners(target, {SpawnerState="on"/"off", SecondsPerCycle=…, …}) — apply an adjust
     // to all groups; the InGroup form scopes to a single group via `Group`/`GroupIndex`.
     let h = host.clone();
-    b.real("TweakAttachedSpawners", lua.create_function(move |_, (target, opts): (Guid, Option<mlua::Table>)| {
+    b.real("TweakAttachedSpawners", lua.create_function(move |_, (target, opts): (Guid, Option<mercs2_luac::rt::Table>)| {
         let (state, respawn) = spawner_opts(&opts);
         Ok(h.borrow_mut().ai_tweak_spawners(target.raw(), 0xFF, state.as_deref(), respawn))
     })?)?;
@@ -249,10 +249,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // (`0xFF`, the same mask the ungrouped `TweakAttachedSpawners` uses) rather than guessing an index
     // — over-broad, but it applies the adjust the script asked for instead of aborting its chain.
     // A numeric group keeps the exact single-group mask. Confirm-live when placement groups land.
-    b.real("TweakAttachedSpawnersInGroup", lua.create_function(move |_, (target, group, opts): (Guid, Value, Option<mlua::Table>)| {
+    b.real("TweakAttachedSpawnersInGroup", lua.create_function(move |_, (target, group, opts): (Guid, Value, Option<mercs2_luac::rt::Table>)| {
         let (state, respawn) = spawner_opts(&opts);
         let mask = match &group {
-            Value::Integer(i) => 1u8.checked_shl(*i as u32).unwrap_or(0),
             Value::Number(n) => 1u8.checked_shl(*n as u32).unwrap_or(0),
             _ => 0xFF,
         };

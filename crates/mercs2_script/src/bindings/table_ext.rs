@@ -30,7 +30,7 @@
 //! `for _ in pairs(self:GetChildren())` in the GUI layer throws — which takes down any boot that
 //! imports `MrxUtil` (i.e. the whole task framework).
 
-use mlua::{Lua, Result as LuaResult, Table, Value};
+use mercs2_luac::rt::{Lua, Result as LuaResult, Table, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;

@@ -26,21 +26,37 @@
 //! - **Out (`IntoLua`)**: a non-zero GUID becomes [`Value::LightUserData`]; `0` becomes `nil`.
 //!   `0` is the engine's "no such handle" and the scripts' `if not uGuid then` depends on it being
 //!   falsey — a lightuserdata (even a NULL one) is truthy in Lua, so 0 must never be pushed as one.
-//! - **In (`FromLua`)**: accepts lightuserdata (the real shape), `nil`/absent → [`Guid::NONE`], and
-//!   — **transitionally** — integers and numbers, so the conversion can land binding-by-binding
-//!   without a flag day while some namespaces still return raw integers. Anything else is `NONE`
-//!   rather than an error, which is exactly what `FUN_0059FF50` does (return 0, never raise).
+//! - **In (`FromLua`)**: accepts lightuserdata (the real shape); everything else — `nil`, absent, a
+//!   number, a string, a table — is [`Guid::NONE`] rather than an error, which is exactly what
+//!   `FUN_0059FF50` does (return 0, never raise).
+//!
+//! # Why numbers are no longer accepted as handles
+//!
+//! There used to be a **transitional** arm here reading a handle out of `Value::Integer` /
+//! `Value::Number`, so the surface could convert namespace by namespace. It is gone, and it had to
+//! go the moment the host moved onto the game's own VM.
+//!
+//! This Lua has one numeric type and it is `f32`. `mercs2_core::FIRST_DYNAMIC_GUID` is
+//! `0x1000_0000` (2^28) and handles mint upward from there, but f32 carries only 24 bits of
+//! mantissa — at 2^28 the representable values are 32 apart. So `2^28 + 1` rounds to `2^28`: a
+//! number-shaped handle does not merely lose precision, it **aliases a different live object**.
+//! Returning `NONE` for a number is the honest answer, and it matches retail, whose reader accepts
+//! only Lua type tags 2 and 7.
+//!
+//! Nothing produced one: no binding returns a handle as a number (checked across `bindings/`; the
+//! `as i64` returns are ammo counts and a string hash). If one is ever added it will read as `NONE`
+//! immediately and loudly rather than corrupting a handle — which is the failure mode worth having.
 //!
 //! That last point is what preserves the **nil-handle contract** documented at the top of
 //! [`crate::bindings`]: a handle miss must push `nil`, not raise, because scripts chain
 //! `Vehicle.GetRiders(Pg.GetGuidByName(sName))` and let the nil fall through. `Guid` absorbs `nil`
 //! into `NONE` for exactly that reason, so `fn(u: Guid)` is as tolerant as the `Option<i64>` it
-//! replaces. (`Option<Guid>` also works — mlua maps `nil` → `None` before ever calling us — but a
-//! bare `Guid` says "0 means none" in one place instead of two.)
+//! replaces. (`Option<Guid>` also works — the layer maps `nil` → `None` before ever calling us —
+//! but a bare `Guid` says "0 means none" in one place instead of two.)
 //!
 //! # Pointer width
 //!
-//! mlua's [`LightUserData`] wraps a `*mut c_void`, so a GUID has to fit in a pointer. On the 64-bit
+//! [`LightUserData`] wraps a `*mut c_void`, so a GUID has to fit in a pointer. On the 64-bit
 //! targets this workspace builds for that is lossless for the full `u64`. On a 32-bit target it is
 //! not, so [`Guid::into_lua`] converts through `usize::try_from` and **raises rather than
 //! truncating** — see [`Guid::as_ptr`]. In practice nothing trips it: `mercs2_core::GuidMap` mints
@@ -49,7 +65,10 @@
 
 use std::ffi::c_void;
 
-use mlua::{Error as LuaError, FromLua, IntoLua, Lua, LightUserData, Result as LuaResult, Value};
+use mercs2_luac::rt::{
+    Error as LuaError, FromLua, FromLuaMulti, IntoLua, IntoLuaMulti, LightUserData, Lua, MultiValue,
+    Result as LuaResult, Value,
+};
 
 /// An engine object handle as seen by Lua.
 ///
@@ -97,19 +116,12 @@ impl Guid {
     pub fn from_value(value: &Value) -> Guid {
         match value {
             Value::LightUserData(ud) => Guid(ud.0 as usize as u64),
-            // TRANSITIONAL: drop once every namespace that *returns* a handle returns `Guid`.
-            // Negative integers cannot be handles, so they collapse to NONE rather than wrapping
-            // around into a huge u64 that would alias a live object.
-            Value::Integer(i) => Guid(u64::try_from(*i).unwrap_or(0)),
-            Value::Number(n) => {
-                if n.is_finite() && *n >= 0.0 && *n <= u64::MAX as f64 {
-                    Guid(*n as u64)
-                } else {
-                    Guid::NONE
-                }
-            }
-            // A full userdata is tag 7, which `FUN_0059FF50` also accepts; we mint none of our own,
-            // so treat it as an unrecognised handle rather than reading through it.
+            // Everything else, INCLUDING a number. This VM's only numeric type is f32, whose
+            // 24-bit mantissa cannot hold a handle — at FIRST_DYNAMIC_GUID (2^28) the representable
+            // values are 32 apart, so reading one back would name a *different* live object. See
+            // the module docs. A full userdata is tag 7, which `FUN_0059FF50` also accepts, but we
+            // mint none of our own, so it is an unrecognised handle rather than something to read
+            // through.
             _ => Guid::NONE,
         }
     }
@@ -124,15 +136,11 @@ impl Guid {
     pub fn as_ptr(self) -> LuaResult<*mut c_void> {
         match usize::try_from(self.0) {
             Ok(bits) => Ok(bits as *mut c_void),
-            Err(_) => Err(LuaError::ToLuaConversionError {
-                from: "Guid".to_string(),
-                to: "lightuserdata",
-                message: Some(format!(
-                    "GUID {:#x} does not fit a {}-bit pointer; refusing to truncate",
-                    self.0,
-                    usize::BITS
-                )),
-            }),
+            Err(_) => Err(LuaError::RuntimeError(format!(
+                "GUID {:#x} does not fit a {}-bit pointer; refusing to truncate",
+                self.0,
+                usize::BITS
+            ))),
         }
     }
 }
@@ -172,6 +180,26 @@ impl FromLua for Guid {
     }
 }
 
+/// A bare `Guid` is a one-value argument list — `move |_, g: Guid|`.
+///
+/// The binding layer enumerates these rather than blanket-implementing them (a blanket impl would
+/// overlap `()`, `MultiValue`, `Variadic` and the tuples), so a foreign type supplies its own. This
+/// is the single most-used argument type on the whole engine surface.
+impl FromLuaMulti for Guid {
+    #[inline]
+    fn from_lua_multi(mut values: MultiValue, lua: &Lua) -> LuaResult<Guid> {
+        Guid::from_lua(values.pop_front(), lua)
+    }
+}
+
+/// And a one-value return list — `Ok::<Guid, Error>(..)`.
+impl IntoLuaMulti for Guid {
+    #[inline]
+    fn into_lua_multi(self, lua: &Lua) -> LuaResult<MultiValue> {
+        Ok(MultiValue::from_iter([self.into_lua(lua)?]))
+    }
+}
+
 /// Render a handle the way a log line wants it: the decimal value, or the empty string for `NONE`.
 ///
 /// The recorded-command log (`EngineHost::script_cmd`) stringifies its arguments, and a handle that
@@ -189,24 +217,43 @@ mod tests {
     /// value survives a round trip back into a binding argument.
     #[test]
     fn guid_is_userdata_to_lua_and_round_trips() {
-        let lua = Lua::new();
-        let f = lua
-            .create_function(|_, ()| Ok(Guid(0x1000_0007)))
-            .unwrap();
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        // 0x1000_0007 is deliberately NOT representable as f32 (2^28 + 7, and f32's steps at 2^28
+        // are 32 wide). A handle that survives it cannot have travelled as a number.
+        const HANDLE: u64 = 0x1000_0007;
+
+        let lua = Lua::new().unwrap();
+        let f = lua.create_function(|_, ()| Ok(Guid(HANDLE))).unwrap();
         lua.globals().set("GetGuid", f).unwrap();
-        let echo = lua.create_function(|_, g: Guid| Ok(g.raw() as i64)).unwrap();
+
+        // Record what Rust actually received, rather than returning it as a number — `as i64` would
+        // go back out through `Value::Number(f32)` and round to 0x1000_0000, which measures the
+        // return channel rather than the handle.
+        let seen = Rc::new(Cell::new(0u64));
+        let sink = seen.clone();
+        let echo = lua
+            .create_function(move |_, g: Guid| {
+                sink.set(g.raw());
+                Ok(g)
+            })
+            .unwrap();
         lua.globals().set("Echo", echo).unwrap();
 
         let ty: String = lua.load("return type(GetGuid())").eval().unwrap();
         assert_eq!(ty, "userdata", "retail pushes handles as lightuserdata (tag 2)");
-        let back: i64 = lua.load("return Echo(GetGuid())").eval().unwrap();
-        assert_eq!(back, 0x1000_0007);
+
+        // Identity across the round trip, checked by Lua itself: lightuserdata compares by pointer.
+        let same: bool = lua.load("return Echo(GetGuid()) == GetGuid()").eval().unwrap();
+        assert!(same, "the handle must come back as the same lightuserdata");
+        assert_eq!(seen.get(), HANDLE, "the full 64-bit handle must reach Rust intact");
     }
 
     /// `0` is `nil`, not a NULL lightuserdata — `if not uGuid then` has to see a falsey value.
     #[test]
     fn zero_is_nil_not_null_lightuserdata() {
-        let lua = Lua::new();
+        let lua = Lua::new().unwrap();
         let f = lua.create_function(|_, ()| Ok(Guid::NONE)).unwrap();
         lua.globals().set("Miss", f).unwrap();
         let ty: String = lua.load("return type(Miss())").eval().unwrap();
@@ -218,7 +265,7 @@ mod tests {
     /// The nil-handle contract: a missing/nil/garbage argument is `NONE`, never a raised error.
     #[test]
     fn absent_or_junk_argument_is_none_not_an_error() {
-        let lua = Lua::new();
+        let lua = Lua::new().unwrap();
         let f = lua.create_function(|_, g: Guid| Ok(g.is_none())).unwrap();
         lua.globals().set("IsNone", f).unwrap();
         for src in [
@@ -237,7 +284,7 @@ mod tests {
     /// sites keep working.
     #[test]
     fn guids_are_stable_table_keys_and_compare_by_value() {
-        let lua = Lua::new();
+        let lua = Lua::new().unwrap();
         let f = lua.create_function(|_, ()| Ok(Guid(0x1000_0042))).unwrap();
         lua.globals().set("G", f).unwrap();
         let ok: bool = lua
@@ -247,14 +294,28 @@ mod tests {
         assert!(ok);
     }
 
-    /// Transitional acceptance: an integer handle from a not-yet-converted namespace still reads.
+    /// A number is NOT a handle on this VM, and the reason is worth a test rather than a comment.
+    ///
+    /// `lua_Number` is f32. At `FIRST_DYNAMIC_GUID` (2^28) the representable values are 32 apart,
+    /// so a number-shaped handle cannot round-trip — it would name a different live object. The
+    /// old transitional arm accepted one; this asserts it no longer does.
     #[test]
-    fn integers_are_still_accepted_while_the_surface_converts() {
-        let lua = Lua::new();
-        let f = lua.create_function(|_, g: Guid| Ok(g.raw() as i64)).unwrap();
-        lua.globals().set("Echo", f).unwrap();
-        let v: i64 = lua.load("return Echo(268435456)").eval().unwrap();
-        assert_eq!(v, 0x1000_0000);
+    fn numbers_are_not_handles_because_f32_cannot_carry_one() {
+        let lua = Lua::new().unwrap();
+        let f = lua.create_function(|_, g: Guid| Ok(g.is_none())).unwrap();
+        lua.globals().set("IsNone", f).unwrap();
+        let none: bool = lua.load("return IsNone(268435456)").eval().unwrap();
+        assert!(none, "a number must read as NONE, not as a handle");
+
+        // The arithmetic behind that decision, made visible: two adjacent handles are the SAME f32.
+        let collide: bool = lua
+            .load("return 268435456 == 268435457")
+            .eval()
+            .unwrap();
+        assert!(
+            collide,
+            "2^28 and 2^28+1 are indistinguishable as f32 — this is why handles are lightuserdata"
+        );
     }
 
     /// A `u64` handle survives the pointer round trip on this target. On 64-bit that is the full

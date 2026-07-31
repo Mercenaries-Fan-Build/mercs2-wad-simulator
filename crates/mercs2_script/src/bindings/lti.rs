@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("LTILibName")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
@@ -150,13 +150,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Shell first-boot gate: `if FirstRun() == 1` — report a normal (non-first) session.
     b.real(
         "FirstRun",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(0i64))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(0i64))?,
     )?;
 
     let installed = b.install_global(GLOBAL)?;
 
     // The shell Flash callbacks address this surface as `LTILibName.*`; bind that alias to the table.
-    if let Ok(lti) = lua.globals().get::<mlua::Table>(GLOBAL) {
+    if let Ok(lti) = lua.globals().get::<mercs2_luac::rt::Table>(GLOBAL) {
         let _ = lua.globals().set("LTILibName", lti);
     }
 

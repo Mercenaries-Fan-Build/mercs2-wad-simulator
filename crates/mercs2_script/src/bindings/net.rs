@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Net")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
@@ -160,19 +160,19 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // Session control → the real NetState.
     let h = host.clone();
-    b.real("StartServer", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(()) })?)?;
+    b.real("StartServer", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(()) })?)?;
     let h = host.clone();
     b.real("ConnectToServer", lua.create_function(move |_, hn: Option<String>| { h.borrow_mut().net_session_start("client", hn.as_deref()); Ok(()) })?)?;
     let h = host.clone();
-    b.real("EnterLobby", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(()) })?)?;
+    b.real("EnterLobby", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(()) })?)?;
     let h = host.clone();
-    b.real("AutoServer", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(true) })?)?;
+    b.real("AutoServer", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(true) })?)?;
     let h = host.clone();
-    b.real("AutoClient", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("client", None); Ok(true) })?)?;
+    b.real("AutoClient", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("client", None); Ok(true) })?)?;
     let h = host.clone();
-    b.real("AutoLobby", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(true) })?)?;
+    b.real("AutoLobby", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(true) })?)?;
     let h = host.clone();
-    b.real("Stop", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().net_stop(); Ok(()) })?)?;
+    b.real("Stop", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_stop(); Ok(()) })?)?;
 
     // Offline platform/matchmaking getters — all false in an offline single-player boot.
     const OFFLINE_FALSE: &[&str] = &[
@@ -197,7 +197,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         }
         let h = host.clone();
         let verb = r.name;
-        b.real(r.name, lua.create_function(move |_, args: mlua::MultiValue| {
+        b.real(r.name, lua.create_function(move |_, args: mercs2_luac::rt::MultiValue| {
             let sa: Vec<String> = args.iter().map(super::stringify_arg).collect();
             h.borrow_mut().net_event(verb, sa);
             Ok(())

@@ -568,8 +568,19 @@ fn h_object_death_fires_event() {
 // relation matrix (mercs2_ai::RelationMatrix, [-100,100] directed) via the host seam.
 fn h_ai_setrelation_roundtrips() {
     let (sh, _h) = setup();
+    // Faction arguments are HANDLES, not indices. The corpus never passes a bare number here —
+    // every call site is `Ai.SetRelation(Pg.GetGuidByName("VZ"), Pg.GetGuidByName("PMC"), …)`
+    // (allcon001, oilcon002, pmccon001, pmccon018, autogunship, hero, …). This used to be spelled
+    // `Ai.SetRelation(1, 2, -100)` and only worked through a transitional arm in `Guid` that read a
+    // handle out of a number. That arm is gone: on the game's own VM `lua_Number` is f32, so a
+    // number cannot carry a handle without aliasing a different object.
     let v: i64 = sh
-        .eval("Ai.SetRelation(1, 2, -100); return Ai.GetRelation(1, 2)")
+        .eval(
+            r#"local vz  = Pg.Spawn("FactionVZ",  0,0,0, 0, false, true)
+               local pmc = Pg.Spawn("FactionPMC", 0,0,0, 0, false, true)
+               Ai.SetRelation(vz, pmc, -100)
+               return Ai.GetRelation(vz, pmc)"#,
+        )
         .unwrap();
     assert_eq!(v, -100, "SetRelation must persist through the host relation matrix");
 }

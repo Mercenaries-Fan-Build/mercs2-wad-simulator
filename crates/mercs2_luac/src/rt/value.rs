@@ -177,6 +177,40 @@ impl Table {
         self.len() == 0
     }
 
+    /// Append to the sequence part — `t[#t + 1] = value`, like `table.insert(t, value)`.
+    pub fn push(&self, value: impl IntoLua) -> Result<()> {
+        self.raw_set((self.len() + 1) as f64, value)
+    }
+
+    /// Remove a key, returning what was there. Metatables are not consulted.
+    ///
+    /// An integer key inside `1..=#t` shifts the tail down, like `table.remove`; any other key —
+    /// including a string — is simply cleared. Both spellings are used: the module loader removes
+    /// globals by name, the binding surface removes list entries by index.
+    pub fn raw_remove(&self, key: impl IntoLua) -> Result<Value> {
+        let lua = self.0.lua();
+        let key = key.into_lua(&lua)?;
+        let n = self.len();
+
+        // Only an in-range positive integer index is a sequence removal.
+        let idx = match &key {
+            Value::Number(f) if *f >= 1.0 && f.fract() == 0.0 && (*f as usize) <= n => *f as usize,
+            _ => {
+                let old = self.raw_get::<Value>(key.clone())?;
+                self.raw_set(key, Value::Nil)?;
+                return Ok(old);
+            }
+        };
+
+        let removed = self.raw_get::<Value>(idx as f64)?;
+        for j in idx..n {
+            let next = self.raw_get::<Value>((j + 1) as f64)?;
+            self.raw_set(j as f64, next)?;
+        }
+        self.raw_set(n as f64, Value::Nil)?;
+        Ok(removed)
+    }
+
     /// The array part, `t[1..#t]`, decoded.
     ///
     /// Collected eagerly rather than lazily: an iterator borrowing the Lua stack across user code
@@ -227,6 +261,27 @@ impl Table {
         out.into_iter()
     }
 }
+
+/// Identity, not structural equality: two handles are equal when they name the same table, which
+/// is what Lua's own `==` reports for tables without an `__eq` metamethod. The module loader uses it
+/// to find which cached module a given table is.
+impl PartialEq for Table {
+    fn eq(&self, other: &Table) -> bool {
+        // SAFETY: both refs push one value; `lua_rawequal` compares without invoking metamethods.
+        unsafe {
+            let lua = self.0.lua();
+            let _balance = super::Balance::new(&lua, "Table::eq");
+            lua.reserve(2);
+            self.0.push();
+            other.0.push();
+            let same = sys::lua_rawequal(lua.state(), -1, -2) != 0;
+            sys::lua_pop(lua.state(), 2);
+            same
+        }
+    }
+}
+
+impl Eq for Table {}
 
 impl std::fmt::Debug for Table {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -309,6 +364,37 @@ impl Value {
     /// Lua truthiness: everything except `nil` and `false`.
     pub fn is_truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Boolean(false))
+    }
+
+    /// The number, if this is one. No string coercion — use [`Lua::coerce_string`]'s counterpart
+    /// `f32::from_lua` when you want Lua's implicit conversion.
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The number truncated to an integer, if this is a number.
+    ///
+    /// Only meaningful up to 2^24 — this VM's numbers are `f32`. Above that the value has already
+    /// been rounded by the time it reaches here, so this cannot recover it.
+    pub fn as_i64(&self) -> Option<i64> {
+        self.as_f32().map(|n| n as i64)
+    }
+
+    /// The string contents, if this is a string. Lossy for non-UTF-8, which the game's ASCII
+    /// strings never are.
+    pub fn as_str(&self) -> Option<String> {
+        match self {
+            Value::String(s) => Some(s.to_string_lossy()),
+            _ => None,
+        }
+    }
+
+    /// Alias of [`Value::as_str`], for call sites that read better as a conversion.
+    pub fn to_str(&self) -> Option<String> {
+        self.as_str()
     }
 }
 

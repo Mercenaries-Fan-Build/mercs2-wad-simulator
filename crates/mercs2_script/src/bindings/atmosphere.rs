@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Atmosphere")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
@@ -120,9 +120,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // --- edit block + time of day ---
     let h = host.clone();
-    b.real("Begin", lua.create_function(move |_, _: mlua::MultiValue| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.active = true; } Ok(()) })?)?;
+    b.real("Begin", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.active = true; } Ok(()) })?)?;
     let h = host.clone();
-    b.real("End", lua.create_function(move |_, _: mlua::MultiValue| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.active = false; } Ok(()) })?)?;
+    b.real("End", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.active = false; } Ok(()) })?)?;
     let h = host.clone();
     b.real("SetTime", lua.create_function(move |_, t: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.atmosphere.time = t; } Ok(()) })?)?;
     let h = host.clone();
@@ -160,7 +160,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     })?)?;
 
     // No sky transition is ever in flight — the game proceeds (`not IsInterpolating()`).
-    b.real("IsInterpolating", lua.create_function(|_, _: mlua::MultiValue| Ok(false))?)?;
+    b.real("IsInterpolating", lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(false))?)?;
 
     // UNBACKED residue: preset/region/interpolation engine (Change/*LineRegion*/Restore/
     // GetCurrentSetting/EnableImmediatelyChangeMode/SetAtmosphere) + multi-face ambient cube + wind/
@@ -175,8 +175,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // Mirror onto `Graphics.Atmosphere`, the name every call site actually uses.
     if let (Ok(gfx), Ok(atmo)) = (
-        lua.globals().get::<mlua::Table>("Graphics"),
-        lua.globals().get::<mlua::Table>(GLOBAL),
+        lua.globals().get::<mercs2_luac::rt::Table>("Graphics"),
+        lua.globals().get::<mercs2_luac::rt::Table>(GLOBAL),
     ) {
         let _ = gfx.set("Atmosphere", atmo);
     }

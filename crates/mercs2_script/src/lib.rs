@@ -15,10 +15,11 @@
 //! `Sys.*` C-binding table calling into the native engine.
 //!
 //! ## What the host installs
-//! - Lua 5.4 (`mlua`, vendored) + the **measured** 5.1→5.4 compat prelude (`COMPAT_PRELUDE`, charter
-//!   migration table: `unpack`, `table.getn`, `math.mod`, `string.gfind`, `loadstring`; the heavy
-//!   constructs are 0 files) + `getfenv`/`setfenv` shims over 5.4's `_ENV`-as-upvalue model, and the
-//!   engine's own `math.randi` / capitalized `Math` namespace.
+//! - **The game's own Lua 5.1.5** (`mercs2_luac`, vendored with Pandemic's float-`lua_Number`
+//!   patches) — so the shipped corpus runs as authored rather than through a compatibility layer.
+//!   No migration shims: `unpack`, `table.getn`, `getfenv`/`setfenv` and friends are native here.
+//!   The `PRELUDE` that remains is engine setup only — `ASSERT`, `math.randi`, the capitalized
+//!   `Math` namespace, and the `_MODULES` registry.
 //! - The **module system**: `import(name)` / `dynamic_import(name)` load a corpus `.lua` into its own
 //!   `_ENV` table (metatable `__index → _G`) so the file's bare `function Foo()` become module members;
 //!   `inherit(base)` chains `__index → base`; results cache in `_MODULES`. This is the C-level
@@ -45,14 +46,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use mlua::{Lua, Result as LuaResult, Table, Value};
+use mercs2_luac::rt::{Lua, Result as LuaResult, Table, Value};
 
 pub mod bindings;
 /// The embedded Lua VM crate, re-exported so hosts can build Lua values natively (tables, callbacks)
-/// against the SAME `mlua` version this crate links — mixing versions would be a type error, and
-/// serializing to Lua source instead would mean splicing untrusted strings (save/mission names) into a
-/// chunk. See `mercs2_engine::script_host::install_boot_save_state` for the motivating consumer.
-pub use mlua;
+/// against the SAME runtime this crate links. Serializing to Lua source instead would mean splicing
+/// untrusted strings (save/mission names) into a chunk. See
+/// `mercs2_engine::script_host::install_boot_save_state` for the motivating consumer.
+///
+/// There is exactly one Lua in the workspace and this is it — the same crate the bytecode compiler
+/// uses. Two Lua builds in one binary would export the same unprefixed `lua_*` symbols and run one
+/// implementation's `lua_State` through the other's functions.
+pub use mercs2_luac;
 pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
 /// The canonical `ObjectHibernation` phases + the folding function, re-exported because the ENGINE is
 /// the producer: it must fire the same canonical spelling the registrations were folded onto, and the
@@ -1254,7 +1259,7 @@ pub type SharedHost = Rc<RefCell<dyn EngineHost>>;
 /// module of 370 that failed to import: `StringToGuid` resolved to nil and the faction-texture table
 /// took a nil key.
 ///
-/// It runs **after** the bindings, not in [`COMPAT_PRELUDE`], because every right-hand side is a member
+/// It runs **after** the bindings, not in [`PRELUDE`], because every right-hand side is a member
 /// of a namespace that does not exist until `install_all` has run.
 ///
 /// Each alias is guarded on its source existing, because our binding surface is a subset of retail's —
@@ -1274,30 +1279,25 @@ if Debug then
 end
 "#;
 
-/// The 5.1→5.4 compatibility prelude — exactly the constructs the charter measured across the 409
-/// corpus files. The heavy ones (`setfenv`/`module`/`loadstring`/`table.setn`/`math.mod`/
-/// `string.gfind`) are 0 files, so this is small and non-invasive.
-const COMPAT_PRELUDE: &str = r#"
--- charter "Lua 5.1 -> 5.4 migration surface" compat aliases
-unpack = unpack or table.unpack
-loadstring = loadstring or load
-if not table.getn then function table.getn(t) return #t end end
--- `table.maxn` — 5.1, removed in 5.2. Unlike `#t` it spans holes: it is the largest **positive
--- numeric** key, which is why `randomlyteleportplayer.lua:17` uses it to size a sparse spawn-point
--- table. Returning `#t` instead would stop at the first gap.
-if not table.maxn then
-  function table.maxn(t)
-    local n = 0
-    for k in pairs(t) do
-      if type(k) == "number" and k > n then n = k end
-    end
-    return n
-  end
-end
-math.mod = math.mod or math.fmod
-string.gfind = string.gfind or string.gmatch
-_MODULES = _MODULES or {}
-
+/// The Lua-side prelude, installed before any module loads.
+///
+/// This **was** the 5.1→5.4 compatibility prelude. All of that is gone, because the host now runs
+/// the game's own Lua 5.1.5 where every one of those names is native — verified against the
+/// vendored `luaconf.h`, which enables `LUA_COMPAT_MOD`, `LUA_COMPAT_GFIND` and `LUA_COMPAT_VARARG`:
+///
+/// | was shimmed | corpus uses | on this VM |
+/// |---|---|---|
+/// | `table.getn` | 112 | native |
+/// | `unpack` | 76 | native |
+/// | `getfenv` / `setfenv` | 18 | native (~35 lines of `debug.getupvalue` reimplementation deleted) |
+/// | `loadstring`, `table.maxn`, `math.mod`, `string.gfind` | 0 | native |
+///
+/// The `getfenv`/`setfenv` pair is the one worth noting: emulating 5.1 environments over 5.4's
+/// `_ENV`-as-upvalue model needed the `debug` library and a scan for the right upvalue slot. Here
+/// they are the VM's own, and the module loader uses `lua_setfenv` directly.
+///
+/// What remains is not compatibility — it is the engine's own Lua-side setup, which retail had too.
+const PRELUDE: &str = r#"
 -- Engine global (not a Lua stdlib function, and not defined anywhere in the script corpus — the
 -- game Lua just calls it). The task framework leans on it: `MrxTask._ModuleLoaded` asserts the
 -- module resolved, `_AddChild` asserts the child name is unique. Retail is a dev-build assert, so a
@@ -1332,43 +1332,14 @@ end
 if type(Math) ~= "table" or type(Math.floor) ~= "function" then Math = math end
 if not Math.randi then Math.randi = math.randi end
 
--- 5.1 getfenv/setfenv shims over 5.4's _ENV-as-upvalue model (used by prototype-inheritance modules
--- like AntiAir: `local m = getfenv(); for _,p in pairs(protos) do setmetatable(p,{__index=m}) end`).
--- The module loader runs each module with its module table as the `_ENV` upvalue, so returning/replacing
--- that upvalue is faithful.
-local function _env_upvalue_index(f)
-  local i = 1
-  while true do
-    local name = debug.getupvalue(f, i)
-    if not name then return nil end
-    if name == "_ENV" then return i end
-    i = i + 1
-  end
-end
-if not getfenv then
-  function getfenv(f)
-    if type(f) == "function" then
-      local i = _env_upvalue_index(f)
-      return i and select(2, debug.getupvalue(f, i)) or _G
-    end
-    local lvl = (type(f) == "number") and f or 1
-    if lvl == 0 then return _G end
-    local info = debug.getinfo(lvl + 1, "f")               -- +1 for this shim frame
-    if info and info.func then
-      local i = _env_upvalue_index(info.func)
-      if i then return select(2, debug.getupvalue(info.func, i)) end
-    end
-    return _G
-  end
-end
-if not setfenv then
-  function setfenv(f, env)
-    local fn = (type(f) == "function") and f or debug.getinfo(((type(f) == "number") and f or 1) + 1, "f").func
-    local i = _env_upvalue_index(fn)
-    if i then debug.setupvalue(fn, i, env) end
-    return fn
-  end
-end
+-- `Math` is the engine's capitalized math namespace (a superset of Lua `math`); the scripts use both
+-- `math.randi` and `Math.randi`. Alias it to the standard library (+ our extension) when it isn't a
+-- real table, so `Math.floor`/`Math.random`/`Math.randi`/… all resolve.
+if type(Math) ~= "table" or type(Math.floor) ~= "function" then Math = math end
+if not Math.randi then Math.randi = math.randi end
+
+-- The module registry `import`/`inherit` cache into.
+_MODULES = _MODULES or {}
 "#;
 
 /// Bring-up auto-stub layer (opt-in). Installs a `_G` metatable so a read of an as-yet-unimplemented
@@ -1459,10 +1430,10 @@ impl Loader {
             return Ok(t.clone());
         }
         let path = self.index.get(&key).cloned().ok_or_else(|| {
-            mlua::Error::RuntimeError(format!("import: module '{name}' not found in roots"))
+            mercs2_luac::rt::Error::RuntimeError(format!("import: module '{name}' not found in roots"))
         })?;
         let src = std::fs::read_to_string(&path)
-            .map_err(|e| mlua::Error::RuntimeError(format!("import '{name}': {e}")))?;
+            .map_err(|e| mercs2_luac::rt::Error::RuntimeError(format!("import '{name}': {e}")))?;
 
         // Fresh environment; misses fall through to the globals (stdlib, other modules, engine tables).
         let env = lua.create_table()?;
@@ -1495,7 +1466,7 @@ impl Loader {
         // `_tPlayerGuiList = {}`). It is DEFERRED into a queue and flushed only when the whole import
         // chain has settled (two-phase: load all, then Init all in load order) — running it eagerly
         // would fire a module's Init mid-cycle while a dependency is still half-loaded.
-        if env.get::<mlua::Function>("Init").is_ok() {
+        if env.get::<mercs2_luac::rt::Function>("Init").is_ok() {
             self.pending_init.borrow_mut().push(env.clone());
         }
         if self.stack.borrow().is_empty() && !self.flushing.get() {
@@ -1506,7 +1477,7 @@ impl Loader {
                 let next = self.pending_init.borrow().get(i).cloned();
                 let Some(m) = next else { break };
                 i += 1;
-                let init: mlua::Function = m.get("Init")?;
+                let init: mercs2_luac::rt::Function = m.get("Init")?;
                 self.stack.borrow_mut().push(m.clone());
                 let r = init.call::<()>(());
                 self.stack.borrow_mut().pop();
@@ -1546,8 +1517,10 @@ impl ScriptHost {
         // All stdlibs incl. `debug` (the game Lua uses the 5.1 `getfenv`/`setfenv`, which our compat
         // shims implement via `debug.getupvalue`/`setupvalue`). This host runs TRUSTED decompiled game
         // Lua, so the unsafe `debug` library is acceptable.
-        let lua = unsafe { Lua::unsafe_new_with(mlua::StdLib::ALL, mlua::LuaOptions::default()) };
-        lua.load(COMPAT_PRELUDE).set_name("@compat_prelude").exec()?;
+        // The full 5.1 standard library, `debug`/`io`/`os` included. Same set retail opened, and
+        // the corpus calls into `os.*` (22 sites) and `io.*` (19).
+        let lua = Lua::new()?;
+        lua.load(PRELUDE).set_name("@prelude").exec()?;
 
         let loader = Rc::new(Loader::new(&roots));
 
@@ -1562,15 +1535,15 @@ impl ScriptHost {
         // mModule)`), so the arg-then-module order is load-bearing, not cosmetic.
         let dimp = loader.clone();
         let dyn_import_fn = lua.create_function(
-            move |lua, (name, cb, args): (String, Option<mlua::Function>, Option<Table>)| {
+            move |lua, (name, cb, args): (String, Option<mercs2_luac::rt::Function>, Option<Table>)| {
                 let m = dimp.import(lua, &name)?;
                 if let Some(cb) = cb {
-                    let mut vals: Vec<mlua::Value> = match args {
-                        Some(t) => t.sequence_values::<mlua::Value>().collect::<LuaResult<_>>()?,
+                    let mut vals: Vec<mercs2_luac::rt::Value> = match args {
+                        Some(t) => t.sequence_values::<mercs2_luac::rt::Value>().collect::<LuaResult<_>>()?,
                         None => Vec::new(),
                     };
-                    vals.push(mlua::Value::Table(m.clone()));
-                    cb.call::<()>(mlua::Variadic::from_iter(vals))?;
+                    vals.push(mercs2_luac::rt::Value::Table(m.clone()));
+                    cb.call::<()>(mercs2_luac::rt::Variadic::from_iter(vals))?;
                 }
                 Ok(m)
             },
@@ -1588,7 +1561,7 @@ impl ScriptHost {
         let drem = loader.clone();
         let dyn_remove_fn = lua.create_function(move |lua, target: Value| {
             let name = match target {
-                Value::String(s) => Some(s.to_str()?.to_owned()),
+                Value::String(s) => Some(s.to_string_lossy()),
                 Value::Table(ref t) => drem.name_of_module(t),
                 _ => None,
             };
@@ -1667,7 +1640,7 @@ impl ScriptHost {
     }
 
     /// Evaluate a source chunk and return a typed result.
-    pub fn eval<T: mlua::FromLuaMulti>(&self, src: &str) -> LuaResult<T> {
+    pub fn eval<T: mercs2_luac::rt::FromLuaMulti>(&self, src: &str) -> LuaResult<T> {
         self.lua.load(src).eval()
     }
 
@@ -1685,7 +1658,7 @@ impl ScriptHost {
     /// * **HUD** — movie end callbacks (`Hud.SetMovieEndCallback`), which also advances movie playback.
     /// * **Player** — boundary / PDA / satellite / disguise / join-leave callbacks.
     ///
-    /// Both registries retain the real `mlua::Function`, which is the whole point: these verbs used to
+    /// Both registries retain the real `mercs2_luac::rt::Function`, which is the whole point: these verbs used to
     /// go through `record_all`, whose `stringify_arg` maps `Value::Function` → `""`, so the closures
     /// were destroyed at registration and pushed into a Vec nothing drained.
     pub fn pump_callbacks(&self, host: &SharedHost, dt: f32) -> LuaResult<()> {
@@ -1726,7 +1699,7 @@ impl ScriptHost {
     /// learns a layer arrived. Unload requests are not reported: they wake nothing.
     pub fn take_streamed_layers(&self) -> LuaResult<Vec<String>> {
         let g = self.lua.globals();
-        let Ok(t) = g.get::<mlua::Table>("__layers_streamed") else { return Ok(Vec::new()) };
+        let Ok(t) = g.get::<mercs2_luac::rt::Table>("__layers_streamed") else { return Ok(Vec::new()) };
         let out: Vec<String> = t.sequence_values::<String>().flatten().collect();
         if !out.is_empty() {
             g.set("__layers_streamed", self.lua.create_table()?)?;
@@ -1737,7 +1710,7 @@ impl ScriptHost {
     /// Advance the `TimerRelative` handlers by `dt` seconds (the engine's per-tick `Event.__pump`).
     pub fn pump_events(&self, dt: f32) -> LuaResult<()> {
         let ev: Table = self.lua.globals().get("Event")?;
-        let pump: mlua::Function = ev.get("__pump")?;
+        let pump: mercs2_luac::rt::Function = ev.get("__pump")?;
         pump.call::<()>(dt)
     }
 
@@ -1849,10 +1822,10 @@ mod tests {
         let h = ScriptHost::new(vec![dir.clone()]).unwrap();
         let child = h.import_module("ChildThing").unwrap();
         // own method
-        let kind: String = child.get::<mlua::Function>("Kind").unwrap().call(()).unwrap();
+        let kind: String = child.get::<mercs2_luac::rt::Function>("Kind").unwrap().call(()).unwrap();
         assert_eq!(kind, "CHILD");
         // inherited method (via __index chain to BaseThing)
-        let greet: String = child.get::<mlua::Function>("Greet").unwrap().call(()).unwrap();
+        let greet: String = child.get::<mercs2_luac::rt::Function>("Greet").unwrap().call(()).unwrap();
         assert_eq!(greet, "base");
 
         let _ = std::fs::remove_dir_all(&dir);

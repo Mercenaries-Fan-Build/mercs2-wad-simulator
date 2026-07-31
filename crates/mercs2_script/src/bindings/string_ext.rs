@@ -13,7 +13,7 @@
 //! **0-based, JS-faithful** semantics (the string operated on is the first argument; game strings are
 //! ASCII so char = byte). Zero corpus call sites — semantics follow the JS spec exactly.
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Value};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;

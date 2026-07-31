@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("socket")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
@@ -34,7 +34,7 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
     for r in REQUIRED {
         b.stub(
             r.name,
-            lua.create_function(|_, _: mlua::MultiValue| Ok(()))?,
+            lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(()))?,
         )?;
     }
     b.install_global(GLOBAL)

@@ -25,7 +25,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Result as LuaResult, Variadic};
+use mercs2_luac::rt::{Lua, Result as LuaResult, Variadic};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;

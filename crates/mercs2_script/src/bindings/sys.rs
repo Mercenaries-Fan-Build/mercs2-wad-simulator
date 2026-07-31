@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Sys")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Value};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::{Guid, SharedHost};
@@ -123,7 +123,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real(
         "RequestAutosave",
         // RequestAutosave(inMission, lastMission, missionTime, pct) — args recorded, ignored here.
-        lua.create_function(move |_, _: mlua::MultiValue| {
+        lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
             h.borrow_mut().sys_request_autosave();
             Ok(())
         })?,
@@ -264,7 +264,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "ToStringL",
         lua.create_function(|lua, v: Value| {
             let g = lua.globals();
-            let f: mlua::Function = match g.get::<Option<mlua::Function>>("_tostring")? {
+            let f: mercs2_luac::rt::Function = match g.get::<Option<mercs2_luac::rt::Function>>("_tostring")? {
                 Some(f) => f,
                 None => g.get("tostring")?,
             };

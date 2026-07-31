@@ -25,7 +25,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use mlua::{Function, IntoLua, Lua, Result as LuaResult, Table, Value, Variadic};
+use mercs2_luac::rt::{Function, IntoLua, Lua, Result as LuaResult, Table, Value, Variadic};
 
 use super::{Installed, NsBuilder, Required};
 use crate::{Guid, SharedHost};

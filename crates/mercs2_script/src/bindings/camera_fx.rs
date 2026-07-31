@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Camera")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
@@ -54,15 +54,15 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("SetYaw", lua.create_function(move |_, y: f32| { h.borrow_mut().camera_set_yaw(y); Ok(()) })?)?;
     let h = host.clone();
-    b.real("GetYaw", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().camera_yaw()))?)?;
+    b.real("GetYaw", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| Ok(h.borrow().camera_yaw()))?)?;
     let h = host.clone();
     b.real("SetPitch", lua.create_function(move |_, p: f32| { h.borrow_mut().camera_set_pitch(p); Ok(()) })?)?;
     let h = host.clone();
-    b.real("GetPitch", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().camera_pitch()))?)?;
+    b.real("GetPitch", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| Ok(h.borrow().camera_pitch()))?)?;
     let h = host.clone();
     b.real("SetFOV", lua.create_function(move |_, f: f32| { h.borrow_mut().camera_set_fov(f); Ok(()) })?)?;
     let h = host.clone();
-    b.real("GetFOV", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().camera_fov()))?)?;
+    b.real("GetFOV", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| Ok(h.borrow().camera_fov()))?)?;
     let h = host.clone();
     b.real("SetPosition", lua.create_function(move |_, (x, y, z): (f32, f32, f32)| { h.borrow_mut().camera_set_position([x, y, z]); Ok(()) })?)?;
     let h = host.clone();
@@ -82,9 +82,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
     let h = host.clone();
-    b.real("Blend", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().camera_set_blending(true); Ok(()) })?)?;
+    b.real("Blend", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().camera_set_blending(true); Ok(()) })?)?;
     let h = host.clone();
-    b.real("StopBlending", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().camera_set_blending(false); Ok(()) })?)?;
+    b.real("StopBlending", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().camera_set_blending(false); Ok(()) })?)?;
     let h = host.clone();
     b.real("Follow", lua.create_function(move |_, guid: Guid| { h.borrow_mut().camera_follow(guid.raw()); Ok(()) })?)?;
     let h = host.clone();
@@ -94,8 +94,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // Preserve the sibling `Camera` surface installed earlier by `camera.rs`; `install_global` below
     // replaces the global table, so copy those functions into ours first (no name overlap).
-    if let Ok(existing) = lua.globals().get::<mlua::Table>(GLOBAL) {
-        for pair in existing.pairs::<String, mlua::Function>() {
+    if let Ok(existing) = lua.globals().get::<mercs2_luac::rt::Table>(GLOBAL) {
+        for pair in existing.pairs::<String, mercs2_luac::rt::Function>() {
             let (k, f) = pair?;
             b.extra(&k, f)?;
         }

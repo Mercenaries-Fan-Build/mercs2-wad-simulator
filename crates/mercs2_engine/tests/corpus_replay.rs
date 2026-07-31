@@ -33,6 +33,17 @@ use mercs2_script::ScriptHost;
 ///
 /// Returns `None` (with a printed skip line) when the corpus is absent — a consumer who stripped it
 /// should still get a green `cargo test`.
+
+/// Bind a handle to a Lua global as lightuserdata — the way the engine really hands one to a script.
+///
+/// These are roster guids, minted from `mercs2_core::FIRST_DYNAMIC_GUID` (2^28) upward. They cannot
+/// be interpolated into Lua source as numbers: this VM's `lua_Number` is f32, whose steps at 2^28
+/// are 32 wide, so the script would receive a *different* handle. `mercs2_script::Guid` refuses to
+/// read one out of a number for exactly that reason.
+fn set_guid(sh: &ScriptHost, name: &str, g: u64) {
+    sh.lua().globals().set(name, mercs2_script::Guid(g)).unwrap();
+}
+
 fn replay_host() -> Option<(ScriptHost, Rc<RefCell<GameScriptHost>>)> {
     let roots = mercs2_script::corpus::roots();
     if roots.is_empty() {
@@ -155,31 +166,32 @@ fn disguise_protocol_parses_named_tables_and_retains_its_callback() {
     // The named-table shape, with the `Player =` key holding a CHARACTER guid. Passing a player handle
     // here is the silent-failure case the code map warns about.
     let ch = host.borrow().player().roster.local().map(|p| p.character).unwrap_or(0);
+    set_guid(&sh, "uCh", ch);
     assert_ne!(ch, 0, "the boot roster possesses the hero");
 
     sh.exec(
         &format!(
             "_replay_fired = false\n\
-             Player.VehicleDisguise({{Player = {ch}, Callback = function() _replay_fired = true end}})"
+             Player.VehicleDisguise({{Player = uCh, Callback = function() _replay_fired = true end}})"
         ),
         "@replay",
     )
     .expect("the named-table form must parse");
 
     let state: bool =
-        sh.eval(&format!("return Player.GetVehicleDisguiseState({{Player = {ch}}})")).unwrap();
+        sh.eval(&format!("return Player.GetVehicleDisguiseState({{Player = uCh}})")).unwrap();
     assert!(state, "the setter is observable by the getter, as a boolean");
 
     // `tostring()` on the state is what the shipped script compares against "true"/"false" — pushing an
     // integer here stringifies to "0" and kills both branches at :37/:41.
     let s: String =
-        sh.eval(&format!("return tostring(Player.GetVehicleDisguiseState({{Player = {ch}}}))")).unwrap();
+        sh.eval(&format!("return tostring(Player.GetVehicleDisguiseState({{Player = uCh}}))")).unwrap();
     assert_eq!(s, "true", "the script compares tostring(...) against \"true\"");
 
     // `Remove = true` is the teardown form.
-    sh.exec(&format!("Player.VehicleDisguise({{Player = {ch}, Remove = true}})"), "@replay").unwrap();
+    sh.exec(&format!("Player.VehicleDisguise({{Player = uCh, Remove = true}})"), "@replay").unwrap();
     let after: bool =
-        sh.eval(&format!("return Player.GetVehicleDisguiseState({{Player = {ch}}})")).unwrap();
+        sh.eval(&format!("return Player.GetVehicleDisguiseState({{Player = uCh}})")).unwrap();
     assert!(!after, "Remove clears the per-player disguise");
 
     // The per-player state and the global gate are independent mechanisms.
@@ -199,11 +211,12 @@ fn disguise_protocol_parses_named_tables_and_retains_its_callback() {
 fn pda_map_mode_takes_nine_arguments_and_splits_exit_from_cancel() {
     let Some((sh, host)) = replay_host() else { return };
     let owner = host.borrow().player().roster.local().map(|p| p.guid).unwrap_or(0);
+    set_guid(&sh, "uOwner", owner);
     assert_ne!(owner, 0);
 
     // The engage form, verbatim in shape from `mrxsupportdesignatorsatellite.lua:77`.
     sh.exec(
-        &format!("Player.SetPDAMapMode({owner}, true, 10, 25, -5, 120, 3, 7, true)"),
+        &format!("Player.SetPDAMapMode(uOwner, true, 10, 25, -5, 120, 3, 7, true)"),
         "@replay",
     )
     .expect("the 9-argument engage must parse");
@@ -223,9 +236,9 @@ fn pda_map_mode_takes_nine_arguments_and_splits_exit_from_cancel() {
     sh.exec(
         &format!(
             "_replay_end = false _replay_cancel = false\n\
-             Player.SetPDAMapModeCallback({owner}, true, function() _replay_end = true end, {{}})\n\
-             Player.SetPDAMapModeCancelCallback({owner}, function() _replay_cancel = true end, {{}})\n\
-             Player.RequestPDAMapModeCancel({owner})"
+             Player.SetPDAMapModeCallback(uOwner, true, function() _replay_end = true end, {{}})\n\
+             Player.SetPDAMapModeCancelCallback(uOwner, function() _replay_cancel = true end, {{}})\n\
+             Player.RequestPDAMapModeCancel(uOwner)"
         ),
         "@replay",
     )
@@ -238,7 +251,7 @@ fn pda_map_mode_takes_nine_arguments_and_splits_exit_from_cancel() {
     assert!(!ended, "and the exit callback did NOT — they are distinct registrations");
 
     // The two-argument teardown form.
-    sh.exec(&format!("Player.SetPDAMapMode({owner}, false)"), "@replay")
+    sh.exec(&format!("Player.SetPDAMapMode(uOwner, false)"), "@replay")
         .expect("the 2-argument teardown must parse");
     assert!(!host.borrow().player().roster.local().unwrap().pda_map.active);
 }

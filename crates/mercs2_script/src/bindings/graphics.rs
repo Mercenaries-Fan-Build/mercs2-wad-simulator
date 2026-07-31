@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Graphics")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
@@ -53,13 +53,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("SetShadowBaseDistance", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.shadow_base_distance = v; } Ok(()) })?)?;
     let h = host.clone();
-    b.real("GetShadowBaseDistance", lua.create_function(move |_, _: mlua::MultiValue| {
+    b.real("GetShadowBaseDistance", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
         Ok(h.borrow().render_state_ref().map(|rs| rs.graphics.shadow_base_distance).unwrap_or(0.0))
     })?)?;
     let h = host.clone();
     b.real("SetScreenRatio", lua.create_function(move |_, v: f32| { if let Some(rs) = h.borrow_mut().render_state() { rs.graphics.screen_ratio = v; } Ok(()) })?)?;
     let h = host.clone();
-    b.real("GetScreenRatio", lua.create_function(move |_, _: mlua::MultiValue| {
+    b.real("GetScreenRatio", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
         Ok(h.borrow().render_state_ref().map(|rs| rs.graphics.screen_ratio).unwrap_or(16.0 / 9.0))
     })?)?;
     let h = host.clone();
@@ -97,7 +97,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         let verb: std::rc::Rc<str> = std::rc::Rc::from(format!("Graphics.Camera.{name}").as_str());
         camera.set(
             name,
-            lua.create_function(move |_, args: mlua::MultiValue| {
+            lua.create_function(move |_, args: mercs2_luac::rt::MultiValue| {
                 let sa: Vec<String> = args.iter().map(super::stringify_arg).collect();
                 h.borrow_mut().script_cmd(&verb, sa);
                 Ok(())

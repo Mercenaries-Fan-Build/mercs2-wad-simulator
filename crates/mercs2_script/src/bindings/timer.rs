@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mlua::{Lua, Result as LuaResult, Value, Variadic};
+use mercs2_luac::rt::{Lua, Result as LuaResult, Value, Variadic};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;
@@ -53,7 +53,6 @@ type Timers = Rc<RefCell<HashMap<String, State>>>;
 fn key_of(args: &Variadic<Value>) -> String {
     match args.first() {
         Some(Value::String(s)) => s.to_string_lossy(),
-        Some(Value::Integer(i)) => i.to_string(),
         Some(Value::Number(n)) => n.to_string(),
         Some(Value::LightUserData(ud)) => crate::guid::stringify_light_userdata(*ud),
         _ => String::new(),

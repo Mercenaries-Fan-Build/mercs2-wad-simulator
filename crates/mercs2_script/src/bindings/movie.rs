@@ -17,7 +17,7 @@
 //! `docs/mercs2-dlc-luacd` (77). Playback is driven from the engine and from Scaleform, not Lua, so
 //! the zero is expected rather than evidence the table is dead.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use super::{Installed, NsBuilder, Required};
 use crate::SharedHost;

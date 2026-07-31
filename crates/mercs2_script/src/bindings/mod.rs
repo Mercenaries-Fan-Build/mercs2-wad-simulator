@@ -59,7 +59,7 @@
 //! that still lack a real body. Those are the faithful blockers; the headline metric is
 //! `totals.remaining` (required − real) trending to zero.
 
-use mlua::{Function, IntoLua, Lua, Result as LuaResult, Table};
+use mercs2_luac::rt::{Function, IntoLua, Lua, Result as LuaResult, Table};
 
 use crate::SharedHost;
 
@@ -118,7 +118,7 @@ pub(crate) fn record_all(
         let verb: std::rc::Rc<str> = std::rc::Rc::from(format!("{ns}.{name}").as_str());
         b.real(
             name,
-            lua.create_function(move |_, args: mlua::MultiValue| {
+            lua.create_function(move |_, args: mercs2_luac::rt::MultiValue| {
                 let sa: Vec<String> = args.iter().map(stringify_arg).collect();
                 h.borrow_mut().script_cmd(&verb, sa);
                 Ok(())
@@ -140,26 +140,25 @@ pub(crate) fn record_all(
 /// 'AnimationData')`).
 ///
 /// A non-table context is passed through as a single argument, and `None`/`Nil` yields no arguments.
-pub(crate) fn unpack_ctx(v: Option<mlua::Value>) -> Vec<mlua::Value> {
+pub(crate) fn unpack_ctx(v: Option<mercs2_luac::rt::Value>) -> Vec<mercs2_luac::rt::Value> {
     match v {
-        Some(mlua::Value::Table(t)) => {
-            t.sequence_values::<mlua::Value>().collect::<mlua::Result<Vec<_>>>().unwrap_or_default()
+        Some(mercs2_luac::rt::Value::Table(t)) => {
+            t.sequence_values::<mercs2_luac::rt::Value>().collect::<mercs2_luac::rt::Result<Vec<_>>>().unwrap_or_default()
         }
-        Some(mlua::Value::Nil) | None => Vec::new(),
+        Some(mercs2_luac::rt::Value::Nil) | None => Vec::new(),
         Some(other) => vec![other],
     }
 }
 
-pub(crate) fn stringify_arg(v: &mlua::Value) -> String {
+pub(crate) fn stringify_arg(v: &mercs2_luac::rt::Value) -> String {
     match v {
-        mlua::Value::String(s) => s.to_string_lossy().to_string(),
-        mlua::Value::Integer(i) => i.to_string(),
-        mlua::Value::Number(n) => n.to_string(),
-        mlua::Value::Boolean(b) => b.to_string(),
+        mercs2_luac::rt::Value::String(s) => s.to_string_lossy().to_string(),
+        mercs2_luac::rt::Value::Number(n) => n.to_string(),
+        mercs2_luac::rt::Value::Boolean(b) => b.to_string(),
         // A GUID now arrives as lightuserdata (see [`crate::guid`]), not `Value::Integer`. Render
         // the handle it carries, so the recorded-command log keeps printing `Ns.Verb(268435456,…)`
         // instead of silently dropping every handle it used to show.
-        mlua::Value::LightUserData(ud) => crate::guid::stringify_light_userdata(*ud),
+        mercs2_luac::rt::Value::LightUserData(ud) => crate::guid::stringify_light_userdata(*ud),
         _ => String::new(),
     }
 }
@@ -267,7 +266,7 @@ impl<'a> NsBuilder<'a> {
     /// wire.
     pub fn install_child(self, parent: &str, name: &str) -> LuaResult<Installed> {
         let globals = self.lua.globals();
-        let parent_tbl: mlua::Table = match globals.get(parent) {
+        let parent_tbl: mercs2_luac::rt::Table = match globals.get(parent) {
             Ok(t) => t,
             Err(_) => {
                 let t = self.lua.create_table()?;

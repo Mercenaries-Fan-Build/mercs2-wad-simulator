@@ -27,16 +27,33 @@ $Order = @(
   'mercs2_core',      # NEW - foundational
   'loadprobe',        # existing 2.0.0 - standalone
   'ucfx_byteswap',    # existing 2.0.0 - needs formats
-  'mercs2_audio','mercs2_ai','mercs2_anim','mercs2_combat','mercs2_decal','mercs2_faction',
-  'mercs2_jobs','mercs2_net','mercs2_physics','mercs2_player','mercs2_population',
+  'mercs2_audio','mercs2_ai','mercs2_anim','mercs2_combat','mercs2_decal','mercs2_destruction',
+  'mercs2_faction','mercs2_jobs','mercs2_net','mercs2_physics','mercs2_player','mercs2_population',
   'mercs2_vehicle','mercs2_water','mercs2_ui',              # NEW - need core+formats
   'mercs2_smuggler','wad_builder',                          # NEW - need formats
   'mercs2_reassemble',                                      # NEW - standalone
   'mercs2_script',                                          # NEW - needs ui,core
   'wad_simulator',                                          # existing 2.0.0 - needs formats,audio,ucfx
+  'mercs2_quartermaster',                                   # NEW - needs formats,luac,wad_simulator
   'mercs2_engine',                                          # NEW - needs all subsystems + script
   'mercs2_probe','mercs2_game','mercs2_workshop'            # NEW - need engine
 )
+
+# A crate missing from $Order is invisible to this script: it is never published, never reported as
+# needing a bump, and the omission only surfaces MUCH later as "no matching package named X found"
+# while packaging whatever depends on it — by which point earlier crates are already live and the
+# run is half-applied. `mercs2_destruction` and `mercs2_quartermaster` were both missing this way.
+# Fail fast instead, before anything is uploaded.
+$publishable = Get-ChildItem -Path 'crates' -Directory | Where-Object {
+  $t = Join-Path $_.FullName 'Cargo.toml'
+  (Test-Path $t) -and -not (Select-String -Path $t -Pattern '^publish\s*=\s*false' -Quiet)
+} | ForEach-Object { $_.Name }
+$absent = $publishable | Where-Object { $Order -notcontains $_ }
+if ($absent) {
+  Write-Host "!! Publishable crate(s) missing from `$Order: $($absent -join ', ')"
+  Write-Host "!! Add them in dependency-valid position (each crate's internal deps must appear EARLIER)."
+  exit 1
+}
 
 $UA = @{ 'User-Agent' = 'publish_release (mercs2 workspace)' }
 
@@ -100,10 +117,20 @@ foreach ($c in $Order) {
   # "At line:char" and CategoryInfo) and that rendering lands in $out - which is the text the
   # rate-limit / already-uploaded regexes below are matched against. It also sets $? to false on
   # a perfectly clean exit. Capture stderr to a FILE instead and re-join it as plain text.
+  # ...and `2>file` alone is NOT enough either: the redirect fills the file, but PS 5.1 still writes
+  # each stderr line to the ERROR STREAM on the way there, so a clean publish still prints a
+  # NativeCommandError block per crate ("At line:char", CategoryInfo, RemoteException) around
+  # nothing worse than "Updating crates.io index". That noise buries the one line that matters and
+  # makes a successful run look like a failing one. Silence the error stream for the duration of the
+  # call only — `$LASTEXITCODE`, captured immediately below, is what actually decides success, and
+  # the stderr TEXT still reaches `$out` via the file, so the regexes below are unaffected.
   while ($true) {
     $errPath = [IO.Path]::GetTempFileName()
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
     $out = (& cargo publish -p $c 2>$errPath | Out-String)
     $rc = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
     $out += (Get-Content $errPath -Raw)
     try { Remove-Item $errPath -Force -ErrorAction Stop } catch {}
     Write-Host $out

@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Gui")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
@@ -93,7 +93,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         ("AddObjective", MarkerKind::Objective),
     ] {
         let h = host.clone();
-        b.real(name, lua.create_function(move |_, _: mlua::MultiValue| {
+        b.real(name, lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
             Ok(h.borrow_mut().markers().map(|m| m.add(kind) as i64).unwrap_or(0))
         })?)?;
     }
@@ -156,29 +156,29 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Input-mode queries gate KB/M-vs-controller branches — PC default = keyboard/mouse.
     b.real(
         "IsXboxController",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(false))?,
     )?;
     b.real(
         "ControllerInUse",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(false))?,
     )?;
     b.real(
         "IsPdaOnSelect",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(false))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(false))?,
     )?;
     // Screen-space queries feeding widget arithmetic — neutral coordinates.
     b.real(
         "GetReticlePosition",
-        lua.create_function(|_, _: mlua::MultiValue| Ok((0.0f64, 0.0f64)))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok((0.0f64, 0.0f64)))?,
     )?;
     b.real(
         "FindGuiLocation",
-        lua.create_function(|_, _: mlua::MultiValue| Ok((0.0f64, 0.0f64, 0.0f64, 0.0f64)))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok((0.0f64, 0.0f64, 0.0f64, 0.0f64)))?,
     )?;
     // Localized-VO asset suffix — faithful base locale.
     b.real(
         "GetLanguageName",
-        lua.create_function(|_, _: mlua::MultiValue| Ok(String::from("english")))?,
+        lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(String::from("english")))?,
     )?;
 
     b.install_global(GLOBAL)

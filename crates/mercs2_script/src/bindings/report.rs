@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Report")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, Result as LuaResult};
+use mercs2_luac::rt::{Lua, Result as LuaResult};
 
 use crate::SharedHost;
 use super::{Installed, NsBuilder, Required};
@@ -40,15 +40,15 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // a reporter-config table ({Callback, SimultaneousReporters, LossThreshold, GoalPriority}); the
     // report is scored against the PMC faction.
     let h = host.clone();
-    b.real("Init", lua.create_function(move |_, _config: Option<mlua::Table>| { h.borrow_mut().report_init(); Ok(()) })?)?;
+    b.real("Init", lua.create_function(move |_, _config: Option<mercs2_luac::rt::Table>| { h.borrow_mut().report_init(); Ok(()) })?)?;
     let h = host.clone();
     b.real("SetDelay", lua.create_function(move |_, secs: f32| { h.borrow_mut().report_set_delay(secs); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Completed", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().report_finish(true); Ok(()) })?)?;
+    b.real("Completed", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().report_finish(true); Ok(()) })?)?;
     let h = host.clone();
-    b.real("Failed", lua.create_function(move |_, _: mlua::MultiValue| { h.borrow_mut().report_finish(false); Ok(()) })?)?;
+    b.real("Failed", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().report_finish(false); Ok(()) })?)?;
     let h = host.clone();
-    b.real("GetInfractions", lua.create_function(move |_, _: mlua::MultiValue| Ok(h.borrow().report_infractions()))?)?;
+    b.real("GetInfractions", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| Ok(h.borrow().report_infractions()))?)?;
 
     b.install_global(GLOBAL)
 }

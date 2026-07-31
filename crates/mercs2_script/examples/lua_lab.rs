@@ -289,7 +289,7 @@ impl Dispatcher<'_> {
             "{name}({})",
             args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
         );
-        let f: Option<mlua::Function> = self.sh.lua().globals().get(name).ok();
+        let f: Option<mercs2_luac::rt::Function> = self.sh.lua().globals().get(name).ok();
 
         let Some(f) = f else {
             let near = self.miscased(name);
@@ -310,7 +310,7 @@ impl Dispatcher<'_> {
         };
 
         println!("  t={:<5.2} │ \x1b[36mengine\x1b[0m   → \x1b[1m{shown}\x1b[0m", host.borrow().now);
-        if let Err(e) = f.call::<()>(mlua::Variadic::from_iter(args.iter().copied())) {
+        if let Err(e) = f.call::<()>(mercs2_luac::rt::Variadic::from_iter(args.iter().copied())) {
             println!("  t={:<5.2} │ \x1b[31mLUA ERROR\x1b[0m in {name}: {e}", host.borrow().now);
         }
         *self.called.entry(name.to_string()).or_default() += 1;
@@ -318,8 +318,8 @@ impl Dispatcher<'_> {
 
     /// Find a global function whose name matches `want` case-insensitively but not exactly.
     fn miscased(&self, want: &str) -> Option<String> {
-        for pair in self.sh.lua().globals().pairs::<mlua::Value, mlua::Value>().flatten() {
-            let (mlua::Value::String(k), mlua::Value::Function(_)) = (&pair.0, &pair.1) else {
+        for pair in self.sh.lua().globals().pairs::<mercs2_luac::rt::Value, mercs2_luac::rt::Value>().flatten() {
+            let (mercs2_luac::rt::Value::String(k), mercs2_luac::rt::Value::Function(_)) = (&pair.0, &pair.1) else {
                 continue;
             };
             let name = k.to_string_lossy().to_string();

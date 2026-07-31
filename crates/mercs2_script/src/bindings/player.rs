@@ -32,7 +32,7 @@
 //!
 //! # Not here
 //!
-//! The eight callback registrations retain their `mlua::Function` in [`PlayerCallbacks`] (this file)
+//! The eight callback registrations retain their `mercs2_luac::rt::Function` in [`PlayerCallbacks`] (this file)
 //! and are dispatched by [`pump_player_callbacks`]; `mercs2_player` holds only opaque ids, which is
 //! faithful — retail stores a Lua *ref* at `player+0x380`, not a closure.
 
@@ -40,7 +40,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use mlua::{Function, IntoLua, Lua, MultiValue, Result as LuaResult, Table, Value};
+use mercs2_luac::rt::{Function, IntoLua, Lua, MultiValue, Result as LuaResult, Table, Value};
 
 use mercs2_player::{
     boundary::Boundary, callbacks::CallbackSlot, disguise::DisguiseRequest, pda::PdaMapModeRequest,
@@ -298,7 +298,7 @@ pub fn pump_player_callbacks(lua: &Lua, host: &SharedHost) -> LuaResult<()> {
                 // A handle handed BACK to a script callback must be lightuserdata too, or the
                 // callback's own `type(u) == "userdata"` gate fails on it.
                 mercs2_player::CallbackArg::Guid(g) => Guid(g).into_lua(lua)?,
-                mercs2_player::CallbackArg::Number(n) => Value::Number(n),
+                mercs2_player::CallbackArg::Number(n) => Value::Number(n as f32),
                 mercs2_player::CallbackArg::Bool(b) => Value::Boolean(b),
                 mercs2_player::CallbackArg::Text(s) => Value::String(lua.create_string(&s)?),
                 mercs2_player::CallbackArg::Nil => Value::Nil,
@@ -630,7 +630,6 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         // The corpus passes both `true` and a small number here, so accept either.
         let v = match mode {
             Some(Value::Boolean(x)) => u8::from(x),
-            Some(Value::Integer(n)) => n.clamp(0, 255) as u8,
             Some(Value::Number(n)) => n.clamp(0.0, 255.0) as u8,
             _ => 1,
         };

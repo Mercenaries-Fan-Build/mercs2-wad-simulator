@@ -25,7 +25,8 @@
 //! * **Panics.** Unwinding into C is undefined behaviour. [`trampoline`] and the `__gc` hook both
 //!   wrap Rust work in `catch_unwind` and convert a panic into a Lua error.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -37,7 +38,7 @@ mod multi;
 mod value;
 
 pub use multi::{FromLuaMulti, IntoLuaMulti, MultiValue, Variadic};
-pub use value::{FromLua, Function, IntoLua, LightUserData, LuaString, Table, Value};
+pub use value::{FromLua, Function, IntoLua, LightUserData, LuaString, Opaque, Table, Value};
 
 /// Why a Lua operation failed.
 ///
@@ -92,6 +93,19 @@ pub(crate) struct LuaInner {
     pub(crate) state: *mut lua_State,
     /// Set while a callback is executing, so `Drop` on a borrowed view never closes the state.
     borrowed: Cell<bool>,
+    /// Type-keyed side storage for state shared between binding namespaces. Held as `Rc<dyn Any>`
+    /// so a handle can outlive the borrow of the map.
+    app_data: RefCell<HashMap<std::any::TypeId, Rc<dyn std::any::Any>>>,
+}
+
+/// A handle to a value stored with [`Lua::set_app_data`]. Derefs to the value.
+pub struct AppDataRef<T>(Rc<T>);
+
+impl<T> std::ops::Deref for AppDataRef<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
 }
 
 impl Drop for LuaInner {
@@ -126,7 +140,13 @@ impl Lua {
         }
         // SAFETY: `state` is a fresh, live state.
         unsafe { sys::luaL_openlibs(state) };
-        Ok(Lua { inner: Rc::new(LuaInner { state, borrowed: Cell::new(false) }) })
+        Ok(Lua {
+            inner: Rc::new(LuaInner {
+                state,
+                borrowed: Cell::new(false),
+                app_data: RefCell::new(HashMap::new()),
+            }),
+        })
     }
 
     pub(crate) fn state(&self) -> *mut lua_State {
@@ -191,9 +211,70 @@ impl Lua {
         }
     }
 
+    /// A table pre-sized for `narr` array slots and `nrec` hash slots.
+    pub fn create_table_with_capacity(&self, narr: usize, nrec: usize) -> Result<Table> {
+        let _balance = Balance::new(self, "Lua::create_table_with_capacity");
+        // SAFETY: stack space reserved; `lua_createtable` leaves exactly one value.
+        unsafe {
+            self.reserve(1);
+            sys::lua_createtable(self.state(), narr as c_int, nrec as c_int);
+            Ok(Table(self.pop_ref()))
+        }
+    }
+
+    /// Build a sequence table (`t[1..n]`) from an iterator — the shape every `Get*List` binding
+    /// hands back to Lua.
+    pub fn create_sequence_from<T, I>(&self, iter: I) -> Result<Table>
+    where
+        T: IntoLua,
+        I: IntoIterator<Item = T>,
+    {
+        let iter = iter.into_iter();
+        let (lower, _) = iter.size_hint();
+        let t = self.create_table_with_capacity(lower, 0)?;
+        for (i, v) in iter.enumerate() {
+            t.raw_set((i + 1) as f64, v)?;
+        }
+        Ok(t)
+    }
+
+    /// Lua's own `tostring` coercion: strings pass through, numbers render, everything else is
+    /// `None`. Matches the VM's implicit conversion rather than a Rust-side guess at it.
+    pub fn coerce_string(&self, v: Value) -> Result<Option<LuaString>> {
+        match v {
+            Value::String(s) => Ok(Some(s)),
+            Value::Number(_) => {
+                let rendered = String::from_lua(v, self)?;
+                Ok(Some(self.create_string(rendered)?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Attach a value to the VM, keyed by its type.
+    ///
+    /// The bindings use this for state that several namespaces share — the event manager is
+    /// registered by `Event.*` and then fired into by `Object.Kill` and the engine tick. Storing it
+    /// on the `Lua` rather than in each closure is what keeps those one object instead of three.
+    ///
+    /// Replaces any previous value of the same type.
+    pub fn set_app_data<T: 'static>(&self, data: T) {
+        self.inner
+            .app_data
+            .borrow_mut()
+            .insert(std::any::TypeId::of::<T>(), Rc::new(data));
+    }
+
+    /// Retrieve app data by type, or `None` if nothing of that type was set.
+    pub fn app_data_ref<T: 'static>(&self) -> Option<AppDataRef<T>> {
+        let map = self.inner.app_data.borrow();
+        let any = map.get(&std::any::TypeId::of::<T>())?.clone();
+        any.downcast::<T>().ok().map(AppDataRef)
+    }
+
     /// Begin loading a chunk. Configure it, then [`Chunk::exec`] or [`Chunk::call`].
-    pub fn load<'a>(&'a self, source: impl Into<Vec<u8>>) -> Chunk<'a> {
-        Chunk { lua: self, source: source.into(), name: None, env: None }
+    pub fn load<'a>(&'a self, source: impl AsRef<[u8]>) -> Chunk<'a> {
+        Chunk { lua: self, source: source.as_ref().to_vec(), name: None, env: None }
     }
 
     /// Ensure `n` free stack slots, growing the stack if needed.

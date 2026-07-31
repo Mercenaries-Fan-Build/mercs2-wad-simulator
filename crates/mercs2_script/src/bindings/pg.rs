@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mlua::{Lua, MultiValue, Result as LuaResult, Table};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Table};
 
 use super::{Installed, NsBuilder, Required};
 use crate::{Guid, SharedHost};
@@ -122,7 +122,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
                 _ => 0,
             };
             // A handle crosses as lightuserdata (retail tag 2); 0 stays nil (`crate::guid`).
-            Ok::<Guid, mlua::Error>(Guid(guid))
+            Ok::<Guid, mercs2_luac::rt::Error>(Guid(guid))
         })?,
     )?;
 
@@ -135,7 +135,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
                   (template, x, y, z, yaw, _link, high): (String, f32, f32, f32, f32, Option<bool>, Option<bool>)| {
                 let guid =
                     h.borrow_mut().pg_spawn(&template, [x, y, z], yaw, high.unwrap_or(false));
-                Ok::<Guid, mlua::Error>(Guid(guid))
+                Ok::<Guid, mercs2_luac::rt::Error>(Guid(guid))
             },
         )?,
     )?;
@@ -182,7 +182,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             for (zone, guid) in h.borrow().landing_zones(slot.unwrap_or(1)) {
                 t.set(zone, crate::Guid(guid))?;
             }
-            Ok::<Table, mlua::Error>(t)
+            Ok::<Table, mercs2_luac::rt::Error>(t)
         })?,
     )?;
 
@@ -225,7 +225,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     for name in ["SpawnRelative", "SpawnFromCamera", "SpawnPlayer", "SpawnPlayerAdvanced"] {
         b.real(
             name,
-            lua.create_function(|_, _: MultiValue| Ok::<Guid, mlua::Error>(Guid::NONE))?,
+            lua.create_function(|_, _: MultiValue| Ok::<Guid, mercs2_luac::rt::Error>(Guid::NONE))?,
         )?;
     }
 
@@ -260,13 +260,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // reenter MrxLayerManager mid-`_ProcessOpQueue`. Returns true (accepted).
     for (name, req) in [("LoadLayer", "Load"), ("ReloadLayer", "Reload"), ("UnloadLayer", "Unload")] {
         let req = req;
-        b.real(name, lua.create_function(move |lua, args: mlua::MultiValue| {
+        b.real(name, lua.create_function(move |lua, args: mercs2_luac::rt::MultiValue| {
             // args: (layerName, [dynamic], callback, [cbdata], [screen]); the callback is the first
             // Function; the layer name is the first string.
             let layer = args.iter().find_map(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
-            let cb = args.iter().find_map(|v| if let mlua::Value::Function(f) = v { Some(f.clone()) } else { None });
+            let cb = args.iter().find_map(|v| if let mercs2_luac::rt::Value::Function(f) = v { Some(f.clone()) } else { None });
             if let Some(cb) = cb {
-                let pend: mlua::Table = match lua.globals().get("__pending_layer_loads") {
+                let pend: mercs2_luac::rt::Table = match lua.globals().get("__pending_layer_loads") {
                     Ok(t) => t,
                     Err(_) => { let t = lua.create_table()?; lua.globals().set("__pending_layer_loads", t.clone())?; t }
                 };
@@ -282,15 +282,15 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Flush hook the resident pump calls each tick: fire each pending layer-load callback with success
     // (`_LayerStatusChange(sRequestType, sLayerName, sLayerType, bSuccess=true)`).
     b.extra("__flush_layer_loads", lua.create_function(|lua, ()| {
-        let Ok(pend) = lua.globals().get::<mlua::Table>("__pending_layer_loads") else { return Ok(()) };
-        let entries: Vec<mlua::Table> = pend.clone().sequence_values::<mlua::Table>().flatten().collect();
+        let Ok(pend) = lua.globals().get::<mercs2_luac::rt::Table>("__pending_layer_loads") else { return Ok(()) };
+        let entries: Vec<mercs2_luac::rt::Table> = pend.clone().sequence_values::<mercs2_luac::rt::Table>().flatten().collect();
         lua.globals().set("__pending_layer_loads", lua.create_table()?)?;
         // Record what streamed in, for the engine to wake. `Pg.LoadLayer` is Lua-side bookkeeping —
         // it instantiates nothing — so without this the objects a layer brings in never signal
         // `Event.ObjectHibernation` and every script gated on its own awake-event waits forever.
         // Drained by the engine's pump (`GameScriptHost::take_streamed_layers`), which owns the
         // layer→objects index; a Lua-side global keeps the binding free of engine types.
-        let streamed: mlua::Table = match lua.globals().get("__layers_streamed") {
+        let streamed: mercs2_luac::rt::Table = match lua.globals().get("__layers_streamed") {
             Ok(t) => t,
             Err(_) => {
                 let t = lua.create_table()?;
@@ -299,7 +299,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             }
         };
         for e in entries {
-            let cb: mlua::Function = e.get("cb")?;
+            let cb: mercs2_luac::rt::Function = e.get("cb")?;
             let req: String = e.get("req")?;
             let layer: String = e.get("layer")?;
             // Unload does not wake anything; Load and Reload both bring the layer's objects in.
@@ -308,8 +308,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             }
             if let Err(err) = cb.call::<()>((req, layer.clone(), "layer", true)) {
                 // Surface the divergence (was silently swallowed → the layer load never cascaded).
-                if let Ok(dbg) = lua.globals().get::<mlua::Table>("Debug") {
-                    if let Ok(pf) = dbg.get::<mlua::Function>("Printf") {
+                if let Ok(dbg) = lua.globals().get::<mercs2_luac::rt::Table>("Debug") {
+                    if let Ok(pf) = dbg.get::<mercs2_luac::rt::Function>("Printf") {
                         let _ = pf.call::<()>(format!("layer '{layer}' completion aborted: {err}"));
                     }
                 }

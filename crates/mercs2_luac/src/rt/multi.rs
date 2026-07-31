@@ -12,7 +12,8 @@ impl MultiValue {
         MultiValue(Vec::new())
     }
 
-    pub(crate) fn from_vec(v: Vec<Value>) -> MultiValue {
+    /// Build from values already in call order.
+    pub fn from_vec(v: Vec<Value>) -> MultiValue {
         MultiValue(v)
     }
 
@@ -45,6 +46,11 @@ impl MultiValue {
 
     pub fn iter(&self) -> std::slice::Iter<'_, Value> {
         self.0.iter()
+    }
+
+    /// Consume into the underlying values.
+    pub fn into_vec(self) -> Vec<Value> {
+        self.0
     }
 }
 
@@ -209,35 +215,62 @@ impl<T: IntoLua> IntoLuaMulti for Vec<T> {
     }
 }
 
-/// Tuples, for the multi-argument bindings. Five is the widest the engine surface uses
-/// (`Camera.Shake`: camera, shake, target, amplitude, time); six is headroom.
+impl<T: FromLua> FromLuaMulti for Vec<T> {
+    /// The mirror of the above: one returned **table** decodes to a `Vec`, which is how
+    /// `sh.eval::<Vec<String>>("return _hits")` reads a list-returning binding. A call that returns
+    /// several separate values is a tuple or a [`Variadic`], not a `Vec`.
+    fn from_lua_multi(mut values: MultiValue, lua: &Lua) -> Result<Vec<T>> {
+        <Vec<T> as FromLua>::from_lua(values.pop_front(), lua)
+    }
+}
+
+/// Tuples, for the multi-argument bindings.
+///
+/// The **last element is `FromLuaMulti`, not `FromLua`** — that is what lets a tuple end in a
+/// catch-all. `(Guid, String, MultiValue)` reads two typed arguments and absorbs however many
+/// remain, which is how the engine's variadic bindings are written (`Vo.Cue` takes a speaker, a cue
+/// and a tail of subtitle arguments it ignores). A tuple of plain `FromLua` elements would silently
+/// drop that tail instead.
+///
+/// The same asymmetry on the way out lets a binding return `(bool, MultiValue)` — one flag plus a
+/// forwarded result list — rather than nesting them into a table.
 macro_rules! impl_tuple {
-    ($($name:ident),+) => {
-        #[allow(non_snake_case)]
-        impl<$($name: FromLua),+> FromLuaMulti for ($($name,)+) {
-            fn from_lua_multi(mut values: MultiValue, lua: &Lua) -> Result<($($name,)+)> {
-                // Decoded front-to-back, so a missing trailing argument arrives as `nil` and an
+    ($($name:ident),* ; $last:ident) => {
+        // `mut` is unused in the 1-tuple case, which has no head elements to pop.
+        #[allow(non_snake_case, unused_mut)]
+        impl<$($name: FromLua,)* $last: FromLuaMulti> FromLuaMulti for ($($name,)* $last,) {
+            fn from_lua_multi(mut values: MultiValue, lua: &Lua) -> Result<($($name,)* $last,)> {
+                // Front-to-back, so a missing trailing argument arrives as `nil` and an
                 // `Option<T>` parameter sees `None`.
-                $(let $name = <$name as FromLua>::from_lua(values.pop_front(), lua)?;)+
-                Ok(($($name,)+))
+                $(let $name = <$name as FromLua>::from_lua(values.pop_front(), lua)?;)*
+                let $last = <$last as FromLuaMulti>::from_lua_multi(values, lua)?;
+                Ok(($($name,)* $last,))
             }
         }
 
         #[allow(non_snake_case)]
-        impl<$($name: IntoLua),+> IntoLuaMulti for ($($name,)+) {
+        impl<$($name: IntoLua,)* $last: IntoLuaMulti> IntoLuaMulti for ($($name,)* $last,) {
             fn into_lua_multi(self, lua: &Lua) -> Result<MultiValue> {
-                let ($($name,)+) = self;
+                let ($($name,)* $last,) = self;
                 let mut out = Vec::new();
-                $(out.push(<$name as IntoLua>::into_lua($name, lua)?);)+
+                $(out.push(<$name as IntoLua>::into_lua($name, lua)?);)*
+                out.extend(<$last as IntoLuaMulti>::into_lua_multi($last, lua)?);
                 Ok(MultiValue::from_vec(out))
             }
         }
     };
 }
 
-impl_tuple!(A);
-impl_tuple!(A, B);
-impl_tuple!(A, B, C);
-impl_tuple!(A, B, C, D);
-impl_tuple!(A, B, C, D, E);
-impl_tuple!(A, B, C, D, E, F);
+// Ten is not headroom — `Hud.MinimapAddObjective` genuinely takes ten. Twelve leaves room.
+impl_tuple!( ; A);
+impl_tuple!(A ; B);
+impl_tuple!(A, B ; C);
+impl_tuple!(A, B, C ; D);
+impl_tuple!(A, B, C, D ; E);
+impl_tuple!(A, B, C, D, E ; F);
+impl_tuple!(A, B, C, D, E, F ; G);
+impl_tuple!(A, B, C, D, E, F, G ; H);
+impl_tuple!(A, B, C, D, E, F, G, H ; I);
+impl_tuple!(A, B, C, D, E, F, G, H, I ; J);
+impl_tuple!(A, B, C, D, E, F, G, H, I, J ; K);
+impl_tuple!(A, B, C, D, E, F, G, H, I, J, K ; L);

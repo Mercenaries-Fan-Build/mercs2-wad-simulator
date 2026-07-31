@@ -20,7 +20,7 @@ mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.0.1" }
 ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.1.0" }
 mercs2_core = { path = "crates/mercs2_core", version = "1.0.1" }
 mercs2_audio = { path = "crates/mercs2_audio", version = "1.1.0" }
-mercs2_script = { path = "crates/mercs2_script", version = "1.1.0" }
+mercs2_script = { path = "crates/mercs2_script", version = "2.0.0" }
 mercs2_physics = { path = "crates/mercs2_physics", version = "1.0.1" }
 mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.0.1" }
 mercs2_destruction = { path = "crates/mercs2_destruction", version = "1.0.0" }

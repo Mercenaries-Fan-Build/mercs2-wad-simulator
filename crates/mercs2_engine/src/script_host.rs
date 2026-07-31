@@ -1900,10 +1900,10 @@ const VZ_MASTER_SCRIPT: &str = "xQ!L";
 /// | `tFlowData.tCulledBindings` | binding cull, so fired bindings don't replay | `mrxmissionflow.lua:612-631` |
 /// | `tFlowData.tActiveMissions` | `UnlockMission(id, tData, false)` per entry | `mrxmissionflow.lua:632-634` |
 /// | `tLayerData` | `MrxLayerManager.LoadSingleton` | `xQ!L.lua:707` |
-fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) -> mercs2_script::mlua::Result<bool> {
+fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) -> mercs2_script::mercs2_luac::rt::Result<bool> {
     let lua = sh.lua();
     let Some(save) = host.borrow().boot_save_state().cloned() else {
-        lua.globals().set("__boot_save_state", mercs2_script::mlua::Value::Nil)?;
+        lua.globals().set("__boot_save_state", mercs2_script::mercs2_luac::rt::Value::Nil)?;
         return Ok(false);
     };
 
@@ -2321,6 +2321,42 @@ pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
 mod tests {
     use super::*;
 
+    /// Mint a handle from a literal, for tests that need a **known** guid on both sides — e.g.
+    /// asserting `host.faction.accumulator(777)` after driving Lua that names 777.
+    ///
+    /// Scripts never do this. The engine hands handles out (`Pg.GetGuidByName`,
+    /// `Player.GetLocalCharacter`) and they cross as lightuserdata; `mercs2_script::Guid` refuses to
+    /// read one out of a number, because this VM's `lua_Number` is f32 and cannot carry a handle
+    /// above 2^24 without aliasing a different object. These tests used to pass bare integers and
+    /// relied on a transitional arm that has since been removed. Every literal below is small enough
+    /// to be exact in f32, so minting one here is a faithful stand-in for an engine-supplied handle.
+    fn install_guid_helper(sh: &ScriptHost) {
+        let f = sh
+            .lua()
+            .create_function(|_, n: f64| {
+                // The literal arrives through a Lua number, i.e. f32. Above 2^24 that silently
+                // rounds — `__guid(0x1000_0001)` would mint 0x1000_0000 and quietly fail to match
+                // the handle the host fires with. Refuse instead: a test needing a real-range guid
+                // must use `set_guid`, which never crosses a number.
+                assert!(
+                    n.abs() < (1u64 << 24) as f64,
+                    "__guid({n}) is beyond f32's exact integer range — use set_guid() instead"
+                );
+                Ok(mercs2_script::Guid(n as u64))
+            })
+            .unwrap();
+        sh.lua().globals().set("__guid", f).unwrap();
+    }
+
+    /// Bind a handle to a Lua global directly, without it ever being a number.
+    ///
+    /// This is how the engine really gives a script a handle, and the only way to carry one at or
+    /// above 2^24 — which every dynamic guid is (`mercs2_core::FIRST_DYNAMIC_GUID` = 2^28).
+    #[allow(dead_code)]
+    fn set_guid(sh: &ScriptHost, name: &str, g: u64) {
+        sh.lua().globals().set(name, mercs2_script::Guid(g)).unwrap();
+    }
+
     /// The audio system is wired in: real game `Sound.*` Lua drives the live `crate::audio::AudioEngine`
     /// through the `EngineHost` forwarding (not a test double). `SetDynamicMusic`/`IsDynamicMusic`
     /// round-trip deterministically; an unknown cue (no sounddb) returns nil, faithful to the exe.
@@ -2329,6 +2365,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         let dyn_on: bool = sh
             .eval("Sound.SetDynamicMusic(true); return Sound.IsDynamicMusic()")
@@ -2367,25 +2404,26 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Order verb (table form) posts to the recovered 1024-slot action ring.
-        sh.exec(r#"Ai.Anchor({AIGuid = 0x1000, AnchorRadius = 0})"#, "@ai").unwrap();
-        sh.exec(r#"Ai.Goal(0x1000, "Attack")"#, "@ai").unwrap();
+        sh.exec(r#"Ai.Anchor({AIGuid = __guid(0x1000), AnchorRadius = 0})"#, "@ai").unwrap();
+        sh.exec(r#"Ai.Goal(__guid(0x1000), "Attack")"#, "@ai").unwrap();
         assert_eq!(host.borrow().ai.bus.len(), 2, "Ai order + goal both post to the ring");
 
         // Faction: a scripted infraction accrues into the mood accumulator...
         let faction: i64 = 777;
-        sh.exec(&format!("Ai.AddInfraction(1, {faction}, 100)"), "@ai").unwrap();
+        sh.exec(&format!("Ai.AddInfraction(__guid(1), __guid({faction}), 100)"), "@ai").unwrap();
         assert!(!host.borrow().faction.accumulator(faction as u32).is_empty(), "AddInfraction accrues mood");
 
         // ...and SetInfractionMultiplier(0) DISABLES further infractions for that faction (shipped
         // gurcon002 pattern): a second faction at multiplier 0 stays empty.
         let quiet: i64 = 888;
-        sh.exec(&format!("Ai.SetInfractionMultiplier({quiet}, 0); Ai.AddInfraction(1, {quiet}, 100)"), "@ai").unwrap();
+        sh.exec(&format!("Ai.SetInfractionMultiplier(__guid({quiet}), 0); Ai.AddInfraction(__guid(1), __guid({quiet}), 100)"), "@ai").unwrap();
         assert!(host.borrow().faction.accumulator(quiet as u32).is_empty(), "multiplier 0 ignores infractions");
 
         // SetAttitude writes the directed relation the faction manager (and AI matrix) hold.
-        sh.exec("Ai.SetAttitude(777, 42, -100)", "@ai").unwrap();
+        sh.exec("Ai.SetAttitude(__guid(777), __guid(42), -100)", "@ai").unwrap();
         assert_eq!(host.borrow().faction.get_relation(777, 42), -100);
         assert_eq!(host.borrow().ai.get_relation(777, 42), -100);
     }
@@ -2397,35 +2435,36 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         let veh: i64 = 0x2000;
         // Full happy-path lifecycle through Lua; each verb returns the resulting state name.
-        let started: String = sh.eval(&format!("return Vehicle.HijackStart({veh})")).unwrap();
+        let started: String = sh.eval(&format!("return Vehicle.HijackStart(__guid({veh}))")).unwrap();
         assert_eq!(started, "started");
         let done: String = sh
-            .eval(&format!("Vehicle.SetHijackSuccess({veh}); return Vehicle.HijackComplete({veh})"))
+            .eval(&format!("Vehicle.SetHijackSuccess(__guid({veh})); return Vehicle.HijackComplete(__guid({veh}))"))
             .unwrap();
         assert_eq!(done, "complete");
         assert_eq!(host.borrow().vehicle_hijack_state(veh as u64), "complete");
 
         // Turret + rotor articulation lands on the host TurretAim.
-        sh.exec(&format!("Vehicle.SetTurretYaw({veh}, 1.5); Vehicle.SpinHeli({veh}, true)"), "@v").unwrap();
+        sh.exec(&format!("Vehicle.SetTurretYaw(__guid({veh}), 1.5); Vehicle.SpinHeli(__guid({veh}), true)"), "@v").unwrap();
         let aim = host.borrow().turrets.get(&(veh as u64)).copied().unwrap();
         assert_eq!(aim.yaw, 1.5);
         assert!(aim.rotor_spinning);
 
         // Cancel from a fresh vehicle returns to idle.
         let cancelled: String = sh
-            .eval("Vehicle.HijackStart(0x3000); return Vehicle.CancelHijack(0x3000)")
+            .eval("Vehicle.HijackStart(__guid(0x3000)); return Vehicle.CancelHijack(__guid(0x3000))")
             .unwrap();
         assert_eq!(cancelled, "idle");
 
         // Seat occupancy + weapon restore land on real host state.
-        sh.exec("Vehicle.EnterBySeatGuid(0x11, 0x99)", "@v").unwrap();
+        sh.exec("Vehicle.EnterBySeatGuid(__guid(0x11), __guid(0x99))", "@v").unwrap();
         assert_eq!(host.borrow().human_seat(0x11), 0x99);
-        sh.exec("Human.ForceExitSeatNoSnap(0x11)", "@v").unwrap();
+        sh.exec("Human.ForceExitSeatNoSnap(__guid(0x11))", "@v").unwrap();
         assert_eq!(host.borrow().human_seat(0x11), 0);
-        sh.exec("Weapon.SetClipAmmo(0x88, 1); Vehicle.RestoreAmmo(0x88)", "@v").unwrap();
+        sh.exec("Weapon.SetClipAmmo(__guid(0x88), 1); Vehicle.RestoreAmmo(__guid(0x88))", "@v").unwrap();
         assert_eq!(host.borrow().weapon_clip(0x88), host.borrow().weapon_max_clip(0x88));
     }
 
@@ -2436,6 +2475,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Tutorials toggle roundtrips through Set→Get.
         let before: bool = sh.eval("return Sys.TutorialsEnabled()").unwrap();
@@ -2463,12 +2503,13 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Label two objects, then filter for "China&&Vehicle".
         sh.exec(
             r#"
-            Object.AddLabel(100, "China"); Object.AddLabel(100, "Vehicle")
-            Object.AddLabel(200, "China")
+            Object.AddLabel(__guid(100), "China"); Object.AddLabel(__guid(100), "Vehicle")
+            Object.AddLabel(__guid(200), "China")
             uFilter = ObjectFilter.Create()
             ObjectFilter.SetFilter(uFilter, "China&&Vehicle")
         "#,
@@ -2477,15 +2518,15 @@ mod tests {
         .unwrap();
 
         // 100 (China+Vehicle) matches; 200 (China only) does not — real predicate evaluation.
-        let m100: bool = sh.eval("return ObjectFilter.Eval(uFilter, 100)").unwrap();
-        let m200: bool = sh.eval("return ObjectFilter.Eval(uFilter, 200)").unwrap();
+        let m100: bool = sh.eval("return ObjectFilter.Eval(uFilter, __guid(100))").unwrap();
+        let m200: bool = sh.eval("return ObjectFilter.Eval(uFilter, __guid(200))").unwrap();
         assert!(m100, "China&&Vehicle matches the labelled vehicle");
         assert!(!m200, "China-only object fails China&&Vehicle");
 
         // Explicit include overrides a failing predicate. Arg 3 is **bExclude**, so `false` includes
         // (retail polarity — see `ObjectFilter::add`; this test asserted the inverse until 2026-07-26).
-        sh.exec("ObjectFilter.AddObject(uFilter, 200, false)", "@of").unwrap();
-        let m200b: bool = sh.eval("return ObjectFilter.Eval(uFilter, 200)").unwrap();
+        sh.exec("ObjectFilter.AddObject(uFilter, __guid(200), false)", "@of").unwrap();
+        let m200b: bool = sh.eval("return ObjectFilter.Eval(uFilter, __guid(200))").unwrap();
         assert!(m200b, "explicit include forces a match");
         let objs: Vec<mercs2_script::Guid> =
             sh.eval("return ObjectFilter.GetObjects(uFilter, false)").unwrap();
@@ -2493,8 +2534,8 @@ mod tests {
         assert_eq!(objs, vec![200]);
 
         // And the other way: `true` excludes, beating a passing predicate.
-        sh.exec("ObjectFilter.AddObject(uFilter, 100, true)", "@of").unwrap();
-        let m100b: bool = sh.eval("return ObjectFilter.Eval(uFilter, 100)").unwrap();
+        sh.exec("ObjectFilter.AddObject(uFilter, __guid(100), true)", "@of").unwrap();
+        let m100b: bool = sh.eval("return ObjectFilter.Eval(uFilter, __guid(100))").unwrap();
         assert!(!m100b, "bExclude=true must exclude even when the predicate passes");
     }
 
@@ -2505,24 +2546,25 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
-        sh.exec("Object.Attach(500, 10); Object.Attach(501, 10)", "@a").unwrap();
+        sh.exec("Object.Attach(__guid(500), __guid(10)); Object.Attach(__guid(501), __guid(10))", "@a").unwrap();
         // Handles cross the boundary as lightuserdata now (see `mercs2_script::guid`), so read them
         // as `Guid` rather than `i64` — and assert the Lua-visible type, since that is what the
         // shipped `type(u) == "userdata"` gates test.
-        let parent: mercs2_script::Guid = sh.eval("return Object.GetParent(500)").unwrap();
+        let parent: mercs2_script::Guid = sh.eval("return Object.GetParent(__guid(500))").unwrap();
         assert_eq!(parent.raw(), 10, "GetParent reads the attachment graph");
-        let kind: String = sh.eval("return type(Object.GetParent(500))").unwrap();
+        let kind: String = sh.eval("return type(Object.GetParent(__guid(500)))").unwrap();
         assert_eq!(kind, "userdata");
 
-        let attached: bool = sh.eval("return Object.IsAttached(500)").unwrap();
+        let attached: bool = sh.eval("return Object.IsAttached(__guid(500))").unwrap();
         assert!(attached);
         let mut kids: Vec<mercs2_script::Guid> =
-            sh.eval("return Object.GetAttachedObjects(10)").unwrap();
+            sh.eval("return Object.GetAttachedObjects(__guid(10))").unwrap();
         kids.sort();
         assert_eq!(kids.iter().map(|g| g.raw()).collect::<Vec<_>>(), vec![500, 501], "both children");
 
-        sh.exec("Object.Detach(500)", "@a").unwrap();
+        sh.exec("Object.Detach(__guid(500))", "@a").unwrap();
         assert_eq!(host.borrow().object_parent(500), 0, "Detach clears the parent");
         assert!(!host.borrow().object_is_attached(500));
     }
@@ -2534,6 +2576,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Cue a line → the VoManager has an active line.
         let handle: Option<i64> = sh.eval(r#"return VO.Cue(1, "vo_intro_001")"#).unwrap();
@@ -2556,6 +2599,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Create a text widget, set its text + visibility → read them back.
         sh.exec(
@@ -2594,7 +2638,7 @@ mod tests {
             r#"
             mObj = Gui.AddObjective()
             Gui._MarkerSetLocation(mObj, 300, 5, 400)
-            Gui._MarkerSetFollowGuid(mObj, 0x1234)
+            Gui._MarkerSetFollowGuid(mObj, __guid(0x1234))
             Gui._MarkerPulse(mObj)
         "#,
             "@mk",
@@ -2615,6 +2659,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Atmosphere generic value store (the dominant real usage).
         let v: f32 = sh.eval(r#"Atmosphere.SetValue("fog_density", 0.35); return Atmosphere.GetValue("fog_density")"#).unwrap();
@@ -2637,7 +2682,7 @@ mod tests {
         assert_eq!(yaw, 1.25);
         // `Camera.Shake(uCamera, sShake, uTarget, nAmp, nTime)` — the single-float form never existed.
         sh.exec(
-            "Camera.SetPosition(1,2,3); Camera.Follow(0x77); Camera.Shake(0, \"ShakeCameraMedium\", 0, 0.5, 0)",
+            "Camera.SetPosition(1,2,3); Camera.Follow(__guid(0x77)); Camera.Shake(__guid(0), \"ShakeCameraMedium\", __guid(0), 0.5, 0)",
             "@cam",
         )
         .unwrap();
@@ -2653,6 +2698,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // The loadout is real ECS state now, so this needs a live world with entities that carry
         // `RuntimeInventory` (the human) and `Equipment` (the weapons). The previous version of this
@@ -2677,14 +2723,14 @@ mod tests {
         host.borrow_mut().attach_world(world.clone(), guids.clone());
 
         // `SetAllWeapons` returns a BOOLEAN (it pushed nothing before).
-        let ok: bool = sh.eval("return Human.Inventory.SetAllWeapons(0x1000, {0x10, 0x20, 0x30})").unwrap();
+        let ok: bool = sh.eval("return Human.Inventory.SetAllWeapons(__guid(0x1000), {__guid(0x10), __guid(0x20), __guid(0x30)})").unwrap();
         assert!(ok, "SetAllWeapons pushes a boolean");
 
         // `GetAllWeapons` returns ONE array table — primaries (equipped first) then secondaries.
         // Asserted through Lua so the assertion sees exactly what a script sees.
         let (n, last): (i64, mercs2_script::Guid) = sh
             .eval(
-                "local t = Human.Inventory.GetAllWeapons(0x1000) \
+                "local t = Human.Inventory.GetAllWeapons(__guid(0x1000)) \
                  return #t, t[#t]",
             )
             .unwrap();
@@ -2694,30 +2740,30 @@ mod tests {
         // And the handles it hands back are lightuserdata, so a script's own `type(w) == "userdata"`
         // gate passes on them.
         let kind: String =
-            sh.eval("return type(Human.Inventory.GetAllWeapons(0x1000)[1])").unwrap();
+            sh.eval("return type(Human.Inventory.GetAllWeapons(__guid(0x1000))[1])").unwrap();
         assert_eq!(kind, "userdata", "handles cross the boundary as lightuserdata");
 
         // Primary and secondary are occupied SIMULTANEOUSLY — the single-index model made these two
         // getters mutually exclusive.
-        let p: mercs2_script::Guid = sh.eval("return Human.Inventory.GetPrimaryWeapon(0x1000)").unwrap();
-        let s: mercs2_script::Guid = sh.eval("return Human.Inventory.GetSecondaryWeapon(0x1000)").unwrap();
+        let p: mercs2_script::Guid = sh.eval("return Human.Inventory.GetPrimaryWeapon(__guid(0x1000))").unwrap();
+        let s: mercs2_script::Guid = sh.eval("return Human.Inventory.GetSecondaryWeapon(__guid(0x1000))").unwrap();
         assert!(p.is_some() && s.raw() == 0x30, "both slots live at once: {p:?} / {s:?}");
 
         // `DropWeapon` returns a boolean.
-        let dropped: bool = sh.eval("return Human.Inventory.DropWeapon(0x1000, 0x20)").unwrap();
+        let dropped: bool = sh.eval("return Human.Inventory.DropWeapon(__guid(0x1000), __guid(0x20))").unwrap();
         assert!(dropped);
         // Not because `Drop` promotes — because `GetPrimaryWeapon` falls back to `+0x0C` (§4.6/§8.3).
-        let p: mercs2_script::Guid = sh.eval("return Human.Inventory.GetPrimaryWeapon(0x1000)").unwrap();
+        let p: mercs2_script::Guid = sh.eval("return Human.Inventory.GetPrimaryWeapon(__guid(0x1000))").unwrap();
         assert_eq!(p.raw(), 0x10, "the getter falls back to the other primary");
 
         // `ReloadAll` REQUIRES its second argument — nil without it, per retail's bail.
-        let bare: Option<bool> = sh.eval("return Human.Inventory.ReloadAll(0x1000)").unwrap();
+        let bare: Option<bool> = sh.eval("return Human.Inventory.ReloadAll(__guid(0x1000))").unwrap();
         assert_eq!(bare, None, "no arg 2 -> nil");
-        let with: Option<bool> = sh.eval("return Human.Inventory.ReloadAll(0x1000, false)").unwrap();
+        let with: Option<bool> = sh.eval("return Human.Inventory.ReloadAll(__guid(0x1000), false)").unwrap();
         assert_eq!(with, Some(true));
 
         // An unresolvable handle reads nil and does not raise.
-        let none: Option<i64> = sh.eval("return Human.Inventory.GetPrimaryWeapon(0x9999)").unwrap();
+        let none: Option<i64> = sh.eval("return Human.Inventory.GetPrimaryWeapon(__guid(0x9999))").unwrap();
         assert_eq!(none, None);
     }
 
@@ -2728,27 +2774,28 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Weapon ammo: set clip + reserve, then Reload pulls from reserve into the clip.
         let w: i64 = 0x555;
-        sh.exec(&format!("Weapon.SetClipAmmo({w}, 5); Weapon.SetReserveAmmo({w}, 90)"), "@wp").unwrap();
-        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetClipAmmo({w})")).unwrap(), 5);
-        sh.exec(&format!("Weapon.Reload({w})"), "@wp").unwrap();
+        sh.exec(&format!("Weapon.SetClipAmmo(__guid({w}), 5); Weapon.SetReserveAmmo(__guid({w}), 90)"), "@wp").unwrap();
+        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetClipAmmo(__guid({w}))")).unwrap(), 5);
+        sh.exec(&format!("Weapon.Reload(__guid({w}))"), "@wp").unwrap();
         // clip refills to max_clip (30), reserve drops by the 25 taken.
-        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetClipAmmo({w})")).unwrap(), 30);
-        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetReserveAmmo({w})")).unwrap(), 65);
+        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetClipAmmo(__guid({w}))")).unwrap(), 30);
+        assert_eq!(sh.eval::<i64>(&format!("return Weapon.GetReserveAmmo(__guid({w}))")).unwrap(), 65);
 
         // Fire: Ignite sets burning, Extinguish clears it.
-        sh.exec("Graphics.FuelTrail.Ignite(0x700)", "@fr").unwrap();
+        sh.exec("Graphics.FuelTrail.Ignite(__guid(0x700))", "@fr").unwrap();
         assert!(host.borrow().object_is_burning(0x700));
-        sh.exec("Graphics.FuelTrail.Extinguish(0x700)", "@fr").unwrap();
+        sh.exec("Graphics.FuelTrail.Extinguish(__guid(0x700))", "@fr").unwrap();
         assert!(!host.borrow().object_is_burning(0x700));
 
         // SendDamage reduces health; enough damage kills (returns true).
-        let died_partial: bool = sh.eval("return ObjectState.SendDamage(0x800, 40)").unwrap();
+        let died_partial: bool = sh.eval("return ObjectState.SendDamage(__guid(0x800), 40)").unwrap();
         assert!(!died_partial);
         assert_eq!(host.borrow().object_health(0x800), 60.0);
-        let died: bool = sh.eval("return ObjectState.SendDamage(0x800, 100)").unwrap();
+        let died: bool = sh.eval("return ObjectState.SendDamage(__guid(0x800), 100)").unwrap();
         assert!(died, "lethal damage returns died=true");
         assert!(!host.borrow().object_is_alive(0x800));
     }
@@ -2759,6 +2806,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Region registry: CreateRegion mints a stable handle; re-creating the name reuses it.
         let r1: mercs2_script::Guid =
@@ -2770,13 +2818,13 @@ mod tests {
         assert_eq!(host.borrow().regions.get(&(r1 as u64)).copied(), Some(([11.0, 0.0, 21.0], 6.0)));
 
         // Alarm state: Activate then Toggle.
-        sh.exec("Junk.ActivateAlarm(0x42, true)", "@al").unwrap();
+        sh.exec("Junk.ActivateAlarm(__guid(0x42), true)", "@al").unwrap();
         assert!(host.borrow().pg_alarm_active(0x42));
-        let now: bool = sh.eval("return Junk.ToggleAlarm(0x42)").unwrap();
+        let now: bool = sh.eval("return Junk.ToggleAlarm(__guid(0x42))").unwrap();
         assert!(!now, "toggle turns the active alarm off");
 
         // Airstrike designator lifecycle + FindDesignatorOwner.
-        sh.exec("Airstrike.EquipDesignator(0x2)", "@as").unwrap();
+        sh.exec("Airstrike.EquipDesignator(__guid(0x2))", "@as").unwrap();
         let owner: mercs2_script::Guid = sh.eval("return Airstrike.FindDesignatorOwner()").unwrap();
         let owner = owner.is_some().then(|| owner.raw() as i64);
         assert_eq!(owner, Some(2));
@@ -2791,22 +2839,23 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         let g: i64 = 0x1000;
         assert!(host.borrow().human_weapons_enabled(g as u64), "weapons enabled by default");
-        sh.exec(&format!("Human.DisableWeapons({g})"), "@hu").unwrap();
+        sh.exec(&format!("Human.DisableWeapons(__guid({g}))"), "@hu").unwrap();
         assert!(!host.borrow().human_weapons_enabled(g as u64), "DisableWeapons persisted");
-        sh.exec(&format!("Human.EnableWeapons({g})"), "@hu").unwrap();
+        sh.exec(&format!("Human.EnableWeapons(__guid({g}))"), "@hu").unwrap();
         assert!(host.borrow().human_weapons_enabled(g as u64));
 
-        sh.exec(&format!("Human.Knockdown({g})"), "@hu").unwrap();
+        sh.exec(&format!("Human.Knockdown(__guid({g}))"), "@hu").unwrap();
         assert!(host.borrow().human_is_knocked_down(g as u64), "Knockdown ragdolls the human");
 
         // StopGrappling clears the grapple flag; IsGrappling reads the real store.
         host.borrow_mut().human_flags.entry(g as u64).or_default().grappling = true;
-        let grap: bool = sh.eval(&format!("return Human.IsGrappling({g})")).unwrap();
+        let grap: bool = sh.eval(&format!("return Human.IsGrappling(__guid({g}))")).unwrap();
         assert!(grap);
-        sh.exec(&format!("Human.StopGrappling({g})"), "@hu").unwrap();
+        sh.exec(&format!("Human.StopGrappling(__guid({g}))"), "@hu").unwrap();
         assert!(!host.borrow().human_is_grappling(g as u64));
     }
 
@@ -2817,6 +2866,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // SP default: server, not active, not multiplayer.
         assert!(sh.eval::<bool>("return Net.IsServer()").unwrap());
@@ -2842,16 +2892,17 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // Emitters + state-machine state.
-        sh.exec(r#"ObjectState.StartEmitter(0x10, "smoke"); ObjectState.SetState(0x10, "Damaged")"#, "@os").unwrap();
+        sh.exec(r#"ObjectState.StartEmitter(__guid(0x10), "smoke"); ObjectState.SetState(__guid(0x10), "Damaged")"#, "@os").unwrap();
         assert!(host.borrow().object_emitter_active(0x10, "smoke"));
         assert_eq!(host.borrow().object_sm_state(0x10), "Damaged");
-        sh.exec(r#"ObjectState.StopEmitter(0x10, "smoke")"#, "@os").unwrap();
+        sh.exec(r#"ObjectState.StopEmitter(__guid(0x10), "smoke")"#, "@os").unwrap();
         assert!(!host.borrow().object_emitter_active(0x10, "smoke"));
 
         // Face: bound set + current expression.
-        sh.exec(r#"Face.BindFaceAnimSet(0x20, "mattias_faces"); Face.PlayFacialExpression(0x20, "angry")"#, "@fa").unwrap();
+        sh.exec(r#"Face.BindFaceAnimSet(__guid(0x20), "mattias_faces"); Face.PlayFacialExpression(__guid(0x20), "angry")"#, "@fa").unwrap();
         assert_eq!(host.borrow().face_current(0x20), "angry");
 
         // Report lifecycle finalizes the faction mood report (no infractions → 0).
@@ -2872,6 +2923,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // The shipped shape: the player handle first, then the value.
         sh.exec(
@@ -2921,6 +2973,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         assert!(
             sh.eval::<Option<i64>>("return Player.GetSecondaryPlayer()").unwrap().is_none(),
@@ -2947,6 +3000,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // A generic script_cmd (Ai spawner control), a net_event, and a sound_cmd.
         sh.exec("Ai.SetRoadSpawning(true)", "@r").unwrap();
@@ -3446,6 +3500,7 @@ mod tests {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
 
         // LoadLayer returns true (accepted) and defers the callback; nothing fires until the flush.
         let accepted: bool = sh.eval(r#"
@@ -3760,10 +3815,47 @@ mod tests {
 mod seat_tests {
     use super::*;
 
+    /// Mint a handle from a literal, for tests that need a **known** guid on both sides — e.g.
+    /// asserting `host.faction.accumulator(777)` after driving Lua that names 777.
+    ///
+    /// Scripts never do this. The engine hands handles out (`Pg.GetGuidByName`,
+    /// `Player.GetLocalCharacter`) and they cross as lightuserdata; `mercs2_script::Guid` refuses to
+    /// read one out of a number, because this VM's `lua_Number` is f32 and cannot carry a handle
+    /// above 2^24 without aliasing a different object. These tests used to pass bare integers and
+    /// relied on a transitional arm that has since been removed. Every literal below is small enough
+    /// to be exact in f32, so minting one here is a faithful stand-in for an engine-supplied handle.
+    fn install_guid_helper(sh: &ScriptHost) {
+        let f = sh
+            .lua()
+            .create_function(|_, n: f64| {
+                // The literal arrives through a Lua number, i.e. f32. Above 2^24 that silently
+                // rounds — `__guid(0x1000_0001)` would mint 0x1000_0000 and quietly fail to match
+                // the handle the host fires with. Refuse instead: a test needing a real-range guid
+                // must use `set_guid`, which never crosses a number.
+                assert!(
+                    n.abs() < (1u64 << 24) as f64,
+                    "__guid({n}) is beyond f32's exact integer range — use set_guid() instead"
+                );
+                Ok(mercs2_script::Guid(n as u64))
+            })
+            .unwrap();
+        sh.lua().globals().set("__guid", f).unwrap();
+    }
+
+    /// Bind a handle to a Lua global directly, without it ever being a number.
+    ///
+    /// This is how the engine really gives a script a handle, and the only way to carry one at or
+    /// above 2^24 — which every dynamic guid is (`mercs2_core::FIRST_DYNAMIC_GUID` = 2^28).
+    #[allow(dead_code)]
+    fn set_guid(sh: &ScriptHost, name: &str, g: u64) {
+        sh.lua().globals().set(name, mercs2_script::Guid(g)).unwrap();
+    }
+
     fn host_with_script() -> (Rc<RefCell<GameScriptHost>>, ScriptHost) {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
         let sh = ScriptHost::bare().unwrap();
         sh.register_engine(host.clone()).unwrap();
+        install_guid_helper(&sh);
         (host, sh)
     }
 
@@ -3773,22 +3865,25 @@ mod seat_tests {
     fn enter_and_exit_round_trip_through_the_bindings() {
         let (host, sh) = host_with_script();
         let (veh, rider) = (0x1000_0001u64, 0x1000_0002u64);
+        // Real-range handles: bound as lightuserdata, the way the engine hands them to a script.
+        set_guid(&sh, "uVeh", veh);
+        set_guid(&sh, "uRider", rider);
 
-        assert!(!sh.eval::<bool>(&format!("return Object.InSeat({rider})")).unwrap(), "starts unseated");
-        assert!(sh.eval::<bool>(&format!("return Vehicle.Enter({veh}, {rider}, \"d\")")).unwrap());
-        assert!(sh.eval::<bool>(&format!("return Object.InSeat({rider})")).unwrap(), "seated");
-        assert!(sh.eval::<bool>(&format!("return Object.InVehicle({rider})")).unwrap(), "same state");
+        assert!(!sh.eval::<bool>(&format!("return Object.InSeat(uRider)")).unwrap(), "starts unseated");
+        assert!(sh.eval::<bool>(&format!("return Vehicle.Enter(uVeh, uRider, \"d\")")).unwrap());
+        assert!(sh.eval::<bool>(&format!("return Object.InSeat(uRider)")).unwrap(), "seated");
+        assert!(sh.eval::<bool>(&format!("return Object.InVehicle(uRider)")).unwrap(), "same state");
         assert_eq!(
-            sh.eval::<String>(&format!("return Vehicle.GetSeatFromRider({rider})")).unwrap(),
+            sh.eval::<String>(&format!("return Vehicle.GetSeatFromRider(uRider)")).unwrap(),
             "d"
         );
         assert_eq!(host.borrow().riders_of(veh), vec![(rider, "d".to_string())]);
 
-        assert!(sh.eval::<bool>(&format!("return Vehicle.Exit({rider})")).unwrap());
-        assert!(!sh.eval::<bool>(&format!("return Object.InSeat({rider})")).unwrap(), "unseated");
+        assert!(sh.eval::<bool>(&format!("return Vehicle.Exit(uRider)")).unwrap());
+        assert!(!sh.eval::<bool>(&format!("return Object.InSeat(uRider)")).unwrap(), "unseated");
         assert!(host.borrow().riders_of(veh).is_empty());
         // Exiting a rider who is not seated is false, not a panic or a phantom event.
-        assert!(!sh.eval::<bool>(&format!("return Vehicle.Exit({rider})")).unwrap());
+        assert!(!sh.eval::<bool>(&format!("return Vehicle.Exit(uRider)")).unwrap());
     }
 
     /// A rider moved to another vehicle emits the EXIT for the old seat before the enter — so a handler
@@ -3820,14 +3915,17 @@ mod seat_tests {
     fn in_seat_filter_wildcards_match() {
         let (host, sh) = host_with_script();
         let (veh, rider) = (0x1000_0001u64, 0x1000_0002u64);
+        // Real-range handles: bound as lightuserdata, the way the engine hands them to a script.
+        set_guid(&sh, "uVeh", veh);
+        set_guid(&sh, "uRider", rider);
         // `{uCharacter, 0, "d", "x"}` — wifpmcgarage.lua:472: this character leaving the driver seat of
         // ANY vehicle. Plus an any-seat and an any-occupant registration.
         sh.exec(
             &format!(
                 "_hits = {{}}\n\
-                 Event.Create(Event.ObjectInSeat, {{{rider}, 0, \"d\", \"x\"}}, function() _hits[#_hits+1]=\"anyveh\" end)\n\
-                 Event.Create(Event.ObjectInSeat, {{{rider}, {veh}, \"a\", \"E\"}}, function() _hits[#_hits+1]=\"anyseat\" end)\n\
-                 Event.Create(Event.ObjectInSeat, {{\"Hero\", {veh}, \"D\", \"e\"}}, function() _hits[#_hits+1]=\"anyocc\" end)"
+                 Event.Create(Event.ObjectInSeat, {{uRider, 0, \"d\", \"x\"}}, function() _hits[#_hits+1]=\"anyveh\" end)\n\
+                 Event.Create(Event.ObjectInSeat, {{uRider, uVeh, \"a\", \"E\"}}, function() _hits[#_hits+1]=\"anyseat\" end)\n\
+                 Event.Create(Event.ObjectInSeat, {{\"Hero\", uVeh, \"D\", \"e\"}}, function() _hits[#_hits+1]=\"anyocc\" end)"
             ),
             "@seatfilter",
         )
@@ -3857,9 +3955,12 @@ mod seat_tests {
     fn the_callback_gets_cbargs_then_occupant_then_vehicle() {
         let (_host, sh) = host_with_script();
         let (veh, rider) = (0x1000_0001u64, 0x1000_0002u64);
+        // Real-range handles: bound as lightuserdata, the way the engine hands them to a script.
+        set_guid(&sh, "uVeh", veh);
+        set_guid(&sh, "uRider", rider);
         sh.exec(
             &format!(
-                "Event.Create(Event.ObjectInSeat, {{{rider}, {veh}, \"d\", \"e\"}},\n\
+                "Event.Create(Event.ObjectInSeat, {{uRider, uVeh, \"d\", \"e\"}},\n\
                  function(a, b, uChar, uVeh)\n\
                    _got = {{a, b, tostring(type(uChar)), tostring(type(uVeh))}}\n\
                  end, {{\"region\", 7}})"
