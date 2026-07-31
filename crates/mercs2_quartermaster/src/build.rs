@@ -597,16 +597,17 @@ fn lower_skinned(
         .collect();
 
     let detected = mercs2_formats::retarget::SourceRig::detect(&source_names);
-    if !retarget.from.trim().is_empty()
-        && !detected
-            .label()
-            .to_ascii_lowercase()
-            .contains(&retarget.from.trim().to_ascii_lowercase())
-    {
+    // Compare against the canonical slug, not a substring of the prose label. `from: cod` is the
+    // documented spelling and `"call of duty (iw-engine)"` does not contain "cod", so this warned
+    // on every correctly-authored CoD manifest — and, being a substring test, `from: a` matched
+    // everything. A warning that fires on correct input teaches authors to ignore warnings.
+    let declared = retarget.from.trim().to_ascii_lowercase();
+    if !declared.is_empty() && declared != detected.slug() {
         log.push(format!(
             "contributions[{index}] {kind} {name}: manifest says `from: {}` but the bone names read \
-             as {} — building from the names in the file",
+             as `{}` ({}) — building from the names in the file",
             retarget.from,
+            detected.slug(),
             detected.label()
         ));
     }

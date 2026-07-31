@@ -246,10 +246,18 @@ pub struct Retarget {
     ///
     /// # Why the map and not just `from:`
     ///
-    /// A convention name is not enough to reproduce a remap. Three of them (`cod`, `valve`,
-    /// `pandemic`) need hand-verified correction tables because the generic keyword mapper misreads
-    /// their namings — CoD's `j_shoulder` is the upper arm, ValveBiped carries four spine rungs
-    /// against Pandemic's three — and any of them can be hand-adjusted per bone in the Workshop.
+    /// A convention name is not enough to reproduce a remap. **Five** conventions carry explicit
+    /// correction tables (`cod`, `valve`, `mixamo`, `unreal`, `pandemic` — see
+    /// `retarget::explicit_target_name`), because the generic keyword mapper misreads their
+    /// namings: CoD's `j_shoulder` is the upper arm, ValveBiped carries four spine rungs against
+    /// Pandemic's three. Pandemic's table is an identity rather than a correction. And any bone in
+    /// any of them can be hand-adjusted in the Workshop.
+    ///
+    /// On "hand-verified": `retarget.rs` states the honest position, which is narrower than this
+    /// doc used to claim — *"CoD is verified against a real asset (Roze); ValveBiped/Mixamo/Unreal
+    /// use their standardised bone names."* Treat the other four as convention-following rather
+    /// than measured.
+    ///
     /// Carrying only `from:` would mean a Shipment built by someone else, or rebuilt later, silently
     /// differed from what the author previewed and approved.
     ///

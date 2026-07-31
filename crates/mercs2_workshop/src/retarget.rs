@@ -132,3 +132,86 @@ impl RetargetPreview for Retarget {
             .collect()
     }
 }
+
+/// The preview-only half's own tests.
+///
+/// These two moved nowhere when the classifier and tables were lifted to `mercs2_formats`: the
+/// commit said "15 tests moved with it", which was literally true and concealed that 17 existed.
+/// The two dropped are exactly the ones covering `rebind_matrices` — the function that same commit
+/// singles out as "load-bearing enough that paraphrasing them from their own doc comments produced
+/// a materially different matrix order". Removing the guard against that is not a move.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn rebind_deform_bone_conforms_via_frame_composition() {
+        // A deform bone (well-aligned source/target frames) uses `TargetBind · S · SourceInvBind`. A
+        // vertex 1 unit above the source arm bone must land 1 (scaled) unit above the target arm bone,
+        // relocated to the target bone's position — the bind-space change working end to end.
+        let src = names(&["hips", "arm"]);
+        let spos = vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]; // y-extent 1
+        let sparents = vec![-1i32, 0];
+        // Source arm bind = translate(0,1,0), identity rotation → inverse-bind = translate(0,-1,0).
+        let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let arm_sib = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 1.0]];
+        let sibm = vec![ident, arm_sib];
+        let tgt = names(&["Bone_Hips", "Bone_LBicep"]);
+        let tpos = vec![[0.0, 0.0, 0.0], [0.5, 1.0, 0.0]]; // y-extent 1 → uscale 1
+        let tparents = vec![-1i32, 0];
+        let r = Retarget::build_full(src, spos, sibm, sparents, tgt, tpos, tparents);
+        let table = vec![0usize, 1];
+        let tgt_bind = vec![
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.0)),
+            glam::Mat4::from_translation(glam::Vec3::new(0.5, 1.0, 0.0)),
+        ];
+        let rebind = r.rebind_matrices(&table, &tgt_bind);
+        // Vertex 1 unit above the source arm bone (0,1,0) → (0,2,0), weighted to the arm.
+        let landed = rebind[1].transform_point3(glam::Vec3::new(0.0, 2.0, 0.0));
+        // Target arm bone at (0.5,1,0); 1 unit above → (0.5,2,0).
+        let expected = glam::Vec3::new(0.5, 2.0, 0.0);
+        assert!(
+            (landed - expected).length() < 1e-4,
+            "deform vertex landed at {landed:?}, expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn rebind_gear_bone_snaps_to_attach_without_frame_flip() {
+        // A gear bone with a WILD source frame (90° rotation) mapped onto an attachment point must be
+        // placed by position + scale, NOT frame composition — otherwise the attach point's unrelated
+        // frame rotates the sling geometry across the hips (the exploded-gear failure). The vertex must
+        // land near the attach point regardless of the gear bone's crazy frame.
+        let src = names(&["hips", "j_sling_target"]);
+        let spos = vec![[0.0, 0.0, 0.0], [5.0, 1.0, 0.0]]; // gear bone far out to one side
+        let sparents = vec![-1i32, 0];
+        // Gear source inverse-bind carries a 90°-about-Z rotation (+ translation) — a frame utterly
+        // unlike the attach point's. If the rebind used it, the vertex would be flung.
+        let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        // inverse-bind = R(90°,Z) then translate — column-major: rows are basis, last row translation.
+        let gear_sib = [[0.0, 1.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [-5.0, -1.0, 0.0, 1.0]];
+        let sibm = vec![ident, gear_sib];
+        let tgt = names(&["Bone_Hips", "bone_attach_hipleft"]);
+        let tpos = vec![[0.0, 0.0, 0.0], [0.2, 1.0, 0.0]]; // y-extent 1 → uscale 1
+        let tparents = vec![-1i32, 0];
+        let r = Retarget::build_full(src, spos, sibm, sparents, tgt, tpos, tparents);
+        let table = vec![0usize, 1];
+        let tgt_bind = vec![
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.0)),
+            glam::Mat4::from_translation(glam::Vec3::new(0.2, 1.0, 0.0)),
+        ];
+        let rebind = r.rebind_matrices(&table, &tgt_bind);
+        // A vertex 0.1 out from the gear bone → should land ~0.1 from the attach point (position-snap),
+        // NOT metres away (which frame composition with the 90° twist would produce).
+        let landed = rebind[1].transform_point3(glam::Vec3::new(5.1, 1.0, 0.0));
+        let attach = glam::Vec3::new(0.2, 1.0, 0.0);
+        assert!(
+            (landed - attach).length() < 0.15,
+            "gear vertex landed at {landed:?}, should be near attach {attach:?}"
+        );
+    }
+}

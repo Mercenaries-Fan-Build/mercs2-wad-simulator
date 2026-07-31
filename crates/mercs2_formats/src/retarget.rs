@@ -44,6 +44,23 @@ impl SourceRig {
         }
     }
 
+    /// The canonical manifest spelling — the vocabulary a Shipment's `retarget.from:` uses.
+    ///
+    /// Separate from [`SourceRig::label`] on purpose. Callers were comparing an author's `from:`
+    /// against the *label* with a substring test, and `"call of duty (iw-engine)"` does not contain
+    /// `"cod"` — so every correctly-authored CoD manifest was told its bone names disagreed with
+    /// itself. The test was also loose in the other direction: `from: a` matched everything.
+    pub fn slug(self) -> &'static str {
+        match self {
+            SourceRig::ValveBiped => "valve",
+            SourceRig::Mixamo => "mixamo",
+            SourceRig::Unreal => "unreal",
+            SourceRig::CallOfDuty => "cod",
+            SourceRig::Pandemic => "pandemic",
+            SourceRig::Generic => "generic",
+        }
+    }
+
     /// Detect the convention from the joint-name set.
     pub fn detect(names: &[String]) -> SourceRig {
         let any = |needle: &str| names.iter().any(|n| n.to_ascii_lowercase().contains(needle));

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_quartermaster"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 description = "Mercenaries 2 Shipment format: reads a manifest.yaml/.json/.toml, lints it against the engine's HANG-class traps, and builds it into an overlay WAD. Ships the `qm` CLI."
 license.workspace = true
