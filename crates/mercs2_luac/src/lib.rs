@@ -21,8 +21,20 @@
 //! header before returning** — so a chunk in the wrong dialect can never reach a WAD.
 //!
 //! Feed the result to `mercs2_formats::scripts_block::ScriptsBlock::replace_lua`.
+//!
+//! # More than a compiler
+//!
+//! [`sys`] exposes the whole vendored VM as raw FFI, because this is the workspace's **single**
+//! Lua. Two builds of Lua in one binary export the same unprefixed `lua_*` symbols and put one
+//! implementation's `lua_State` through the other's functions — a SIGSEGV, not a link error. So the
+//! engine's script host and this compiler share one library rather than each vendoring their own.
+
+pub mod rt;
+pub mod sys;
 
 use std::os::raw::{c_char, c_int, c_void};
+
+use sys::lua_State;
 
 /// The 12-byte LuaQ header the game's VM accepts. See the module docs.
 pub const MERCS2_LUAQ_HEADER: [u8; 12] = [
@@ -37,29 +49,13 @@ pub const MERCS2_LUAQ_HEADER: [u8; 12] = [
     0x00, // lua_Number is not integral
 ];
 
-#[allow(non_camel_case_types)]
-type lua_State = c_void;
-
-extern "C" {
-    fn luaL_newstate() -> *mut lua_State;
-    fn lua_close(L: *mut lua_State);
-    fn luaL_loadbuffer(
-        L: *mut lua_State,
-        buff: *const c_char,
-        sz: usize,
-        name: *const c_char,
-    ) -> c_int;
-    fn lua_dump(
-        L: *mut lua_State,
-        writer: extern "C" fn(*mut lua_State, *const c_void, usize, *mut c_void) -> c_int,
-        data: *mut c_void,
-    ) -> c_int;
-    fn lua_tolstring(L: *mut lua_State, idx: c_int, len: *mut usize) -> *const c_char;
-    fn lua_settop(L: *mut lua_State, idx: c_int);
-}
+use sys::{lua_close, lua_dump, lua_settop, lua_tolstring, luaL_loadbuffer, luaL_newstate};
 
 /// `lua_Writer` — append each dumped block to the `Vec<u8>` behind `ud`.
-extern "C" fn writer(
+///
+/// Declared safe and coerced to [`sys::lua_Writer`] at the call site, so the `unsafe` block below
+/// stays explicit about which operations are the unchecked ones.
+extern "C-unwind" fn writer(
     _l: *mut lua_State,
     p: *const c_void,
     sz: usize,
