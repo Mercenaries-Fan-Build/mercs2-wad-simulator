@@ -3811,25 +3811,8 @@ pub fn run(opts: Options) {
                                     // donor. Re-loads the source glb raw (exact f32 weights + node graph).
                                     let mut paths = vec![opts.wadpath.clone()];
                                     paths.extend(opts.overlays.iter().cloned());
-                                    let (cs, glb, donor) = faithful_char_skin(&paths, thash, rt, &src_path)?;
-                                    let report = mercs2_formats::char_skin::validate::validate(
-                                        &cs,
-                                        &glb.vjoints,
-                                        &glb.vweights,
-                                        &glb.indices,
-                                    );
-                                    // Host = the donor's LARGEST drawing group (the body) that fits.
-                                    let host = mercs2_formats::model_inject::drawing_group_caps(&donor)
-                                        .into_iter()
-                                        .filter(|&(_, _, tricap)| cs.stats.tris as u32 <= tricap)
-                                        .max_by_key(|&(_, vcap, _)| vcap)
-                                        .map(|(ord, _, _)| ord)
-                                        .ok_or_else(|| {
-                                            format!(
-                                                "no donor drawing group fits {} triangles — decimate",
-                                                cs.stats.tris
-                                            )
-                                        })?;
+                                    let (glb, donor, opts_lower) =
+                                        faithful_lower_opts(&paths, thash, rt, &src_path)?;
                                     let Some(out_path) = rfd::FileDialog::new()
                                         .add_filter("model block", &["bin"])
                                         .set_title("Export faithful character block")
@@ -3838,59 +3821,38 @@ pub fn run(opts: Options) {
                                     else {
                                         return Ok("export cancelled".into());
                                     };
-                                    let mesh = mercs2_formats::model_inject::ExternalMesh {
-                                        positions: cs.pos.clone(),
-                                        // CONFORMED normals (see CharSkin::nrm) - the
-                                        // source field describes the pre-conform surface.
-                                        normals: if cs.nrm.is_empty() {
-                                            glb.normals.clone()
-                                        } else {
-                                            cs.nrm.clone()
-                                        },
-                                        uvs: glb.uvs.clone(),
-                                        tris: glb.tris.clone(),
-                                        joints: (0..cs.stats.verts)
-                                            .map(|i| {
-                                                [
-                                                    cs.skin_bytes[i * 8],
-                                                    cs.skin_bytes[i * 8 + 1],
-                                                    cs.skin_bytes[i * 8 + 2],
-                                                    cs.skin_bytes[i * 8 + 3],
-                                                ]
-                                            })
-                                            .collect(),
-                                        weights: (0..cs.stats.verts)
-                                            .map(|i| {
-                                                [
-                                                    cs.skin_bytes[i * 8 + 4],
-                                                    cs.skin_bytes[i * 8 + 5],
-                                                    cs.skin_bytes[i * 8 + 6],
-                                                    cs.skin_bytes[i * 8 + 7],
-                                                ]
-                                            })
-                                            .collect(),
-                                    };
                                     let new_name = mercs2_formats::hash::pandemic_hash_m2(&format!(
                                         "{tlabel}_faithful"
                                     ));
-                                    let (block, _stats) =
-                                        mercs2_formats::model_inject::inject_character_into_donor_block(
-                                            &donor, &mesh, &cs.ranges, host, &[], new_name,
-                                        )?;
-                                    std::fs::write(&out_path, &block)
+                                    // ONE lowering, shared with the Quartermaster. This arm used to
+                                    // hand-roll its own: single-host-or-error, `&[]` repoints, its
+                                    // own ExternalMesh construction byte-for-byte identical to
+                                    // char_lower's. It could not export what the Quartermaster
+                                    // ships — this very fixture needs five host groups — so
+                                    // "preview == shipped" was a claim with two code paths behind
+                                    // it. Now there is one.
+                                    let low = mercs2_formats::char_lower::character_into_donor(
+                                        &donor, &glb, new_name, &opts_lower,
+                                    )?;
+                                    std::fs::write(&out_path, &low.block)
                                         .map_err(|e| format!("write {}: {e}", out_path.display()))?;
-                                    let checks = report
+                                    for w in &low.warnings {
+                                        eprintln!("faithful export: WARNING - {w}");
+                                    }
+                                    let checks = low
+                                        .report
                                         .checks
                                         .iter()
                                         .map(|c| format!("{}={:?}", c.title, c.status))
                                         .collect::<Vec<_>>()
                                         .join(" ");
                                     Ok(format!(
-                                        "EXPORTED {tlabel} — {} verts, palette {}/{} runs, host grp {host}, {:?} [{checks}] -> {}",
-                                        cs.stats.verts,
-                                        cs.palette_slots,
-                                        cs.stats.range_count,
-                                        cs.mode,
+                                        "EXPORTED {tlabel} - {} verts, palette {}/{} runs, hosts {:?}, {:?} [{checks}] -> {}",
+                                        low.skin.stats.verts,
+                                        low.skin.palette_slots,
+                                        low.skin.stats.range_count,
+                                        low.hosts,
+                                        low.skin.mode,
                                         out_path.display()
                                     ))
                                 })();
@@ -5263,6 +5225,47 @@ fn source_model_data(
 pub(crate) fn load_model_data(w: &mut WadStack, hash: u32) -> Result<ModelData, String> {
     load_model_data_tier(w, hash, 0x01)
 }
+/// The donor, the source, and the [`LowerOpts`] to lower it with — the export's half of the
+/// preview.
+///
+/// [`LowerOpts`]: mercs2_formats::char_lower::LowerOpts
+///
+/// Exists so `Act::ExportFaithfulCharacter` can call the SAME
+/// `mercs2_formats::char_lower::character_into_donor` the Quartermaster calls, instead of the
+/// hand-rolled single-host injection it used to carry. That copy could not export what the
+/// Quartermaster ships — the working fixture needs five host groups — so "what you see on the
+/// pedestal is exactly what gets written" was true of the conform and false of everything after it.
+///
+/// The preview path (`faithful_char_skin`) still exists and still runs the same
+/// `convention_overrides` + donor-transfer policy; this returns that policy as data rather than as
+/// an already-built `CharSkin`, because the lowering wants to run `build_character` itself.
+pub(crate) fn faithful_lower_opts(
+    wad_paths: &[String],
+    thash: u32,
+    rt: &crate::retarget::Retarget,
+    src_path: &std::path::Path,
+) -> Result<
+    (
+        mercs2_formats::char_skin::CharGlbData,
+        Vec<u8>,
+        mercs2_formats::char_lower::LowerOpts,
+    ),
+    String,
+> {
+    let donor = crate::publish::donor_block(wad_paths, thash)?;
+    let skel = mercs2_formats::skeleton::Skeleton::from_block(&donor)?;
+    let target = mercs2_formats::char_skin::TargetSkeleton::from_skeleton(&skel);
+    let glb = crate::import::load_char_glb(src_path)?;
+    let opts = mercs2_formats::char_lower::LowerOpts {
+        overrides: rt.convention_overrides(target.bones.len()),
+        native_rig: rt.convention == crate::retarget::SourceRig::Pandemic,
+        // The Workshop export writes a bare model block, not a WAD, so there is nowhere to put a
+        // texture block beside it. Skins are bound by the Quartermaster's `textures:`.
+        repoints: Vec::new(),
+    };
+    Ok((glb, donor, opts))
+}
+
 
 /// The target character skeleton's HIER bone names, in bone order — the Skeleton workbench feeds
 /// these to `retarget::Retarget::build` as the map's right-hand side. Empty when the model has no
