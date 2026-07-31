@@ -29,7 +29,8 @@ pub struct Written {
     /// Of those, how many differ from what the convention table alone would give — the hand
     /// adjustments, which are the reason the map is worth writing at all.
     pub manual: usize,
-    /// Target bones dropped because no name in the corpus resolves them.
+    /// Rows written as a bare `0xHHHHHHHH` because no corpus names that target bone. Legal, and
+    /// preferable to dropping them — but worth reporting, since a hash is one-way and undiffable.
     pub unnamed: usize,
 }
 
@@ -50,6 +51,26 @@ pub fn slugify(s: &str) -> String {
         "my-outfit".into()
     } else {
         t
+    }
+}
+
+/// Quote a YAML scalar when leaving it bare would change its type.
+///
+/// A bare `0xEB6F1B2D` is parsed as the INTEGER 3949927213, so the manifest fails to load with
+/// *"invalid type: integer, expected a string"*. Plan 04's own examples quote every hash
+/// (`target: "0x6F84F6A3"`, `touches: ["0xE54047D5"]`) — this makes the emitter agree with them.
+/// Verified by emitting one unquoted and watching the build refuse it.
+fn yaml_scalar(s: &str) -> String {
+    let plain = !s.is_empty()
+        && !s.starts_with("0x")
+        && !s.starts_with("0X")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        && !s.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if plain {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
 }
 
@@ -118,14 +139,30 @@ pub fn write(
         match tgt {
             None => rows.push((sname.clone(), None)),
             Some(ti) => match rt.target_bones.get(*ti as usize) {
-                // A target with no name in the corpus is DROPPED, not written as `hash_XXXXXXXX`.
-                // The Quartermaster resolves `bones:` by hashing the name, so a placeholder would
-                // hash to a bone the donor does not have and fail the build. Dropping leaves that
-                // joint to the automap, which is where it would have landed anyway.
-                Some(tn) if !tn.starts_with("hash_") && !tn.starts_with("0x") => {
-                    rows.push((sname.clone(), Some(tn.clone())))
+                None => unnamed += 1,
+                Some(tn) => {
+                    // A NAME is preferred, a bare hash is legal — Plan 04 decision 3, and the
+                    // Quartermaster resolves `bones:` through `asset_hash`, which accepts either.
+                    //
+                    // So an unnameable target is written as `0xHHHHHHHH` rather than dropped. It
+                    // has to be: 21 of pmc_hum_mattias's 116 bones have no name in ANY corpus this
+                    // project holds, and dropping them left the map silently incomplete — which
+                    // defeats the one thing it exists for. The two spellings a target can arrive
+                    // in are the workbench's `0x…` and `TargetSkeleton`'s `hash_…`; both mean the
+                    // same thing, and only the first is a legal reference.
+                    let name = match tn.strip_prefix("hash_") {
+                        Some(hex) => {
+                            unnamed += 1;
+                            format!("0x{hex}")
+                        }
+                        None if tn.starts_with("0x") || tn.starts_with("0X") => {
+                            unnamed += 1;
+                            tn.clone()
+                        }
+                        None => tn.clone(),
+                    };
+                    rows.push((sname.clone(), Some(name)));
                 }
-                _ => unnamed += 1,
             },
         }
     }

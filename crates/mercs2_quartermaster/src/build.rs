@@ -721,7 +721,14 @@ fn lower_skinned(
                     overrides.insert(si, None); // explicit drop
                 }
                 Some(t) => {
-                    let h = mercs2_formats::hash::pandemic_hash_m2(t);
+                    // Through `asset_hash`, like every other reference in this format: a bare
+                    // `0x…` IS the hash, anything else is a name. This called `pandemic_hash_m2`
+                    // directly, which made a hash-spelled target unrepresentable — it would be
+                    // hashed as the STRING "0x1C2E8837" and miss. That matters here more than
+                    // most places: 21 of pmc_hum_mattias's 116 bones have no name in any corpus we
+                    // have, so a name-only `bones:` map cannot address them at all and the
+                    // Workshop was dropping those rows.
+                    let h = crate::manifest::asset_hash(t);
                     match hier_of_name.get(&h) {
                         Some(&hier) => {
                             overrides.insert(si, Some(hier));
