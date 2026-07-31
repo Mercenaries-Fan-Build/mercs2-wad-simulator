@@ -858,6 +858,21 @@ fn lower_skinned(
         tex_blocks.push(block);
     }
 
+    // Say what a skin-less outfit actually ships. `wad_simulator` reports this after the fact —
+    // "material[N] diffuse 0x… is base-resident but not shipped by the patch (fallback render) …
+    // flags fallback-render risk in menu/wardrobe scenes" — and an author who never runs it has no
+    // way to know. The materials are the DONOR's, resolved out of the base WAD at runtime, so the
+    // outfit depends on those textures being resident wherever it is drawn. When the donor is also
+    // the wearer that is nearly always true; when it is not, the wardrobe is where it shows.
+    if repoints.is_empty() {
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: no `textures:` — wears donor {donor_name}'s \
+             materials, which this patch does not ship. Fine in-world where they are resident; \
+             the wardrobe/menu scene is where a fallback render would show. Supply `textures:` to \
+             carry its own."
+        ));
+    }
+
     let opts = char_lower::LowerOpts {
         overrides,
         // A model already on the game's own rig keeps the author's weights: there is no fuzzy map
