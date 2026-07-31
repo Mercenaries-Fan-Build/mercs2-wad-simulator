@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_formats"
-version = "3.2.0"
+version = "3.3.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — asset format layer: WAD/sges/UCFX/mesh/texture/terrain container parsing and decompression."
 readme = "README.md"
@@ -12,7 +12,12 @@ flate2 = "1"
 # Parser + accessor readers ONLY. `default-features` pulls `import`, which drags in `image` and
 # `base64` for decoding embedded textures — this crate never needs those: a Shipment supplies its
 # maps as separate files, and the rigid-prop path reads geometry alone.
-gltf = { version = "1", default-features = false, features = ["utils"] }
+#
+# `names` is load-bearing rather than cosmetic: `char_import` reads a rigged character, and
+# `char_skin::automap` classifies every source bone BY NAME to map it onto the Mercenaries rig.
+# Without it the whole skinned path degrades to anonymous joints. It only retains the name strings
+# the file already carries — no extra dependencies.
+gltf = { version = "1", default-features = false, features = ["utils", "names"] }
 
 [dev-dependencies]
 serde_json = "1"

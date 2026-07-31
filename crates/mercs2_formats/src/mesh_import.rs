@@ -23,18 +23,22 @@ use std::path::Path;
 /// otherwise collapse to the origin. Primitives are concatenated with their indices rebased, so a
 /// multi-part prop arrives as one welded soup — correct for a rigid host group, and the reason the
 /// per-material split the Workshop does is not reproduced here.
-pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
+/// Open a `.glb`/`.gltf` and resolve its buffers **without** gltf's `import` feature.
+///
+/// `import` would pull `image` + `base64` in just to decode embedded textures neither reader wants:
+///   - GLB → the BIN chunk, handed back as buffer 0.
+///   - `.gltf` with an external `.bin` URI → read relative to the file.
+///   - a base64 `data:` URI → refused by name, since decoding it is the dependency we declined.
+///
+/// Shared with [`crate::char_import`] so the rigid and skinned readers cannot disagree about what
+/// counts as a loadable file.
+pub(crate) fn open_gltf(path: &Path) -> Result<(gltf::Document, Vec<Vec<u8>>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let gltf::Gltf {
         document: doc,
         blob,
     } = gltf::Gltf::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
 
-    // Buffer sources, resolved WITHOUT the `import` feature (which would pull `image` + `base64`
-    // just to decode embedded textures we never read):
-    //   - GLB  → the BIN chunk, handed back as buffer 0.
-    //   - .gltf with an external `.bin` URI → read it relative to the file.
-    //   - a base64 `data:` URI → refused by name, since decoding it is the dependency we declined.
     let mut buffers: Vec<Vec<u8>> = Vec::new();
     for buffer in doc.buffers() {
         match buffer.source() {
@@ -56,6 +60,11 @@ pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
             }
         }
     }
+    Ok((doc, buffers))
+}
+
+pub fn external_mesh_from_gltf(path: &Path) -> Result<ExternalMesh, String> {
+    let (doc, buffers) = open_gltf(path)?;
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();

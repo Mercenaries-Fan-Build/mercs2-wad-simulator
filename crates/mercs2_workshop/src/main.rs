@@ -63,6 +63,9 @@ mod index;
 mod luaview;
 mod publish;
 mod retarget;
+// The preview-only half (`rebind_matrices` / `animation_rig`) is an extension trait now that the
+// mapper itself lives in `mercs2_formats::retarget`; the call sites below are unchanged.
+use crate::retarget::RetargetPreview as _;
 mod settings;
 mod shot;
 mod texenc;
