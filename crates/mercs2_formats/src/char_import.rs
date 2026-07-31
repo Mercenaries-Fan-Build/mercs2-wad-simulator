@@ -99,19 +99,66 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
     };
     let node_world: Vec<[f64; 16]> = world_cm.iter().map(cm_to_rm).collect();
 
-    // ── skin 0 ───────────────────────────────────────────────────────────────────────────────
-    let skin = doc.skins().next().ok_or("glb has no skin — not rigged")?;
-    let joint_nodes: Vec<usize> = skin.joints().map(|j| j.index()).collect();
-    let reader = skin.reader(get);
-    let ibm: Vec<Option<[f64; 16]>> = {
-        let ibms: Vec<Mat4> = reader
+    // ── EVERY skin, unified ──────────────────────────────────────────────────────────────────
+    //
+    // A file may ship more than one. The CoD/Valve "Roze" rip binds its body to a 103-joint CoD rig
+    // (skin 0) and its face+hair to an 11-joint ValveBiped rig (skin 1). `JOINTS_0` indexes the
+    // PRIMITIVE'S OWN skin, so reading skin 0 and concatenating every primitive silently rebinds
+    // skin 1's head onto skin 0's joints 0..10 — the root and spine. That is 35% of that model,
+    // wrong, with no error.
+    //
+    // This was implemented once, in the `mercs2_poc::gltf` copy, and lost when that copy was
+    // deleted as redundant: the drift ran BOTH ways, and only the direction that favoured keeping
+    // this file was checked. Restored here, against the same rig it was written for.
+    if doc.skins().len() == 0 {
+        return Err("glb has no skin — not rigged".into());
+    }
+    let mut joint_nodes: Vec<usize> = Vec::new();
+    let mut node_to_joint: HashMap<usize, usize> = HashMap::new();
+    let mut ibm: Vec<Option<[f64; 16]>> = Vec::new();
+    // skin index → (local joint index → unified joint index)
+    let mut skin_local_to_unified: Vec<Vec<usize>> = Vec::new();
+    for skin in doc.skins() {
+        let ibms: Vec<Mat4> = skin
+            .reader(get)
             .read_inverse_bind_matrices()
             .map(|it| it.collect())
             .unwrap_or_default();
-        (0..joint_nodes.len())
-            .map(|i| ibms.get(i).map(cm_to_rm))
-            .collect()
-    };
+        let mut map = Vec::new();
+        for (local, j) in skin.joints().enumerate() {
+            let node = j.index();
+            let uni = *node_to_joint.entry(node).or_insert_with(|| {
+                joint_nodes.push(node);
+                ibm.push(None);
+                joint_nodes.len() - 1
+            });
+            // First skin to define a joint's inverse-bind wins; a later skin sharing that node
+            // keeps it rather than overwriting with its own bind pose.
+            if ibm[uni].is_none() {
+                if let Some(m) = ibms.get(local) {
+                    ibm[uni] = Some(cm_to_rm(m));
+                }
+            }
+            map.push(uni);
+        }
+        skin_local_to_unified.push(map);
+    }
+
+    // mesh index → the skin the node drawing it uses. A mesh drawn by no skinned node falls back to
+    // skin 0, which is the previous single-skin behaviour.
+    let mut mesh_skin: HashMap<usize, usize> = HashMap::new();
+    for node in doc.nodes() {
+        if let (Some(m), Some(s)) = (node.mesh(), node.skin()) {
+            mesh_skin.insert(m.index(), s.index());
+        }
+    }
+    if skin_local_to_unified.len() > 1 {
+        eprintln!(
+            "char_import: {} skins unified into {} joints — per-primitive JOINTS_0 remapped",
+            skin_local_to_unified.len(),
+            joint_nodes.len()
+        );
+    }
 
     // ── skinned primitives ───────────────────────────────────────────────────────────────────
     //
@@ -149,7 +196,24 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
                 .read_tex_coords(0)
                 .map(|tc| tc.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; m]);
-            let jv: Vec<[u16; 4]> = joints.into_u16().collect();
+            // Remap this primitive's joint indices out of ITS OWN skin's local space and into the
+            // unified list. For a single-skin file the map is the identity and this is a no-op.
+            let smap = mesh_skin
+                .get(&mesh.index())
+                .and_then(|s| skin_local_to_unified.get(*s))
+                .or_else(|| skin_local_to_unified.first());
+            let jv: Vec<[u16; 4]> = joints
+                .into_u16()
+                .map(|j| match smap {
+                    Some(map) => [
+                        map.get(j[0] as usize).copied().unwrap_or(0) as u16,
+                        map.get(j[1] as usize).copied().unwrap_or(0) as u16,
+                        map.get(j[2] as usize).copied().unwrap_or(0) as u16,
+                        map.get(j[3] as usize).copied().unwrap_or(0) as u16,
+                    ],
+                    None => j,
+                })
+                .collect();
             let wv: Vec<[f64; 4]> = weights
                 .into_f32()
                 .map(|w| [w[0] as f64, w[1] as f64, w[2] as f64, w[3] as f64])

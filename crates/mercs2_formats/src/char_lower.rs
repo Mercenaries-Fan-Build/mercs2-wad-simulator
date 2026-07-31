@@ -64,6 +64,19 @@ pub struct Lowered {
     /// Every donor drawing group the mesh was split across. More than one is normal: retail's own
     /// `pmc_hum_mattias` is 22 skinned groups, and no single group's budget holds a whole character.
     pub hosts: Vec<usize>,
+    /// Everything the build wanted to tell the author, in one place.
+    ///
+    /// `build_character` and `donor_transfer` both populate `CharSkin::warnings`, and until this
+    /// field existed **nothing on the shipping path read them** — including the one that says an
+    /// extremity will be stranded in space. A warning nobody prints is a warning that was not
+    /// issued.
+    pub warnings: Vec<String>,
+    /// Per-host vertex/index budget audit from the injector. Discarded into `_audits` before, which
+    /// meant a group that only just fit and one that had room to spare read identically.
+    pub audits: Vec<crate::model_inject::GroupBudgetAudit>,
+    /// The skinning validation report. The Workshop ran this on its preview and the Quartermaster
+    /// ran nothing, so the shipped path had strictly less checking than the preview of it.
+    pub report: crate::char_skin::validate::Report,
 }
 
 /// Lower a rigged source mesh into `donor_block`, re-stamped as `new_name_hash`.
@@ -95,10 +108,13 @@ pub fn character_into_donor(
         }
     };
 
-    // Host selection. Budgets are per group and count BONES as well as triangles, so "largest"
-    // alone is not enough — and one group is frequently not enough either. Retail's own
-    // `pmc_hum_mattias` is 22 skinned draw groups; a 6k-triangle import does not fit any single one
-    // of them, which is why the single-group injector alone cannot ship a real character.
+    // Host selection. `drawing_group_caps` reports `(ordinal, vertex_cap, triangle_cap)` — vertex
+    // and index budgets only. It does NOT report bones, and this comment used to claim it did;
+    // the bone limit is enforced inside the injector, per host, after the split is chosen.
+    //
+    // One group is frequently not enough: retail's own `pmc_hum_mattias` is 22 skinned draw groups,
+    // and a 6k-triangle import fits none of them alone, which is why the single-group injector
+    // cannot ship a real character by itself.
     let mut caps = drawing_group_caps(donor_block);
     caps.sort_by_key(|&(_, vcap, _)| std::cmp::Reverse(vcap));
 
@@ -166,15 +182,38 @@ pub fn character_into_donor(
             .collect(),
     };
 
-    let (block, stats) = if hosts.len() == 1 {
-        inject_character_into_donor_block(
+    let (block, stats, audits) = if hosts.len() == 1 {
+        // The single-host path hands the WHOLE-MODEL palette straight to `patch_skin_info56`, which
+        // checks the run count and nothing else. The multi path gates per group; this one gated
+        // nowhere, so a palette that had grown past what the format expresses shipped silently.
+        // `donor_transfer` in particular REPLACES the palette after `build_character` has had its
+        // say, so the only honest place to check is here, against the final numbers.
+        let slots = skin.palette_slots;
+        let bones = skin.stats.bones;
+        if slots > crate::char_skin::build::MAX_PALETTE_SLOTS {
+            return Err(format!(
+                "the palette is {slots} slots, past the {} the engine's reader accepts — the group \
+                 will not decode. Split it across more donor groups.",
+                crate::char_skin::build::MAX_PALETTE_SLOTS
+            ));
+        }
+        if bones > crate::char_skin::build::MAX_GROUP_BONES {
+            return Err(format!(
+                "the mesh weights {bones} distinct bones in one group, above the {} that is the \
+                 measured ceiling across every skinned group in the shipped game. Split it across \
+                 more donor groups.",
+                crate::char_skin::build::MAX_GROUP_BONES
+            ));
+        }
+        let (b, s) = inject_character_into_donor_block(
             donor_block,
             &mesh,
             &skin.ranges,
             hosts[0],
             &opts.repoints,
             new_name_hash,
-        )?
+        )?;
+        (b, s, Vec::new())
     } else {
         // MULTI-GROUP. Each host gets its OWN palette and `INFO(56)` table, computed inside the
         // injector from the bones that group actually uses — so `mesh.joints` must carry **global**
@@ -186,10 +225,27 @@ pub fn character_into_donor(
         for (vi, j) in gmesh.joints.iter_mut().enumerate() {
             for k in 0..4 {
                 let slot = skin.skin_bytes[vi * 8 + k] as usize;
-                j[k] = palette.get(slot).copied().unwrap_or(0) as u8;
+                // Both failures here used to be silent. A slot outside the palette became bone 0
+                // (`GlobalSRT`, the root) — which IS the "extremity stranded in space" the palette
+                // warning describes, manufactured locally; and `as u8` wrapped for a donor with more
+                // than 255 HIER bones, quietly aliasing every high bone onto a low one.
+                let Some(&global) = palette.get(slot) else {
+                    return Err(format!(
+                        "vertex {vi} influence {k} names palette slot {slot}, but the palette has \
+                         {} — the skin and its range table disagree",
+                        palette.len()
+                    ));
+                };
+                if global > 255 {
+                    return Err(format!(
+                        "donor HIER bone {global} is past the 255 that BLENDINDICES can address; \
+                         this donor needs a palette-relative multi-group split, not a global one"
+                    ));
+                }
+                j[k] = global as u8;
             }
         }
-        let (b, _audits, s) = crate::model_inject::inject_character_multi_into_donor_block(
+        let (b, audits, s) = crate::model_inject::inject_character_multi_into_donor_block(
             donor_block,
             &gmesh,
             &hosts,
@@ -203,8 +259,24 @@ pub fn character_into_donor(
             None,
             None,
         )?;
-        (b, s)
+        (b, s, audits)
     };
+
+    // Validate what we are about to ship. The Workshop ran this on its preview and the Quartermaster
+    // ran nothing, so the path that produced a WAD was checked LESS than the path that produced a
+    // picture. Returned rather than enforced: `Report` grades, and which grades are fatal is the
+    // caller's policy, not the lowering's.
+    let report = crate::char_skin::validate::validate(
+        &skin,
+        &glb.vjoints,
+        &glb.vweights,
+        &glb.indices,
+    );
+
+    let mut warnings = skin.warnings.clone();
+    for lim in report.limits.iter().filter(|l| !l.ok) {
+        warnings.push(format!("{}: {}", lim.title, lim.text));
+    }
 
     Ok(Lowered {
         block,
@@ -213,5 +285,8 @@ pub fn character_into_donor(
         transfer,
         host_group: hosts[0],
         hosts,
+        warnings,
+        audits,
+        report,
     })
 }

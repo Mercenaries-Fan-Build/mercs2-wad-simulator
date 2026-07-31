@@ -689,11 +689,30 @@ fn lower_skinned(
     let hash = crate::manifest::asset_hash(name);
     let out = char_lower::character_into_donor(&donor_blk, &glb, hash, &opts).map_err(lower_err)?;
 
+    // Report every host, not `hosts[0]`. A two-host build logging "group 3" said nothing about
+    // group 7 also being rewritten and the other 26 neutralised.
     log.push(format!(
-        "contributions[{index}] {kind} {name} 0x{hash:08X} ← donor {donor_name} group {}: \
-         {} verts, {} tris | {}",
-        out.host_group, out.stats.vertex_count, out.stats.triangle_count, out.transfer
+        "contributions[{index}] {kind} {name} 0x{hash:08X} ← donor {donor_name} groups {:?}: \
+         {} verts, {} tris, {} bones / {} palette slots | {}",
+        out.hosts,
+        out.stats.vertex_count,
+        out.stats.triangle_count,
+        out.skin.stats.bones,
+        out.skin.palette_slots,
+        out.transfer
     ));
+    // `CharSkin::warnings` was populated all along and read by nothing on this path — including the
+    // one that says an extremity will be stranded in space. A warning nobody prints was not issued.
+    for w in &out.warnings {
+        log.push(format!("contributions[{index}] {kind} {name}: WARNING — {w}"));
+    }
+    use mercs2_formats::char_skin::validate::Status;
+    for c in out.report.checks.iter().filter(|c| c.status != Status::Ok) {
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: {} = {:?}",
+            c.title, c.status
+        ));
+    }
 
     Ok(out.block)
 }
@@ -926,22 +945,27 @@ fn lower(
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
-            // `textures:` was parsed and then dropped on the floor by the `..` in this pattern, so
-            // an author shipped a skin and silently got the donor's. Binding them needs the
-            // per-group MTRL repoint the skinned lowering performs; refuse rather than repeat the
-            // silent drop.
-            if (textures.diffuse.is_some()
+            // `textures:` is parsed and then used by nothing. It was originally dropped on the
+            // floor by the `..` in this pattern; a first fix refused it only when `retarget` was
+            // absent, on the stated grounds that "the skinned lowering performs the per-group MTRL
+            // repoint" — which it does not. `lower_skinned` takes no textures argument and passes
+            // `repoints: Vec::new()`. So the refusal steered authors toward `retarget:`, where the
+            // silent drop was still waiting.
+            //
+            // Refuse on BOTH branches until the repoint path actually exists. An honest refusal is
+            // worth more than a fix that only moves where the skin goes missing.
+            if textures.diffuse.is_some()
                 || textures.normal.is_some()
-                || textures.specular.is_some())
-                && retarget.is_none()
+                || textures.specular.is_some()
             {
                 return Err(BuildError::Unsupported {
                     index,
                     kind,
-                    reason: "`textures:` needs the skinned lowering, which is selected by \
-                             `retarget:`. Without it the outfit hosts its geometry rigidly on the \
-                             donor and wears the DONOR's materials — which is what silently \
-                             happened to every `textures:` block until now."
+                    reason: "`textures:` is not wired up yet, on either the rigid or the skinned \
+                             path — the lowering passes no MTRL repoints, so an outfit built now \
+                             wears the DONOR's materials whatever you put here. Refusing rather \
+                             than shipping a silent substitution. Remove `textures:` to build the \
+                             geometry alone."
                         .into(),
                 });
             }
