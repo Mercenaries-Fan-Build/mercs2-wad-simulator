@@ -386,6 +386,17 @@ pub struct ModelMesh {
     /// groups, NO retail group has a zero draw count, so treating zero as "not drawn" cannot cost
     /// retail geometry.
     pub prmt_draw: u32,
+    /// `range_count` as this group's `INFO(56)` bone-palette table declares it — the run count the
+    /// engine reads at `+20`, gated to `1..=8` by the field's own width. Zero means the group ships
+    /// no believable palette table (a rigid `MESH` INFO(60) holds different data there).
+    pub range_count: usize,
+    /// Total bone slots this group's palette table expands to — the sum of the runs' counts, and
+    /// the quantity a writer's palette must fit inside. Zero when [`ModelMesh::range_count`] is.
+    pub palette_slots: usize,
+    /// Distinct bones this group's vertices actually weight. **Not** the same as
+    /// [`ModelMesh::palette_slots`]: the packer bridges gaps between runs to stay inside the
+    /// 8-range field, so a shipped group can carry more slots than bones.
+    pub distinct_bones: usize,
     /// Per-PRMT sub-strip material ranges into `tris`. A single PRMG group frequently carries
     /// SEVERAL PRMT records, each an independent sub-strip with its OWN material (e.g. the PMC hall:
     /// group 1 = 23 materials, its floor/walls/trim all in one group). Binding only the first material
@@ -738,6 +749,12 @@ pub fn read_model_meshes_segm(
         // accumulating counts. Expand the table and map each index to its global HIER bone.
         // Groups without a valid table (rigid MESH INFO(60) holds different data; sanity
         // gates reject it) keep their indices as-is.
+        // The shipped table's own dimensions, kept rather than discarded: `range_count` is the
+        // field's declared run count and `palette_slots` the total the runs expand to. They are the
+        // only direct evidence of what size palette retail actually ships, and every writer in this
+        // workspace is gated on a constant that was guessed from one group of one model.
+        let mut range_count = 0usize;
+        let mut palette_slots = 0usize;
         if !joints.is_empty() {
             if let Some((is_, ie_)) = grp_info {
                 let rc = if ie_ - is_ >= 28 {
@@ -762,6 +779,10 @@ pub fn read_model_meshes_segm(
                         palette.extend(base..base + cnt);
                     }
                     if ok {
+                        // Only report a table we actually believed: a rejected one is not evidence
+                        // of a shipped palette size, and counting it would inflate the census.
+                        range_count = rc;
+                        palette_slots = palette.len();
                         for j4 in joints.iter_mut() {
                             for j in j4.iter_mut() {
                                 *j = palette
@@ -775,6 +796,25 @@ pub fn read_model_meshes_segm(
                 }
             }
         }
+
+        // Bones this group's vertices actually reference, with weight. Distinct from `palette_slots`
+        // because the packer's run-length encoding bridges gaps between runs to stay within the
+        // 8-range field, so a group can ship more slots than it has bones. Conflating the two is
+        // what made `PALETTE_CAP` compare a bone count against a slot count.
+        let distinct_bones = {
+            let mut seen = std::collections::BTreeSet::new();
+            for (vi, j4) in joints.iter().enumerate() {
+                for (c, &j) in j4.iter().enumerate() {
+                    // No BLENDWEIGHT stream means every declared influence counts; filtering on a
+                    // weight that does not exist would report zero bones for a group that has them.
+                    let used = weights.get(vi).map(|w4| w4[c] > 0).unwrap_or(true);
+                    if used {
+                        seen.insert(j);
+                    }
+                }
+            }
+            seen.len()
+        };
 
         // Index strip (u16) → triangles. Index count at ibuf_info+0.
         let ic = read_u32_le(container, iis) as usize;
@@ -812,6 +852,9 @@ pub fn read_model_meshes_segm(
             tris,
             submeshes,
             prmt_draw,
+            range_count,
+            palette_slots,
+            distinct_bones,
         });
     }
     Ok(out)

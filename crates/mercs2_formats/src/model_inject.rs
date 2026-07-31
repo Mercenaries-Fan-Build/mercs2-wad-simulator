@@ -1670,12 +1670,23 @@ fn inject_multi_into_donor_block_ex(
             }
             used.sort_unstable();
             let (ranges32, slot_of, slots) = crate::char_skin::build::build_palette_ranges(&used);
-            if slots > crate::char_skin::build::PALETTE_CAP {
+            // Gate BONES against the measured retail wall and SLOTS against the engine reader's
+            // own limit. These were one check comparing slots against the bone number, which
+            // rejected retail's own shape: `pmc_hum_mattias` group 3 ships 49 slots over 48 bones.
+            if used.len() > crate::char_skin::build::MAX_GROUP_BONES {
                 return Err(format!(
-                    "group {gi}: palette is {slots} slots over {} bones, above the {} the game \
-                     ships; split across more groups",
+                    "group {gi}: {} distinct bones, above the {} that is the measured ceiling \
+                     across every skinned group in the shipped game; split across more groups",
                     used.len(),
-                    crate::char_skin::build::PALETTE_CAP
+                    crate::char_skin::build::MAX_GROUP_BONES
+                ));
+            }
+            if slots > crate::char_skin::build::MAX_PALETTE_SLOTS {
+                return Err(format!(
+                    "group {gi}: palette is {slots} slots over {} bones, past the {} the engine's \
+                     reader accepts; split across more groups",
+                    used.len(),
+                    crate::char_skin::build::MAX_PALETTE_SLOTS
                 ));
             }
             for j in lm.joints.iter_mut() {

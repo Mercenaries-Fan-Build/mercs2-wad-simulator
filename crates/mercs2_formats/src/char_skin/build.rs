@@ -11,20 +11,42 @@ use super::automap::{automap, Origin, Rig};
 use super::mat::*;
 use std::collections::HashMap;
 
-/// Largest palette a single draw group may carry.
+/// Largest number of distinct BONES a single draw group may weight.
 ///
-/// Was 46, described as "largest palette the shipped game uses". Measured otherwise:
-/// `mercs2_probe --bin skin_census --group 3` reports **48** distinct bones in shipped
-/// pmc_hum_mattias group 3 (chris 45). So 46 was below retail and fired the finger-collapse
-/// unnecessarily -- on 50 Cent it destroyed 30 mapped bones (both finger ranges), taking the
-/// palette from 58 mapped down to 28. Set to the measured retail maximum, not to an invented
-/// number and not to the structural ceiling (BLENDINDICES is u8, so 255 slots would fit, but
-/// nothing shipped comes close and an unproven jump is not worth the risk).
+/// **Measured across the whole shipped game**, not inferred from one group:
+/// `skin_census --wad --per-group` over 3,007 model assets / 2,052 skinned drawing groups gives a
+/// sharp wall at 48 — the tail runs 44:41 groups, 45:47, 46:32, 47:13, 48:8, and then stops dead.
+/// No shipped group weights a 49th bone. The census is committed at
+/// `docs/data/palette_census.csv` in the research repo.
 ///
-/// Raising 46 -> 64 lifted multi-influence 14.6% -> 19.4%, which is real but small: the cap was
-/// never the main cause of coarse skinning. That is source detail the target rig cannot represent
-/// (muscle/twist/face helper joints with no counterpart), and no palette size fixes it.
-pub const PALETTE_CAP: usize = 48;
+/// History worth keeping, because the number moved twice for bad reasons: it was 46, described as
+/// "largest palette the shipped game uses", which was below retail and fired the finger-collapse
+/// unnecessarily — on 50 Cent it destroyed 30 mapped bones (both finger ranges), taking the palette
+/// from 58 mapped down to 28. It then became 48 from a single `--group 3` reading of one model.
+/// That value happens to be right, but it was right by luck and it was being compared against the
+/// wrong quantity — see [`MAX_PALETTE_SLOTS`].
+pub const MAX_GROUP_BONES: usize = 48;
+
+/// Largest palette SLOT COUNT a draw group may declare — the sum of its `INFO(56)` run lengths,
+/// which is what `BLENDINDICES` actually addresses.
+///
+/// **This is not the same quantity as [`MAX_GROUP_BONES`], and conflating them was a real bug.**
+/// [`build_palette_ranges`] bridges gaps between runs to stay inside the 8-range field, so a group
+/// ships more slots than it has bones. Retail's own `pmc_hum_mattias` group 3 is
+/// `range_count=4, slots=49, bones=48` — so a writer gating SLOTS at 48 rejects the exact donor it
+/// is conforming to. Measured retail maximum is **62** slots (`gr_hum_elite` group 3: one range of
+/// 62 covering 13 weighted bones — retail declares a wide contiguous window and leaves most of it
+/// unweighted).
+///
+/// The value here is the ENGINE's own reader gate, from `model_cubeize`'s expansion
+/// (`palette.len() + cnt > 256` rejects) and the decomp-anchored `skinning_animation_spec.md`
+/// (`1<=rc<=8`, `total <= 256`). Above [`RETAIL_MAX_SLOTS`] we warn rather than reject: nothing
+/// shipped goes there, but the format demonstrably expresses it.
+pub const MAX_PALETTE_SLOTS: usize = 256;
+
+/// Largest slot count observed in the shipped corpus. Above this a palette is legal but unattested
+/// — worth saying so, not worth refusing.
+pub const RETAIL_MAX_SLOTS: usize = 62;
 
 /// Run-length encode a SORTED, deduplicated bone-index list into at most [`MAX_RANGES`] runs,
 /// returning `(ranges, bone -> palette slot, slot count)`.
@@ -279,6 +301,10 @@ pub struct Stats {
     pub verts: usize,
     pub tris: usize,
     pub palette_slots: usize,
+    /// Distinct bones the palette covers. Separate from `palette_slots` because the run-length
+    /// merge bridges gaps to stay inside the 8-range field, so slots >= bones. This is the one the
+    /// measured retail ceiling ([`MAX_GROUP_BONES`]) applies to.
+    pub bones: usize,
     pub range_count: usize,
     pub collapsed_fingers: bool,
     pub height: f64,
@@ -534,10 +560,25 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
     // ---- 3. palette (donor HIER indices; fingers kept per-bone unless the donor lacked them) ----
     let used = collect(&full, false);
     let (ranges, slot_of, palette_slots) = build_palette_ranges(&used);
-    if palette_slots > PALETTE_CAP {
+    // Two different limits, deliberately reported separately — they were one check comparing slots
+    // against a bone-derived number, which both under- and over-reported depending on how much the
+    // run-length merge had to bridge.
+    if used.len() > MAX_GROUP_BONES {
         warn.push(format!(
-            "palette is {palette_slots} slots, above the {PALETTE_CAP} the game ships. The \
-             HIGHEST slots silently unbind: an extremity will be stranded in space."
+            "group weights {} distinct bones, above the {MAX_GROUP_BONES} that is the measured \
+             ceiling across every skinned group in the shipped game. Split across more groups.",
+            used.len()
+        ));
+    }
+    if palette_slots > MAX_PALETTE_SLOTS {
+        warn.push(format!(
+            "palette is {palette_slots} slots, past the {MAX_PALETTE_SLOTS} the engine's own \
+             reader accepts — it will refuse the table and the group's skinning will not decode."
+        ));
+    } else if palette_slots > RETAIL_MAX_SLOTS {
+        warn.push(format!(
+            "palette is {palette_slots} slots; the largest in the shipped game is \
+             {RETAIL_MAX_SLOTS}. Legal, but nothing retail does goes here."
         ));
     }
     let min_hier = used.first().copied().unwrap_or(0);
@@ -1562,6 +1603,7 @@ pub fn build_character(inp: &BuildInput) -> Result<CharSkin, String> {
         verts: nv,
         tris: inp.indices.len() / 3,
         palette_slots,
+        bones: used.len(),
         range_count: ranges.len(),
         collapsed_fingers,
         height,

@@ -247,6 +247,12 @@ pub fn apply_donor_transfer(
         .map(|&(b, c)| (b as u16, c as u16))
         .collect();
     cs.palette_slots = slots;
+    // The transfer REPLACES the palette, so every derived stat has to move with it. Updating only
+    // `cs.palette_slots` left `cs.stats` describing the pre-transfer palette, and `validate` reads
+    // stats — so a 49-slot result was reported as "24 / 48 Ok" by the one check meant to catch it.
+    cs.stats.palette_slots = slots;
+    cs.stats.bones = used.len();
+    cs.stats.range_count = ranges32.len();
     Ok(format!(
         "donor transfer: {} donor samples, {} bones / {slots} slots, {:.1}% multi-influence",
         donor.len(),

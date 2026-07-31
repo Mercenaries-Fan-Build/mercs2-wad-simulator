@@ -472,8 +472,20 @@ pub fn validate(
         Limit {
             id: "palette",
             title: "Palette slots",
-            ok: cs.stats.palette_slots <= super::build::PALETTE_CAP,
-            text: format!("{} / {}", cs.stats.palette_slots, super::build::PALETTE_CAP),
+            // Reads `cs.palette_slots`, NOT `cs.stats.palette_slots`. The donor transfer rebuilds
+            // the palette and writes the former; the latter keeps `build_character`'s original.
+            // Reading stats here reported "24 / 48 Ok" for a palette that had become 49 slots —
+            // the validator was blind to precisely the overflow it exists to catch.
+            ok: cs.palette_slots <= super::build::MAX_PALETTE_SLOTS,
+            text: format!("{} / {}", cs.palette_slots, super::build::MAX_PALETTE_SLOTS),
+        },
+        Limit {
+            id: "bones",
+            title: "Distinct bones",
+            // The limit that actually binds: measured at 48 across all 2,052 skinned groups in the
+            // shipped game. Slots and bones are different quantities and need separate rows.
+            ok: cs.stats.bones <= super::build::MAX_GROUP_BONES,
+            text: format!("{} / {}", cs.stats.bones, super::build::MAX_GROUP_BONES),
         },
         Limit {
             id: "ranges",
