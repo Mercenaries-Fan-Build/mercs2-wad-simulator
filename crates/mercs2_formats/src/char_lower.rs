@@ -79,6 +79,122 @@ pub struct Lowered {
     pub report: crate::char_skin::validate::Report,
 }
 
+/// The faithful triangle→host partition: one source part per host group, split further wherever a
+/// group's bone palette would overflow.
+pub struct Partition {
+    /// Triangles REORDERED by `(part, dominant bone)`. Index-parallel with [`Partition::tri_group`]
+    /// — the injector reads the two positionally, so they must be handed over together.
+    pub tris: Vec<[u32; 3]>,
+    /// Host slot for each triangle of [`Partition::tris`].
+    pub tri_group: Vec<usize>,
+    /// Source part index behind each host slot. `seg_part.len()` is how many host groups the split
+    /// actually needs, discovered rather than guessed.
+    pub seg_part: Vec<usize>,
+}
+
+/// Partition a conformed character the way retail authors one.
+///
+/// Lifted from `mercs2_poc::bin::xfer_apply`, which shipped this before `char_lower` existed and is
+/// where the measurements in these comments come from. It was trapped in a `fn main()`, not by any
+/// type — every input is public `mercs2_formats` API.
+///
+/// **Sub-object first, then contiguous bone span.** Retail authors a character as many small draw
+/// groups (shipped mattias: 22, bone counts 2/9/2/48/27/6/...), and their bone sets are near
+/// CONTIGUOUS in HIER index — group 3 packs 48 bones into 48 slots over 5 runs, chris 45 into 45
+/// over 7, with zero gap bridging. A group is a body REGION and HIER indices are hierarchical, so a
+/// region is an index range. Ordering triangles by `(part, dominant bone)` makes any cut fall on
+/// such a range.
+///
+/// **One part per group is required, not preferred.** A draw group carries exactly one material, so
+/// a group spanning two parts cannot be textured — whichever material it names is wrong for one of
+/// them. The even-triangle split straddles part boundaries by construction (50 Cent's parts are
+/// 9173/6191/320 triangles against a 3921 chunk), which is why an import could never wear its own
+/// textures no matter what was packed alongside it.
+///
+/// **The cut is on SLOTS, not distinct bones.** The injector re-derives each group's palette with
+/// `build_palette_ranges`, which bridges small gaps between runs — so 46 distinct bones can occupy
+/// 49 slots. Counting bones and hoping for headroom is how that surfaced as a late panic; count
+/// what the injector counts.
+pub fn faithful_partition(
+    glb: &CharGlbData,
+    skin: &CharSkin,
+    global_joints: &[[u8; 4]],
+) -> Partition {
+    let dom_of = |tri: &[u32; 3]| -> u32 {
+        let mut best = (0u8, u32::MAX);
+        for &v in tri {
+            let vi = v as usize;
+            for c in 0..4 {
+                let w = skin.skin_bytes[vi * 8 + 4 + c];
+                if w > best.0 {
+                    best = (w, global_joints[vi][c] as u32);
+                }
+            }
+        }
+        best.1
+    };
+    let mut part_of = vec![0usize; glb.tris.len()];
+    for (pi, part) in glb.parts.iter().enumerate() {
+        for t in part.tri_start..(part.tri_start + part.tri_count).min(part_of.len()) {
+            part_of[t] = pi;
+        }
+    }
+    let mut order: Vec<usize> = (0..glb.tris.len()).collect();
+    order.sort_by_key(|&i| (part_of[i], dom_of(&glb.tris[i])));
+    let tris: Vec<[u32; 3]> = order.iter().map(|&i| glb.tris[i]).collect();
+
+    let slots_of = |bones: &[u8]| -> usize {
+        let mut v: Vec<u32> = bones.iter().map(|&b| b as u32).collect();
+        v.sort_unstable();
+        v.dedup();
+        crate::char_skin::build::build_palette_ranges(&v).2
+    };
+    let tri_bones = |t: &[u32; 3]| -> Vec<u8> {
+        let mut s: Vec<u8> = Vec::new();
+        for &v in t {
+            let vi = v as usize;
+            for c in 0..4 {
+                if skin.skin_bytes[vi * 8 + 4 + c] > 0 && !s.contains(&global_joints[vi][c]) {
+                    s.push(global_joints[vi][c]);
+                }
+            }
+        }
+        s
+    };
+    let mut seg_part: Vec<usize> = Vec::new();
+    let mut cur_bones: Vec<u8> = Vec::new();
+    let tri_group: Vec<usize> = order
+        .iter()
+        .map(|&i| {
+            let pi = part_of[i];
+            let tb = tri_bones(&glb.tris[i]);
+            let mut merged = cur_bones.clone();
+            for b in &tb {
+                if !merged.contains(b) {
+                    merged.push(*b);
+                }
+            }
+            // Close the group when the next triangle would cross a part boundary, or push the
+            // palette past what the injector will accept.
+            let open_new = seg_part.last() != Some(&pi)
+                || slots_of(&merged) > crate::char_skin::build::MAX_GROUP_BONES;
+            if open_new {
+                seg_part.push(pi);
+                cur_bones = tb;
+            } else {
+                cur_bones = merged;
+            }
+            seg_part.len() - 1
+        })
+        .collect();
+
+    Partition {
+        tris,
+        tri_group,
+        seg_part,
+    }
+}
+
 /// Lower a rigged source mesh into `donor_block`, re-stamped as `new_name_hash`.
 pub fn character_into_donor(
     donor_block: &[u8],
@@ -118,36 +234,86 @@ pub fn character_into_donor(
     let mut caps = drawing_group_caps(donor_block);
     caps.sort_by_key(|&(_, vcap, _)| std::cmp::Reverse(vcap));
 
-    let single = caps
-        .iter()
-        .filter(|&&(_, _, tricap)| skin.stats.tris as u32 <= tricap)
-        .max_by_key(|&&(_, vcap, _)| vcap)
-        .map(|&(ord, _, _)| ord);
-
-    // Enough groups, biggest first, for the triangle budget to cover the mesh.
-    let hosts: Vec<usize> = match single {
-        Some(ord) => vec![ord],
-        None => {
-            let mut acc = 0u32;
-            let mut picked = Vec::new();
-            for &(ord, _, tricap) in &caps {
-                if acc >= skin.stats.tris as u32 {
-                    break;
-                }
-                acc = acc.saturating_add(tricap);
-                picked.push(ord);
-            }
-            if acc < skin.stats.tris as u32 {
+    // Global HIER index per vertex influence — what the partitioner reasons about, and what the
+    // multi-group injector expects in `mesh.joints`.
+    let palette = crate::char_skin::expand_ranges(&skin.ranges);
+    let mut global_joints: Vec<[u8; 4]> = Vec::with_capacity(skin.stats.verts);
+    for vi in 0..skin.stats.verts {
+        let mut g = [0u8; 4];
+        for k in 0..4 {
+            let slot = skin.skin_bytes[vi * 8 + k] as usize;
+            // Both failures here used to be silent. A slot outside the palette became bone 0
+            // (`GlobalSRT`, the root) — the "stranded extremity" the palette warning describes,
+            // manufactured locally; and `as u8` wrapped for a donor with more than 255 HIER bones.
+            let Some(&global) = palette.get(slot) else {
                 return Err(format!(
-                    "the donor's {} drawing groups hold {acc} triangles between them but the mesh \
-                     has {} — decimate it or pick a larger donor",
-                    caps.len(),
-                    skin.stats.tris
+                    "vertex {vi} influence {k} names palette slot {slot}, but the palette has {} — \
+                     the skin and its range table disagree",
+                    palette.len()
+                ));
+            };
+            if global > 255 {
+                return Err(format!(
+                    "donor HIER bone {global} is past the 255 that BLENDINDICES can address; this \
+                     donor needs a palette-relative multi-group split, not a global one"
                 ));
             }
-            picked
+            g[k] = global as u8;
         }
-    };
+        global_joints.push(g);
+    }
+
+    // THE SPLIT DECIDES THE HOST COUNT, not a triangle budget.
+    //
+    // This used to hand out "enough groups, biggest first, for the triangle budget to cover the
+    // mesh", and passed `tri_group: None` so the injector split them evenly by triangle order. That
+    // straddles source parts by construction, so every host group carried geometry from several
+    // parts and therefore could not name a material that was right for all of it — the reason an
+    // import could not wear its own textures. It also forced each group's palette to span nearly
+    // the whole skeleton (measured 46-47 bones per group however many groups were used).
+    //
+    // The faithful partition discovers how many groups are needed instead: one per source part,
+    // split further only where a palette would overflow.
+    let part = faithful_partition(glb, &skin, &global_joints);
+    let nseg = part.seg_part.len();
+    if nseg > caps.len() {
+        return Err(format!(
+            "the split needs {nseg} host groups (one per source part, plus a cut wherever a bone \
+             palette would overflow) but the donor has only {} drawing groups. Merge source parts, \
+             or pick a donor with more groups.",
+            caps.len()
+        ));
+    }
+    // Biggest first — `grow` lifts the per-group vertex/index ceiling, so capacity ordering is a
+    // preference rather than a constraint, but a bigger donor group still means less growth.
+    let hosts: Vec<usize> = caps.iter().take(nseg).map(|&(ord, _, _)| ord).collect();
+
+    // `grow` removes the DONOR's budget as a limit but not the format's: a group's index buffer is
+    // u16, so no host can hold more than ~21.8k triangles however large the donor group was. Check
+    // it here, where the source part is still nameable, rather than letting the injector report
+    // "group 3 budget violated: ic 85381>65534" — true, and no use to whoever has to fix it.
+    const MAX_TRIS_PER_GROUP: usize = 65534 / 3;
+    let mut per_slot = vec![0usize; nseg];
+    for &g in &part.tri_group {
+        per_slot[g] += 1;
+    }
+    for (slot, &n) in per_slot.iter().enumerate() {
+        if n > MAX_TRIS_PER_GROUP {
+            let pi = part.seg_part[slot];
+            let pname = glb
+                .parts
+                .get(pi)
+                .map(|p| p.name.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("<unnamed>");
+            return Err(format!(
+                "source part {pi} ({pname}) puts {n} triangles in one draw group, past the \
+                 {MAX_TRIS_PER_GROUP} a u16 index buffer can address. Decimate that part, or split \
+                 it into several in the source file — a part cannot span draw groups, because a \
+                 group carries exactly one material."
+            ));
+        }
+    }
 
     let mesh = ExternalMesh {
         positions: skin.pos.clone(),
@@ -220,31 +386,15 @@ pub fn character_into_donor(
         // donor HIER indices here, NOT the whole-model palette slots the single-group path wants.
         // Expanding the slots back through the model palette is what recovers them; skipping it
         // produces a model whose every group indexes the wrong bones.
-        let palette = crate::char_skin::expand_ranges(&skin.ranges);
+        // Each host gets its OWN palette and `INFO(56)` table, computed inside the injector from the
+        // bones that group actually uses — so `mesh.joints` carries GLOBAL donor HIER indices here,
+        // not the whole-model palette slots the single-group path wants. `global_joints` was built
+        // above for the partitioner and is the same expansion.
         let mut gmesh = mesh;
-        for (vi, j) in gmesh.joints.iter_mut().enumerate() {
-            for k in 0..4 {
-                let slot = skin.skin_bytes[vi * 8 + k] as usize;
-                // Both failures here used to be silent. A slot outside the palette became bone 0
-                // (`GlobalSRT`, the root) — which IS the "extremity stranded in space" the palette
-                // warning describes, manufactured locally; and `as u8` wrapped for a donor with more
-                // than 255 HIER bones, quietly aliasing every high bone onto a low one.
-                let Some(&global) = palette.get(slot) else {
-                    return Err(format!(
-                        "vertex {vi} influence {k} names palette slot {slot}, but the palette has \
-                         {} — the skin and its range table disagree",
-                        palette.len()
-                    ));
-                };
-                if global > 255 {
-                    return Err(format!(
-                        "donor HIER bone {global} is past the 255 that BLENDINDICES can address; \
-                         this donor needs a palette-relative multi-group split, not a global one"
-                    ));
-                }
-                j[k] = global as u8;
-            }
-        }
+        gmesh.joints = global_joints;
+        // The REORDERED triangles, index-parallel with `tri_group`. The injector reads the two
+        // positionally, so handing over one without the other assigns triangles to the wrong hosts.
+        gmesh.tris = part.tris;
         let (b, audits, s) = crate::model_inject::inject_character_multi_into_donor_block(
             donor_block,
             &gmesh,
@@ -252,11 +402,13 @@ pub fn character_into_donor(
             &opts.repoints,
             new_name_hash,
             true, // grow: an import is denser than the donor; the packager recomputes page_count
-            // No explicit triangle→group map: this splits evenly by triangle order, which is the
-            // proven behaviour. `CharGlbData::parts` carries the source's own sub-object partition
-            // and is the faithful split (one material per group) — promoting it here is the known
-            // next step, not something to improvise while the even split is what has shipped.
-            None,
+            // The faithful partition: one source part per host, cut again wherever a palette would
+            // overflow. The even split this replaces put geometry from several parts in one group,
+            // and a draw group carries exactly ONE material — so no group could name a material
+            // that was right for all of its geometry.
+            Some(&part.tri_group),
+            // Materials stay the donor's own per host (the injector preserves each group's PRMT
+            // field 0 now). Per-part materials arrive with `textures:`, which needs its own blocks.
             None,
         )?;
         (b, s, audits)

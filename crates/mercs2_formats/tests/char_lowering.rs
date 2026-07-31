@@ -264,8 +264,14 @@ fn a_mesh_that_cannot_fit_any_group_is_a_loud_error() {
         Err(e) => e,
         Ok(_) => panic!("an oversized mesh must be refused, not silently injected"),
     };
+    // The error has to name an action and, now that the split is per source part, the part that
+    // needs it. "group 3 budget violated: ic 85381>65534" is true and useless.
     assert!(
-        err.contains("decimate") || err.contains("fits"),
+        err.to_lowercase().contains("decimate"),
         "the error should tell the author what to do, got: {err}"
+    );
+    assert!(
+        err.contains("source part"),
+        "the error should name the source part that overflowed, got: {err}"
     );
 }
