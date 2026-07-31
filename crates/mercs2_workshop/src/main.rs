@@ -1128,7 +1128,28 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // Rung 0 (close-up) with the destruction machine at its pristine default -- the state a
         // freshly-placed instance gets. For a character this is all-true: characters ship no
         // destruction machine, so clause (3) is a no-op for them and only the LOD tier bites.
-        let rs = app::default_render_state(&mut w, hash);
+        let mut rs = app::default_render_state(&mut w, hash);
+        // `--render-view-state 0xNN` forces the draw gate's view_state, which is otherwise pinned
+        // to 0x01 (rung 0). Without it a model's LOD tiers can only be REPORTED, never seen — and
+        // "geometry on a 0x02 group previews perfectly and is invisible in game" is a failure this
+        // project has already shipped once. Being able to render tier 0x02/0x04/0x08 is what makes
+        // that checkable rather than reasoned about.
+        if let Some(v) = get("--render-view-state") {
+            let t = v.trim();
+            match t
+                .strip_prefix("0x")
+                .map(|h| u8::from_str_radix(h, 16))
+                .unwrap_or_else(|| t.parse::<u8>())
+            {
+                Ok(bits) if bits != 0 => {
+                    rs.view_state = bits;
+                    println!("view_state forced to 0x{bits:02X}");
+                }
+                _ => return eprintln!(
+                    "--render-view-state '{v}': expected a non-zero tier bitmask, e.g. 0x02"
+                ),
+            }
+        }
         let gate: std::collections::HashSet<usize> = match w.extract_container(hash) {
             Ok(c) => match mercs2_formats::model_inject::group_draw_report(&c) {
                 Ok(rep) => rep.iter().filter(|r| r.1 > 0 && r.2 > 0).map(|r| r.0).collect(),
