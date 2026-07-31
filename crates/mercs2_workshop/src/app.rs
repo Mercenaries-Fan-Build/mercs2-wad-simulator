@@ -1571,14 +1571,21 @@ pub fn run(opts: Options) {
                                         {
                                             actions.push(Act::ExportFaithfulCharacter);
                                         }
-                                        if ui
-                                            .add_enabled(can_export, egui::Button::new("Export Shipment…"))
-                                            .on_hover_text("Write a buildable Shipment (manifest.yaml + src/) carrying THIS bone map, hand adjustments included — then `qm build` it into a patch WAD")
-                                            .clicked()
-                                        {
-                                            actions.push(Act::ExportShipment);
-                                        }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            // Publishing is a DANGER verb, not a secondary one — the
+                                            // Mods bench styles "Publish patch WAD" the same way.
+                                            // It is the commit: everything else on this page is
+                                            // reversible, and this one writes a folder an author
+                                            // then ships. Rightmost, matching that bench.
+                                            if theme::danger_button(ui, "Export Shipment", can_export)
+                                                .on_hover_text(
+                                                    "Write a buildable Shipment (manifest.yaml + src/) carrying THIS bone map, \
+                                                     hand adjustments included — then `qm build` it into a patch WAD",
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(Act::ExportShipment);
+                                            }
                                             if theme::primary_button(ui, "Apply retarget", ready).clicked() {
                                                 actions.push(Act::RetargetApply);
                                             }
@@ -3902,13 +3909,16 @@ pub fn run(opts: Options) {
                                     let w = crate::shipment::write(
                                         &dir, &asset, "mattias", &tlabel, &src_path, rt,
                                     )?;
+                                    // Terse state, the way the status line reads elsewhere. The
+                                    // hand-adjusted count leads because it is the reason the file
+                                    // is worth writing: the convention table is derivable, that is
+                                    // not.
                                     Ok(format!(
-                                        "SHIPMENT {} — {} bone rows ({} hand-adjusted{}) -> qm build {}",
-                                        asset,
+                                        "SHIPMENT {asset} · {} rows · {} hand-adjusted{} → qm build {}",
                                         w.rows,
                                         w.manual,
                                         if w.unnamed > 0 {
-                                            format!(", {} unnamed target bone(s) left to the automap", w.unnamed)
+                                            format!(" · {} unnamed → automap", w.unnamed)
                                         } else {
                                             String::new()
                                         },
