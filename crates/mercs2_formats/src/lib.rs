@@ -80,6 +80,7 @@ pub mod aset_type_ids;
 pub mod atmosphere;
 pub mod bink;
 pub mod char_import;
+pub mod char_lower;
 pub mod char_skin;
 pub mod retarget;
 pub mod chunk_validate;

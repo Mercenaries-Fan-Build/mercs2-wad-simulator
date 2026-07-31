@@ -236,7 +236,30 @@ impl PlaceIn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Retarget {
+    /// The source rig's convention — `cod`, `valve`, `mixamo`, `unreal`, `pandemic`, `generic`.
+    ///
+    /// Documentation and a sanity check, not the instruction. Detection runs from the bone names in
+    /// the file itself; this records what the author believed so a mismatch can be reported.
     pub from: String,
+
+    /// The RESOLVED bone map: source bone name → target bone name, or `~` to drop the bone.
+    ///
+    /// # Why the map and not just `from:`
+    ///
+    /// A convention name is not enough to reproduce a remap. Three of them (`cod`, `valve`,
+    /// `pandemic`) need hand-verified correction tables because the generic keyword mapper misreads
+    /// their namings — CoD's `j_shoulder` is the upper arm, ValveBiped carries four spine rungs
+    /// against Pandemic's three — and any of them can be hand-adjusted per bone in the Workshop.
+    /// Carrying only `from:` would mean a Shipment built by someone else, or rebuilt later, silently
+    /// differed from what the author previewed and approved.
+    ///
+    /// So the Workshop writes the map it actually used. It is verbose, and that is the point: it is
+    /// reviewable in a diff, and the build is reproducible from the Shipment alone.
+    ///
+    /// Omit it and the build falls back to `char_skin::automap` on the names in the file, which is
+    /// correct for generic and Mixamo-style rigs and is reported as a warning for the rest.
+    #[serde(default)]
+    pub bones: Option<std::collections::BTreeMap<String, Option<String>>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

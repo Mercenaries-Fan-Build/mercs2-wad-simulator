@@ -53,6 +53,7 @@ use crate::names::NameTable;
 use mercs2_formats::donor;
 use mercs2_formats::mesh_import;
 use mercs2_formats::model_inject::inject_static_into_donor_block;
+use mercs2_formats::{char_import, char_lower};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
@@ -558,6 +559,145 @@ pub fn script_mutations(
     Ok(out)
 }
 
+/// Lower a rigged `.glb` onto a donor — the SKINNED path, shared by `add_model` and `add_outfit`.
+///
+/// This used to be a flat refusal (`BuildError::Unsupported`), because everything it needs lived in
+/// binary crates: the skinned glTF reader in the Workshop, a second copy in `mercs2_poc`, and the
+/// bone mapper alongside them. All three are library code now, so a Shipment can finally ship a
+/// character instead of being told the format supports one in principle.
+fn lower_skinned(
+    index: usize,
+    kind: &'static str,
+    name: &str,
+    model: &Path,
+    donor_name: &str,
+    retarget: &crate::manifest::Retarget,
+    root: &Path,
+    game: &mut GameStack,
+    log: &mut Vec<String>,
+) -> Result<Vec<u8>, BuildError> {
+    let lower_err = |m: String| BuildError::Lower {
+        index,
+        kind,
+        message: m,
+    };
+
+    let donor_hash = crate::manifest::asset_hash(donor_name);
+    let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let donor_blk = donor::donor_block(&paths, donor_hash).map_err(lower_err)?;
+
+    let glb = char_import::load_char_glb(&root.join(model)).map_err(lower_err)?;
+
+    // Names of the source rig's joints, in palette order — what both the convention detector and
+    // the `bones:` map key on.
+    let source_names: Vec<String> = glb
+        .joint_nodes
+        .iter()
+        .map(|&n| glb.node_name.get(n).cloned().unwrap_or_default())
+        .collect();
+
+    let detected = mercs2_formats::retarget::SourceRig::detect(&source_names);
+    if !retarget.from.trim().is_empty()
+        && !detected
+            .label()
+            .to_ascii_lowercase()
+            .contains(&retarget.from.trim().to_ascii_lowercase())
+    {
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: manifest says `from: {}` but the bone names read \
+             as {} — building from the names in the file",
+            retarget.from,
+            detected.label()
+        ));
+    }
+
+    // The RESOLVED map wins when the Shipment carries one. Resolve target bone NAMES onto this
+    // donor's own HIER indices by name hash, so a map authored against one donor still lands
+    // correctly on another that orders its bones differently.
+    let skel = mercs2_formats::skeleton::Skeleton::from_block(&donor_blk)
+        .map_err(|e| lower_err(format!("donor has no readable HIER skeleton: {e}")))?;
+    let hier_of_name: std::collections::HashMap<u32, u32> = skel
+        .bones
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.name_hash, i as u32))
+        .collect();
+
+    let mut overrides: std::collections::HashMap<usize, Option<u32>> =
+        std::collections::HashMap::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    if let Some(map) = &retarget.bones {
+        for (src, tgt) in map {
+            let Some(si) = source_names.iter().position(|n| n == src) else {
+                unresolved.push(format!("{src} (not a bone in the model)"));
+                continue;
+            };
+            match tgt {
+                None => {
+                    overrides.insert(si, None); // explicit drop
+                }
+                Some(t) => {
+                    let h = mercs2_formats::hash::pandemic_hash_m2(t);
+                    match hier_of_name.get(&h) {
+                        Some(&hier) => {
+                            overrides.insert(si, Some(hier));
+                        }
+                        None => unresolved.push(format!("{src} -> {t} (donor has no such bone)")),
+                    }
+                }
+            }
+        }
+        if !unresolved.is_empty() {
+            return Err(lower_err(format!(
+                "`retarget.bones` does not fit this pairing: {}. The map is the reproducible record \
+                 of a remap, so a stale entry is an error rather than something to skip.",
+                unresolved.join("; ")
+            )));
+        }
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: applied {} explicit bone mappings",
+            overrides.len()
+        ));
+    } else {
+        // No map. `automap` is correct for generic/Mixamo-style namings and is what the Workshop
+        // itself runs for them; the three conventions with hand-verified correction tables need the
+        // map, and silently producing a different character than the author approved is the failure
+        // this warning exists to prevent.
+        use mercs2_formats::retarget::SourceRig;
+        if matches!(
+            detected,
+            SourceRig::CallOfDuty | SourceRig::ValveBiped | SourceRig::Pandemic
+        ) {
+            log.push(format!(
+                "contributions[{index}] {kind} {name}: WARNING — the source reads as {}, whose bone \
+                 map needs hand-verified corrections, but the manifest carries no `retarget.bones`. \
+                 Building from the generic automap; export the Shipment from the Workshop to record \
+                 the map it previewed.",
+                detected.label()
+            ));
+        }
+    }
+
+    let opts = char_lower::LowerOpts {
+        overrides,
+        // A model already on the game's own rig keeps the author's weights: there is no fuzzy map
+        // to repair, and resampling would discard everything painted on new geometry.
+        native_rig: detected == mercs2_formats::retarget::SourceRig::Pandemic,
+        repoints: Vec::new(),
+    };
+
+    let hash = crate::manifest::asset_hash(name);
+    let out = char_lower::character_into_donor(&donor_blk, &glb, hash, &opts).map_err(lower_err)?;
+
+    log.push(format!(
+        "contributions[{index}] {kind} {name} 0x{hash:08X} ← donor {donor_name} group {}: \
+         {} verts, {} tris | {}",
+        out.host_group, out.stats.vertex_count, out.stats.triangle_count, out.transfer
+    ));
+
+    Ok(out.block)
+}
+
 /// Lower a single contribution into a patch block.
 fn lower(
     index: usize,
@@ -666,17 +806,6 @@ fn lower(
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
-            if retarget.is_some() {
-                return Err(BuildError::Unsupported {
-                    index,
-                    kind,
-                    reason: "an inline `retarget:` is the CROSS-RIG path and needs char_skin's \
-                             palette-relative BLENDINDICES + INFO(56) range table. This lowering is \
-                             the RIGID one, which leaves joints empty; hand-authoring global joint \
-                             indices for a skinned group is documented as wrong."
-                        .into(),
-                });
-            }
             // Resolved Q2 says `donor` may be omitted and auto-picked. Auto-pick is not written, so
             // this asks rather than guessing — a wrong host silently produces a prop with the wrong
             // rig and materials.
@@ -690,6 +819,30 @@ fn lower(
                         .into(),
                 });
             };
+
+            // SKINNED path. `retarget:` means the source carries a rig to be re-posed onto the
+            // donor's, which needs char_skin's palette-relative BLENDINDICES and the matching
+            // INFO(56) range table. Without it this stays the rigid lowering, which leaves joints
+            // empty — correct for a prop, wrong for anything that animates.
+            if let Some(rt) = retarget {
+                let new_block = lower_skinned(
+                    index, kind, name, model, donor_name, rt, root, game, log,
+                )?;
+                let hash = crate::manifest::asset_hash(name);
+                let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
+                let block = PatchBlock::from_decompressed(
+                    &new_block,
+                    format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                    vec![aset],
+                    None,
+                )
+                .map_err(|m| BuildError::Lower {
+                    index,
+                    kind,
+                    message: m,
+                })?;
+                return Ok(Lowering::Block(block));
+            }
 
             let donor_hash = crate::manifest::asset_hash(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
@@ -767,18 +920,28 @@ fn lower(
             model,
             donor,
             retarget,
+            textures,
             ..
         } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
-            if retarget.is_some() {
+            // `textures:` was parsed and then dropped on the floor by the `..` in this pattern, so
+            // an author shipped a skin and silently got the donor's. Binding them needs the
+            // per-group MTRL repoint the skinned lowering performs; refuse rather than repeat the
+            // silent drop.
+            if (textures.diffuse.is_some()
+                || textures.normal.is_some()
+                || textures.specular.is_some())
+                && retarget.is_none()
+            {
                 return Err(BuildError::Unsupported {
                     index,
                     kind,
-                    reason: "an inline `retarget:` is the CROSS-RIG path and needs char_skin's \
-                             palette-relative BLENDINDICES + INFO(56) range table; this lowering is \
-                             the rigid one."
+                    reason: "`textures:` needs the skinned lowering, which is selected by \
+                             `retarget:`. Without it the outfit hosts its geometry rigidly on the \
+                             donor and wears the DONOR's materials — which is what silently \
+                             happened to every `textures:` block until now."
                         .into(),
                 });
             }
@@ -793,6 +956,29 @@ fn lower(
                             .into(),
                 });
             };
+
+            // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
+            if let Some(rt) = retarget {
+                let new_block =
+                    lower_skinned(index, kind, name, model, donor_name, rt, root, game, log)?;
+                let hash = crate::manifest::asset_hash(name);
+                let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
+                let block = PatchBlock::from_decompressed(
+                    &new_block,
+                    format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                    vec![aset],
+                    None,
+                )
+                .map_err(|m| BuildError::Lower {
+                    index,
+                    kind,
+                    message: m,
+                })?;
+                log.push(format!(
+                    "contributions[{index}] add_outfit {name}: wardrobe row {wearer}/{slug}"
+                ));
+                return Ok(Lowering::Block(block));
+            }
 
             let donor_hash = crate::manifest::asset_hash(donor_name);
             let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
