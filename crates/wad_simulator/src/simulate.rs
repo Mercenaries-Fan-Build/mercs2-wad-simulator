@@ -60,26 +60,26 @@
 //! # Usage
 //!
 //! ```no_run
-//! use wad_simulator::simulate::run_simulation;
+//! use wad_simulator::simulate::{run_simulate, run_simulate_with_options, SimulateOptions};
 //! use std::path::Path;
 //!
-//! let report = run_simulation(
-//!     Path::new("patch.wad"),
+//! // Defaults: every asset, automatic job count.
+//! let report = run_simulate(
 //!     Some(Path::new("base.wad")),
-//!     None, // base_wad_dir
-//!     false, // skip_aset
-//!     false, // skip_audio
-//!     false, // audio_only
-//!     0, // asset_limit (0 = all)
-//!     100, // progress_interval
-//!     0, // jobs (auto)
-//!     false, // skip_assets
-//!     None, // audios_dir
-//!     None, // audio_manifest
-//!     None, // rainbow_table
-//! ).expect("Simulation failed");
+//!     Some(Path::new("patch.wad")),
+//! )?;
+//!
+//! // Or tune the run through `SimulateOptions`, which is where the knobs live — the long
+//! // positional-argument form this example used to show no longer exists.
+//! let report = run_simulate_with_options(
+//!     Some(Path::new("base.wad")),
+//!     Some(Path::new("patch.wad")),
+//!     SimulateOptions::default(),
+//! )?;
+//!
 //!
 //! println!("Structural violations: {}", report.structural_violations);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use std::collections::{HashMap, HashSet};

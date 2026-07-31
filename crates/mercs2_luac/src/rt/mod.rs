@@ -612,6 +612,21 @@ impl<'a> Chunk<'a> {
         Ok(())
     }
 
+    /// Load without running, yielding the chunk as a callable.
+    ///
+    /// `luaL_loadbuffer` dispatches on the `\x1bLua` signature, so the source may be **either** Lua
+    /// text or a precompiled LuaQ chunk. That is what lets this host load the bytecode retail
+    /// shipped in `scripts_vz` directly — our `lundump` reads the game's 32-bit/float dialect, so
+    /// its chunks are not foreign to us.
+    pub fn into_function(self) -> Result<Function> {
+        // SAFETY: the loaded function is the only value left on the stack, and `pop_ref` takes it.
+        unsafe {
+            let _balance = Balance::new(self.lua, "Chunk::into_function");
+            self.load_onto_stack()?;
+            Ok(Function(self.lua.pop_ref()))
+        }
+    }
+
     /// Run for side effects.
     pub fn exec(self) -> Result<()> {
         self.call::<()>(())

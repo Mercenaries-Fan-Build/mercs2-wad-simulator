@@ -368,7 +368,13 @@ pub fn check_sources(manifest: &Manifest, root: &Path) -> Vec<SourceIssue> {
         path,
     } in source_refs(manifest)
     {
-        if path.is_absolute() {
+        // `is_absolute()` alone is HOST-dependent, and a manifest is not: `/etc/hosts` is absolute
+        // on Unix but not on Windows, where an absolute path needs a `C:\` prefix or a UNC root.
+        // Judged by `is_absolute()` on Windows it fell through to the escapes-root arm — still
+        // rejected, but reported as the wrong thing, and the diagnostic is the whole product here.
+        // `has_root()` catches the leading-separator form on every platform, so a Shipment authored
+        // on Linux is diagnosed identically when it is checked on Windows.
+        if path.is_absolute() || path.has_root() {
             issues.push(SourceIssue::Absolute {
                 index,
                 kind,

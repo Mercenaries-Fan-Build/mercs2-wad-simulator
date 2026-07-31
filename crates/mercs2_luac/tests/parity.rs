@@ -34,17 +34,21 @@
 //! source — and it is also not the property the linker needs. What the linker needs is that our
 //! codegen equals retail's, which is what is asserted.
 
-//! ## Why this test does not depend on `mercs2_script`
+//! ## Why the corpus is located by path — and why that is no longer forced
 //!
-//! That crate owns the corpus, so it looks like the natural home — and it is not. It links mlua's
-//! vendored **Lua 5.4** while this crate vendors a patched **Lua 5.1**, and both export the same
-//! unprefixed C symbols (`lua_newstate`, `lua_pcall`, `lua_close`, …). Linking both into one binary
-//! resolves each call to whichever definition the linker picked, so a `lua_State` allocated by one
-//! runtime gets parsed by the other. The failure is a **SIGSEGV partway through the corpus**, not a
-//! link error — which is how it presented, and it took a bisect to see that the crashing script
-//! compiled perfectly on its own.
+//! **Historically:** `mercs2_script` owns the corpus, so it looked like the natural dependency, and
+//! it was not. That crate linked mlua's vendored **Lua 5.4** while this one vendors a patched
+//! **Lua 5.1**, and both export the same unprefixed C symbols (`lua_newstate`, `lua_pcall`,
+//! `lua_close`, …). Linking both into one binary resolved each call to whichever definition the
+//! linker picked, so a `lua_State` allocated by one runtime got parsed by the other. The failure was
+//! a **SIGSEGV partway through the corpus**, not a link error — which is how it presented, and it
+//! took a bisect to see that the crashing script compiled perfectly on its own.
 //!
-//! So the corpus is located by path rather than by dependency.
+//! **That constraint is gone.** `mercs2_script` now runs *this* crate's VM: there is one Lua in the
+//! workspace, and `mercs2_engine/tests/one_lua.rs` links the runtime and the compiler side by side
+//! to keep it that way. The path lookup is kept anyway — it costs a dozen lines, it lets this test
+//! run without pulling the whole engine binding surface in, and a compiler test that can be built
+//! from a bare checkout is worth more than the tidiness of a dependency.
 
 use std::path::{Path, PathBuf};
 

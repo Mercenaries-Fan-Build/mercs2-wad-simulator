@@ -204,11 +204,44 @@ pub fn discover() -> Option<Discovered> {
     discover_from(&cwd)
 }
 
+/// Read `vz_wad` out of a local config.
+///
+/// # Why this is not just `toml::from_str`
+///
+/// It was, and on Windows that silently lost the file. A native path written into a TOML **basic**
+/// string carries backslashes — `vz_wad = "C:\Users\me\…\vz.wad"` — and `\U`, `\m` and friends are
+/// not valid TOML escapes, so the whole document fails to parse. `read_local_config` returned
+/// `None`, discovery fell through to the registry, and the config the user wrote did nothing. No
+/// error was reported anywhere, because a missing config is a legitimate state.
+///
+/// `scripts/find-vz-wad.sh` avoids it by writing forward slashes, which is why the generated file
+/// always worked and only hand-written ones broke.
+///
+/// So: parse as TOML first — that is the format, and it handles quoting, comments and literal
+/// strings (`'C:\path'`, which needs no escaping) correctly. Fall back to a tolerant `key = value`
+/// scan only when the document does not parse, which is exactly the backslash case. The fallback is
+/// the same shape the other in-tree readers of this file already use.
 fn read_local_config(path: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(path).ok()?;
-    let doc: toml::Value = toml::from_str(&text).ok()?;
-    let raw = doc.get("vz_wad")?.as_str()?;
-    Some(PathBuf::from(shellexpand_home(raw)))
+    if let Ok(doc) = toml::from_str::<toml::Value>(&text) {
+        if let Some(raw) = doc.get("vz_wad").and_then(|v| v.as_str()) {
+            return Some(PathBuf::from(shellexpand_home(raw)));
+        }
+    }
+    // Not valid TOML (or no `vz_wad` key). Recover the value by hand rather than discarding a
+    // config the user plainly meant.
+    let line = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.starts_with("vz_wad"))?;
+    let raw = line.split_once('=')?.1.trim();
+    let raw = raw
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or(raw);
+    (!raw.is_empty()).then(|| PathBuf::from(shellexpand_home(raw)))
 }
 
 /// Expand a leading `~/` so the config can be written by hand without an absolute path.
@@ -505,6 +538,41 @@ mod tests {
         let home = std::env::var("HOME").unwrap_or_default();
         assert_eq!(shellexpand_home("~/a/b"), format!("{home}/a/b"));
         assert_eq!(shellexpand_home("/abs/path"), "/abs/path");
+    }
+
+    /// A NATIVE Windows path in a TOML basic string is not valid TOML — `\U`, `\m`, `\v` are not
+    /// escapes — so strict parsing dropped the whole document and the config silently did nothing.
+    /// Both spellings must resolve, because both are things a user actually writes.
+    #[test]
+    fn a_windows_path_with_backslashes_still_resolves() {
+        let dir = scratch("winpath");
+        let cfg = dir.join(LOCAL_CONFIG);
+
+        // The form `wad.display()` produces on Windows, and that a user typing a path produces.
+        std::fs::write(&cfg, "vz_wad = \"C:\\Users\\me\\Mercenaries 2\\data\\vz.wad\"\n").unwrap();
+        assert_eq!(
+            read_local_config(&cfg),
+            Some(PathBuf::from("C:\\Users\\me\\Mercenaries 2\\data\\vz.wad")),
+            "a backslashed path must survive, not be dropped as a TOML parse failure"
+        );
+
+        // A TOML literal string needs no escaping and must keep working through the strict path.
+        std::fs::write(&cfg, "vz_wad = 'C:\\Users\\me\\data\\vz.wad'\n").unwrap();
+        assert_eq!(
+            read_local_config(&cfg),
+            Some(PathBuf::from("C:\\Users\\me\\data\\vz.wad"))
+        );
+
+        // Forward slashes — what `scripts/find-vz-wad.sh` writes — parse strictly as before.
+        std::fs::write(&cfg, "# comment\nvz_wad = \"C:/Games/Mercs2/data/vz.wad\"\n").unwrap();
+        assert_eq!(
+            read_local_config(&cfg),
+            Some(PathBuf::from("C:/Games/Mercs2/data/vz.wad"))
+        );
+
+        // A config with no key at all stays `None` — absence is still absence.
+        std::fs::write(&cfg, "# nothing here\n").unwrap();
+        assert_eq!(read_local_config(&cfg), None);
     }
 
     /// The config is found by walking UP, so a test running from a subdirectory still sees the

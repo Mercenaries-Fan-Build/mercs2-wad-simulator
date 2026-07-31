@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_engine"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu). Phase 1 skeleton."
 readme = "README.md"
@@ -60,6 +60,13 @@ mercs2_player = { workspace = true }
 winreg = "0.52" # discover the game install (vz.wad) from the EA Games registry key
 
 [dev-dependencies]
+# The Shipment builder, as a DEV dep only — `tests/one_lua.rs` links it beside the script host to
+# prove the two Lua consumers coexist. That combination was a SIGSEGV until the host moved off mlua,
+# and it is the linkage the Workshop needs; this is its regression guard, not a runtime dependency.
+mercs2_quartermaster = { workspace = true }
+# The compiler half of that pair, reached directly so the test can interleave compile/run.
+mercs2_luac = { workspace = true }
+
 # Shader compiler front-end (same version wgpu 0.20 already pulls in) — dev-only, used to statically
 # parse + validate the WGSL in a unit test so a shader syntax/binding error is caught by `cargo test`
 # without needing a GPU/surface. Not linked into the library.

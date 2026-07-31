@@ -17,8 +17,11 @@ cc = "1"
 # `tests/parity.rs` diffs our output against the bytecode retail actually shipped, which means
 # reading `scripts_vz` out of a WAD.
 #
-# ⚠ Deliberately NOT `mercs2_script`, even though it owns the Lua corpus this test reads. That crate
-# links mlua's vendored Lua 5.4, and our vendored Lua 5.1 exports the same unprefixed C symbols
-# (`lua_newstate`, `lua_pcall`, …). Linking both puts one implementation's `lua_State` through the
-# other's functions — an immediate SIGSEGV, not a link error. The corpus is reached by path instead.
+# Historically this could NOT be `mercs2_script` — that crate linked mlua's vendored Lua 5.4 while
+# this one vendors Lua 5.1, both exporting the same unprefixed C symbols (`lua_newstate`,
+# `lua_pcall`, …), and linking both put one implementation's `lua_State` through the other's
+# functions: an immediate SIGSEGV, not a link error.
+#
+# `mercs2_script` now runs THIS crate's VM, so the hazard is gone. The corpus is still reached by
+# path, which keeps this compiler test buildable without the engine's binding surface.
 mercs2_formats = { workspace = true }

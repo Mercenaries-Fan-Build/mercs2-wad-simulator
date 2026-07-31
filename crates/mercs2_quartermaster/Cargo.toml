@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_quartermaster"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Mercenaries 2 Shipment format: reads a manifest.yaml/.json/.toml, lints it against the engine's HANG-class traps, and builds it into an overlay WAD. Ships the `qm` CLI."
 license.workspace = true
@@ -27,10 +27,14 @@ sha2 = "0.10"
 # The Lua linker compiles the base script plus each Shipment's appended source into one scripts_vz
 # block. Verified against retail bytecode by `mercs2_luac/tests/parity.rs`.
 #
-# ⚠ This crate must NEVER also depend on `mercs2_script`. That crate links mlua's vendored Lua 5.4
-# while this compiler vendors a patched Lua 5.1, and both export the same unprefixed C symbols
-# (`lua_newstate`, `lua_pcall`, …). Linking both is a runtime SIGSEGV, not a link error. The Lua
-# corpus is therefore taken as a PATH, not by depending on the crate that owns it.
+# This used to carry a hard prohibition on ever depending on `mercs2_script`: that crate linked
+# mlua's vendored Lua 5.4 while this compiler vendors a patched Lua 5.1, both exporting the same
+# unprefixed C symbols, and linking both was a runtime SIGSEGV rather than a link error.
+#
+# `mercs2_script` now runs `mercs2_luac`'s VM — one Lua in the workspace — so that prohibition is
+# lifted, and it is what lets the Workshop link this crate at all. The Lua corpus is still taken as a
+# PATH rather than by dependency, to keep this crate headless.
+# Guard: `mercs2_engine/tests/one_lua.rs` links the runtime and the compiler together on purpose.
 mercs2_luac = { workspace = true }
 png = "0.17"  # decode source images for texture lowering (same version the workspace already uses)
 # M0003's predicate. `texture::texture_buffer_too_small` carries two retail-verified false-positive

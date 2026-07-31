@@ -33,17 +33,24 @@
 //! # Usage
 //!
 //! ```no_run
-//! use wad_simulator::blocks::{prefetch_blocks_parallel, collect_block_keys};
+//! use wad_simulator::blocks::{collect_block_keys, prefetch_blocks_parallel};
+//! use wad_simulator::overlay::VirtualDisk;
 //! use std::path::Path;
 //!
 //! let entries = vec![/* resolved assets */];
 //! let keys = collect_block_keys(&entries, Some(Path::new("base.wad")), Some(Path::new("patch.wad")));
-//! let cache = prefetch_blocks_parallel(
-//!     &keys,
-//!     Some(Path::new("base.wad")),
-//!     Some(Path::new("patch.wad")),
-//!     8, // threads
-//! ).expect("Prefetch failed");
+//!
+//! // The keys are CONSUMED, and the result is a map of per-block outcomes rather than one
+//! // all-or-nothing `Result` — a single unreadable block must not sink the whole prefetch.
+//! let vd: VirtualDisk = todo!("open the base + patch overlay");
+//! let cache = prefetch_blocks_parallel(keys, &vd, 8 /* jobs */, 100 /* progress every */);
+//!
+//! for (key, outcome) in &cache {
+//!     match outcome {
+//!         Ok(bytes) => println!("{key:?}: {} bytes", bytes.len()),
+//!         Err(e) => eprintln!("{key:?}: {e}"),
+//!     }
+//! }
 //! ```
 
 use std::collections::{HashMap, HashSet};
