@@ -5310,22 +5310,11 @@ pub(crate) fn faithful_char_skin(
     // the authoring round-trip lossless. Left on the automap path the game's own rig was detected as
     // `generic`, collapsed 116 bones onto 28, and came back 1.224 m tall with the skull drawn out
     // into a spike — measured on a re-imported `pmc_hum_mattias` bundle.
-    let overrides: std::collections::HashMap<usize, Option<u32>> =
-        if matches!(
-            rt.convention,
-            crate::retarget::SourceRig::CallOfDuty
-                | crate::retarget::SourceRig::ValveBiped
-                | crate::retarget::SourceRig::Pandemic
-        ) {
-            let table = rt.joint_table(target.bones.len().max(1));
-            table.iter().enumerate().map(|(j, &t)| (j, Some(t as u32))).collect()
-        } else {
-            rt.map
-                .iter()
-                .filter(|m| m.confidence == crate::retarget::Confidence::Manual)
-                .map(|m| (m.source_index, m.target_index.map(|t| t as u32)))
-                .collect()
-        };
+    // Lifted to `mercs2_formats::retarget::convention_overrides`, where the Quartermaster can
+    // reach it too. It lived here, in a binary crate, which is why the headless build silently
+    // used the generic automap while this preview used the hand-verified table — the two paths
+    // disagreed on 21 of 45 source joints and nothing said so.
+    let overrides = rt.convention_overrides(target.bones.len());
     let mut cs = mercs2_formats::char_skin::build_character(&glb.build_input(&target, None, overrides, false))?;
     // DONOR TRANSFER. build_character carries the SOURCE rig's weights across the bone map, which is
     // fuzzy on the limbs for a mismatched rig (a 119-bone Unreal mannequin onto a 116-bone Pandemic

@@ -60,7 +60,33 @@ pub(crate) fn ortho3_colvec(m: [f64; 9]) -> Option<[f64; 9]> {
 impl TargetSkeleton {
     /// Derive the target skeleton from a real donor's [`Skeleton`]. Bones are in HIER order,
     /// so `bone i` is global HIER index `i` — matching the mesher's baked `skeleton_npc84`.
+    ///
+    /// Bones come back named `hash_XXXXXXXX`, because HIER stores only name hashes and
+    /// `pandemic_hash_m2` is one-way. **That is load-bearing, not cosmetic:** the per-convention
+    /// correction tables in [`crate::retarget`] resolve their targets BY NAME, so against a
+    /// hash-named skeleton `Retarget::build_full(..).mapped_count()` is **0**. Every headless
+    /// caller — the Quartermaster included — silently got the generic automap instead of the
+    /// convention table it thought it was using.
+    ///
+    /// Use [`TargetSkeleton::from_skeleton_with_names`] wherever a name source is available.
     pub fn from_skeleton(sk: &Skeleton) -> TargetSkeleton {
+        Self::from_skeleton_with_names(sk, |_| None)
+    }
+
+    /// Same, but resolve each bone's real name through `name_of`.
+    ///
+    /// `name_of` takes a HIER name hash and returns the name if it is known. Unresolved bones keep
+    /// the `hash_XXXXXXXX` spelling, which is honest — a name we do not have is not a name we may
+    /// invent, and the correction tables simply will not match it.
+    ///
+    /// The workspace's own source is `data/production_names.json` (23,110 hash-verified entries),
+    /// reachable through `mercs2_quartermaster::names::NameTable`. On `pmc_hum_mattias` it resolves
+    /// 95 of 116 bones; the 21 it misses are unresolvable by any corpus in the project, and none of
+    /// them is a bone the correction tables name.
+    pub fn from_skeleton_with_names(
+        sk: &Skeleton,
+        name_of: impl Fn(u32) -> Option<String>,
+    ) -> TargetSkeleton {
         let bones: Vec<TargetBone> = sk
             .bones
             .iter()
@@ -91,7 +117,8 @@ impl TargetSkeleton {
                     i: i as u32,
                     pos: [p[0] as f64, p[1] as f64, p[2] as f64],
                     parent: b.parent,
-                    name: format!("hash_{:08X}", b.name_hash),
+                    name: name_of(b.name_hash)
+                        .unwrap_or_else(|| format!("hash_{:08X}", b.name_hash)),
                     name_hash: b.name_hash,
                     rot,
                 }

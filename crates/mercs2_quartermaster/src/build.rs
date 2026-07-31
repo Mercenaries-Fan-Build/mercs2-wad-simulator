@@ -574,6 +574,7 @@ fn lower_skinned(
     retarget: &crate::manifest::Retarget,
     root: &Path,
     game: &mut GameStack,
+    names: Option<&NameTable>,
     log: &mut Vec<String>,
 ) -> Result<Vec<u8>, BuildError> {
     let lower_err = |m: String| BuildError::Lower {
@@ -660,21 +661,67 @@ fn lower_skinned(
             overrides.len()
         ));
     } else {
-        // No map. `automap` is correct for generic/Mixamo-style namings and is what the Workshop
-        // itself runs for them; the three conventions with hand-verified correction tables need the
-        // map, and silently producing a different character than the author approved is the failure
-        // this warning exists to prevent.
-        use mercs2_formats::retarget::SourceRig;
-        if matches!(
-            detected,
-            SourceRig::CallOfDuty | SourceRig::ValveBiped | SourceRig::Pandemic
-        ) {
+        // No explicit map — so derive the SAME one the Workshop's preview derives.
+        //
+        // This used to leave `overrides` empty, which meant `build_character` fell through to the
+        // generic `char_skin::automap` no matter what the source rig was. The convention tables had
+        // been lifted into the library one commit earlier precisely so this call site could reach
+        // them, and it never called them. Measured on a ValveBiped source against
+        // `pmc_hum_mattias`: 21 of 45 source joints landed differently, including the whole spine
+        // ladder and all 18 finger bones folded onto the hands. The author previewed the corrected
+        // conform and shipped the uncorrected one, with only a warning to say so.
+        //
+        // Bone NAMES are load-bearing here: the tables resolve targets by name, and a HIER-derived
+        // skeleton is hash-named, against which every table entry misses and `mapped_count()` is 0.
+        // Hence `from_skeleton_with_names` over the curated table.
+        let target = mercs2_formats::char_skin::TargetSkeleton::from_skeleton_with_names(
+            &skel,
+            |h| names.and_then(|n| n.reverse(h)).map(|s| s.to_string()),
+        );
+        let named = target
+            .bones
+            .iter()
+            .filter(|b| !b.name.starts_with("hash_"))
+            .count();
+        let target_names: Vec<String> = target.bones.iter().map(|b| b.name.clone()).collect();
+        let target_pos: Vec<[f32; 3]> = target
+            .bones
+            .iter()
+            .map(|b| [b.pos[0] as f32, b.pos[1] as f32, b.pos[2] as f32])
+            .collect();
+        // Source bind positions, index-aligned to `source_names`. `Retarget::align_by_position`
+        // needs them, and `node_world` is row-major with the translation at [3]/[7]/[11].
+        let source_pos: Vec<[f32; 3]> = glb
+            .joint_nodes
+            .iter()
+            .map(|&n| {
+                glb.node_world
+                    .get(n)
+                    .map(|m| [m[3] as f32, m[7] as f32, m[11] as f32])
+                    .unwrap_or([0.0, 0.0, 0.0])
+            })
+            .collect();
+        let rt = mercs2_formats::retarget::Retarget::build_with_pos(
+            source_names.clone(),
+            source_pos,
+            target_names,
+            target_pos,
+        );
+        overrides = rt.convention_overrides(target.bones.len());
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: {} bone map from the {} table \
+             ({named}/{} donor bones named, {} source joints mapped)",
+            if overrides.is_empty() { "generic automap" } else { "convention" },
+            rt.convention.slug(),
+            target.bones.len(),
+            overrides.len()
+        ));
+        if named * 2 < target.bones.len() {
             log.push(format!(
-                "contributions[{index}] {kind} {name}: WARNING — the source reads as {}, whose bone \
-                 map needs hand-verified corrections, but the manifest carries no `retarget.bones`. \
-                 Building from the generic automap; export the Shipment from the Workshop to record \
-                 the map it previewed.",
-                detected.label()
+                "contributions[{index}] {kind} {name}: WARNING — only {named} of {} donor bones \
+                 could be named, so the convention tables have little to match against. The bone \
+                 map will be closer to the generic automap than to the Workshop's preview.",
+                target.bones.len()
             ));
         }
     }
@@ -724,6 +771,10 @@ fn lower(
     contribution: &Contribution,
     root: &Path,
     game: Option<&mut GameStack>,
+    // Host-provided, like the game stack — the crate never reaches into the filesystem for it.
+    // Load-bearing for the skinned path: without bone NAMES the retarget correction tables have
+    // nothing to match against and every build silently falls back to the generic automap.
+    names: Option<&NameTable>,
     log: &mut Vec<String>,
 ) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
@@ -846,7 +897,7 @@ fn lower(
             // empty — correct for a prop, wrong for anything that animates.
             if let Some(rt) = retarget {
                 let new_block = lower_skinned(
-                    index, kind, name, model, donor_name, rt, root, game, log,
+                    index, kind, name, model, donor_name, rt, root, game, names, log,
                 )?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
@@ -985,7 +1036,7 @@ fn lower(
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
             if let Some(rt) = retarget {
                 let new_block =
-                    lower_skinned(index, kind, name, model, donor_name, rt, root, game, log)?;
+                    lower_skinned(index, kind, name, model, donor_name, rt, root, game, names, log)?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -1718,7 +1769,7 @@ pub fn build(
     let mut blocks = Vec::new();
     let mut files = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        match lower(index, c, &shipment.root, game.as_deref_mut(), &mut log)? {
+        match lower(index, c, &shipment.root, game.as_deref_mut(), names, &mut log)? {
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
             Lowering::File {

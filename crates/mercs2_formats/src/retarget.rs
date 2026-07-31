@@ -562,6 +562,59 @@ impl Retarget {
     /// it follows its neighbour (fingers→hand, toes→foot) instead of clumping the pelvis. With no
     /// positions it falls back to the target's pelvis (or bone 0). This is render-only: the bone map
     /// still shows those bones unmapped, so `align_by_position` can still refine them.
+    /// The source-joint → target-HIER override map to hand `build_input`, chosen by convention.
+    ///
+    /// **This is the lowering decision, and it was previously reachable only from the Workshop's
+    /// GUI arm.** The Quartermaster called `SourceRig::detect` for a label and then passed an empty
+    /// override map, so every headless build silently used the generic `char_skin::automap`
+    /// regardless of what the source rig was. Measured on a ValveBiped fixture: **21 of 45 source
+    /// joints map differently**, and the difference is exactly the failure the tables exist to
+    /// prevent.
+    ///
+    /// Three conventions take the explicit table as FULL overrides:
+    ///
+    /// * **CoD** — `automap` cannot read `j_*` naming at all.
+    /// * **ValveBiped** — its names *are* readable, but `automap`'s `ladder_assign` spreads a chain
+    ///   across rungs by INDEX (`k*rungs/n`) with no idea where the joints physically sit.
+    ///   ValveBiped carries FOUR spine rungs (it skips Spine3) against Pandemic's three, so the
+    ///   overflow doubles up the BOTTOM rung and everything above the waist lands low — Spine1
+    ///   -5.8%, Spine2 -6.3%, Spine4 -14.0% of body height, compressing the torso into the pelvis.
+    ///   `automap` is parity-locked to the shared mapper, so the ladder is corrected here rather
+    ///   than by forking it.
+    /// * **Pandemic (native)** — the strongest case of the three: there is nothing to retarget. A
+    ///   model authored on the exported base kit is already on the donor's skeleton, so the table
+    ///   is a pure identity by name and feeding it as full overrides is what keeps the authoring
+    ///   round-trip lossless. Left on the automap path the game's own rig detects as `generic`,
+    ///   collapses 116 bones onto 28, and comes back 1.224 m tall with the skull drawn out into a
+    ///   spike — measured on a re-imported `pmc_hum_mattias` bundle.
+    ///
+    /// Everything else keeps `automap`'s own resolution and layers only the author's MANUAL rows.
+    ///
+    /// Note the dependency: the tables resolve targets by NAME, so this returns useful output only
+    /// for a [`TargetSkeleton`](crate::char_skin::TargetSkeleton) built with real bone names. See
+    /// `TargetSkeleton::from_skeleton_with_names`.
+    pub fn convention_overrides(
+        &self,
+        target_bone_count: usize,
+    ) -> std::collections::HashMap<usize, Option<u32>> {
+        if matches!(
+            self.convention,
+            SourceRig::CallOfDuty | SourceRig::ValveBiped | SourceRig::Pandemic
+        ) {
+            self.joint_table(target_bone_count.max(1))
+                .iter()
+                .enumerate()
+                .map(|(j, &t)| (j, Some(t as u32)))
+                .collect()
+        } else {
+            self.map
+                .iter()
+                .filter(|m| m.confidence == Confidence::Manual)
+                .map(|m| (m.source_index, m.target_index.map(|t| t as u32)))
+                .collect()
+        }
+    }
+
     pub fn joint_table(&self, target_bone_count: usize) -> Vec<usize> {
         let clamp = |i: usize| i.min(target_bone_count.saturating_sub(1));
         let pelvis = self
@@ -1362,5 +1415,51 @@ mod tests {
         assert!(side_of("bip01_l_upperarm") == Some(Side::L));
         assert!(side_of("bone_rbicep") == Some(Side::R));
         assert!(side_of("bone_hips").is_none());
+    }
+
+    /// A ValveBiped source must take the hand-verified table as FULL overrides, and a generic one
+    /// must not — this is the branch the Quartermaster skipped entirely, passing an empty map and
+    /// silently getting `char_skin::automap` for every convention.
+    #[test]
+    fn convention_overrides_uses_the_table_for_valve_and_not_for_generic() {
+        let valve = names(&[
+            "ValveBiped.Bip01_Pelvis",
+            "ValveBiped.Bip01_Spine",
+            "ValveBiped.Bip01_Spine1",
+            "ValveBiped.Bip01_Spine2",
+            "ValveBiped.Bip01_Spine4",
+            "ValveBiped.Bip01_Neck1",
+            "ValveBiped.Bip01_Head1",
+            "ValveBiped.Bip01_L_UpperArm",
+            "ValveBiped.Bip01_L_Forearm",
+            "ValveBiped.Bip01_L_Hand",
+            "ValveBiped.Bip01_L_Thigh",
+            "ValveBiped.Bip01_L_Calf",
+            "ValveBiped.Bip01_L_Foot",
+        ]);
+        let target = names(&[
+            "GlobalSRT", "bone_root", "Bone_Hips", "bone_spine1", "Bone_Spine2", "Bone_Chest",
+            "bone_neck", "Bone_Head", "bone_lshoulder", "Bone_LBicep", "Bone_LForearm",
+            "bone_lhand", "Bone_LThigh", "Bone_LShin", "Bone_LFootBone1",
+        ]);
+
+        let rt = Retarget::build(valve.clone(), &target);
+        assert_eq!(rt.convention, SourceRig::ValveBiped, "fixture must read as ValveBiped");
+        let ov = rt.convention_overrides(target.len());
+        assert_eq!(
+            ov.len(),
+            valve.len(),
+            "a table convention supplies a FULL override map, one row per source joint"
+        );
+
+        // The same joints under a generic naming get no overrides at all, so `automap` keeps its
+        // own resolution — which is the correct behaviour for namings it can actually read.
+        let generic = names(&["root", "spine_a", "spine_b", "neck_a", "head_a"]);
+        let rtg = Retarget::build(generic, &target);
+        assert_ne!(rtg.convention, SourceRig::ValveBiped);
+        assert!(
+            rtg.convention_overrides(target.len()).is_empty(),
+            "a generic rig with no MANUAL rows must not override automap"
+        );
     }
 }
