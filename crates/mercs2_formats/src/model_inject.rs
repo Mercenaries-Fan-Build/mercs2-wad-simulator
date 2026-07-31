@@ -90,8 +90,13 @@ pub struct InjectStats {
     pub avg_normal_len: f32,
     pub avg_tangent_len: f32,
     /// SEGM row rewritten to `{node: -1, lod_mask: 0x7f}` to host the mesh unconditionally
-    /// (always visible, every LOD tier, never superseded, model-space).
+    /// (always visible, every LOD tier, never superseded, model-space). First of
+    /// [`InjectStats::unbound_segs`], kept because single-host callers report a scalar.
     pub unbound_seg: Option<usize>,
+    /// Every SEGM row so rewritten. A multi-host injection unbinds one per host, and reporting only
+    /// the first hides whether the rest were done at all — which is how the multi path shipped with
+    /// no SEGM handling whatsoever and nothing noticed.
+    pub unbound_segs: Vec<usize>,
 }
 
 // --------------------------------------------------------------------- f16
@@ -1751,13 +1756,26 @@ fn inject_multi_into_donor_block_ex(
         new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
         new_bodies.insert(g.ibuf_data, ib);
         // PRMT: one strip record per existing donor record slot
-        let nrec = leaf(ucfx, data_off, &rows[g.prmt]).len() / 16;
+        let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
+        let nrec = prmt_old.len() / 16;
         let mut rec = Vec::with_capacity(16);
-        // Material index. Per-group when supplied; otherwise the historical fixed 6.
-        let mat_idx = group_materials
-            .and_then(|gm| gm.get(ci))
-            .copied()
-            .unwrap_or(6u32);
+        // Field 0 is the MATERIAL INDEX (`ucfx_tag_registry.md` §3, CONFIRMED double-blind against
+        // the bytes; it reads sequentially per group across all 28 groups of pmc_hum_mattias).
+        // Per-group when the caller supplied a map, otherwise the DONOR'S OWN — never a constant.
+        //
+        // This used to fall back to `6`, commented "prim type 6 (strip)" from the era when the
+        // field's meaning was open. Under the resolved reading that forced every injected group
+        // onto donor MTRL record 6, whose diffuse on pmc_hum_mattias is a 64x128 `teeth` map — so
+        // an imported body shipped wearing the donor's teeth, and `MtrlRepoint` cannot mask it
+        // (it is a value-scan for a texture hash, not a material rebind). The rigid injector was
+        // already fixed for exactly this, as "the 138-vert bug"; this is the same fix.
+        let mat_idx = match group_materials.and_then(|gm| gm.get(ci)).copied() {
+            Some(m) => m,
+            None if prmt_old.len() >= 4 => read_u32_le(prmt_old, 0),
+            // A donor group with no PRMT record at all cannot tell us its material. Naming record 0
+            // is the only in-range answer; every container has at least one material.
+            None => 0,
+        };
         rec.extend_from_slice(&mat_idx.to_le_bytes());
         rec.extend_from_slice(&0u32.to_le_bytes());
         rec.extend_from_slice(&(ic - 2).to_le_bytes());
@@ -1841,6 +1859,50 @@ fn inject_multi_into_donor_block_ex(
         }
     }
     new_bodies.insert(0, top);
+
+    // ---- ★UNBIND EVERY HOST SEGM ROW ----
+    //
+    // This function had NO SEGM handling at all, which is a silent-invisibility bug rather than a
+    // cosmetic gap. The donor partitions its groups across LOD tiers via `SEGM.state_mask`
+    // (pmc_hum_mattias: groups 0-8 `0x01`, 9-14 `0x02`, 15-18 `0x04`, 19-21 `0x08`), the draw gate
+    // is `view_state & lod_mask != 0`, and the non-host neutralisation above zeroes every other
+    // group's PRMT draw count. So the hosts kept whatever tier the donor happened to give them and
+    // everything else stopped drawing: past the nearest tier the character simply vanished.
+    // `character_kit.md` records this as already shipped once, "as an invisible torso and arms".
+    //
+    // Same rewrite as the single-host path — `{node: -1, lod_mask: 0x7f}` — and for the same four
+    // reasons (see `inject_into_donor_block_impl`). Preserving the donor's tier split would buy
+    // nothing here: every group that could have served a coarser rung is already neutralised, so
+    // there is no LOD chain left to be part of. One full-detail mesh at every distance is the
+    // honest outcome, and it is what the single-host path has been shipping.
+    {
+        let seg_of_group: std::collections::HashMap<usize, usize> =
+            crate::model_cubeize::read_model_meshes(ucfx)
+                .map(|ms| ms.iter().map(|m| (m.group_index, m.seg_id)).collect())
+                .unwrap_or_default();
+        let segm_row = rows
+            .iter()
+            .position(|r| &r.tag == b"SEGM" && r.u0 != 0xFFFF_FFFF);
+        if let Some(sr) = segm_row {
+            let mut segm = leaf(ucfx, data_off, &rows[sr]).to_vec();
+            let mut touched = false;
+            for &(gi, _, _) in &targets {
+                let Some(&seg_id) = seg_of_group.get(&gi) else { continue };
+                let o = seg_id * 4;
+                if o + 4 <= segm.len() {
+                    segm[o..o + 2].copy_from_slice(&0xFFFFu16.to_le_bytes()); // node = -1 (i16)
+                    segm[o + 2] = seg_id as u8; // SEGM[i].seg_id == i self-check invariant
+                    segm[o + 3] = 0x7F; // present at every LOD tier
+                    stats.unbound_segs.push(seg_id);
+                    touched = true;
+                }
+            }
+            if touched {
+                stats.unbound_seg = stats.unbound_segs.first().copied();
+                new_bodies.insert(sr, segm);
+            }
+        }
+    }
 
     stats.vertex_count = tot_v;
     stats.triangle_count = mesh.tris.len();
@@ -2268,7 +2330,17 @@ fn inject_into_donor_block_impl(
     let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
     let nrec = prmt_old.len() / 16;
     let mut rec = Vec::with_capacity(16);
-    rec.extend_from_slice(&6u32.to_le_bytes()); // prim type 6 (strip)
+    // Field 0 is the MATERIAL INDEX — PRESERVE the donor group's own. This wrote the constant `6`
+    // commented "prim type 6 (strip)", from before `ucfx_tag_registry.md` §3 resolved the field
+    // (CONFIRMED double-blind against the bytes). That constant bound every injected group to donor
+    // MTRL record 6 — a 64x128 `teeth` map on pmc_hum_mattias — and on a donor with =<6 materials
+    // it is an out-of-range material read (the `0x004CC064` overrun).
+    let field0 = if prmt_old.len() >= 4 {
+        read_u32_le(prmt_old, 0)
+    } else {
+        0
+    };
+    rec.extend_from_slice(&field0.to_le_bytes());
     rec.extend_from_slice(&0u32.to_le_bytes()); // index_start
     rec.extend_from_slice(&(ic - 2).to_le_bytes()); // index_count = strip_len-2
     rec.extend_from_slice(&((vc - 1) as u16).to_le_bytes()); // max vert
@@ -2778,7 +2850,7 @@ pub fn inject_static_into_donor_block(
         new_bodies.insert(g.strm_data, vb);
         new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
         new_bodies.insert(g.ibuf_data, ib.clone());
-        // PRMT: preserve field[0] (prim-type/matidx unresolved, registry §3).
+        // PRMT: preserve field[0] — the MATERIAL INDEX (registry §3, ★RESOLVED 2026-07-30).
         let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
         let nrec = (prmt_old.len() / 16).max(1);
         let field0 = if prmt_old.len() >= 4 {
@@ -2885,6 +2957,7 @@ pub fn inject_static_into_donor_block(
                 segm[o + 3] = 0x7F; // present at every LOD tier
                 new_bodies.insert(sr, segm);
                 stats.unbound_seg = Some(seg_id);
+                stats.unbound_segs.push(seg_id);
             }
         }
     }
