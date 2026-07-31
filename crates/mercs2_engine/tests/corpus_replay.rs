@@ -281,17 +281,20 @@ fn mode_gates_read_argument_two_not_the_handle() {
 
 /// **Sweep — every corpus module imports.**
 ///
-/// `#[ignore]`d because it is slow and because its failure list is a *work queue*, not a gate: the
-/// modules that fail are the ones whose engine surface is still missing.
+/// Its failure list is a *work queue*, not a gate: the modules that fail are the ones whose engine
+/// surface is still missing, so it asserts only that the loader works at all (`ok > 0`) and prints
+/// the rest.
 ///
-/// ```sh
-/// cargo test -p mercs2_engine --test corpus_replay -- --ignored --nocapture
-/// ```
+/// It used to be `#[ignore]`d as "slow". It is not — it sweeps the whole corpus in ~0.3 s — and
+/// being ignored meant the one test that touches every shipped module never ran.
 #[test]
-#[ignore]
 fn every_corpus_module_imports() {
-    let Some((sh, _host)) = replay_host() else { return };
-    let Some(root) = mercs2_script::corpus::root() else { return };
+    let Some((sh, _host)) = replay_host() else {
+        return eprintln!("SKIPPING: no replay host could be built");
+    };
+    let Some(root) = mercs2_script::corpus::root() else {
+        return eprintln!("SKIPPING: no Lua corpus found (mercs2_script::corpus::root)");
+    };
 
     let mut ok = 0usize;
     let mut failed: Vec<(String, String)> = Vec::new();

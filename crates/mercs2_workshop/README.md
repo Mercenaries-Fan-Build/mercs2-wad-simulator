@@ -128,8 +128,8 @@ Binary crate — these are private modules, listed for orientation:
   (`world = local · world_parent`); glTF is column-major / column-vector
   (`world = world_parent · local`). A wrongly-transposed matrix still *looks* like a plausible
   skeleton, so `tests/anim_export_parity.rs` recomputes each bone's model-space position both ways
-  and asserts they agree. It needs the retail WAD, so it is `#[ignore]`d — run with
-  `cargo test -p mercs2_workshop -- --ignored`.
+  and asserts they agree. It needs the retail WAD, and runs automatically when one is discoverable
+  (`scripts/find-vz-wad.sh --write`), skipping loudly otherwise — `cargo test -p mercs2_workshop`.
 - **Loading a model always walks the LOD-block chain.** `build_indexed_from_container` reads only
   the resident block, and for any model whose near geometry lives in a finer rung it finds nothing
   and reports a false "no placed drawing groups". `civ_hum_beachfemale_a` is the case in point: its

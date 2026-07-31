@@ -4,16 +4,19 @@
 //! world loop + boot Lua flow use.
 //!
 //! ```text
-//! cargo test -p mercs2_game --test spawn_marker_probe -- --ignored --nocapture
+//! cargo test -p mercs2_probe --test spawn_marker_probe -- --nocapture
 //! ```
 
 use mercs2_engine::wad;
 use mercs2_engine::worldutil::find_terrain_blocks;
 
 #[test]
-#[ignore]
 fn spawn_markers_present_in_vz_wad() {
-    let path = wad::resolve_vz_wad(None).expect("vz.wad resolvable via EA registry");
+    let Some(path) = wad::resolve_vz_wad(None) else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut w = wad::open(&path).expect("open vz.wad");
     let (_low, ls) = find_terrain_blocks(&mut w).expect("find layers_static");
     let placements = mercs2_formats::placement::load_placements(&ls).expect("load placements");

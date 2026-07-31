@@ -438,14 +438,14 @@ mod tests {
     /// Integration: mount the real shipped stack and assert the documented order + that `base()` still
     /// means the LEVEL archive rather than `Loading.wad`, which now sits beneath it.
     ///
-    /// ```text
-    /// cargo test -p mercs2_engine --lib real_wad_stack -- --ignored --nocapture
-    /// ```
+    /// Not `#[ignore]`d: it discovers the install and runs whenever one is present, skipping loudly
+    /// otherwise.
     #[test]
-    #[ignore]
     fn real_wad_stack_mounts_in_the_documented_order() {
         let Some(path) = wad::resolve_vz_wad(None) else {
-            return eprintln!("[skip] vz.wad not resolvable");
+            return eprintln!(
+                "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+            );
         };
         let src = AssetSource::discover(&path, &[]).expect("mount the stack");
         println!("[stack] {:?}", src.slots());

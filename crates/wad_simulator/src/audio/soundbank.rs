@@ -178,17 +178,38 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// `tools/testdata/audio_endian`, holding the PC/Xbox soundbank pairs these tests diff.
+    ///
+    /// The manifest dir is `tools/wad_simulator/crates/wad_simulator`, so reaching `tools/` takes
+    /// **three** `..` hops. It used to take one, which resolved to `crates/testdata` — a directory
+    /// that has never existed — so every one of these tests panicked on a missing file. Nobody
+    /// noticed because they were all `#[ignore]`d, and an ignored test that would fail looks exactly
+    /// like an ignored test that would pass. They now run by default and skip loudly instead.
     fn golden_dir() -> PathBuf {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("..");
+        p.push("..");
         p.push("..");
         p.push("testdata");
         p.push("audio_endian");
         p
     }
 
-    fn load_golden_pc(hash_hex: &str) -> Vec<u8> {
+    /// `Some(bytes)`, or `None` with a loud message when the goldens are not on this machine.
+    ///
+    /// They are retail-derived and `*.bin` is gitignored, so a fresh checkout genuinely lacks them.
+    /// These tests used to be `#[ignore]`d for that reason, which hid the fact that [`golden_dir`]
+    /// pointed at a directory that has never existed — they would have failed on every machine,
+    /// including ones that DO have the data. Skipping loudly keeps the absence visible instead.
+    fn load_golden_pc(hash_hex: &str) -> Option<Vec<u8>> {
         let path = golden_dir().join(format!("soundbank_{hash_hex}_pc.bin"));
-        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        match std::fs::read(&path) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("SKIPPING: golden {} unavailable: {e}", path.display());
+                None
+            }
+        }
     }
 
     fn always_resolve(_h: u32) -> bool {
@@ -196,9 +217,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]  // Requires golden test files
     fn consume_golden_4b8ab553_no_panic() {
-        let data = load_golden_pc("4B8AB553");
+        let Some(data) = load_golden_pc("4B8AB553") else { return };
         let slice = SafeSlice::new(data, "soundbank_4B8AB553");
         let result = consume_soundbank(&slice, &always_resolve);
         assert!(result.is_ok(), "consume_soundbank failed: {:?}", result.err());
@@ -207,9 +227,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]  // Requires golden test files
     fn consume_golden_84701c9a_stride_116() {
-        let data = load_golden_pc("84701C9A");
+        let Some(data) = load_golden_pc("84701C9A") else { return };
         let slice = SafeSlice::new(data, "soundbank_84701C9A");
         let result = consume_soundbank(&slice, &always_resolve);
         assert!(result.is_ok());
@@ -218,9 +237,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]  // Requires golden test files
     fn consume_golden_c1bdeead_stride_118() {
-        let data = load_golden_pc("C1BDEEAD");
+        let Some(data) = load_golden_pc("C1BDEEAD") else { return };
         let slice = SafeSlice::new(data, "soundbank_C1BDEEAD");
         let result = consume_soundbank(&slice, &always_resolve);
         assert!(result.is_ok());
@@ -238,12 +256,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore]  // Requires golden test files
     fn u8x4_fields_are_endian_invariant() {
-        let pc = load_golden_pc("4B8AB553");
+        let Some(pc) = load_golden_pc("4B8AB553") else { return };
         let xbox_path = golden_dir().join("soundbank_4B8AB553_xbox.bin");
-        let xbox = std::fs::read(&xbox_path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", xbox_path.display()));
+        let Ok(xbox) = std::fs::read(&xbox_path) else {
+            return eprintln!("SKIPPING: golden {} unavailable", xbox_path.display());
+        };
 
         let slice_pc = SafeSlice::new(pc.clone(), "pc");
         let data_start = slice_pc.read_u32_le(16, "ds").unwrap() as usize;

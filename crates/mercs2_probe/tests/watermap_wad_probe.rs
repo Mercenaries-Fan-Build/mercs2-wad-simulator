@@ -14,7 +14,7 @@
 //!    height is not the dry sentinel — is what catches that, and it holds for all 66,049 cells.
 //!
 //! ```text
-//! cargo test -p mercs2_game --test watermap_wad_probe -- --ignored --nocapture
+//! cargo test -p mercs2_probe --test watermap_wad_probe -- --nocapture
 //! ```
 
 use mercs2_engine::asset::AssetSource;
@@ -26,9 +26,12 @@ const RETAIL_WATR_LEN: usize = 495_669;
 const RETAIL_WET_CELLS: usize = 38_078;
 
 #[test]
-#[ignore]
 fn watermap_resolves_by_type_and_parses_aligned_from_vz_wad() {
-    let path = mercs2_engine::wad::resolve_vz_wad(None).expect("vz.wad resolvable via EA registry");
+    let Some(path) = mercs2_engine::wad::resolve_vz_wad(None) else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut assets = AssetSource::discover(&path, &[]).expect("mount the WAD stack");
 
     // (1) The type hash is `pandemic_hash_m2("watermap")` — a TYPE, never an asset name.

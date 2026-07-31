@@ -4,7 +4,7 @@
 //! `sounddb` catalog routes real cues to those decoded waves and mixes them to audible PCM.
 //!
 //! ```text
-//! cargo test -p mercs2_game --test audio_wad_probe -- --ignored --nocapture
+//! cargo test -p mercs2_probe --test audio_wad_probe -- --nocapture
 //! ```
 
 use mercs2_engine::audio::{AudioEngine, SoundDb};
@@ -33,9 +33,12 @@ fn bank_body(w: &mut wad::Wad, name: &str, type_hash: u32, raw_ok: bool) -> Opti
 }
 
 #[test]
-#[ignore]
 fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
-    let path = wad::resolve_vz_wad(None).expect("vz.wad resolvable via EA registry");
+    let Some(path) = wad::resolve_vz_wad(None) else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut w = wad::open(&path).expect("open vz.wad");
 
     // Load every resident wavebank into one engine + merge every per-bank sounddb into one catalog —

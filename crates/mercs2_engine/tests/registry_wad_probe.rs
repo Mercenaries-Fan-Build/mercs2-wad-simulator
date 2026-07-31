@@ -1,7 +1,13 @@
 //! Integration probes for the asset layer against the REAL `vz.wad`.
 //!
-//! `#[ignore]`d: they need the retail install (discovered via the EA registry key). Run with
-//! `cargo test -p mercs2_engine --test registry_wad_probe -- --ignored --nocapture`.
+//! These need the retail install, and they are deliberately **not** `#[ignore]`d. They discover a
+//! `vz.wad` (`scripts/find-vz-wad.sh --write`, then the `game_paths` resolution) and run
+//! automatically when one is present, skipping loudly when it is not.
+//!
+//! `#[ignore]` was the wrong default: it means the tests that exercise the real format only run when
+//! somebody remembers a flag, and an ignored test that would FAIL is indistinguishable from one that
+//! would pass. That is not hypothetical — `wad_simulator`'s soundbank goldens sat broken behind
+//! `#[ignore]` with a path two directory levels wrong, and nothing reported it.
 //!
 //! What these pin down (measured with `mercs2_probe --bin aset_probe`):
 //! - `oc_veh_helicopter_md500` (`0x9FCAE910`) — model chunk in block **3350**.
@@ -25,9 +31,12 @@ fn open_base() -> Option<Vec<wad::Wad>> {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn resolving_a_model_makes_its_block_resident_and_registers_block_mates() {
-    let Some(mut wads) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut wads) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut r = AssetRegistry::default();
 
     let c = r.resolve(&mut wads, TYPE_HASH_MODEL, MD500).expect("md500 model resolves");
@@ -49,9 +58,12 @@ fn resolving_a_model_makes_its_block_resident_and_registers_block_mates() {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn textures_resolve_from_other_blocks_than_the_model() {
-    let Some(mut wads) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut wads) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut r = AssetRegistry::default();
 
     r.resolve(&mut wads, TYPE_HASH_MODEL, MD500).expect("model");
@@ -69,11 +81,14 @@ fn textures_resolve_from_other_blocks_than_the_model() {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn a_resolved_chunk_equals_what_the_old_per_hash_extractor_returned() {
     // The registry must be a drop-in for `wad::extract_container`, byte for byte — otherwise the
     // switchover silently changes what every model loader sees.
-    let Some(mut wads) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut wads) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut r = AssetRegistry::default();
 
     for hash in [MD500, 0xA3C1_FABC /* mattias_v3 */, 0xE540_47D5 /* boat_destroyer */] {
@@ -84,9 +99,12 @@ fn a_resolved_chunk_equals_what_the_old_per_hash_extractor_returned() {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn eviction_drops_chunks_and_a_later_resolve_streams_them_back() {
-    let Some(mut wads) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut wads) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut r = AssetRegistry::with_capacity(1); // force eviction on the second block
 
     r.resolve(&mut wads, TYPE_HASH_MODEL, MD500).expect("model");

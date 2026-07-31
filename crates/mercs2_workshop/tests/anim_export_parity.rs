@@ -13,7 +13,9 @@
 //!             using the values the exporter writes into the file.
 //! If the exporter's convention is wrong, these diverge and the test fails.
 //!
-//! Requires the retail WAD, so it is `#[ignore]`d like the other WAD probes; run with `--ignored`.
+//! Requires the retail WAD. Deliberately **not** `#[ignore]`d: it discovers the install and runs
+//! automatically when one is present, skipping loudly when it is not — see the note in
+//! `mercs2_engine/tests/registry_wad_probe.rs`.
 
 use mercs2_engine::{game_world, model::Model, wad};
 use mercs2_formats::anim::QsTransform;
@@ -50,10 +52,11 @@ fn gltf_trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> [[f32; 4]; 4] {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn exported_animation_matches_engine_pose() {
     let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
-        eprintln!("no vz.wad — skipping");
+        eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
         return;
     };
     let m = Model::load(&mut w, MATTIAS_V3).expect("load mattias");
@@ -145,10 +148,11 @@ fn exported_animation_matches_engine_pose() {
 /// diverge FAR beyond the f32 rounding the parity test tolerates. If this test ever stops finding a
 /// large divergence, the parity test has gone blind and is no longer evidence of anything.
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn a_conjugated_quaternion_would_be_caught() {
     let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
-        eprintln!("no vz.wad — skipping");
+        eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
         return;
     };
     let m = Model::load(&mut w, MATTIAS_V3).expect("load mattias");

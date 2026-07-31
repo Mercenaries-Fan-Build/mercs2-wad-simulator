@@ -150,5 +150,6 @@ engine owns the window, loop and render; you supply the config, the loader, and 
 - `Post::new` returns `Option` — on failure the caller renders straight to the swapchain rather than
   breaking.
 - **Tests:** `shader_validation` parses + validates every WGSL with `naga` (no GPU needed);
-  `registry_wad_probe` is `#[ignore]`d because it needs the retail install —
-  `cargo test -p mercs2_engine --test registry_wad_probe -- --ignored --nocapture`.
+  `registry_wad_probe` and `gate_invariant_probe` need the retail install and run automatically when
+  one is discoverable (`scripts/find-vz-wad.sh --write`), skipping loudly otherwise —
+  `cargo test -p mercs2_engine --test registry_wad_probe -- --nocapture`.

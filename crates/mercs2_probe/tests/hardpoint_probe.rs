@@ -4,7 +4,7 @@
 //! (actor pos + mesh hardpoint) instead of a baked constant.
 //!
 //! ```text
-//! cargo test -p mercs2_game --test hardpoint_probe -- --ignored --nocapture
+//! cargo test -p mercs2_probe --test hardpoint_probe -- --nocapture
 //! ```
 
 use mercs2_engine::wad;
@@ -13,9 +13,12 @@ use mercs2_formats::hash::pandemic_hash_m2 as m2;
 const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
 
 #[test]
-#[ignore]
 fn interior_hardpoint_derives_the_spawn() {
-    let path = wad::resolve_vz_wad(None).expect("vz.wad via registry");
+    let Some(path) = wad::resolve_vz_wad(None) else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let mut w = wad::open(&path).expect("open vz.wad");
 
     // The ornate main hall the player teleports onto (the "HqInterior" actor mesh).

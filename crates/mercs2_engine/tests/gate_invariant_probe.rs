@@ -11,8 +11,9 @@
 //!
 //! Models *with* SWIT are expected to differ — that is the fix, not a regression.
 //!
-//! `#[ignore]`d: needs the retail install. Run with
-//! `cargo test -p mercs2_engine --test gate_invariant_probe -- --ignored --nocapture`.
+//! Needs the retail install, and deliberately **not** `#[ignore]`d — it discovers a `vz.wad` and
+//! runs automatically when one is present, skipping loudly when it is not. See the note in
+//! `registry_wad_probe.rs` for why `#[ignore]` was the wrong default.
 
 use mercs2_engine::render_state::RenderState;
 use mercs2_engine::{mesh, wad};
@@ -32,9 +33,12 @@ fn kept(draws: &[mesh::DrawGroup]) -> Vec<(usize, usize, u32)> {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn swit_less_models_gate_identically_at_rung_0() {
-    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut w) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let hashes: Vec<u32> = wad::model_list(&w).into_iter().map(|(h, _)| h).take(SAMPLE).collect();
 
     let (mut checked, mut skipped_swit, mut skipped_zero_mask, mut load_fail) = (0, 0, 0, 0);
@@ -83,11 +87,14 @@ fn swit_less_models_gate_identically_at_rung_0() {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn build_indexed_all_is_a_superset_of_every_rung() {
     // Whole-model upload must contain every segment any rung could ask for — otherwise moving the
     // filter to draw time silently loses geometry at some distance.
-    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut w) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     for h in [0x9FCA_E910u32 /* md500 */, 0xA3C1_FABC /* mattias */, 0xE540_47D5 /* destroyer */] {
         let c = wad::extract_container(&mut w, h).expect("container");
         let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
@@ -111,11 +118,14 @@ fn build_indexed_all_is_a_superset_of_every_rung() {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
     // Clause 3 is orthogonal to clause 2: a disabled node is gone at all rungs, near and far. This is
     // the mechanism that hides a wreck, and the one we do not implement today.
-    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut w) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let c = wad::extract_container(&mut w, 0x9FCA_E910).expect("md500");
     let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
 
@@ -144,7 +154,6 @@ fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
 }
 
 #[test]
-#[ignore = "needs the retail vz.wad"]
 fn a_meshs_segment_record_is_segm_indx_group_not_segm_group() {
     // THE assembly rule, validated against an independent witness. `INDX[group]` is a SEG_ID; the
     // mesh's record is `SEGM[INDX[group]]`. Reading `SEGM[group]` (what we used to do) picks
@@ -154,7 +163,11 @@ fn a_meshs_segment_record_is_segm_indx_group_not_segm_group() {
     //
     // Witness: the HIER node whose OWN bbox matches the mesh. It must agree with the node the rule
     // yields, and the barrel must land at turret height.
-    let Some(mut w) = open_base() else { return eprintln!("no vz.wad; skipping") };
+    let Some(mut w) = open_base() else {
+        return eprintln!(
+            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+        );
+    };
     let c = wad::extract_container(&mut w, 0xF881_47A1).expect("ch_veh_tank_ztz98");
 
     let mut blk = vec![0u8; 20];
