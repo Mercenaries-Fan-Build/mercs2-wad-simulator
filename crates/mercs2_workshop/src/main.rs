@@ -788,6 +788,148 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
     // actual output can be checked without opening the GUI. This runs faithful_char_skin (now with
     // donor transfer) exactly as the Skeleton workbench does.
     // Usage: --faithful <file.glb> --rebind-target <name> [--faithful-out p] [--faithful-clip 0x..]
+    // ── Export a SHIPMENT: the artifact the Quartermaster consumes. ──────────────────────────
+    //
+    // `retarget.bones` is documented as "written by the Workshop … the build is reproducible from
+    // the Shipment alone", and nothing wrote it. The Workshop had no manifest emitter at all, so
+    // the handoff at the centre of Workshop -> Quartermaster did not exist: an author previewed
+    // here and then hand-wrote YAML somewhere else.
+    //
+    // The map written is the one the lowering actually uses — `convention_overrides`, resolved to
+    // NAMES so it lands correctly on a donor that orders its HIER differently. Names, not indices,
+    // because a Shipment is reviewed in a diff and rebuilt against whatever donor it names.
+    if let Some(glb) = get("--export-shipment") {
+        let target = get("--rebind-target").unwrap_or_else(|| "pmc_hum_mattias".into());
+        let outdir = get("--shipment-out").unwrap_or_else(|| "shipment".into());
+        let name = get("--shipment-name").unwrap_or_else(|| "my_outfit".into());
+        let wearer = get("--shipment-wearer").unwrap_or_else(|| "mattias".into());
+        let slug = get("--shipment-slug").unwrap_or_else(|| {
+            // A slug is a Lua identifier in the wardrobe table; derive a safe one by default.
+            let mut out = String::new();
+            let mut up = true;
+            for c in name.chars() {
+                if c.is_ascii_alphanumeric() {
+                    out.extend(if up { c.to_uppercase().collect::<Vec<_>>() } else { vec![c] });
+                    up = false;
+                } else {
+                    up = true;
+                }
+            }
+            if out.is_empty() { "MyOutfit".into() } else { out }
+        });
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
+            Ok(s) => s,
+            Err(e) => return eprintln!("workshop: {e}"),
+        };
+        let thash = mercs2_formats::hash::pandemic_hash_m2(target.trim_start_matches('_'));
+        let src = std::path::Path::new(&glb);
+        let rt = match import::import_model(src).map(|im| {
+            let (tn, tp, tpar) = app::target_bone_info(&mut w, thash, None);
+            crate::retarget::Retarget::build_full(
+                im.skin_joints, im.skin_joint_pos, im.skin_ibm, im.skin_parents, tn, tp, tpar,
+            )
+        }) {
+            Ok(r) => r,
+            Err(e) => return eprintln!("--export-shipment: {e}"),
+        };
+        if rt.target_bones.is_empty() {
+            return eprintln!("--export-shipment: target '{target}' has no readable HIER skeleton");
+        }
+
+        // The SAME map the lowering will use, resolved to names. Unresolved target bones are
+        // dropped rather than written as `hash_XXXXXXXX`: the Quartermaster resolves `bones:` by
+        // hashing the name, and a placeholder would hash to something the donor does not have and
+        // fail the build. Dropping them leaves those joints to the automap, which is what would
+        // have happened anyway.
+        let overrides = rt.convention_overrides(rt.target_bones.len());
+        let mut rows: Vec<(String, Option<String>)> = Vec::new();
+        let mut unnamed = 0usize;
+        for (si, tgt) in &overrides {
+            let Some(sname) = rt.source_bones.get(*si) else { continue };
+            match tgt {
+                None => rows.push((sname.clone(), None)),
+                Some(ti) => match rt.target_bones.get(*ti as usize) {
+                    Some(tn) if !tn.starts_with("hash_") && !tn.starts_with("0x") => {
+                        rows.push((sname.clone(), Some(tn.clone())))
+                    }
+                    _ => unnamed += 1,
+                },
+            }
+        }
+        rows.sort();
+
+        let dir = std::path::Path::new(&outdir);
+        if let Err(e) = std::fs::create_dir_all(dir.join("src")) {
+            return eprintln!("--export-shipment: {}: {e}", dir.display());
+        }
+        let stem = src.file_name().map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "model.glb".into());
+        if let Err(e) = std::fs::copy(src, dir.join("src").join(&stem)) {
+            return eprintln!("--export-shipment: copy {}: {e}", src.display());
+        }
+
+        // `shipment.name` is a SLUG (`^[a-z0-9]+(-[a-z0-9]+)*$`) — a package identity. The
+        // contribution's `name` is the ASSET name, which is `pmc_hum_*` with underscores. They are
+        // different grammars and the Quartermaster's linter rejects the wrong one, so derive the
+        // slug rather than reusing the asset name for both.
+        let ship_slug = {
+            let mut out = String::new();
+            for c in name.chars() {
+                if c.is_ascii_alphanumeric() {
+                    out.extend(c.to_lowercase());
+                } else if !out.ends_with('-') && !out.is_empty() {
+                    out.push('-');
+                }
+            }
+            let t = out.trim_matches('-').to_string();
+            if t.is_empty() { "my-outfit".into() } else { t }
+        };
+        let mut y = String::new();
+        y.push_str("format: 1\n");
+        y.push_str(&format!(
+            "shipment: {{ name: {ship_slug}, version: 1.0.0, target: retail }}\n"
+        ));
+        y.push_str("contributions:\n");
+        y.push_str("  - kind: add_outfit\n");
+        y.push_str(&format!("    name: {name}\n"));
+        y.push_str(&format!("    slug: {slug}\n"));
+        y.push_str(&format!("    display: {name}\n"));
+        y.push_str(&format!("    wearer: {wearer}\n"));
+        y.push_str(&format!("    model: src/{stem}\n"));
+        y.push_str(&format!("    donor: {target}\n"));
+        y.push_str("    retarget:\n");
+        y.push_str(&format!("      from: {}\n", rt.convention.slug()));
+        if !rows.is_empty() {
+            // The resolved map, verbose on purpose: reviewable in a diff, and the build is
+            // reproducible from the Shipment alone rather than from whoever ran the Workshop.
+            y.push_str("      bones:\n");
+            for (s_, t_) in &rows {
+                match t_ {
+                    Some(t) => y.push_str(&format!("        {s_}: {t}\n")),
+                    None => y.push_str(&format!("        {s_}: ~\n")),
+                }
+            }
+        }
+        let mpath = dir.join("manifest.yaml");
+        if let Err(e) = std::fs::write(&mpath, y) {
+            return eprintln!("--export-shipment: write {}: {e}", mpath.display());
+        }
+        println!(
+            "wrote {} ({} source rig, {} bone rows{})",
+            mpath.display(),
+            rt.convention.slug(),
+            rows.len(),
+            if unnamed > 0 {
+                format!(", {unnamed} target bone(s) left to the automap — no name in the corpus")
+            } else {
+                String::new()
+            }
+        );
+        println!("wrote {}", dir.join("src").join(&stem).display());
+        println!("build it:  qm build {} --corpus <mercs2-luacd/src>", dir.display());
+        return;
+    }
+
     if let Some(glb) = get("--faithful") {
         let target = get("--rebind-target").unwrap_or_else(|| "pmc_hum_mattias".into());
         let out = get("--faithful-out").unwrap_or_else(|| "faithful".into());
