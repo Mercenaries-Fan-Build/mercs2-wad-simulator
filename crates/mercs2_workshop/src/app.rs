@@ -440,6 +440,9 @@ enum Act {
     /// shipped-format skinning (palette-relative BLENDINDICES + INFO(56) range table, via
     /// `mercs2_formats::char_skin`) and inject into the target donor block. Prompts for an output file.
     ExportFaithfulCharacter,
+    /// Write a buildable Shipment from the CURRENT retarget — including hand-adjusted bones, which
+    /// exist nowhere but this UI and so cannot be recovered by any headless rebuild.
+    ExportShipment,
     /// Skeleton workbench: unload the current import from the GPU + the `imported` store and reset
     /// all retarget state (map / target / source path / selection), so a fresh model can be imported
     /// from a clean slate without restarting the app.
@@ -1567,6 +1570,13 @@ pub fn run(opts: Options) {
                                             .clicked()
                                         {
                                             actions.push(Act::ExportFaithfulCharacter);
+                                        }
+                                        if ui
+                                            .add_enabled(can_export, egui::Button::new("Export Shipment…"))
+                                            .on_hover_text("Write a buildable Shipment (manifest.yaml + src/) carrying THIS bone map, hand adjustments included — then `qm build` it into a patch WAD")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ExportShipment);
                                         }
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if theme::primary_button(ui, "Apply retarget", ready).clicked() {
@@ -3859,6 +3869,55 @@ pub fn run(opts: Options) {
                                 status = match out {
                                     Ok(s) => s,
                                     Err(e) => format!("EXPORT FAILED: {e}"),
+                                };
+                            }
+                            Act::ExportShipment => {
+                                // Driven by the LIVE retarget, which is the whole point: the
+                                // convention table is derivable from the source file (the
+                                // Quartermaster derives it itself when no map is supplied), so a
+                                // map carrying only that adds nothing. What a rebuild cannot
+                                // recover is the author moving a bone here — that decision exists
+                                // nowhere but in this UI.
+                                let out = (|| -> Result<String, String> {
+                                    let src_path = retarget_src_path
+                                        .clone()
+                                        .ok_or("import a rigged .glb first")?;
+                                    let (_thash, tlabel) = retarget_target
+                                        .clone()
+                                        .ok_or("pick a target skeleton first")?;
+                                    let rt = retarget.as_ref().ok_or("pick a target skeleton first")?;
+                                    let Some(dir) = rfd::FileDialog::new()
+                                        .set_title("Export Shipment into an empty folder")
+                                        .pick_folder()
+                                    else {
+                                        return Ok("export cancelled".into());
+                                    };
+                                    // Default the asset name off the folder the author chose, so the
+                                    // common case needs no extra prompt; it is a plain YAML field
+                                    // they can edit afterwards.
+                                    let asset = dir
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "my_outfit".into());
+                                    let w = crate::shipment::write(
+                                        &dir, &asset, "mattias", &tlabel, &src_path, rt,
+                                    )?;
+                                    Ok(format!(
+                                        "SHIPMENT {} — {} bone rows ({} hand-adjusted{}) -> qm build {}",
+                                        asset,
+                                        w.rows,
+                                        w.manual,
+                                        if w.unnamed > 0 {
+                                            format!(", {} unnamed target bone(s) left to the automap", w.unnamed)
+                                        } else {
+                                            String::new()
+                                        },
+                                        dir.display()
+                                    ))
+                                })();
+                                status = match out {
+                                    Ok(s) => s,
+                                    Err(e) => format!("SHIPMENT EXPORT FAILED: {e}"),
                                 };
                             }
                             Act::RetargetManual(src, tgt) => {
