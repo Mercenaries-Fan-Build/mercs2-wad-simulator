@@ -563,21 +563,26 @@ pub fn script_mutations(
     Ok(out)
 }
 
-/// Encode one authored map into a `TYPE_ID_TEXTURE` patch block, and say what to repoint onto it.
+/// Encode one authored image into a `TYPE_ID_TEXTURE` patch block under `asset_name`.
 ///
-/// Returns `(block, to_hash)`. The caller pairs `to_hash` with each donor hash the model currently
-/// names at that slot to build the [`MtrlRepoint`]s.
+/// Returns `(block, to_hash)`. For a skin, the caller pairs `to_hash` with each donor hash the model
+/// names at that slot to build the [`MtrlRepoint`]s; for a standalone `add_texture` the hash IS the
+/// asset and nothing is repointed.
+///
+/// The name is a PARAMETER rather than being derived as `<outfit>_<slot>` here, which is what
+/// previously made a novel texture inexpressible on its own: the encoder already did every hard
+/// part (swizzle, format choice, full resident mip chain, primary ASET row) and simply had no way
+/// to be told what to call its output.
 ///
 /// Format policy, from `character_kit.md`: a NORMAL map is BC3/DXT5nm — this project's swizzle is
 /// `R=1, G=ny, B=1, A=nx` (matching `mercs2_workshop::texenc::encode_normal_full_chain`, so preview
 /// and shipped agree). Diffuse and specular are BC1 unless the source carries real alpha, which
 /// needs BC3. Textures are fully resident: the whole mip chain ships, because a short BODY makes the
 /// engine over-read and the world-load livelocks.
-fn build_outfit_texture(
+fn build_named_texture(
     index: usize,
     kind: &'static str,
-    outfit: &str,
-    suffix: &str,
+    asset_name: &str,
     path: &Path,
     is_normal: bool,
 ) -> Result<(PatchBlock, u32), BuildError> {
@@ -618,7 +623,7 @@ fn build_outfit_texture(
         TexFormat::Bc3 => texture_encode::mip_chain(w, h, 4, &pixels, texture_encode::encode_bc3),
     };
 
-    let to = mercs2_formats::hash::pandemic_hash_m2(&format!("{outfit}_{suffix}"));
+    let to = crate::manifest::asset_hash(asset_name);
     let td = TextureData {
         width: w as u32,
         height: h as u32,
@@ -837,8 +842,9 @@ fn lower_skinned(
         (2, "nm", &textures.normal, true),
     ] {
         let Some(rel) = src else { continue };
+        // The historical naming for an outfit's own maps, now spelled at the call site.
         let (block, to) =
-            build_outfit_texture(index, kind, name, suffix, &root.join(rel), is_normal)?;
+            build_named_texture(index, kind, &format!("{name}_{suffix}"), &root.join(rel), is_normal)?;
         let froms = mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot);
         if froms.is_empty() {
             // Nothing to bind it to. Shipping the texture anyway would look like it worked.
@@ -1043,6 +1049,8 @@ fn lower(
             name,
             model,
             donor,
+            group,
+            textures,
             retarget,
         } => {
             let Some(game) = game else {
@@ -1067,11 +1075,11 @@ fn lower(
             // INFO(56) range table. Without it this stays the rigid lowering, which leaves joints
             // empty — correct for a prop, wrong for anything that animates.
             if let Some(rt) = retarget {
-                // `add_model` has no `textures:` field — a prop wears the donor's materials by
-                // design. Only `add_outfit` carries a skin.
-                let (new_block, _no_textures) = lower_skinned(
-                    index, kind, name, model, donor_name, rt, root, game, names,
-                    &crate::manifest::Textures::default(), log,
+                // `textures:` is the model's OWN skin. Empty stays the old behaviour — a prop
+                // wears the donor's materials, which is right for a prop and was wrong for a novel
+                // mesh, the case the field was added for.
+                let (new_block, tex_blocks) = lower_skinned(
+                    index, kind, name, model, donor_name, rt, root, game, names, textures, log,
                 )?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
@@ -1086,7 +1094,14 @@ fn lower(
                     kind,
                     message: m,
                 })?;
-                return Ok(Lowering::Block(block));
+                // The model's MTRL repoints name hashes that only resolve if the skin travels with
+                // it, so they ship as one `Blocks` group and cannot be separated by accident.
+                if tex_blocks.is_empty() {
+                    return Ok(Lowering::Block(block));
+                }
+                let mut out = vec![block];
+                out.extend(tex_blocks);
+                return Ok(Lowering::Blocks(out));
             }
 
             let donor_hash = crate::manifest::asset_hash(donor_name);
@@ -1107,19 +1122,23 @@ fn lower(
             })?;
 
             let hash = crate::manifest::asset_hash(name);
+            // The author's `group:` when given, else the default. The conform bench has always let
+            // a host group be picked and had nowhere to record it, so a placement could be
+            // previewed and then not expressed.
+            let host_group = group.map(|g| g as usize).unwrap_or(DEFAULT_TARGET_GROUP);
             // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
             // transform), target the raw rendered group, neutralise the rest.
             let (new_block, stats) = inject_static_into_donor_block(
                 &donor_blk,
                 &mesh,
-                DEFAULT_TARGET_GROUP,
+                host_group,
                 &[],
                 hash,
                 false,
                 false,
                 false,
                 false,
-                &[DEFAULT_TARGET_GROUP],
+                &[host_group],
                 1.0,
                 false,
             )
@@ -1131,7 +1150,7 @@ fn lower(
 
             log.push(format!(
                 "contributions[{index}] add_model {name} 0x{hash:08X} ← donor {donor_name} \
-                 group {DEFAULT_TARGET_GROUP}: {} verts, {} tris",
+                 group {host_group}: {} verts, {} tris",
                 stats.vertex_count, stats.triangle_count
             ));
 
@@ -1302,6 +1321,25 @@ fn lower(
         // ships both compressed `CFX` (61 assets) and uncompressed `GFX` (3), so there is no
         // encoding to normalise TO, and swapping an author's verified bytes for ones nobody has run
         // is exactly the kind of helpfulness that produces a WAD that looks fine and does nothing.
+        // A standalone novel texture. Needs NO game stack: the dimensions and format come from the
+        // author's own image rather than from a target the way `replace_texture` does, which makes
+        // this (with `raw` and `add_movie`) one of the few kinds that exercises the whole emission
+        // contract hermetically — the shape template CI runs in.
+        Contribution::AddTexture {
+            name,
+            image,
+            normal_map,
+        } => {
+            let (block, hash) =
+                build_named_texture(index, kind, name, &root.join(image), *normal_map)?;
+            log.push(format!(
+                "contributions[{index}] add_texture {name} 0x{hash:08X} <- {} ({})",
+                root.join(image).display(),
+                if *normal_map { "DXT5nm normal" } else { "colour" }
+            ));
+            Ok(Lowering::Block(block))
+        }
+
         Contribution::AddMovie { name, movie } => {
             let path = root.join(movie);
             let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {

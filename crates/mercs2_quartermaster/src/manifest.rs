@@ -309,10 +309,39 @@ pub enum Contribution {
     AddModel {
         name: String,
         model: PathBuf,
+        /// Host whose rig/materials are BORROWED — read-only, never written. Omit to auto-pick.
         #[serde(default)]
         donor: Option<String>,
+        /// The donor draw group the geometry is injected into (0..=63).
+        ///
+        /// Omit to let the builder pick. The Workshop's conform bench has always had this control
+        /// and had nowhere to record it, so a conformed placement could be previewed and then not
+        /// expressed — the transform was baked into vertices while the host group was lost.
+        #[serde(default)]
+        group: Option<u32>,
+        /// The model's OWN skin. Empty means it wears the donor's materials, which is right for a
+        /// prop and wrong for a novel mesh — the case this field exists for.
+        #[serde(default)]
+        textures: Textures,
         #[serde(default)]
         retarget: Option<Retarget>,
+    },
+    /// Data, new-hash additive. A standalone texture under a name the author chooses.
+    ///
+    /// Distinct from [`Contribution::ReplaceTexture`], which is same-hash and can only overwrite
+    /// something retail already ships. Novel textures were previously expressible ONLY as the three
+    /// slots inside an `add_outfit`, under a hash derived as `<outfit>_<slot>` — so a texture could
+    /// not be named, shared between contributions, or exist on its own at all.
+    AddTexture {
+        /// ASSET identity → `pandemic_hash_m2`. This is the hash a material repoints onto.
+        name: String,
+        image: PathBuf,
+        /// Encode as a normal map: DXT5nm with this project's `R=1, G=ny, B=1, A=nx` swizzle.
+        ///
+        /// Not inferable from the image — a normal map is just an RGB PNG — and getting it wrong
+        /// produces lighting that is subtly inverted rather than an error, so the author declares it.
+        #[serde(default)]
+        normal_map: bool,
     },
     /// Data, new-hash additive. A Scaleform GFx movie (`cfx_pack`, type_id 23) added as a WAD asset,
     /// so Lua can point `SetSwfFile` at it.
@@ -390,11 +419,35 @@ pub enum Contribution {
 }
 
 impl Contribution {
+    /// Every `kind` tag the format knows — the ONE list downstream surfaces check themselves against.
+    ///
+    /// This exists because a kind can be fully implemented and still be unreachable. The Workshop's
+    /// add-menu is a hand-written table, and `edit_state_machine` was absent from it: the format
+    /// parsed it, `blast` claimed for it, the linter had rules about it, and there was no way to add
+    /// one from the UI. Nothing failed — it simply was not offered.
+    ///
+    /// Keeping the list here does not make it self-updating (Rust cannot enumerate variants), but it
+    /// makes ONE place authoritative, and the conformance and UI tests assert against it rather than
+    /// against private copies that drift independently.
+    pub const ALL_KINDS: &'static [&'static str] = &[
+        "add_outfit",
+        "add_model",
+        "add_texture",
+        "add_movie",
+        "replace_texture",
+        "patch_lua",
+        "edit_state_machine",
+        "native_hook",
+        "place_file",
+        "raw",
+    ];
+
     /// The kind tag as written in the manifest — for diagnostics that must name it back to the author.
     pub fn kind(&self) -> &'static str {
         match self {
             Contribution::AddOutfit { .. } => "add_outfit",
             Contribution::AddModel { .. } => "add_model",
+            Contribution::AddTexture { .. } => "add_texture",
             Contribution::AddMovie { .. } => "add_movie",
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",

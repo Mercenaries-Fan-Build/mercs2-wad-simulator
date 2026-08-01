@@ -53,6 +53,18 @@ contributions:
   - kind: add_model
     name: my_custom_helipad
     model: src/helipad/pad.glb
+    group: 3
+    textures:
+      diffuse: src/helipad/pad_d.png
+
+  - kind: add_texture
+    name: my_custom_decal
+    image: src/decals/decal.png
+    normal_map: false
+
+  - kind: edit_state_machine
+    target: al_veh_boat_destroyer
+    states: src/destroyer/states.yaml
 
   - kind: add_movie
     name: my_hud_widgets
@@ -124,7 +136,20 @@ const JSON: &str = r#"
     {
       "kind": "add_model",
       "name": "my_custom_helipad",
-      "model": "src/helipad/pad.glb"
+      "model": "src/helipad/pad.glb",
+      "group": 3,
+      "textures": { "diffuse": "src/helipad/pad_d.png" }
+    },
+    {
+      "kind": "add_texture",
+      "name": "my_custom_decal",
+      "image": "src/decals/decal.png",
+      "normal_map": false
+    },
+    {
+      "kind": "edit_state_machine",
+      "target": "al_veh_boat_destroyer",
+      "states": "src/destroyer/states.yaml"
     },
     {
       "kind": "add_movie",
@@ -204,6 +229,19 @@ image = "src/boss/new_boss_ub.png"
 kind = "add_model"
 name = "my_custom_helipad"
 model = "src/helipad/pad.glb"
+group = 3
+textures = { diffuse = "src/helipad/pad_d.png" }
+
+[[contributions]]
+kind = "add_texture"
+name = "my_custom_decal"
+image = "src/decals/decal.png"
+normal_map = false
+
+[[contributions]]
+kind = "edit_state_machine"
+target = "al_veh_boat_destroyer"
+states = "src/destroyer/states.yaml"
 
 [[contributions]]
 kind = "add_movie"
@@ -255,6 +293,8 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_outfit",
             "replace_texture",
             "add_model",
+            "add_texture",
+            "edit_state_machine",
             "add_movie",
             "patch_lua",
             "native_hook",
@@ -508,4 +548,30 @@ fn bare_hash_touches_are_detectable() {
     // A name that merely looks hexy is still a name.
     assert!(!Touch("deadbeef".into()).is_bare_hash());
     assert!(!Touch("0x".into()).is_bare_hash());
+}
+
+/// Every kind the FORMAT knows must appear in the fixtures above.
+///
+/// The kind list in `toml_carries_the_kind_tag_for_every_v1_kind` is hand-written, so it can only
+/// say "the fixture contains what I expected" — it cannot notice a kind that was added to the format
+/// and never exercised anywhere. `Contribution::ALL_KINDS` is the authoritative list, and this
+/// closes the loop against it.
+///
+/// `edit_state_machine` is the reason this exists: it parsed, claimed a blast radius and had linter
+/// rules, while being absent from the Workshop's add-menu and from every fixture. Nothing failed.
+#[test]
+fn the_fixtures_exercise_every_kind_the_format_knows() {
+    use mercs2_quartermaster::manifest::Contribution;
+    let m = from_str(YAML, Format::Yaml).expect("YAML must parse");
+    let present: std::collections::BTreeSet<&str> =
+        m.contributions.iter().map(|c| c.kind()).collect();
+    let missing: Vec<&&str> = Contribution::ALL_KINDS
+        .iter()
+        .filter(|k| !present.contains(**k))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "kinds in the format with no conformance fixture: {missing:?} — add one to YAML, JSON and \
+         TOML, or remove the kind"
+    );
 }

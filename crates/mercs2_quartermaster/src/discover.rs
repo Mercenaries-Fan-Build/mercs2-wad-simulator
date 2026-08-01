@@ -294,7 +294,19 @@ impl Contribution {
                     out.push(("textures.specular", p.as_path()));
                 }
             }
-            Contribution::AddModel { model, .. } => out.push(("model", model.as_path())),
+            Contribution::AddModel { model, textures, .. } => {
+                out.push(("model", model.as_path()));
+                if let Some(p) = &textures.diffuse {
+                    out.push(("textures.diffuse", p.as_path()));
+                }
+                if let Some(p) = &textures.normal {
+                    out.push(("textures.normal", p.as_path()));
+                }
+                if let Some(p) = &textures.specular {
+                    out.push(("textures.specular", p.as_path()));
+                }
+            }
+            Contribution::AddTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::AddMovie { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
