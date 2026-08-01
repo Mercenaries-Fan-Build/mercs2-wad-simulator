@@ -470,6 +470,24 @@ pub mod theme {
             .inner
     }
 
+    /// Monospace text in a sunken `G0` well — for the literal bytes/YAML a recipe writes, or any
+    /// verbatim format dump. Selectable so the author can copy it. Wraps rather than scrolls, since
+    /// callers put it inside the inspector's own scroll.
+    pub fn code_block(ui: &mut egui::Ui, text: &str) {
+        egui::Frame::none()
+            .fill(G0)
+            .stroke(egui::Stroke::new(1.0, LINE))
+            .rounding(egui::Rounding::same(4.0))
+            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).monospace().size(11.0).color(DIM))
+                        .selectable(true)
+                        .wrap(),
+                );
+            });
+    }
+
     /// A COLLAPSIBLE framed inspector section: the `card()` look (rounded panel, brass-tick stencil
     /// eyebrow + optional badge) but with a persistent expand/collapse toggle. The body has NO inner
     /// scroll area — an open section shows its full content and the single outer inspector scroll
@@ -507,6 +525,35 @@ pub mod theme {
                         add(ui);
                     });
             });
+    }
+
+    /// A tier-3 **Advanced** reveal: format-level detail a normal read never needs — raw hashes,
+    /// descriptor/ASET rows, host-group numbers, state hashes, chunk inventory. Hidden by default
+    /// behind a persistent, dim disclosure, so the common case stays uncluttered and "show me the
+    /// bytes" is one click away. This is the single place the Tier-3-behind-a-reveal rule is spelled,
+    /// so every panel reveals the same way. `key` must be STATIC and unique within its section.
+    ///
+    /// Returns whether the reveal is open, so a caller can skip building expensive rows when hidden.
+    pub fn advanced(ui: &mut egui::Ui, key: &str, add: impl FnOnce(&mut egui::Ui)) -> bool {
+        let id = ui.make_persistent_id(("adv", key));
+        let mut open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
+        let marker = if open { '\u{25be}' } else { '\u{25b8}' }; // ▾ / ▸
+        let resp = ui
+            .add(egui::Label::new(disp_text(format!("{marker} ADVANCED"), 9.0, FAINT))
+                .sense(egui::Sense::click()))
+            .on_hover_text("format-level detail — raw hashes and descriptor rows");
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            open = !open;
+            ui.data_mut(|d| d.insert_temp(id, open));
+        }
+        if open {
+            ui.add_space(3.0);
+            add(ui);
+        }
+        open
     }
 
     /// A full-width framed, clickable row (the LOD-tier / segment / clip chip). `fill`/`border` carry

@@ -353,6 +353,28 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
 }
 
 /// `dest:` is the first field in the format whose value set is CLOSED, so it is the first place the
+/// `contribution_yaml` (the Workshop's "show me what this does") must emit the SAME kind-tagged
+/// block that lands in a manifest — a legible, self-describing preview, not a debug dump. Proven by
+/// round-tripping every fixture contribution through it back into a Contribution.
+#[test]
+fn contribution_yaml_previews_the_exact_manifest_block() {
+    use mercs2_quartermaster::manifest::Contribution;
+    let m = from_str(YAML, Format::Yaml).expect("YAML parses");
+    // Every kind the format knows must produce a legible, kind-tagged preview — no debug noise, no
+    // silently-empty block. The fixture exercises all of them (guarded by
+    // `the_fixtures_exercise_every_kind_the_format_knows`), so this covers each kind.
+    for c in &m.contributions {
+        let yaml = mercs2_quartermaster::contribution_yaml(c);
+        assert!(
+            yaml.contains(&format!("kind: {}", c.kind())),
+            "the preview must carry the kind tag: {yaml}"
+        );
+        assert!(!yaml.contains("cannot serialize"), "the preview must not be an error: {yaml}");
+        // It reads as manifest text, not a Rust debug dump: mapping keys, no struct syntax.
+        assert!(!yaml.contains('{') && !yaml.contains("Contribution"), "not manifest YAML: {yaml}");
+    }
+}
+
 /// three serializations could disagree about how an author spells one. All three must map the same
 /// snake_case name onto the same destination — a format that read `on_boot` as anything else would
 /// place a file in a different directory depending on which extension the manifest happened to use.

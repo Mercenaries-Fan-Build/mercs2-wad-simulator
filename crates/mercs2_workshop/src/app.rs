@@ -2850,6 +2850,22 @@ pub fn run(opts: Options) {
                                                     let tag = if hier.contains(&h) { "@" } else { "" };
                                                     format!("{tag}{}", name_or_hash(&index, h))
                                                 };
+                                                // Tier-3: the decoded enter/exit COMMAND SCRIPTS (raw
+                                                // hashes → SHOW/HIDE/SetState) are format-level detail,
+                                                // hidden behind Advanced so the node/state picker stays
+                                                // clean for the common case.
+                                                let show_scripts = theme::advanced(
+                                                    ui,
+                                                    "destr-scripts",
+                                                    |ui| {
+                                                        ui.label(theme::disp_text(
+                                                            "enter/exit command scripts, shown per selected state below",
+                                                            9.0,
+                                                            theme::FAINT,
+                                                        ));
+                                                    },
+                                                );
+                                                ui.add_space(3.0);
                                                 egui::ScrollArea::vertical()
                                                     .max_height(620.0)
                                                     .id_source("machine_scroll")
@@ -2875,14 +2891,16 @@ pub fn run(opts: Options) {
                                                                     }
                                                                 }
                                                             });
-                                                            if let Some(st) = node.states.get(cur) {
-                                                                let enter = mercs2_formats::orchestrator::decode_script(&st.enter, resolve);
-                                                                if !enter.is_empty() {
-                                                                    ui.label(egui::RichText::new(format!("→ {enter}")).monospace().size(10.0).color(theme::FAINT));
-                                                                }
-                                                                let exit = mercs2_formats::orchestrator::decode_script(&st.exit, resolve);
-                                                                if !exit.is_empty() {
-                                                                    ui.label(egui::RichText::new(format!("← {exit}")).monospace().size(10.0).color(theme::FAINT));
+                                                            if show_scripts {
+                                                                if let Some(st) = node.states.get(cur) {
+                                                                    let enter = mercs2_formats::orchestrator::decode_script(&st.enter, resolve);
+                                                                    if !enter.is_empty() {
+                                                                        ui.label(egui::RichText::new(format!("→ {enter}")).monospace().size(10.0).color(theme::FAINT));
+                                                                    }
+                                                                    let exit = mercs2_formats::orchestrator::decode_script(&st.exit, resolve);
+                                                                    if !exit.is_empty() {
+                                                                        ui.label(egui::RichText::new(format!("← {exit}")).monospace().size(10.0).color(theme::FAINT));
+                                                                    }
                                                                 }
                                                             }
                                                             ui.add_space(9.0);

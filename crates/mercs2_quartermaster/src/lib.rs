@@ -117,3 +117,11 @@ pub fn from_str(text: &str, format: Format) -> Result<Manifest, ReadError> {
 pub fn to_yaml(manifest: &Manifest) -> Result<String, String> {
     serde_norway::to_string(manifest).map_err(|e| e.to_string())
 }
+
+/// Serialize ONE contribution as the YAML block a manifest embeds — the exact text that landing this
+/// recipe would write under `contributions:`. `Contribution` is internally tagged (`kind: …`), so a
+/// single-item dump is a valid, self-describing block. This is the "show me what this does" the
+/// Workshop shows for a recipe: the format is legible, so the UI can be honest about what it emits.
+pub fn contribution_yaml(c: &manifest::Contribution) -> String {
+    serde_norway::to_string(c).unwrap_or_else(|e| format!("# cannot serialize: {e}"))
+}

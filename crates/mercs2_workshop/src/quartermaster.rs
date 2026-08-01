@@ -971,6 +971,16 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                             }
                         });
                     }
+                    // "Show me what this does" — the exact YAML block this recipe writes under
+                    // `contributions:`. Every Tier-1 recipe gets a visible way to see the format it
+                    // lowers to, so the easy face is never opaque about the manifest it produces.
+                    ui.add_space(6.0);
+                    theme::advanced(ui, "what-this-writes", |ui| {
+                        ui.label(theme::disp_text("writes this into manifest.yaml", 9.0, theme::FAINT));
+                        ui.add_space(2.0);
+                        let yaml = mercs2_quartermaster::contribution_yaml(c);
+                        theme::code_block(ui, yaml.trim_end());
+                    });
                 });
 
                 theme::section(ui, "Blast radius", Some("computed"), true, |ui| {
