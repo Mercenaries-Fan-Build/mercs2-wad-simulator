@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_workshop"
-version = "2.1.1"
+version = "2.2.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native asset workshop (browse / inspect / remix) on the mercs2_engine renderer."
 readme = "README.md"
@@ -43,3 +43,5 @@ bytemuck = { version = "1", features = ["derive"] }
 mercs2_engine = { workspace = true }
 mercs2_core = { workspace = true }
 mercs2_formats = { workspace = true }
+# The Shipment format, linter and builder — the Quartermaster dock is its UI front end.
+mercs2_quartermaster = { workspace = true }

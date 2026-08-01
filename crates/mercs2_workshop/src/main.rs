@@ -66,6 +66,7 @@ mod retarget;
 // The preview-only half (`rebind_matrices` / `animation_rig`) is an extension trait now that the
 // mapper itself lives in `mercs2_formats::retarget`; the call sites below are unchanged.
 use crate::retarget::RetargetPreview as _;
+mod quartermaster;
 mod settings;
 mod shipment;
 mod shot;
@@ -164,7 +165,10 @@ fn main() {
     // a HEADLESS run has nobody to answer a dialog and must fail with a message a script can read,
     // but the GUI launch has a user right there — so it asks once, with a native picker, and
     // remembers the answer. Both paths are also reachable later from the Settings workbench.
-    const PASSIVE_FLAGS: [&str; 4] = ["--wad", "--names", "--overlay", "--no-auto-patch"];
+    // `--shipment` CONFIGURES the GUI run rather than replacing it, so it belongs here: treating it
+    // as a mode flag would open a Shipment into a window that never appears.
+    const PASSIVE_FLAGS: [&str; 5] =
+        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment"];
     let headless =
         args[1..].iter().any(|a| a.starts_with("--") && !PASSIVE_FLAGS.contains(&a.as_str()));
     let wadpath = match wadpath {
@@ -1806,7 +1810,8 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         return;
     }
 
-    app::run(app::Options { wadpath, overlays, names_csv });
+    let shipment = get("--shipment").map(std::path::PathBuf::from);
+    app::run(app::Options { wadpath, overlays, names_csv, shipment });
 }
 
 /// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and

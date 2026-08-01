@@ -763,6 +763,7 @@ pub mod theme {
         Sandbox,
         Mods,
         Skeleton,
+        Quartermaster,
         Settings,
         Log,
     }
@@ -791,6 +792,17 @@ pub mod theme {
                 p.circle_stroke(c + vec2(-3.5, -3.5), 3.0, s);
                 p.line_segment([c + vec2(-1.2, -1.2), c + vec2(6.0, 6.0)], s);
                 p.line_segment([c + vec2(6.0, 6.0), c + vec2(6.5, 3.5)], s);
+            }
+            // A crate, seen head-on with its banding — the Shipment.
+            RailIcon::Quartermaster => {
+                p.rect_stroke(
+                    egui::Rect::from_center_size(c, vec2(15.0, 13.0)),
+                    1.0,
+                    s,
+                );
+                p.line_segment([c + vec2(-7.5, -2.0), c + vec2(7.5, -2.0)], s);
+                p.line_segment([c + vec2(-2.5, -2.0), c + vec2(-2.5, 6.5)], s);
+                p.line_segment([c + vec2(2.5, -2.0), c + vec2(2.5, 6.5)], s);
             }
             RailIcon::Skeleton => {
                 p.circle_stroke(c + vec2(-4.0, -4.0), 2.2, s);

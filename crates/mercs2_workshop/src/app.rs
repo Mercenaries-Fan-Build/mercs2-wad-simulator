@@ -51,6 +51,11 @@ pub struct Options {
     /// (`data/vz-patch.wad`): a later archive's asset wins over an earlier one's.
     pub overlays: Vec<String>,
     pub names_csv: Option<PathBuf>,
+    /// A Shipment folder to open in the Quartermaster dock at startup.
+    ///
+    /// The dock is otherwise only reachable by clicking, which makes it unverifiable from a script —
+    /// and this project's standard is that a change is shown, not asserted.
+    pub shipment: Option<PathBuf>,
 }
 
 /// The open archive set: base + overlays. Asset resolution walks the stack in REVERSE (last
@@ -462,17 +467,21 @@ enum Workbench {
     Mods,
     /// Retarget a Source-rigged (ValveBiped / Mixamo / Unreal) import onto a Mercs2 HIER skeleton.
     Skeleton,
+    /// The Shipment accumulator: the contribution queue, what each one touches, the linter, and the
+    /// build. Every domain's edits land in the same Shipment, so this is where it is assembled.
+    Quartermaster,
     /// Where the game and the reference bundle live — the two paths the tool cannot discover for
     /// itself on every platform. Last on the rail: configuration, not an authoring surface.
     Settings,
 }
 
 impl Workbench {
-    const ALL: [Workbench; 5] = [
+    const ALL: [Workbench; 6] = [
         Workbench::Inspect,
         Workbench::Sandbox,
         Workbench::Mods,
         Workbench::Skeleton,
+        Workbench::Quartermaster,
         Workbench::Settings,
     ];
     fn label(self) -> &'static str {
@@ -481,6 +490,7 @@ impl Workbench {
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mods",
             Workbench::Skeleton => "Skeleton",
+            Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
         }
     }
@@ -491,6 +501,7 @@ impl Workbench {
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mod project",
             Workbench::Skeleton => "Retarget",
+            Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
         }
     }
@@ -765,9 +776,36 @@ pub fn run(opts: Options) {
     let mut hp_selected: Option<usize> = None;
     // node_hash -> resolved name, for the loaded template (hp_* names come from the bone-name list).
     let mut hp_names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    // The Quartermaster dock. Present beside every workbench, because edits from anywhere land in
+    // the same Shipment — so the surface holding them cannot be a page you navigate away to.
+    let mut qm = crate::quartermaster::Panel::default();
+    // Host-provided, like the game stack: the crate never reaches into the filesystem for it.
+    let qm_names = mercs2_quartermaster::names::NameTable::find_from(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    )
+    .or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().and_then(mercs2_quartermaster::names::NameTable::find_from))
+    });
+    let qm_stack: Vec<String> = {
+        let mut v = vec![opts.wadpath.clone()];
+        v.extend(opts.overlays.iter().cloned());
+        v
+    };
+    let qm_corpus = crate::quartermaster::corpus_root();
+    if let Some(dir) = opts.shipment.clone() {
+        qm.open_shipment(&dir, qm_names.as_ref());
+        eprintln!("[workshop] quartermaster: {}", qm.status_line(true));
+    }
     // The active workbench (activity rail) + the vehicle inventory the Mods navigator lists as donor
     // templates (rebuilt when names/overlays change).
-    let mut wb = Workbench::Inspect;
+    // Asking for a Shipment IS asking for its page — landing on Inspect would hide what you opened.
+    let mut wb = if opts.shipment.is_some() {
+        Workbench::Quartermaster
+    } else {
+        Workbench::Inspect
+    };
     // Settings workbench: the saved document plus the outcome of the last action. `cfg_note` is the
     // ONLY feedback the page gives, so it carries the validation result (model count / name count),
     // never a bare "saved" — a settings page that cannot say what it just accepted is how a bad path
@@ -1336,6 +1374,7 @@ pub fn run(opts: Options) {
 
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
+    let mut qm_acts: Vec<crate::quartermaster::Act> = Vec::new();
                     let mut hovered_bone: Option<usize> = None;
                     // Skeleton workbench hover: (bone index, is_source_tree). Resolved to a viewer
                     // highlight in the PREVIEW's current space (source before Apply, target after).
@@ -1424,6 +1463,7 @@ pub fn run(opts: Options) {
                                     theme::RailIcon::Sandbox,
                                     theme::RailIcon::Mods,
                                     theme::RailIcon::Skeleton,
+                                    theme::RailIcon::Quartermaster,
                                     theme::RailIcon::Settings,
                                 ];
                                 for (i, w) in Workbench::ALL.iter().enumerate() {
@@ -1488,6 +1528,9 @@ pub fn run(opts: Options) {
                                 let has_preview = preview.is_some();
                                 let has_placed = !placed.is_empty();
                                 match wb {
+                                    Workbench::Quartermaster => {
+                                        qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
+                                    }
                                     Workbench::Inspect => {
                                         if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
                                             actions.push(Act::Place);
@@ -1615,6 +1658,9 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                           match wb {
+                            Workbench::Quartermaster => {
+                                qm_acts.extend(crate::quartermaster::navigator(ui, &qm));
+                            }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone());
                             ui.label(theme::disp_text("ASSETS", 15.0, theme::TX));
@@ -2320,6 +2366,9 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                              if wb == Workbench::Quartermaster {
+                                  qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
+                              }
                               if matches!(wb, Workbench::Inspect) {
                                 match &mut preview {
                                     None => {
@@ -3508,10 +3557,21 @@ pub fn run(opts: Options) {
                         // Remember the (possibly just-dragged) width so it survives a card collapse.
                         inspector_width = inspector_resp.response.rect.width();
 
+                        // ── QUARTERMASTER main content: the selected contribution, in full. A
+                        // CentralPanel rather than the 3D viewport, because a Shipment is read, not
+                        // orbited. Added last so the side panels have already claimed their space.
+                        if wb == Workbench::Quartermaster {
+                            crate::quartermaster::center(ctx, &qm);
+                        }
+
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
                         // works underneath. ──
+                        //
+                        // Suppressed on the Quartermaster page: there is no 3D under it, so the chips
+                        // would sit on top of the contribution rather than over a scene.
                         let vp = ctx.available_rect();
+                        if wb != Workbench::Quartermaster {
                         egui::Area::new(egui::Id::new("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
@@ -3626,7 +3686,19 @@ pub fn run(opts: Options) {
                         if let Some(v) = &mut lua_view {
                             v.show(ctx);
                         }
+                        }
                     });
+
+                    for act in std::mem::take(&mut qm_acts) {
+                        crate::quartermaster::apply(
+                            act,
+                            &mut qm,
+                            &qm_stack,
+                            qm_names.as_ref(),
+                            qm_corpus.as_deref(),
+                            &mut status,
+                        );
+                    }
                     if lua_view.as_ref().is_some_and(|v| !v.open) {
                         lua_view = None;
                     }
@@ -3909,6 +3981,9 @@ pub fn run(opts: Options) {
                                     let w = crate::shipment::write(
                                         &dir, &asset, "mattias", &tlabel, &src_path, rt,
                                     )?;
+                                    // Exporting a Shipment IS starting one, so the dock picks it up
+                                    // and checks it rather than making the author go and open it.
+                                    qm.open_shipment(&dir, qm_names.as_ref());
                                     // Terse state, the way the status line reads elsewhere. The
                                     // hand-adjusted count leads because it is the reason the file
                                     // is worth writing: the convention table is derivable, that is
