@@ -1,10 +1,29 @@
-# Workshop "Mods" rebuild — Plan 04: the Shipment manifest format (DRAFT)
+# Workshop "Mods" rebuild — Plan 04: the Shipment manifest format
 
-**Status:** DRAFT for review (rev 3, 2026-07-25). This is the **format-first deliverable** — the
-CONTRACT the `mercs2_quartermaster` crate (Plan 01) implements and `mercs2-shipment-template`
-scaffolds. Nothing is frozen. When frozen, it graduates to the template repo README +
-`docs/modding/manifest_format.md`.
+**Status:** ★ LANDED (2026-08-01). Implemented in `mercs2_quartermaster`; the frozen contract lives at
+`docs/modding/manifest_format.md`. Conformance fixtures (`yaml_json_and_toml_agree`,
+`toml_carries_the_kind_tag_for_every_v1_kind`, `the_fixtures_exercise_every_kind_the_format_knows`)
+hold it to the crate.
 **Siblings:** `workshop-mods-rebuild-01-mod-model.md` (the model), `-02-navigation.md`, `-03-live-bridge.md`
+
+> ## What landed (absorbs Plan 05 §G/§H)
+>
+> Every v1 kind lowers or refuses honestly, with a firing + staying-quiet lint fixture each:
+> `add_outfit`, `add_model` (now with **`textures:`** and **`group:`**, and **donor auto-pick**),
+> `add_texture`, `add_sound`, `add_movie`, **`add_ui`** (movie + Quartermaster-owned `qm_modloader`
+> loader), `replace_texture`, `edit_stringdb`, **`edit_state_machine`** (full-family regenerator —
+> add/remove states, `qm extract-states` baseline, M0193 vocabulary guard), `patch_lua`, `native_hook`,
+> `place_file`, `raw`.
+>
+> - **Composition** (§Composition here) is the model the crate implements — five mechanisms, four merge
+>   classes — and it **supersedes** Plan 01's ClaimGroup line. Load order (`after`/`before`) and
+>   cross-Shipment conflicts are resolved (Plan 01 F1/F2).
+> - **Novel assets**: the survey (Plan 05 §H) proved most "needs a builder" types are opaque `data`
+>   wrappers; audio, stringdb and movies all land. Video is not an ASET type (loose `data/Movies`
+>   files or a `cfx_pack`).
+> - **Next format work, scoped not built**: the `vz_state` world overlay (permanent, world-scale
+>   destruction) — `docs/modding/vz_state_world_overlay_scope.md`. And the `edit_state_machine`
+>   **`states:` schema** is now real (`crate::states`, extract-then-edit).
 
 ## Naming (re-settled 2026-07-25 — supersedes the Dossier/Handler pair)
 

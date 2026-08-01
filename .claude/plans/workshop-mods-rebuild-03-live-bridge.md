@@ -1,9 +1,18 @@
 # Workshop "Mods" rebuild — Plan 03: the live bridge
 
-**Status:** DESIGN (2026-07-24). Wally's repo survey COMPLETE — facts below are from reading his source.
-Account: `github.com/loganw234`, ~23 M2 repos, self-branded ecosystem "mercs2.tools", mostly MIT,
-explicitly ports format work from our project lineage.
+**Status:** ⏳ OPEN (2026-08-01) — the one part of Plans 01–04 **not yet built**. Design complete.
 **Siblings:** `-01-mod-model.md`, `-02-navigation.md`, `-04-manifest-format.md`
+
+> ## Standing (2026-08-01)
+>
+> This is the last unbuilt pillar. It was parked with Plan 02 in the retired Plan 05's "out of scope";
+> it is no longer parked — it is simply the next build. **Phases 1–3 are ours to build now:** the
+> TCP↔WS shim (Plan 03's "single highest-value first move" — Wally's browser clients speak WebSocket
+> to a raw-TCP listener that can't answer them), the `mercs2_bridge` crate, and the Lua console as a
+> Craft mode. **It is unblocked:** the old mlua/`mercs2_luac` symbol collision that would have made a
+> compile-and-talk-to-a-live-VM binary SIGSEGV is **resolved** (`mercs2_script` v2.0.0 runs
+> `mercs2_luac`'s one VM), so no symbol-prefixing is needed first. Phases 4–5 (enrich Wally's Ess Lua;
+> serve the protocol from the reimpl engine) depend on external work and stay open here, not moved.
 
 ## Why this matters most (the loop, not a capability)
 

@@ -1,7 +1,27 @@
 # Workshop "Mods" rebuild — Plan 01: the mod model + shared crate
 
-**Status:** DESIGN (rev 2, 2026-07-25). Multi-session effort. No code written yet.
+**Status:** ★ LANDED (2026-08-01). `mercs2_quartermaster` exists and is the crate both clients use.
 **Siblings:** `-02-navigation.md`, `-03-live-bridge.md`, `-04-manifest-format.md` (the format contract)
+
+> ## What landed (absorbs the retired Plan 05)
+>
+> - **The crate + `qm` CLI + publishing + template repo** — built (Plan 05 §C/§D/§E/§F/§I, now here).
+> - **The Lua linker** — `add_outfit`/`patch_lua` lower; cross-Shipment relink deploys; the mlua
+>   symbol collision is **resolved** (`mercs2_script` v2.0.0 runs `mercs2_luac`'s VM — one Lua, no
+>   clash), so a Workshop script editor and a live Lua console are **not** blocked.
+> - **The linter tail** — M0001–M0004 (`artifact_checks`), plus M0180–M0182, M0190–M0193. Every rule
+>   ships a firing + staying-quiet fixture. M0006 is now **measured** (the texture fan-in map: 678
+>   shared assets in retail, real and distinct from M0009) — the rule implementation is the remaining
+>   delta. **M0005 and M0008 stay open in place**, blocked on RE (residency predicate / the
+>   `page_count` livelock), and `qm rules` prints them under `KNOWN AND NOT YET CHECKED`.
+> - ⚠ **The ClaimGroup line here is superseded.** Plan 01's "adopt modkit's ClaimGroup — all-or-nothing,
+>   LAST-wins, partial-overlap = hard error" is replaced by **Plan 04 §Composition** (five mechanisms,
+>   four merge classes), which the crate implements and whose tests assert the opposite on purpose
+>   (`composition.rs` — two texture replacements are load-order, not a conflict). The real gap was the
+>   missing **resolver** (F1 load order, F2 cross-Shipment conflicts), now built, not the model.
+> - **§Testing** carries the verification standard retired from Plan 05: build → `read_patch_wad`
+>   (ASET row primary, single-entry table, byte-identical across two builds) → `wad_simulator` clean.
+>   This has caught every structural bug; no digest check has caught any.
 **Origin:** rebuild the Workshop's "Mods" page from the ground up. The page today is a
 black-sheep single-recipe bench (inject a static mesh into a vehicle container's group N → emit a WAD).
 See `app.rs` `Workbench::Mods` arm (~lines 1410, 2797–3056) and memory `mercs2-workshop-devtool`.

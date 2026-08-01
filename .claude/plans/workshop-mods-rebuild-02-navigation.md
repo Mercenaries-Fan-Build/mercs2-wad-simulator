@@ -1,7 +1,27 @@
 # Workshop "Mods" rebuild — Plan 02: navigation, domains, tiers
 
-**Status:** DESIGN (rev 2, 2026-07-25). Multi-session.
+**Status:** ★ LANDED (2026-08-01). The navigation spine is built in `mercs2_workshop`.
 **Siblings:** `-01-mod-model.md`, `-03-live-bridge.md`, `-04-manifest-format.md`
+
+> ## What landed
+>
+> - **The four-surface taxonomy** — Library (Inspect, 8 categories + routing menus), **Craft**
+>   (replaced Sandbox; Scene/Rig/Conform/Texture/Script/States modes), the **domain spine** (a single
+>   `Workbench::Domain(Domain)` variant, seven lenses reusing `category()`/`vehicle_class()`), and the
+>   **Shipment** (Quartermaster) page with a real form per kind.
+> - **Settings** is a real page (navigator lists sections, no blank panels, shows the resolved stack).
+> - **Tier reveals (D3)** — `theme::advanced` disclosure for format-level rows + "show me what this
+>   does" (the exact contribution YAML). This is also where the Raw/Core/Easy tiering (Plan 01 §F8)
+>   is realised — one idiom, not a parallel API.
+> - **The vehicle-only donor navigator is gone** — `build_donor_inventory` offers any host, filtered
+>   by the active domain.
+>
+> ### Open questions — resolved
+> 1. **Domains**: all seven ship as thin browsers; Characters carries the one piece of depth (the
+>    wardrobe → `Craft::Rig` route). Systems/Engine is the home for Code-layer contributions.
+> 2. **Craft** is centre-column modes selected on the first row, not a docked panel — it follows the
+>    current subject.
+> 3. **Labels** are the literal themed set (World/Characters/Weapons/Driving/Audio/Missions/Systems).
 **Scope:** how the Workshop is NAVIGATED once `mercs2_quartermaster` (Plan 01) exists. This is the UX spine.
 A mod = a **Shipment** (see Plan 01 for the naming).
 

@@ -1,7 +1,28 @@
 # Workshop "Mods" rebuild — Plan 05: the remaining scope
 
-**Status:** SCOPE (2026-07-28). Continues Plan 01's phasing after increment 6.
-**Siblings:** `-01-mod-model.md`, `-02-navigation.md`, `-03-live-bridge.md`, `-04-manifest-format.md`
+> # ⛔ RETIRED (2026-08-01) — folded back into Plans 01–04
+>
+> **This was never a plan. It was a ledger of deferrals** — work Plans 01–04 already specified,
+> discovered piecemeal and parked here, which then became the document people worked from. Its own
+> closing line ("Out of scope: Plan 02 … and Plan 03") is the defect: it parked two of the four
+> originals. That work is now done or owned elsewhere, so the ledger is retired and its live content
+> returned to the plan that owns it. **There are four plans, not five.**
+>
+> | Plan-05 item | Now |
+> |---|---|
+> | §A Lua linker, §Step 1 mlua collision | **Done** (§A) and **resolved** (Step 1: `mercs2_script` v2.0.0 dropped mlua → one Lua, no symbol clash). → owned by **Plan 01** |
+> | §B HANG-class rules (M0001–M0004) | **Done** (`artifact_checks`). M0006 **measured** this pass (fan-in map, 678 shared assets — real, distinct from M0009). M0005/M0008 stay open on RE. → **Plan 01** |
+> | §C library extraction, §D `qm` CLI, §E publishing, §F doc links, §I template repo | **Done** → **Plan 01** |
+> | §G `raw`, `native_hook` | **Done**; `edit_state_machine` was "BLOCKED", now **fully built** (full-family regenerator, `qm extract-states`, M0193 vocabulary guard) → **Plan 04** |
+> | §H format gaps (`add_model.group`, donor auto-pick, novel-asset survey) | **Done**: `group:`, donor auto-pick, `add_texture`, `add_model.textures`, `edit_stringdb`, `add_ui`, `add_sound` all land → **Plan 04** |
+> | "Out of scope: Plan 02, Plan 03" | Plan 02 (navigation/domains/Settings) is **built**. Plan 03 (live bridge) is **still open**, marked so in Plan 03 itself — no longer parked here |
+> | The verification standard (build → `read_patch_wad` → `wad_simulator`) | Kept as the crate's testing rule → **Plan 01 §Testing** |
+> | The `vz_state` world overlay (emerged from the destruction work) | New scope → `docs/modding/vz_state_world_overlay_scope.md` |
+>
+> The body below is preserved as the **historical record** — the surveys and decisions are worth
+> keeping — but it is no longer the working document. Work from Plans 01–04.
+
+---
 
 ## Context
 
