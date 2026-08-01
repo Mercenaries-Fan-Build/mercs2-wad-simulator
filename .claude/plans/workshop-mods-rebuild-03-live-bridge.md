@@ -1,7 +1,22 @@
 # Workshop "Mods" rebuild — Plan 03: the live bridge
 
-**Status:** ⏳ OPEN (2026-08-01) — the one part of Plans 01–04 **not yet built**. Design complete.
+**Status:** ★ LANDED phases 1–3 (2026-08-01). Phase 1 obviated; 2–3 built; 4–5 open (external).
 **Siblings:** `-01-mod-model.md`, `-02-navigation.md`, `-04-manifest-format.md`
+
+> ## What landed (2026-08-01)
+>
+> - **Phase 1 (TCP↔WS shim) — OBVIATED.** Wally's v0.5.0+ ASI already serves both raw-TCP and
+>   WebSocket on the one loopback port 27050, auto-detecting the transport, so browsers reach it
+>   directly and a native tool opens a socket — nothing to bridge. (Detail below.)
+> - **Phase 2 (`mercs2_bridge`) — built.** A std-only, rate-limited, timeout-bounded raw-TCP client
+>   for the `<<<RUN>>>`/`<<<END>>>` protocol, driven from a worker thread. Protocol proven against a
+>   mock REPL (no game needed).
+> - **Phase 3 (Lua console) — built.** `Craft ▸ Console`: a chunk runs in the live game, the result
+>   returns, `0xHASH` is enriched to `0xHASH (name)` from the Workshop's name pack. Worker thread +
+>   mpsc so the frame loop never blocks.
+> - **Phases 4–5 stay open** (enrich Wally's Ess Lua — his repo; serve the protocol from the reimpl
+>   engine), marked here, not moved. The one thing unit tests cannot cover is a live game at the far
+>   end of the socket.
 
 > ## Standing (2026-08-01) — ★ CORRECTED against Wally's v0.5.0+ ASI
 >
