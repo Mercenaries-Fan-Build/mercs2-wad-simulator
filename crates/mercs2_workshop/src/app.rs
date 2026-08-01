@@ -963,7 +963,7 @@ fn resolve_node_names(
 
 fn build_vehicle_inventory(index: &crate::index::AssetIndex) -> Vec<(&'static str, Vec<(u32, String)>)> {
     let mut map: std::collections::HashMap<&'static str, Vec<(u32, String)>> = Default::default();
-    for r in &index.models {
+    for r in &*index.models() {
         if let Some(c) = r.vehicle_class() {
             map.entry(c).or_default().push((r.hash, r.label()));
         }
@@ -993,8 +993,8 @@ pub fn run(opts: Options) {
     let mut index = AssetIndex::build(&w.wads, HashMap::new());
     eprintln!(
         "[workshop] catalog: {} models, {} textures ({} wad(s))",
-        index.models.len(),
-        index.textures.len(),
+        index.models().len(),
+        index.textures().len(),
         w.wads.len()
     );
     // The resident AnimationLookup — the per-character clip resolver (parsed once). None on a
@@ -1378,10 +1378,12 @@ pub fn run(opts: Options) {
                         KeyCode::Home if list_visible => sel = 0,
                         KeyCode::End if list_visible => sel = filtered.len().saturating_sub(1),
                         KeyCode::ArrowLeft | KeyCode::ArrowRight if list_visible => {
-                            kind = match kind {
-                                Kind::Model => Kind::Texture,
-                                Kind::Texture => Kind::Model,
-                            };
+                            // Cycles the whole category strip now that there are eight of them,
+                            // not two. Left steps back, right steps forward, both wrapping.
+                            let cur = Kind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
+                            let n = Kind::ALL.len();
+                            let step = if code == KeyCode::ArrowLeft { n - 1 } else { 1 };
+                            kind = Kind::ALL[(cur + step) % n];
                             filtered = refilter(&index, kind, &filter);
                             sel = 0;
                         }
@@ -1526,8 +1528,8 @@ pub fn run(opts: Options) {
                                     status = format!(
                                         "{} names loaded ({secs:.1}s) — {} models, {} textures, {} lua scripts",
                                         index.names.len(),
-                                        index.models.len(),
-                                        index.textures.len(),
+                                        index.models().len(),
+                                        index.textures().len(),
                                         lua_corpus.len()
                                     );
                                 }
@@ -1985,47 +1987,58 @@ pub fn run(opts: Options) {
                             // Segmented Models / Textures toggle — two EQUAL-width segments, each a
                             // centred "LABEL  count" unit, the active one filled. Custom-drawn so the
                             // segments are exactly half the pill and the text is truly centred.
+                            // Eight categories now, so the old two-EQUAL-segment pill does not
+                            // fit: they WRAP, and an empty category is dimmed but still listed —
+                            // "this game has no X" is information, and hiding it would make the
+                            // catalog look like it only knows about the types it happens to have.
                             egui::Frame::none()
                                 .fill(theme::G0)
                                 .stroke(egui::Stroke::new(1.0, theme::LINE))
                                 .rounding(egui::Rounding::same(7.0))
-                                .inner_margin(egui::Margin::same(3.0))
+                                .inner_margin(egui::Margin::same(4.0))
                                 .show(ui, |ui| {
-                                    ui.spacing_mut().item_spacing.x = 3.0;
-                                    ui.horizontal(|ui| {
-                                        let seg_w = (ui.available_width() - 3.0) / 2.0;
-                                        for (k, name, count) in [
-                                            (Kind::Model, "Models", index.models.len()),
-                                            (Kind::Texture, "Textures", index.textures.len()),
-                                        ] {
+                                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        for k in Kind::ALL {
+                                            let count = index.count(k);
                                             let on = kind == k;
+                                            let name = k.short();
+                                            let p0 = ui.painter();
+                                            let g_name = p0.layout_no_wrap(
+                                                name.to_uppercase(),
+                                                egui::FontId::new(10.0, theme::disp()),
+                                                theme::TX,
+                                            );
+                                            let g_cnt = p0.layout_no_wrap(
+                                                commafy(count),
+                                                egui::FontId::monospace(9.0),
+                                                theme::FAINT,
+                                            );
+                                            let gap = 5.0;
+                                            let w = g_name.size().x + gap + g_cnt.size().x + 14.0;
                                             let (rect, resp) = ui.allocate_exact_size(
-                                                egui::vec2(seg_w, 26.0),
+                                                egui::vec2(w, 24.0),
                                                 egui::Sense::click(),
                                             );
+                                            let empty = count == 0;
                                             let p = ui.painter();
                                             let fill = if on {
                                                 theme::G3
-                                            } else if resp.hovered() {
+                                            } else if resp.hovered() && !empty {
                                                 theme::G2
                                             } else {
                                                 egui::Color32::TRANSPARENT
                                             };
                                             p.rect_filled(rect, egui::Rounding::same(5.0), fill);
-                                            let name_col = if on { theme::TX } else { theme::DIM };
+                                            let name_col = if on {
+                                                theme::TX
+                                            } else if empty {
+                                                theme::FAINT
+                                            } else {
+                                                theme::DIM
+                                            };
                                             let cnt_col = if on { theme::BRASS } else { theme::FAINT };
-                                            let g_name = p.layout_no_wrap(
-                                                name.to_uppercase(),
-                                                egui::FontId::new(11.0, theme::disp()),
-                                                name_col,
-                                            );
-                                            let g_cnt = p.layout_no_wrap(
-                                                commafy(count),
-                                                egui::FontId::monospace(9.5),
-                                                cnt_col,
-                                            );
                                             let (nsz, csz) = (g_name.size(), g_cnt.size());
-                                            let gap = 6.0;
                                             let x0 = rect.center().x - (nsz.x + gap + csz.x) / 2.0;
                                             let cy = rect.center().y;
                                             p.galley(egui::pos2(x0, cy - nsz.y / 2.0), g_name, name_col);
@@ -2034,7 +2047,19 @@ pub fn run(opts: Options) {
                                                 g_cnt,
                                                 cnt_col,
                                             );
-                                            if resp.clicked() {
+                                            // Say what the category previews as, so a browse-only
+                                            // one is understood before it is clicked.
+                                            let resp = match k.preview() {
+                                                crate::index::Preview::Render => {
+                                                    resp.on_hover_text("previews on the pedestal")
+                                                }
+                                                crate::index::Preview::Plate => {
+                                                    resp.on_hover_text("previews as a texture plate")
+                                                }
+                                                crate::index::Preview::None(why) => resp
+                                                    .on_hover_text(format!("browse only — {why}")),
+                                            };
+                                            if resp.clicked() && !empty {
                                                 kind = k;
                                             }
                                         }
@@ -2258,7 +2283,7 @@ pub fn run(opts: Options) {
                                         .inner_margin(egui::Margin::same(4.0))
                                         .show(ui, |ui| {
                                             let mut shown = 0usize;
-                                            for r in index.models.iter() {
+                                            for r in index.models().iter() {
                                                 if shown >= 10 {
                                                     ui.weak("…refine the search");
                                                     break;
@@ -2293,7 +2318,7 @@ pub fn run(opts: Options) {
                                 for i in 0..placed.len() {
                                     let (phash, plabel) = (placed[i].hash, placed[i].label.clone());
                                     let cat = index
-                                        .models
+                                        .models()
                                         .iter()
                                         .find(|r| r.hash == phash)
                                         .map(|r| r.category())
@@ -2428,7 +2453,7 @@ pub fn run(opts: Options) {
                                     );
                                     let f = filter.to_ascii_lowercase();
                                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                                        for r in index.models.iter() {
+                                        for r in index.models().iter() {
                                             let label = r.label();
                                             let ll = label.to_ascii_lowercase();
                                             let humanoid = ll.contains("hum") || ll.contains("merc")
@@ -3945,7 +3970,7 @@ pub fn run(opts: Options) {
                                         match settings_section {
                                             SettingsSection::Game => {
                                         // ── Game archive ──
-                                        let wad_badge = format!("{} models", index.models.len());
+                                        let wad_badge = format!("{} models", index.models().len());
                                         theme::section(ui, "Game archive", Some(&wad_badge), true, |ui| {
                                             let set = cfg.wad_path.is_some();
                                             let shown = cfg
@@ -4182,8 +4207,8 @@ pub fn run(opts: Options) {
                                                                     .unwrap_or_else(|| "embedded only".into()),
                                                             ),
                                                         );
-                                                        theme::kv(ui, "models", egui::RichText::new(commafy(index.models.len())));
-                                                        theme::kv(ui, "textures", egui::RichText::new(commafy(index.textures.len())));
+                                                        theme::kv(ui, "models", egui::RichText::new(commafy(index.models().len())));
+                                                        theme::kv(ui, "textures", egui::RichText::new(commafy(index.textures().len())));
                                                     },
                                                 );
                                                 theme::section(ui, "Config file", None, true, |ui| {
@@ -4923,6 +4948,14 @@ pub fn run(opts: Options) {
                                         };
                                         bind_tex_plate(&mut w, &mut scene, &mut tv);
                                         tex_view = Some(tv);
+                                    }
+                                    // A category with no faithful preview SAYS so rather than silently doing
+                                    // nothing. It is browsable, and that is the honest state of it — the
+                                    // standing rule against affordances that look like they work.
+                                    other => {
+                                        if let crate::index::Preview::None(why) = other.preview() {
+                                            status = format!("{} — {why}", row.label());
+                                        }
                                     }
                                 }
                             }

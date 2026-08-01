@@ -7,18 +7,116 @@ use std::path::{Path, PathBuf};
 
 use mercs2_engine::wad;
 
-/// What an [`AssetRow`] is, which decides how Enter previews it (3D model vs 2D texture plate).
+/// How the Library previews a category, stated HONESTLY.
+///
+/// The catalog indexes every ASET type, but only two of them have a faithful preview today. A
+/// category whose preview is not implemented says so rather than offering a dead affordance — the
+/// standing no-hidden-features rule, and the reason `Preview::None` carries its own explanation
+/// instead of the UI inventing one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Preview {
+    /// Full pipeline render on the pedestal.
+    Render,
+    /// 2D plate view (hi-mip streamed).
+    Plate,
+    /// Browsable with metadata; no faithful preview yet, and here is why.
+    None(&'static str),
+}
+
+/// A browsable asset category.
+///
+/// Plan 02 organises the Library around the retail ASET type-discriminator table rather than
+/// around the two types the tool happened to load first: *"Expand the browsable types beyond
+/// Models/Textures."* Before this, `AssetIndex::build` kept exactly two type ids and dropped every
+/// other ASET row on the floor, so 5,000+ animations, 314 effects, 248 audio banks and every font
+/// and string table were invisible to the tool that is supposed to be the content browser.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Model,
     Texture,
+    Animation,
+    Effect,
+    Audio,
+    UiGfx,
+    FaceFx,
+    Text,
 }
 
 impl Kind {
+    pub const ALL: [Kind; 8] = [
+        Kind::Model,
+        Kind::Texture,
+        Kind::Animation,
+        Kind::Effect,
+        Kind::Audio,
+        Kind::UiGfx,
+        Kind::FaceFx,
+        Kind::Text,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Kind::Model => "MODELS",
             Kind::Texture => "TEXTURES",
+            Kind::Animation => "ANIMATIONS",
+            Kind::Effect => "EFFECTS",
+            Kind::Audio => "AUDIO",
+            Kind::UiGfx => "UI / GFX",
+            Kind::FaceFx => "FACEFX",
+            Kind::Text => "FONTS & TEXT",
+        }
+    }
+
+    /// Short label for the category strip, where eight of them share one row.
+    pub fn short(self) -> &'static str {
+        match self {
+            Kind::Model => "Models",
+            Kind::Texture => "Textures",
+            Kind::Animation => "Anims",
+            Kind::Effect => "VFX",
+            Kind::Audio => "Audio",
+            Kind::UiGfx => "UI",
+            Kind::FaceFx => "FaceFX",
+            Kind::Text => "Text",
+        }
+    }
+
+    /// The ASET type ids that belong to this category.
+    ///
+    /// Ids without a constant in `mercs2_formats::types` are spelled numerically and named in a
+    /// comment; they come from `aset_type_ids::type_id_for_type_hash`, which is the registry.
+    pub fn type_ids(self) -> &'static [u32] {
+        use mercs2_formats::types::*;
+        match self {
+            Kind::Model => &[TYPE_ID_MODEL],
+            Kind::Texture => &[TYPE_ID_TEXTURE],
+            Kind::Animation => &[TYPE_ID_ANIMATION],
+            Kind::Effect => &[TYPE_ID_EFFECT, TYPE_ID_FX_DICTIONARY],
+            // wavebank, soundbank, sounddb(13)
+            Kind::Audio => &[TYPE_ID_WAVEBANK, TYPE_ID_SOUNDBANK, 13],
+            Kind::UiGfx => &[TYPE_ID_CFX_PACK],
+            // facefx_animset(5), facefx_actor(34)
+            Kind::FaceFx => &[5, 34],
+            Kind::Text => &[TYPE_ID_FONT, TYPE_ID_STRINGDB],
+        }
+    }
+
+    pub fn preview(self) -> Preview {
+        match self {
+            Kind::Model => Preview::Render,
+            Kind::Texture => Preview::Plate,
+            // A clip needs a rig to play on, and the Library has no subject of its own. The
+            // per-character catalog on a loaded model's Animation card is where clips play today.
+            Kind::Animation => Preview::None(
+                "a clip needs a rig — load a character and use its Animation card",
+            ),
+            Kind::Effect => Preview::None(
+                "the effect format is decoded but its parameters are still hash-only",
+            ),
+            Kind::Audio => Preview::None("playback is not wired into the Library yet"),
+            Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
+            Kind::FaceFx => Preview::None("needs a head to drive"),
+            Kind::Text => Preview::None("fonts render as a plate; string tables as a list"),
         }
     }
 }
@@ -152,17 +250,33 @@ pub fn classify_vehicle_token(cls: &str) -> &'static str {
 
 #[derive(Clone)]
 pub struct AssetIndex {
-    pub models: Vec<AssetRow>,
-    pub textures: Vec<AssetRow>,
+    /// One row list per [`Kind`], parallel to `Kind::ALL`. A `Vec` of lists rather than a field
+    /// per category: eight named fields would need eight matches to iterate, and the two that
+    /// existed already had to be listed by hand in `rows`, `build` and `apply_names`.
+    rows: Vec<Vec<AssetRow>>,
     pub names: HashMap<u32, String>,
 }
 
 impl AssetIndex {
     pub fn rows(&self, kind: Kind) -> &[AssetRow] {
-        match kind {
-            Kind::Model => &self.models,
-            Kind::Texture => &self.textures,
-        }
+        self.rows
+            .get(Kind::ALL.iter().position(|k| *k == kind).unwrap_or(0))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The 3D models. Kept as a named accessor because most of the app is about them.
+    pub fn models(&self) -> &[AssetRow] {
+        self.rows(Kind::Model)
+    }
+
+    pub fn textures(&self) -> &[AssetRow] {
+        self.rows(Kind::Texture)
+    }
+
+    /// How many assets a category holds — for the category strip's counts.
+    pub fn count(&self, kind: Kind) -> usize {
+        self.rows(kind).len()
     }
 
     /// Build the catalog from EVERY open WAD's ASET table (base + overlays, in stack order — a
@@ -173,29 +287,32 @@ impl AssetIndex {
     /// the (multi-second) name corpora on a background thread and calls [`Self::apply_names`]
     /// when they arrive, so the window opens immediately.
     pub fn build(wads: &[wad::Wad], names: HashMap<u32, String>) -> AssetIndex {
-        let mut models: HashMap<u32, AssetRow> = HashMap::new();
-        let mut textures: HashMap<u32, AssetRow> = HashMap::new();
+        // type_id -> which category it lands in, derived from `Kind::type_ids` so the mapping is
+        // stated once. An id no category claims is skipped rather than guessed at.
+        let mut of_type: HashMap<u32, usize> = HashMap::new();
+        for (i, k) in Kind::ALL.iter().enumerate() {
+            for t in k.type_ids() {
+                of_type.insert(*t, i);
+            }
+        }
+        let mut buckets: Vec<HashMap<u32, AssetRow>> =
+            (0..Kind::ALL.len()).map(|_| HashMap::new()).collect();
         for (src, w) in wads.iter().enumerate() {
             let primary_block: HashMap<u32, u16> = wad::model_list(w).into_iter().collect();
             for (hash, ty, _) in wad::all_asets(w) {
-                if ty == wad::MODEL_ASET_TYPE_ID {
-                    models.insert(
-                        hash,
-                        AssetRow {
-                            hash,
-                            block: primary_block.get(&hash).copied().unwrap_or(0),
-                            src,
-                            name: None,
-                        },
-                    );
-                } else if ty == mercs2_formats::types::TYPE_ID_TEXTURE {
-                    textures.insert(hash, AssetRow { hash, block: 0, src, name: None });
-                }
+                let Some(&i) = of_type.get(&ty) else { continue };
+                // Only models carry a primary block here; the rest are reached through their own
+                // ASET row, so 0 is the honest "not resolved by this index" value.
+                let block = if ty == wad::MODEL_ASET_TYPE_ID {
+                    primary_block.get(&hash).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                buckets[i].insert(hash, AssetRow { hash, block, src, name: None });
             }
         }
         let mut idx = AssetIndex {
-            models: models.into_values().collect(),
-            textures: textures.into_values().collect(),
+            rows: buckets.into_iter().map(|b| b.into_values().collect()).collect(),
             names: HashMap::new(),
         };
         idx.apply_names(names);
@@ -212,7 +329,7 @@ impl AssetIndex {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.hash.cmp(&b.hash),
         };
-        for rows in [&mut self.models, &mut self.textures] {
+        for rows in self.rows.iter_mut() {
             for r in rows.iter_mut() {
                 r.name = self.names.get(&r.hash).cloned();
             }

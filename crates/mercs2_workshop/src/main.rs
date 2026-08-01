@@ -265,7 +265,7 @@ fn main() {
         };
         let hashes: Vec<u32> = {
             let idx = index::AssetIndex::build(&w.wads, index::load_all_names(names_csv.clone()));
-            idx.models.iter().map(|r| r.hash).collect()
+            idx.models().iter().map(|r| r.hash).collect()
         };
         println!("hash\tresolves\tbones\tskinned_groups\tverts\ttris\ttextures");
         let (mut ok, mut failed) = (0usize, 0usize);
@@ -307,7 +307,7 @@ fn main() {
         };
         let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
         for (kind, rows) in
-            [(index::Kind::Model, &idx.models), (index::Kind::Texture, &idx.textures)]
+            [(index::Kind::Model, &idx.models()), (index::Kind::Texture, &idx.textures())]
         {
             for r in rows.iter().filter(|r| {
                 filter.is_empty() || r.label().to_ascii_lowercase().contains(&filter)
@@ -329,7 +329,7 @@ fn main() {
         let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
         let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
             std::collections::BTreeMap::new();
-        for r in &idx.models {
+        for r in idx.models() {
             if let Some(c) = r.vehicle_class() {
                 if want.as_deref().is_none_or(|w| w == c) {
                     by_class.entry(c).or_default().push(r);
@@ -479,7 +479,7 @@ fn main() {
         let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
         // A whole vehicle class ("class:helicopter") or a single asset.
         let targets: Vec<(u32, String)> = if let Some(cls) = arg.strip_prefix("class:") {
-            idx.models.iter()
+            idx.models().iter()
                 .filter(|r| r.vehicle_class() == Some(cls))
                 .map(|r| (r.hash, r.label()))
                 .collect()
