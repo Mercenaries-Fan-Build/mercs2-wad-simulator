@@ -476,14 +476,23 @@ enum Workbench {
 }
 
 impl Workbench {
-    const ALL: [Workbench; 6] = [
+    /// The rail. Mods and Skeleton are NOT peers here.
+    ///
+    /// Plan 02: *"'Mods' as a page disappears … Sandbox / Skeleton dissolve into craft surfaces,
+    /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
+    /// from the Shipment page and return to it, rather than being places you navigate to and then
+    /// have to remember what you were assembling.
+    const ALL: [Workbench; 4] = [
         Workbench::Inspect,
         Workbench::Sandbox,
-        Workbench::Mods,
-        Workbench::Skeleton,
         Workbench::Quartermaster,
         Workbench::Settings,
     ];
+
+    /// A craft surface reached from a contribution, rather than from the rail.
+    fn is_craft(self) -> bool {
+        matches!(self, Workbench::Mods | Workbench::Skeleton)
+    }
     fn label(self) -> &'static str {
         match self {
             Workbench::Inspect => "Inspect",
@@ -1400,6 +1409,21 @@ pub fn run(opts: Options) {
                                 ui.label(theme::disp_text("MERCS 2", 16.0, theme::TX));
                                 ui.label(theme::disp_text("WORKSHOP", 9.5, theme::FAINT));
                                 ui.separator();
+                                // A craft surface was entered FROM the Shipment, so it offers the way
+                                // back. Without this the rail no longer lists it and there is no
+                                // route out — which is how a "dissolved" page becomes a trap.
+                                if wb.is_craft()
+                                    && ui
+                                        .add(egui::Button::new(theme::disp_text(
+                                            "\u{2039} SHIPMENT",
+                                            10.0,
+                                            theme::BRASS,
+                                        )))
+                                        .on_hover_text("Back to the Shipment")
+                                        .clicked()
+                                {
+                                    wb = Workbench::Quartermaster;
+                                }
                                 ui.label(theme::disp_text(wb.verb().to_uppercase(), 10.0, theme::FAINT));
                                 // The breadcrumb names what the PAGE is working on. On the Shipment
                                 // page that is the Shipment — showing the previewed model instead
@@ -3577,7 +3601,7 @@ pub fn run(opts: Options) {
                         // CentralPanel rather than the 3D viewport, because a Shipment is read, not
                         // orbited. Added last so the side panels have already claimed their space.
                         if wb == Workbench::Quartermaster {
-                            crate::quartermaster::center(ctx, &qm);
+                            qm_acts.extend(crate::quartermaster::center(ctx, &qm));
                         }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
@@ -3706,6 +3730,14 @@ pub fn run(opts: Options) {
                     });
 
                     for act in std::mem::take(&mut qm_acts) {
+                        // Switching pages is the app's business, not the panel's — it owns `wb`.
+                        if let crate::quartermaster::Act::Craft(c) = act {
+                            wb = match c {
+                                crate::quartermaster::Craft::Rig => Workbench::Skeleton,
+                                crate::quartermaster::Craft::Conform => Workbench::Mods,
+                            };
+                            continue;
+                        }
                         crate::quartermaster::apply(
                             act,
                             &mut qm,

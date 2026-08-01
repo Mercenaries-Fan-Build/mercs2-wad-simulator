@@ -68,12 +68,32 @@ impl Gate {
     }
 }
 
+/// A craft surface — a bench that edits ONE contribution, entered from it and returning to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Craft {
+    /// The retarget bench: source rig onto the donor's, and the bone map a Shipment records.
+    Rig,
+    /// The conform bench: fit an import onto a donor, host groups and hardpoints.
+    Conform,
+}
+
+/// The three heroes `_tOutfits` is keyed by.
+///
+/// A closed set, because the table has one list per hero and a name that is not one of these
+/// creates a wardrobe nobody reads. Retail reuses `Original`/`ChickenSuit` across all three, which
+/// is why the merge key is `(wearer, slug)` and not `slug` alone.
+pub const WEARERS: [&str; 3] = ["mattias", "chris", "jen"];
+
 /// Queued by the widgets, executed by [`apply`], so rendering never borrows the game stack.
 pub enum Act {
     Open,
     /// Append a contribution of this `kind` to the manifest and write it back.
     Add(&'static str),
     Remove(usize),
+    /// Open the craft surface that edits this contribution — the rig bench, or the conform bench.
+    Craft(Craft),
+    /// Set the hero whose wardrobe an outfit joins.
+    SetWearer(usize, &'static str),
     Recheck,
     Build,
     Reveal,
@@ -499,7 +519,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
     })
 }
 
-// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 navigator
+// ---- navigator ----------------------------------------------------------------------
 
 /// The contribution queue.
 ///
@@ -618,7 +638,8 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 /// The blast radius here is COMPUTED, never authored — only `raw` declares its own, and it is the
 /// one kind that can. Showing it is the point of giving this a main area: it answers "can this
 /// coexist with someone else's Shipment", which a modder cannot work out alone.
-pub fn center(ctx: &egui::Context, p: &Panel) {
+pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+    let mut acts: Vec<Act> = Vec::new();
     egui::CentralPanel::default()
         .frame(
             egui::Frame::none()
@@ -651,9 +672,58 @@ pub fn center(ctx: &egui::Context, p: &Panel) {
             ui.add_space(14.0);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
+                // ── WARDROBE ────────────────────────────────────────────────────────────────
+                //
+                // Moved off Modkit, which is Tier 1 — install, load order, deploy. Choosing which
+                // hero wears an outfit is authoring, and authoring belongs to the tool that has the
+                // rig, the donor and the linter. Modkit keeping its own copy is what produced two
+                // independent writers of `_tOutfits` and the half-applied conflict.
+                if let Contribution::AddOutfit { wearer, slug, .. } = c {
+                    theme::section(ui, "Wardrobe", Some(slug), true, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "`_tOutfits` has one list per hero, so the wearer is a closed set \u{2014} and the merge key is (wearer, slug), which is why retail can reuse `Original` across all three.",
+                            )
+                            .size(11.0)
+                            .color(theme::FAINT),
+                        );
+                        ui.add_space(7.0);
+                        ui.horizontal(|ui| {
+                            for w in WEARERS {
+                                if theme::pill(ui, w, w == wearer.as_str()).clicked() {
+                                    acts.push(Act::SetWearer(i, w));
+                                }
+                            }
+                        });
+                    });
+                }
+
                 theme::section(ui, "Source", None, true, |ui| {
                     for (k, v) in source_rows(c) {
                         row(ui, &k, &v, theme::TX);
+                    }
+                    // ── CRAFT ───────────────────────────────────────────────────────────────
+                    //
+                    // Mods and Skeleton are no longer rail peers; they act on ONE contribution, so
+                    // they are entered from it and hand control back.
+                    if matches!(c, Contribution::AddOutfit { .. } | Contribution::AddModel { .. }) {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Edit rig\u{2026}")
+                                .on_hover_text("Retarget the source rig onto the donor's, and record the bone map")
+                                .clicked()
+                            {
+                                acts.push(Act::Craft(Craft::Rig));
+                            }
+                            if ui
+                                .button("Conform\u{2026}")
+                                .on_hover_text("Fit the import onto the donor \u{2014} host groups and hardpoints")
+                                .clicked()
+                            {
+                                acts.push(Act::Craft(Craft::Conform));
+                            }
+                        });
                     }
                 });
 
@@ -712,6 +782,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) {
                 });
             });
         });
+    acts
 }
 
 fn empty_middle(ui: &mut egui::Ui, title: &str, sub: &str) {
@@ -1057,6 +1128,19 @@ pub fn apply(
                 }
             }
         }
+        // Handled by the caller, which owns the workbench: the panel cannot switch pages itself.
+        Act::Craft(_) => {}
+        Act::SetWearer(i, w) => match p.mutate(names, |m| {
+            if let Some(Contribution::AddOutfit { wearer, .. }) = m.contributions.get_mut(i) {
+                *wearer = w.to_string();
+            }
+        }) {
+            Ok(()) => *status = p.status.clone(),
+            Err(e) => {
+                p.error = Some(e);
+                *status = "could not write the manifest".into();
+            }
+        },
         Act::Remove(i) => match p.mutate(names, |m| {
             if i < m.contributions.len() {
                 m.contributions.remove(i);
