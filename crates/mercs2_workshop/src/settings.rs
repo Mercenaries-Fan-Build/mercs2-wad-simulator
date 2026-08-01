@@ -9,7 +9,8 @@
 //!
 //! So both paths are settable and remembered here. Resolution order, most explicit first:
 //!
-//!   WAD   `--wad <path>` → this file → the Windows registry key → the first-run picker
+//!   WAD   `--wad <path>` → this file → CO-LOCATION → `$MERCS2_GAME_DIR`/`$VZ_WAD` → the Windows
+//!         registry key → the first-run picker
 //!   data  `MERCS2_WORKSHOP_DATA` → this file → next to the exe → a CWD walk-up
 //!
 //! A command-line flag still wins over a saved setting (a one-off run must not silently rewrite

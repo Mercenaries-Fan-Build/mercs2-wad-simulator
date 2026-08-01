@@ -29,7 +29,7 @@ use egui::Color32;
 use mercs2_quartermaster::build::{self, BuildError, BuildReport};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::lint::{Diagnostic, Severity};
-use mercs2_quartermaster::manifest::Contribution;
+use mercs2_quartermaster::manifest::{Contribution, Touch};
 use mercs2_quartermaster::names::NameTable;
 
 use crate::gui::theme;
@@ -91,9 +91,24 @@ pub enum Act {
     Add(&'static str),
     Remove(usize),
     /// Open the craft surface that edits this contribution — the rig bench, or the conform bench.
-    Craft(Craft),
+    ///
+    /// Carries the contribution INDEX. Without it the bench had no idea what it was editing, so a
+    /// commit could only ever append a new contribution, and there was no way back to the one you
+    /// came from.
+    Craft(Craft, usize),
     /// Set the hero whose wardrobe an outfit joins.
     SetWearer(usize, &'static str),
+    /// Replace contribution `.0` with an edited copy.
+    ///
+    /// The form edits a CLONE and emits this when a field commits, rather than mutating the
+    /// manifest under the renderer — the same rule the rest of this panel follows, and the reason
+    /// rendering never has to borrow the game stack. Boxed because `Contribution` is much larger
+    /// than the other variants and `Act` is moved around per frame.
+    Edit(usize, Box<Contribution>),
+    /// Scaffold a brand-new Shipment.
+    New,
+    /// Replace the Shipment's own identity block (name, version, target, load order).
+    EditIdentity(Box<mercs2_quartermaster::manifest::Shipment>, Box<mercs2_quartermaster::manifest::Load>),
     Recheck,
     Build,
     Reveal,
@@ -215,7 +230,7 @@ impl Panel {
     /// Writes YAML whatever the file was read as, so a Shipment authored in TOML or JSON is
     /// refused rather than silently re-emitted in another format under the same filename.
     /// `to_yaml` is documented as "the one format the Quartermaster WRITES".
-    fn mutate(
+    pub(crate) fn mutate(
         &mut self,
         names: Option<&NameTable>,
         edit: impl FnOnce(&mut mercs2_quartermaster::manifest::Manifest),
@@ -240,12 +255,149 @@ impl Panel {
         Ok(())
     }
 
+    /// Add a contribution, or replace the one at `i`. The single entry point for every surface
+    /// that produces one — the Library's "Add to Shipment", a craft bench committing its work, the
+    /// queue's own add menu.
+    pub(crate) fn upsert_contribution(
+        &mut self,
+        names: Option<&NameTable>,
+        i: Option<usize>,
+        c: Contribution,
+    ) -> Result<usize, String> {
+        let mut at = i.unwrap_or(usize::MAX);
+        self.mutate(names, |m| match i {
+            Some(i) if i < m.contributions.len() => m.contributions[i] = c,
+            _ => {
+                at = m.contributions.len();
+                m.contributions.push(c);
+            }
+        })?;
+        self.selected = Some(at);
+        Ok(at)
+    }
+
+    /// The root of an OPEN Shipment, creating one if there is none.
+    ///
+    /// This is what stops a craft bench being a dead end. Before it, the only way a bench could
+    /// produce a Shipment was `shipment::write`, which always picked a fresh folder and wrote a
+    /// brand-new single-contribution manifest over it — so work done with a Shipment already open
+    /// either had nowhere to go or silently replaced what was there.
+    ///
+    /// **Nothing in the workspace scaffolded a Shipment**: `qm` has no `init`, `discover` is
+    /// read-only, and the skeleton existed only in the template repo. So the scaffold is authored
+    /// here — through `to_yaml`, never by formatting YAML by hand.
+    pub(crate) fn ensure_shipment(
+        &mut self,
+        names: Option<&NameTable>,
+    ) -> Result<PathBuf, String> {
+        if let Some(r) = self.root() {
+            return Ok(r.to_path_buf());
+        }
+        let dir = rfd::FileDialog::new()
+            .set_title("New Shipment — pick an empty folder")
+            .pick_folder()
+            .ok_or("cancelled")?;
+        self.scaffold(&dir, names)?;
+        Ok(dir)
+    }
+
+    /// Write a fresh `manifest.yaml` + `src/` + `README.md` into `dir` and open it.
+    ///
+    /// Refuses a folder that already holds a manifest rather than overwriting one: this is reached
+    /// from a picker, and picking the wrong folder must not destroy someone's work.
+    pub(crate) fn scaffold(
+        &mut self,
+        dir: &Path,
+        names: Option<&NameTable>,
+    ) -> Result<(), String> {
+        use mercs2_quartermaster::manifest::{Load, Manifest, Shipment, Target, FORMAT_VERSION};
+
+        if mercs2_quartermaster::discover::find_manifest(dir).is_ok() {
+            return Err(format!(
+                "{} already holds a manifest — open it instead of scaffolding over it",
+                dir.display()
+            ));
+        }
+        // `shipment.name` is a slug AND the output filename (`build/<name>.wad`), so it cannot be
+        // the folder name verbatim.
+        let name = crate::shipment::slugify(
+            &dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+        );
+        let name = if name.is_empty() { "my-shipment".to_string() } else { name };
+        let m = Manifest {
+            format: FORMAT_VERSION,
+            shipment: Shipment {
+                name: name.clone(),
+                title: None,
+                version: "0.1.0".into(),
+                authors: Vec::new(),
+                description: None,
+                target: Target::Retail,
+                quartermaster: None,
+                license: None,
+                homepage: None,
+                tags: Vec::new(),
+            },
+            load: Load::default(),
+            contributions: Vec::new(),
+        };
+        m.validate().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(dir.join("src"))
+            .map_err(|e| format!("{}: {e}", dir.join("src").display()))?;
+        let text = mercs2_quartermaster::to_yaml(&m)?;
+        let path = dir.join("manifest.yaml");
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Only if absent — a folder may already carry the author's own notes.
+        let readme = dir.join("README.md");
+        if !readme.exists() {
+            let _ = std::fs::write(
+                &readme,
+                format!(
+                    "# {name}\n\nA Mercenaries 2 Shipment. Sources live in `src/`; \
+                     `qm build .` writes `build/{name}.wad`.\n",
+                ),
+            );
+        }
+        self.open_shipment(dir, names);
+        Ok(())
+    }
+
+    /// Copy a source file into the Shipment's `src/` and return the manifest-relative path.
+    ///
+    /// Every kind references its inputs by a `src/`-relative path, so a bench holding an absolute
+    /// path to a scratch file has to bring the bytes along or the Shipment stops building the
+    /// moment it moves machines. Collisions get a numeric suffix rather than overwriting.
+    pub(crate) fn import_source(root: &Path, from: &Path) -> Result<PathBuf, String> {
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let stem = from.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "asset".into());
+        let ext = from.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+        let mut leaf = format!("{stem}{ext}");
+        let mut n = 1;
+        while src.join(&leaf).exists() {
+            // Same name, same bytes: reuse it rather than piling up copies.
+            if std::fs::read(src.join(&leaf)).ok() == std::fs::read(from).ok() {
+                return Ok(PathBuf::from("src").join(leaf));
+            }
+            leaf = format!("{stem}_{n}{ext}");
+            n += 1;
+        }
+        std::fs::copy(from, src.join(&leaf))
+            .map_err(|e| format!("copying {}: {e}", from.display()))?;
+        Ok(PathBuf::from("src").join(leaf))
+    }
+
     /// A suffix that does not collide with what is already queued.
     fn next_stub_index(&self) -> usize {
         self.shipment
             .as_ref()
             .map(|s| s.manifest.contributions.len() + 1)
             .unwrap_or(1)
+    }
+
+    /// How many contributions are queued — for a caller minting a non-colliding stub name.
+    pub fn contribution_count(&self) -> usize {
+        self.shipment.as_ref().map(|s| s.manifest.contributions.len()).unwrap_or(0)
     }
 
     pub fn root(&self) -> Option<&Path> {
@@ -324,6 +476,7 @@ fn contribution_name(c: &Contribution) -> String {
     match c {
         Contribution::AddOutfit { name, .. }
         | Contribution::AddModel { name, .. }
+        | Contribution::AddTexture { name, .. }
         | Contribution::AddMovie { name, .. } => name.clone(),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
@@ -446,8 +599,10 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("add_outfit", "A wearable outfit — model plus a wardrobe row"),
             ("add_model", "A new model on a donor's rig"),
+            ("add_texture", "A new texture under a name you choose"),
             ("add_movie", "A Scaleform movie"),
             ("replace_texture", "Replace a shipped texture, same hash"),
+            ("edit_state_machine", "Rewrite a destructible's states"),
         ],
     ),
     ("Script", &[("patch_lua", "Append to a shipped script")]),
@@ -460,6 +615,39 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
     ),
     ("Any", &[("raw", "Opaque bytes plus a declared blast radius")]),
 ];
+
+/// What an EXISTING game asset can become the basis of, and how.
+///
+/// This is Plan 02's *"act on an asset — context menu → start a Shipment from this"*, which had no
+/// implementation at all: there was no code path from an Inspect selection into the Quartermaster.
+///
+/// The asset is never the thing being written. A shipped model becomes a **donor** (its rig,
+/// materials and state machine are borrowed, read-only); a shipped texture becomes a **target**.
+/// That distinction is the `no-destructive-replacements` mandate expressed as a menu: nothing here
+/// can produce a contribution that overwrites the asset you right-clicked.
+pub fn routes_for(is_texture: bool) -> &'static [(&'static str, &'static str)] {
+    if is_texture {
+        &[("replace_texture", "Replace this texture")]
+    } else {
+        &[
+            ("add_outfit", "New outfit on this donor"),
+            ("add_model", "New model on this donor"),
+        ]
+    }
+}
+
+/// A stub for `kind` with an existing asset wired in as its donor or target.
+pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
+    let mut c = stub(kind, n)?;
+    match &mut c {
+        Contribution::AddOutfit { donor, .. } | Contribution::AddModel { donor, .. } => {
+            *donor = Some(asset.to_string());
+        }
+        Contribution::ReplaceTexture { target, .. } => *target = asset.to_string(),
+        _ => {}
+    }
+    Some(c)
+}
 
 /// A schema-valid stub for `kind`.
 ///
@@ -485,7 +673,18 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             name,
             model: PathBuf::from("src/model.glb"),
             donor: Some("pmc_hum_mattias".into()),
+            group: None,
+            textures: Textures::default(),
             retarget: None,
+        },
+        "add_texture" => Contribution::AddTexture {
+            name,
+            image: PathBuf::from("src/texture.png"),
+            normal_map: false,
+        },
+        "edit_state_machine" => Contribution::EditStateMachine {
+            target: "al_veh_boat_destroyer".into(),
+            states: PathBuf::from("src/states.yaml"),
         },
         "add_movie" => Contribution::AddMovie {
             name,
@@ -638,7 +837,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 /// The blast radius here is COMPUTED, never authored — only `raw` declares its own, and it is the
 /// one kind that can. Showing it is the point of giving this a main area: it answers "can this
 /// coexist with someone else's Shipment", which a modder cannot work out alone.
-pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     egui::CentralPanel::default()
         .frame(
@@ -654,8 +853,30 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     "Open one, or export a character from the Skeleton bench.",
                 );
             };
+            // Nothing selected: show the Shipment's OWN identity rather than a shrug. These
+            // fields had no editor anywhere, and `shipment.name` decides the output filename.
             let Some(i) = p.selected.filter(|i| *i < s.manifest.contributions.len()) else {
-                return empty_middle(ui, "PICK A CONTRIBUTION", "The queue is on the left.");
+                ui.label(theme::disp_text(
+                    s.manifest.shipment.name.to_uppercase(),
+                    22.0,
+                    theme::TX,
+                ));
+                ui.label(
+                    egui::RichText::new("the Shipment itself — pick a contribution at left to edit one")
+                        .size(11.0)
+                        .color(theme::FAINT),
+                );
+                ui.add_space(14.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let mut sh = s.manifest.shipment.clone();
+                    let mut load = s.manifest.load.clone();
+                    if identity_form(ui, &mut sh, &mut load)
+                        && (sh != s.manifest.shipment || load != s.manifest.load)
+                    {
+                        acts.push(Act::EditIdentity(Box::new(sh), Box::new(load)));
+                    }
+                });
+                return;
             };
             let c = &s.manifest.contributions[i];
 
@@ -698,9 +919,17 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     });
                 }
 
-                theme::section(ui, "Source", None, true, |ui| {
-                    for (k, v) in source_rows(c) {
-                        row(ui, &k, &v, theme::TX);
+                // ── FIELDS: the contribution, editable.
+                //
+                // Every field of every kind, committed through `Act::Edit` → `upsert_contribution`
+                // → `mutate`, which re-writes the manifest and re-lints. The linter IS the feedback
+                // loop; there is no separate "check" button to forget to press.
+                let root = s.root.as_path();
+                theme::section(ui, "Fields", Some(c.kind()), true, |ui| {
+                    let mut edited = c.clone();
+                    let commit = contribution_form(ui, &mut edited, root, names);
+                    if commit && edited != *c {
+                        acts.push(Act::Edit(i, Box::new(edited)));
                     }
                     // ── CRAFT ───────────────────────────────────────────────────────────────
                     //
@@ -714,14 +943,14 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                                 .on_hover_text("Retarget the source rig onto the donor's, and record the bone map")
                                 .clicked()
                             {
-                                acts.push(Act::Craft(Craft::Rig));
+                                acts.push(Act::Craft(Craft::Rig, i));
                             }
                             if ui
                                 .button("Conform\u{2026}")
                                 .on_hover_text("Fit the import onto the donor \u{2014} host groups and hardpoints")
                                 .clicked()
                             {
-                                acts.push(Act::Craft(Craft::Conform));
+                                acts.push(Act::Craft(Craft::Conform, i));
                             }
                         });
                     }
@@ -785,6 +1014,598 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     acts
 }
 
+// ───────────────────────────────────────────────────────────────────── the per-kind edit form
+//
+// This replaces a read-only rendering. `center` used to print `source_rows()` — a
+// `Vec<(String, String)>` of pre-formatted DISPLAY strings — so every field of every kind was
+// text, and the only editable thing on the whole page was the wearer. Anything else meant leaving
+// the tool and hand-editing YAML, which is the gap between the Quartermaster and Modkit that this
+// page exists to close.
+
+/// Does a source path resolve, and what should the field say about it?
+///
+/// Mirrors `discover::check_sources`, which is what the linter runs — so the answer here is the
+/// same answer M0110/M0111/M0112 will give, just delivered at the click instead of at the next
+/// lint pass.
+fn source_state(root: &Path, rel: &Path) -> (theme::FieldState, Option<String>) {
+    if rel.as_os_str().is_empty() {
+        return (theme::FieldState::Bad, Some("no file chosen".into()));
+    }
+    if rel.is_absolute() {
+        return (
+            theme::FieldState::Bad,
+            Some("M0111 — an absolute path leaves the Shipment; keep sources under src/".into()),
+        );
+    }
+    if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return (
+            theme::FieldState::Bad,
+            Some("M0111 — `..` leaves the Shipment root".into()),
+        );
+    }
+    if !root.join(rel).is_file() {
+        return (
+            theme::FieldState::Bad,
+            Some(format!("M0110 — {} does not exist", rel.display())),
+        );
+    }
+    if !rel.starts_with("src") {
+        return (
+            theme::FieldState::Warn,
+            Some("M0112 — outside src/; conventional sources live there".into()),
+        );
+    }
+    (theme::FieldState::Good, None)
+}
+
+/// A `src/`-relative file row plus its live verdict.
+fn source_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut PathBuf,
+    root: &Path,
+    filters: &[&str],
+) -> bool {
+    let (state, note) = source_state(root, value);
+    let changed = theme::path_field(ui, label, value, root, filters, state);
+    if let Some(n) = note {
+        theme::field_note(ui, state, &n);
+    }
+    changed
+}
+
+/// An asset-reference row: free text, with the hash it resolves to shown live.
+///
+/// Every reference goes through `manifest::asset_hash`, which is a documented mandate — a bare
+/// `0x…` IS the hash and anything else is hashed as a name. Hashing the *string* `"0x56130E64"`
+/// yields `0xC6B71C1F`, so a field that computed its own preview differently would show one number
+/// while the builder used another.
+fn asset_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    names: Option<&NameTable>,
+) -> bool {
+    let empty = value.trim().is_empty();
+    let state = if empty { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+    let r = theme::text_field(ui, label, value, "name or 0xHASH", state);
+    if empty {
+        theme::field_note(ui, theme::FieldState::Bad, "required");
+    } else {
+        let h = mercs2_quartermaster::manifest::asset_hash(value);
+        match mercs2_quartermaster::manifest::bare_hash(value) {
+            // M0130: a hash is one-way, so a manifest full of them cannot be reviewed. Offer the
+            // name when one is known — advisory, never blocking.
+            Some(_) => match names.and_then(|n| n.reverse(h)) {
+                Some(name) => theme::field_note(
+                    ui,
+                    theme::FieldState::Warn,
+                    &format!("M0130 — this is `{name}`; a name diffs, a hash does not"),
+                ),
+                None => theme::field_note(
+                    ui,
+                    theme::FieldState::Neutral,
+                    &format!("0x{h:08X} — no name known for this hash"),
+                ),
+            },
+            None => theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!("hashes to 0x{h:08X}"),
+            ),
+        }
+    }
+    r.lost_focus()
+}
+
+/// A plain required-text row (asset NAME being minted, slug, display).
+fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, required: bool) -> bool {
+    let bad = required && value.trim().is_empty();
+    let state = if bad { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+    let r = theme::text_field(ui, label, value, hint, state);
+    if bad {
+        theme::field_note(ui, theme::FieldState::Bad, "required");
+    }
+    r.lost_focus()
+}
+
+/// An editable list of blast-radius entries (`raw.touches`, `native_hook.touches`).
+fn touches_editor(ui: &mut egui::Ui, touches: &mut Vec<Touch>, required: bool) -> bool {
+    let mut commit = false;
+    let mut remove: Option<usize> = None;
+    for (i, t) in touches.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            // State computed BEFORE the mutable borrow of the same field.
+            let state = if t.0.trim().is_empty() {
+                theme::FieldState::Bad
+            } else {
+                theme::FieldState::Neutral
+            };
+            let label = format!("touch {i}");
+            let r = theme::text_field(ui, &label, &mut t.0, "name or 0xHASH", state);
+            commit |= r.lost_focus();
+            if ui.small_button("✕").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        touches.remove(i);
+        commit = true;
+    }
+    if ui.button("+ touch").clicked() {
+        touches.push(Touch(String::new()));
+        commit = true;
+    }
+    if required && touches.is_empty() {
+        theme::field_note(
+            ui,
+            theme::FieldState::Bad,
+            "M0150 — a raw payload must declare what it touches; nothing downstream can infer it",
+        );
+    }
+    commit
+}
+
+/// Edit every field of one contribution. Returns true when a change should be written back.
+///
+/// The caller passes a CLONE; this mutates it, and the caller compares and emits `Act::Edit`.
+fn contribution_form(
+    ui: &mut egui::Ui,
+    c: &mut Contribution,
+    root: &Path,
+    names: Option<&NameTable>,
+) -> bool {
+    use mercs2_quartermaster::manifest::{Layer, PlaceIn, Target};
+    let mut commit = false;
+
+    match c {
+        Contribution::AddOutfit {
+            name, slug, display, wearer, model, donor, textures, retarget,
+        } => {
+            commit |= text_row(ui, "Asset name", name, "pmc_hum_my_outfit", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!(
+                    "0x{:08X} — what Player.SetOutfit receives",
+                    mercs2_quartermaster::manifest::asset_hash(name)
+                ),
+            );
+            commit |= text_row(ui, "Wardrobe slug", slug, "MyOutfit", true);
+            commit |= text_row(ui, "Display", display, "My outfit", true);
+            // A CLOSED set: `_tOutfits` has one list per hero, so a fourth name creates a wardrobe
+            // nothing reads. M0140 is unrepresentable here rather than merely checked.
+            ui.horizontal(|ui| {
+                let lw = theme::field_label_w(ui.available_width());
+                ui.add_space(lw + 4.0);
+                for w in WEARERS {
+                    if theme::pill(ui, w, w == wearer.as_str()).clicked() {
+                        *wearer = w.to_string();
+                        commit = true;
+                    }
+                }
+            });
+            commit |= source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]);
+            let mut d = donor.clone().unwrap_or_default();
+            if asset_row(ui, "Donor", &mut d, names) {
+                *donor = (!d.trim().is_empty()).then_some(d);
+                commit = true;
+            }
+            ui.add_space(4.0);
+            theme::eyebrow(ui, "Skin — omit a slot to keep the donor's");
+            for (lbl, slot) in [
+                ("Diffuse", &mut textures.diffuse),
+                ("Normal", &mut textures.normal),
+                ("Specular", &mut textures.specular),
+            ] {
+                commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
+            }
+            commit |= retarget_summary(ui, retarget);
+        }
+        Contribution::AddModel { name, model, donor, group, textures, retarget } => {
+            commit |= text_row(ui, "Asset name", name, "my_custom_helipad", true);
+            commit |= source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]);
+            let mut d = donor.clone().unwrap_or_default();
+            if asset_row(ui, "Donor", &mut d, names) {
+                *donor = (!d.trim().is_empty()).then_some(d);
+                commit = true;
+            }
+            // The host draw group. Previously unrecordable, so a conform could be previewed and
+            // then not expressed.
+            let mut g = group.unwrap_or(0) as f32;
+            if theme::scalar_field(ui, "Host group", &mut g, 1.0) {
+                *group = Some((g.max(0.0) as u32).min(63));
+                commit = true;
+            }
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "0..63 — the donor draw group the geometry replaces",
+            );
+            ui.add_space(4.0);
+            theme::eyebrow(ui, "Skin — omit to wear the donor's materials");
+            for (lbl, slot) in [
+                ("Diffuse", &mut textures.diffuse),
+                ("Normal", &mut textures.normal),
+                ("Specular", &mut textures.specular),
+            ] {
+                commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
+            }
+            commit |= retarget_summary(ui, retarget);
+        }
+        Contribution::AddTexture { name, image, normal_map } => {
+            commit |= text_row(ui, "Asset name", name, "my_custom_decal", true);
+            commit |= source_row(ui, "Image", image, root, &["png"]);
+            ui.horizontal(|ui| {
+                let lw = theme::field_label_w(ui.available_width());
+                ui.add_space(lw + 4.0);
+                if theme::pill(ui, "normal map", *normal_map).clicked() {
+                    *normal_map = !*normal_map;
+                    commit = true;
+                }
+            });
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                if *normal_map {
+                    "DXT5nm, R=1 G=ny B=1 A=nx — matches the preview encoder"
+                } else {
+                    "BC1, or BC3 when the image carries real alpha"
+                },
+            );
+        }
+        Contribution::AddMovie { name, movie } => {
+            commit |= text_row(ui, "Asset name", name, "my_menu", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "a NAME, not a filename — retail's are bare (`topbar`, `pause_menu`)",
+            );
+            commit |= source_row(ui, "Movie", movie, root, &["gfx", "cfx", "swf"]);
+        }
+        Contribution::ReplaceTexture { target, image } => {
+            commit |= asset_row(ui, "Target", target, names);
+            commit |= source_row(ui, "Image", image, root, &["png"]);
+        }
+        Contribution::PatchLua { target, append } => {
+            commit |= text_row(ui, "Target script", target, "wifpmcinterior", true);
+            commit |= source_row(ui, "Append", append, root, &["lua"]);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "a declared MUTATION — relinked across every installed Shipment at deploy",
+            );
+        }
+        Contribution::EditStateMachine { target, states } => {
+            commit |= asset_row(ui, "Target", target, names);
+            commit |= source_row(ui, "States", states, root, &["yaml", "yml"]);
+        }
+        Contribution::NativeHook { target, plugin, symbol, touches } => {
+            // `both` is reserved and rejected in v1, so it is not offered.
+            commit |= theme::combo_field(
+                ui,
+                "Engine",
+                target,
+                &[(Target::Retail, "retail"), (Target::Reimpl, "reimpl")],
+                theme::FieldState::Neutral,
+            );
+            let mut p = plugin.clone().unwrap_or_default();
+            if source_row(ui, "Plugin", &mut p, root, &["asi"]) {
+                *plugin = (!p.as_os_str().is_empty()).then_some(p);
+                commit = true;
+            }
+            // The builder chooses the destination; there is no `dest` field, which is what keeps
+            // `Mercenaries2.exe` and `data/vz.wad` unreachable by construction.
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "placed in scripts/ — the loader's own glob. There is no destination to choose.",
+            );
+            let mut s = symbol.clone().unwrap_or_default();
+            if text_row(ui, "Symbol", &mut s, "optional", false) {
+                *symbol = (!s.trim().is_empty()).then_some(s);
+                commit = true;
+            }
+            if plugin.is_none() && symbol.is_none() {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Bad,
+                    "M0161 — supply a plugin, a symbol, or both",
+                );
+            }
+            ui.add_space(4.0);
+            theme::eyebrow(ui, "Declared blast radius");
+            commit |= touches_editor(ui, touches, false);
+        }
+        Contribution::PlaceFile { file, dest } => {
+            commit |= source_row(ui, "File", file, root, &[]);
+            // Live, against the builder's OWN refusals rather than a copy of them.
+            if let Some(n) = file.file_name().map(|s| s.to_string_lossy().to_string()) {
+                if let Some(why) = mercs2_quartermaster::build::companion_name_refusal(&n) {
+                    theme::field_note(ui, theme::FieldState::Bad, &format!("M0162 — {why}"));
+                }
+            }
+            commit |= theme::combo_field(
+                ui,
+                "Destination",
+                dest,
+                &[
+                    (PlaceIn::GameRoot, "game root"),
+                    (PlaceIn::Scripts, "scripts/"),
+                    (PlaceIn::Plugins, "plugins/"),
+                    (PlaceIn::Update, "update/"),
+                    (PlaceIn::OnBoot, "scripts/OnBoot"),
+                    (PlaceIn::OnLoad, "scripts/OnLoad"),
+                    (PlaceIn::OnKey, "scripts/OnKey"),
+                ],
+                theme::FieldState::Neutral,
+            );
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "a NAME from a closed set, never a path — that is the security property",
+            );
+        }
+        Contribution::Raw { description, payload, target_layer, touches } => {
+            let mut d = description.clone().unwrap_or_default();
+            if text_row(ui, "Description", &mut d, "what these bytes are", false) {
+                *description = (!d.trim().is_empty()).then_some(d);
+                commit = true;
+            }
+            commit |= source_row(ui, "Payload", payload, root, &[]);
+            commit |= theme::combo_field(
+                ui,
+                "Layer",
+                target_layer,
+                &[
+                    (Layer::Data, "data"),
+                    (Layer::Script, "script"),
+                    (Layer::Code, "code"),
+                    (Layer::Runtime, "runtime"),
+                ],
+                if *target_layer == Layer::Data {
+                    theme::FieldState::Neutral
+                } else {
+                    theme::FieldState::Bad
+                },
+            );
+            if *target_layer != Layer::Data {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Bad,
+                    "only `data` lowers — the overlay is a WAD, and that is the only layer a WAD \
+                     holds. Use patch_lua / native_hook / place_file instead.",
+                );
+            }
+            ui.add_space(4.0);
+            theme::eyebrow(ui, "Declared blast radius — must match the payload exactly");
+            commit |= touches_editor(ui, touches, true);
+        }
+    }
+    commit
+}
+
+/// The Shipment's OWN identity — what it is called, who wrote it, and how it orders against others.
+///
+/// Shown where "pick a contribution" used to be. That space was doing nothing, and these fields had
+/// no editor at all: `shipment.name` decides the output filename (`build/<name>.wad`) and every
+/// cross-Shipment reference, and was reachable only by hand-editing YAML.
+fn identity_form(
+    ui: &mut egui::Ui,
+    sh: &mut mercs2_quartermaster::manifest::Shipment,
+    load: &mut mercs2_quartermaster::manifest::Load,
+) -> bool {
+    use mercs2_quartermaster::manifest::{Target, MAX_NAME_LEN};
+    let mut commit = false;
+
+    // Badge cloned out first: `section` holds it across the closure that also mutates `sh`.
+    let badge = sh.version.clone();
+    theme::section(ui, "Identity", Some(&badge), true, |ui| {
+        // The slug rule is enforced in the WIDGET, not left to M0100: this string becomes a
+        // filename, so an invalid one is a build that cannot name its own output.
+        let slug_ok = !sh.name.is_empty()
+            && sh.name.len() <= MAX_NAME_LEN
+            && !sh.name.starts_with('-')
+            && !sh.name.ends_with('-')
+            && !sh.name.contains("--")
+            && sh
+                .name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        let st = if slug_ok { theme::FieldState::Good } else { theme::FieldState::Bad };
+        commit |= theme::text_field(ui, "Name", &mut sh.name, "my-shipment", st).lost_focus();
+        if slug_ok {
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!("builds to build/{}.wad", sh.name),
+            );
+        } else {
+            theme::field_note(
+                ui,
+                theme::FieldState::Bad,
+                "M0100 — lowercase, digits and single hyphens only (it becomes the filename)",
+            );
+        }
+
+        let mut title = sh.title.clone().unwrap_or_default();
+        if theme::text_field(ui, "Title", &mut title, "My Shipment", theme::FieldState::Neutral)
+            .lost_focus()
+        {
+            sh.title = (!title.trim().is_empty()).then_some(title);
+            commit = true;
+        }
+        let vst = if sh.version.trim().is_empty() {
+            theme::FieldState::Bad
+        } else {
+            theme::FieldState::Neutral
+        };
+        commit |= theme::text_field(ui, "Version", &mut sh.version, "1.0.0", vst).lost_focus();
+
+        let mut desc = sh.description.clone().unwrap_or_default();
+        if theme::text_field(ui, "Description", &mut desc, "what it does", theme::FieldState::Neutral)
+            .lost_focus()
+        {
+            sh.description = (!desc.trim().is_empty()).then_some(desc);
+            commit = true;
+        }
+
+        let mut authors = sh.authors.join(", ");
+        if theme::text_field(ui, "Authors", &mut authors, "you, someone else", theme::FieldState::Neutral)
+            .lost_focus()
+        {
+            sh.authors = authors
+                .split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect();
+            commit = true;
+        }
+
+        // `both` is reserved and rejected in v1, so it is not offered — the same reason the
+        // native_hook engine picker omits it.
+        commit |= theme::combo_field(
+            ui,
+            "Target",
+            &mut sh.target,
+            &[(Target::Retail, "retail"), (Target::Reimpl, "reimpl")],
+            theme::FieldState::Neutral,
+        );
+
+        let mut lic = sh.license.clone().unwrap_or_default();
+        if theme::text_field(ui, "License", &mut lic, "MIT", theme::FieldState::Neutral).lost_focus() {
+            sh.license = (!lic.trim().is_empty()).then_some(lic);
+            commit = true;
+        }
+        let mut home = sh.homepage.clone().unwrap_or_default();
+        if theme::text_field(ui, "Homepage", &mut home, "https://…", theme::FieldState::Neutral)
+            .lost_focus()
+        {
+            sh.homepage = (!home.trim().is_empty()).then_some(home);
+            commit = true;
+        }
+        let mut tags = sh.tags.join(", ");
+        if theme::text_field(ui, "Tags", &mut tags, "outfit, character", theme::FieldState::Neutral)
+            .lost_focus()
+        {
+            sh.tags = tags
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            commit = true;
+        }
+    });
+
+    theme::section(ui, "Load order", None, false, |ui| {
+        ui.label(
+            egui::RichText::new(
+                "Names of other Shipments. `after`/`before` constrain the deploy-time link order; \
+                 `conflicts` declares one that cannot be installed alongside this.",
+            )
+            .size(11.0)
+            .color(theme::FAINT),
+        );
+        ui.add_space(6.0);
+        for (lbl, list) in [
+            ("After", &mut load.after),
+            ("Before", &mut load.before),
+            ("Conflicts", &mut load.conflicts),
+        ] {
+            let mut joined = list.join(", ");
+            if theme::text_field(ui, lbl, &mut joined, "other-shipment", theme::FieldState::Neutral)
+                .lost_focus()
+            {
+                *list = joined
+                    .split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                commit = true;
+            }
+        }
+    });
+
+    commit
+}
+
+/// An optional `src/` file (a texture slot). Absent is a meaningful value, so the widget owns its
+/// own clear button — nesting one beside `path_field` put the two in separate horizontal layouts.
+fn optional_source_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    slot: &mut Option<PathBuf>,
+    root: &Path,
+    filters: &[&str],
+) -> bool {
+    let (state, note) = match slot.as_deref() {
+        None => (theme::FieldState::Neutral, None),
+        Some(rel) => source_state(root, rel),
+    };
+    let changed = theme::opt_path_field(ui, label, slot, root, filters, state);
+    if let Some(n) = note {
+        theme::field_note(ui, state, &n);
+    }
+    changed
+}
+
+/// The retarget sub-block, read-only plus a way in.
+///
+/// The bone map is not hand-editable here on purpose: it is produced by the rig bench, where a bone
+/// can be seen. What this shows is whether one is recorded, because a Shipment carrying only
+/// `from:` rebuilds to something the author never approved.
+fn retarget_summary(
+    ui: &mut egui::Ui,
+    rt: &mut Option<mercs2_quartermaster::manifest::Retarget>,
+) -> bool {
+    ui.add_space(4.0);
+    match rt {
+        None => {
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "No retarget — the source is assumed already hero-rigged.",
+            );
+            false
+        }
+        Some(r) => {
+            let n = r.bones.as_ref().map(|b| b.len()).unwrap_or(0);
+            theme::kv(ui, "retarget from", egui::RichText::new(&r.from));
+            theme::kv(ui, "bone rows", egui::RichText::new(n.to_string()));
+            if n == 0 {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Warn,
+                    "no bone map recorded — a rebuild will re-derive it and may differ from what \
+                     you approved",
+                );
+            }
+            false
+        }
+    }
+}
+
 fn empty_middle(ui: &mut egui::Ui, title: &str, sub: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space(90.0);
@@ -792,77 +1613,6 @@ fn empty_middle(ui: &mut egui::Ui, title: &str, sub: &str) {
         ui.add_space(6.0);
         ui.label(egui::RichText::new(sub).size(12.0).color(theme::FAINT));
     });
-}
-
-/// The contribution's own inputs, as the author wrote them.
-fn source_rows(c: &Contribution) -> Vec<(String, String)> {
-    // The path the AUTHOR wrote. An absolute scratch path is not what they recognise.
-    let abs = |p: &PathBuf| p.display().to_string();
-    match c {
-        Contribution::AddOutfit {
-            model, donor, wearer, slug, retarget, textures, ..
-        } => {
-            let mut v = vec![("Model".to_string(), abs(model))];
-            if let Some(d) = donor {
-                v.push(("Donor".into(), d.clone()));
-            }
-            v.push(("Wearer".into(), format!("{wearer} / {slug}")));
-            if let Some(r) = retarget {
-                let n = r.bones.as_ref().map(|b| b.len()).unwrap_or(0);
-                v.push(("Retarget".into(), format!("{} \u{b7} {n} bone rows", r.from)));
-            }
-            for (k, t) in [
-                ("Diffuse", &textures.diffuse),
-                ("Specular", &textures.specular),
-                ("Normal", &textures.normal),
-            ] {
-                if let Some(t) = t {
-                    v.push((k.to_string(), abs(t)));
-                }
-            }
-            v
-        }
-        Contribution::AddModel { model, donor, retarget, .. } => {
-            let mut v = vec![("Model".to_string(), abs(model))];
-            if let Some(d) = donor {
-                v.push(("Donor".into(), d.clone()));
-            }
-            if let Some(r) = retarget {
-                v.push(("Retarget".into(), r.from.clone()));
-            }
-            v
-        }
-        Contribution::AddMovie { movie, .. } => vec![("Movie".to_string(), abs(movie))],
-        Contribution::ReplaceTexture { target, image } => vec![
-            ("Target".to_string(), target.clone()),
-            ("Image".to_string(), abs(image)),
-        ],
-        Contribution::PatchLua { target, append, .. } => vec![
-            ("Target".to_string(), target.clone()),
-            ("Append".to_string(), abs(append)),
-        ],
-        Contribution::EditStateMachine { target, .. } => {
-            vec![("Target".to_string(), target.clone())]
-        }
-        Contribution::NativeHook { plugin, symbol, target, .. } => {
-            let mut v = vec![("Engine".to_string(), format!("{target:?}").to_lowercase())];
-            if let Some(f) = plugin {
-                v.push(("Plugin".into(), abs(f)));
-            }
-            if let Some(sym) = symbol {
-                v.push(("Symbol".into(), sym.clone()));
-            }
-            v
-        }
-        Contribution::PlaceFile { file, dest } => vec![
-            ("File".to_string(), abs(file)),
-            ("Destination".to_string(), format!("{dest:?}")),
-        ],
-        Contribution::Raw { payload, target_layer, .. } => vec![
-            ("Payload".to_string(), abs(payload)),
-            ("Layer".to_string(), format!("{target_layer:?}")),
-        ],
-    }
 }
 
 /// What the contribution touches, and how it merges with someone else's.
@@ -881,6 +1631,9 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         }
         Contribution::AddMovie { name, .. } => {
             vec![("Writes".to_string(), format!("cfx_pack {name}  (new hash)"))]
+        }
+        Contribution::AddTexture { name, .. } => {
+            vec![("Writes".to_string(), format!("texture {name}  (new hash)"))]
         }
         Contribution::ReplaceTexture { target, .. } => vec![
             ("Writes".to_string(), format!("texture {target}")),
@@ -1049,6 +1802,9 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
 /// The verb bar for this page.
 pub fn verbs(ui: &mut egui::Ui, p: &Panel, has_game: bool) -> Vec<Act> {
     let mut acts = Vec::new();
+    if ui.button("New").on_hover_text("Scaffold manifest.yaml + src/ in an empty folder").clicked() {
+        acts.push(Act::New);
+    }
     if ui.button("Open Shipment").clicked() {
         acts.push(Act::Open);
     }
@@ -1129,7 +1885,7 @@ pub fn apply(
             }
         }
         // Handled by the caller, which owns the workbench: the panel cannot switch pages itself.
-        Act::Craft(_) => {}
+        Act::Craft(..) => {}
         Act::SetWearer(i, w) => match p.mutate(names, |m| {
             if let Some(Contribution::AddOutfit { wearer, .. }) = m.contributions.get_mut(i) {
                 *wearer = w.to_string();
@@ -1141,6 +1897,37 @@ pub fn apply(
                 *status = "could not write the manifest".into();
             }
         },
+        Act::Edit(i, c) => match p.upsert_contribution(names, Some(i), *c) {
+            Ok(_) => *status = p.status.clone(),
+            Err(e) => {
+                p.error = Some(e);
+                *status = "could not write the manifest".into();
+            }
+        },
+        Act::EditIdentity(sh, load) => match p.mutate(names, |m| {
+            m.shipment = *sh;
+            m.load = *load;
+        }) {
+            Ok(()) => *status = p.status.clone(),
+            Err(e) => {
+                p.error = Some(e);
+                *status = "could not write the manifest".into();
+            }
+        },
+        Act::New => {
+            if let Some(dir) = rfd::FileDialog::new()
+                .set_title("New Shipment — pick an empty folder")
+                .pick_folder()
+            {
+                match p.scaffold(&dir, names) {
+                    Ok(()) => *status = p.status.clone(),
+                    Err(e) => {
+                        p.error = Some(e);
+                        *status = "could not scaffold a Shipment".into();
+                    }
+                }
+            }
+        }
         Act::Remove(i) => match p.mutate(names, |m| {
             if i < m.contributions.len() {
                 m.contributions.remove(i);
@@ -1289,7 +2076,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn open_in_os(target: &Path) -> std::io::Result<()> {
+pub fn open_in_os(target: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         std::process::Command::new("cmd")
@@ -1304,5 +2091,189 @@ fn open_in_os(target: &Path) -> std::io::Result<()> {
             .arg(target)
             .spawn()
             .map(|_| ())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────── tests
+//
+// Unit tests rather than an integration test: `mercs2_workshop` is a BINARY crate with no
+// `src/lib.rs`, so `tests/` can only reach other crates. These need `Panel`'s own methods.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mercs2_quartermaster::manifest::{Contribution, Retarget as QmRetarget, Textures};
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("mercs2_qm_test_{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn outfit(model: &str, bone_target: &str) -> Contribution {
+        let mut bones = std::collections::BTreeMap::new();
+        bones.insert("bip01_spine".to_string(), Some(bone_target.to_string()));
+        bones.insert("bip01_tail".to_string(), None);
+        Contribution::AddOutfit {
+            name: "my_asset".into(),
+            slug: "MyAsset".into(),
+            display: "My asset".into(),
+            wearer: "mattias".into(),
+            model: PathBuf::from(model),
+            donor: Some("pmc_hum_mattias".into()),
+            textures: Textures::default(),
+            retarget: Some(QmRetarget { from: "mixamo".into(), bones: Some(bones) }),
+        }
+    }
+
+    /// Nothing in the workspace scaffolded a Shipment before this — `qm` has no `init` and
+    /// `discover` is read-only — so a craft bench had nowhere to put its work.
+    #[test]
+    fn scaffold_writes_a_shipment_that_opens_and_validates() {
+        let d = tmp("scaffold");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+
+        assert!(d.join("manifest.yaml").is_file(), "no manifest");
+        assert!(d.join("src").is_dir(), "no src/");
+        assert!(d.join("README.md").is_file(), "no README");
+        assert_eq!(p.root(), Some(d.as_path()), "not opened");
+        let s = p.shipment.as_ref().expect("opened");
+        // The folder name becomes a SLUG, not the name verbatim: it is also `build/<name>.wad`.
+        assert_eq!(s.manifest.shipment.name, "mercs2-qm-test-scaffold");
+        s.manifest.validate().expect("scaffolded manifest must validate");
+        assert!(s.manifest.contributions.is_empty());
+    }
+
+    /// Reached from a folder picker, so picking the wrong folder must not destroy someone's work.
+    #[test]
+    fn scaffold_refuses_to_overwrite_an_existing_manifest() {
+        let d = tmp("nooverwrite");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).unwrap();
+        std::fs::write(d.join("manifest.yaml"), "format: 1\n# hand-edited\n").unwrap();
+
+        let mut q = Panel::default();
+        let err = q.scaffold(&d, None).expect_err("must refuse");
+        assert!(err.contains("already holds a manifest"), "{err}");
+        let text = std::fs::read_to_string(d.join("manifest.yaml")).unwrap();
+        assert!(text.contains("# hand-edited"), "the existing manifest was clobbered");
+    }
+
+    #[test]
+    fn upsert_appends_then_replaces_in_place() {
+        let d = tmp("upsert");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).unwrap();
+
+        let at = p.upsert_contribution(None, None, outfit("src/a.glb", "Bone_Chest")).unwrap();
+        assert_eq!(at, 0);
+        assert_eq!(p.shipment.as_ref().unwrap().manifest.contributions.len(), 1);
+
+        let at2 = p.upsert_contribution(None, None, outfit("src/b.glb", "Bone_Chest")).unwrap();
+        assert_eq!(at2, 1, "second add must APPEND");
+        assert_eq!(p.shipment.as_ref().unwrap().manifest.contributions.len(), 2);
+
+        // Replacing index 0 must not grow the list — this is the path a craft bench takes when it
+        // re-commits work on a contribution the author entered it from.
+        p.upsert_contribution(None, Some(0), outfit("src/c.glb", "Bone_Chest")).unwrap();
+        let m = &p.shipment.as_ref().unwrap().manifest;
+        assert_eq!(m.contributions.len(), 2, "replace must not append");
+        match &m.contributions[0] {
+            Contribution::AddOutfit { model, .. } => assert_eq!(model, &PathBuf::from("src/c.glb")),
+            other => panic!("wrong kind: {}", other.kind()),
+        }
+    }
+
+    /// ★ The regression this rewrite exists for.
+    ///
+    /// The old emitter built YAML with `format!` and its `yaml_scalar` guard was never called, so a
+    /// target bone with no known name went out as a BARE `0xE54047D5`. 21 of `pmc_hum_mattias`'s
+    /// 116 bones have no name in any corpus here, so this is the normal case, not an edge one — and
+    /// a bare `0x…` scalar is exactly what YAML may read back as something other than a string.
+    #[test]
+    fn a_bare_hash_bone_target_survives_the_yaml_round_trip_as_a_string() {
+        let d = tmp("barehash");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).unwrap();
+        p.upsert_contribution(None, None, outfit("src/a.glb", "0xE54047D5")).unwrap();
+
+        // Re-read from DISK, not from memory: the question is what the file says.
+        let mut q = Panel::default();
+        q.open_shipment(&d, None);
+        let m = &q.shipment.as_ref().expect("re-opened").manifest;
+        let Contribution::AddOutfit { retarget: Some(rt), .. } = &m.contributions[0] else {
+            panic!("kind changed across the round trip");
+        };
+        let bones = rt.bones.as_ref().expect("bones dropped");
+        assert_eq!(
+            bones.get("bip01_spine").and_then(|o| o.as_deref()),
+            Some("0xE54047D5"),
+            "bare hash did not survive as a string"
+        );
+        // `~` (drop this bone) has to survive as an explicit null, not vanish.
+        assert!(bones.contains_key("bip01_tail"), "the dropped-bone row disappeared");
+        assert_eq!(bones.get("bip01_tail").unwrap(), &None);
+    }
+
+    /// ★ Every kind the FORMAT knows must be offerable from the UI, and must produce a stub.
+    ///
+    /// This is the drift the whole crate keeps producing: `edit_state_machine` parsed, claimed a
+    /// blast radius and had linter rules, while being absent from `KINDS` and from `stub()` — so
+    /// there was no way to add one. Nothing failed; it simply was not there. Same shape as the rail
+    /// indexing a 6-entry icon array with a 4-entry workbench list.
+    #[test]
+    fn the_add_menu_offers_every_kind_the_format_knows() {
+        let offered: std::collections::BTreeSet<&str> =
+            KINDS.iter().flat_map(|(_, ks)| ks.iter().map(|(k, _)| *k)).collect();
+        let missing: Vec<&&str> = Contribution::ALL_KINDS
+            .iter()
+            .filter(|k| !offered.contains(**k))
+            .collect();
+        assert!(missing.is_empty(), "kinds the UI cannot add: {missing:?}");
+
+        // And every offered kind must actually build one, or the menu entry is a dead button.
+        for k in &offered {
+            let c = stub(k, 1).unwrap_or_else(|| panic!("`{k}` is offered but has no stub"));
+            assert_eq!(&c.kind(), k, "stub for `{k}` produced a {} instead", c.kind());
+        }
+    }
+
+    /// The queue menu groups kinds by layer; a kind in two groups would show up twice.
+    #[test]
+    fn no_kind_is_offered_twice() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (_, ks) in KINDS {
+            for (k, _) in *ks {
+                assert!(seen.insert(*k), "`{k}` is listed in more than one layer group");
+            }
+        }
+    }
+
+    #[test]
+    fn import_source_copies_dedupes_and_suffixes() {
+        let d = tmp("import");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).unwrap();
+        let ext = tmp("import_ext");
+
+        let a = ext.join("model.glb");
+        std::fs::write(&a, b"AAAA").unwrap();
+        let r1 = Panel::import_source(&d, &a).unwrap();
+        assert_eq!(r1, PathBuf::from("src").join("model.glb"));
+        assert_eq!(std::fs::read(d.join(&r1)).unwrap(), b"AAAA");
+
+        // Same name, same bytes -> reuse rather than pile up copies.
+        let r2 = Panel::import_source(&d, &a).unwrap();
+        assert_eq!(r2, r1, "identical file should not be duplicated");
+
+        // Same name, DIFFERENT bytes -> suffix, never overwrite.
+        let b = tmp("import_ext2").join("model.glb");
+        std::fs::write(&b, b"BBBB").unwrap();
+        let r3 = Panel::import_source(&d, &b).unwrap();
+        assert_ne!(r3, r1, "a different file must not overwrite");
+        assert_eq!(std::fs::read(d.join(&r1)).unwrap(), b"AAAA", "original was overwritten");
+        assert_eq!(std::fs::read(d.join(&r3)).unwrap(), b"BBBB");
     }
 }

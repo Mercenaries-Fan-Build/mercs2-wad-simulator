@@ -734,6 +734,306 @@ pub mod theme {
         changed
     }
 
+    // ─────────────────────────────────────────────────────────── editable fields (text/choice/path)
+    //
+    // The panel had a strong themed language for NUMBERS (`scrub_cell` → `scalar_field` /
+    // `vec3_field`, aligned by `field_label_w`) and for BOOLEANS (`pill`, `bit_chip`) — and nothing
+    // at all for text, choices or paths. Every text input in the app was a raw
+    // `ui.text_edit_singleline`, which is why a form built out of them would not have looked like
+    // the rest of the tool.
+    //
+    // These three follow `scrub_cell`'s construction exactly: hand-paint the `G0` well, flatten the
+    // widget's own chrome to transparent, keep the text left-aligned and monospace so values line
+    // up down a column.
+
+    /// How a field's current value stands up to validation, as a border colour.
+    ///
+    /// The point of surfacing it in the WIDGET is that the Shipment linter's file rules (M0110 a
+    /// source that does not exist, M0111 a path that escapes the root, M0112 a source outside
+    /// `src/`) are all answerable the instant a path is chosen. Answering them here means the
+    /// author sees the problem at the click rather than at the next lint pass.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum FieldState {
+        /// Nothing to say. Neutral border.
+        Neutral,
+        /// Valid and known-good — the field earned green.
+        Good,
+        /// Advisory. Amber, never red: red means the build is blocked.
+        Warn,
+        /// Blocking.
+        Bad,
+    }
+
+    impl FieldState {
+        fn border(self) -> Color32 {
+            match self {
+                FieldState::Neutral => LINE,
+                FieldState::Good => GOOD_DK,
+                FieldState::Warn => BRASS_DK,
+                FieldState::Bad => BAD,
+            }
+        }
+    }
+
+    /// Paint the input well and return the rect to put the widget inside.
+    fn well(ui: &mut egui::Ui, w: f32, h: f32, state: FieldState) -> (egui::Rect, egui::Rect) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+        ui.painter().rect(
+            rect,
+            egui::Rounding::same(3.0),
+            G0,
+            egui::Stroke::new(1.0, state.border()),
+        );
+        let inner = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 6.0, rect.top()),
+            egui::pos2(rect.right() - 5.0, rect.bottom()),
+        );
+        (rect, inner)
+    }
+
+    /// Strip a widget's own background/border so it reads as text sitting in our well.
+    fn flatten(ui: &mut egui::Ui) {
+        let w = ui.visuals_mut();
+        for s in [&mut w.widgets.inactive, &mut w.widgets.hovered, &mut w.widgets.active] {
+            s.weak_bg_fill = Color32::TRANSPARENT;
+            s.bg_stroke = egui::Stroke::NONE;
+        }
+        w.extreme_bg_color = Color32::TRANSPARENT;
+        w.selection.bg_fill = BRASS_SOFT;
+    }
+
+    /// A single-line text row: caption in the shared column, then a well that fills the rest.
+    ///
+    /// Returns the `TextEdit` response, so a caller can act on `.changed()` (commit + re-lint) or
+    /// `.lost_focus()` (commit on blur) rather than on every keystroke.
+    pub fn text_field(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut String,
+        hint: &str,
+        state: FieldState,
+    ) -> egui::Response {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if !label.is_empty() {
+                field_label(ui, label);
+            }
+            let w = (ui.available_width() - 4.0).max(60.0);
+            let (_, inner) = well(ui, w, 22.0, state);
+            ui.allocate_ui_at_rect(inner, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    flatten(ui);
+                    ui.add(
+                        egui::TextEdit::singleline(value)
+                            .hint_text(hint)
+                            .frame(false)
+                            .font(egui::FontId::monospace(11.0))
+                            .desired_width(f32::INFINITY),
+                    )
+                })
+                .inner
+            })
+            .inner
+        })
+        .inner
+    }
+
+    /// A choice row over a CLOSED set. Returns true when the selection changed.
+    ///
+    /// Closed by construction is the point: several manifest fields (`PlaceIn`, `Target`, `Layer`,
+    /// the wardrobe hero) are enums precisely so an author cannot spell something the loader will
+    /// not accept, and a free-text box would hand that back.
+    pub fn combo_field<T: PartialEq + Copy>(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut T,
+        options: &[(T, &str)],
+        state: FieldState,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if !label.is_empty() {
+                field_label(ui, label);
+            }
+            let w = (ui.available_width() - 4.0).max(60.0);
+            let (_, inner) = well(ui, w, 22.0, state);
+            let shown = options
+                .iter()
+                .find(|(v, _)| v == value)
+                .map(|(_, t)| *t)
+                .unwrap_or("—");
+            ui.allocate_ui_at_rect(inner, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    flatten(ui);
+                    egui::ComboBox::from_id_source(ui.auto_id_with(label))
+                        .selected_text(
+                            egui::RichText::new(shown).monospace().size(11.0).color(TX),
+                        )
+                        .width(inner.width())
+                        .show_ui(ui, |ui| {
+                            for (v, t) in options {
+                                if ui.selectable_label(v == value, *t).clicked() {
+                                    *value = *v;
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+            });
+        });
+        changed
+    }
+
+    /// A source-file row: the path shown RELATIVE to the Shipment root, plus a picker.
+    ///
+    /// Relative because that is what the author wrote and what the manifest stores; an absolute
+    /// scratch path is not something they recognise, and `src/`-relative is the form the linter
+    /// reasons about. Returns true when the path changed.
+    ///
+    /// `filters` are extension names for the native dialog (`&["glb", "gltf"]`); empty picks any
+    /// file. The chosen path is made relative to `root` when it is underneath it, and otherwise
+    /// stored as given — so the M0111 "leaves the Shipment root" rule still has something to fire
+    /// on rather than the widget silently rewriting a bad choice into a plausible one.
+    /// Draw one path row: label, a well with the path painted into it, `Choose`, optional clear.
+    ///
+    /// The text is painted with the PAINTER rather than by nesting a `Ui` inside the well. That is
+    /// not a style choice: `allocate_ui_at_rect` restores the parent cursor when it returns, so a
+    /// nested widget leaves the cursor at the START of the well and the next widget -- the button --
+    /// gets drawn INSIDE it. `scrub_cell` paints its own chrome for exactly the same reason.
+    ///
+    /// Returns `(chose_a_new_path, cleared)`.
+    fn path_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut std::path::PathBuf,
+        root: &std::path::Path,
+        filters: &[&str],
+        state: FieldState,
+        clearable: bool,
+    ) -> (bool, bool) {
+        let (mut changed, mut cleared) = (false, false);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if !label.is_empty() {
+                field_label(ui, label);
+            }
+            let reserved = 62.0 + if clearable { 26.0 } else { 0.0 };
+            let w = (ui.available_width() - reserved - 8.0).max(60.0);
+            let (rect, inner) = well(ui, w, 22.0, state);
+
+            let shown = value.to_string_lossy().replace('\\', "/");
+            let empty = shown.is_empty();
+            // Elide from the FRONT: the tail of a path is what identifies it.
+            let max_chars = ((inner.width() / 6.2).floor() as usize).max(8);
+            let n = shown.chars().count();
+            let text = if empty {
+                "\u{2014}".to_string()
+            } else if n <= max_chars {
+                shown.clone()
+            } else {
+                format!("\u{2026}{}", shown.chars().skip(n - (max_chars - 1)).collect::<String>())
+            };
+            ui.painter().text(
+                inner.left_center(),
+                egui::Align2::LEFT_CENTER,
+                text,
+                egui::FontId::monospace(11.0),
+                if empty { FAINT } else { TX },
+            );
+            if !empty {
+                ui.interact(rect, ui.auto_id_with(("pathhover", label)), egui::Sense::hover())
+                    .on_hover_text(root.join(&*value).display().to_string());
+            }
+
+            if ui.add(egui::Button::new("Choose\u{2026}").min_size(egui::vec2(62.0, 22.0))).clicked() {
+                let mut d = rfd::FileDialog::new().set_title(format!("Choose {label}"));
+                if root.is_dir() {
+                    d = d.set_directory(root);
+                }
+                if !filters.is_empty() {
+                    d = d.add_filter(label, filters);
+                }
+                if let Some(p) = d.pick_file() {
+                    // Made relative when it IS under the root; otherwise stored as given, so the
+                    // M0111 "leaves the Shipment root" rule has something to fire on rather than the
+                    // widget silently rewriting a bad choice into a plausible one.
+                    *value = p.strip_prefix(root).map(|r| r.to_path_buf()).unwrap_or(p);
+                    changed = true;
+                }
+            }
+            if clearable
+                && ui
+                    .add(egui::Button::new("\u{2715}").min_size(egui::vec2(22.0, 22.0)))
+                    .on_hover_text("Clear")
+                    .clicked()
+            {
+                cleared = true;
+            }
+        });
+        (changed, cleared)
+    }
+
+    /// A required source-file row: the path shown RELATIVE to the Shipment root, plus a picker.
+    ///
+    /// Relative because that is what the author wrote and what the manifest stores; an absolute
+    /// scratch path is not something they recognise, and `src/`-relative is the form the linter
+    /// reasons about.
+    pub fn path_field(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut std::path::PathBuf,
+        root: &std::path::Path,
+        filters: &[&str],
+        state: FieldState,
+    ) -> bool {
+        path_row(ui, label, value, root, filters, state, false).0
+    }
+
+    /// An OPTIONAL source-file row -- a texture slot, a plugin. Absent is a meaningful value, so the
+    /// row owns its clear button instead of the caller nesting one beside it: that put the two in
+    /// separate horizontal layouts and rendered them out of order.
+    pub fn opt_path_field(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut Option<std::path::PathBuf>,
+        root: &std::path::Path,
+        filters: &[&str],
+        state: FieldState,
+    ) -> bool {
+        let mut p = value.clone().unwrap_or_default();
+        let (changed, cleared) = path_row(ui, label, &mut p, root, filters, state, value.is_some());
+        if cleared {
+            *value = None;
+            return true;
+        }
+        if changed {
+            *value = Some(p);
+            return true;
+        }
+        false
+    }
+
+    /// A note under a field — the linter's own message, in the field's own colour.
+    ///
+    /// Indented to the value column and WRAPPED. A rule title is a sentence, not a label: unwrapped
+    /// in a horizontal layout it runs off the panel and the half that says what to do is the half
+    /// that gets clipped.
+    pub fn field_note(ui: &mut egui::Ui, state: FieldState, msg: &str) {
+        let colour = match state {
+            FieldState::Neutral => FAINT,
+            FieldState::Good => GOOD,
+            FieldState::Warn => BRASS,
+            FieldState::Bad => BAD,
+        };
+        let lw = field_label_w(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(lw + 4.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.label(egui::RichText::new(msg).size(10.5).color(colour));
+        });
+    }
+
     /// A filled brass "go" button (Place / Merge / Apply). Dimmed when disabled.
     pub fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
         let fg = if enabled { Color32::from_rgb(0x1c, 0x16, 0x06) } else { FAINT };

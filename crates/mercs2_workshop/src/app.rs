@@ -372,6 +372,67 @@ const SCENE_FILE: &str = "workshop_scene.json";
 /// One user intention, queued from EITHER a keyboard shortcut or an inspector-GUI widget and
 /// executed once per frame where every `&mut` is free — so the GUI and the keys share one
 /// implementation instead of two drifting copies.
+/// How loud one log line is. Inferred from the message rather than declared, because every
+/// `status = …` site in this file already writes in a settled house style (`"… FAILED: {e}"`,
+/// `"could not …"`), and threading a level through forty call sites would be a change with no
+/// behavioural payoff.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    fn of(msg: &str) -> LogLevel {
+        let m = msg.to_ascii_lowercase();
+        if m.contains("failed") || m.contains("could not") || m.contains("cannot") || m.contains("error")
+        {
+            LogLevel::Error
+        } else if m.contains("blocked") || m.contains("warn") || m.contains("refus") {
+            LogLevel::Warn
+        } else {
+            LogLevel::Info
+        }
+    }
+    fn colour(self) -> egui::Color32 {
+        match self {
+            LogLevel::Info => crate::gui::theme::DIM,
+            LogLevel::Warn => crate::gui::theme::BRASS,
+            LogLevel::Error => crate::gui::theme::BAD,
+        }
+    }
+    fn tag(self) -> &'static str {
+        match self {
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "FAIL",
+        }
+    }
+}
+
+/// One line of session history. The status bar shows only the LATEST message, so without this the
+/// previous forty are gone — including every error that scrolled past while something else
+/// succeeded. That is what made the rail's "Log" button a button with nothing behind it.
+struct LogLine {
+    /// Seconds since the window opened. A wall clock would be better in a bug report and worse
+    /// while working; this is the one that answers "did that just happen".
+    t: f32,
+    level: LogLevel,
+    text: String,
+}
+
+/// Keep the log bounded — a long session with a busy clip loader produces thousands of lines and
+/// none of the old ones justify an unbounded allocation.
+const LOG_CAP: usize = 2000;
+
+fn push_log(log: &mut std::collections::VecDeque<LogLine>, t: f32, text: &str) {
+    if log.len() == LOG_CAP {
+        log.pop_front();
+    }
+    log.push_back(LogLine { t, level: LogLevel::of(text), text: text.to_string() });
+}
+
 enum Act {
     /// Load the browser row at `filtered[i]` (models → preview, textures → plate view).
     LoadRow(usize),
@@ -428,6 +489,13 @@ enum Act {
     LoadDonorRef,
     /// Load a model by hash onto the preview pedestal (Model Workbench inventory click).
     LoadModelHash(u32, String),
+    /// Library: show a texture's plate straight from the catalog.
+    LoadTexture(u32, String),
+    /// Library routing: start a contribution of `kind` with this asset as its donor/target,
+    /// scaffolding a Shipment if none is open, and go to the Shipment page.
+    AddToShipment(&'static str, u32, String),
+    /// Library routing: open a craft bench on this asset.
+    CraftOn(CraftMode, u32, String),
     /// Skeleton workbench: set the target character skeleton and (re)compute the bone map.
     RetargetSetTarget(u32, String),
     /// Skeleton workbench: recompute the source→target bone map from the current source + target.
@@ -473,6 +541,94 @@ enum Workbench {
     /// Where the game and the reference bundle live — the two paths the tool cannot discover for
     /// itself on every platform. Last on the rail: configuration, not an authoring surface.
     Settings,
+    /// **Craft** — the persistent, domain-agnostic bench, and the rail slot Sandbox used to hold.
+    ///
+    /// Plan 02: *"Craft cuts across domains. Texture-swap, Lua editing, retarget, the linter,
+    /// build/publish each apply to World AND Weapons AND Driving. If nav were purely by domain,
+    /// those tools would appear five times or fracture."*
+    ///
+    /// It is never rendered directly: [`CraftMode`] selects which bench the panels show, so the
+    /// existing Scene / Rig / Conform surfaces keep their implementations and simply stop being
+    /// rail peers. That is the half of the Plan-02 migration that was never built — `Mods` and
+    /// `Skeleton` were deleted from the rail on the promise of this surface, and without it they
+    /// became reachable only through a one-way, index-less page flip from two contribution kinds.
+    Craft,
+}
+
+/// Which bench the Craft surface is showing.
+///
+/// Chosen by a strip on the FIRST row of the centre column, above the verbs — so the mode changes
+/// what the viewport is doing while the navigator and inspector stay bound to the same subject.
+/// That is what makes "follows the current subject" true by construction rather than by discipline.
+#[derive(PartialEq, Clone, Copy)]
+enum CraftMode {
+    /// Arrange placed instances — the old Sandbox.
+    Scene,
+    /// Retarget a source rig onto a Mercs2 HIER skeleton — the old Skeleton bench.
+    Rig,
+    /// Fit an import onto a donor: host group, transform, hardpoints — the old Mods bench.
+    Conform,
+    /// Swap a texture and see it on the real material.
+    Texture,
+    /// The game's Lua, read-only until the editor lands.
+    Script,
+    /// The destruction state machine.
+    States,
+}
+
+impl CraftMode {
+    const ALL: [CraftMode; 6] = [
+        CraftMode::Scene,
+        CraftMode::Rig,
+        CraftMode::Conform,
+        CraftMode::Texture,
+        CraftMode::Script,
+        CraftMode::States,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            CraftMode::Scene => "Scene",
+            CraftMode::Rig => "Rig",
+            CraftMode::Conform => "Conform",
+            CraftMode::Texture => "Texture",
+            CraftMode::Script => "Script",
+            CraftMode::States => "States",
+        }
+    }
+    /// The workbench whose panels implement this mode.
+    ///
+    /// The mapping exists so the migration did not have to move three thousand lines of working
+    /// panel code: `Mods` and `Skeleton` stop being reachable from the rail and become the
+    /// implementation of a mode instead.
+    fn workbench(self) -> Workbench {
+        match self {
+            CraftMode::Scene => Workbench::Sandbox,
+            CraftMode::Rig => Workbench::Skeleton,
+            CraftMode::Conform => Workbench::Mods,
+            // Not yet their own surfaces: Texture and States are read-only views that live on
+            // Inspect today, and Script is the read-only Lua viewer. Named here rather than hidden
+            // so the set of craft tools Plan 02 lists is visible, with its gaps stated.
+            CraftMode::Texture | CraftMode::Script | CraftMode::States => Workbench::Inspect,
+        }
+    }
+    /// What this mode still needs before it is a real bench, or `None` when it is one.
+    fn unbuilt(self) -> Option<&'static str> {
+        match self {
+            CraftMode::Scene | CraftMode::Rig | CraftMode::Conform => None,
+            CraftMode::Texture => Some(
+                "read-only: the plate viewer. Authoring a swap is `replace_texture` / \
+                 `add_texture` on the Shipment page.",
+            ),
+            CraftMode::Script => Some(
+                "read-only: the Lua viewer. An editor needs the compiler beside the host, which \
+                 is now linkable.",
+            ),
+            CraftMode::States => Some(
+                "read-only: the state picker. A writer is unblocked — the round-trip survey \
+                 proved the family is flat and losslessly recoverable.",
+            ),
+        }
+    }
 }
 
 impl Workbench {
@@ -484,7 +640,7 @@ impl Workbench {
     /// have to remember what you were assembling.
     const ALL: [Workbench; 4] = [
         Workbench::Inspect,
-        Workbench::Sandbox,
+        Workbench::Craft,
         Workbench::Quartermaster,
         Workbench::Settings,
     ];
@@ -492,6 +648,14 @@ impl Workbench {
     /// A craft surface reached from a contribution, rather than from the rail.
     fn is_craft(self) -> bool {
         matches!(self, Workbench::Mods | Workbench::Skeleton)
+    }
+    /// Does this page put the 3D viewport in the centre?
+    ///
+    /// Drives the viewport HUD chips. It used to be spelled `wb != Quartermaster` at the one call
+    /// site, so the moment a SECOND page stopped owning the viewport the "ORBIT" chip started
+    /// painting over that page's heading — which is exactly what Settings then did.
+    fn has_viewport(self) -> bool {
+        !matches!(self, Workbench::Quartermaster | Workbench::Settings)
     }
     fn label(self) -> &'static str {
         match self {
@@ -501,6 +665,22 @@ impl Workbench {
             Workbench::Skeleton => "Skeleton",
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
+            Workbench::Craft => "Craft",
+        }
+    }
+    /// The rail glyph. A METHOD, not a parallel array: the rail used to index a 6-entry `icons`
+    /// list with the position in `ALL`, which has 4 — so trimming `ALL` silently gave Shipment the
+    /// Mods glyph and Settings the Skeleton one. Keyed off the variant, that cannot happen.
+    fn icon(self) -> crate::gui::theme::RailIcon {
+        match self {
+            Workbench::Inspect => crate::gui::theme::RailIcon::Inspect,
+            Workbench::Sandbox => crate::gui::theme::RailIcon::Sandbox,
+            Workbench::Mods => crate::gui::theme::RailIcon::Mods,
+            Workbench::Skeleton => crate::gui::theme::RailIcon::Skeleton,
+            Workbench::Quartermaster => crate::gui::theme::RailIcon::Quartermaster,
+            Workbench::Settings => crate::gui::theme::RailIcon::Settings,
+            // Craft took the slot Sandbox held, and keeps its glyph.
+            Workbench::Craft => crate::gui::theme::RailIcon::Sandbox,
         }
     }
     /// The command-bar breadcrumb verb.
@@ -512,8 +692,178 @@ impl Workbench {
             Workbench::Skeleton => "Retarget",
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
+            Workbench::Craft => "Craft",
         }
     }
+}
+
+/// A section of the Settings page.
+///
+/// Settings used to render its whole form INSIDE the navigator, which left the centre and the
+/// inspector deliberately registered and empty — two blank panels on the one page that had nothing
+/// to put in them. It now behaves like every other page: the navigator lists, the centre holds the
+/// subject, and the inspector is simply not registered here (see the `wb != Settings` guard on it).
+#[derive(PartialEq, Clone, Copy)]
+enum SettingsSection {
+    Game,
+    Data,
+    Shipments,
+    Shortcuts,
+    About,
+}
+
+impl SettingsSection {
+    const ALL: [SettingsSection; 5] = [
+        SettingsSection::Game,
+        SettingsSection::Data,
+        SettingsSection::Shipments,
+        SettingsSection::Shortcuts,
+        SettingsSection::About,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Game => "Game archive",
+            SettingsSection::Data => "Reference data",
+            SettingsSection::Shipments => "Shipments library",
+            SettingsSection::Shortcuts => "Shortcuts",
+            SettingsSection::About => "About & diagnostics",
+        }
+    }
+    fn blurb(self) -> &'static str {
+        match self {
+            SettingsSection::Game => "Which install the tool reads",
+            SettingsSection::Data => "Hash-to-name bundle",
+            SettingsSection::Shipments => "Where built Shipments go",
+            SettingsSection::Shortcuts => "Keys this window answers",
+            SettingsSection::About => "Versions and resolved paths",
+        }
+    }
+}
+
+/// Every key this window answers, for the Settings page to print.
+///
+/// Kept here beside the `match code` that implements them. It is a hand-maintained mirror, which is
+/// a real cost — but the alternative was what existed before: shortcuts discoverable only by
+/// pressing keys, since the verb bar names a handful and the rest are buried in an event handler.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Esc", "Quit (or close the texture plate)"),
+    ("Tab", "Toggle browse / edit mode"),
+    ("Enter", "Load the selected asset"),
+    ("F3", "View the preview's textures"),
+    ("F4", "Next animation clip"),
+    ("F5 / F9", "Save / load the sandbox arrangement"),
+    ("F6", "Place the preview into the sandbox"),
+    ("F7", "Merge every placed object into one model"),
+    ("F8", "Clear the sandbox"),
+    ("F10", "Export the preview (OBJ + textures)"),
+    ("F11", "Cycle LOD tier"),
+    ("Space", "Play / pause the clip"),
+    (", / .", "Previous / next clip"),
+    ("\\", "Stop the clip"),
+    ("[ / ]", "Cycle draw groups"),
+    ("N / B", "Cycle the selected placed object"),
+    ("Delete", "Remove the selected placed object"),
+    ("W A S D / Q E", "Move the camera"),
+    ("R / F", "Raise / lower the camera"),
+    ("Drag / Shift-drag", "Orbit / pan"),
+];
+
+/// The Library's "act on this asset" menu — ONE implementation, used by the browser row and by the
+/// inspector heading.
+///
+/// Those two were separate copies, and they had drifted: the heading offered
+/// `Export (OBJ + textures)` and nothing else, while the row offered load/place/export. Neither had
+/// been touched since before Shipments existed, so the only verb the Library offered for an asset
+/// was to write it to disk as OBJ — Plan 02's *"edit in \<domain\> / start a Shipment from this"*
+/// had no implementation, and there was **no code path from an Inspect selection into `qm` at all**.
+///
+/// Export stays: it is asset extraction and independently useful. It is just no longer the only
+/// thing you can do with an asset.
+fn asset_menu(
+    ui: &mut egui::Ui,
+    hash: u32,
+    label: &str,
+    is_texture: bool,
+    actions: &mut Vec<Act>,
+) {
+    use crate::gui::theme;
+    ui.label(theme::disp_text(label.to_uppercase(), 10.0, theme::BRASS));
+    ui.separator();
+
+    if is_texture {
+        if ui.button("View plate").clicked() {
+            actions.push(Act::LoadTexture(hash, label.to_string()));
+            ui.close_menu();
+        }
+    } else {
+        if ui.button("Preview").clicked() {
+            actions.push(Act::LoadModelHash(hash, label.to_string()));
+            ui.close_menu();
+        }
+        if ui.button("Place in scene").clicked() {
+            actions.push(Act::PlaceHash(hash, label.to_string()));
+            ui.close_menu();
+        }
+        // Craft follows the SUBJECT — that is the property the surface exists for, so an asset can
+        // be taken straight to a bench instead of having to be reached from a contribution.
+        ui.menu_button("Open in Craft", |ui| {
+            for m in [CraftMode::Rig, CraftMode::Conform, CraftMode::Texture] {
+                let mut b = ui.button(m.label());
+                if let Some(why) = m.unbuilt() {
+                    b = b.on_hover_text(why);
+                }
+                if b.clicked() {
+                    actions.push(Act::CraftOn(m, hash, label.to_string()));
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    // The routing that did not exist. A shipped asset becomes a DONOR or a TARGET — never the
+    // thing written — so no entry here can produce a destructive contribution.
+    ui.menu_button("Add to Shipment", |ui| {
+        for (kind, what) in crate::quartermaster::routes_for(is_texture) {
+            if ui.button(*what).clicked() {
+                actions.push(Act::AddToShipment(kind, hash, label.to_string()));
+                ui.close_menu();
+            }
+        }
+    });
+
+    ui.separator();
+    if !is_texture && ui.button("Export (OBJ + textures)").clicked() {
+        actions.push(Act::ExportHash(hash, label.to_string()));
+        ui.close_menu();
+    }
+    if ui.button("Copy name").clicked() {
+        ui.ctx().copy_text(label.to_string());
+        ui.close_menu();
+    }
+    if ui.button(format!("Copy hash 0x{hash:08X}")).clicked() {
+        ui.ctx().copy_text(format!("0x{hash:08X}"));
+        ui.close_menu();
+    }
+    // What you would paste into a manifest — a NAME where one is known, because a hash is one-way
+    // and a manifest full of them cannot be reviewed (the M0130 preference, offered up front).
+    if ui.button("Copy as manifest reference").clicked() {
+        ui.ctx().copy_text(label.to_string());
+        ui.close_menu();
+    }
+}
+
+/// A secondary-click-only handle over the viewport rect.
+///
+/// `Sense::click()` alone would swallow the LEFT button too and kill the camera drag, so this
+/// senses the secondary button only and leaves primary drags to the camera underneath.
+fn ui_ctx_interact(ctx: &egui::Context, rect: egui::Rect) -> egui::Response {
+    egui::Area::new(egui::Id::new("vp_ctx"))
+        .fixed_pos(rect.left_top())
+        .order(egui::Order::Background)
+        .show(ctx, |ui| {
+            ui.allocate_response(rect.size(), egui::Sense::click())
+        })
+        .inner
 }
 
 /// Model Workbench vehicle-class display order (helicopters first, per user).
@@ -821,6 +1171,14 @@ pub fn run(opts: Options) {
     // gets remembered and fails at the next launch instead of at the click.
     let mut cfg = crate::settings::load();
     let mut cfg_note: Option<Result<String, String>> = None;
+    // Which Settings section the centre is showing. The navigator lists them.
+    let mut settings_section = SettingsSection::Game;
+    // Which bench the Craft surface is showing, and which contribution (if any) it was entered
+    // from. The index is what makes a craft edit land back on the RIGHT contribution instead of
+    // appending a new one — `Act::Craft` used to carry no index at all, so a bench had no idea
+    // what it was editing and no way back.
+    let mut craft_mode = CraftMode::Scene;
+    let mut craft_subject: Option<usize> = None;
     // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
     // Never started automatically — only from the Settings button, so the tool never reaches out to
     // the network on its own.
@@ -849,6 +1207,19 @@ pub fn run(opts: Options) {
     // flips back to the character picker to choose a different target.
     let mut show_target_picker = false;
     let mut status = String::from("Enter loads the selected asset. Tab = edit mode. Esc quits.");
+    // ── Session log. `status` holds only the LATEST line, so every message before it was lost the
+    // moment the next one landed — which is why the rail's "Log" button had nothing to show.
+    //
+    // History is captured by DIFFING `status` once per frame rather than by routing its forty
+    // assignment sites through a helper: the sites are spread across the whole action processor and
+    // several are inside closures that already borrow half the world, so the diff catches every
+    // transition (including ones a future edit adds) without touching any of them.
+    let mut log: std::collections::VecDeque<LogLine> = std::collections::VecDeque::new();
+    let mut last_status = String::new();
+    let mut log_open = false;
+    // Whether the log window is showing Info lines. Warnings and errors are never filterable — a
+    // log that can hide its failures is worse than no log.
+    let mut log_show_info = true;
 
     // Orbit camera.
     let mut cam_target = Vec3::ZERO;
@@ -1392,6 +1763,14 @@ pub fn run(opts: Options) {
                         vehicle_inventory = build_vehicle_inventory(&index);
                         inventory_dirty = false;
                     }
+                    // The workbench whose PANELS and MARKERS to draw this frame. Craft is never
+                    // rendered directly: its mode selects one of the benches that used to be rail
+                    // peers, so the panel code below is unchanged and simply stops being reachable
+                    // by navigating to it.
+                    //
+                    // Resolved ONCE per frame, before the GUI runs, so the panels, the viewport HUD
+                    // and the 3D marker passes cannot disagree about which bench is showing.
+                    let eff = if wb == Workbench::Craft { craft_mode.workbench() } else { wb };
                     use crate::gui::theme;
                     gui.run(|ctx| {
                         // ── COMMAND BAR: identity + breadcrumb (left) · scene I/O (right). Only
@@ -1497,34 +1876,53 @@ pub fn run(opts: Options) {
                             .frame(egui::Frame::none().fill(theme::G0))
                             .show(ctx, |ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.add_space(6.0);
-                                let icons = [
-                                    theme::RailIcon::Inspect,
-                                    theme::RailIcon::Sandbox,
-                                    theme::RailIcon::Mods,
-                                    theme::RailIcon::Skeleton,
-                                    theme::RailIcon::Quartermaster,
-                                    theme::RailIcon::Settings,
-                                ];
-                                for (i, w) in Workbench::ALL.iter().enumerate() {
-                                    // The Shipment carries a count of what BLOCKS, so the gate is
-                                    // visible from whatever page you are actually working on.
-                                    let badge = (*w == Workbench::Quartermaster)
-                                        .then(|| qm.blocking_count());
-                                    if theme::rail_item_badged(
-                                        ui,
-                                        Some(i + 1),
-                                        w.label(),
-                                        icons[i],
-                                        wb == *w,
-                                        badge,
-                                    ) {
-                                        wb = *w;
-                                    }
-                                }
+                                // Log pins to the BOTTOM and is laid out first so it keeps its
+                                // place however many workbenches the rail grows.
                                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                                     ui.add_space(6.0);
-                                    theme::rail_item(ui, None, "Log", theme::RailIcon::Log, false);
+                                    // Was inert: the returned `bool` was discarded and there was no
+                                    // history behind it anyway. Both halves exist now.
+                                    let unread = log
+                                        .iter()
+                                        .filter(|l| l.level == LogLevel::Error)
+                                        .count();
+                                    if theme::rail_item_badged(
+                                        ui,
+                                        None,
+                                        "Log",
+                                        theme::RailIcon::Log,
+                                        log_open,
+                                        (unread > 0).then_some(unread),
+                                    ) {
+                                        log_open = !log_open;
+                                    }
+                                    // The workbenches fill the space above, top-down, and scroll if
+                                    // the rail ever runs out of height.
+                                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                                        ui.add_space(6.0);
+                                        egui::ScrollArea::vertical()
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                ui.spacing_mut().item_spacing.y = 1.0;
+                                                for (i, w) in Workbench::ALL.iter().enumerate() {
+                                                    // The Shipment carries a count of what BLOCKS,
+                                                    // so the gate is visible from whatever page you
+                                                    // are actually working on.
+                                                    let badge = (*w == Workbench::Quartermaster)
+                                                        .then(|| qm.blocking_count());
+                                                    if theme::rail_item_badged(
+                                                        ui,
+                                                        Some(i + 1),
+                                                        w.label(),
+                                                        w.icon(),
+                                                        wb == *w,
+                                                        badge,
+                                                    ) {
+                                                        wb = *w;
+                                                    }
+                                                }
+                                            });
+                                    });
                                 });
                             });
                         egui::TopBottomPanel::bottom("status")
@@ -1566,138 +1964,6 @@ pub fn run(opts: Options) {
                                 }
                             });
                         });
-                        // ── VERB-BAR: the current workbench's primary actions, over the viewport.
-                        // Contextual verbs live HERE (not the command bar); brass = go, hazard = the
-                        // irreversible. Every verb shows its keyboard shortcut. ──
-                        egui::TopBottomPanel::bottom("verbbar")
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin::symmetric(13.0, 5.0)),
-                            )
-                            .show(ctx, |ui| {
-                            ui.horizontal(|ui| {
-                                let has_preview = preview.is_some();
-                                let has_placed = !placed.is_empty();
-                                match wb {
-                                    Workbench::Quartermaster => {
-                                        qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
-                                    }
-                                    Workbench::Inspect => {
-                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
-                                            actions.push(Act::Place);
-                                        }
-                                        if ui.add_enabled(has_preview && exporter.is_none(), egui::Button::new("Export  F10")).clicked() {
-                                            actions.push(Act::Export);
-                                        }
-                                        ui.separator();
-                                        if ui.add_enabled(has_preview, egui::Button::new("View textures  F3")).clicked() {
-                                            actions.push(Act::TexOfPreview);
-                                        }
-                                        if ui.add_enabled(has_preview, egui::Button::new("Next clip  F4")).clicked() {
-                                            actions.push(Act::ClipNav(1));
-                                        }
-                                    }
-                                    Workbench::Sandbox => {
-                                        let has_sel = sel_placed.is_some_and(|i| i < placed.len());
-                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
-                                            actions.push(Act::Place);
-                                        }
-                                        if ui.add_enabled(has_sel, egui::Button::new("Duplicate")).clicked() {
-                                            actions.push(Act::DuplicatePlaced(sel_placed.unwrap()));
-                                        }
-                                        if ui.add_enabled(has_sel, egui::Button::new("Delete")).clicked() {
-                                            actions.push(Act::RemovePlaced(sel_placed.unwrap()));
-                                            sel_placed = None;
-                                        }
-                                        ui.separator();
-                                        if ui.add_enabled(has_placed, egui::Button::new("Merge  F7")).clicked() {
-                                            actions.push(Act::Merge);
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if theme::danger_button(ui, "Clear", has_placed).clicked() {
-                                                actions.push(Act::ClearSandbox);
-                                            }
-                                        });
-                                    }
-                                    Workbench::Mods => {
-                                        if ui.button("Load donor ref").clicked() {
-                                            actions.push(Act::LoadDonorRef);
-                                        }
-                                        if ui.add_enabled(has_preview, egui::Button::new("Auto-fit")).clicked() {
-                                            actions.push(Act::ConformAutofit);
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let busy = publisher.is_some();
-                                            let lbl = if busy { "publishing…" } else { "Publish patch WAD" };
-                                            if theme::danger_button(ui, lbl, !mod_items.is_empty() && !busy).clicked() {
-                                                actions.push(Act::Publish);
-                                            }
-                                        });
-                                    }
-                                    Workbench::Skeleton => {
-                                        let ready = retarget.as_ref().is_some_and(|r| r.mapped_count() > 0)
-                                            && retarget_target.is_some();
-                                        if ui.add_enabled(retarget.is_some(), egui::Button::new("Auto-map bones")).clicked() {
-                                            actions.push(Act::RetargetRemap);
-                                        }
-                                        if ui
-                                            .add_enabled(preview.is_some(), egui::Button::new("Clear import"))
-                                            .on_hover_text("Unload the current import and reset the retarget — start over with a fresh model")
-                                            .clicked()
-                                        {
-                                            actions.push(Act::ClearImport);
-                                        }
-                                        let can_align = retarget.as_ref().is_some_and(|r| {
-                                            !r.source_pos.is_empty() && !r.target_pos.is_empty()
-                                        });
-                                        if ui
-                                            .add_enabled(can_align, egui::Button::new("Align by position"))
-                                            .on_hover_text("Fill the still-unmapped bones by nearest target bone in 3D space")
-                                            .clicked()
-                                        {
-                                            actions.push(Act::RetargetAlignPos);
-                                        }
-                                        let can_export = ready && retarget_src_path.is_some();
-                                        if ui
-                                            .add_enabled(can_export, egui::Button::new("Export faithful character"))
-                                            .on_hover_text("Re-pose onto the target skeleton with shipped-format skinning (palette-relative BLENDINDICES + INFO(56) range table) and inject into the target donor block")
-                                            .clicked()
-                                        {
-                                            actions.push(Act::ExportFaithfulCharacter);
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            // Publishing is a DANGER verb, not a secondary one — the
-                                            // Mods bench styles "Publish patch WAD" the same way.
-                                            // It is the commit: everything else on this page is
-                                            // reversible, and this one writes a folder an author
-                                            // then ships. Rightmost, matching that bench.
-                                            if theme::danger_button(ui, "Export Shipment", can_export)
-                                                .on_hover_text(
-                                                    "Write a buildable Shipment (manifest.yaml + src/) carrying THIS bone map, \
-                                                     hand adjustments included — then `qm build` it into a patch WAD",
-                                                )
-                                                .clicked()
-                                            {
-                                                actions.push(Act::ExportShipment);
-                                            }
-                                            if theme::primary_button(ui, "Apply retarget", ready).clicked() {
-                                                actions.push(Act::RetargetApply);
-                                            }
-                                        });
-                                    }
-                                    // The page itself is the whole surface; the command bar just says
-                                    // where the file being edited actually is.
-                                    Workbench::Settings => {
-                                        let loc = crate::settings::config_path()
-                                            .map(|p| p.display().to_string())
-                                            .unwrap_or_else(|| "(no config directory)".into());
-                                        ui.label(
-                                            egui::RichText::new(loc).color(theme::FAINT).size(11.0),
-                                        );
-                                    }
-                                }
-                            });
-                        });
                         // ── NAVIGATOR (left): the current workbench's list. The viewport keeps its
                         // camera when the workbench changes; only this + the inspector reconfigure. ──
                         let navigator_resp = egui::SidePanel::left("navigator")
@@ -1708,7 +1974,7 @@ pub fn run(opts: Options) {
                                     .inner_margin(egui::Margin { left: 13.0, right: 10.0, top: 12.0, bottom: 0.0 }),
                             )
                             .show(ctx, |ui| {
-                          match wb {
+                          match eff {
                             Workbench::Quartermaster => {
                                 qm_acts.extend(crate::quartermaster::navigator(ui, &qm));
                             }
@@ -1940,47 +2206,15 @@ pub fn run(opts: Options) {
                                             actions.push(Act::LoadRow(vi));
                                         }
                                         row.context_menu(|ui| {
-                                            match kind {
-                                                Kind::Model => {
-                                                    if ui.button("Load / preview").clicked() {
-                                                        sel = vi;
-                                                        actions.push(Act::LoadRow(vi));
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Place in sandbox").clicked() {
-                                                        actions.push(Act::PlaceHash(
-                                                            hash,
-                                                            label.clone(),
-                                                        ));
-                                                        ui.close_menu();
-                                                    }
-                                                    if ui.button("Export (OBJ + textures)").clicked()
-                                                    {
-                                                        actions.push(Act::ExportHash(
-                                                            hash,
-                                                            label.clone(),
-                                                        ));
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                                Kind::Texture => {
-                                                    if ui.button("View plate").clicked() {
-                                                        sel = vi;
-                                                        actions.push(Act::LoadRow(vi));
-                                                        ui.close_menu();
-                                                    }
-                                                }
-                                            }
-                                            ui.separator();
-                                            if ui.button("Copy name").clicked() {
-                                                ui.ctx().copy_text(label.clone());
-                                                ui.close_menu();
-                                            }
-                                            if ui.button(format!("Copy hash 0x{hash:08X}")).clicked()
-                                            {
-                                                ui.ctx().copy_text(format!("0x{hash:08X}"));
-                                                ui.close_menu();
-                                            }
+                                            // ONE menu, shared with the inspector heading — the
+                                            // two used to be separate copies and had drifted.
+                                            asset_menu(
+                                                ui,
+                                                hash,
+                                                &label,
+                                                kind == Kind::Texture,
+                                                &mut actions,
+                                            );
                                         });
                                     }
                                 },
@@ -2220,195 +2454,57 @@ pub fn run(opts: Options) {
                             // what you read every time.
                             Workbench::Settings => {
                                 ui.label(theme::disp_text("SETTINGS", 15.0, theme::TX));
-                                ui.add_space(10.0);
-
-                                // Tail of a path — the part that identifies it. The full string is
-                                // always one hover away, so the chip never has to carry 80 characters.
-                                let tail = |p: &std::path::Path| -> String {
-                                    let n: Vec<_> = p.components().rev().take(2).collect();
-                                    n.iter()
-                                        .rev()
-                                        .map(|c| c.as_os_str().to_string_lossy())
-                                        .collect::<Vec<_>>()
-                                        .join("/")
-                                };
-                                // A path row: green when the user set it, neutral when it was found
-                                // by the fallback chain. State is the fill, not a sentence.
-                                let path_chip = |ui: &mut egui::Ui, set: bool, text: &str, hover: &str| {
-                                    let (fill, bord) = if set {
-                                        (theme::GOOD_SOFT, theme::GOOD_DK)
-                                    } else {
-                                        (theme::G2, theme::LINE)
-                                    };
-                                    theme::row_chip(ui, fill, bord, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(text)
-                                                .monospace()
-                                                .size(10.5)
-                                                .color(if set { theme::TX } else { theme::DIM }),
-                                        );
-                                    })
-                                    .on_hover_text(hover);
-                                };
-
-                                // ── Game archive ──
-                                let wad_badge = format!("{} models", index.models.len());
-                                theme::section(ui, "Game archive", Some(&wad_badge), true, |ui| {
-                                    let set = cfg.wad_path.is_some();
-                                    let shown = cfg
-                                        .wad_path
-                                        .as_deref()
-                                        .map(tail)
-                                        .unwrap_or_else(|| tail(std::path::Path::new(&opts.wadpath)));
-                                    path_chip(
-                                        ui,
-                                        set,
-                                        &shown,
-                                        &format!(
-                                            "In use: {}\n\n{}",
-                                            opts.wadpath,
-                                            if set {
-                                                "Saved setting. Cleared, the app falls back to auto-detection."
-                                            } else if cfg!(windows) {
-                                                "Auto-detected from the EA Games registry key. Choose a file to pin it."
-                                            } else {
-                                                // No registry off Windows — this page is the only
-                                                // way to avoid retyping `--wad` on every launch.
-                                                "No auto-detection on this platform: without a saved path, --wad is required every launch."
-                                            }
-                                        ),
-                                    );
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Choose…").clicked() {
-                                            if let Some(p) = crate::settings::pick_wad() {
-                                                // Validate before saving, for the same reason the
-                                                // first-run picker does: a remembered bad path fails
-                                                // at the NEXT launch, far from the click that caused it.
-                                                cfg_note = Some(match crate::settings::check_wad(&p) {
-                                                    Ok(desc) => {
-                                                        cfg.wad_path = Some(p);
-                                                        cfg.save()
-                                                            .map(|_| format!("Saved ({desc}). Restart to load it."))
-                                                            .map_err(|e| format!("Could not save: {e}"))
-                                                    }
-                                                    Err(e) => Err(format!("Not a game archive: {e}")),
-                                                });
-                                            }
-                                        }
-                                        if ui
-                                            .add_enabled(set, egui::Button::new("Clear"))
-                                            .on_hover_text("Forget the saved path and go back to auto-detection")
-                                            .clicked()
-                                        {
-                                            cfg.wad_path = None;
-                                            cfg_note = Some(
-                                                cfg.save()
-                                                    .map(|_| "Cleared — back to auto-detection.".to_string())
-                                                    .map_err(|e| format!("Could not save: {e}")),
-                                            );
-                                        }
-                                    });
-                                });
-
-                                // ── Reference data ──
-                                // The badge IS the health readout: names resolved is the one number
-                                // that says whether the bundle is doing its job.
-                                let data_badge = if names_pending {
-                                    "loading…".to_string()
-                                } else {
-                                    format!("{} names", index.names.len())
-                                };
-                                theme::section(ui, "Reference data", Some(&data_badge), true, |ui| {
-                                    let set = cfg.data_dir.is_some();
-                                    let home = crate::index::data_home();
-                                    let shown = match (cfg.data_dir.as_deref(), home.as_deref()) {
-                                        (Some(p), _) => tail(p),
-                                        (None, Some(h)) => tail(h),
-                                        (None, None) => "none — embedded names only".to_string(),
-                                    };
-                                    path_chip(
-                                        ui,
-                                        set,
-                                        &shown,
-                                        &match &home {
-                                            Some(h) => format!(
-                                                "In use: {}\n\nThe workshop_data bundle: hash to name for every asset and bone.",
-                                                h.display()
-                                            ),
-                                            None => "No bundle found — only the names compiled into the app, so most assets and bones show as bare 0x… hashes.\n\nShips with the release as mercs2-workshop-data.zip.".to_string(),
-                                        },
-                                    );
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Choose…").clicked() {
-                                            if let Some(p) = crate::settings::pick_data_dir() {
-                                                cfg_note = Some(match crate::settings::check_data_dir(&p) {
-                                                    Ok(desc) => {
-                                                        cfg.data_dir = Some(p);
-                                                        cfg.save()
-                                                            .map(|_| format!("Saved ({desc}). Restart to load it."))
-                                                            .map_err(|e| format!("Could not save: {e}"))
-                                                    }
-                                                    Err(e) => Err(e),
-                                                });
-                                            }
-                                        }
-                                        if ui.add_enabled(set, egui::Button::new("Clear")).clicked() {
-                                            cfg.data_dir = None;
-                                            cfg_note = Some(
-                                                cfg.save()
-                                                    .map(|_| "Cleared.".to_string())
-                                                    .map_err(|e| format!("Could not save: {e}")),
-                                            );
-                                        }
-                                        // Self-service: fetch the bundle from the release rather than
-                                        // asking someone to find a zip and unpack it to the right
-                                        // place. Explicit — the tool never downloads unprompted.
-                                        let busy = fetch_rx.is_some();
-                                        let label = if busy { "Downloading…" } else { "Download" };
-                                        if ui
-                                            .add_enabled(!busy, egui::Button::new(label))
-                                            .on_hover_text(
-                                                "Fetch the reference bundle published with the latest release and install it for this user",
-                                            )
-                                            .clicked()
-                                        {
-                                            let (tx, rx) = std::sync::mpsc::channel();
-                                            fetch_rx = Some(rx);
-                                            fetch_msg = "starting…".into();
-                                            cfg_note = None;
-                                            std::thread::spawn(move || {
-                                                crate::fetch::download(|e| {
-                                                    let _ = tx.send(e);
-                                                });
-                                            });
-                                        }
-                                    });
-                                    if fetch_rx.is_some() {
-                                        ui.horizontal(|ui| {
-                                            ui.add(egui::Spinner::new().size(11.0));
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "The paths the tool cannot discover for itself on every platform.",
+                                    )
+                                    .size(11.5)
+                                    .color(theme::FAINT),
+                                );
+                                ui.add_space(9.0);
+                                for s in SettingsSection::ALL {
+                                    let on = settings_section == s;
+                                    let r = egui::Frame::none()
+                                        .fill(if on { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT })
+                                        .inner_margin(egui::Margin { left: 9.0, right: 8.0, top: 6.0, bottom: 7.0 })
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
                                             ui.label(
-                                                egui::RichText::new(&fetch_msg)
-                                                    .color(theme::DIM)
-                                                    .size(10.5),
+                                                egui::RichText::new(s.label())
+                                                    .size(12.5)
+                                                    .color(if on { theme::BRASS } else { theme::TX }),
                                             );
-                                        });
+                                            ui.label(
+                                                egui::RichText::new(s.blurb()).size(10.5).color(theme::FAINT),
+                                            );
+                                        })
+                                        .response;
+                                    if on {
+                                        ui.painter().rect_filled(
+                                            egui::Rect::from_min_size(r.rect.min, egui::vec2(3.0, r.rect.height())),
+                                            0.0,
+                                            theme::BRASS,
+                                        );
                                     }
-                                });
-
-                                // Outcome of the last action — one line, only when there IS one.
-                                if let Some(note) = &cfg_note {
-                                    let (col, text) = match note {
-                                        Ok(m) => (theme::GOOD, m.as_str()),
-                                        Err(m) => (theme::BAD, m.as_str()),
-                                    };
-                                    theme::status_dot(ui, text, col);
+                                    if r.interact(egui::Sense::click()).clicked() {
+                                        settings_section = s;
+                                    }
                                 }
                             }
+                            // `eff` is resolved through `CraftMode::workbench()`, whose match is
+                            // exhaustive and never yields `Craft` — Craft is a rail slot, not a
+                            // page. Loud rather than silent if that ever stops being true.
+                            Workbench::Craft => unreachable!("Craft resolves to a CraftMode bench"),
                           } // ── end match wb (navigator) ──
                         });
                         navigator_width = navigator_resp.response.rect.width();
                         // ── INSPECTOR (right): the current workbench's detail cards. ──
-                        let inspector_resp = egui::SidePanel::right("inspector")
+                        // ── INSPECTOR (right). NOT registered on Settings: that page has a
+                        // navigator and a centre and nothing a detail panel would hold, and an
+                        // empty registered panel reads as something that failed to load rather
+                        // than something that was never meant to be there.
+                        let inspector_resp = (wb != Workbench::Settings).then(|| egui::SidePanel::right("inspector")
                             .resizable(true)
                             .default_width(inspector_width)
                             .frame(
@@ -2417,10 +2513,10 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                              if wb == Workbench::Quartermaster {
+                              if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
                               }
-                              if matches!(wb, Workbench::Inspect) {
+                              if matches!(eff, Workbench::Inspect) {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -2443,19 +2539,10 @@ pub fn run(opts: Options) {
                                         );
                                         ui.add_space(8.0);
                                         head.context_menu(|ui| {
-                                            if ui.button("Export (OBJ + textures)").clicked() {
-                                                actions.push(Act::Export);
-                                                ui.close_menu();
-                                            }
-                                            ui.separator();
-                                            if ui.button("Copy name").clicked() {
-                                                ui.ctx().copy_text(plabel.clone());
-                                                ui.close_menu();
-                                            }
-                                            if ui.button(format!("Copy hash 0x{phash:08X}")).clicked() {
-                                                ui.ctx().copy_text(format!("0x{phash:08X}"));
-                                                ui.close_menu();
-                                            }
+                                            // The SAME menu as the browser row. These were two
+                                            // copies: this one offered only OBJ export, and neither
+                                            // had been revisited since before Shipments existed.
+                                            asset_menu(ui, phash, &plabel, false, &mut actions);
                                         });
                                         theme::section(ui, "Info", None, true, |ui| {
                                                 theme::kv(ui, "verts / tris", egui::RichText::new(format!("{} / {}", p.verts, p.tris)));
@@ -3156,7 +3243,7 @@ pub fn run(opts: Options) {
                                     }
                                 }
                               } // ── end Inspect inspector ──
-                              if matches!(wb, Workbench::Sandbox) {
+                              if matches!(eff, Workbench::Sandbox) {
                                 // The SELECTED instance's transform, then scene-wide actions.
                                 match sel_placed.and_then(|i| placed.get(i).map(|p| (i, p.label.clone()))) {
                                     Some((i, plabel)) => {
@@ -3229,7 +3316,7 @@ pub fn run(opts: Options) {
                                     ui.weak("Merging bakes every placed instance into one model you can export or add to a mod.");
                                 });
                               } // ── end Sandbox inspector ──
-                              if matches!(wb, Workbench::Mods) {
+                              if matches!(eff, Workbench::Mods) {
                                 // ── Interaction hardpoints: a vehicle's `hp_*` HIER nodes (seat you
                                 // enter at, exhausts, wheels, muzzle). Conform at a different SIZE and
                                 // these stay where the DONOR's were — the seat floats off the model —
@@ -3489,7 +3576,7 @@ pub fn run(opts: Options) {
                                     }
                                 });
                               } // ── end Mods inspector ──
-                              if matches!(wb, Workbench::Skeleton) {
+                              if matches!(eff, Workbench::Skeleton) {
                                 ui.label(theme::disp_text("Skeleton retarget", 18.0, theme::TX));
                                 match &retarget {
                                     None => {
@@ -3604,32 +3691,626 @@ pub fn run(opts: Options) {
                                 }
                               } // ── end Skeleton inspector ──
                             });
-                        });
+                        }));
                         // Remember the (possibly just-dragged) width so it survives a card collapse.
-                        inspector_width = inspector_resp.response.rect.width();
+                        // Absent on Settings, where the panel is not registered — keep the last
+                        // width so returning to another page restores the drag rather than resetting it.
+                        if let Some(r) = &inspector_resp {
+                            inspector_width = r.response.rect.width();
+                        }
+
+                        // ── VERB-BAR: the current workbench's primary actions.
+                        //
+                        // Registered AFTER the navigator and inspector, and as a TOP panel, so it
+                        // spans only the CENTRE column. As a `bottom` panel declared before the
+                        // side panels it ran the full width of the window, which put a second
+                        // full-width bar under the status bar and read as chrome belonging to the
+                        // whole app rather than verbs belonging to the page.
+                        //
+                        // brass = go, hazard = the irreversible. Every verb shows its shortcut. ──
+                        egui::TopBottomPanel::top("verbs")
+                            .frame(
+                                egui::Frame::side_top_panel(&ctx.style())
+                                    .inner_margin(egui::Margin::symmetric(13.0, 5.0)),
+                            )
+                            .show(ctx, |ui| {
+                            // ── CRAFT MODE STRIP: row one of the centre column.
+                            //
+                            // Above the verbs and inside the centre, so switching bench changes
+                            // what the VIEWPORT does while the navigator and inspector stay bound
+                            // to the same subject. Craft is a mode of the centre, never a page you
+                            // navigate away to — which is the property that stopped Skeleton being
+                            // a dead end.
+                            if wb == Workbench::Craft {
+                                ui.horizontal(|ui| {
+                                    for m in CraftMode::ALL {
+                                        let on = craft_mode == m;
+                                        let r = theme::pill(ui, m.label(), on);
+                                        // A mode that is not a real bench yet SAYS so on hover
+                                        // rather than opening something that looks broken.
+                                        let r = match m.unbuilt() {
+                                            Some(why) => r.on_hover_text(why),
+                                            None => r,
+                                        };
+                                        if r.clicked() {
+                                            craft_mode = m;
+                                        }
+                                    }
+                                    // What the bench is acting on. Without this the benches had no
+                                    // idea what they were editing — `Act::Craft` carried no index.
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| match craft_subject {
+                                            Some(i) => {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "editing contributions[{i}]"
+                                                    ))
+                                                    .size(10.5)
+                                                    .monospace()
+                                                    .color(theme::BRASS),
+                                                );
+                                            }
+                                            None => {
+                                                ui.label(
+                                                    egui::RichText::new("free-form — commits start a Shipment")
+                                                        .size(10.5)
+                                                        .color(theme::FAINT),
+                                                );
+                                            }
+                                        },
+                                    );
+                                });
+                                if let Some(why) = craft_mode.unbuilt() {
+                                    ui.label(
+                                        egui::RichText::new(why).size(10.0).color(theme::FAINT),
+                                    );
+                                }
+                                ui.separator();
+                            }
+                            ui.horizontal(|ui| {
+                                let has_preview = preview.is_some();
+                                let has_placed = !placed.is_empty();
+                                match eff {
+                                    Workbench::Quartermaster => {
+                                        qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
+                                    }
+                                    Workbench::Inspect => {
+                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
+                                            actions.push(Act::Place);
+                                        }
+                                        if ui.add_enabled(has_preview && exporter.is_none(), egui::Button::new("Export  F10")).clicked() {
+                                            actions.push(Act::Export);
+                                        }
+                                        ui.separator();
+                                        if ui.add_enabled(has_preview, egui::Button::new("View textures  F3")).clicked() {
+                                            actions.push(Act::TexOfPreview);
+                                        }
+                                        if ui.add_enabled(has_preview, egui::Button::new("Next clip  F4")).clicked() {
+                                            actions.push(Act::ClipNav(1));
+                                        }
+                                    }
+                                    Workbench::Sandbox => {
+                                        let has_sel = sel_placed.is_some_and(|i| i < placed.len());
+                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
+                                            actions.push(Act::Place);
+                                        }
+                                        if ui.add_enabled(has_sel, egui::Button::new("Duplicate")).clicked() {
+                                            actions.push(Act::DuplicatePlaced(sel_placed.unwrap()));
+                                        }
+                                        if ui.add_enabled(has_sel, egui::Button::new("Delete")).clicked() {
+                                            actions.push(Act::RemovePlaced(sel_placed.unwrap()));
+                                            sel_placed = None;
+                                        }
+                                        ui.separator();
+                                        if ui.add_enabled(has_placed, egui::Button::new("Merge  F7")).clicked() {
+                                            actions.push(Act::Merge);
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if theme::danger_button(ui, "Clear", has_placed).clicked() {
+                                                actions.push(Act::ClearSandbox);
+                                            }
+                                        });
+                                    }
+                                    Workbench::Mods => {
+                                        if ui.button("Load donor ref").clicked() {
+                                            actions.push(Act::LoadDonorRef);
+                                        }
+                                        if ui.add_enabled(has_preview, egui::Button::new("Auto-fit")).clicked() {
+                                            actions.push(Act::ConformAutofit);
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let busy = publisher.is_some();
+                                            let lbl = if busy { "publishing…" } else { "Publish patch WAD" };
+                                            if theme::danger_button(ui, lbl, !mod_items.is_empty() && !busy).clicked() {
+                                                actions.push(Act::Publish);
+                                            }
+                                        });
+                                    }
+                                    Workbench::Skeleton => {
+                                        let ready = retarget.as_ref().is_some_and(|r| r.mapped_count() > 0)
+                                            && retarget_target.is_some();
+                                        if ui.add_enabled(retarget.is_some(), egui::Button::new("Auto-map bones")).clicked() {
+                                            actions.push(Act::RetargetRemap);
+                                        }
+                                        if ui
+                                            .add_enabled(preview.is_some(), egui::Button::new("Clear import"))
+                                            .on_hover_text("Unload the current import and reset the retarget — start over with a fresh model")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ClearImport);
+                                        }
+                                        let can_align = retarget.as_ref().is_some_and(|r| {
+                                            !r.source_pos.is_empty() && !r.target_pos.is_empty()
+                                        });
+                                        if ui
+                                            .add_enabled(can_align, egui::Button::new("Align by position"))
+                                            .on_hover_text("Fill the still-unmapped bones by nearest target bone in 3D space")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::RetargetAlignPos);
+                                        }
+                                        let can_export = ready && retarget_src_path.is_some();
+                                        if ui
+                                            .add_enabled(can_export, egui::Button::new("Export faithful character"))
+                                            .on_hover_text("Re-pose onto the target skeleton with shipped-format skinning (palette-relative BLENDINDICES + INFO(56) range table) and inject into the target donor block")
+                                            .clicked()
+                                        {
+                                            actions.push(Act::ExportFaithfulCharacter);
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            // Publishing is a DANGER verb, not a secondary one — the
+                                            // Mods bench styles "Publish patch WAD" the same way.
+                                            // It is the commit: everything else on this page is
+                                            // reversible, and this one writes a folder an author
+                                            // then ships. Rightmost, matching that bench.
+                                            if theme::danger_button(ui, "Export Shipment", can_export)
+                                                .on_hover_text(
+                                                    "Write a buildable Shipment (manifest.yaml + src/) carrying THIS bone map, \
+                                                     hand adjustments included — then `qm build` it into a patch WAD",
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(Act::ExportShipment);
+                                            }
+                                            if theme::primary_button(ui, "Apply retarget", ready).clicked() {
+                                                actions.push(Act::RetargetApply);
+                                            }
+                                        });
+                                    }
+                                    // The page itself is the whole surface; the command bar just says
+                                    // where the file being edited actually is.
+                                    Workbench::Settings => {
+                                        let loc = crate::settings::config_path()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "(no config directory)".into());
+                                        ui.label(
+                                            egui::RichText::new(loc).color(theme::FAINT).size(11.0),
+                                        );
+                                    }
+                                    // See the navigator's note: `eff` never resolves to Craft.
+                                    Workbench::Craft => {
+                                        unreachable!("Craft resolves to a CraftMode bench")
+                                    }
+                                }
+                            });
+                        });
+
+                        // -- SETTINGS page: the navigator lists the sections, the CENTRE holds the selected one.
+                        //
+                        // The whole form used to live in the navigator, which left this centre panel and the
+                        // inspector registered and EMPTY -- two blank panels on the one page with nothing to put
+                        // in them. Settings is now shaped like every other page, and the inspector is simply not
+                        // registered here (see its `wb != Settings` guard) rather than being drawn blank.
+                        if wb == Workbench::Settings {
+                            egui::CentralPanel::default()
+                                .frame(
+                                    egui::Frame::none()
+                                        .fill(theme::G0)
+                                        .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+                                )
+                                .show(ctx, |ui| {
+                                    ui.label(theme::disp_text(settings_section.label().to_uppercase(), 18.0, theme::TX));
+                                    ui.add_space(12.0);
+                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+
+                                    // Tail of a path — the part that identifies it. The full string is
+                                    // always one hover away, so the chip never has to carry 80 characters.
+                                    let tail = |p: &std::path::Path| -> String {
+                                        let n: Vec<_> = p.components().rev().take(2).collect();
+                                        n.iter()
+                                            .rev()
+                                            .map(|c| c.as_os_str().to_string_lossy())
+                                            .collect::<Vec<_>>()
+                                            .join("/")
+                                    };
+                                    // A path row: green when the user set it, neutral when it was found
+                                    // by the fallback chain. State is the fill, not a sentence.
+                                    let path_chip = |ui: &mut egui::Ui, set: bool, text: &str, hover: &str| {
+                                        let (fill, bord) = if set {
+                                            (theme::GOOD_SOFT, theme::GOOD_DK)
+                                        } else {
+                                            (theme::G2, theme::LINE)
+                                        };
+                                        theme::row_chip(ui, fill, bord, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(text)
+                                                    .monospace()
+                                                    .size(10.5)
+                                                    .color(if set { theme::TX } else { theme::DIM }),
+                                            );
+                                        })
+                                        .on_hover_text(hover);
+                                    };
+                                        match settings_section {
+                                            SettingsSection::Game => {
+                                        // ── Game archive ──
+                                        let wad_badge = format!("{} models", index.models.len());
+                                        theme::section(ui, "Game archive", Some(&wad_badge), true, |ui| {
+                                            let set = cfg.wad_path.is_some();
+                                            let shown = cfg
+                                                .wad_path
+                                                .as_deref()
+                                                .map(tail)
+                                                .unwrap_or_else(|| tail(std::path::Path::new(&opts.wadpath)));
+                                            path_chip(
+                                                ui,
+                                                set,
+                                                &shown,
+                                                &format!(
+                                                    "In use: {}\n\n{}",
+                                                    opts.wadpath,
+                                                    if set {
+                                                        "Saved setting. Cleared, the app falls back to auto-detection."
+                                                    } else if cfg!(windows) {
+                                                        "Auto-detected from the EA Games registry key. Choose a file to pin it."
+                                                    } else {
+                                                        // No registry off Windows — this page is the only
+                                                        // way to avoid retyping `--wad` on every launch.
+                                                        "No auto-detection on this platform: without a saved path, --wad is required every launch."
+                                                    }
+                                                ),
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Choose…").clicked() {
+                                                    if let Some(p) = crate::settings::pick_wad() {
+                                                        // Validate before saving, for the same reason the
+                                                        // first-run picker does: a remembered bad path fails
+                                                        // at the NEXT launch, far from the click that caused it.
+                                                        cfg_note = Some(match crate::settings::check_wad(&p) {
+                                                            Ok(desc) => {
+                                                                cfg.wad_path = Some(p);
+                                                                cfg.save()
+                                                                    .map(|_| format!("Saved ({desc}). Restart to load it."))
+                                                                    .map_err(|e| format!("Could not save: {e}"))
+                                                            }
+                                                            Err(e) => Err(format!("Not a game archive: {e}")),
+                                                        });
+                                                    }
+                                                }
+                                                if ui
+                                                    .add_enabled(set, egui::Button::new("Clear"))
+                                                    .on_hover_text("Forget the saved path and go back to auto-detection")
+                                                    .clicked()
+                                                {
+                                                    cfg.wad_path = None;
+                                                    cfg_note = Some(
+                                                        cfg.save()
+                                                            .map(|_| "Cleared — back to auto-detection.".to_string())
+                                                            .map_err(|e| format!("Could not save: {e}")),
+                                                    );
+                                                }
+                                            });
+                                        });
+                                            }
+                                            SettingsSection::Data => {
+                                        // ── Reference data ──
+                                        // The badge IS the health readout: names resolved is the one number
+                                        // that says whether the bundle is doing its job.
+                                        let data_badge = if names_pending {
+                                            "loading…".to_string()
+                                        } else {
+                                            format!("{} names", index.names.len())
+                                        };
+                                        theme::section(ui, "Reference data", Some(&data_badge), true, |ui| {
+                                            let set = cfg.data_dir.is_some();
+                                            let home = crate::index::data_home();
+                                            let shown = match (cfg.data_dir.as_deref(), home.as_deref()) {
+                                                (Some(p), _) => tail(p),
+                                                (None, Some(h)) => tail(h),
+                                                (None, None) => "none — embedded names only".to_string(),
+                                            };
+                                            path_chip(
+                                                ui,
+                                                set,
+                                                &shown,
+                                                &match &home {
+                                                    Some(h) => format!(
+                                                        "In use: {}\n\nThe workshop_data bundle: hash to name for every asset and bone.",
+                                                        h.display()
+                                                    ),
+                                                    None => "No bundle found — only the names compiled into the app, so most assets and bones show as bare 0x… hashes.\n\nShips with the release as mercs2-workshop-data.zip.".to_string(),
+                                                },
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Choose…").clicked() {
+                                                    if let Some(p) = crate::settings::pick_data_dir() {
+                                                        cfg_note = Some(match crate::settings::check_data_dir(&p) {
+                                                            Ok(desc) => {
+                                                                cfg.data_dir = Some(p);
+                                                                cfg.save()
+                                                                    .map(|_| format!("Saved ({desc}). Restart to load it."))
+                                                                    .map_err(|e| format!("Could not save: {e}"))
+                                                            }
+                                                            Err(e) => Err(e),
+                                                        });
+                                                    }
+                                                }
+                                                if ui.add_enabled(set, egui::Button::new("Clear")).clicked() {
+                                                    cfg.data_dir = None;
+                                                    cfg_note = Some(
+                                                        cfg.save()
+                                                            .map(|_| "Cleared.".to_string())
+                                                            .map_err(|e| format!("Could not save: {e}")),
+                                                    );
+                                                }
+                                                // Self-service: fetch the bundle from the release rather than
+                                                // asking someone to find a zip and unpack it to the right
+                                                // place. Explicit — the tool never downloads unprompted.
+                                                let busy = fetch_rx.is_some();
+                                                let label = if busy { "Downloading…" } else { "Download" };
+                                                if ui
+                                                    .add_enabled(!busy, egui::Button::new(label))
+                                                    .on_hover_text(
+                                                        "Fetch the reference bundle published with the latest release and install it for this user",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    let (tx, rx) = std::sync::mpsc::channel();
+                                                    fetch_rx = Some(rx);
+                                                    fetch_msg = "starting…".into();
+                                                    cfg_note = None;
+                                                    std::thread::spawn(move || {
+                                                        crate::fetch::download(|e| {
+                                                            let _ = tx.send(e);
+                                                        });
+                                                    });
+                                                }
+                                            });
+                                            if fetch_rx.is_some() {
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::Spinner::new().size(11.0));
+                                                    ui.label(
+                                                        egui::RichText::new(&fetch_msg)
+                                                            .color(theme::DIM)
+                                                            .size(10.5),
+                                                    );
+                                                });
+                                            }
+                                        });
+                                            }
+                                            SettingsSection::Shipments => {
+                                                // Where a built Shipment is handed to Modkit. Deliberately NOT
+                                                // configurable: a folder both apps agree on IS the integration, and a
+                                                // per-app override is how two tools end up disagreeing about where the
+                                                // work went.
+                                                theme::section(ui, "Shipments library", None, true, |ui| {
+                                                    match crate::quartermaster::shipments_library() {
+                                                        Some(p) => {
+                                                            let exists = p.is_dir();
+                                                            path_chip(
+                                                                ui,
+                                                                exists,
+                                                                &tail(&p),
+                                                                &format!(
+                                                                    "{}\n\n{}",
+                                                                    p.display(),
+                                                                    if exists {
+                                                                        "Build, then Send to Modkit, drops a copy here."
+                                                                    } else {
+                                                                        "Created on the first Send to Modkit."
+                                                                    }
+                                                                ),
+                                                            );
+                                                            if ui.add_enabled(exists, egui::Button::new("Reveal")).clicked() {
+                                                                let _ = crate::quartermaster::open_in_os(&p);
+                                                            }
+                                                        }
+                                                        None => {
+                                                            ui.label(
+                                                                egui::RichText::new(
+                                                                    "No home directory to place the library in.",
+                                                                )
+                                                                .size(11.0)
+                                                                .color(theme::BAD),
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                            SettingsSection::Shortcuts => {
+                                                // Written down because they were otherwise discoverable only by pressing
+                                                // keys: the verb bar names a few, and the rest live in a `match code`
+                                                // nobody outside this file reads.
+                                                theme::section(ui, "Keys", None, true, |ui| {
+                                                    for (k, what) in SHORTCUTS {
+                                                        theme::kv(ui, what, egui::RichText::new(*k));
+                                                    }
+                                                });
+                                            }
+                                            SettingsSection::About => {
+                                                theme::section(ui, "Build", None, true, |ui| {
+                                                    theme::kv(ui, "workshop", egui::RichText::new(env!("CARGO_PKG_VERSION")));
+                                                });
+                                                // Plan 02: "Show the resolved stack, do not just resolve it." Which
+                                                // install was actually read sits behind a large share of this project own
+                                                // trap reports, and it was visible only on the Shipment page.
+                                                theme::section(
+                                                    ui,
+                                                    "Resolved stack",
+                                                    Some(&format!("{} wad(s)", qm_stack.len())),
+                                                    true,
+                                                    |ui| {
+                                                        if qm_stack.is_empty() {
+                                                            ui.label(
+                                                                egui::RichText::new("No game configured.")
+                                                                    .size(11.0)
+                                                                    .color(theme::BAD),
+                                                            );
+                                                        }
+                                                        for (i, w) in qm_stack.iter().enumerate() {
+                                                            theme::kv(
+                                                                ui,
+                                                                if i == 0 { "base" } else { "overlay" },
+                                                                egui::RichText::new(w.as_str()),
+                                                            );
+                                                        }
+                                                    },
+                                                );
+                                                theme::section(
+                                                    ui,
+                                                    "Reference data",
+                                                    Some(&format!("{} names", index.names.len())),
+                                                    true,
+                                                    |ui| {
+                                                        theme::kv(
+                                                            ui,
+                                                            "bundle",
+                                                            egui::RichText::new(
+                                                                crate::index::data_home()
+                                                                    .map(|h| h.display().to_string())
+                                                                    .unwrap_or_else(|| "embedded only".into()),
+                                                            ),
+                                                        );
+                                                        theme::kv(ui, "models", egui::RichText::new(commafy(index.models.len())));
+                                                        theme::kv(ui, "textures", egui::RichText::new(commafy(index.textures.len())));
+                                                    },
+                                                );
+                                                theme::section(ui, "Config file", None, true, |ui| {
+                                                    theme::kv(
+                                                        ui,
+                                                        "settings.json",
+                                                        egui::RichText::new(
+                                                            crate::settings::config_path()
+                                                                .map(|p| p.display().to_string())
+                                                                .unwrap_or_else(|| "(no config directory)".into()),
+                                                        ),
+                                                    );
+                                                });
+                                            }
+                                        }
+                                    // Outcome of the last action — one line, only when there IS one.
+                                    if let Some(note) = &cfg_note {
+                                        let (col, text) = match note {
+                                            Ok(m) => (theme::GOOD, m.as_str()),
+                                            Err(m) => (theme::BAD, m.as_str()),
+                                        };
+                                        theme::status_dot(ui, text, col);
+                                    }
+                                    });
+                                });
+                        }
 
                         // ── QUARTERMASTER main content: the selected contribution, in full. A
                         // CentralPanel rather than the 3D viewport, because a Shipment is read, not
                         // orbited. Added last so the side panels have already claimed their space.
                         if wb == Workbench::Quartermaster {
-                            qm_acts.extend(crate::quartermaster::center(ctx, &qm));
+                            qm_acts.extend(crate::quartermaster::center(ctx, &qm, qm_names.as_ref()));
                         }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
                         // works underneath. ──
                         //
-                        // Suppressed on the Quartermaster page: there is no 3D under it, so the chips
-                        // would sit on top of the contribution rather than over a scene.
+                        // Suppressed on every page that does NOT own the viewport — there is no 3D
+                        // under those, so the chips would sit on top of the page's own content
+                        // rather than over a scene. Asked as a question about the workbench rather
+                        // than as `!= Quartermaster`, which silently stopped being the whole answer
+                        // the moment Settings also took the centre.
                         let vp = ctx.available_rect();
-                        if wb != Workbench::Quartermaster {
+                        // ── VIEWPORT CONTEXT MENU (Scene).
+                        //
+                        // The navigator rows have had one for a long time; the 3D itself had none,
+                        // so every scene verb needed a round trip to the list. Right-click acts on
+                        // the SELECTED instance — a real hit test needs a picking pass the renderer
+                        // does not have, and inventing one from the bounding sphere would mis-pick
+                        // silently, which is worse than asking for a selection.
+                        if eff == Workbench::Sandbox {
+                            let bg = ui_ctx_interact(ctx, vp);
+                            let sel = sel_placed.filter(|&i| i < placed.len());
+                            bg.context_menu(|ui| {
+                                match sel {
+                                    Some(i) => {
+                                        ui.label(theme::disp_text(
+                                            placed[i].label.to_uppercase(),
+                                            10.0,
+                                            theme::BRASS,
+                                        ));
+                                        ui.separator();
+                                        if ui.button("Snap to camera target").clicked() {
+                                            actions.push(Act::SnapPlaced(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Duplicate").clicked() {
+                                            actions.push(Act::DuplicatePlaced(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Remove").clicked() {
+                                            actions.push(Act::RemovePlaced(i));
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                    }
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new("Nothing selected — pick an object at left")
+                                                .size(10.5)
+                                                .color(theme::FAINT),
+                                        );
+                                        ui.separator();
+                                    }
+                                }
+                                if ui
+                                    .add_enabled(preview.is_some(), egui::Button::new("Place preview  F6"))
+                                    .clicked()
+                                {
+                                    actions.push(Act::Place);
+                                    ui.close_menu();
+                                }
+                                if ui
+                                    .add_enabled(!placed.is_empty(), egui::Button::new("Merge all  F7"))
+                                    .clicked()
+                                {
+                                    actions.push(Act::Merge);
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui.button("Save arrangement  F5").clicked() {
+                                    actions.push(Act::SaveScene);
+                                    ui.close_menu();
+                                }
+                                if ui.button("Load arrangement  F9").clicked() {
+                                    actions.push(Act::LoadScene);
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui
+                                    .add_enabled(!placed.is_empty(), egui::Button::new("Clear scene  F8"))
+                                    .clicked()
+                                {
+                                    actions.push(Act::ClearSandbox);
+                                    ui.close_menu();
+                                }
+                            });
+                        }
+                        if eff.has_viewport() && wb != Workbench::Settings {
                         egui::Area::new(egui::Id::new("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
                             .show(ctx, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::chip(ui, "Orbit", true, Some(theme::BRASS));
-                                    if wb == Workbench::Sandbox {
+                                    if eff == Workbench::Sandbox {
                                         theme::chip(ui, &format!("{} objects", placed.len()), false, None);
                                         if let Some(i) = sel_placed.filter(|&i| i < placed.len()) {
                                             theme::chip(ui, &format!("n{i} selected"), true, Some(theme::BRASS));
@@ -3661,8 +4342,8 @@ pub fn run(opts: Options) {
                             });
                         // Bone/hardpoint marker legend (top-right). Node/hardpoint markers are a
                         // Mods-workbench tool; the pinned-bone glow is the Inspect skeleton view.
-                        let hp_legend = wb == Workbench::Mods && show_hardpoints;
-                        let node_legend = wb == Workbench::Mods && show_nodes;
+                        let hp_legend = eff == Workbench::Mods && show_hardpoints;
+                        let node_legend = eff == Workbench::Mods && show_nodes;
                         if hp_legend || node_legend || sel_bone.is_some() {
                             egui::Area::new(egui::Id::new("vp_legend"))
                                 .fixed_pos(vp.right_top() + egui::vec2(-166.0, 12.0))
@@ -3734,6 +4415,110 @@ pub fn run(opts: Options) {
                                     });
                                 });
                         }
+                        // ── LOG: the session's status history. Virtualised the same way the Lua
+                        // viewer is, because a long session reaches the 2000-line cap and drawing
+                        // every row each frame would be paid on every frame the window is open.
+                        if log_open {
+                            let mut open = true;
+                            egui::Window::new("Log")
+                                .id(egui::Id::new("log_view"))
+                                .open(&mut open)
+                                .default_size([720.0, 420.0])
+                                .resizable(true)
+                                .show(ctx, |ui| {
+                                    let errs = log.iter().filter(|l| l.level == LogLevel::Error).count();
+                                    let warns = log.iter().filter(|l| l.level == LogLevel::Warn).count();
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{} lines", log.len()))
+                                                .color(theme::DIM)
+                                                .size(11.0),
+                                        );
+                                        if errs > 0 {
+                                            theme::status_dot(ui, &format!("{errs} failed"), theme::BAD);
+                                        }
+                                        if warns > 0 {
+                                            theme::status_dot(ui, &format!("{warns} warned"), theme::BRASS);
+                                        }
+                                        ui.separator();
+                                        // Only Info is hideable. A filter that can suppress a
+                                        // failure turns the log into a source of false confidence.
+                                        if theme::pill(ui, "info", log_show_info).clicked() {
+                                            log_show_info = !log_show_info;
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.button("Copy all").clicked() {
+                                                    let all: String = log
+                                                        .iter()
+                                                        .map(|l| {
+                                                            format!(
+                                                                "[{:>8.2}] {} {}\n",
+                                                                l.t,
+                                                                l.level.tag(),
+                                                                l.text
+                                                            )
+                                                        })
+                                                        .collect();
+                                                    ui.ctx().copy_text(all);
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.separator();
+                                    let rows: Vec<&LogLine> = log
+                                        .iter()
+                                        .filter(|l| log_show_info || l.level != LogLevel::Info)
+                                        .collect();
+                                    if rows.is_empty() {
+                                        ui.add_space(12.0);
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Nothing logged yet.")
+                                                    .color(theme::FAINT)
+                                                    .size(12.0),
+                                            );
+                                        });
+                                        return;
+                                    }
+                                    let h = ui.text_style_height(&egui::TextStyle::Monospace);
+                                    egui::ScrollArea::vertical()
+                                        .auto_shrink([false, false])
+                                        // Newest line is the interesting one, so open at the end.
+                                        .stick_to_bottom(true)
+                                        .show_rows(ui, h, rows.len(), |ui, range| {
+                                            for i in range {
+                                                let l = rows[i];
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(format!("{:>8.2}", l.t))
+                                                            .monospace()
+                                                            .size(10.5)
+                                                            .color(theme::FAINT),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(l.level.tag())
+                                                            .monospace()
+                                                            .size(10.5)
+                                                            .color(l.level.colour()),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(&l.text)
+                                                            .monospace()
+                                                            .size(11.0)
+                                                            .color(if l.level == LogLevel::Info {
+                                                                theme::TX
+                                                            } else {
+                                                                l.level.colour()
+                                                            }),
+                                                    );
+                                                });
+                                            }
+                                        });
+                                });
+                            log_open = open;
+                        }
                         if let Some(v) = &mut lua_view {
                             v.show(ctx);
                         }
@@ -3742,11 +4527,22 @@ pub fn run(opts: Options) {
 
                     for act in std::mem::take(&mut qm_acts) {
                         // Switching pages is the app's business, not the panel's — it owns `wb`.
-                        if let crate::quartermaster::Act::Craft(c) = act {
-                            wb = match c {
-                                crate::quartermaster::Craft::Rig => Workbench::Skeleton,
-                                crate::quartermaster::Craft::Conform => Workbench::Mods,
+                        // Entering a craft bench FROM a contribution. It now carries the index, so
+                        // the bench knows what it is editing and a commit can land back on that
+                        // contribution instead of appending a new one. Previously this was a
+                        // one-way, index-less page flip — the bench never learned its subject and
+                        // there was no route back, which is how a "dissolved" page became a trap.
+                        if let crate::quartermaster::Act::Craft(c, at) = act {
+                            wb = Workbench::Craft;
+                            craft_mode = match c {
+                                crate::quartermaster::Craft::Rig => CraftMode::Rig,
+                                crate::quartermaster::Craft::Conform => CraftMode::Conform,
                             };
+                            craft_subject = Some(at);
+                            status = format!(
+                                "{} bench — editing contributions[{at}]",
+                                craft_mode.label()
+                            );
                             continue;
                         }
                         crate::quartermaster::apply(
@@ -4024,35 +4820,42 @@ pub fn run(opts: Options) {
                                         .clone()
                                         .ok_or("pick a target skeleton first")?;
                                     let rt = retarget.as_ref().ok_or("pick a target skeleton first")?;
-                                    let Some(dir) = rfd::FileDialog::new()
-                                        .set_title("Export Shipment into an empty folder")
-                                        .pick_folder()
-                                    else {
-                                        return Ok("export cancelled".into());
-                                    };
-                                    // Default the asset name off the folder the author chose, so the
-                                    // common case needs no extra prompt; it is a plain YAML field
-                                    // they can edit afterwards.
+                                    // ADD to the open Shipment, scaffolding one only if there is
+                                    // none. This used to unconditionally pick a folder and write a
+                                    // whole new single-contribution manifest over it, which meant a
+                                    // retarget could never join a Shipment already being assembled
+                                    // — it replaced it, and re-pointed the dock at the replacement.
+                                    let dir = qm.ensure_shipment(qm_names.as_ref())?;
+                                    // Default the asset name off the Shipment folder, so the common
+                                    // case needs no extra prompt; it is a plain YAML field the
+                                    // contribution form can edit afterwards.
                                     let asset = dir
                                         .file_name()
                                         .map(|s| s.to_string_lossy().to_string())
                                         .unwrap_or_else(|| "my_outfit".into());
-                                    let w = crate::shipment::write(
-                                        &dir, &asset, "mattias", &tlabel, &src_path, rt,
+                                    // The bytes have to travel with the manifest or the Shipment
+                                    // stops building the moment it changes machines.
+                                    let model =
+                                        crate::quartermaster::Panel::import_source(&dir, &src_path)?;
+                                    let (c, st) = crate::shipment::outfit_contribution(
+                                        &asset, "mattias", &tlabel, model, rt,
                                     )?;
-                                    // Exporting a Shipment IS starting one, so the dock picks it up
-                                    // and checks it rather than making the author go and open it.
-                                    qm.open_shipment(&dir, qm_names.as_ref());
+                                    // Replace the contribution this bench was ENTERED from, if it
+                                    // was entered from one; otherwise append. Always appending is
+                                    // what made "edit the rig" produce a second copy of the outfit
+                                    // rather than updating the one being worked on.
+                                    let at =
+                                        qm.upsert_contribution(qm_names.as_ref(), craft_subject, c)?;
                                     // Terse state, the way the status line reads elsewhere. The
-                                    // hand-adjusted count leads because it is the reason the file
+                                    // hand-adjusted count leads because it is the reason the map
                                     // is worth writing: the convention table is derivable, that is
                                     // not.
                                     Ok(format!(
-                                        "SHIPMENT {asset} · {} rows · {} hand-adjusted{} → qm build {}",
-                                        w.rows,
-                                        w.manual,
-                                        if w.unnamed > 0 {
-                                            format!(" · {} unnamed → automap", w.unnamed)
+                                        "SHIPMENT contributions[{at}] {asset} · {} rows · {} hand-adjusted{} → {}",
+                                        st.rows,
+                                        st.manual,
+                                        if st.unnamed > 0 {
+                                            format!(" · {} unnamed → automap", st.unnamed)
                                         } else {
                                             String::new()
                                         },
@@ -4337,6 +5140,67 @@ pub fn run(opts: Options) {
                                         ));
                                     }
                                 }
+                            }
+                            // ── Library routing: an asset becomes a contribution.
+                            //
+                            // Plan 02 line 88 specified this and it had no implementation — there
+                            // was no code path from an Inspect selection into `qm` whatsoever, so
+                            // the only verb the Library offered for an asset was OBJ export.
+                            Act::AddToShipment(kind, _hash, label) => {
+                                let out = (|| -> Result<String, String> {
+                                    // Scaffolds one if none is open, so this is never a dead end.
+                                    let dir = qm.ensure_shipment(qm_names.as_ref())?;
+                                    let n = qm.contribution_count() + 1;
+                                    let c = crate::quartermaster::seeded(kind, &label, n)
+                                        .ok_or_else(|| format!("no stub for `{kind}`"))?;
+                                    let at =
+                                        qm.upsert_contribution(qm_names.as_ref(), None, c)?;
+                                    Ok(format!(
+                                        "contributions[{at}] {kind} from {label} — {}",
+                                        dir.display()
+                                    ))
+                                })();
+                                match out {
+                                    Ok(m) => {
+                                        // Go to the page that now holds it: the contribution is a
+                                        // deliberately-unfinished stub and the form is where it
+                                        // gets finished.
+                                        wb = Workbench::Quartermaster;
+                                        status = m;
+                                    }
+                                    Err(e) => status = format!("ADD TO SHIPMENT FAILED: {e}"),
+                                }
+                            }
+                            Act::CraftOn(mode, hash, label) => {
+                                wb = Workbench::Craft;
+                                craft_mode = mode;
+                                // Reached from the Library rather than from a contribution, so
+                                // there is nothing to write back to yet. A commit will scaffold.
+                                craft_subject = None;
+                                match mode {
+                                    // The rig bench needs a TARGET skeleton; the asset is it.
+                                    CraftMode::Rig => {
+                                        actions.push(Act::RetargetSetTarget(hash, label.clone()));
+                                        status = format!("Rig bench — target {label}");
+                                    }
+                                    CraftMode::Conform => {
+                                        actions.push(Act::ModDonor(hash, label.clone()));
+                                        status = format!("Conform bench — donor {label}");
+                                    }
+                                    _ => {
+                                        actions.push(Act::LoadModelHash(hash, label.clone()));
+                                        status = format!("{} bench — {label}", mode.label());
+                                    }
+                                }
+                            }
+                            Act::LoadTexture(hash, label) => {
+                                tex_view = Some(TexView {
+                                    hashes: vec![hash],
+                                    labels: vec![label.clone()],
+                                    idx: 0,
+                                    info: String::new(),
+                                });
+                                status = format!("texture {label}");
                             }
                             Act::ExportHash(hash, label) => {
                                 status = match source_model_data(&mut w, &imported, hash)
@@ -4975,7 +5839,7 @@ pub fn run(opts: Options) {
                             // nodes = functional attach points (rotor/skid/seat/tail/hardpoint);
                             // nodes at the origin = structural/break-piece parents — so the user can
                             // map imported geometry onto them by sight.
-                            if show_nodes && wb == Workbench::Mods {
+                            if show_nodes && eff == Workbench::Mods {
                                 // Posed world position of every node.
                                 let node_pos: Vec<[f32; 3]> = p
                                     .rig
@@ -5033,7 +5897,7 @@ pub fn run(opts: Options) {
                             // ---- INTERACTION HARDPOINTS: big, unmistakable, and at their EDITED
                             // position. These are what the player touches (the seat is the ENTRY
                             // point) -- so they must sit ON the new model, not where the donor's were.
-                            if show_hardpoints && wb == Workbench::Mods {
+                            if show_hardpoints && eff == Workbench::Mods {
                                 for (i, b) in p.rig.iter().enumerate() {
                                     let Some(n) = hp_names.get(&b.name_hash) else { continue };
                                     if !n.starts_with("hp_") {
@@ -5088,6 +5952,14 @@ pub fn run(opts: Options) {
                         } else if !show && has_ref {
                             let _ = world.remove_one::<ModelRef>(p.entity);
                         }
+                    }
+
+                    // ── Session log: record `status` whenever it CHANGED this frame. Runs after the
+                    // action processor, so a click and the outcome it produced land on one line.
+                    if status != last_status {
+                        push_log(&mut log, start.elapsed().as_secs_f32(), &status);
+                        last_status.clear();
+                        last_status.push_str(&status);
                     }
 
                     // ── Render: plate view + empty viewport go through the menu path (shell

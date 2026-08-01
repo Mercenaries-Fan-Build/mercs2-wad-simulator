@@ -75,6 +75,28 @@ mod texpng;
 
 use mercs2_engine::{mesh, wad};
 
+/// `vz.wad` from an install the Workshop is sitting INSIDE — the executable's own directory first,
+/// then the working directory.
+///
+/// Plan 02 rev 2's resolution step 2. Each candidate has to carry `Mercenaries2.exe` before its
+/// archive counts: the exe is what makes a folder an install, whereas a bare `vz.wad` beside the
+/// binary could be a copy someone was extracting from. Both the root and its `data/` are probed,
+/// via `game_paths::wad_under` — the shared rule for what "a path to the game" means, so this does
+/// not become a fourth private copy of it.
+fn colocated_vz_wad() -> Option<String> {
+    use mercs2_formats::game_paths::wad_under;
+    let roots = [
+        std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())),
+        std::env::current_dir().ok(),
+    ];
+    roots
+        .into_iter()
+        .flatten()
+        .filter(|root| root.join("Mercenaries2.exe").is_file())
+        .find_map(|root| wad_under(&root, "vz.wad"))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let get = |flag: &str| {
@@ -124,6 +146,14 @@ fn main() {
         .or_else(|| {
             settings::load().wad_path.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
         })
+        // CO-LOCATION, before the environment/registry step. Plan 02 rev 2 calls this "the only
+        // path that works off Windows": modders really do drop the Workshop into the game folder,
+        // and `registry_vz_wad` is `cfg(not(windows)) -> None`, so without this a macOS or Linux
+        // user sitting *inside* the install still had to type `--wad` every launch.
+        //
+        // Anchored on `Mercenaries2.exe` rather than on finding a `vz.wad`: a stray `vz.wad` beside
+        // the binary could be anything, but the exe next to it means this IS an install.
+        .or_else(colocated_vz_wad)
         .or_else(|| wad::resolve_vz_wad(None));
     let names_csv = get("--names").map(std::path::PathBuf::from).or_else(index::default_names_csv);
 
@@ -827,22 +857,40 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Err(e) => return eprintln!("--export-shipment: {e}"),
         };
         let dir = std::path::Path::new(&outdir);
-        let written = match shipment::write(dir, &name, &wearer, &target, src, &rt) {
+        // Same write path as the GUI: scaffold if the folder is not already a Shipment, copy the
+        // source in, then append the contribution. The emitter no longer formats YAML by hand, so
+        // this and the GUI cannot drift into producing differently-shaped manifests.
+        let mut panel = crate::quartermaster::Panel::default();
+        let qm_names = mercs2_quartermaster::names::NameTable::find_from(
+            &std::env::current_dir().unwrap_or_default(),
+        );
+        let out = (|| -> Result<(usize, crate::shipment::BoneMapStats), String> {
+            if mercs2_quartermaster::discover::find_manifest(dir).is_ok() {
+                panel.open_shipment(dir, qm_names.as_ref());
+            } else {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                panel.scaffold(dir, qm_names.as_ref())?;
+            }
+            let model = crate::quartermaster::Panel::import_source(dir, src)?;
+            let (c, st) = shipment::outfit_contribution(&name, &wearer, &target, model, &rt)?;
+            let at = panel.upsert_contribution(qm_names.as_ref(), None, c)?;
+            Ok((at, st))
+        })();
+        let (at, st) = match out {
             Ok(v) => v,
             Err(e) => return eprintln!("--export-shipment: {e}"),
         };
         println!(
-            "wrote {} ({} source rig, {} bone rows{})",
-            written.manifest.display(),
+            "wrote {}/manifest.yaml contributions[{at}] ({} source rig, {} bone rows{})",
+            dir.display(),
             rt.convention.slug(),
-            written.rows,
-            if written.unnamed > 0 {
-                format!(", {} target bone(s) left to the automap — no name in the corpus", written.unnamed)
+            st.rows,
+            if st.unnamed > 0 {
+                format!(", {} target bone(s) left to the automap — no name in the corpus", st.unnamed)
             } else {
                 String::new()
             }
         );
-        println!("wrote {}", written.model.display());
         println!("build it:  qm build {} --corpus <mercs2-luacd/src>", dir.display());
         return;
     }
