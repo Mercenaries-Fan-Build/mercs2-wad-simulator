@@ -1975,20 +1975,23 @@ fn lower(
             index,
             kind,
             reason: format!(
-                "the destruction state machine can be READ but not WRITTEN. \
-                 `orchestrator::parse_state_machine` decodes the SWIT/NODE/STAT/CHDR/CEXE family \
-                 and is validated against retail, but it returns a decoded VIEW with no descriptor \
-                 indices or data offsets, and no serializer for the family exists anywhere in the \
-                 workspace — mercs2_workshop's bundler lists exactly these tags as preserved only \
-                 in raw bytes. The family is also a nested container INSIDE the model container, so \
-                 writing one means rebuilding that container's descriptor table and re-emitting the \
-                 whole model block. On top of that, `states:` has no schema: nothing in the manifest \
-                 format says what that file contains, so defining one is a format change rather \
-                 than a lowering. Shipping a guess would be worse than refusing, because the \
-                 closest known corruption of this kind faults at model instantiation and \
-                 wad_simulator does not catch it — it only appears in-game. \
-                 If you have already hand-built the block for {target:?}, ship it as `kind: raw` \
-                 with `target_layer: data`: that at least carries a declared blast radius."
+                "the destruction state machine WRITER now exists — `orchestrator::\
+                 serialize_state_machine`, proven byte-identical across all 1,311 retail \
+                 destructibles (see mercs2_formats/tests/state_machine_writer.rs), with same-shape \
+                 edits (rename a state, rewrite an Enter/Exit command list, change a switch slot) a \
+                 contiguous splice and a no-op exactly reproducing the container. So the family is no \
+                 longer the blocker the earlier refusal named. \
+                 Two things remain before {target:?} can be lowered, and both are engineering, not \
+                 research: (1) the container is a leaf INSIDE a MODEL block, and a model's ASET row \
+                 carries a LOD chain — so the overlay must shadow the WHOLE base block (restating \
+                 every ASET row verbatim, the way `script_patch_blocks` does for scripts, which \
+                 preserves the LOD rungs) rather than mint a single primary row, which would orphan \
+                 the finer rungs (M0001). (2) `states:` still has no schema — the YAML that names \
+                 which node/state to edit and the command list to write — and that is a Plan 04 \
+                 format change, not a lowering. \
+                 Until both land, ship a hand-built block for {target:?} as `kind: raw` with \
+                 `target_layer: data`: that carries a declared blast radius, and the writer above is \
+                 what a future lowering will call."
             ),
         }),
 

@@ -118,9 +118,12 @@ fn edit_state_machine_refuses_with_the_reason_and_a_way_forward() {
     match build::build(&s, None, None, None, None) {
         Err(e @ BuildError::Unsupported { .. }) => {
             let m = e.to_string();
-            // What is missing: no writer for the chunk family, and no schema for `states:`.
-            assert!(m.contains("no serializer"), "{m}");
-            assert!(m.contains("`states:` has no schema"), "{m}");
+            // The WRITER now exists (F6 core) — the refusal must say so, not claim otherwise.
+            assert!(m.contains("serialize_state_machine"), "{m}");
+            assert!(m.to_lowercase().contains("byte-identical"), "{m}");
+            // What remains: the LOD-chain-preserving block overlay, and no schema for `states:`.
+            assert!(m.contains("LOD"), "{m}");
+            assert!(m.contains("`states:` still has no schema"), "{m}");
             // And the escape hatch that exists today.
             assert!(m.contains("kind: raw"), "{m}");
             assert!(m.contains("al_veh_boat_destroyer"), "{m}");
