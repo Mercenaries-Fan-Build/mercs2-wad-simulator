@@ -45,7 +45,21 @@ Two things had to be pinned down:
   retail difference falls inside that map. An exact byte match against a decompiled corpus is not
   achievable and is not the property the linker needs.
 
-### ⚠ `mercs2_luac` and `mercs2_script` cannot be linked into the same binary
+### ~~⚠ `mercs2_luac` and `mercs2_script` cannot be linked into the same binary~~ ★ RESOLVED
+
+> **★ STALE — do not act on the "consequences" below (verified 2026-07-31).** The collision was
+> removed, and not by the symbol-prefixing this section recommends: **`mercs2_script` v2.0.0 dropped
+> mlua and now runs `mercs2_luac`'s VM.** There is one Lua in the workspace and `mlua` is not in the
+> dependency tree at all, so there are no duplicate `lua_*` symbols to collide.
+>
+> `mercs2_workshop` **already** depends on `mercs2_script` *and* `mercs2_luac`, both resolving to a
+> single `mercs2_luac v1.1.0`, and builds clean. `mercs2_engine/tests/one_lua.rs` is the regression
+> guard — `the_runtime_and_the_compiler_coexist_in_one_process`,
+> `the_compiler_emits_what_the_runtime_loads`, `quartermaster_is_usable_alongside_the_runtime`, all
+> green.
+>
+> **So a Workshop script editor beside publishing is NOT blocked**, and neither is a live Lua
+> console. One VM beat namespacing two.
 
 Found the hard way: the parity test, first placed in `mercs2_script`, **SIGSEGV'd partway through
 the corpus** — while the script it died on compiled perfectly on its own, and all 114 compiled fine
@@ -433,7 +447,28 @@ a digest of the intended bytes would still verify after a truncated write. The l
 that an ASI is unrestricted native code, because a green digest reads as "safe" to a Tier-1 user
 when it only means "unmodified".
 
-### `edit_state_machine` — ❌ BLOCKED, with evidence
+### `edit_state_machine` — ~~❌ BLOCKED~~ ★ UNBLOCKED BY MEASUREMENT (2026-07-31)
+
+> **★ SUPERSEDED. Gaps 1 and 2 below were WRONG, and they were wrong because they were reasoned
+> from the parser instead of measured from the bytes.**
+> `mercs2_formats/tests/state_machine_roundtrip_survey.rs` swept all 25,707 model containers in
+> retail `vz.wad` (1,311 carry a destruction family) and found:
+>
+> * **Gap 2 is false — the family does NOT nest.** 0 of 1,311 have a container among the family's
+>   children. The parent is a `STAM` container whose children are a *flat run of leaves*, closed
+>   over exactly `{INFO, NODE, STAT, CHDR, CEXE, SWIT}`, with no unknown tags. Their data regions
+>   tile with **zero gaps, zero padding, zero overlaps**.
+> * **Gap 1 is false — it round-trips.** 1,311/1,311 (100%) are losslessly recoverable from the
+>   parsed `StateMachine`. Every record is fixed-size (`INFO` 12 B, `NODE` 8 B, `STAT` 4 B,
+>   `CHDR` 8 B); the one field the parser "skips", `INFO` word 0, is the **constant 5** everywhere;
+>   and the 20th descriptor byte `desc_rows` never reads is, in 237,892/237,892 rows, simply the
+>   count of siblings following that row — derivable, not stored.
+>
+> So a serializer is a **bounded job**, not research. Only the container-subtree splice remains
+> (rewrite `STAM`'s size, re-base following siblings' offsets, recompute CSUM) — mechanical over a
+> flat contiguous run. Gaps 3 (`states:` schema) and 4 (a `wad_simulator` check) stand and are
+> ordinary work. **The lesson is the one this project keeps relearning: measure the bytes before
+> recording a blocker.** The original text follows for the record.
 
 **The destruction machine can be READ and cannot be WRITTEN**, and three of the four gaps are
 outside this crate. Left `Unsupported` on purpose; the reason now names the gaps and points at the
@@ -478,6 +513,33 @@ radius. That is the open lower bound doing the job it exists for, and it is what
 at.
 
 ## H. Format gaps recorded but unresolved
+
+### ★ NOVEL-ASSET SURVEY (2026-07-31) — most of the "needs a builder" list is a wrapper
+
+`mercs2_formats/tests/novel_asset_shape_survey.rs` censuses the container shape of **every** ASET
+type in retail `vz.wad`. The premise it tests: `build_cfx_pack_block` is 30 lines because
+`cfx_pack` turned out to be an opaque `data` leaf, so the question for every other type is *shape*,
+not *whether someone wrote a parser*.
+
+| verdict | types |
+|---|---|
+| **Opaque `data` wrapper** — one generic builder covers all 8 | `cfx_pack` 64/64 · **`soundbank` 98/98 (76 assets, 94 MB)** · **`sounddb` 58/58 (77 assets, 65 MB)** · `binary` · `world_entity_data` · `guidmap` · `0xFA0B8DBC` · `0x6310807F` (625) |
+| **Near-wrapper** | **`wavebank` 92/93 `data`** (95 assets, 207 MB); lone exception `NAME,INFO,BODY` |
+| **Small uniform structure** — a fixed leaf list | `font` 9/9 `INFO,CHAR,MTRL` · `stringdb` 3/3 `INFO,KEYS,STRS` · `material_params` 6/6 `INFO,DATA` · `stance` 14/15 `INFO,TYPE,VALU` |
+| **Genuinely structured — not yet** | `effect` (`EFCT,EMTR,GEOM×N`, 261-336 rows, params hash-only) · `animation` (wavelet encode unproven) |
+
+Two consequences worth stating plainly:
+
+- **Audio lands.** `wavebank` + `soundbank` + `sounddb` are the whole audio stack and all three are
+  wrappers. `add_sound` was assumed to need a decode project; it needs a wrapper.
+- **`stringdb` round-trips byte-identically 3/3** through the existing `stringdb::{parse,build}`, so
+  `edit_stringdb` needs only a block wrapper — which is what makes a novel UI element's text
+  localisable instead of hardcoded English.
+- **Video is not an ASET type at all.** No Bink row exists in the registry; retail ships movies as
+  loose files under `data/Movies`. "A new movie clip" is therefore either a Scaleform `cfx_pack`
+  (already expressible) or a file placement — never a new WAD kind.
+
+### The original list
 
 - `add_model` cannot say **which donor group** hosts the geometry — likely wants a `group:` field.
 - Donor auto-pick is unimplemented; the builder asks rather than guessing.
