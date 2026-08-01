@@ -140,6 +140,11 @@ pub struct SimulateReport {
     pub total_assets_consumed: usize,
     pub xref_checks: usize,
     pub xref_unresolved: usize,
+    /// The fan-in map (F7): referenced texture/asset hash → the DISTINCT assets that reference it.
+    /// A hash with more than one referrer is SHARED — replacing it (`replace_texture`) reskins every
+    /// sharer, which is the M0006 collateral-reskin case. Kept so a measurement can cross-tabulate
+    /// fan-in against M0009's no-primary-row predicate and decide whether M0006 needs its own rule.
+    pub xref_fan_in: HashMap<u32, Vec<String>>,
     pub pws_files_found: usize,
     pub pws_files_validated: usize,
     pub streaming_clips: usize,
@@ -271,9 +276,11 @@ pub fn run_simulate_with_options(
 
     let all_entries: Vec<_> = vd.resolved.values().cloned().collect();
     let mut wavebanks: HashMap<u32, LoadedWavebank> = HashMap::new();
-    // xref hash → label of the first asset (model/material block) that referenced it,
-    // so an unresolved ref names the source block/model instead of a bare hash.
-    let mut xref_sources: HashMap<u32, String> = HashMap::new();
+    // xref hash → labels of EVERY asset (model/material block) that referenced it. Keeping all
+    // referrers rather than the first (F7) turns this into the fan-in map: a texture referenced by
+    // several materials is one whose replacement reskins all of them (the M0006 collateral-reskin
+    // case), and an unresolved ref names every source that would break, not just the first found.
+    let mut xref_sources: HashMap<u32, Vec<String>> = HashMap::new();
     // Texture sub-resources dispatched in Pass 1, keyed (block, name_hash), so the
     // post-pass full-block texture sweep doesn't re-report them.
     let mut dispatched_textures: HashSet<(BlockKey, u32)> = HashSet::new();
@@ -424,7 +431,12 @@ pub fn run_simulate_with_options(
             }
         }
         for h in &result.xref_hashes {
-            xref_sources.entry(*h).or_insert_with(|| label.clone());
+            // Distinct referrers only — one material naming a texture in two slots (diffuse+normal)
+            // is one sharer, not two. The fan-in that matters is how many DIFFERENT assets break.
+            let refs = xref_sources.entry(*h).or_default();
+            if !refs.contains(&label) {
+                refs.push(label.clone());
+            }
         }
         for iss in &result.issues {
             // FATAL position violations come only from the verified 42-byte
@@ -620,18 +632,26 @@ pub fn run_simulate_with_options(
         .values()
         .flat_map(|p| p.entries.iter().map(|e| e.name_hash))
         .collect();
-    for (h, source) in &xref_sources {
+    for (h, sources) in &xref_sources {
         report.xref_checks += 1;
         if !loaded_hashes.contains(h)
             && !aux_aset_hashes.contains(h)
             && !block_internal_hashes.contains(h)
         {
             report.xref_unresolved += 1;
-            // Name the referencing model/block so a corrupt MTRL hash array is
-            // traceable to its source (the {source} is the asset's "block[N] hash=…").
+            // Name every referencing model/block so a corrupt MTRL hash array is traceable to ALL
+            // its sources, not just the first found — the fan-in is what says how much breaks.
+            let mut named: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+            named.sort_unstable();
+            let shown = named.iter().take(4).copied().collect::<Vec<_>>().join(", ");
+            let more = if named.len() > 4 {
+                format!(" (+{} more)", named.len() - 4)
+            } else {
+                String::new()
+            };
             report
                 .unresolved_hashes
-                .push(format!("0x{h:08X} (xref from {source})"));
+                .push(format!("0x{h:08X} (xref from {shown}{more})"));
         }
     }
 
@@ -641,7 +661,16 @@ pub fn run_simulate_with_options(
             report.xref_checks - report.xref_unresolved,
             report.xref_unresolved
         ));
+        // F7 measurement: the fan-in distribution. A shared texture (fan-in > 1) is one whose
+        // replacement is a collateral reskin — the M0006 case. Reported so the shape is visible
+        // rather than assumed; the survey test cross-tabulates it against M0009's predicate.
+        let shared = xref_sources.values().filter(|v| v.len() > 1).count();
+        let max_fan = xref_sources.values().map(|v| v.len()).max().unwrap_or(0);
+        log(format!(
+            "  Pass 3 fan-in: {shared} referenced hash(es) are SHARED by >1 asset (max fan-in {max_fan})"
+        ));
     }
+    report.xref_fan_in = xref_sources;
 
     Ok(report)
 }

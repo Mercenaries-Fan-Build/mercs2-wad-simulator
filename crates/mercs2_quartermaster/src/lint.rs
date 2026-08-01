@@ -225,6 +225,12 @@ pub const PENDING: &[Rule] = &[
         title: "non-resident costume on the on-demand path — STATE_WAITFORGAME wedge",
         doc: "docs/modding/field_guide.md#trap-12--your-character-skin-hangs-the-wardrobe-preview-a-count-field-not-a-crash",
     },
+    // MEASURED (F7, 2026-08-01, retail vz.wad via the simulator's fan-in map): 678 referenced
+    // hashes are shared by more than one asset, one by 400. So this is NOT redundant with M0009 —
+    // that fires on ASET-row STRUCTURE (no primary row), while collateral reskin is about material
+    // FAN-IN, and the two do not coincide. The measurement mechanism now exists (`SimulateReport::
+    // xref_fan_in`); the rule itself is the remaining delta — an artifact check that flags a
+    // replace_texture whose base target has fan-in > 1.
     Rule {
         code: "M0006",
         title: "replace_texture target is shared by several materials — collateral reskin",
