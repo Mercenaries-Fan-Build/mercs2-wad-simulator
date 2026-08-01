@@ -56,6 +56,7 @@
 
 mod app;
 mod bundle;
+mod console;
 mod domain;
 mod fetch;
 mod gui;

@@ -579,16 +579,19 @@ enum CraftMode {
     Script,
     /// The destruction state machine.
     States,
+    /// The LIVE Lua console — a chunk runs in the running game via `mercs2_bridge`, not a file.
+    Console,
 }
 
 impl CraftMode {
-    const ALL: [CraftMode; 6] = [
+    const ALL: [CraftMode; 7] = [
         CraftMode::Scene,
         CraftMode::Rig,
         CraftMode::Conform,
         CraftMode::Texture,
         CraftMode::Script,
         CraftMode::States,
+        CraftMode::Console,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -598,6 +601,7 @@ impl CraftMode {
             CraftMode::Texture => "Texture",
             CraftMode::Script => "Script",
             CraftMode::States => "States",
+            CraftMode::Console => "Console",
         }
     }
     /// The workbench whose panels implement this mode.
@@ -613,13 +617,17 @@ impl CraftMode {
             // Not yet their own surfaces: Texture and States are read-only views that live on
             // Inspect today, and Script is the read-only Lua viewer. Named here rather than hidden
             // so the set of craft tools Plan 02 lists is visible, with its gaps stated.
-            CraftMode::Texture | CraftMode::Script | CraftMode::States => Workbench::Inspect,
+            // Console renders its own centre (the live REPL), but maps to Inspect for the
+            // navigator/inspector panels it does not use.
+            CraftMode::Texture | CraftMode::Script | CraftMode::States | CraftMode::Console => {
+                Workbench::Inspect
+            }
         }
     }
     /// What this mode still needs before it is a real bench, or `None` when it is one.
     fn unbuilt(self) -> Option<&'static str> {
         match self {
-            CraftMode::Scene | CraftMode::Rig | CraftMode::Conform => None,
+            CraftMode::Scene | CraftMode::Rig | CraftMode::Conform | CraftMode::Console => None,
             CraftMode::Texture => Some(
                 "read-only: the plate viewer. Authoring a swap is `replace_texture` / \
                  `add_texture` on the Shipment page.",
@@ -1215,6 +1223,9 @@ pub fn run(opts: Options) {
     // what it was editing and no way back.
     let mut craft_mode = CraftMode::Scene;
     let mut craft_subject: Option<usize> = None;
+    // The live Lua console (Craft ▸ Console). `None` until the author connects; a worker thread holds
+    // the socket so the frame loop never blocks on the game.
+    let mut live_console: Option<crate::console::LiveConsole> = None;
     // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
     // Never started automatically — only from the Settings button, so the tool never reaches out to
     // the network on its own.
@@ -4058,6 +4069,100 @@ pub fn run(opts: Options) {
                                 }
                             });
                         });
+
+                        // -- LIVE LUA CONSOLE (Craft ▸ Console): a chunk runs in the running game via
+                        // the bridge worker. A floating window, so it does not fight the central
+                        // viewport's dispatch; the worker thread keeps the socket off this frame loop.
+                        if wb == Workbench::Craft && craft_mode == CraftMode::Console {
+                            if let Some(con) = live_console.as_mut() {
+                                con.poll(|h| index.names.get(&h).cloned());
+                            }
+                            let mut do_connect = false;
+                            let mut send_chunk: Option<String> = None;
+                            egui::Window::new("Live Lua console")
+                                .default_size([560.0, 440.0])
+                                .show(ctx, |ui| match live_console.as_mut() {
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Runs a Lua chunk in the RUNNING game via the lua-bridge ASI \
+                                                 on 127.0.0.1:27050. Start the game with the ASI loaded, then connect.",
+                                            )
+                                            .size(11.5)
+                                            .color(theme::FAINT),
+                                        );
+                                        ui.add_space(8.0);
+                                        if theme::primary_button(ui, "Connect", true).clicked() {
+                                            do_connect = true;
+                                        }
+                                    }
+                                    Some(con) => {
+                                        ui.horizontal(|ui| {
+                                            let (col, txt) = if con.finished {
+                                                (theme::BAD, "\u{25cf} disconnected")
+                                            } else if con.connected {
+                                                (theme::GOOD, "\u{25cf} connected")
+                                            } else {
+                                                (theme::FAINT, "\u{25cf} connecting\u{2026}")
+                                            };
+                                            ui.label(egui::RichText::new(txt).size(11.0).color(col));
+                                            if con.finished {
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.button("Reconnect").clicked() {
+                                                        do_connect = true;
+                                                    }
+                                                });
+                                            }
+                                        });
+                                        ui.separator();
+                                        egui::ScrollArea::vertical()
+                                            .stick_to_bottom(true)
+                                            .auto_shrink([false, false])
+                                            .max_height(320.0)
+                                            .show(ui, |ui| {
+                                                for line in &con.history {
+                                                    let (col, txt) = match line {
+                                                        crate::console::Line::Sent(s) => (theme::BRASS, format!("\u{bb} {s}")),
+                                                        crate::console::Line::Result(s) => (theme::TX, s.clone()),
+                                                        crate::console::Line::Error(s) => (theme::BAD, format!("! {s}")),
+                                                        crate::console::Line::Status(s) => (theme::FAINT, format!("\u{b7} {s}")),
+                                                    };
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(txt).monospace().size(11.0).color(col),
+                                                        )
+                                                        .wrap(),
+                                                    );
+                                                }
+                                            });
+                                        ui.add_space(4.0);
+                                        let resp = ui.add(
+                                            egui::TextEdit::multiline(&mut con.input)
+                                                .desired_rows(2)
+                                                .font(egui::TextStyle::Monospace)
+                                                .hint_text("Lua \u{2014} Ctrl+Enter to run")
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                        let ctrl_enter = resp.has_focus()
+                                            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+                                        if theme::primary_button(ui, "Run  Ctrl+Enter", !con.input.trim().is_empty()).clicked()
+                                            || ctrl_enter
+                                        {
+                                            send_chunk = Some(std::mem::take(&mut con.input));
+                                        }
+                                    }
+                                });
+                            if do_connect {
+                                live_console = Some(crate::console::LiveConsole::spawn(
+                                    mercs2_bridge::DEFAULT_ADDR.to_string(),
+                                ));
+                            }
+                            if let Some(chunk) = send_chunk {
+                                if let Some(con) = live_console.as_mut() {
+                                    con.send(chunk);
+                                }
+                            }
+                        }
 
                         // -- SETTINGS page: the navigator lists the sections, the CENTRE holds the selected one.
                         //
