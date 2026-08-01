@@ -1113,6 +1113,9 @@ pub mod theme {
         Quartermaster,
         Settings,
         Log,
+        /// A short (1-2 char) monogram, drawn as text — the domain-spine rail entries share this one
+        /// variant rather than each minting bespoke line-art, so adding a domain costs no drawing.
+        Glyph(&'static str),
     }
 
     fn paint_icon(p: &egui::Painter, icon: RailIcon, c: egui::Pos2, col: Color32) {
@@ -1172,6 +1175,15 @@ pub mod theme {
                 p.circle_stroke(c, 6.0, s);
                 p.line_segment([c, c + vec2(0.0, -3.5)], s);
                 p.line_segment([c, c + vec2(2.8, 1.5)], s);
+            }
+            RailIcon::Glyph(text) => {
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::new(11.0, disp()),
+                    col,
+                );
             }
         }
     }

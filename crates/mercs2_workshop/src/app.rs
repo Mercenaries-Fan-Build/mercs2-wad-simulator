@@ -553,6 +553,11 @@ enum Workbench {
     /// `Skeleton` were deleted from the rail on the promise of this surface, and without it they
     /// became reachable only through a one-way, index-less page flip from two contribution kinds.
     Craft,
+    /// **A domain** (Plan 02 §C): one of seven curated lenses over the catalog. A single variant
+    /// rather than seven, so each dispatch site gains ONE arm, not seven. A domain page IS Inspect
+    /// with a lens-filtered navigator — the viewport, inspector cards and verbs all read the same
+    /// loaded preview, so browsing here is browsing there, narrowed to what the domain governs.
+    Domain(crate::domain::Domain),
 }
 
 /// Which bench the Craft surface is showing.
@@ -638,12 +643,25 @@ impl Workbench {
     /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
     /// from the Shipment page and return to it, rather than being places you navigate to and then
     /// have to remember what you were assembling.
-    const ALL: [Workbench; 4] = [
+    const ALL: [Workbench; 11] = [
         Workbench::Inspect,
         Workbench::Craft,
+        Workbench::Domain(crate::domain::Domain::World),
+        Workbench::Domain(crate::domain::Domain::Characters),
+        Workbench::Domain(crate::domain::Domain::Weapons),
+        Workbench::Domain(crate::domain::Domain::Driving),
+        Workbench::Domain(crate::domain::Domain::Audio),
+        Workbench::Domain(crate::domain::Domain::Missions),
+        Workbench::Domain(crate::domain::Domain::Systems),
         Workbench::Quartermaster,
         Workbench::Settings,
     ];
+
+    /// A domain page reuses Inspect's centre viewport, inspector cards and verbs — it is Inspect with
+    /// a lens-filtered navigator. This is the single predicate that keeps those three surfaces shared.
+    fn inspect_like(self) -> bool {
+        matches!(self, Workbench::Inspect | Workbench::Domain(_))
+    }
 
     /// A craft surface reached from a contribution, rather than from the rail.
     fn is_craft(self) -> bool {
@@ -655,7 +673,12 @@ impl Workbench {
     /// site, so the moment a SECOND page stopped owning the viewport the "ORBIT" chip started
     /// painting over that page's heading — which is exactly what Settings then did.
     fn has_viewport(self) -> bool {
-        !matches!(self, Workbench::Quartermaster | Workbench::Settings)
+        match self {
+            Workbench::Quartermaster | Workbench::Settings => false,
+            // A model-browsing domain shows the loaded model; audio/missions/systems do not.
+            Workbench::Domain(d) => d.browses_models(),
+            _ => true,
+        }
     }
     fn label(self) -> &'static str {
         match self {
@@ -666,6 +689,7 @@ impl Workbench {
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
             Workbench::Craft => "Craft",
+            Workbench::Domain(d) => d.label(),
         }
     }
     /// The rail glyph. A METHOD, not a parallel array: the rail used to index a 6-entry `icons`
@@ -681,6 +705,7 @@ impl Workbench {
             Workbench::Settings => crate::gui::theme::RailIcon::Settings,
             // Craft took the slot Sandbox held, and keeps its glyph.
             Workbench::Craft => crate::gui::theme::RailIcon::Sandbox,
+            Workbench::Domain(d) => crate::gui::theme::RailIcon::Glyph(d.short()),
         }
     }
     /// The command-bar breadcrumb verb.
@@ -693,6 +718,7 @@ impl Workbench {
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
             Workbench::Craft => "Craft",
+            Workbench::Domain(d) => d.label(),
         }
     }
 }
@@ -2470,6 +2496,85 @@ pub fn run(opts: Options) {
                                     });
                                 }
                             }
+                            // ── DOMAIN: a curated lens over the catalog. The navigator is the only
+                            // domain-specific surface; the viewport, inspector and verbs are Inspect's,
+                            // so picking a model here shows it there exactly as browsing Inspect would.
+                            Workbench::Domain(d) => {
+                                ui.label(theme::disp_text(d.label().to_uppercase(), 15.0, theme::TX));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(d.blurb()).size(11.5).color(theme::FAINT));
+                                ui.add_space(9.0);
+                                if d.browses_models() {
+                                    // The lens-filtered model list, grouped by the Library's own
+                                    // category so a domain view and the Library never disagree.
+                                    let mut rows: Vec<&crate::index::AssetRow> =
+                                        index.models().iter().filter(|r| d.model_lens(r)).collect();
+                                    rows.sort_by(|a, b| {
+                                        crate::index::category_order(a.category())
+                                            .cmp(&crate::index::category_order(b.category()))
+                                            .then_with(|| a.label().cmp(&b.label()))
+                                    });
+                                    ui.label(theme::disp_text(
+                                        format!("{} model(s)", rows.len()),
+                                        10.0,
+                                        theme::FAINT,
+                                    ));
+                                    ui.add_space(4.0);
+                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                        let mut last_cat = "";
+                                        for r in rows {
+                                            let cat = r.category();
+                                            if cat != last_cat {
+                                                ui.add_space(4.0);
+                                                theme::eyebrow(ui, cat);
+                                                last_cat = cat;
+                                            }
+                                            let sel_now = preview.as_ref().is_some_and(|p| p.hash == r.hash);
+                                            let resp = theme::row_chip(
+                                                ui,
+                                                if sel_now { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT },
+                                                theme::LINE,
+                                                |ui| {
+                                                    ui.label(egui::RichText::new(r.label())
+                                                        .size(11.5)
+                                                        .color(if sel_now { theme::BRASS } else { theme::TX }));
+                                                },
+                                            );
+                                            if resp.clicked() {
+                                                actions.push(Act::LoadModelHash(r.hash, r.label()));
+                                            }
+                                            // Route an asset into a Shipment or Craft — the same menu
+                                            // the Library uses, so the two cannot drift.
+                                            resp.context_menu(|ui| {
+                                                asset_menu(ui, r.hash, &r.label(), false, &mut actions);
+                                            });
+                                        }
+                                    });
+                                    // Characters thickens toward the wardrobe: an outfit edit routes
+                                    // to Craft::Rig, which is where a hero's rig is retargeted.
+                                    if matches!(d, crate::domain::Domain::Characters) {
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new(
+                                            "Right-click a hero → Add to Shipment ▸ add_outfit, then Edit rig in Craft.",
+                                        ).size(10.0).color(theme::FAINT));
+                                    }
+                                } else {
+                                    // Audio / Missions / Systems: not model rows. Name the Lua that
+                                    // governs the domain and the kinds an edit here would write, so
+                                    // the browser is honest about being a thin script/host surface.
+                                    theme::eyebrow(ui, "Governing scripts");
+                                    ui.add_space(3.0);
+                                    for needle in d.governing_scripts() {
+                                        ui.label(egui::RichText::new(format!("· {needle}"))
+                                            .monospace().size(10.5).color(theme::DIM));
+                                    }
+                                    ui.add_space(8.0);
+                                    theme::eyebrow(ui, "Adds");
+                                    ui.add_space(3.0);
+                                    ui.label(egui::RichText::new(d.kinds().join(", "))
+                                        .size(10.5).color(theme::FAINT));
+                                }
+                            }
                             // ── SETTINGS: the two paths the tool cannot always discover. ──
                             // Two cards in the inspector's own vocabulary (`section` + `row_chip`),
                             // NOT prose: each is a path chip you can read at a glance, a count in the
@@ -2541,7 +2646,7 @@ pub fn run(opts: Options) {
                               if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
                               }
-                              if matches!(eff, Workbench::Inspect) {
+                              if eff.inspect_like() {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -3818,7 +3923,11 @@ pub fn run(opts: Options) {
                                     Workbench::Quartermaster => {
                                         qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
                                     }
-                                    Workbench::Inspect => {
+                                    // A domain page shares Inspect's verbs — it is Inspect narrowed to
+                                    // a lens, so Place / Export / textures / clip act on the same
+                                    // loaded model. (For a non-model domain there is no preview, so
+                                    // these sit disabled, which reads correctly as "nothing loaded".)
+                                    Workbench::Inspect | Workbench::Domain(_) => {
                                         if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
                                             actions.push(Act::Place);
                                         }
