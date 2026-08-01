@@ -2397,3 +2397,66 @@ fn edit_stringdb_refuses_an_unknown_key() {
         Ok(_) => panic!("an unknown key must not build"),
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────── donor auto-pick
+
+/// Omitting `donor:` on an add_outfit no longer refuses with "auto-pick not implemented" — it picks
+/// the wearer's hero model and proceeds. With a placeholder model the build then fails at model
+/// IMPORT, which is exactly the proof: auto-pick ran and handed off.
+#[test]
+fn add_outfit_without_donor_auto_picks_and_proceeds() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("auto_donor");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // Not a real glTF — enough to prove control reached the importer past auto-pick.
+    std::fs::write(dir.join("src/model.glb"), b"not a real glb").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_outfit\n    name: pmc_hum_auto\n    slug: AutoFit\n    \
+         display: Auto\n    wearer: mattias\n    model: src/model.glb\n",
+    );
+
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e) => {
+            let m = format!("{e:?}");
+            assert!(
+                !m.contains("auto-pick"),
+                "auto-pick should have run, not refused: {m}"
+            );
+            // It got as far as trying to read the (bogus) model — the importer, past donor.
+            assert!(
+                m.to_lowercase().contains("glb")
+                    || m.to_lowercase().contains("gltf")
+                    || m.to_lowercase().contains("model")
+                    || m.to_lowercase().contains("import"),
+                "expected a model-import failure after auto-pick, got: {m}"
+            );
+        }
+        Ok(_) => panic!("a bogus model should not build"),
+    }
+}
+
+/// A wearer the auto-pick does not know is refused clearly rather than silently hosting on nothing.
+#[test]
+fn add_outfit_without_donor_and_unknown_wearer_is_refused() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("auto_donor_bad");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/model.glb"), b"x").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_outfit\n    name: pmc_hum_x\n    slug: X\n    display: X\n    \
+         wearer: bulldog\n    model: src/model.glb\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e) => assert!(
+            format!("{e:?}").contains("bulldog"),
+            "the refusal should name the unknown wearer: {e:?}"
+        ),
+        Ok(_) => panic!("an unknown wearer with no donor must not build"),
+    }
+}

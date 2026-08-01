@@ -1225,6 +1225,15 @@ fn contribution_form(
                 *donor = (!d.trim().is_empty()).then_some(d);
                 commit = true;
             }
+            // An outfit's donor is OPTIONAL: omit it and the build hosts on the wearer's own hero
+            // model. Say so, so the empty field does not read as unfinished.
+            if donor.is_none() {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Neutral,
+                    &format!("optional — auto-picks pmc_hum_{wearer}. Set one for a variant host."),
+                );
+            }
             ui.add_space(4.0);
             theme::eyebrow(ui, "Skin — omit a slot to keep the donor's");
             for (lbl, slot) in [

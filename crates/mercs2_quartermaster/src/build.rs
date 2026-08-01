@@ -47,7 +47,7 @@
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
 use crate::link::{self, ScriptMutation};
-use crate::lint::{self, Diagnostic};
+use crate::lint::{self, Diagnostic, WARDROBE_HEROES};
 use crate::manifest::{Contribution, Layer};
 use crate::names::NameTable;
 use mercs2_formats::donor;
@@ -1212,16 +1212,42 @@ fn lower(
                         .into(),
                 });
             }
-            let Some(donor_name) = donor else {
-                return Err(BuildError::Unsupported {
-                    index,
-                    kind,
-                    reason:
-                        "donor auto-pick is not implemented — name a `donor:` explicitly. For an \
-                             outfit the donor must be a hero-rigged host, or the model will not \
-                             animate."
-                            .into(),
-                });
+            // Auto-pick when omitted (Plan 04 Q2): an outfit's `wearer` NAMES its valid host — the
+            // hero whose wardrobe it joins and whose rig it must animate on. `pmc_hum_<wearer>` is
+            // that hero's base model, and it is validated against the stack so a wrong pick fails
+            // loudly here rather than silently producing an outfit rigged to nothing. `donor:` is
+            // still an optional override for a variant host (`pmc_hum_mattias_v3`, …).
+            let picked;
+            let donor_name = match donor {
+                Some(d) => d.as_str(),
+                None => {
+                    let host = auto_donor_for_wearer(wearer).ok_or_else(|| BuildError::Unsupported {
+                        index,
+                        kind,
+                        reason: format!(
+                            "no donor given and `wearer: {wearer}` is not a hero the auto-pick \
+                             knows ({}). Name a `donor:` explicitly.",
+                            WARDROBE_HEROES.join(", ")
+                        ),
+                    })?;
+                    let hh = crate::manifest::asset_hash(host);
+                    if !game.has_asset(hh, TYPE_ID_MODEL) {
+                        return Err(BuildError::Lower {
+                            index,
+                            kind,
+                            message: format!(
+                                "auto-picked donor {host:?} (0x{hh:08X}) for wearer {wearer} is not \
+                                 in the configured game stack — name a `donor:` explicitly"
+                            ),
+                        });
+                    }
+                    log.push(format!(
+                        "contributions[{index}] add_outfit {name}: donor auto-picked {host} for \
+                         wearer {wearer}"
+                    ));
+                    picked = host.to_string();
+                    picked.as_str()
+                }
             };
 
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
@@ -1997,6 +2023,25 @@ fn lower(
     }
 }
 
+/// The hero base model that hosts an outfit for `wearer`, or `None` for an unknown hero.
+///
+/// An outfit's `wearer` is which hero's wardrobe it joins, so that hero's own base model is its
+/// only correct donor — the rig and materials it must animate on. This is the auto-pick Plan 04 Q2
+/// resolved for `add_outfit`.
+///
+/// Both `jen` (the Workshop's pill label) and `jennifer` (the `_tOutfits` key the linter checks)
+/// map to `pmc_hum_jen`, because the model name follows neither spelling and both reach the same
+/// hero. `add_model` has no wearer and gets no auto-pick — a prop's host is geometry-dependent, and
+/// the weight-transfer history shows guessing it is how a model ends up rigged to nothing.
+fn auto_donor_for_wearer(wearer: &str) -> Option<&'static str> {
+    match wearer.trim().to_ascii_lowercase().as_str() {
+        "mattias" => Some("pmc_hum_mattias"),
+        "chris" => Some("pmc_hum_chris"),
+        "jen" | "jennifer" => Some("pmc_hum_jen"),
+        _ => None,
+    }
+}
+
 /// Parse a string-edits file: `[Bracket.Key] = New text` per line, or `[Bracket.Key]: New text`.
 ///
 /// Deliberately line-oriented rather than YAML: the values are UTF-16 UI text that routinely
@@ -2551,4 +2596,21 @@ fn placement_json(placements: &[Placement]) -> String {
     }))
     .unwrap_or_else(|_| "{}".into())
         + "\n"
+}
+
+#[cfg(test)]
+mod donor_tests {
+    use super::auto_donor_for_wearer;
+
+    #[test]
+    fn each_hero_maps_to_its_own_base_model() {
+        assert_eq!(auto_donor_for_wearer("mattias"), Some("pmc_hum_mattias"));
+        assert_eq!(auto_donor_for_wearer("chris"), Some("pmc_hum_chris"));
+        // Both the wardrobe key and the UI pill reach the same hero model.
+        assert_eq!(auto_donor_for_wearer("jennifer"), Some("pmc_hum_jen"));
+        assert_eq!(auto_donor_for_wearer("jen"), Some("pmc_hum_jen"));
+        // Case- and space-insensitive, since it runs on author input.
+        assert_eq!(auto_donor_for_wearer("  Mattias "), Some("pmc_hum_mattias"));
+        assert_eq!(auto_donor_for_wearer("bulldog"), None);
+    }
 }
