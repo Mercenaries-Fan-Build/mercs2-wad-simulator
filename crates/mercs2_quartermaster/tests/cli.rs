@@ -225,7 +225,7 @@ fn every_listed_rule_carries_its_doc() {
     let registered = mercs2_quartermaster::lint::RULES.len()
         + mercs2_quartermaster::lint::PENDING.len()
         + mercs2_quartermaster::lint::ARTIFACT_RULES.len()
-        + 2; // the two game-stack rules
+        + 3; // the game-stack rules: M0007, M0009, M0192
     assert_eq!(checked, registered, "every registered rule must be printed");
 }
 

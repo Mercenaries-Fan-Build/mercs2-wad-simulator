@@ -2460,3 +2460,38 @@ fn add_outfit_without_donor_and_unknown_wearer_is_refused() {
         Ok(_) => panic!("an unknown wearer with no donor must not build"),
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────── M0192 (add_movie)
+
+/// M0192: a movie under a name retail ships is a REPLACEMENT and stays quiet; a novel name warns,
+/// because the engine references movies by fixed name and nothing points at a new one.
+#[test]
+fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
+    let Some(game) = discovered_game() else {
+        return;
+    };
+    use mercs2_quartermaster::lint;
+
+    // `MINIMAP` is a real cfx_pack in vz.wad (the mounted stack) — replacing it is proven.
+    let dir = scratch("m0192_quiet");
+    let quiet = shipment(&dir, "  - kind: add_movie\n    name: MINIMAP\n    movie: src/x.gfx\n");
+    assert!(
+        !lint::game_checks(&quiet.manifest, &game)
+            .iter()
+            .any(|d| d.rule.code == "M0192"),
+        "replacing a shipped movie must not warn"
+    );
+
+    // A name retail does not ship: the movie would sit in the WAD, referenced by nothing.
+    let dir2 = scratch("m0192_fires");
+    let fires = shipment(
+        &dir2,
+        "  - kind: add_movie\n    name: qm_totally_novel_movie\n    movie: src/x.gfx\n",
+    );
+    assert!(
+        lint::game_checks(&fires.manifest, &game)
+            .iter()
+            .any(|d| d.rule.code == "M0192"),
+        "a novel movie name must warn that nothing references it"
+    );
+}

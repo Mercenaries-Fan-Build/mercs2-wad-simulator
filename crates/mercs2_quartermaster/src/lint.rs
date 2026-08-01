@@ -169,6 +169,11 @@ pub const M0191_SHARED_STRING_TABLE: Rule = Rule {
     title: "editing one copy of a string table shared between shell.wad and vz.wad is a half-fix",
     doc: "docs/modding/manifest_format.md#edit_stringdb",
 };
+pub const M0192_MOVIE_UNREFERENCED: Rule = Rule {
+    code: "M0192",
+    title: "an added movie's name matches no shipped movie, so nothing references it",
+    doc: "docs/modding/manifest_format.md#add_movie",
+};
 
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
@@ -299,6 +304,26 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
                          which then wins the lookup. That is what makes the replacement take \
                          effect, but it also means every asset that shares this texture now gets \
                          your version."
+                    ),
+                    at: Some(index),
+                    fix: None,
+                });
+            }
+        }
+
+        // A movie whose name matches a shipped cfx_pack is a REPLACEMENT — the proven UI-mod path:
+        // same name -> same hash -> last-wins, and every Lua site that already names it now serves
+        // yours. A NOVEL name mints a movie the game references from nowhere, so it will sit in the
+        // WAD and never display. Advisory, because a Shipment MAY add a movie it also wires up with
+        // its own patch_lua — this cannot see that the reference was added, only that retail has none.
+        if let Contribution::AddMovie { name, .. } = c {
+            let hash = crate::manifest::asset_hash(name);
+            if !game.has_asset(hash, mercs2_formats::types::TYPE_ID_CFX_PACK) {
+                out.push(Diagnostic {
+                    rule: M0192_MOVIE_UNREFERENCED,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "no shipped movie is named {name:?}, so nothing in the game references it —                          the engine looks movies up by fixed names (`shell`, `topbar`, `MINIMAP`,                          a `*_briefing`, …). To REPLACE one, use its exact name. To add a NEW movie,                          also ship a `patch_lua` that points a UI site at it, or it will sit in the                          WAD and never display."
                     ),
                     at: Some(index),
                     fix: None,
