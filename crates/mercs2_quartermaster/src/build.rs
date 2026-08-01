@@ -2200,6 +2200,28 @@ pub fn link_installed(
     }
     let mut log = Vec::new();
     let mut mutations = Vec::new();
+
+    // Order is load-bearing here, and `linked_source` already owns it: it sorts mutations by
+    // Shipment name so the merge is a function of the installed SET, not of the order the caller
+    // happened to name them in — which for a shell glob is filesystem order.
+    //
+    // That matters because `_tOutfits[hero]` is an ordered list and the save file persists a
+    // POSITION, not a name: a set that appended in a different order on reinstall would silently
+    // resolve a saved game to the wrong costume.
+    //
+    // So this does NOT re-sort. It reports the order that will be used, because a guarantee nobody
+    // can see is one the next person re-implements.
+    if shipments.len() > 1 {
+        let mut names: Vec<&str> = shipments
+            .iter()
+            .map(|s| s.manifest.shipment.name.as_str())
+            .collect();
+        names.sort_unstable();
+        log.push(format!(
+            "link order (by shipment name, so saved costume positions are stable): {}",
+            names.join(", ")
+        ));
+    }
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
     }

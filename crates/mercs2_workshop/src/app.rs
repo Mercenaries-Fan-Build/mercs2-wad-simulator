@@ -1507,7 +1507,18 @@ pub fn run(opts: Options) {
                                     theme::RailIcon::Settings,
                                 ];
                                 for (i, w) in Workbench::ALL.iter().enumerate() {
-                                    if theme::rail_item(ui, Some(i + 1), w.label(), icons[i], wb == *w) {
+                                    // The Shipment carries a count of what BLOCKS, so the gate is
+                                    // visible from whatever page you are actually working on.
+                                    let badge = (*w == Workbench::Quartermaster)
+                                        .then(|| qm.blocking_count());
+                                    if theme::rail_item_badged(
+                                        ui,
+                                        Some(i + 1),
+                                        w.label(),
+                                        icons[i],
+                                        wb == *w,
+                                        badge,
+                                    ) {
                                         wb = *w;
                                     }
                                 }

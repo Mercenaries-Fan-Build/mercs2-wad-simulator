@@ -364,3 +364,67 @@ fn the_corpus_lookup_finds_a_vz_script_and_reports_what_it_tried() {
         "should report every location it searched: {tried:?}"
     );
 }
+
+/// The linked block must be a function of the installed SET, not of the order it was named in.
+///
+/// `linked_source` already sorts by Shipment name and says why; this is the regression test that
+/// was missing, and Plan 05 names it as the verification this design needs.
+///
+/// The property is worth pinning because breaking it is silent and it corrupts player state:
+/// `_tOutfits[hero]` is an ordered list and the save file persists a POSITION, not a name, so a set
+/// that appended in a different order on reinstall would resolve a saved game to the wrong costume
+/// — no error, no crash, just the wrong clothes on a character the player already owns.
+///
+/// The caller's order is whatever the shell globbed, which is filesystem order and differs between
+/// machines and after a rename.
+#[test]
+fn link_order_does_not_depend_on_the_order_shipments_are_named() {
+    let Some(corpus) = corpus_root() else {
+        return eprintln!("SKIPPING: no Lua corpus under crates/mercs2_script/corpus");
+    };
+    let Some(base) = retail_block_bytes("scripts_vz") else {
+        return eprintln!("SKIPPING: no vz.wad discovered, so there is no base block to link into");
+    };
+
+    // Two mutations on one target, named so that source order and sorted order DISAGREE.
+    let mk = |shipment: &str, marker: &str| ScriptMutation {
+        shipment: shipment.to_string(),
+        target: "wifpmcinterior".to_string(),
+        append: format!("-- {marker}\n"),
+    };
+    let a = mk("alpha-outfit", "ALPHA");
+    let z = mk("zulu-outfit", "ZULU");
+
+    let mut fwd = ScriptsBlock::parse(&base).expect("parse the retail scripts block");
+    let mut rev = ScriptsBlock::parse(&base).expect("parse the retail scripts block");
+    let path = "blocks\\VZ\\scripts_vz_P000_Q3.block".to_string();
+    let one = link::link_into_blocks(
+        &mut [link::TargetBlock { path: path.clone(), block: &mut fwd }],
+        &corpus,
+        &[a.clone(), z.clone()],
+    )
+    .expect("link forward");
+    let two = link::link_into_blocks(
+        &mut [link::TargetBlock { path, block: &mut rev }],
+        &corpus,
+        &[z, a],
+    )
+    .expect("link reversed");
+
+    assert_eq!(
+        one.len(),
+        two.len(),
+        "the same set must produce the same number of linked targets"
+    );
+    for (f, r) in one.iter().zip(two.iter()) {
+        assert_eq!(
+            f.contributors, r.contributors,
+            "contributor order must be sorted, not as-supplied"
+        );
+        assert_eq!(
+            f.bytecode_bytes, r.bytecode_bytes,
+            "identical input sets must compile to identical bytecode, or saved costume \
+             positions move when a mod is reinstalled"
+        );
+    }
+}

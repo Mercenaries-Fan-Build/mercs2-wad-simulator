@@ -1236,23 +1236,42 @@ pub fn run_build(
     }
 }
 
-/// Where the Workshop drops a built Shipment for Modkit to find.
+/// Where the Workshop drops a Shipment for Modkit to find: **Modkit's own data root**.
 ///
-/// A folder both apps agree on IS the integration; a deep link would only be convenience over it,
-/// and needs two Tauri plugins Modkit does not carry. Modkit already drives `qm`, so nothing here
-/// writes into a game folder — install and undo stay its job, with the undo record to match.
+/// This used to be `%LOCALAPPDATA%/mercs2/shipments` — a location invented here that Modkit never
+/// reads, so "Send to Modkit" wrote into the void. Modkit keeps its state under
+/// `%APPDATA%/mercs2-modkit/` (`staging`, `deployed`, `bin`, …), so `shipments/` belongs beside
+/// those, in the layout Modkit already owns.
+///
+/// A folder both apps agree on IS the integration. A deep link would only be convenience over it,
+/// and needs two Tauri plugins Modkit does not carry. Nothing here writes into a game folder —
+/// install and undo stay Modkit's job, with the placement record to match.
 pub fn shipments_library() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(base.join("mercs2").join("shipments"))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("mercs2-modkit").join("shipments"))
 }
 
 fn send_to_modkit(p: &Panel) -> Result<PathBuf, String> {
     let root = p.root().ok_or("no shipment open")?;
     let lib = shipments_library().ok_or("no home directory to place the shipments library in")?;
     let dest = lib.join(root.file_name().ok_or("the shipment folder has no name")?);
+    // Copying a folder INTO itself walks forever and fills the disk, so refuse rather than trust
+    // that the library never overlaps the Shipment.
+    if dest.starts_with(root) || root.starts_with(&dest) {
+        return Err(format!(
+            "this Shipment already lives in the library at {} — nothing to send",
+            dest.display()
+        ));
+    }
     copy_tree(root, &dest).map_err(|e| format!("copying the shipment: {e}"))?;
+    // Open it, because Modkit has no watcher and no deep link: the handoff ends with a person
+    // adding it, so the folder had better be in front of them.
+    let _ = open_in_os(&dest);
     Ok(dest)
 }
 

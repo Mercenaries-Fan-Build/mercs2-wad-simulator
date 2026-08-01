@@ -832,6 +832,23 @@ pub mod theme {
     /// One activity-rail entry: index + icon + label, with a brass left-bar + soft fill when active.
     /// Returns whether it was clicked.
     pub fn rail_item(ui: &mut egui::Ui, index: Option<usize>, label: &str, icon: RailIcon, on: bool) -> bool {
+        rail_item_badged(ui, index, label, icon, on, None)
+    }
+
+    /// [`rail_item`] with a count in the corner.
+    ///
+    /// This is the "always-present" half of the Quartermaster: the page is one of several, but
+    /// whether something BLOCKS the build has to be visible from wherever you are working, or you
+    /// only find out when you go looking. A zero count paints nothing — a badge that is always
+    /// there is decoration.
+    pub fn rail_item_badged(
+        ui: &mut egui::Ui,
+        index: Option<usize>,
+        label: &str,
+        icon: RailIcon,
+        on: bool,
+        badge: Option<usize>,
+    ) -> bool {
         let w = ui.available_width();
         // Square cell: height == width, so the icon+label block reads as a tidy square button.
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, w), egui::Sense::click());
@@ -866,6 +883,19 @@ pub mod theme {
             egui::FontId::new(8.5, disp()),
             col,
         );
+        // BAD, not BRASS: this counts things that BLOCK, and blocking is the one state the colour
+        // contract reserves red for.
+        if let Some(n) = badge.filter(|n| *n > 0) {
+            let c = rect.right_top() + egui::vec2(-11.0, 11.0);
+            p.circle_filled(c, 7.0, BAD);
+            p.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                if n > 9 { "9+".to_string() } else { n.to_string() },
+                egui::FontId::new(9.0, disp()),
+                Color32::from_rgb(0x1a, 0x0f, 0x0c),
+            );
+        }
         resp.clicked()
     }
 
