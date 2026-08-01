@@ -46,3 +46,4 @@ mercs2_formats = { workspace = true }
 # The Shipment format, linter and builder — the Quartermaster dock is its UI front end.
 mercs2_quartermaster = { workspace = true }
 mercs2_bridge = { workspace = true }
+mercs2_destruction = { workspace = true }

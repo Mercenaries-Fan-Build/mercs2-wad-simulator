@@ -45,6 +45,10 @@
 //!   posts real damage messages with live HP math we have not recovered. [`DamageBands`] makes the
 //!   approximation explicit and tunable rather than burying it.
 
+/// Live destruction control — Lua generation for poking a running game's destructibles over the
+/// bridge (the console consumes this). See the module for why it lives here.
+pub mod live;
+
 use std::collections::HashSet;
 
 use mercs2_core::{Destructible, Entity, Health, ModelRef, World};

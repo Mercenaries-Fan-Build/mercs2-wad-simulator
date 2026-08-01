@@ -1231,6 +1231,10 @@ pub fn run(opts: Options) {
         &crate::index::data_home().unwrap_or_default(),
     );
     let mut console_search = String::new();
+    // Destruction poke: a target (object name or guid expr) + the chosen vocabulary state.
+    let mut destruct_target = String::new();
+    let mut destruct_state = 0usize;
+    let destruct_states = mercs2_destruction::live::states();
     // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
     // Never started automatically — only from the Settings button, so the tool never reaches out to
     // the network on its own.
@@ -4140,6 +4144,67 @@ pub fn run(opts: Options) {
                                                     );
                                                 }
                                             });
+                                        // Destruction: force a destructible's state by NAME (our
+                                        // cracked global vocabulary — the one thing Ess has no verb
+                                        // for), or demolish/repair via the health lever. Generates
+                                        // the Lua and sends it over the same bridge.
+                                        ui.add_space(4.0);
+                                        egui::CollapsingHeader::new(
+                                            egui::RichText::new("Destruction").size(11.0).color(theme::HAZARD),
+                                        )
+                                        .id_source("destruct_panel")
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("target").size(10.0).color(theme::FAINT));
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut destruct_target)
+                                                        .hint_text("object name or guid expr")
+                                                        .desired_width(190.0),
+                                                );
+                                            });
+                                            let has_target = !destruct_target.trim().is_empty();
+                                            ui.horizontal(|ui| {
+                                                egui::ComboBox::from_id_source("destruct_state")
+                                                    .selected_text(
+                                                        destruct_states.get(destruct_state).map(|(n, _)| *n).unwrap_or("state"),
+                                                    )
+                                                    .show_ui(ui, |ui| {
+                                                        for (i, (n, _)) in destruct_states.iter().enumerate() {
+                                                            ui.selectable_value(&mut destruct_state, i, *n);
+                                                        }
+                                                    });
+                                                if ui.add_enabled(has_target, egui::Button::new("Set state")).clicked() {
+                                                    if let Some((name, _)) = destruct_states.get(destruct_state) {
+                                                        if let Ok(lua) = mercs2_destruction::live::set_state_lua(&destruct_target, name) {
+                                                            send_chunk = Some(lua);
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                if theme::danger_button(ui, "Demolish", has_target).clicked() {
+                                                    send_chunk = Some(mercs2_destruction::live::demolish_lua(&destruct_target));
+                                                }
+                                                if ui.add_enabled(has_target, egui::Button::new("Repair")).clicked() {
+                                                    send_chunk = Some(mercs2_destruction::live::repair_lua(&destruct_target));
+                                                }
+                                                if ui
+                                                    .button("Watch")
+                                                    .on_hover_text("install a reporter that logs every destruction transition, by state name")
+                                                    .clicked()
+                                                {
+                                                    send_chunk = Some(mercs2_destruction::live::watch_lua());
+                                                }
+                                            });
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Set state uses the cracked SetState vocabulary; demolish/repair use the health lever.",
+                                                )
+                                                .size(9.0)
+                                                .color(theme::FAINT),
+                                            );
+                                        });
+
                                         // API reference: type to search Ess wrappers + engine natives
                                         // (bundled from Wally's library). Click an entry to insert it.
                                         if !ess_api.is_empty() {
