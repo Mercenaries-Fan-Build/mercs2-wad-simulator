@@ -4164,18 +4164,33 @@ pub fn run(opts: Options) {
                                                     .inner_margin(egui::Margin::symmetric(6.0, 4.0))
                                                     .show(ui, |ui| {
                                                         for e in hits {
-                                                            let col = if e.ess { theme::BRASS } else { theme::DIM };
-                                                            let label = format!("{}{}", e.name, e.sig);
-                                                            if ui
-                                                                .add(
+                                                            let clicked = ui.horizontal(|ui| {
+                                                                // A small tier tag: easy=green (guardrailed), core=brass, raw=hazard.
+                                                                if !e.tier.is_empty() {
+                                                                    let tc = match e.tier.as_str() {
+                                                                        "easy" => theme::GOOD,
+                                                                        "raw" => theme::HAZARD,
+                                                                        _ => theme::BRASS_DK,
+                                                                    };
+                                                                    ui.label(egui::RichText::new(&e.tier[..1].to_uppercase()).monospace().size(9.0).color(tc));
+                                                                } else {
+                                                                    ui.label(egui::RichText::new("n").monospace().size(9.0).color(theme::FAINT));
+                                                                }
+                                                                let col = if e.ess { theme::BRASS } else { theme::DIM };
+                                                                let r = ui.add(
                                                                     egui::Label::new(
-                                                                        egui::RichText::new(label).monospace().size(10.5).color(col),
+                                                                        egui::RichText::new(e.label()).monospace().size(10.5).color(col),
                                                                     )
                                                                     .sense(egui::Sense::click()),
-                                                                )
-                                                                .on_hover_text(if e.ess { "Ess wrapper \u{2014} click to insert" } else { "engine native \u{2014} click to insert" })
-                                                                .clicked()
-                                                            {
+                                                                );
+                                                                let hover = if e.doc.is_empty() {
+                                                                    if e.ess { format!("Ess {} \u{2014} click to insert", e.tier) } else { "engine native \u{2014} click to insert".into() }
+                                                                } else {
+                                                                    e.doc.clone()
+                                                                };
+                                                                r.on_hover_text(hover).clicked()
+                                                            }).inner;
+                                                            if clicked {
                                                                 if !con.input.is_empty() && !con.input.ends_with(char::is_whitespace) {
                                                                     con.input.push(' ');
                                                                 }
