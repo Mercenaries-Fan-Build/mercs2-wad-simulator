@@ -162,17 +162,65 @@ fn rewriting_a_command_list_resizes_and_round_trips() {
     assert_eq!(reparsed.nodes[ni].states[sj].enter, want, "{label}: the new list must read back");
 }
 
-/// The writer refuses a shape change by NAME rather than emitting a subtly wrong container — adding
-/// a node is exactly the surgery it does not do yet.
+/// Adding a STATE grows the descriptor table, re-bases `data_off`, and must still produce a
+/// container that re-parses with the new state present and the machine otherwise intact — the
+/// container-subtree splice the full regenerator does on every write.
 #[test]
-fn adding_a_node_is_refused_not_mangled() {
+fn adding_a_state_grows_the_family_and_round_trips() {
     let Some(families) = family_containers() else {
         eprintln!("SKIPPING: no vz.wad");
         return;
     };
-    let (_, original) = families.into_iter().next().expect("a family");
+    let Some((label, original)) = families
+        .into_iter()
+        .find(|(_, c)| parse_state_machine(c).is_some_and(|sm| !sm.nodes.is_empty()))
+    else {
+        eprintln!("SKIPPING: no family with a node");
+        return;
+    };
     let mut sm = parse_state_machine(&original).expect("parse");
-    sm.nodes.push(Default::default());
-    let err = serialize_state_machine(&original, &sm).expect_err("adding a node must be refused");
-    assert!(err.to_lowercase().contains("node"), "the refusal should name the cause: {err}");
+    let before_states: usize = sm.nodes.iter().map(|n| n.states.len()).sum();
+    // Add a new state (using a REAL vocabulary hash so it is a meaningful edit) with a short script.
+    use mercs2_formats::orchestrator::StateDef;
+    let gone = 0xCA26_1E5B; // GoneState
+    sm.nodes[0].states.push(StateDef { name_hash: gone, enter: vec![1, 0xDEAD, 2, 0xBEEF, 3], exit: vec![] });
+
+    let out = serialize_state_machine(&original, &sm).expect("add a state");
+    let re = parse_state_machine(&out).expect("the grown container must re-parse");
+    assert_eq!(
+        re.nodes.iter().map(|n| n.states.len()).sum::<usize>(),
+        before_states + 1,
+        "{label}: exactly one state added"
+    );
+    assert_eq!(re.nodes[0].states.last().unwrap().name_hash, gone);
+    assert_eq!(re.nodes[0].states.last().unwrap().enter, vec![1, 0xDEAD, 2, 0xBEEF, 3]);
+    // The rest of the machine is unchanged.
+    assert_eq!(re.nodes.len(), sm.nodes.len());
+    assert_eq!(re.switch_slots, sm.switch_slots);
+}
+
+/// Removing a state shrinks the family and re-parses with one fewer.
+#[test]
+fn removing_a_state_shrinks_the_family_and_round_trips() {
+    let Some(families) = family_containers() else {
+        eprintln!("SKIPPING: no vz.wad");
+        return;
+    };
+    let Some((label, original)) = families
+        .into_iter()
+        .find(|(_, c)| parse_state_machine(c).is_some_and(|sm| sm.nodes.iter().any(|n| n.states.len() >= 2)))
+    else {
+        eprintln!("SKIPPING: no node with two states");
+        return;
+    };
+    let mut sm = parse_state_machine(&original).expect("parse");
+    let ni = sm.nodes.iter().position(|n| n.states.len() >= 2).unwrap();
+    let removed = sm.nodes[ni].states.pop().unwrap();
+    let before: usize = parse_state_machine(&original).unwrap().nodes.iter().map(|n| n.states.len()).sum();
+
+    let out = serialize_state_machine(&original, &sm).expect("remove a state");
+    let re = parse_state_machine(&out).expect("re-parse");
+    assert_eq!(re.nodes.iter().map(|n| n.states.len()).sum::<usize>(), before - 1, "{label}");
+    assert_eq!(re.nodes[ni].states.len(), sm.nodes[ni].states.len(), "the node lost exactly its last state");
+    let _ = removed;
 }

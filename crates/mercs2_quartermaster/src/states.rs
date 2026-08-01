@@ -75,8 +75,16 @@ pub struct StatesDoc {
 }
 
 /// Dump a parsed machine to the editable YAML baseline. `name_of` reverses a hash to a name where it
-/// can, so the extracted file reads in vocabulary rather than hex.
+/// can, so the extracted file reads in vocabulary rather than hex. The GLOBAL destruction-state
+/// vocabulary (`PristineState`/`DamagedState`/… — the hashes the engine's `SetState` keys on) is
+/// always applied first, so states read by their real names even when the caller's name table (built
+/// from devkit strings) does not carry them — those hashes were cracked separately.
 pub fn extract(sm: &StateMachine, name_of: impl Fn(u32) -> Option<String>) -> String {
+    let name_of = |h: u32| {
+        mercs2_formats::orchestrator::state_name(h)
+            .map(String::from)
+            .or_else(|| name_of(h))
+    };
     let doc = StatesDoc {
         nodes: sm
             .nodes

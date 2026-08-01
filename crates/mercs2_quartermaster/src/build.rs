@@ -1977,8 +1977,12 @@ fn lower(
         // record the source block index. `build_patch_wad_multi` then re-points `_P000` at the new
         // block and remaps or SENTINELS the finer rungs — a sentinel degrades the model to its coarse
         // tier, it does not dangle — so no block-mate is carried and nothing hangs. `states:` is the
-        // extracted-then-edited machine (see `crate::states`); `serialize_state_machine` applies it
-        // and, being same-shape only, is what rejects an edit that adds or removes nodes/states.
+        // extracted-then-edited machine (see `crate::states`); `serialize_state_machine` REGENERATES
+        // the whole family from it, so an edit may add or remove nodes and states, not only rewrite
+        // them. What it cannot make safe is state IDENTITY: a state's hash is the engine's GLOBAL
+        // `SetState` address, so an edit that names a state outside the known vocabulary (and outside
+        // the model's own base states) is warned about — it ships, but the damage system will never
+        // reach that state.
         Contribution::EditStateMachine { target, states } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
@@ -2015,6 +2019,32 @@ fn lower(
                 message: format!("{}: {m}", root.join(states).display()),
             })?;
 
+            // ── State IDENTITY guard (M0193) ────────────────────────────────────────────────────
+            //
+            // A state's `name_hash` is the engine's global `SetState` address, not a per-model label.
+            // Warn on any edited state whose hash is neither one the base model already used nor a
+            // member of the known global vocabulary — it is legal to ship, but the damage system's
+            // transitions will never reach it, so the state is effectively dead.
+            let base_states: std::collections::BTreeSet<u32> =
+                base.nodes.iter().flat_map(|n| n.states.iter().map(|s| s.name_hash)).collect();
+            for node in &edited_sm.nodes {
+                for st in &node.states {
+                    if !base_states.contains(&st.name_hash)
+                        && !mercs2_formats::orchestrator::is_known_state(st.name_hash)
+                    {
+                        log.push(format!(
+                            "contributions[{index}] WARNING ({}): state 0x{:08X} is not a known \
+                             destruction state and was not in the base model — the engine's SetState \
+                             will never transition into it, so it is unreachable. Edit a state's \
+                             Enter/Exit scripts rather than renaming it, or use a vocabulary state \
+                             (PristineState, DamagedState, DestroyedState, GoneState, …).",
+                            crate::lint::M0193_STATE_OFF_VOCABULARY.code,
+                            st.name_hash
+                        ));
+                    }
+                }
+            }
+
             let edited = mercs2_formats::orchestrator::serialize_state_machine(
                 &inputs.container,
                 &edited_sm,
@@ -2023,21 +2053,21 @@ fn lower(
                 index,
                 kind,
                 message: format!(
-                    "applying the edited states to {target:?}: {m}. Edits are same-shape — rename \
-                     states, rewrite Enter/Exit command lists, change switch slots — but the node \
-                     and state COUNTS must match the model's; start from an extracted baseline so \
-                     they do"
+                    "applying the edited states to {target:?}: {m}. The family is regenerated in \
+                     full, so adding or removing nodes and states is fine — start from an extracted \
+                     baseline so the shape and state identities are the model's own"
                 ),
             })?;
 
-            // Same-shape means the base machine had the same node/state counts; report the deltas so
-            // a build log shows an edit actually changed bytes (a no-op states file is a mistake).
-            let (n_nodes, n_states): (usize, usize) =
+            let n_nodes = edited_sm.nodes.len();
+            let n_states: usize = edited_sm.nodes.iter().map(|n| n.states.len()).sum();
+            let (b_nodes, b_states): (usize, usize) =
                 (base.nodes.len(), base.nodes.iter().map(|n| n.states.len()).sum());
             log.push(format!(
                 "contributions[{index}] edit_state_machine {target} 0x{hash:08X}: \
-                 {n_nodes} node(s), {n_states} state(s); container {} -> {} bytes, \
-                 emitted as a single-model block (finer LOD rungs sentinel to coarse tier)",
+                 {b_nodes}\u{2192}{n_nodes} node(s), {b_states}\u{2192}{n_states} state(s); \
+                 container {} -> {} bytes, emitted as a single-model block (finer LOD rungs sentinel \
+                 to coarse tier)",
                 inputs.container.len(),
                 edited.len()
             ));

@@ -212,6 +212,44 @@ pub const LIST_ENTER: u32 = 0x9DA9_7065;
 /// `pandemic_hash_m2("Exit")` — CHDR list selector for a state's Exit list.
 pub const LIST_EXIT: u32 = 0xDB41_017D;
 
+/// The GLOBAL destruction-state vocabulary — the hashes the engine's `SetState` / `SetStateOnMsg`
+/// (`FUN_004d3e10`) key on, identical across every destructible. Cracked; **do not re-derive**
+/// (`docs/modernization/vehicle_model_spec.md` §5, `docs/destruction_orchestrator_format.md`).
+///
+/// This matters for editing: a state's `name_hash` is not a per-model label, it is this shared
+/// address. Rename a state to a hash outside this set and the damage system's transitions no longer
+/// reach it — the state becomes dead. Some members are observed-but-not-yet-named (`""`); they are
+/// still real states, so an edit that uses one is fine and only a hash outside the whole set warns.
+pub const STATE_VOCABULARY: &[(u32, &str)] = &[
+    (0x0ACE_072A, "InitState"),
+    (0x5D30_8F4F, "InitDestroyedState"),
+    (0x5A6E_8927, "InitDamagedState"),
+    (0xACB5_1200, "PristineState"),
+    (0x1D55_75A1, "DamagedState"),
+    (0x9279_1EBB, "StartDestroyedState"),
+    (0x7687_DF41, "DestroyedState"),
+    (0xCA26_1E5B, "GoneState"),
+    // Observed across retail machines, not yet name-cracked — real states all the same.
+    (0x381B_E6A4, ""),
+    (0xCE60_3754, ""),
+    (0xA530_B827, ""),
+];
+
+/// The cracked name of a global destruction state, or `None` for a hash outside the vocabulary (or
+/// an observed-but-unnamed member).
+pub fn state_name(hash: u32) -> Option<&'static str> {
+    STATE_VOCABULARY
+        .iter()
+        .find(|(h, n)| *h == hash && !n.is_empty())
+        .map(|(_, n)| *n)
+}
+
+/// Is this hash a known global destruction state at all (named or not)? An edit that names a state
+/// outside this set has decoupled it from the engine's `SetState` transitions.
+pub fn is_known_state(hash: u32) -> bool {
+    STATE_VOCABULARY.iter().any(|(h, _)| *h == hash)
+}
+
 /// One named state of a switch node.
 #[derive(Debug, Clone, Default)]
 pub struct StateDef {
@@ -361,25 +399,22 @@ pub fn parse_state_machine(buf: &[u8]) -> Option<StateMachine> {
     (!sm.nodes.is_empty()).then_some(sm)
 }
 
-/// Re-emit a model container with an edited destruction state machine spliced back in.
+/// Re-emit a model container with its destruction state machine REGENERATED from `sm`.
 ///
-/// **Same-shape only.** The edit may rename nodes and states and rewrite their Enter/Exit command
-/// lists — the retargeting edits that matter (SHOW/HIDE/SetState scripts, state names, switch
-/// slots) — but it may **not** add or remove nodes or states. That would change the descriptor ROW
-/// COUNT, which grows the descriptor table and re-bases `data_off`; a larger surgery this refuses by
-/// name rather than get subtly wrong. A mismatched shape returns `Err` naming the disagreement.
+/// The whole family is rebuilt every time — descriptor rows and leaf data both — from the parsed
+/// model, rather than overlaid onto the existing leaves. That is what lets an edit **add or remove**
+/// nodes and states, not only rename or rewrite them: a shape change is just a different number of
+/// generated leaves, and the container-subtree splice (grow the descriptor table, re-base `data_off`,
+/// bump the family parent's and every ancestor's descendant count, re-tile the data, recompute the
+/// `CSUM`) is mechanical over the flat, contiguous family the survey established.
 ///
-/// On a no-op — an `sm` parsed straight back out of `original` — the output is **byte-identical** to
-/// the input. That is proven across all 1,311 retail destructibles by
-/// [`tests/state_machine_writer.rs`], resting on the survey in
-/// `tests/state_machine_roundtrip_survey.rs`: the family is a flat, contiguous run of leaf chunks
-/// with zero nesting, zero gaps, and nothing else interleaved, so an edit is a contiguous byte
-/// splice — regenerate the family bytes, shift every following leaf's data offset by the size delta,
-/// patch the family's descriptor sizes, recompute the `CSUM`.
-///
-/// Only the fields `sm` owns are overlaid onto the original leaf bytes (name hashes, list contents,
-/// CHDR counts, switch slots); INFO and every descriptor word the model does not model are copied
-/// verbatim, which is what makes the no-op exact.
+/// The regeneration follows retail's exact canonical layout, measured across all 1,311 destructibles
+/// (`tests/state_machine_layout_survey.rs`): `INFO[5, switch_count, node_count]`; `SWIT` either right
+/// after `INFO` or last (its original position is preserved); per node a `NODE[hash, state_count]`;
+/// per state a `STAT[hash]`, always an Enter `CHDR`+`CEXE`, and an Exit `CHDR`+`CEXE` **iff** the exit
+/// list is non-empty (no retail state has an empty Exit, or an empty Enter). Because that layout is
+/// exactly what retail emits, a no-op — `sm` parsed straight back out — reproduces the container
+/// byte-for-byte (proven in `tests/state_machine_writer.rs`).
 pub fn serialize_state_machine(original: &[u8], sm: &StateMachine) -> Result<Vec<u8>, String> {
     let (data_off, rows) = desc_rows(original);
     if rows.is_empty() {
@@ -399,165 +434,151 @@ pub fn serialize_state_machine(original: &[u8], sm: &StateMachine) -> Result<Vec
         .find(|&p| rows[p].u3 > 0 && children_of(p).iter().any(|&c| &rows[c].tag == b"NODE"))
         .ok_or("container carries no destruction family")?;
 
-    // Family leaves in offset order (the survey proves `kids` order IS offset order — they tile).
-    let mut leaves: Vec<usize> = children_of(parent)
-        .into_iter()
-        .filter(|&k| rows[k].u0 != 0xFFFF_FFFF)
-        .collect();
-    leaves.sort_by_key(|&k| rows[k].u0);
-    if leaves.is_empty() {
-        return Err("destruction family has no leaf chunks".into());
+    // The family occupies a CONSECUTIVE run of descriptor rows: the parent's children are all leaves
+    // (u3 == 0), so `children_of` advances by one each step and they are `parent+1 ..= parent+u3`.
+    let old_n = rows[parent].u3 as usize;
+    let fam_first = parent + 1;
+    let fam_last = parent + old_n;
+    if fam_last >= rows.len() {
+        return Err("destruction family runs past the descriptor table".into());
+    }
+    let fam_rows = &rows[fam_first..=fam_last];
+    if fam_rows.iter().any(|r| r.u0 == 0xFFFF_FFFF) {
+        return Err("destruction family nests a container — this writer models only flat families".into());
     }
 
-    let leaf_bytes = |k: usize| -> &[u8] {
-        let s = data_off + rows[k].u0 as usize;
-        let e = (s + rows[k].size as usize).min(original.len());
-        if s > e {
-            &[]
-        } else {
-            &original[s..e]
-        }
-    };
+    // SWIT position: retail puts it either right after INFO (ordinal 1) or last. Preserve it; a
+    // family with no SWIT leaf gets none.
+    let swit_ordinal = fam_rows.iter().position(|r| &r.tag == b"SWIT");
+    let swit_first = swit_ordinal == Some(1);
+    let has_swit = swit_ordinal.is_some();
 
-    // Regenerate each family leaf, mirroring the parser's walk so the sm field for each chunk is
-    // unambiguous. `(new_off, new_bytes)` per leaf, re-tiled contiguously from the first leaf's off.
-    let mut new_leaf: Vec<(usize, u32, Vec<u8>)> = Vec::with_capacity(leaves.len());
-    let base_off = rows[leaves[0]].u0;
-    let mut cursor = base_off;
-    let mut ni = 0usize; // next node
-    let mut si = 0usize; // next state within the current node
-    let mut pending: Option<bool> = None; // the list the next CEXE fills (true = Enter)
-    for &k in &leaves {
-        let orig = leaf_bytes(k).to_vec();
-        let mut b = orig.clone();
-        match &rows[k].tag {
-            b"INFO" => { /* the model owns nothing here — copy verbatim */ }
-            b"NODE" => {
-                let node = sm.nodes.get(ni).ok_or_else(|| {
-                    format!("edit has {} nodes, container has more (at NODE #{ni})", sm.nodes.len())
-                })?;
-                put_u32(&mut b, 0, node.name_hash);
-                // word4 is the declared state count; same-shape means it is unchanged, but assert it.
-                if u32_le(&orig, 4) as usize != node.states.len() {
-                    return Err(format!(
-                        "node #{ni} has {} states in the edit but {} in the container — adding or \
-                         removing states is not a same-shape edit",
-                        node.states.len(),
-                        u32_le(&orig, 4)
-                    ));
+    // Regenerate the leaves in canonical order.
+    let u32v = |v: u32| v.to_le_bytes().to_vec();
+    let words = |list: &[u32]| -> Vec<u8> { list.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    let swit_leaf = || ([b'S', b'W', b'I', b'T'], words(&sm.switch_slots));
+    let mut new_leaves: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+    // INFO = [5, switch_count, node_count]; word0 is the constant the survey pinned.
+    let mut info = u32v(5);
+    info.extend_from_slice(&(sm.switch_slots.len() as u32).to_le_bytes());
+    info.extend_from_slice(&(sm.nodes.len() as u32).to_le_bytes());
+    new_leaves.push(([b'I', b'N', b'F', b'O'], info));
+    if has_swit && swit_first {
+        new_leaves.push(swit_leaf());
+    }
+    for node in &sm.nodes {
+        let mut n = u32v(node.name_hash);
+        n.extend_from_slice(&(node.states.len() as u32).to_le_bytes());
+        new_leaves.push(([b'N', b'O', b'D', b'E'], n));
+        for st in &node.states {
+            new_leaves.push(([b'S', b'T', b'A', b'T'], u32v(st.name_hash)));
+            // A list emits its CHDR/CEXE leaf IFF it is non-empty — retail's exact rule, measured
+            // across 82,790 states (0 leaves with an empty list, 31,311 states with no leaves at
+            // all). Enter always precedes Exit.
+            for (selector, list) in [(LIST_ENTER, &st.enter), (LIST_EXIT, &st.exit)] {
+                if list.is_empty() {
+                    continue;
                 }
-                ni += 1;
-                si = 0;
-            }
-            b"STAT" => {
-                let st = sm
-                    .nodes
-                    .get(ni - 1)
-                    .and_then(|n| n.states.get(si))
-                    .ok_or_else(|| format!("edit is missing state #{si} of node #{}", ni - 1))?;
-                put_u32(&mut b, 0, st.name_hash);
-                si += 1;
-            }
-            b"CHDR" => {
-                let which = u32_le(&orig, 0);
-                let st = sm.nodes.get(ni - 1).and_then(|n| n.states.get(si - 1));
-                let list = match which {
-                    LIST_ENTER => {
-                        pending = Some(true);
-                        st.map(|s| s.enter.len())
-                    }
-                    LIST_EXIT => {
-                        pending = Some(false);
-                        st.map(|s| s.exit.len())
-                    }
-                    _ => {
-                        pending = None;
-                        None
-                    }
-                };
-                if let Some(n) = list {
-                    put_u32(&mut b, 4, n as u32);
-                }
-            }
-            b"CEXE" => {
-                if let Some(enter) = pending.take() {
-                    if let Some(st) = sm.nodes.get(ni - 1).and_then(|n| n.states.get(si - 1)) {
-                        let list = if enter { &st.enter } else { &st.exit };
-                        b = list.iter().flat_map(|w| w.to_le_bytes()).collect();
-                    }
-                }
-            }
-            b"SWIT" => {
-                b = sm.switch_slots.iter().flat_map(|w| w.to_le_bytes()).collect();
-            }
-            other => {
-                return Err(format!(
-                    "family carries an unexpected leaf {:?} — the writer models only \
-                     INFO/NODE/STAT/CHDR/CEXE/SWIT",
-                    String::from_utf8_lossy(other)
-                ));
+                let mut chdr = u32v(selector);
+                chdr.extend_from_slice(&(list.len() as u32).to_le_bytes());
+                new_leaves.push(([b'C', b'H', b'D', b'R'], chdr));
+                new_leaves.push(([b'C', b'E', b'X', b'E'], words(list)));
             }
         }
-        let size = b.len() as u32;
-        new_leaf.push((k, cursor, b));
-        cursor += size;
     }
-    if ni != sm.nodes.len() {
-        return Err(format!(
-            "edit has {} nodes, container has {} — adding or removing nodes is not a same-shape edit",
-            sm.nodes.len(),
-            ni
-        ));
+    if has_swit && !swit_first {
+        new_leaves.push(swit_leaf());
     }
+    let new_n = new_leaves.len();
+    let row_delta = new_n as i64 - old_n as i64;
 
-    // The original family byte span (row-relative), contiguous by the survey's tiling result.
-    let fam_lo = base_off as usize;
-    let fam_hi = leaves
-        .iter()
-        .map(|&k| rows[k].u0 as usize + rows[k].size as usize)
-        .max()
-        .unwrap_or(fam_lo);
-    let new_fam: Vec<u8> = new_leaf.iter().flat_map(|(_, _, b)| b.clone()).collect();
+    // The original family's contiguous byte span, and the new one re-tiled from the same start.
+    let fam_lo = fam_rows.iter().map(|r| r.u0 as usize).min().unwrap();
+    let fam_hi = fam_rows.iter().map(|r| r.u0 as usize + r.size as usize).max().unwrap();
     let old_fam_len = fam_hi - fam_lo;
-    let delta = new_fam.len() as i64 - old_fam_len as i64;
+    let mut new_family_data = Vec::new();
+    let mut new_offsets: Vec<(u32, u32)> = Vec::with_capacity(new_n); // (off, size), row-relative
+    let mut cursor = fam_lo;
+    for (_, data) in &new_leaves {
+        new_offsets.push((cursor as u32, data.len() as u32));
+        new_family_data.extend_from_slice(data);
+        cursor += data.len();
+    }
+    let data_delta = new_family_data.len() as i64 - old_fam_len as i64;
 
-    // Where the data region ends (before an optional CSUM trailer).
     let has_csum = original.len() >= 8 && &original[original.len() - 8..original.len() - 4] == b"CSUM";
     let data_end = if has_csum { original.len() - 8 } else { original.len() };
-    if data_off > data_end {
-        return Err("data offset past the container's data region".into());
-    }
-    let region = &original[data_off..data_end];
-    if fam_hi > region.len() {
-        return Err("destruction family runs past the data region".into());
+    if data_off > data_end || fam_hi > data_end - data_off {
+        return Err("data offset/family runs past the container's data region".into());
     }
 
-    // Prefix = header + descriptor table (+ any padding up to data_off), copied then patched.
-    let mut out = original[..data_off].to_vec();
-    let new_off_of: std::collections::HashMap<usize, u32> =
-        new_leaf.iter().map(|(k, off, _)| (*k, *off)).collect();
-    let new_size_of: std::collections::HashMap<usize, u32> =
-        new_leaf.iter().map(|(k, _, b)| (*k, b.len() as u32)).collect();
-    for (i, r) in rows.iter().enumerate() {
+    // A leaf whose data sits AFTER the family shifts by the family's size delta; anything before is
+    // untouched; a container row (0xFFFFFFFF) has no data offset.
+    let remap_off = |off: u32| -> u32 {
+        if off != 0xFFFF_FFFF && off as usize >= fam_hi {
+            (off as i64 + data_delta) as u32
+        } else {
+            off
+        }
+    };
+    // `i` is an ancestor of the family parent when the parent lies inside its subtree.
+    let is_ancestor = |i: usize| i < parent && parent <= i + rows[i].u3 as usize;
+
+    let new_ndesc = (rows.len() as i64 + row_delta) as usize;
+    let new_data_off = (data_off as i64 + 20 * row_delta) as usize;
+
+    // ── Header: UCFX, new data offset, the two words we do not model, new descriptor count. ──
+    let mut out = Vec::with_capacity(new_data_off + new_family_data.len() + 8);
+    out.extend_from_slice(&original[0..4]);
+    out.extend_from_slice(&(new_data_off as u32).to_le_bytes());
+    out.extend_from_slice(&original[8..16]);
+    out.extend_from_slice(&(new_ndesc as u32).to_le_bytes());
+
+    // Copy an original descriptor row, patching its data offset and (for the parent / an ancestor)
+    // its descendant count. Its `w12` sibling-count word is untouched — inserting into the family
+    // subtree changes no other row's sibling count.
+    let emit_original = |out: &mut Vec<u8>, i: usize| {
         let ro = 20 + i * 20;
-        if r.u0 == 0xFFFF_FFFF {
-            continue; // a nested container: no data offset to move
+        let mut row: [u8; 20] = original[ro..ro + 20].try_into().unwrap();
+        let off = u32_le(&row, 4);
+        row[4..8].copy_from_slice(&remap_off(off).to_le_bytes());
+        if i == parent {
+            row[16..20].copy_from_slice(&(new_n as u32).to_le_bytes());
+        } else if is_ancestor(i) {
+            let u3 = (rows[i].u3 as i64 + row_delta) as u32;
+            row[16..20].copy_from_slice(&u3.to_le_bytes());
         }
-        if let Some(&off) = new_off_of.get(&i) {
-            put_u32(&mut out, ro + 4, off);
-            put_u32(&mut out, ro + 8, new_size_of[&i]);
-        } else if (r.u0 as usize) >= fam_hi {
-            // A leaf after the family shifts by the size delta.
-            put_u32(&mut out, ro + 4, (r.u0 as i64 + delta) as u32);
-        }
+        out.extend_from_slice(&row);
+    };
+
+    for i in 0..=parent {
+        emit_original(&mut out, i);
+    }
+    // New family rows: siblings at the parent's child level, so w12 = (count-1-ordinal), u3 = 0.
+    for (j, ((tag, _), (off, size))) in new_leaves.iter().zip(&new_offsets).enumerate() {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&((new_n - 1 - j) as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+    }
+    for i in fam_last + 1..rows.len() {
+        emit_original(&mut out, i);
     }
 
-    // Data region = untouched head, the regenerated family, untouched tail (shifted implicitly).
+    // Any padding between the descriptor table and the data region is preserved verbatim.
+    let orig_table_end = 20 + rows.len() * 20;
+    if data_off > orig_table_end {
+        out.extend_from_slice(&original[orig_table_end..data_off]);
+    }
+    debug_assert_eq!(out.len(), new_data_off, "descriptor table + padding must land at data_off");
+
+    // Data region: untouched head, the regenerated family, untouched tail.
+    let region = &original[data_off..data_end];
     out.extend_from_slice(&region[..fam_lo]);
-    out.extend_from_slice(&new_fam);
+    out.extend_from_slice(&new_family_data);
     out.extend_from_slice(&region[fam_hi..]);
 
-    // Recompute the CSUM trailer over everything above it.
     if has_csum {
         let csum = crate::crc32::crc32_mercs2(&out);
         out.extend_from_slice(b"CSUM");
@@ -566,13 +587,6 @@ pub fn serialize_state_machine(original: &[u8], sm: &StateMachine) -> Result<Vec
     Ok(out)
 }
 
-/// Write a little-endian u32 into `buf` at `off`, if it fits — a no-op past the end so a short leaf
-/// (already reported by the shape checks) cannot panic here.
-fn put_u32(buf: &mut [u8], off: usize, v: u32) {
-    if off + 4 <= buf.len() {
-        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    }
-}
 
 /// Decode a state's Enter/Exit COMMAND SCRIPT into readable calls. Token grammar (observed on
 /// retail vehicles, e.g. `al_veh_truck_hmmwv_avenger`):

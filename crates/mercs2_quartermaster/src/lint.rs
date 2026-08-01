@@ -175,6 +175,16 @@ pub const M0192_MOVIE_UNREFERENCED: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_movie",
 };
 
+/// An `edit_state_machine` names a state whose hash is neither one the base model used nor a member
+/// of the cracked global vocabulary. The engine's `SetState`/`SetStateOnMsg` key on that global
+/// hash, so a novel one is unreachable — the state ships but the damage system never enters it.
+/// Surfaced from the lowering (it needs both the game stack and the states file), not `game_checks`.
+pub const M0193_STATE_OFF_VOCABULARY: Rule = Rule {
+    code: "M0193",
+    title: "an edited destruction state is outside the global SetState vocabulary — unreachable",
+    doc: "docs/modding/manifest_format.md#edit_state_machine",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",

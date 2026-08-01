@@ -406,7 +406,7 @@ fn cmd_rules() -> ExitCode {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     println!("\nNeed the retail WADs — `qm lint --with-game`, and always during `qm build`:");
-    for r in [lint::M0007_MULTI_RUNG_REPLACE, lint::M0009_NO_PRIMARY_ROW, lint::M0192_MOVIE_UNREFERENCED] {
+    for r in [lint::M0007_MULTI_RUNG_REPLACE, lint::M0009_NO_PRIMARY_ROW, lint::M0192_MOVIE_UNREFERENCED, lint::M0193_STATE_OFF_VOCABULARY] {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     println!("\nChecked against the WAD the builder emits, before it reaches disk:");

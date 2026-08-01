@@ -187,11 +187,14 @@ fn edit_state_machine_renames_a_state_end_to_end() {
         .find_map(|(i, n)| (!n.states.is_empty()).then_some((i, 0)))
         .expect("a node with a state");
 
-    // Extract, rename one state to a novel name, ship it.
+    // Extract, rename one state to a NOVEL name, ship it. Extract shows a state by its vocabulary
+    // name where one exists, else hex — replace whichever token it used.
     let mut yaml = mercs2_quartermaster::states::extract(&sm, |_| None);
-    let old_hash_hex = format!("0x{:08X}", sm.nodes[ni].states[si].name_hash);
-    assert!(yaml.contains(&old_hash_hex), "extract should show the state as hex: {yaml}");
-    yaml = yaml.replacen(&old_hash_hex, "qm_test_renamed_state", 1);
+    let old_token = mercs2_formats::orchestrator::state_name(sm.nodes[ni].states[si].name_hash)
+        .map(String::from)
+        .unwrap_or_else(|| format!("0x{:08X}", sm.nodes[ni].states[si].name_hash));
+    assert!(yaml.contains(&old_token), "extract should show the state token: {yaml}");
+    yaml = yaml.replacen(&old_token, "qm_test_renamed_state", 1);
 
     let dir = scratch("esm_rename");
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -201,6 +204,12 @@ fn edit_state_machine_renames_a_state_end_to_end() {
         &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
     );
     let report = build::build(&s, Some(&mut game), None, None, None).expect("build the rename");
+    // Renaming to a novel hash decouples the state from the engine's SetState — M0193 must warn.
+    assert!(
+        report.log.iter().any(|l| l.contains("M0193")),
+        "renaming a state off-vocabulary must warn (M0193): {:?}",
+        report.log
+    );
     let on_disk = std::fs::read(report.wad.unwrap()).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
     let dec = mercs2_formats::sges::decompress_sges(&contents.blocks[0].compressed_data).unwrap();
