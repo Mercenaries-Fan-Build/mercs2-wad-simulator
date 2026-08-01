@@ -1226,6 +1226,11 @@ pub fn run(opts: Options) {
     // The live Lua console (Craft ▸ Console). `None` until the author connects; a worker thread holds
     // the socket so the frame loop never blocks on the game.
     let mut live_console: Option<crate::console::LiveConsole> = None;
+    // The Ess / engine API reference the console autocompletes against, loaded once from the pack.
+    let ess_api = crate::essapi::ApiIndex::load(
+        &crate::index::data_home().unwrap_or_default(),
+    );
+    let mut console_search = String::new();
     // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
     // Never started automatically — only from the Settings button, so the tool never reaches out to
     // the network on its own.
@@ -4135,6 +4140,51 @@ pub fn run(opts: Options) {
                                                     );
                                                 }
                                             });
+                                        // API reference: type to search Ess wrappers + engine natives
+                                        // (bundled from Wally's library). Click an entry to insert it.
+                                        if !ess_api.is_empty() {
+                                            ui.add_space(4.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label(theme::disp_text("API", 9.0, theme::FAINT));
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut console_search)
+                                                        .hint_text("search Ess / natives\u{2026}")
+                                                        .desired_width(200.0),
+                                                );
+                                                if !console_search.is_empty() && ui.small_button("\u{2715}").clicked() {
+                                                    console_search.clear();
+                                                }
+                                            });
+                                            let hits = ess_api.search(&console_search, 8);
+                                            if !hits.is_empty() {
+                                                egui::Frame::none()
+                                                    .fill(theme::G0)
+                                                    .stroke(egui::Stroke::new(1.0, theme::LINE))
+                                                    .rounding(4.0)
+                                                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                                    .show(ui, |ui| {
+                                                        for e in hits {
+                                                            let col = if e.ess { theme::BRASS } else { theme::DIM };
+                                                            let label = format!("{}{}", e.name, e.sig);
+                                                            if ui
+                                                                .add(
+                                                                    egui::Label::new(
+                                                                        egui::RichText::new(label).monospace().size(10.5).color(col),
+                                                                    )
+                                                                    .sense(egui::Sense::click()),
+                                                                )
+                                                                .on_hover_text(if e.ess { "Ess wrapper \u{2014} click to insert" } else { "engine native \u{2014} click to insert" })
+                                                                .clicked()
+                                                            {
+                                                                if !con.input.is_empty() && !con.input.ends_with(char::is_whitespace) {
+                                                                    con.input.push(' ');
+                                                                }
+                                                                con.input.push_str(&e.name);
+                                                            }
+                                                        }
+                                                    });
+                                            }
+                                        }
                                         ui.add_space(4.0);
                                         let resp = ui.add(
                                             egui::TextEdit::multiline(&mut con.input)
