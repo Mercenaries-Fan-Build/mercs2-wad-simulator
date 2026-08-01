@@ -892,12 +892,6 @@ fn ui_ctx_interact(ctx: &egui::Context, rect: egui::Rect) -> egui::Response {
         .inner
 }
 
-/// Model Workbench vehicle-class display order (helicopters first, per user).
-const VEH_CLASS_ORDER: &[&str] = &[
-    "helicopter", "tank", "apc", "vtol", "jet", "car", "truck", "van", "semi", "trailer", "towed",
-    "motorcycle", "boat", "other",
-];
-
 /// The name map a RELEASED build can always reach: the bundled `workshop_data/names.bin` (found
 /// through the full [`crate::index::data_home`] chain, so a bundle the user installed, pointed
 /// Settings at, or let the tool fetch for itself all count) overlaid by the ASET dictionary
@@ -987,15 +981,30 @@ fn resolve_node_names(
     out
 }
 
-fn build_vehicle_inventory(index: &crate::index::AssetIndex) -> Vec<(&'static str, Vec<(u32, String)>)> {
+/// The donor pool: EVERY named model, grouped by the Library's category — not just vehicles.
+///
+/// Plan 02: *"Delete the vehicle-only donor navigator — any host, not just vehicles."* A prop, a
+/// building or a character is as valid a host to conform an import onto as a truck, and the old
+/// vehicle-only filter simply made those hosts unreachable. Grouping by `AssetRow::category()`
+/// subsumes the old behaviour — vehicles still break out by class — while adding every other host,
+/// in `CATEGORY_ORDER`. `filter` narrows the pool to a domain's lens when one is active (Systems and
+/// the domain pages), or takes everything when it is `None`. Unnamed rows are skipped: you cannot
+/// pick a host you cannot name.
+fn build_donor_inventory(
+    index: &crate::index::AssetIndex,
+    filter: Option<crate::domain::Domain>,
+) -> Vec<(&'static str, Vec<(u32, String)>)> {
     let mut map: std::collections::HashMap<&'static str, Vec<(u32, String)>> = Default::default();
     for r in &*index.models() {
-        if let Some(c) = r.vehicle_class() {
-            map.entry(c).or_default().push((r.hash, r.label()));
+        if r.name.is_none() {
+            continue;
+        }
+        if filter.map(|d| d.model_lens(r)).unwrap_or(true) {
+            map.entry(r.category()).or_default().push((r.hash, r.label()));
         }
     }
     let mut out = Vec::new();
-    for &c in VEH_CLASS_ORDER {
+    for &c in crate::index::CATEGORY_ORDER {
         if let Some(mut rows) = map.remove(c) {
             rows.sort_by(|a, b| a.1.cmp(&b.1));
             out.push((c, rows));
@@ -1215,7 +1224,7 @@ pub fn run(opts: Options) {
     // egui re-fit the panel to its (now shorter) content.
     let mut navigator_width = 300.0f32;
     let mut inspector_width = 372.0f32;
-    let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_vehicle_inventory(&index);
+    let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_donor_inventory(&index, None);
     let mut inventory_dirty = false;
     // After a retarget auto-play, many character clips (weapon/pistol variants) won't bind to the rig;
     // this counts down auto-advances to the NEXT clip until one binds, so the pedestal shows a real
@@ -1788,7 +1797,7 @@ pub fn run(opts: Options) {
                     // highlight in the PREVIEW's current space (source before Apply, target after).
                     let mut hover_skel: Option<(usize, bool)> = None;
                     if inventory_dirty {
-                        vehicle_inventory = build_vehicle_inventory(&index);
+                        vehicle_inventory = build_donor_inventory(&index, None);
                         inventory_dirty = false;
                     }
                     // The workbench whose PANELS and MARKERS to draw this frame. Craft is never
@@ -2393,8 +2402,9 @@ pub fn run(opts: Options) {
                             }
                             Workbench::Mods => {
                                 ui.label(theme::disp_text("Donor templates", 15.0, theme::TX));
-                                ui.weak("Pick a vehicle template — it becomes the conform donor its \
-                                         container hosts the injected geometry.");
+                                ui.weak("Pick ANY host template — vehicle, character, building or prop \
+                                         — it becomes the conform donor whose container hosts the \
+                                         injected geometry.");
                                 ui.separator();
                                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                                     if vehicle_inventory.is_empty() {
