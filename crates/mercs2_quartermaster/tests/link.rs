@@ -121,7 +121,7 @@ fn a_resident_script_links_into_the_resident_block() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[]).expect("link must succeed");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[]).expect("link must succeed");
     drop(targets);
 
     assert_eq!(linked.len(), 1);
@@ -177,7 +177,7 @@ fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
         .iter_mut()
         .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs).expect("link must succeed");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs, &[]).expect("link must succeed");
     drop(targets);
 
     // Both the trampoline host and the minted loader come back as linked, both in scripts_vz.
@@ -240,7 +240,7 @@ fn vz_and_resident_targets_split_across_two_blocks() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[]).expect("link");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[]).expect("link");
     drop(targets);
 
     assert_eq!(linked.len(), 2);
@@ -468,12 +468,14 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
         &corpus,
         &[a.clone(), z.clone()],
         &[],
+        &[],
     )
     .expect("link forward");
     let two = link::link_into_blocks(
         &mut [link::TargetBlock { path, block: &mut rev }],
         &corpus,
         &[z, a],
+        &[],
         &[],
     )
     .expect("link reversed");

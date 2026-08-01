@@ -40,8 +40,9 @@
 //! the crate's standing discipline and partly forced: the crate that owns the corpus
 //! (`mercs2_script`) links a second, incompatible Lua runtime — see the note in `Cargo.toml`.
 
+use crate::manifest::Load;
 use mercs2_formats::scripts_block::ScriptsBlock;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Every block a `patch_lua` target may live in, as `(PTHS needle, PTHS path)`.
@@ -99,6 +100,11 @@ pub enum LinkError {
         target: String,
         message: String,
     },
+    /// `load.after`/`load.before` across the installed set form a cycle, so no deterministic order
+    /// exists. Names the Shipments still tangled after everything orderable was placed.
+    LoadCycle {
+        names: Vec<String>,
+    },
     Block(String),
 }
 
@@ -123,6 +129,12 @@ impl std::fmt::Display for LinkError {
             LinkError::Splice { target, message } => {
                 write!(f, "splicing {target:?} back into the block: {message}")
             }
+            LinkError::LoadCycle { names } => write!(
+                f,
+                "load order is cyclic — {} reference each other through load.after / load.before, so \
+                 no order satisfies them all. Break the cycle by removing one constraint",
+                names.join(", ")
+            ),
             LinkError::Block(m) => write!(f, "{m}"),
         }
     }
@@ -181,15 +193,83 @@ pub fn base_source_path(corpus_root: &Path, target: &str) -> Result<PathBuf, Vec
     Err(tried)
 }
 
-/// Concatenate the base source with every mutation's append, in a deterministic order.
+/// The deterministic load order over an installed set: an alphabetical base that `load.after` /
+/// `load.before` then constrain, tie-broken by name so it is stable.
 ///
-/// **Ordered by Shipment name, not install order.** Two installs with the same set of Shipments must
-/// produce byte-identical output, or verify-by-hash means nothing and a user's saved state can shift
-/// under them between deploys. Load order decides who *wins* a conflict; it does not get to decide
-/// the bytes of a merge that has no conflict.
-pub fn linked_source(base: &str, mutations: &[&ScriptMutation]) -> (String, Vec<String>) {
+/// **Name is the base, not install order.** Two installs of the same set must produce byte-identical
+/// output, or verify-by-hash means nothing and a saved costume position can shift under the player
+/// between deploys. `after`/`before` do not replace that sort — they constrain it: a Kahn
+/// topological pass that, among ready Shipments, always takes the alphabetically smallest. A
+/// constraint naming an uninstalled Shipment is inert (you cannot order against what is not there); a
+/// cycle is a named error, never a silent arbitrary pick.
+pub fn resolve_load_order(shipments: &[(String, Load)]) -> Result<Vec<String>, LinkError> {
+    let names: BTreeSet<&str> = shipments.iter().map(|(n, _)| n.as_str()).collect();
+    // Directed edges `x -> y` meaning x loads before y. `after: A` on N ⇒ A before N. `before: B` on
+    // N ⇒ N before B. Edges touching an uninstalled name, or self-edges, are dropped.
+    let mut edges: Vec<(&str, &str)> = Vec::new();
+    for (n, load) in shipments {
+        for a in &load.after {
+            if names.contains(a.as_str()) && a != n {
+                edges.push((a.as_str(), n.as_str()));
+            }
+        }
+        for b in &load.before {
+            if names.contains(b.as_str()) && b != n {
+                edges.push((n.as_str(), b.as_str()));
+            }
+        }
+    }
+    let mut succ: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut indeg: BTreeMap<&str, usize> = names.iter().map(|&n| (n, 0)).collect();
+    for (from, to) in edges {
+        if succ.entry(from).or_default().insert(to) {
+            *indeg.get_mut(to).unwrap() += 1;
+        }
+    }
+    let mut ready: BTreeSet<&str> =
+        indeg.iter().filter(|(_, &d)| d == 0).map(|(&n, _)| n).collect();
+    let mut order: Vec<String> = Vec::with_capacity(names.len());
+    while let Some(&n) = ready.iter().next() {
+        ready.remove(n);
+        order.push(n.to_string());
+        if let Some(ss) = succ.get(n) {
+            for &s in ss {
+                let d = indeg.get_mut(s).unwrap();
+                *d -= 1;
+                if *d == 0 {
+                    ready.insert(s);
+                }
+            }
+        }
+    }
+    if order.len() != names.len() {
+        let placed: BTreeSet<&str> = order.iter().map(|s| s.as_str()).collect();
+        let tangled: Vec<String> =
+            names.iter().filter(|n| !placed.contains(*n)).map(|s| s.to_string()).collect();
+        return Err(LinkError::LoadCycle { names: tangled });
+    }
+    Ok(order)
+}
+
+/// Concatenate the base source with every mutation's append, in the deterministic load order.
+///
+/// `order` is the resolved sequence from [`resolve_load_order`]; a Shipment absent from it (an empty
+/// `order`, or the synthetic mod-loader trampoline) falls back to name order, so the historical
+/// behaviour — pure alphabetical — is exactly the empty-`order` case. Load order decides who *wins* a
+/// conflict; it does not get to decide the bytes of a merge that has no conflict, which is why the
+/// tie-break is still the name.
+pub fn linked_source(
+    base: &str,
+    mutations: &[&ScriptMutation],
+    order: &[String],
+) -> (String, Vec<String>) {
+    let rank = |name: &str| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
     let mut ordered: Vec<&&ScriptMutation> = mutations.iter().collect();
-    ordered.sort_by(|a, b| a.shipment.cmp(&b.shipment));
+    ordered.sort_by(|a, b| {
+        rank(&a.shipment)
+            .cmp(&rank(&b.shipment))
+            .then_with(|| a.shipment.cmp(&b.shipment))
+    });
 
     let mut out = String::with_capacity(
         base.len() + ordered.iter().map(|m| m.append.len()).sum::<usize>() + 256,
@@ -403,7 +483,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[])
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[])
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -420,6 +500,7 @@ pub fn link_into_blocks(
     corpus_root: &Path,
     mutations: &[ScriptMutation],
     ui_regs: &[UiRegistration],
+    order: &[String],
 ) -> Result<Vec<LinkedScript>, LinkError> {
     // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any UI mod
     // registered — ONE line regardless of how many, so the resident never grows with mod count.
@@ -463,7 +544,7 @@ pub fn link_into_blocks(
             message: format!("reading base source {}: {e}", source_path.display()),
         })?;
 
-        let (mut source, contributors) = linked_source(&base, &group);
+        let (mut source, contributors) = linked_source(&base, &group, order);
         // Emitted once, AFTER every Shipment's append — see `derived_epilogue`. Putting it here
         // rather than in each Shipment is what makes "exactly once" structural.
         if let Some(epilogue) = derived_epilogue(target) {
@@ -572,8 +653,8 @@ mod tests {
     fn concatenation_order_is_deterministic_regardless_of_input_order() {
         let a = mutation("aaa-mod", "s", "-- A\n");
         let b = mutation("zzz-mod", "s", "-- Z\n");
-        let (one, c1) = linked_source("base\n", &[&a, &b]);
-        let (two, c2) = linked_source("base\n", &[&b, &a]);
+        let (one, c1) = linked_source("base\n", &[&a, &b], &[]);
+        let (two, c2) = linked_source("base\n", &[&b, &a], &[]);
         assert_eq!(one, two, "install order must not change the linked source");
         assert_eq!(c1, c2);
         assert_eq!(c1, vec!["aaa-mod", "zzz-mod"]);
@@ -585,7 +666,7 @@ mod tests {
     #[test]
     fn a_base_without_a_trailing_newline_is_separated() {
         let m = mutation("mod", "s", "print('x')\n");
-        let (src, _) = linked_source("local t = 1", &[&m]);
+        let (src, _) = linked_source("local t = 1", &[&m], &[]);
         assert!(src.starts_with("local t = 1\n"), "{src}");
         assert!(
             !src.contains("local t = 1--"),
@@ -596,8 +677,93 @@ mod tests {
     #[test]
     fn each_append_is_attributed_in_the_source() {
         let m = mutation("sean-devlin", "s", "-- outfit\n");
-        let (src, _) = linked_source("base\n", &[&m]);
+        let (src, _) = linked_source("base\n", &[&m], &[]);
         assert!(src.contains("appended by Shipment: sean-devlin"), "{src}");
+    }
+
+    fn with_load(name: &str, after: &[&str], before: &[&str]) -> (String, Load) {
+        (
+            name.to_string(),
+            Load {
+                after: after.iter().map(|s| s.to_string()).collect(),
+                before: before.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// With no constraints the order is pure alphabetical — the stable base every install shares.
+    #[test]
+    fn load_order_defaults_to_alphabetical() {
+        let ships = [with_load("zulu", &[], &[]), with_load("alpha", &[], &[]), with_load("mike", &[], &[])];
+        assert_eq!(resolve_load_order(&ships).unwrap(), vec!["alpha", "mike", "zulu"]);
+    }
+
+    /// `after` / `before` constrain that base, and the result is the same whatever order the set is
+    /// presented in — the determinism the whole design rests on, now with constraints.
+    #[test]
+    fn after_and_before_constrain_the_alphabetical_base() {
+        // `zulu` must load before `alpha` (via before), and `mike` after `alpha` (via after).
+        let a = [
+            with_load("alpha", &[], &[]),
+            with_load("mike", &["alpha"], &[]),
+            with_load("zulu", &[], &["alpha"]),
+        ];
+        let want = vec!["zulu".to_string(), "alpha".to_string(), "mike".to_string()];
+        assert_eq!(resolve_load_order(&a).unwrap(), want);
+        // Same set, reversed input — identical output.
+        let b = [
+            with_load("zulu", &[], &["alpha"]),
+            with_load("mike", &["alpha"], &[]),
+            with_load("alpha", &[], &[]),
+        ];
+        assert_eq!(resolve_load_order(&b).unwrap(), want);
+    }
+
+    /// `after` and `before` are two spellings of one edge and must agree: X.before=[Y] and
+    /// Y.after=[X] both mean X loads first.
+    #[test]
+    fn before_and_after_are_symmetric() {
+        let via_before = [with_load("x", &[], &["y"]), with_load("y", &[], &[])];
+        let via_after = [with_load("x", &[], &[]), with_load("y", &["x"], &[])];
+        assert_eq!(resolve_load_order(&via_before).unwrap(), vec!["x", "y"]);
+        assert_eq!(resolve_load_order(&via_after).unwrap(), vec!["x", "y"]);
+    }
+
+    /// A constraint naming a Shipment that is not installed is inert — you cannot order against what
+    /// is not there — so the rest still order alphabetically rather than failing.
+    #[test]
+    fn a_constraint_on_an_absent_shipment_is_inert() {
+        let ships = [with_load("beta", &["not-installed"], &[]), with_load("alpha", &[], &[])];
+        assert_eq!(resolve_load_order(&ships).unwrap(), vec!["alpha", "beta"]);
+    }
+
+    /// A cycle has no valid order, so it is a named error rather than an arbitrary pick.
+    #[test]
+    fn a_cycle_is_a_named_error() {
+        let ships = [with_load("a", &["b"], &[]), with_load("b", &["a"], &[])];
+        match resolve_load_order(&ships) {
+            Err(LinkError::LoadCycle { names }) => {
+                assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()));
+            }
+            other => panic!("expected a LoadCycle, got {other:?}"),
+        }
+    }
+
+    /// Load order actually reorders the appends: `b` forced before `a` overrides the alphabetical
+    /// default, so `b`'s source concatenates first.
+    #[test]
+    fn load_order_reorders_the_appends() {
+        let a = mutation("a-mod", "s", "-- A\n");
+        let b = mutation("b-mod", "s", "-- B\n");
+        // Default (empty order) is alphabetical: A then B.
+        let (def, _) = linked_source("base\n", &[&a, &b], &[]);
+        assert!(def.find("-- A").unwrap() < def.find("-- B").unwrap());
+        // Force b before a.
+        let order = vec!["b-mod".to_string(), "a-mod".to_string()];
+        let (forced, contrib) = linked_source("base\n", &[&a, &b], &order);
+        assert!(forced.find("-- B").unwrap() < forced.find("-- A").unwrap(), "{forced}");
+        assert_eq!(contrib, vec!["b-mod", "a-mod"]);
     }
 
     fn reg(shipment: &str, movie: &str) -> UiRegistration {

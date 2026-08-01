@@ -668,7 +668,7 @@ fn the_availability_lift_is_emitted_exactly_once() {
         target: "wifpmcinterior".into(),
         append: link::outfit_row_append("mattias", "Two", "m_two", "Two"),
     };
-    let (src, _) = link::linked_source("base\n", &[&a, &b]);
+    let (src, _) = link::linked_source("base\n", &[&a, &b], &[]);
     let epilogue = link::derived_epilogue("wifpmcinterior").unwrap();
     let full = format!("{src}{epilogue}");
     assert_eq!(

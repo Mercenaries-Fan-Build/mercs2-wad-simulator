@@ -2297,8 +2297,10 @@ pub fn build(
                 block: &mut lb.block,
             })
             .collect();
+        // A single Shipment has nothing to order against, so the resolved order is trivially itself
+        // and `&[]` (name-sort fallback) is correct. Cross-Shipment order is `link_installed`'s job.
         let linked =
-            link::link_into_blocks(&mut targets, corpus, &mutations, &ui_regs).map_err(|e| {
+            link::link_into_blocks(&mut targets, corpus, &mutations, &ui_regs, &[]).map_err(|e| {
                 BuildError::Lower {
                     index: 0,
                     kind: "patch_lua",
@@ -2516,15 +2518,23 @@ pub fn link_installed(
     //
     // So this does NOT re-sort. It reports the order that will be used, because a guarantee nobody
     // can see is one the next person re-implements.
+    // The deterministic load order: an alphabetical base (so saved costume positions are stable
+    // across installs) that `load.after` / `load.before` constrain. Computed once and REPORTED,
+    // because a guarantee nobody can see is one the next person re-implements. A cyclic constraint is
+    // a named build error, not a silent arbitrary pick.
+    let load_inputs: Vec<(String, crate::manifest::Load)> = shipments
+        .iter()
+        .map(|s| (s.manifest.shipment.name.clone(), s.manifest.load.clone()))
+        .collect();
+    let order = link::resolve_load_order(&load_inputs).map_err(|e| BuildError::Lower {
+        index: 0,
+        kind: "link",
+        message: e.to_string(),
+    })?;
     if shipments.len() > 1 {
-        let mut names: Vec<&str> = shipments
-            .iter()
-            .map(|s| s.manifest.shipment.name.as_str())
-            .collect();
-        names.sort_unstable();
         log.push(format!(
-            "link order (by shipment name, so saved costume positions are stable): {}",
-            names.join(", ")
+            "load order (name base, constrained by load.after / load.before): {}",
+            order.join(", ")
         ));
     }
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
@@ -2559,13 +2569,13 @@ pub fn link_installed(
         })
         .collect();
     let linked =
-        link::link_into_blocks(&mut targets, corpus_root, &mutations, &ui_regs).map_err(|e| {
-            BuildError::Lower {
+        link::link_into_blocks(&mut targets, corpus_root, &mutations, &ui_regs, &order).map_err(
+            |e| BuildError::Lower {
                 index: 0,
                 kind: "link",
                 message: e.to_string(),
-            }
-        })?;
+            },
+        )?;
     drop(targets);
     for l in &linked {
         log.push(format!(
