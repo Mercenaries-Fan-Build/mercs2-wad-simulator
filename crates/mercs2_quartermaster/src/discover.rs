@@ -312,6 +312,7 @@ impl Contribution {
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
+            Contribution::EditStringDb { strings, .. } => out.push(("strings", strings.as_path())),
             Contribution::NativeHook { plugin, .. } => {
                 if let Some(p) = plugin {
                     out.push(("plugin", p.as_path()));

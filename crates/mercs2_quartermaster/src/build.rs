@@ -58,7 +58,10 @@ use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FF
 use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
-use mercs2_formats::types::{TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_TEXTURE};
+use mercs2_formats::types::{
+    TYPE_HASH_STRINGDB, TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_STRINGDB,
+    TYPE_ID_TEXTURE,
+};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -1914,7 +1917,135 @@ fn lower(
                  with `target_layer: data`: that at least carries a declared blast radius."
             ),
         }),
+
+        // Same-hash string-table edit. Reads the base container from the stack (like
+        // replace_texture reads a texture's dims), applies the author's key→text edits through the
+        // proven codec, and emits an overlay copy that wins by mount order.
+        Contribution::EditStringDb { target, strings } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            let hash = crate::manifest::asset_hash(target);
+            let container = game
+                .container_for_asset(hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{target:?} (0x{hash:08X}) is not a string table in the configured game \
+                         stack — check the spelling; a name that does not exist hashes to a lookup \
+                         that simply misses"
+                    ),
+                })?;
+
+            let text = std::fs::read_to_string(root.join(strings)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(strings).display()),
+            })?;
+            let edits = parse_string_edits(&text).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            if edits.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} declares no edits — an edit_stringdb that changes nothing would ship a \
+                         same-hash overlay that only restates the base table",
+                        root.join(strings).display()
+                    ),
+                });
+            }
+
+            let edited = mercs2_formats::stringdb::edit_container(&container, &edits).map_err(|m| {
+                BuildError::Lower { index, kind, message: m }
+            })?;
+            log.push(format!(
+                "contributions[{index}] edit_stringdb {target} 0x{hash:08X}: {} key(s) edited, \
+                 container {} -> {} bytes",
+                edits.len(),
+                container.len(),
+                edited.len()
+            ));
+
+            // Wrap the edited container as a single-entry block. A stringdb is INFO/KEYS/STRS, not
+            // an opaque `data` leaf, so `build_wrapped_block` does not apply — the container is
+            // spliced straight into the block table `[count][name][type][field_c][size][container]`.
+            // Same hash, stringdb type, PRIMARY: a string table has no LOD chain, so anything but
+            // the sentinel in the low 16 would dangle (M0001).
+            let mut block_data = Vec::new();
+            block_data.extend_from_slice(&1u32.to_le_bytes()); // entry count
+            block_data.extend_from_slice(&hash.to_le_bytes());
+            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
+            block_data.extend_from_slice(&0u32.to_le_bytes());
+            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
+            block_data.extend_from_slice(&edited);
+
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
+            let block = PatchBlock::from_decompressed(
+                &block_data,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            Ok(Lowering::Block(block))
+        }
     }
+}
+
+/// Parse a string-edits file: `[Bracket.Key] = New text` per line, or `[Bracket.Key]: New text`.
+///
+/// Deliberately line-oriented rather than YAML: the values are UTF-16 UI text that routinely
+/// carries `:`, `%s`, quotes and colons, and a YAML parser would demand escaping the very
+/// characters the strings are made of. `#` begins a comment; blank lines are skipped. The key is the
+/// bracket key verbatim, hashed by the engine's own `pandemic_hash_m2`.
+fn parse_string_edits(text: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        // The key is either a `[Bracket.Key]` token or a bare `0xHASH` — the same rule
+        // `stringdb::edit_container` resolves them by, since a bracket key's reverse is not always
+        // known and a dump gives only the hash.
+        let (key, rest) = if t.starts_with('[') {
+            let close = t
+                .find(']')
+                .ok_or_else(|| format!("line {}: unterminated `[` key", n + 1))?;
+            (t[..=close].to_string(), t[close + 1..].trim_start())
+        } else {
+            // A `0xHASH key = value`: split on the first `=`/`:`, then the left side is the key.
+            let sep = t
+                .find(['=', ':'])
+                .ok_or_else(|| format!("line {}: expected `=` or `:` after the key", n + 1))?;
+            let k = t[..sep].trim();
+            let is_hash = k
+                .strip_prefix("0x")
+                .or_else(|| k.strip_prefix("0X"))
+                .is_some_and(|h| !h.is_empty() && h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()));
+            if !is_hash {
+                return Err(format!(
+                    "line {}: expected a `[Bracket.Key]` or a bare `0xHASH`, got {k:?}",
+                    n + 1
+                ));
+            }
+            (k.to_string(), &t[sep..])
+        };
+        let value = rest
+            .trim_start()
+            .strip_prefix('=')
+            .or_else(|| rest.trim_start().strip_prefix(':'))
+            .ok_or_else(|| format!("line {}: expected `=` or `:` after the key", n + 1))?
+            .trim();
+        out.insert(key, value.to_string());
+    }
+    Ok(out)
 }
 
 struct Rgba {

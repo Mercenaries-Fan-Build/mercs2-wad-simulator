@@ -156,6 +156,20 @@ pub const M0190_MOVIE_CARRIES_AS3: Rule = Rule {
     doc: "docs/reverse_engineer/scaleform_gfx_class_map.md#1-sdk-version--settled",
 };
 
+/// String tables retail serves from BOTH `shell.wad` and `vz.wad`, per
+/// `docs/fixpack/wad_duplicate_inventory.md` §C. The language tables carry the shared UI chrome
+/// (button prompts, options, PDA), so editing one copy is a half-fix. A DLC module table
+/// (`english_dlc01`) lives in one place and is not on this list.
+pub const SHARED_STRING_TABLES: &[&str] = &[
+    "english", "french", "german", "italian", "spanish", "japanese",
+];
+
+pub const M0191_SHARED_STRING_TABLE: Rule = Rule {
+    code: "M0191",
+    title: "editing one copy of a string table shared between shell.wad and vz.wad is a half-fix",
+    doc: "docs/modding/manifest_format.md#edit_stringdb",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -188,6 +202,7 @@ pub const RULES: &[Rule] = &[
     M0170_BAD_DIGEST,
     M0171_INSECURE_URL,
     M0190_MOVIE_CARRIES_AS3,
+    M0191_SHARED_STRING_TABLE,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -819,6 +834,25 @@ pub fn lint(
                              as exclusive: your Shipment will refuse to install alongside any other \
                              that patches the same script. This is deliberate — the alternative is \
                              the two silently annihilating each other."
+                        ),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
+            }
+            Contribution::EditStringDb { target, .. } => {
+                // The shared UI tables are served from BOTH shell.wad (front end) and vz.wad
+                // (gameplay); an overlay reaches only one mount point, so a shared-string edit that
+                // ships as a single Shipment overlay is a half-fix. Advisory — the fix is a deploy
+                // question (mount last in every session, or ship a shell copy too), not a defect in
+                // the manifest — so amber, never red.
+                let t = target.to_ascii_lowercase();
+                if SHARED_STRING_TABLES.iter().any(|s| t == *s) {
+                    out.push(Diagnostic {
+                        rule: M0191_SHARED_STRING_TABLE,
+                        severity: Severity::Warning,
+                        message: format!(
+                            "`{target}` is served from BOTH shell.wad (front end) and vz.wad                              (gameplay). One overlay reaches one mount point, so a shared UI string                              edited here may show in only one. Deploy it to mount last in every                              session, or ship a shell copy too."
                         ),
                         at: Some(index),
                         fix: None,

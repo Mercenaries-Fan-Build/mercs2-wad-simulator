@@ -481,7 +481,8 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddMovie { name, .. } => name.clone(),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
-        | Contribution::EditStateMachine { target, .. } => target.clone(),
+        | Contribution::EditStateMachine { target, .. }
+        | Contribution::EditStringDb { target, .. } => target.clone(),
         // `NativeHook.target` is the ENGINE, not an asset — so name it by what it actually is.
         Contribution::NativeHook { plugin, symbol, .. } => plugin
             .as_ref()
@@ -605,6 +606,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("add_movie", "A Scaleform movie"),
             ("replace_texture", "Replace a shipped texture, same hash"),
             ("edit_state_machine", "Rewrite a destructible's states"),
+            ("edit_stringdb", "Correct or localise UI text"),
         ],
     ),
     ("Script", &[("patch_lua", "Append to a shipped script")]),
@@ -692,6 +694,10 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "edit_state_machine" => Contribution::EditStateMachine {
             target: "al_veh_boat_destroyer".into(),
             states: PathBuf::from("src/states.yaml"),
+        },
+        "edit_stringdb" => Contribution::EditStringDb {
+            target: "english".into(),
+            strings: PathBuf::from("src/strings.txt"),
         },
         "add_movie" => Contribution::AddMovie {
             name,
@@ -1329,6 +1335,15 @@ fn contribution_form(
             commit |= asset_row(ui, "Target", target, names);
             commit |= source_row(ui, "States", states, root, &["yaml", "yml"]);
         }
+        Contribution::EditStringDb { target, strings } => {
+            commit |= asset_row(ui, "Target table", target, names);
+            commit |= source_row(ui, "Strings", strings, root, &["txt"]);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "one `[Bracket.Key] = New text` per line. Same-hash, last-wins.",
+            );
+        }
         Contribution::NativeHook { target, plugin, symbol, touches } => {
             // `both` is reserved and rejected in v1, so it is not offered.
             commit |= theme::combo_field(
@@ -1684,6 +1699,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::EditStateMachine { target, .. } => {
             vec![("Writes".to_string(), format!("state machine {target}"))]
         }
+        Contribution::EditStringDb { target, .. } => vec![
+            ("Writes".to_string(), format!("stringdb {target}")),
+            ("Merge".to_string(), "last-wins \u{2014} load order is the answer".to_string()),
+        ],
         // Discovery is filesystem order, so two plugins on one address have no load order that
         // resolves them — it has to be exclusive.
         Contribution::NativeHook { symbol, .. } => vec![(

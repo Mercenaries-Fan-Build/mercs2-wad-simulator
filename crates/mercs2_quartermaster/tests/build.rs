@@ -2292,3 +2292,108 @@ fn an_empty_sound_bank_is_refused() {
         Ok(_) => panic!("an empty bank must not build"),
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────── edit_stringdb
+
+/// ★ `edit_stringdb` end to end against retail vz.wad, then re-read.
+///
+/// The corpus already proved the CODEC byte-identical against all six retail language tables; this
+/// proves the CONTRIBUTION — reading the base table from the game stack, splicing the edit into a
+/// same-hash block, and re-reading it out of the emitted WAD. Edits a key by its HASH (read live
+/// from the table it is about to edit) so the test does not depend on knowing a bracket-key name.
+#[test]
+fn edit_stringdb_builds_end_to_end() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+
+    // Read the base table and pick a real key + its shipped text, live.
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let (ks, kl) = {
+        // Re-extract KEYS to read a real key hash.
+        let find = |tag: &[u8; 4]| -> (usize, usize) {
+            let le = |o: usize| u32::from_le_bytes([base[o], base[o + 1], base[o + 2], base[o + 3]]) as usize;
+            let data = le(4);
+            for i in 0..le(16) {
+                let row = 20 + i * 20;
+                if &base[row..row + 4] == tag {
+                    return (data + le(row + 4), le(row + 8));
+                }
+            }
+            panic!("no {tag:?} chunk");
+        };
+        find(b"KEYS")
+    };
+    let key_hash = u32::from_le_bytes([base[ks + 4], base[ks + 5], base[ks + 6], base[ks + 7]]);
+    let _ = kl;
+
+    let dir = scratch("edit_stringdb_e2e");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // The new text is longer than most single strings, exercising the resize path.
+    std::fs::write(
+        dir.join("src/english.txt"),
+        format!("0x{key_hash:08X} = QUARTERMASTER EDIT — a deliberately long replacement string\n"),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("must build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+
+    // Re-read the emitted overlay and confirm the ONE key changed and the table still parses.
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+    let row = &block.aset_entries[0];
+    assert_eq!(row.asset_hash, english, "the row must name the english table");
+    assert_eq!(row.u32_3, TYPE_ID_STRINGDB, "type id must dispatch to the stringdb loader");
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "a string table has no LOD rung; must be primary");
+
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let container = &dec[20..]; // past the single-entry block table
+    let ex = |tag: &[u8; 4]| {
+        let le = |o: usize| u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]) as usize;
+        let data = le(4);
+        for i in 0..le(16) {
+            let r = 20 + i * 20;
+            if &container[r..r + 4] == tag {
+                return container[data + le(r + 4)..data + le(r + 4) + le(r + 8)].to_vec();
+            }
+        }
+        panic!("no {tag:?}");
+    };
+    let db = mercs2_formats::stringdb::parse(&ex(b"KEYS"), &ex(b"STRS")).expect("parse edited table");
+    let edited = db.entries.iter().find(|e| e.key_hash == key_hash).expect("key present");
+    assert!(
+        edited.text.contains("QUARTERMASTER EDIT"),
+        "the edited key must carry the new text, got {:?}",
+        edited.text
+    );
+}
+
+/// A key that is not in the table is refused BY NAME rather than silently dropped — a dropped
+/// correction is the exact failure the SYEK/KEYS tag confusion once produced.
+#[test]
+fn edit_stringdb_refuses_an_unknown_key() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("edit_stringdb_unknown");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/english.txt"), "[No.Such.Key.At.All] = x\n").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e) => assert!(format!("{e:?}").contains("No.Such.Key"), "must name the key: {e:?}"),
+        Ok(_) => panic!("an unknown key must not build"),
+    }
+}

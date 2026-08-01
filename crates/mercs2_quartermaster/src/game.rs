@@ -496,6 +496,40 @@ impl GameStack {
         None
     }
 
+    /// The decompressed `UCFX` container for `(name_hash, type_id)`, last-mounted-wins.
+    ///
+    /// Locates the asset's block by its ASET row (block index = high 16 of `packed_block_ref`),
+    /// decompresses it, and pulls the matching container out of the block's entry table. This is
+    /// how `edit_stringdb` reads the base string table it edits — the string equivalent of
+    /// [`Self::texture`], which reads a texture's dims for `replace_texture`.
+    pub fn container_for_asset(&mut self, name_hash: u32, type_hash: u32, type_id: u32) -> Option<Vec<u8>> {
+        for wad in self.wads.iter_mut().rev() {
+            let Some(row) = wad
+                .archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == name_hash && e.type_id == type_id)
+            else {
+                continue;
+            };
+            let block_idx = row.block_index();
+            let Ok(dec) = mercs2_formats::sges::decompress_block(
+                &mut wad.file,
+                &wad.archive.indx,
+                block_idx,
+            ) else {
+                continue;
+            };
+            let parsed = mercs2_formats::ucfx::walk_decompressed_block(&dec, "stringdb").0;
+            if let Some(c) =
+                mercs2_formats::ucfx::get_container_by_type_hash(&parsed, type_hash, Some(name_hash))
+            {
+                return Some(c);
+            }
+        }
+        None
+    }
+
     pub fn primary_lod_chain(&self, name_hash: u32, type_id: u32) -> Option<(u32, u32)> {
         for wad in self.wads.iter().rev() {
             if let Some(e) = wad

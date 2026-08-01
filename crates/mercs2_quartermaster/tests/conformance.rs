@@ -71,6 +71,10 @@ contributions:
     target: al_veh_boat_destroyer
     states: src/destroyer/states.yaml
 
+  - kind: edit_stringdb
+    target: english
+    strings: src/text/english.txt
+
   - kind: add_movie
     name: my_hud_widgets
     movie: src/ui/widgets.gfx
@@ -161,6 +165,11 @@ const JSON: &str = r#"
       "kind": "edit_state_machine",
       "target": "al_veh_boat_destroyer",
       "states": "src/destroyer/states.yaml"
+    },
+    {
+      "kind": "edit_stringdb",
+      "target": "english",
+      "strings": "src/text/english.txt"
     },
     {
       "kind": "add_movie",
@@ -261,6 +270,11 @@ target = "al_veh_boat_destroyer"
 states = "src/destroyer/states.yaml"
 
 [[contributions]]
+kind = "edit_stringdb"
+target = "english"
+strings = "src/text/english.txt"
+
+[[contributions]]
 kind = "add_movie"
 name = "my_hud_widgets"
 movie = "src/ui/widgets.gfx"
@@ -313,6 +327,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_texture",
             "add_sound",
             "edit_state_machine",
+            "edit_stringdb",
             "add_movie",
             "patch_lua",
             "native_hook",

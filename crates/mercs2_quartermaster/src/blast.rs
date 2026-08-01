@@ -284,6 +284,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::EditStateMachine { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
+            // Same-hash edit of a shipped table: a Write on the asset, last-wins (like
+            // replace_texture). Two Shipments editing the same table is a load-order question, not
+            // a conflict — whichever mounts last serves the lookup.
+            Contribution::EditStringDb { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
             Contribution::NativeHook {
                 plugin,
                 symbol,

@@ -252,6 +252,173 @@ impl StringDb {
     }
 }
 
+/// Extract a named chunk's body range `(start, len)` from a `UCFX` container. Little-endian
+/// descriptor table, the layout the whole container family shares.
+fn chunk_range(container: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
+    if container.len() < 20 || &container[0..4] != b"UCFX" {
+        return None;
+    }
+    let le = |o: usize| u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]) as usize;
+    let data_area = le(4);
+    let n = le(16);
+    for i in 0..n {
+        let row = 20 + i * 20;
+        if row + 20 > container.len() || &container[row..row + 4] != tag {
+            continue;
+        }
+        let rel = le(row + 4);
+        if rel == 0xFFFF_FFFF {
+            return None; // a nested container, not a body
+        }
+        let start = data_area + rel;
+        let size = le(row + 8);
+        if start + size <= container.len() {
+            return Some((start, size));
+        }
+    }
+    None
+}
+
+/// Apply text edits to a stringdb `UCFX` container and return the rebuilt container.
+///
+/// This is what a `edit_stringdb` contribution lowers through, and it is the SAME writer the fix
+/// pack proved against retail (`wad_builder::stringdb_patch`) — promoted out of that binary so the
+/// Quartermaster can reach it, since Plan 05 §C names the binary-only crates as the recurring tax.
+///
+/// `edits` maps a bracket key (`"[DlcCon001.Title]"`) — hashed the way the engine does — to its new
+/// text. A key not present is a hard error and is NAMED: a silently-dropped correction is worse than
+/// a failed build, and it is the exact failure the SYEK/KEYS tag confusion once produced ("0
+/// containers checked" against a WAD that plainly had six).
+///
+/// Arbitrary-length edits are supported: the heap is rebuilt and the `KEYS`/`STRS` descriptors are
+/// re-pointed, then the trailing `CSUM` is re-stamped. Retail's shared-string dedupe is preserved by
+/// `build`, which only shares a heap slot when the offset AND the text still match.
+pub fn edit_container(
+    container: &[u8],
+    edits: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<u8>, String> {
+    let (ks, kl) = chunk_range(container, b"KEYS").ok_or("container has no KEYS chunk")?;
+    let (ss, sl) = chunk_range(container, b"STRS").ok_or("container has no STRS chunk")?;
+    let mut db = parse(&container[ks..ks + kl], &container[ss..ss + sl])?;
+
+    for (key, text) in edits {
+        // A bare `0xHHHHHHHH` IS the key hash; anything else is a bracket key, hashed the way the
+        // engine does. Same rule as `manifest::asset_hash`, so an author who only has the hash from
+        // a dump can still edit — the reverse of a bracket key is not always known.
+        let hit = match key
+            .trim()
+            .strip_prefix("0x")
+            .or_else(|| key.trim().strip_prefix("0X"))
+            .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+        {
+            Some(h) => db.set_by_hash(h, text),
+            None => db.set_by_name(key, text),
+        };
+        if !hit {
+            return Err(format!(
+                "{key} is not a key in this string table — check the spelling; the engine hashes \
+                 the bracket key verbatim, so an unknown key resolves to a lookup that simply misses"
+            ));
+        }
+    }
+
+    let (new_keys, new_strs) = build(&db);
+    rebuild_container(container, &[(*b"KEYS", &new_keys), (*b"STRS", &new_strs)])
+}
+
+/// Rebuild a `UCFX` container substituting new bodies for some chunks, re-laying out everything
+/// after them and re-stamping the trailing `CSUM`.
+///
+/// Relies on the measured invariant that the family's chunk bodies are **contiguous** — no
+/// alignment padding — so the rebuild is header, bodies in shipped order (with substitutions), then
+/// the 8-byte `CSUM` trailer. A container with padding between bodies is REFUSED rather than
+/// guessed at: reproducing an unknown padding scheme would emit a container that validates and is
+/// subtly wrong, which is the failure mode this whole codec exists to avoid.
+fn rebuild_container(container: &[u8], replacements: &[([u8; 4], &[u8])]) -> Result<Vec<u8>, String> {
+    if container.len() < 28 || &container[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
+    }
+    let le = |o: usize| u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]);
+    let base = le(4) as usize;
+    let n = le(16) as usize;
+
+    // (row, body_start, size), body descriptors only, in file order.
+    let mut bodies: Vec<(usize, usize, usize)> = Vec::new();
+    for i in 0..n {
+        let row = 20 + i * 20;
+        if row + 20 > container.len() {
+            return Err(format!("descriptor {i} runs past the container"));
+        }
+        let rel = le(row + 4);
+        if rel == 0xFFFF_FFFF {
+            continue; // nested container, no body
+        }
+        let start = base + rel as usize;
+        let size = le(row + 8) as usize;
+        if start + size > container.len() {
+            return Err(format!("descriptor {i} body runs past the container"));
+        }
+        bodies.push((row, start, size));
+    }
+    bodies.sort_by_key(|b| b.1);
+
+    let mut cursor = base;
+    for (_, start, size) in &bodies {
+        if *start != cursor {
+            return Err(format!(
+                "a chunk starts at 0x{start:X} but the previous body ended at 0x{cursor:X} — this \
+                 container has padding between bodies, which this rebuild does not reproduce. \
+                 Refusing rather than emitting a container that validates and is wrong."
+            ));
+        }
+        cursor += size;
+    }
+    if container.len() != cursor + 8 {
+        return Err(format!(
+            "container is {} B but bodies end at 0x{cursor:X} + an 8 B CSUM trailer; unexpected tail",
+            container.len()
+        ));
+    }
+
+    let mut out = Vec::with_capacity(container.len());
+    out.extend_from_slice(&container[..base]);
+    let mut repoint: Vec<(usize, u32, u32)> = Vec::new(); // (row, new_rel, new_size)
+    // Descriptor rows are in table order; bodies were sorted by position. Re-emit in FILE order so
+    // the original layout is preserved for every chunk the caller did not touch.
+    let mut file_order = bodies.clone();
+    file_order.sort_by_key(|b| b.0); // by row = table order
+    // But bytes must be written in POSITION order to stay contiguous; retail's table order matches
+    // its position order for this family, so a single ordering suffices — assert it.
+    for (a, b) in bodies.iter().zip(file_order.iter()) {
+        if a.0 != b.0 {
+            return Err("descriptor table order differs from body position order; unsupported".into());
+        }
+    }
+    for (row, start, size) in &bodies {
+        let rel = (out.len() - base) as u32;
+        let body: &[u8] = replacements
+            .iter()
+            .find(|(t, _)| container[*row..*row + 4] == *t)
+            .map(|(_, b)| *b)
+            .unwrap_or(&container[*start..*start + *size]);
+        out.extend_from_slice(body);
+        repoint.push((*row, rel, body.len() as u32));
+    }
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&[0u8; 4]);
+    for (row, rel, size) in repoint {
+        out[row + 4..row + 8].copy_from_slice(&rel.to_le_bytes());
+        out[row + 8..row + 12].copy_from_slice(&size.to_le_bytes());
+    }
+
+    // Re-stamp CSUM (JAMCRC over everything before the 8-byte trailer).
+    let n = out.len();
+    let crc = crate::crc32::crc32_mercs2(&out[..n - 8]);
+    out[n - 4..].copy_from_slice(&crc.to_le_bytes());
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +566,93 @@ mod tests {
             !db.set_by_hash(0xDEAD, "y"),
             "a fix aimed at a missing key must not silently pass"
         );
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Build a tiny INFO/KEYS/STRS container the way retail lays one out, so the re-splice can be
+    /// tested without a game install. Two keys, one shared string, to exercise the dedupe path.
+    fn tiny_container() -> Vec<u8> {
+        // Two entries, both pointing at heap offset 0 ("Hi\0"): a shared string.
+        let mut keys = Vec::new();
+        keys.extend_from_slice(&2u32.to_le_bytes());
+        keys.extend_from_slice(&0xAAAA_0001u32.to_le_bytes());
+        keys.extend_from_slice(&0u32.to_le_bytes());
+        keys.extend_from_slice(&0xAAAA_0002u32.to_le_bytes());
+        keys.extend_from_slice(&0u32.to_le_bytes());
+        let mut strs = Vec::new();
+        let heap: Vec<u16> = "Hi".encode_utf16().chain([0]).collect();
+        strs.extend_from_slice(&(heap.len() as u32).to_le_bytes());
+        for u in &heap {
+            strs.extend_from_slice(&u.to_le_bytes());
+        }
+        let info = vec![0u8; 8];
+
+        // UCFX: header (20) + 3 descriptors (20 each) + bodies + CSUM.
+        let data_area = 20 + 3 * 20;
+        let mut c = Vec::new();
+        c.extend_from_slice(b"UCFX");
+        c.extend_from_slice(&(data_area as u32).to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes());
+        c.extend_from_slice(&0u32.to_le_bytes());
+        c.extend_from_slice(&3u32.to_le_bytes());
+        let mut rel = 0u32;
+        for (tag, body) in [(b"INFO", &info), (b"KEYS", &keys), (b"STRS", &strs)] {
+            c.extend_from_slice(tag);
+            c.extend_from_slice(&rel.to_le_bytes());
+            c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            c.extend_from_slice(&0u32.to_le_bytes());
+            c.extend_from_slice(&0u32.to_le_bytes());
+            rel += body.len() as u32;
+        }
+        c.extend_from_slice(&info);
+        c.extend_from_slice(&keys);
+        c.extend_from_slice(&strs);
+        let crc = crate::crc32::crc32_mercs2(&c);
+        c.extend_from_slice(b"CSUM");
+        c.extend_from_slice(&crc.to_le_bytes());
+        c
+    }
+
+    #[test]
+    fn a_noop_edit_rebuilds_byte_identical() {
+        let c = tiny_container();
+        // An edit that sets a key to the text it already has is a no-op; the container must come
+        // back byte-for-byte, which is what makes any post-edit difference attributable to the edit.
+        let mut edits = BTreeMap::new();
+        edits.insert("0xAAAA0001".to_string(), "Hi".to_string());
+        let out = edit_container(&c, &edits).expect("edit");
+        assert_eq!(out, c, "a no-op edit must reproduce the container exactly");
+    }
+
+    #[test]
+    fn a_longer_edit_grows_the_container_and_reparses() {
+        let c = tiny_container();
+        let mut edits = BTreeMap::new();
+        edits.insert("0xAAAA0001".to_string(), "Hello there".to_string());
+        let out = edit_container(&c, &edits).expect("edit");
+        assert!(out.len() > c.len(), "a longer string must grow the container");
+
+        // Re-extract and re-parse: the edited key changed, the OTHER key is intact, and — the trap
+        // the codec exists to avoid — the shared neighbour was NOT dragged along.
+        let (ks, kl) = chunk_range(&out, b"KEYS").unwrap();
+        let (ss, sl) = chunk_range(&out, b"STRS").unwrap();
+        let db = parse(&out[ks..ks + kl], &out[ss..ss + sl]).unwrap();
+        let by = |h: u32| db.entries.iter().find(|e| e.key_hash == h).map(|e| e.text.as_str());
+        assert_eq!(by(0xAAAA_0001), Some("Hello there"));
+        assert_eq!(by(0xAAAA_0002), Some("Hi"), "the shared neighbour must be untouched");
+    }
+
+    #[test]
+    fn an_unknown_key_is_named_not_silently_dropped() {
+        let c = tiny_container();
+        let mut edits = BTreeMap::new();
+        edits.insert("[No.Such.Key]".to_string(), "x".to_string());
+        let err = edit_container(&c, &edits).expect_err("must reject an absent key");
+        assert!(err.contains("[No.Such.Key]"), "the refusal must name the key: {err}");
     }
 }

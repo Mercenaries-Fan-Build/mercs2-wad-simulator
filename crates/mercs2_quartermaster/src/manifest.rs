@@ -425,6 +425,26 @@ pub enum Contribution {
     PatchLua { target: String, append: PathBuf },
     /// Data. SWIT/STAT/CHDR/CEXE rewrite (`FUN_004cf340`, decoded).
     EditStateMachine { target: String, states: PathBuf },
+    /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
+    ///
+    /// Same-hash and last-wins, like [`Contribution::ReplaceTexture`]: the overlay carries an
+    /// edited copy of the target `stringdb` and the mount order decides which wins. The codec
+    /// (`mercs2_formats::stringdb`) is proven byte-identical against all six retail language tables,
+    /// and arbitrary-length edits are supported — the heap is rebuilt and the descriptors repointed.
+    ///
+    /// ⚠ A shared UI string (button prompts, options, PDA chrome) lives in BOTH `shell.wad` and
+    /// `vz.wad`'s english table, served at different times — front end from shell, gameplay from vz
+    /// (`docs/fixpack/wad_duplicate_inventory.md` §C). Editing one table is a half-fix; the linter
+    /// warns when the target is one of those shared tables.
+    // `snake_case` on the enum would derive `edit_string_db`; the kind tag and every doc say
+    // `edit_stringdb`, matching `stringdb` everywhere else, so the tag is pinned explicitly.
+    #[serde(rename = "edit_stringdb")]
+    EditStringDb {
+        /// The string-table asset — `english`, `french`, `english_dlc01`, …
+        target: String,
+        /// A `src/`-relative file mapping bracket keys (`[Menu.Play]`) to their new text.
+        strings: PathBuf,
+    },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
     /// else's ASI use `load.requires` with a pinned digest instead — never vendor a third-party
     /// binary. `dest` is deliberately absent: the author cannot name a path, so the exe and
@@ -488,6 +508,7 @@ impl Contribution {
         "replace_texture",
         "patch_lua",
         "edit_state_machine",
+        "edit_stringdb",
         "native_hook",
         "place_file",
         "raw",
@@ -504,6 +525,7 @@ impl Contribution {
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
+            Contribution::EditStringDb { .. } => "edit_stringdb",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
             Contribution::Raw { .. } => "raw",
