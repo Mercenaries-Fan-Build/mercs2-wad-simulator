@@ -3,16 +3,33 @@
 **Status:** ⏳ OPEN (2026-08-01) — the one part of Plans 01–04 **not yet built**. Design complete.
 **Siblings:** `-01-mod-model.md`, `-02-navigation.md`, `-04-manifest-format.md`
 
-> ## Standing (2026-08-01)
+> ## Standing (2026-08-01) — ★ CORRECTED against Wally's v0.5.0+ ASI
 >
-> This is the last unbuilt pillar. It was parked with Plan 02 in the retired Plan 05's "out of scope";
-> it is no longer parked — it is simply the next build. **Phases 1–3 are ours to build now:** the
-> TCP↔WS shim (Plan 03's "single highest-value first move" — Wally's browser clients speak WebSocket
-> to a raw-TCP listener that can't answer them), the `mercs2_bridge` crate, and the Lua console as a
-> Craft mode. **It is unblocked:** the old mlua/`mercs2_luac` symbol collision that would have made a
-> compile-and-talk-to-a-live-VM binary SIGSEGV is **resolved** (`mercs2_script` v2.0.0 runs
-> `mercs2_luac`'s one VM), so no symbol-prefixing is needed first. Phases 4–5 (enrich Wally's Ess Lua;
-> serve the protocol from the reimpl engine) depend on external work and stay open here, not moved.
+> This is the last unbuilt pillar, and reading Wally's current C source
+> (`loganw234/Merc2-Mods-Exp/mods/lua-bridge-DEV`, permission to build on it granted) **obsoletes
+> phase 1**:
+>
+> - **G1 (the TCP↔WS shim) is OBVIATED.** Plan 03 called it "the single highest-value first move"
+>   because his ASI was raw-TCP only and his browser clients speak WebSocket. His **v0.5.0+ ASI now
+>   serves BOTH transports on the one port `127.0.0.1:27050`, auto-detecting** raw-TCP vs a full
+>   WebSocket handshake (bcrypt SHA-1 + base64, ≤16 WS clients). Browsers reach it directly; nothing
+>   bridges TCP↔WS anymore.
+> - **Protocol, confirmed from source:** raw-TCP is clean request/response — send `<lua chunk>` +
+>   `<<<RUN>>>`, chunk queues to the next engine frame, result returns + `<<<END>>>`. The WS side is a
+>   `type`-tagged *broadcast* line channel (`ws_broadcast_typed_line`), not per-request correlated.
+>   So a console (request→response) uses **raw-TCP**, and our native egui Workshop opens a TCP socket
+>   directly — **we need no WebSocket on our end at all.**
+> - **Script lifecycle maps onto our tooling:** his loader runs `scripts/OnBoot` / `OnLoad` / `OnKey`,
+>   which is exactly `place_file`'s `on_boot` / `on_load` / `on_key` destinations — a Shipment can
+>   drop Lua into his loader.
+> - **Unblocked:** the old mlua/`mercs2_luac` symbol clash is resolved (`mercs2_script` v2.0.0 runs
+>   one VM), so a compile-and-talk-to-a-live-VM Workshop is fine.
+>
+> **So the build is: G2 `mercs2_bridge`** — a raw-TCP client speaking `<<<RUN>>>`/`<<<END>>>`,
+> rate-limited and poll-not-block (his measured costs: `Tcp.Send` ~15 ms, `Loader.Printf` ~5 ms; the
+> retail game is frame-sensitive), consumed by the Workshop and Modkit — **then G3 the Lua console**
+> as a Craft mode with `0xHASH ⇄ name` enrichment (we hold the name pack). Phases 4–5 (enrich his Ess
+> Lua; serve the protocol from the reimpl engine) depend on external work and stay open here.
 
 ## Why this matters most (the loop, not a capability)
 
