@@ -59,8 +59,8 @@ use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
 use mercs2_formats::types::{
-    TYPE_HASH_STRINGDB, TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_STRINGDB,
-    TYPE_ID_TEXTURE,
+    TYPE_HASH_MODEL, TYPE_HASH_STRINGDB, TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT,
+    TYPE_ID_STRINGDB, TYPE_ID_TEXTURE,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -1971,29 +1971,106 @@ fn lower(
         //    an access violation at model instantiation that `wad_simulator` does NOT catch; it
         //    shows up only in-game. Every structural bug this crate has shipped was caught by that
         //    simulator, so a lowering it cannot see is a lowering with no safety net at all.
-        Contribution::EditStateMachine { target, .. } => Err(BuildError::Unsupported {
-            index,
-            kind,
-            reason: format!(
-                "the destruction state machine WRITER now exists — `orchestrator::\
-                 serialize_state_machine`, proven byte-identical across all 1,311 retail \
-                 destructibles (see mercs2_formats/tests/state_machine_writer.rs), with same-shape \
-                 edits (rename a state, rewrite an Enter/Exit command list, change a switch slot) a \
-                 contiguous splice and a no-op exactly reproducing the container. So the family is no \
-                 longer the blocker the earlier refusal named. \
-                 Two things remain before {target:?} can be lowered, and both are engineering, not \
-                 research: (1) the container is a leaf INSIDE a MODEL block, and a model's ASET row \
-                 carries a LOD chain — so the overlay must shadow the WHOLE base block (restating \
-                 every ASET row verbatim, the way `script_patch_blocks` does for scripts, which \
-                 preserves the LOD rungs) rather than mint a single primary row, which would orphan \
-                 the finer rungs (M0001). (2) `states:` still has no schema — the YAML that names \
-                 which node/state to edit and the command list to write — and that is a Plan 04 \
-                 format change, not a lowering. \
-                 Until both land, ship a hand-built block for {target:?} as `kind: raw` with \
-                 `target_layer: data`: that carries a declared blast radius, and the writer above is \
-                 what a future lowering will call."
-            ),
-        }),
+        // The destruction state machine, EDITED in place. The container is a leaf inside a model
+        // block whose ASET row carries a LOD chain, but we do NOT shadow the whole base block: we
+        // emit ONLY this model's edited container as a single-entry block, copy its ASET row, and
+        // record the source block index. `build_patch_wad_multi` then re-points `_P000` at the new
+        // block and remaps or SENTINELS the finer rungs — a sentinel degrades the model to its coarse
+        // tier, it does not dangle — so no block-mate is carried and nothing hangs. `states:` is the
+        // extracted-then-edited machine (see `crate::states`); `serialize_state_machine` applies it
+        // and, being same-shape only, is what rejects an edit that adds or removes nodes/states.
+        Contribution::EditStateMachine { target, states } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            let hash = crate::manifest::asset_hash(target);
+            let inputs = game.model_container_for_edit(hash).ok_or_else(|| BuildError::Lower {
+                index,
+                kind,
+                message: format!(
+                    "{target:?} (0x{hash:08X}) is not a model in the configured game stack, or its \
+                     block carries no primary container — check the spelling; a name that does not \
+                     exist hashes to a lookup that simply misses"
+                ),
+            })?;
+
+            let base = mercs2_formats::orchestrator::parse_state_machine(&inputs.container)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{target:?} is a model but carries no destruction state machine — \
+                         edit_state_machine only applies to destructibles (SWIT/NODE/STAT/CHDR/CEXE)"
+                    ),
+                })?;
+
+            let text = std::fs::read_to_string(root.join(states)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(states).display()),
+            })?;
+            let edited_sm = crate::states::parse(&text).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: format!("{}: {m}", root.join(states).display()),
+            })?;
+
+            let edited = mercs2_formats::orchestrator::serialize_state_machine(
+                &inputs.container,
+                &edited_sm,
+            )
+            .map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: format!(
+                    "applying the edited states to {target:?}: {m}. Edits are same-shape — rename \
+                     states, rewrite Enter/Exit command lists, change switch slots — but the node \
+                     and state COUNTS must match the model's; start from an extracted baseline so \
+                     they do"
+                ),
+            })?;
+
+            // Same-shape means the base machine had the same node/state counts; report the deltas so
+            // a build log shows an edit actually changed bytes (a no-op states file is a mistake).
+            let (n_nodes, n_states): (usize, usize) =
+                (base.nodes.len(), base.nodes.iter().map(|n| n.states.len()).sum());
+            log.push(format!(
+                "contributions[{index}] edit_state_machine {target} 0x{hash:08X}: \
+                 {n_nodes} node(s), {n_states} state(s); container {} -> {} bytes, \
+                 emitted as a single-model block (finer LOD rungs sentinel to coarse tier)",
+                inputs.container.len(),
+                edited.len()
+            ));
+
+            // Splice the edited container straight into a single-entry block — it is a full UCFX
+            // container (with its recomputed CSUM), not an opaque `data` leaf, so it is placed as-is
+            // with the ORIGINAL field_c so the entry matches what the loader expects.
+            let mut block_data = Vec::new();
+            block_data.extend_from_slice(&1u32.to_le_bytes());
+            block_data.extend_from_slice(&hash.to_le_bytes());
+            block_data.extend_from_slice(&TYPE_HASH_MODEL.to_le_bytes());
+            block_data.extend_from_slice(&inputs.field_c.to_le_bytes());
+            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
+            block_data.extend_from_slice(&edited);
+
+            // Copy the base model's LOD-chain row verbatim; the builder re-points `_P000` and
+            // remaps/sentinels the rest via `source_block_index`.
+            let aset = AsetEntry::new(
+                hash,
+                inputs.secondary_ref,
+                inputs.packed_block_ref,
+                TYPE_ID_MODEL,
+            );
+            let mut block = PatchBlock::from_decompressed(
+                &block_data,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            block.source_block_index = Some(inputs.source_block_index);
+            Ok(Lowering::Block(block))
+        }
 
         // Same-hash string-table edit. Reads the base container from the stack (like
         // replace_texture reads a texture's dims), applies the author's key→text edits through the

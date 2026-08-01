@@ -629,8 +629,9 @@ impl CraftMode {
                  is now linkable.",
             ),
             CraftMode::States => Some(
-                "read-only: the state picker. A writer is unblocked — the round-trip survey \
-                 proved the family is flat and losslessly recoverable.",
+                "read-only here: the state picker. To SHIP an edit, `qm extract-states <model>` \
+                 for the baseline, edit it, and add an `edit_state_machine` to the Shipment — the \
+                 writer lowers it byte-identically.",
             ),
         }
     }

@@ -94,43 +94,131 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 }
 
 // ---------------------------------------------------------------------------
-// Honest unsupported reporting
+// edit_state_machine — the destruction writer, end to end
 // ---------------------------------------------------------------------------
 
-/// A kind we cannot lower yet must FAIL LOUDLY with the reason, never be skipped — a silently
-/// dropped contribution produces a WAD that looks fine and does nothing.
-///
-/// `add_outfit`, `patch_lua`, `raw` and `native_hook` all used to be here. `edit_state_machine` is
-/// what is left, and it is the one kind still genuinely unlowerable.
-///
-/// The refusal is asserted for CONTENT, not just for its variant. "Not implemented" tells an author
-/// nothing they can act on; what they need is which of the four gaps they hit, and that a
-/// hand-built block can ship through `raw` today.
+/// The FIRST destructible model in the stack — scanned by hash so the test never depends on knowing
+/// a retail name. Returns a `0x…` target (the manifest accepts a bare hash anywhere a name goes) and
+/// the model's edit inputs. Skips loudly when the stack carries none.
+fn a_destructible(game: &mut mercs2_quartermaster::GameStack) -> Option<(String, mercs2_quartermaster::game::ModelEditInputs)> {
+    use mercs2_formats::types::TYPE_ID_MODEL;
+    for hash in game.asset_hashes(TYPE_ID_MODEL) {
+        if let Some(inputs) = game.model_container_for_edit(hash) {
+            if mercs2_formats::orchestrator::parse_state_machine(&inputs.container).is_some() {
+                return Some((format!("0x{hash:08X}"), inputs));
+            }
+        }
+    }
+    None
+}
+
+/// ★ edit_state_machine, end to end against retail: a NO-OP edit (extract the machine, change
+/// nothing, rebuild) must produce an overlay whose model container is BYTE-IDENTICAL to the base,
+/// carried as a single-model block with a primary ASET row — no block-mate shadowed, no dangling
+/// rung. This is the whole "recompute the row, don't shadow everything" claim, checked on real bytes.
 #[test]
-fn edit_state_machine_refuses_with_the_reason_and_a_way_forward() {
-    let dir = scratch("unsupported");
+fn edit_state_machine_noop_ships_a_byte_identical_single_model_block() {
+    let Some(mut game) = discovered_game() else {
+        eprintln!("SKIPPING: no game stack");
+        return;
+    };
+    let Some((target, inputs)) = a_destructible(&mut game) else {
+        eprintln!("SKIPPING: no known destructible in the stack");
+        return;
+    };
+    let hash = mercs2_quartermaster::manifest::asset_hash(&target);
+
+    // Extract the machine to the `states:` baseline and ship it UNCHANGED — the no-op.
+    let sm = mercs2_formats::orchestrator::parse_state_machine(&inputs.container).unwrap();
+    let yaml = mercs2_quartermaster::states::extract(&sm, |_| None);
+
+    let dir = scratch("esm_noop");
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("src/a.bin"), b"x").unwrap();
+    std::fs::write(dir.join("src/states.yaml"), &yaml).unwrap();
     let s = shipment(
         &dir,
-        "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/a.bin\n",
+        &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
     );
-    match build::build(&s, None, None, None, None) {
-        Err(e @ BuildError::Unsupported { .. }) => {
-            let m = e.to_string();
-            // The WRITER now exists (F6 core) — the refusal must say so, not claim otherwise.
-            assert!(m.contains("serialize_state_machine"), "{m}");
-            assert!(m.to_lowercase().contains("byte-identical"), "{m}");
-            // What remains: the LOD-chain-preserving block overlay, and no schema for `states:`.
-            assert!(m.contains("LOD"), "{m}");
-            assert!(m.contains("`states:` still has no schema"), "{m}");
-            // And the escape hatch that exists today.
-            assert!(m.contains("kind: raw"), "{m}");
-            assert!(m.contains("al_veh_boat_destroyer"), "{m}");
-        }
-        other => panic!("expected Unsupported, got {other:?}"),
-    }
+
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit_state_machine must build");
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1, "one model, one block — nothing else shadowed");
+    let block = &contents.blocks[0];
+
+    // The ASET row: primary rung re-pointed to our block, every finer rung sentinelled to coarse
+    // tier (we carry only the primary), so nothing dangles.
+    let row = &block.aset_entries[0];
+    assert_eq!(row.asset_hash, hash);
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "_P001 must sentinel — the rung is not carried");
+    assert_eq!(row.u32_1, 0xFFFF_FFFF, "_P002/_P003 must sentinel — not dangle");
+
+    // The block is a proper single-entry table carrying the MODEL container with its original
+    // field_c, and — this is the no-op claim — the container is byte-identical to the base.
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1);
+    assert_eq!(entries[0].name_hash, hash);
+    assert_eq!(entries[0].field_c, inputs.field_c, "field_c must be preserved, not guessed");
+    let pos = 4 + entries.len() * 16;
+    let container = &dec[pos..pos + entries[0].chunk_size as usize];
+    assert_eq!(container, inputs.container.as_slice(), "a no-op edit must reproduce the base container");
 }
+
+/// A real edit — rename a state — lands in the shipped container and still parses, while every other
+/// byte of the container stays put (same length, only the one hash changed).
+#[test]
+fn edit_state_machine_renames_a_state_end_to_end() {
+    let Some(mut game) = discovered_game() else {
+        eprintln!("SKIPPING: no game stack");
+        return;
+    };
+    let Some((target, inputs)) = a_destructible(&mut game) else {
+        eprintln!("SKIPPING: no known destructible");
+        return;
+    };
+    let hash = mercs2_quartermaster::manifest::asset_hash(&target);
+    let sm = mercs2_formats::orchestrator::parse_state_machine(&inputs.container).unwrap();
+    let (ni, si) = sm
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| (!n.states.is_empty()).then_some((i, 0)))
+        .expect("a node with a state");
+
+    // Extract, rename one state to a novel name, ship it.
+    let mut yaml = mercs2_quartermaster::states::extract(&sm, |_| None);
+    let old_hash_hex = format!("0x{:08X}", sm.nodes[ni].states[si].name_hash);
+    assert!(yaml.contains(&old_hash_hex), "extract should show the state as hex: {yaml}");
+    yaml = yaml.replacen(&old_hash_hex, "qm_test_renamed_state", 1);
+
+    let dir = scratch("esm_rename");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/states.yaml"), &yaml).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("build the rename");
+    let on_disk = std::fs::read(report.wad.unwrap()).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let dec = mercs2_formats::sges::decompress_sges(&contents.blocks[0].compressed_data).unwrap();
+    let (_c, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    let pos = 4 + entries.len() * 16;
+    let container = &dec[pos..pos + entries[0].chunk_size as usize];
+
+    // A hash is fixed-width, so a rename does not resize the container.
+    assert_eq!(container.len(), inputs.container.len(), "a rename must not resize the container");
+    // The shipped machine reads back with the new name and nothing else moved.
+    let reparsed = mercs2_formats::orchestrator::parse_state_machine(container).expect("re-parse");
+    assert_eq!(
+        reparsed.nodes[ni].states[si].name_hash,
+        mercs2_formats::hash::pandemic_hash_m2("qm_test_renamed_state"),
+    );
+    assert_eq!(reparsed.nodes.len(), sm.nodes.len());
+}
+
 
 // ---------------------------------------------------------------------------
 // Emission

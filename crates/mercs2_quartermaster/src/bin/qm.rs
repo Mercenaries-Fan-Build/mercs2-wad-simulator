@@ -102,6 +102,22 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         corpus: Option<PathBuf>,
     },
+    /// Extract a destructible's state machine as an editable `states:` file.
+    ///
+    /// The baseline for `edit_state_machine`: dump what the model already carries (states named where
+    /// their hashes reverse, command scripts as token lists), redirect it to a file, edit that, and
+    /// point `states:` at it. Authoring one by hand would be punishing; this is the "pull it
+    /// automatically" half of the workflow.
+    ExtractStates {
+        /// The destructible model — a name or a bare `0xHASH`.
+        target: String,
+        /// Where the game is installed. Defaults to host discovery.
+        #[arg(long, value_name = "DIR")]
+        game: Option<PathBuf>,
+        /// hash → name lookup, so the dump reads in names. Defaults to the workspace's names.
+        #[arg(long, value_name = "FILE")]
+        names: Option<PathBuf>,
+    },
     /// List every rule: what is checked, what is known-but-unchecked, and where each is documented.
     Rules,
 }
@@ -133,6 +149,11 @@ fn main() -> ExitCode {
             out,
             corpus,
         } => cmd_link(&shipments, game.as_deref(), &out, corpus.as_deref()),
+        Command::ExtractStates {
+            target,
+            game,
+            names,
+        } => cmd_extract_states(&target, game.as_deref(), names.as_deref()),
         Command::Rules => cmd_rules(),
     }
 }
@@ -281,6 +302,29 @@ fn cmd_build(
             ExitCode::from(code)
         }
     }
+}
+
+fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
+    let mut stack = match resolve_game(game_dir) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let hash = mercs2_quartermaster::manifest::asset_hash(target);
+    let Some(inputs) = stack.model_container_for_edit(hash) else {
+        eprintln!(
+            "error: {target:?} (0x{hash:08X}) is not a model in the game stack (or its block has no \
+             primary container)"
+        );
+        return ExitCode::from(EXIT_UNUSABLE);
+    };
+    let Some(sm) = mercs2_formats::orchestrator::parse_state_machine(&inputs.container) else {
+        eprintln!("error: {target:?} is a model but carries no destruction state machine to extract");
+        return ExitCode::from(EXIT_UNUSABLE);
+    };
+    let names = resolve_names(names_path);
+    let name_of = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
+    print!("{}", mercs2_quartermaster::states::extract(&sm, name_of));
+    ExitCode::SUCCESS
 }
 
 fn cmd_link(

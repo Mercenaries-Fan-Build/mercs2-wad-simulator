@@ -289,6 +289,23 @@ struct OpenWad {
     archive: FfcsArchive,
 }
 
+/// What [`GameStack::model_container_for_edit`] hands back: the model's container plus the exact
+/// bytes an overlay copy must reproduce (its `field_c` and its ASET LOD-chain refs) and the source
+/// block index the rung remap needs.
+#[derive(Debug, Clone)]
+pub struct ModelEditInputs {
+    /// The model's primary UCFX container, verbatim (with its CSUM) — the bytes to edit.
+    pub container: Vec<u8>,
+    /// The original block entry's third word, carried through so the re-emitted entry matches.
+    pub field_c: u32,
+    /// The ASET row's `secondary_ref` (`_P002`/`_P003` rungs) — copied so the chain is preserved.
+    pub secondary_ref: u32,
+    /// The ASET row's `packed_block_ref` (`_P000`/`_P001`) — copied; `_P000` is re-pointed at emit.
+    pub packed_block_ref: u32,
+    /// The block this container came from, so the rung remap can re-point or sentinel each rung.
+    pub source_block_index: u32,
+}
+
 /// An opened `[base, overlays…]` stack.
 pub struct GameStack {
     wads: Vec<OpenWad>,
@@ -388,6 +405,20 @@ impl GameStack {
                 .iter()
                 .any(|e| e.asset_hash == name_hash && e.type_id == type_id)
         })
+    }
+
+    /// Every asset hash of a given type across the stack, deduplicated — for callers that must scan
+    /// (a domain lens, the destructible finder) rather than name one asset up front.
+    pub fn asset_hashes(&self, type_id: u32) -> Vec<u32> {
+        let mut seen = std::collections::BTreeSet::new();
+        for w in &self.wads {
+            for e in &w.archive.aset {
+                if e.type_id == type_id {
+                    seen.insert(e.asset_hash);
+                }
+            }
+        }
+        seen.into_iter().collect()
     }
 
     /// The raw `(packed_block_ref, secondary_ref)` of an asset's PRIMARY row, last-mounted-wins.
@@ -492,6 +523,59 @@ impl GameStack {
                 })
                 .collect();
             return Some((dec, rows));
+        }
+        None
+    }
+
+    /// Everything an in-place MODEL-container edit (`edit_state_machine`) needs to re-emit the model
+    /// as its OWN minimal block without shadowing its block-mates.
+    ///
+    /// A model container is a leaf in a block that usually holds many other models, and its ASET row
+    /// packs a LOD chain of block indices. To edit just this one model we emit a single-entry block
+    /// carrying only its (edited) container, copy its ASET row verbatim, and record the source block
+    /// index. [`build_patch_wad_multi`](mercs2_formats::patch_wad::build_patch_wad_multi) then
+    /// rewrites `_P000` to the new block and remaps or sentinels the finer rungs — a sentinel
+    /// degrades that model to its coarse tier, it does not dangle — so no block-mate is carried and
+    /// the chain never hangs. `field_c` from the original entry is preserved because the loader reads
+    /// it and a guessed value is a needless risk.
+    pub fn model_container_for_edit(&mut self, name_hash: u32) -> Option<ModelEditInputs> {
+        use mercs2_formats::types::{TYPE_HASH_MODEL, TYPE_ID_MODEL};
+        for wad in self.wads.iter_mut().rev() {
+            let Some(row) = wad
+                .archive
+                .aset
+                .iter()
+                .find(|e| e.asset_hash == name_hash && e.type_id == TYPE_ID_MODEL && e.is_primary())
+            else {
+                continue;
+            };
+            let (secondary_ref, packed_block_ref) = (row.secondary_ref, row.packed_block_ref);
+            let block_index = row.block_index();
+            let Ok(dec) = mercs2_formats::sges::decompress_block(
+                &mut wad.file,
+                &wad.archive.indx,
+                block_index,
+            ) else {
+                continue;
+            };
+            // Walk the raw entry table so `field_c` and the exact container bytes come through — the
+            // container is spliced back verbatim, so anything the higher-level walker normalises away
+            // would corrupt it.
+            let (_n, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+            let mut pos = 4 + entries.len() * 16;
+            for e in &entries {
+                let end = (pos + e.chunk_size as usize).min(dec.len());
+                if e.name_hash == name_hash && e.type_hash == TYPE_HASH_MODEL && pos < end {
+                    return Some(ModelEditInputs {
+                        container: dec[pos..end].to_vec(),
+                        field_c: e.field_c,
+                        secondary_ref,
+                        packed_block_ref,
+                        source_block_index: block_index as u32,
+                    });
+                }
+                pos = end;
+            }
         }
         None
     }
