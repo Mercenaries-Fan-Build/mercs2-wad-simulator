@@ -23,7 +23,8 @@ else
 fi
 
 ZIP="$(echo "$TMP"/Ess-*.zip)"
-unzip -o "$ZIP" 'api/ess.json' 'api/natives.json' -d "$TMP" >/dev/null
+unzip -o "$ZIP" 'api/ess.json' 'api/natives.json' 'api/nodes.json' -d "$TMP" >/dev/null
 cp "$TMP/api/ess.json"     "$OUT/ess_api.json"
 cp "$TMP/api/natives.json" "$OUT/ess_natives.json"
+cp "$TMP/api/nodes.json"    "$OUT/ess_nodes.json"
 echo "bundled $(basename "$ZIP") -> ess_api.json ($(grep -c '"tier"' "$OUT/ess_api.json") tiered fns) + ess_natives.json"

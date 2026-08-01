@@ -4183,10 +4183,13 @@ pub fn run(opts: Options) {
                                                                     )
                                                                     .sense(egui::Sense::click()),
                                                                 );
-                                                                let hover = if e.doc.is_empty() {
-                                                                    if e.ess { format!("Ess {} \u{2014} click to insert", e.tier) } else { "engine native \u{2014} click to insert".into() }
+                                                                // Hover: the friendly node title (if any) + the description; else a bare hint.
+                                                                let hover = if !e.doc.is_empty() {
+                                                                    if e.title.is_empty() { e.doc.clone() } else { format!("{}\n\n{}", e.title, e.doc) }
+                                                                } else if e.ess {
+                                                                    format!("Ess {} \u{2014} click to insert", e.tier)
                                                                 } else {
-                                                                    e.doc.clone()
+                                                                    "engine native \u{2014} click to insert".into()
                                                                 };
                                                                 r.on_hover_text(hover).clicked()
                                                             }).inner;

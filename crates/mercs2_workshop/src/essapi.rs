@@ -30,8 +30,12 @@ pub struct ApiEntry {
     pub tier: String,
     /// What it returns, when the manifest records it (e.g. `"ok"`, `"x,y,z | nil"`).
     pub returns: String,
-    /// One-line description from his docs, when present.
+    /// One-line description — the node catalogue's friendlier `desc_short` where it exists, else the
+    /// manifest's terse `description`.
     pub doc: String,
+    /// A human title from the visual-editor node catalogue (`nodes.json`), e.g. "AI Orders: Command".
+    /// Empty when this call is not a graph node (most natives, a few internal wrappers).
+    pub title: String,
     /// `true` for an `Ess.*` wrapper, `false` for a raw engine native.
     pub ess: bool,
 }
@@ -63,8 +67,45 @@ impl ApiIndex {
         idx.load_natives(&data_home.join("ess_natives.json"));
         idx.entries.sort_by(|a, b| a.name.cmp(&b.name));
         idx.entries.dedup_by(|a, b| a.name == b.name);
+        // Merge the visual-editor node catalogue's friendlier titles/prose over the terse manifest
+        // descriptions, matched by `call`. This is prose enrichment, not new callables — it must run
+        // after the entries exist and does not add any.
+        idx.merge_nodes(&data_home.join("ess_nodes.json"));
         idx.keys = idx.entries.iter().map(|e| e.name.to_lowercase()).collect();
         idx
+    }
+
+    /// Overlay `nodes.json`'s `{call, title, desc_short, desc}` onto matching entries. `desc_short`
+    /// (a complete sentence) replaces the manifest's often-fragmentary `description`; the title is
+    /// added for a friendlier label. Nodes with no matching entry are ignored — this never invents a
+    /// callable.
+    fn merge_nodes(&mut self, path: &Path) {
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+        let Some(nodes) = v.get("nodes").and_then(|n| n.as_array()) else { return };
+        let mut by_call: std::collections::HashMap<&str, (&str, &str)> = std::collections::HashMap::new();
+        for n in nodes {
+            let Some(call) = n.get("call").and_then(|s| s.as_str()) else { continue };
+            let title = n.get("title").and_then(|s| s.as_str()).unwrap_or_default();
+            // Prefer the concise-but-complete `desc_short`; fall back to the full `desc`.
+            let desc = n
+                .get("desc_short")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| n.get("desc").and_then(|s| s.as_str()))
+                .unwrap_or_default();
+            by_call.insert(call, (title, desc));
+        }
+        for e in &mut self.entries {
+            if let Some((title, desc)) = by_call.get(e.name.as_str()) {
+                if !title.is_empty() {
+                    e.title = (*title).to_string();
+                }
+                if !desc.is_empty() {
+                    e.doc = (*desc).to_string();
+                }
+            }
+        }
     }
 
     /// Wally's `api/ess.json`: `{ "functions": { "Ess.NS.func": {namespace, tier, params[], returns,
@@ -97,6 +138,7 @@ impl ApiIndex {
                 tier: f.get("tier").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
                 returns: f.get("returns").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
                 doc: f.get("description").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
+                title: String::new(),
                 ess: true,
             });
         }
@@ -144,6 +186,7 @@ impl ApiIndex {
             tier: String::new(),
             returns: String::new(),
             doc: String::new(),
+            title: String::new(),
             ess: false,
         });
     }
@@ -192,6 +235,7 @@ mod tests {
             tier: if ess { "core".into() } else { String::new() },
             returns: String::new(),
             doc: String::new(),
+            title: String::new(),
             ess,
         };
         let idx = ApiIndex {
@@ -246,14 +290,25 @@ mod tests {
             idx.search("health", 8).iter().any(|e| e.name == "Ess.Object.health"),
             "search over the real manifest did not find Ess.Object.health"
         );
+        // The node catalogue folded in: many wrappers gained a friendly title + a fuller sentence.
+        let with_title = idx.entries.iter().filter(|e| !e.title.is_empty()).count();
+        assert!(
+            with_title > 400,
+            "expected the node catalogue (~649 nodes) to enrich most wrappers, got {with_title} \
+             titled — is ess_nodes.json bundled / did its schema drift?"
+        );
+        let cmd = idx.entries.iter().find(|e| e.name == "Ess.AIOrders.command").unwrap();
+        assert_eq!(cmd.title, "AI Orders: Command", "node title did not merge onto its call");
+        assert!(cmd.doc.len() > 20, "node desc did not replace the terse manifest description");
         eprintln!(
-            "ess seam: {} entries ({} Ess, {} native); tiers easy/core/raw = {}/{}/{}",
+            "ess seam: {} entries ({} Ess, {} native); tiers e/c/r = {}/{}/{}; {} node-titled",
             idx.entries.len(),
             idx.entries.iter().filter(|e| e.ess).count(),
             idx.entries.iter().filter(|e| !e.ess).count(),
             idx.entries.iter().filter(|e| e.tier == "easy").count(),
             idx.entries.iter().filter(|e| e.tier == "core").count(),
             idx.entries.iter().filter(|e| e.tier == "raw").count(),
+            with_title,
         );
     }
 }
