@@ -56,6 +56,32 @@ fn two_outfit_mods_for_the_same_hero_coexist() {
     assert!(found.is_empty(), "outfit mods must compose, got: {found:?}");
 }
 
+/// A Shipment declaring `load.conflicts: [other]` fires ONLY when `other` is also installed — the
+/// author-asserted incompatibility the claim graph cannot infer.
+#[test]
+fn a_declared_conflict_fires_only_when_the_named_shipment_is_installed() {
+    let hostile = parse(
+        "format: 1
+shipment: { name: hostile, version: 1.0.0, target: retail }
+load: { conflicts: [victim] }
+contributions:
+  - kind: replace_texture
+    target: al_hum_boss_ub
+    image: src/t.png
+",
+    );
+    let victim = replace_texture("victim", "al_veh_boat_ub");
+    let bystander = replace_texture("bystander", "al_veh_car_ub");
+
+    // Fires: victim is installed alongside hostile.
+    let with_victim = blast::declared_conflicts(&[("hostile", &hostile), ("victim", &victim)]);
+    assert_eq!(with_victim, vec![("hostile".to_string(), "victim".to_string())]);
+
+    // Quiet: the named Shipment is not in the set, so there is nothing to clash with.
+    let without = blast::declared_conflicts(&[("hostile", &hostile), ("bystander", &bystander)]);
+    assert!(without.is_empty(), "a declared conflict on an absent Shipment is inert: {without:?}");
+}
+
 /// ...but the same slug on the same hero is a genuine duplicate key.
 #[test]
 fn the_same_outfit_slug_on_one_hero_collides() {

@@ -323,7 +323,20 @@ fn cmd_link(
                     refs.len()
                 ),
             }
-            ExitCode::SUCCESS
+            // Cross-Shipment conflicts are findings, not a hard failure: the WAD emitted, but two
+            // Shipments fight over a target no load order resolves, so exit non-zero so CI notices.
+            if report_.conflicts.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!(
+                    "\n{} cross-Shipment conflict(s) — the install is not clean:",
+                    report_.conflicts.len()
+                );
+                for c in &report_.conflicts {
+                    eprintln!("  {c}");
+                }
+                ExitCode::from(EXIT_FINDINGS)
+            }
         }
         Err(e) => {
             eprintln!("error: {e}");

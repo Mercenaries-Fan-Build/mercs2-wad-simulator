@@ -519,6 +519,27 @@ pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
         .collect()
 }
 
+/// A Shipment's DECLARED incompatibility that is actually present: it names another Shipment in
+/// `load.conflicts` and that Shipment is also installed.
+///
+/// This is distinct from [`conflicts`], which INFERS collisions from the claim graph. A declared
+/// conflict is the author asserting "we do not coexist" for a reason the claims cannot show — a
+/// runtime clash, a shared save assumption. Returns `(declarer, named)` pairs; a `load.conflicts`
+/// entry naming an uninstalled Shipment is inert (there is nothing to clash with) and a
+/// self-reference is ignored.
+pub fn declared_conflicts(shipments: &[(&str, &Manifest)]) -> Vec<(String, String)> {
+    let installed: std::collections::BTreeSet<&str> = shipments.iter().map(|(n, _)| *n).collect();
+    let mut out = Vec::new();
+    for (name, m) in shipments {
+        for other in &m.load.conflicts {
+            if other != name && installed.contains(other.as_str()) {
+                out.push(((*name).to_string(), other.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// A read that no Shipment in the set provides.
 ///
 /// **This is only half the answer.** Most reads (`donor: pmc_hum_mattias`) are satisfied by the

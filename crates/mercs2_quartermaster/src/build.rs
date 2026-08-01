@@ -2479,6 +2479,12 @@ pub struct LinkReport {
     pub wad: Option<PathBuf>,
     pub placements: Vec<Placement>,
     pub linked: Vec<crate::link::LinkedScript>,
+    /// Cross-Shipment collisions over the installed set: two Shipments claiming one target in a way
+    /// no load order resolves (an `Exclusive` new-asset hash, a `KeyedSet` duplicate key). Computed
+    /// from the claim graph and also from each Shipment's DECLARED `load.conflicts`. Empty is the
+    /// good case; the Workshop renders these in the Problems panel rather than the build failing,
+    /// because the merged WAD is still emittable — it just does not carry what one Shipment intended.
+    pub conflicts: Vec<crate::blast::Conflict>,
     pub log: Vec<String>,
 }
 
@@ -2537,6 +2543,32 @@ pub fn link_installed(
             order.join(", ")
         ));
     }
+
+    // ── Cross-Shipment conflicts (F2) ───────────────────────────────────────────────────────────
+    //
+    // `blast::conflicts` is the claim graph over the whole installed set — two Shipments claiming one
+    // target no load order resolves (an `Exclusive` new-asset hash both mint, a `KeyedSet` duplicate
+    // key). It is computed here, at the one place that sees every Shipment, and reported rather than
+    // made fatal: the merged WAD still emits, it just does not carry what one Shipment intended, and
+    // the Workshop renders these in Problems. Note what is NOT here — two `replace_texture` on one
+    // target are `LastWins`, a load-order choice, not a conflict.
+    let shipment_refs: Vec<(&str, &crate::manifest::Manifest)> = shipments
+        .iter()
+        .map(|s| (s.manifest.shipment.name.as_str(), &s.manifest))
+        .collect();
+    let conflicts = crate::blast::conflicts(&shipment_refs);
+    for c in &conflicts {
+        log.push(format!("CONFLICT: {c}"));
+    }
+    // Author-DECLARED incompatibility: a Shipment naming another installed one in `load.conflicts`.
+    // This is the modder saying "we do not coexist" for reasons the claim graph cannot see (a runtime
+    // clash, a design assumption); surfaced the same way.
+    for (declarer, named) in crate::blast::declared_conflicts(&shipment_refs) {
+        log.push(format!(
+            "CONFLICT (declared): {declarer} declares it is incompatible with {named}, also installed"
+        ));
+    }
+
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
@@ -2546,10 +2578,13 @@ pub fn link_installed(
     // install of nothing but add_ui Shipments still has script work to do.
     if mutations.is_empty() && ui_regs.is_empty() {
         log.push("no installed Shipment touches a script — nothing to link".into());
+        // A Data-only install still has cross-Shipment conflicts worth reporting (two mods minting
+        // the same texture name), so carry them even when there is no script overlay to emit.
         return Ok(LinkReport {
             wad: None,
             placements: Vec::new(),
             linked: Vec::new(),
+            conflicts,
             log,
         });
     }
@@ -2636,6 +2671,7 @@ pub fn link_installed(
             destination: Destination::Overlay,
         }],
         linked,
+        conflicts,
         log,
     })
 }
