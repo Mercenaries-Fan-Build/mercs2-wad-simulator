@@ -316,3 +316,56 @@ pub fn extract_data_chunk_safe(container: &SafeSlice) -> AccessResult<SafeSlice>
     })?;
     Ok(SafeSlice::new(body, format!("{}::data", container.label())))
 }
+
+/// Wrap opaque bytes as a single-`data`-leaf UCFX container inside a single-entry block.
+///
+/// This is `gfx::build_cfx_pack_block` with the type hash lifted into a parameter. Its doc records
+/// how that one was written — *"The shape is not invented. All 64 `cfx_pack` containers in retail
+/// `vz.wad` were measured and every one of them is byte-for-byte this layout"* — and
+/// `tests/novel_asset_shape_survey.rs` since ran the same measurement across EVERY ASET type.
+/// Seven more types turned out to be the identical shape, including the whole audio stack
+/// (`soundbank` 98/98, `sounddb` 58/58, `wavebank` 92/93 bare `data`). So the builder that was
+/// written for movies is the builder for all of them, and the only thing that ever varied was the
+/// type hash in the entry table.
+///
+/// ```text
+/// UCFX | data_area_off = 40 | 0 | 0 | ndesc = 1
+/// desc[0]: "data", off 0, size = payload.len(), 0, 0
+/// <payload bytes>
+/// CSUM <crc32_mercs2 of everything above>
+/// ```
+///
+/// The payload is copied VERBATIM. Nothing here inspects it — validate before calling, the way
+/// `GfxMovie::parse` gates the movie path, because a container whose `data` leaf is not what its
+/// type claims still checksums, still walks and still resolves; the loader is the first thing that
+/// finds out, and it does not say which asset.
+pub fn build_wrapped_block(name_hash: u32, type_hash: u32, payload: &[u8]) -> Vec<u8> {
+    const HEADER: u32 = 20;
+    const DESC_ROW: u32 = 20;
+    let data_area_off = HEADER + DESC_ROW;
+
+    let mut ucfx = Vec::with_capacity(data_area_off as usize + payload.len() + 8);
+    ucfx.extend_from_slice(b"UCFX");
+    ucfx.extend_from_slice(&data_area_off.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&1u32.to_le_bytes()); // one descriptor
+    ucfx.extend_from_slice(b"data");
+    ucfx.extend_from_slice(&0u32.to_le_bytes()); // body offset, relative to the data area
+    ucfx.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(&0u32.to_le_bytes());
+    ucfx.extend_from_slice(payload);
+    let csum = crate::crc32::crc32_mercs2(&ucfx);
+    ucfx.extend_from_slice(b"CSUM");
+    ucfx.extend_from_slice(&csum.to_le_bytes());
+
+    let mut block = Vec::with_capacity(20 + ucfx.len());
+    block.extend_from_slice(&1u32.to_le_bytes()); // entry count
+    block.extend_from_slice(&name_hash.to_le_bytes());
+    block.extend_from_slice(&type_hash.to_le_bytes());
+    block.extend_from_slice(&0u32.to_le_bytes());
+    block.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
+    block.extend_from_slice(&ucfx);
+    block
+}

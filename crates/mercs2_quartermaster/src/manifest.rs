@@ -281,6 +281,38 @@ pub struct Textures {
     pub specular: Option<PathBuf>,
 }
 
+/// Which audio table a bank is.
+///
+/// A closed set of three, because the ASET type id decides which loader the engine dispatches
+/// and there is nothing safe to guess. All three are opaque `data` wrappers in retail —
+/// `soundbank` 98/98, `sounddb` 58/58, `wavebank` 92/93 — measured in
+/// `mercs2_formats/tests/novel_asset_shape_survey.rs`.
+///
+/// The bytes are copied VERBATIM: this crate has no encoder for any of them, and swapping an
+/// author's working bank for one nobody has run is the kind of helpfulness that produces a WAD
+/// which looks fine and does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoundKind {
+    Wavebank,
+    Soundbank,
+    Sounddb,
+}
+
+impl SoundKind {
+    /// The ASET `type_id` and UCFX `type_hash` the engine dispatches on.
+    pub fn ids(self) -> (u32, u32) {
+        use mercs2_formats::types::*;
+        match self {
+            SoundKind::Wavebank => (TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK),
+            SoundKind::Soundbank => (TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK),
+            // No constant for sounddb in `types`; the pair comes from `aset_type_ids`, which is
+            // the registry the rest of the workspace reads.
+            SoundKind::Sounddb => (13, 0xE527_3C14),
+        }
+    }
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -342,6 +374,24 @@ pub enum Contribution {
         /// produces lighting that is subtly inverted rather than an error, so the author declares it.
         #[serde(default)]
         normal_map: bool,
+    },
+    /// Data, new-hash additive. An audio bank under a name the author chooses.
+    ///
+    /// Expressible because the container turned out to be an opaque `data` wrapper — the same shape
+    /// `add_movie` already shipped — rather than because anything here understands audio. The
+    /// survey measured it across the whole archive: `soundbank` 98/98, `sounddb` 58/58 and
+    /// `wavebank` 92/93 are bare `data`, which is 248 assets and ~366 MB of retail content that had
+    /// no way into a Shipment at all.
+    ///
+    /// The bytes ship VERBATIM; nothing here encodes or validates them, so `bank` must already be a
+    /// table the game accepts.
+    AddSound {
+        /// ASSET identity → `pandemic_hash_m2`.
+        name: String,
+        bank: PathBuf,
+        /// Which table this is. Not inferable from the bytes, and the type id decides which loader
+        /// runs, so the author declares it.
+        sound: SoundKind,
     },
     /// Data, new-hash additive. A Scaleform GFx movie (`cfx_pack`, type_id 23) added as a WAD asset,
     /// so Lua can point `SetSwfFile` at it.
@@ -433,6 +483,7 @@ impl Contribution {
         "add_outfit",
         "add_model",
         "add_texture",
+        "add_sound",
         "add_movie",
         "replace_texture",
         "patch_lua",
@@ -448,6 +499,7 @@ impl Contribution {
             Contribution::AddOutfit { .. } => "add_outfit",
             Contribution::AddModel { .. } => "add_model",
             Contribution::AddTexture { .. } => "add_texture",
+            Contribution::AddSound { .. } => "add_sound",
             Contribution::AddMovie { .. } => "add_movie",
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",

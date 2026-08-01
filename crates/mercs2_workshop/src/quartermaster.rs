@@ -477,6 +477,7 @@ fn contribution_name(c: &Contribution) -> String {
         Contribution::AddOutfit { name, .. }
         | Contribution::AddModel { name, .. }
         | Contribution::AddTexture { name, .. }
+        | Contribution::AddSound { name, .. }
         | Contribution::AddMovie { name, .. } => name.clone(),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
@@ -600,6 +601,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("add_outfit", "A wearable outfit — model plus a wardrobe row"),
             ("add_model", "A new model on a donor's rig"),
             ("add_texture", "A new texture under a name you choose"),
+            ("add_sound", "A new audio bank (wavebank / soundbank / sounddb)"),
             ("add_movie", "A Scaleform movie"),
             ("replace_texture", "Replace a shipped texture, same hash"),
             ("edit_state_machine", "Rewrite a destructible's states"),
@@ -681,6 +683,11 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             name,
             image: PathBuf::from("src/texture.png"),
             normal_map: false,
+        },
+        "add_sound" => Contribution::AddSound {
+            name,
+            bank: PathBuf::from("src/bank.bin"),
+            sound: mercs2_quartermaster::manifest::SoundKind::Soundbank,
         },
         "edit_state_machine" => Contribution::EditStateMachine {
             target: "al_veh_boat_destroyer".into(),
@@ -1275,6 +1282,27 @@ fn contribution_form(
                 },
             );
         }
+        Contribution::AddSound { name, bank, sound } => {
+            use mercs2_quartermaster::manifest::SoundKind;
+            commit |= text_row(ui, "Asset name", name, "amb_myjungle", true);
+            commit |= source_row(ui, "Bank", bank, root, &[]);
+            commit |= theme::combo_field(
+                ui,
+                "Table",
+                sound,
+                &[
+                    (SoundKind::Wavebank, "wavebank"),
+                    (SoundKind::Soundbank, "soundbank"),
+                    (SoundKind::Sounddb, "sounddb"),
+                ],
+                theme::FieldState::Neutral,
+            );
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "the bytes ship verbatim — nothing here encodes audio, so the bank must already                  be one the game accepts",
+            );
+        }
         Contribution::AddMovie { name, movie } => {
             commit |= text_row(ui, "Asset name", name, "my_menu", true);
             theme::field_note(
@@ -1635,6 +1663,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::AddTexture { name, .. } => {
             vec![("Writes".to_string(), format!("texture {name}  (new hash)"))]
         }
+        Contribution::AddSound { name, sound, .. } => vec![(
+            "Writes".to_string(),
+            format!("{} {name}  (new hash)", format!("{sound:?}").to_lowercase()),
+        )],
         Contribution::ReplaceTexture { target, .. } => vec![
             ("Writes".to_string(), format!("texture {target}")),
             (

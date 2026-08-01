@@ -62,6 +62,11 @@ contributions:
     image: src/decals/decal.png
     normal_map: false
 
+  - kind: add_sound
+    name: amb_myjungle
+    bank: src/audio/myjungle.bnk
+    sound: soundbank
+
   - kind: edit_state_machine
     target: al_veh_boat_destroyer
     states: src/destroyer/states.yaml
@@ -145,6 +150,12 @@ const JSON: &str = r#"
       "name": "my_custom_decal",
       "image": "src/decals/decal.png",
       "normal_map": false
+    },
+    {
+      "kind": "add_sound",
+      "name": "amb_myjungle",
+      "bank": "src/audio/myjungle.bnk",
+      "sound": "soundbank"
     },
     {
       "kind": "edit_state_machine",
@@ -239,6 +250,12 @@ image = "src/decals/decal.png"
 normal_map = false
 
 [[contributions]]
+kind = "add_sound"
+name = "amb_myjungle"
+bank = "src/audio/myjungle.bnk"
+sound = "soundbank"
+
+[[contributions]]
 kind = "edit_state_machine"
 target = "al_veh_boat_destroyer"
 states = "src/destroyer/states.yaml"
@@ -294,6 +311,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "replace_texture",
             "add_model",
             "add_texture",
+            "add_sound",
             "edit_state_machine",
             "add_movie",
             "patch_lua",

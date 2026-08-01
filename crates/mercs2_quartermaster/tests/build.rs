@@ -2182,3 +2182,113 @@ fn two_movies_under_one_name_are_a_self_conflict() {
         other => panic!("expected Blocked, got {other:?}"),
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────── add_sound
+
+/// Re-read an emitted audio-bank WAD and check the row the loader will dispatch on.
+///
+/// Same shape as `read_back_movie`, and for the same reason: the survey found `soundbank`,
+/// `sounddb` and `wavebank` are the identical opaque `data` container `cfx_pack` is, so they share
+/// a builder and must share the assertions that builder's output has to satisfy.
+fn read_back_sound(wad: &[u8], type_id: u32, type_hash: u32) -> (u32, Vec<u8>) {
+    let contents = mercs2_formats::patch_wad::read_patch_wad(wad).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+    let row = &block.aset_entries[0];
+    assert_eq!(
+        row.u32_2 & 0xFFFF,
+        0xFFFF,
+        "an audio bank has no LOD chain, so anything but the primary sentinel dangles (M0001)"
+    );
+    assert_eq!(row.u32_3, type_id, "the row's type id is what picks the loader");
+
+    let decompressed = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&decompressed);
+    assert_eq!(count, 1, "expected a single-entry block table");
+    assert_eq!(entries[0].type_hash, type_hash);
+    assert_eq!(&decompressed[20..24], b"UCFX", "container must start after the 20-byte table");
+    assert_eq!(entries[0].name_hash, row.asset_hash);
+
+    let container = &decompressed[20..];
+    let bytes = mercs2_formats::ucfx::extract_chunk_body(container, b"data")
+        .expect("the container must carry a `data` leaf");
+    (entries[0].name_hash, bytes)
+}
+
+/// ★ Audio becomes shippable — and it needs no game stack, so template CI can run it.
+///
+/// This kind exists because the container was MEASURED to be an opaque wrapper, not because
+/// anything here understands audio: `soundbank` 98/98, `sounddb` 58/58 and `wavebank` 92/93 of
+/// retail's containers are a bare `data` leaf. That is 248 assets and ~366 MB of game content that
+/// previously had no way into a Shipment at all.
+#[test]
+fn add_sound_builds_for_every_table_without_a_game() {
+    use mercs2_formats::types::*;
+    for (yaml_name, type_id, type_hash) in [
+        ("wavebank", TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK),
+        ("soundbank", TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK),
+        ("sounddb", 13, 0xE527_3C14u32),
+    ] {
+        let dir = scratch(&format!("add_sound_{yaml_name}"));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        // Opaque on purpose: nothing in the pipeline parses these bytes, and a test that fed it a
+        // real bank would be asserting the fixture rather than the wrapper.
+        let bank: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        std::fs::write(dir.join("src/bank.bin"), &bank).unwrap();
+        let s = shipment(
+            &dir,
+            &format!(
+                "  - kind: add_sound\n    name: amb_ci_test\n    bank: src/bank.bin\n    \
+                 sound: {yaml_name}\n"
+            ),
+        );
+
+        let report = build::build(&s, None, None, None, None).expect("must build with no game");
+        let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+        let (hash, carried) = read_back_sound(&on_disk, type_id, type_hash);
+        assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("amb_ci_test"));
+        // VERBATIM. There is no encoder here, so any difference would be corruption.
+        assert_eq!(carried, bank, "{yaml_name}: the bank must ship byte-for-byte");
+    }
+}
+
+/// Two builds of the same Shipment produce the same bytes, or verify-by-hash means nothing.
+#[test]
+fn add_sound_is_reproducible() {
+    let dir = scratch("add_sound_repro");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/bank.bin"), vec![7u8; 1024]).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_sound\n    name: amb_repro\n    bank: src/bank.bin\n    sound: soundbank\n",
+    );
+    let a = std::fs::read(
+        build::build(&s, None, None, None, None).expect("build 1").wad.expect("wad"),
+    )
+    .unwrap();
+    let b = std::fs::read(
+        build::build(&s, None, None, None, None).expect("build 2").wad.expect("wad"),
+    )
+    .unwrap();
+    assert_eq!(a, b, "two builds of one Shipment must be byte-identical");
+}
+
+/// An empty bank is refused by NAME rather than emitted as a valid-looking container with nothing
+/// in it — the loader would be the first thing to find out, and it does not say which asset.
+#[test]
+fn an_empty_sound_bank_is_refused() {
+    let dir = scratch("add_sound_empty");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/bank.bin"), b"").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_sound\n    name: amb_empty\n    bank: src/bank.bin\n    sound: wavebank\n",
+    );
+    match build::build(&s, None, None, None, None) {
+        Err(e) => {
+            let m = format!("{e:?}");
+            assert!(m.contains("empty"), "the refusal should name the problem: {m}");
+        }
+        Ok(_) => panic!("an empty bank must not build"),
+    }
+}

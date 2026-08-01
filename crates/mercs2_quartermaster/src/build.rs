@@ -1340,6 +1340,45 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
+        // Opaque bytes into a `data`-leaf container. Needs NO game stack, so it exercises the
+        // emission contract hermetically — the shape template CI runs in.
+        Contribution::AddSound { name, bank, sound } => {
+            let path = root.join(bank);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+            if bytes.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{} is empty", path.display()),
+                });
+            }
+            let (type_id, type_hash) = sound.ids();
+            let hash = crate::manifest::asset_hash(name);
+            let block_bytes =
+                mercs2_formats::ucfx::build_wrapped_block(hash, type_hash, &bytes);
+            log.push(format!(
+                "contributions[{index}] add_sound {name} 0x{hash:08X} <- {} ({:?}, {} bytes, verbatim)",
+                path.display(),
+                sound,
+                bytes.len()
+            ));
+            // ADDITIVE and PRIMARY. An audio bank has no LOD chain, so both rung halves stay at
+            // their sentinels — `0x0000` in the low 16 is the dangling-rung HANG, not "no rung".
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, type_id);
+            let block = PatchBlock::from_decompressed(
+                &block_bytes,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            Ok(Lowering::Block(block))
+        }
+
         Contribution::AddMovie { name, movie } => {
             let path = root.join(movie);
             let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {

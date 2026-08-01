@@ -251,6 +251,10 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddTexture { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
+            // Same shape as a movie or a texture: one new hash, nothing borrowed.
+            Contribution::AddSound { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
             // A movie mints a new hash and borrows nothing — one write claim, no read claim. The
             // `Additive` intent is what makes two Shipments choosing the same movie name a hard
             // conflict rather than a load-order question: the chunk registry is first-writer-wins,

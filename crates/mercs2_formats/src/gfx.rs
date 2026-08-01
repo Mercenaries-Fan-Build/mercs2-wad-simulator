@@ -469,34 +469,10 @@ fn scan_shape_fills(
 /// [`GfxMovie::parse`] *before* calling this — it is the check that the thing being wrapped is a
 /// movie at all.
 pub fn build_cfx_pack_block(name_hash: u32, movie: &[u8]) -> Vec<u8> {
-    const HEADER: u32 = 20;
-    const DESC_ROW: u32 = 20;
-    let data_area_off = HEADER + DESC_ROW;
-
-    let mut ucfx = Vec::with_capacity(data_area_off as usize + movie.len() + 8);
-    ucfx.extend_from_slice(b"UCFX");
-    ucfx.extend_from_slice(&data_area_off.to_le_bytes());
-    ucfx.extend_from_slice(&0u32.to_le_bytes());
-    ucfx.extend_from_slice(&0u32.to_le_bytes());
-    ucfx.extend_from_slice(&1u32.to_le_bytes()); // one descriptor
-    ucfx.extend_from_slice(b"data");
-    ucfx.extend_from_slice(&0u32.to_le_bytes()); // body offset, relative to the data area
-    ucfx.extend_from_slice(&(movie.len() as u32).to_le_bytes());
-    ucfx.extend_from_slice(&0u32.to_le_bytes());
-    ucfx.extend_from_slice(&0u32.to_le_bytes());
-    ucfx.extend_from_slice(movie);
-    let csum = crate::crc32::crc32_mercs2(&ucfx);
-    ucfx.extend_from_slice(b"CSUM");
-    ucfx.extend_from_slice(&csum.to_le_bytes());
-
-    let mut block = Vec::with_capacity(20 + ucfx.len());
-    block.extend_from_slice(&1u32.to_le_bytes()); // entry count
-    block.extend_from_slice(&name_hash.to_le_bytes());
-    block.extend_from_slice(&crate::types::TYPE_HASH_CFX_PACK.to_le_bytes());
-    block.extend_from_slice(&0u32.to_le_bytes());
-    block.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
-    block.extend_from_slice(&ucfx);
-    block
+    // Delegates to the generic wrapper. The layout below was measured for `cfx_pack` first; the
+    // survey later found seven more ASET types with byte-for-byte the same shape, so the code
+    // lives in `ucfx` and this stays as the movie-typed front door.
+    crate::ucfx::build_wrapped_block(name_hash, crate::types::TYPE_HASH_CFX_PACK, movie)
 }
 
 #[cfg(test)]
