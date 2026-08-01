@@ -77,12 +77,10 @@ pub enum Craft {
     Conform,
 }
 
-/// The three heroes `_tOutfits` is keyed by.
-///
-/// A closed set, because the table has one list per hero and a name that is not one of these
-/// creates a wardrobe nobody reads. Retail reuses `Original`/`ChickenSuit` across all three, which
-/// is why the merge key is `(wearer, slug)` and not `slug` alone.
-pub const WEARERS: [&str; 3] = ["mattias", "chris", "jen"];
+/// The three wardrobe heroes, in the preferred spelling — re-exported from the manifest crate so
+/// the UI pills and the format's own vocabulary cannot drift. `jen`, not `jennifer`; the runtime
+/// `_tOutfits` key (`jennifer`) is resolved by `manifest::wearer_table_key` at emit time.
+pub use mercs2_quartermaster::manifest::WEARERS;
 
 /// Queued by the widgets, executed by [`apply`], so rendering never borrows the game stack.
 pub enum Act {

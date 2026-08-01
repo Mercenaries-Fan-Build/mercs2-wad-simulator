@@ -127,6 +127,30 @@ pub fn asset_hash(reference: &str) -> u32 {
     bare_hash(reference).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(reference.trim()))
 }
 
+/// The wardrobe heroes, in the spelling the tool PREFERS and shows.
+///
+/// `jen`, not `jennifer` (user preference). This is the input/label vocabulary — the runtime
+/// `_tOutfits` KEY is a separate question answered by [`wearer_table_key`], because the game's table
+/// is keyed `chris` / `jennifer` / `mattias` (`wifpmcinterior.lua` lines 156/183/215) and the third
+/// key is `jennifer`. A row appended to `_tOutfits.jen` would land in a table nothing reads.
+pub const WEARERS: [&str; 3] = ["mattias", "chris", "jen"];
+
+/// The runtime `_tOutfits` key for a wearer spelling, or `None` if it is not a hero.
+///
+/// This is the ONE place the `jen`/`jennifer` split is resolved. Both spellings — the preferred
+/// `jen` and the literal runtime key `jennifer` — map to `jennifer`, which is what the shipped
+/// wardrobe table is actually keyed by. Every site that turns a `wearer` into the `_tOutfits` table
+/// key MUST route through here, or an outfit silently appends to a table the game never reads
+/// (the M0140 failure).
+pub fn wearer_table_key(wearer: &str) -> Option<&'static str> {
+    match wearer.trim().to_ascii_lowercase().as_str() {
+        "mattias" => Some("mattias"),
+        "chris" => Some("chris"),
+        "jen" | "jennifer" => Some("jennifer"),
+        _ => None,
+    }
+}
+
 /// A declared blast-radius entry. A name, or a bare hash where no name is known.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]

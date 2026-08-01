@@ -630,7 +630,11 @@ impl std::fmt::Display for Diagnostic {
 
 /// The wardrobe's hero keys, verified against `wifpmcinterior.lua:155`. An outfit filed under any
 /// other key sits in a table nothing ever reads.
-pub const WARDROBE_HEROES: [&str; 3] = ["chris", "jennifer", "mattias"];
+/// The wearer spellings the linter SUGGESTS — the preferred set (`jen`, not `jennifer`). Validity
+/// is a separate question: `manifest::wearer_table_key` accepts either spelling, since `jennifer`
+/// is the literal runtime key and is not wrong to write. Kept as a re-export of the manifest's
+/// vocabulary so the two cannot drift.
+pub use crate::manifest::WEARERS as WARDROBE_HEROES;
 
 /// M0162 and M0163 — the two things that can be wrong with a `place_file`.
 ///
@@ -798,7 +802,9 @@ pub fn lint(
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
             Contribution::AddOutfit { wearer, .. } => {
-                if !WARDROBE_HEROES.contains(&wearer.as_str()) {
+                // Valid = resolves to a real `_tOutfits` key (either `jen` or `jennifer` does);
+                // the suggestion, when it does not, is the preferred spelling.
+                if crate::manifest::wearer_table_key(wearer).is_none() {
                     let suggestion = closest(wearer, &WARDROBE_HEROES);
                     out.push(Diagnostic {
                         rule: M0140_UNKNOWN_WEARER,

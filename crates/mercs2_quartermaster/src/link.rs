@@ -225,8 +225,12 @@ pub fn linked_source(base: &str, mutations: &[&ScriptMutation]) -> (String, Vec<
 /// **Append only, never insert.** Index 2 is reserved for the unlock-code outfit, and a saved
 /// costume is a POSITION into this list — inserting would silently re-dress every existing player.
 pub fn outfit_row_append(wearer: &str, slug: &str, model: &str, display: &str) -> String {
+    // Normalize to the RUNTIME `_tOutfits` key — the game's third key is `jennifer`, so an outfit
+    // authored with the preferred `jen` must land there, not in an empty `_tOutfits.jen` the game
+    // never reads. An unknown wearer falls through as-written; M0140 already flags it.
+    let key = crate::manifest::wearer_table_key(wearer).unwrap_or(wearer);
     format!(
-        "table.insert(_tOutfits.{wearer}, {{ Name = {}, Model = {}, PlayerVisibleName = {} }})\n",
+        "table.insert(_tOutfits.{key}, {{ Name = {}, Model = {}, PlayerVisibleName = {} }})\n",
         lua_string(slug),
         lua_string(model),
         lua_string(display),
@@ -393,6 +397,19 @@ mod tests {
             target: target.into(),
             append: append.into(),
         }
+    }
+
+    /// ★ The preferred spelling `jen` must reach the RUNTIME key `jennifer`, or the outfit appends
+    /// to a `_tOutfits.jen` the game never reads. This is the whole reason the split exists.
+    #[test]
+    fn jen_appends_to_the_jennifer_table() {
+        let row = outfit_row_append("jen", "MyFit", "pmc_hum_jen", "[X]");
+        assert!(row.contains("_tOutfits.jennifer"), "jen must normalize to jennifer: {row}");
+        assert!(!row.contains("_tOutfits.jen,"), "must not emit the empty jen table: {row}");
+        // The literal runtime key still works, and mattias/chris pass straight through.
+        assert!(outfit_row_append("jennifer", "F", "m", "d").contains("_tOutfits.jennifer"));
+        assert!(outfit_row_append("mattias", "F", "m", "d").contains("_tOutfits.mattias"));
+        assert!(outfit_row_append("chris", "F", "m", "d").contains("_tOutfits.chris"));
     }
 
     /// The ordering property the whole design rests on: same set of Shipments, same bytes, whatever
