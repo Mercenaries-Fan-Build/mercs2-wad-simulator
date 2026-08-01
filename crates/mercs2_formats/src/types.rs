@@ -13,16 +13,16 @@ pub const TYPE_ID_FONT: u32 = 15;
 pub const TYPE_ID_PATH: u32 = 28;
 pub const TYPE_ID_EFFECT: u32 = 29;
 pub const TYPE_ID_STRINGDB: u32 = 7;
-pub const TYPE_ID_LEVEL: u32 = 20;
+pub const TYPE_ID_LEVEL: u32 = 26;
 /// "stance" / named-registry (ActionTable, VehicleAnimationLookup, Sounds, …);
 /// type_hash 0x207359C7. Processed by FUN_0067cfb0's fixed 1024-slot table.
 pub const TYPE_ID_STANCE: u32 = 11;
 pub const TYPE_ID_MATERIAL_PARAMS: u32 = 14;
-pub const TYPE_ID_MUSIC_STATE_MAP: u32 = 26;
-pub const TYPE_ID_MUSIC_CUE_TABLE: u32 = 4;
-pub const TYPE_ID_ANIM_STATE_MACHINE: u32 = 31;
-pub const TYPE_ID_WORLD_ENTITY_DATA: u32 = 8;
-pub const TYPE_ID_FX_DICTIONARY: u32 = 25;
+pub const TYPE_ID_MUSIC_STATE_MAP: u32 = 8;
+pub const TYPE_ID_MUSIC_CUE_TABLE: u32 = 10;
+pub const TYPE_ID_ANIM_STATE_MACHINE: u32 = 33;
+pub const TYPE_ID_WORLD_ENTITY_DATA: u32 = 17;
+pub const TYPE_ID_FX_DICTIONARY: u32 = 0;
 /// Scaleform GFx movie (`cfx_pack`). Retail ships 64 of them in `vz.wad`; every one is a UCFX
 /// container with a single `data` leaf holding the whole `.gfx` movie verbatim.
 ///
@@ -32,7 +32,7 @@ pub const TYPE_ID_FX_DICTIONARY: u32 = 25;
 /// `CFX`. So the type carries a movie whichever way it is encoded.
 pub const TYPE_ID_CFX_PACK: u32 = 23;
 /// Singleton `watermap` in resident block (`pandemic_hash_m2("watermap")`).
-pub const TYPE_ID_WATERMAP: u32 = 0;
+pub const TYPE_ID_WATERMAP: u32 = 25;
 
 pub const TYPE_HASH_WAVEBANK: u32 = 0xF753F6D0;
 pub const TYPE_HASH_SOUNDBANK: u32 = 0x9F8BCA10;
@@ -131,38 +131,45 @@ pub fn type_name_from_hash(hash: u32) -> &'static str {
 }
 
 pub fn type_name(type_id: u32) -> &'static str {
+    // Keyed on the WAD's OWN table at offset 0x48, not on the derived registry doc. This map was
+    // previously keyed on ids that were wrong for 12 of 36 entries, so several names pointed at the
+    // wrong type entirely — `fx_dictionary` and `watermap` were transposed, and `world_entity_data`
+    // named id 8 (which is actually `musicstatemap`). `tests/type_ids_match_the_wad.rs` pins the
+    // ids; these names come from the same measurement.
     match type_id {
-        0 => "singleton",
+        0 => "fxdict",
+        1 => "guidmap",
         3 => "binary",
-        4 => "music_cue_table",
-        5 => "mission_flow",
+        4 => "decaltable",
+        5 => "facefxanimationset",
         6 => "wavebank",
         7 => "stringdb",
-        8 => "world_entity_data",
+        8 => "music_state_map",
         9 => "layer",
-        10 => "guidmap",
-        11 => "stance",
-        12 => "shader_scrb",
-        13 => "audio_group",
+        10 => "music_cue_table",
+        11 => "animationtable",
+        12 => "scrub",
+        13 => "sounddb",
         14 => "material_params",
         15 => "font",
         16 => "animation",
-        18 => "resident_misc",
+        17 => "world_entity_data",
+        18 => "chatter",
         19 => "model",
-        20 => "level",
         21 => "soundbank",
         22 => "lowresterrain",
         23 => "cfx_pack",
-        25 => "fx_dictionary",
-        26 => "music_state_map",
+        24 => "sequencetable",
+        25 => "watermap",
+        26 => "level",
         27 => "texture",
         28 => "path",
         29 => "effect",
-        30 => "object_registry",
-        31 => "anim_state_machine",
+        30 => "lineregion",
+        31 => "materialtable",
         32 => "terrainmesh",
-        33 => "sequence",
-        34 => "starter",
+        33 => "anim_state_machine",
+        34 => "facefxactor",
         35 => "script",
         _ => "unknown",
     }
