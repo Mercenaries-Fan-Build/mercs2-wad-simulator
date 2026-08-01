@@ -1401,7 +1401,23 @@ pub fn run(opts: Options) {
                                 ui.label(theme::disp_text("WORKSHOP", 9.5, theme::FAINT));
                                 ui.separator();
                                 ui.label(theme::disp_text(wb.verb().to_uppercase(), 10.0, theme::FAINT));
-                                if let Some(p) = &preview {
+                                // The breadcrumb names what the PAGE is working on. On the Shipment
+                                // page that is the Shipment — showing the previewed model instead
+                                // pointed at whatever Inspect happened to be holding.
+                                if wb == Workbench::Quartermaster {
+                                    if let Some(root) = qm.root() {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                root.file_name()
+                                                    .map(|s| s.to_string_lossy().to_string())
+                                                    .unwrap_or_default(),
+                                            )
+                                            .strong(),
+                                        );
+                                    } else {
+                                        ui.label(egui::RichText::new("no shipment").weak());
+                                    }
+                                } else if let Some(p) = &preview {
                                     ui.label(egui::RichText::new(&p.label).strong());
                                     ui.label(
                                         egui::RichText::new(format!("0x{:08X}", p.hash))

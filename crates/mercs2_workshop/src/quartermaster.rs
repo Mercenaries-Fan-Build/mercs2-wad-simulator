@@ -53,7 +53,7 @@ impl Gate {
             Gate::Empty => "Nothing queued",
             Gate::Blocked => "Build blocked",
             Gate::Advisory => "Ready to build",
-            Gate::Done => "Built and verified",
+            Gate::Done => "Built",
             Gate::NoGame => "Checks only",
         }
     }
@@ -71,6 +71,9 @@ impl Gate {
 /// Queued by the widgets, executed by [`apply`], so rendering never borrows the game stack.
 pub enum Act {
     Open,
+    /// Append a contribution of this `kind` to the manifest and write it back.
+    Add(&'static str),
+    Remove(usize),
     Recheck,
     Build,
     Reveal,
@@ -136,16 +139,27 @@ impl Panel {
         let (h, e, w) = self.counts();
         match g {
             Gate::Empty => "Open one, or export a character from the Skeleton bench.".into(),
-            Gate::Blocked if h > 0 => {
-                format!("{h} hang and {e} error, neither of which the game will report.")
-            }
-            Gate::Blocked => format!("{e} error, and the game will not say so."),
+            Gate::Blocked if h > 0 => format!(
+                "{h} hang and {e} error{}, neither of which the game will report.",
+                plural(e)
+            ),
+            Gate::Blocked => format!(
+                "{e} error{}, and the game will not say so.",
+                plural(e)
+            ),
             Gate::Advisory if w > 0 => format!(
                 "{w} advisor{}, and nothing built yet.",
                 if w == 1 { "y" } else { "ies" }
             ),
             Gate::Advisory => "Nothing built yet.".into(),
-            Gate::Done => "Rebuilds byte-identical.".into(),
+            // Was "Rebuilds byte-identical." — true of the BUILDER, and not something this
+            // run tested. State the artifact instead; a Verify pass is what would earn the claim.
+            Gate::Done => self
+                .report
+                .as_ref()
+                .and_then(|r| r.wad.as_ref())
+                .map(|w| format!("{} is on disk.", leaf(w)))
+                .unwrap_or_else(|| "Nothing to ship — no overlay was produced.".into()),
             Gate::NoGame => "Checks run without a game; building needs the retail WADs.".into(),
         }
     }
@@ -176,6 +190,44 @@ impl Panel {
         }
     }
 
+    /// Edit the manifest, write it back, and re-check.
+    ///
+    /// Writes YAML whatever the file was read as, so a Shipment authored in TOML or JSON is
+    /// refused rather than silently re-emitted in another format under the same filename.
+    /// `to_yaml` is documented as "the one format the Quartermaster WRITES".
+    fn mutate(
+        &mut self,
+        names: Option<&NameTable>,
+        edit: impl FnOnce(&mut mercs2_quartermaster::manifest::Manifest),
+    ) -> Result<(), String> {
+        let Some(sh) = &self.shipment else {
+            return Err("no shipment open".into());
+        };
+        if sh.format != mercs2_quartermaster::Format::Yaml {
+            return Err(format!(
+                "this Shipment is {:?}; editing writes YAML, so it is read-only here",
+                sh.format
+            ));
+        }
+        let (path, root) = (sh.manifest_path.clone(), sh.root.clone());
+        let mut m = sh.manifest.clone();
+        edit(&mut m);
+        let text = mercs2_quartermaster::to_yaml(&m)?;
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Re-open rather than patch state in place: the linter has to see the file that is now on
+        // disk, not the one we think we wrote.
+        self.open_shipment(&root, names);
+        Ok(())
+    }
+
+    /// A suffix that does not collide with what is already queued.
+    fn next_stub_index(&self) -> usize {
+        self.shipment
+            .as_ref()
+            .map(|s| s.manifest.contributions.len() + 1)
+            .unwrap_or(1)
+    }
+
     pub fn root(&self) -> Option<&Path> {
         self.shipment.as_ref().map(|s| s.root.as_path())
     }
@@ -197,6 +249,15 @@ impl Panel {
     pub fn status_line(&self, has_game: bool) -> String {
         let g = self.gate(has_game);
         format!("{} — {}", g.title(), self.gate_detail(g))
+    }
+}
+
+/// `""` for one, `"s"` for any other count — including zero.
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
     }
 }
 
@@ -304,12 +365,33 @@ fn tally(ds: &[Diagnostic]) -> String {
 }
 
 
+/// Sizes a person reads, not a raw byte count.
+fn human_bytes(n: usize) -> String {
+    if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / (1u64 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{:.1} kB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
 /// A key/value row that reads left-to-right.
 ///
 /// `theme::kv` right-aligns its value, which is right for a short number and wrong for a path: a
 /// long value grows leftward until it sits on top of its own key. Here the key keeps a fixed
 /// column and the value is elided from the FRONT, because the end of a path is what identifies it.
 fn row(ui: &mut egui::Ui, key: &str, value: &str, colour: Color32) {
+    row_of(ui, key, value, value, colour, true)
+}
+
+/// A row whose value is truncated from the END — right for a digest, where the leading characters
+/// are the ones anyone actually compares.
+fn row_head(ui: &mut egui::Ui, key: &str, value: &str, colour: Color32) {
+    row_of(ui, key, value, value, colour, false)
+}
+
+fn row_of(ui: &mut egui::Ui, key: &str, value: &str, hover: &str, colour: Color32, from_front: bool) {
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(egui::vec2(78.0, 14.0), egui::Sense::hover());
         ui.painter().text(
@@ -319,21 +401,105 @@ fn row(ui: &mut egui::Ui, key: &str, value: &str, colour: Color32) {
             egui::FontId::proportional(11.0),
             theme::FAINT,
         );
-        let avail = ui.available_width();
-        let max_chars = ((avail / 6.2).floor() as usize).max(12);
+        let max_chars = ((ui.available_width() / 6.2).floor() as usize).max(12);
         let n = value.chars().count();
-        let shown = if n > max_chars {
-            let tail: String = value.chars().skip(n - (max_chars - 1)).collect();
-            format!("\u{2026}{tail}")
-        } else {
+        let shown = if n <= max_chars {
             value.to_string()
+        } else if from_front {
+            // A path identifies itself by its tail.
+            format!("\u{2026}{}", value.chars().skip(n - (max_chars - 1)).collect::<String>())
+        } else {
+            format!("{}\u{2026}", value.chars().take(max_chars - 1).collect::<String>())
         };
         ui.label(egui::RichText::new(shown).monospace().size(11.0).color(colour))
-            .on_hover_text(value);
+            .on_hover_text(hover);
     });
 }
 
-// ─────────────────────────────────────────────────────────────────────────── navigator
+/// Every kind the format knows, grouped by the layer it lands in.
+///
+/// Taken from the `Contribution` enum rather than a hand-kept list, so a kind the format gains
+/// cannot silently go missing from the menu.
+pub const KINDS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Data",
+        &[
+            ("add_outfit", "A wearable outfit — model plus a wardrobe row"),
+            ("add_model", "A new model on a donor's rig"),
+            ("add_movie", "A Scaleform movie"),
+            ("replace_texture", "Replace a shipped texture, same hash"),
+        ],
+    ),
+    ("Script", &[("patch_lua", "Append to a shipped script")]),
+    (
+        "Code",
+        &[
+            ("native_hook", "An ASI plugin, or a symbol to detour"),
+            ("place_file", "A companion file beside a plugin"),
+        ],
+    ),
+    ("Any", &[("raw", "Opaque bytes plus a declared blast radius")]),
+];
+
+/// A schema-valid stub for `kind`.
+///
+/// Deliberately valid enough to SERIALIZE and invalid enough to LINT: the placeholder paths do not
+/// exist, so M0110 fires immediately and the panel tells the author what the contribution still
+/// needs. An empty-name stub would fail `Manifest::validate` on the way back in and the page would
+/// report "could not open" instead.
+fn stub(kind: &str, n: usize) -> Option<Contribution> {
+    use mercs2_quartermaster::manifest::{Layer, PlaceIn, Target, Textures};
+    let name = format!("my_asset_{n}");
+    Some(match kind {
+        "add_outfit" => Contribution::AddOutfit {
+            name: name.clone(),
+            slug: format!("MyOutfit{n}"),
+            display: "My outfit".into(),
+            wearer: "mattias".into(),
+            model: PathBuf::from("src/model.glb"),
+            donor: Some("pmc_hum_mattias".into()),
+            textures: Textures::default(),
+            retarget: None,
+        },
+        "add_model" => Contribution::AddModel {
+            name,
+            model: PathBuf::from("src/model.glb"),
+            donor: Some("pmc_hum_mattias".into()),
+            retarget: None,
+        },
+        "add_movie" => Contribution::AddMovie {
+            name,
+            movie: PathBuf::from("src/movie.gfx"),
+        },
+        "replace_texture" => Contribution::ReplaceTexture {
+            target: "al_hum_boss_ub".into(),
+            image: PathBuf::from("src/texture.png"),
+        },
+        "patch_lua" => Contribution::PatchLua {
+            target: "wifpmcinterior".into(),
+            append: PathBuf::from("src/patch.lua"),
+        },
+        "native_hook" => Contribution::NativeHook {
+            target: Target::Retail,
+            plugin: Some(PathBuf::from("src/plugin.asi")),
+            symbol: None,
+            touches: Vec::new(),
+        },
+        "place_file" => Contribution::PlaceFile {
+            file: PathBuf::from("src/plugin.ini"),
+            dest: PlaceIn::Scripts,
+        },
+        "raw" => Contribution::Raw {
+            description: None,
+            payload: PathBuf::from("src/payload.bin"),
+            target_layer: Layer::Data,
+            touches: Vec::new(),
+        },
+        _ => return None,
+    })
+}
+
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 navigator
 
 /// The contribution queue.
 ///
@@ -365,6 +531,23 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     ui.add_space(9.0);
     theme::eyebrow(ui, &format!("Contributions \u{b7} {}", s.manifest.contributions.len()));
     ui.add_space(5.0);
+
+    // The queue is where a Shipment is composed, so the menu that composes it lives here rather
+    // than behind a toolbar. Grouped by LAYER, because that is how the format groups them and it
+    // says where the change lands — Data in the overlay, Script through the linker, Code as a file
+    // beside the game.
+    let add_menu = |ui: &mut egui::Ui, out: &mut Vec<Act>| {
+        for (layer, kinds) in KINDS {
+            ui.label(theme::disp_text(layer.to_uppercase(), 9.0, theme::FAINT));
+            for (kind, blurb) in *kinds {
+                if ui.button(*kind).on_hover_text(*blurb).clicked() {
+                    out.push(Act::Add(kind));
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+        }
+    };
 
     for (i, c) in s.manifest.contributions.iter().enumerate() {
         let stripe = match p.row_severity(i) {
@@ -401,9 +584,29 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             0.0,
             stripe,
         );
-        if resp.interact(egui::Sense::click()).clicked() {
+        let resp = resp.interact(egui::Sense::click());
+        if resp.clicked() {
             acts.push(Act::Select(i));
         }
+        let mut menu: Vec<Act> = Vec::new();
+        resp.context_menu(|ui| {
+            add_menu(ui, &mut menu);
+            if ui.button("Remove this contribution").clicked() {
+                menu.push(Act::Remove(i));
+                ui.close_menu();
+            }
+        });
+        acts.extend(menu);
+    }
+
+    // The empty space below the rows is still the queue, so right-clicking it adds too — otherwise
+    // an empty Shipment would have nothing to right-click at all.
+    let rest = ui.available_rect_before_wrap();
+    if rest.height() > 4.0 {
+        let bg = ui.interact(rest, ui.id().with("qm_queue_bg"), egui::Sense::click());
+        let mut menu: Vec<Act> = Vec::new();
+        bg.context_menu(|ui| add_menu(ui, &mut menu));
+        acts.extend(menu);
     }
     acts
 }
@@ -686,14 +889,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
             );
         }
         for (i, w) in wad_stack.iter().enumerate() {
-            theme::kv(
-                ui,
-                if i == 0 { "base" } else { "overlay" },
-                egui::RichText::new(leaf(Path::new(w)))
-                    .monospace()
-                    .size(10.5)
-                    .color(theme::DIM),
-            );
+            row(ui, if i == 0 { "base" } else { "overlay" }, &leaf(Path::new(w)), theme::DIM);
         }
     });
 
@@ -746,25 +942,24 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
 
     if let Some(r) = &p.report {
         theme::section(ui, "Output", None, true, |ui| {
+            // The overlay, then its size and digest as their OWN rows. Using the filename as a
+            // key made it a 19-character label in a 78px column, so it ran across its own value.
             if let Some(w) = &r.wad {
-                theme::kv(
-                    ui,
-                    "Overlay",
-                    egui::RichText::new(leaf(w)).monospace().size(10.5).color(theme::TX),
-                );
+                let name = leaf(w);
+                row(ui, "Overlay", &name, theme::TX);
+                if let Some(pl) = r.placements.iter().find(|p| p.name == name) {
+                    row(ui, "Size", &human_bytes(pl.bytes), theme::DIM);
+                    row_head(ui, "sha256", &pl.sha256, theme::DIM);
+                }
             }
-            for pl in &r.placements {
-                theme::kv(
+            // Anything that is NOT the overlay — an .asi and its companions — and where it goes.
+            let overlay = r.wad.as_ref().map(|w| leaf(w));
+            for pl in r.placements.iter().filter(|p| Some(&p.name) != overlay.as_ref()) {
+                row(
                     ui,
                     &pl.name,
-                    egui::RichText::new(format!(
-                        "{} B \u{b7} {}",
-                        pl.bytes,
-                        &pl.sha256[..16.min(pl.sha256.len())]
-                    ))
-                    .monospace()
-                    .size(10.0)
-                    .color(theme::DIM),
+                    &format!("{} \u{b7} {:?}", human_bytes(pl.bytes), pl.destination),
+                    theme::DIM,
                 );
             }
             ui.add_space(4.0);
@@ -847,6 +1042,32 @@ pub fn apply(
 ) {
     match act {
         Act::Select(i) => p.selected = Some(i),
+        // The stub is schema-valid and deliberately NOT lint-clean: its placeholder paths do not
+        // exist, so M0110 fires straight away and the panel tells the author what it still needs.
+        Act::Add(kind) => {
+            let Some(c) = stub(kind, p.next_stub_index()) else {
+                p.error = Some(format!("no stub for `{kind}`"));
+                return;
+            };
+            match p.mutate(names, |m| m.contributions.push(c)) {
+                Ok(()) => *status = p.status.clone(),
+                Err(e) => {
+                    p.error = Some(e);
+                    *status = "could not write the manifest".into();
+                }
+            }
+        }
+        Act::Remove(i) => match p.mutate(names, |m| {
+            if i < m.contributions.len() {
+                m.contributions.remove(i);
+            }
+        }) {
+            Ok(()) => *status = p.status.clone(),
+            Err(e) => {
+                p.error = Some(e);
+                *status = "could not write the manifest".into();
+            }
+        },
         Act::Open => {
             if let Some(dir) = rfd::FileDialog::new()
                 .set_title("Open a Shipment folder")

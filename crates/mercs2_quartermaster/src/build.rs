@@ -2012,7 +2012,24 @@ pub fn build(
                 l.contributors
             ));
         }
-        blocks.extend(script_patch_blocks(&loaded, &linked, "patch_lua")?);
+        // Say what shipping a scripts block COSTS, because the number is not obvious and the
+        // failure surfaces far away.
+        //
+        // A scripts block is claimed whole: the overlay carries every script asset in it, not just
+        // the one that was patched. So a second installed mod that also touches scripts overlaps on
+        // all of them, and neither contains the other — Modkit reports it as a half-applied mod,
+        // and without that check it is the silent mutual annihilation the linter exists for.
+        // `qm link` across the installed set is the fix; a standalone overlay cannot be.
+        let script_blocks = script_patch_blocks(&loaded, &linked, "patch_lua")?;
+        let carried: usize = script_blocks.iter().map(|b| b.aset_entries.len()).sum();
+        if carried > 1 {
+            log.push(format!(
+                "scripts: this overlay claims {carried} script asset(s) — the whole block, not just \
+                 the patched script. It is valid on its own, and cannot be installed beside another \
+                 script-touching mod until `qm link` rebuilds them together."
+            ));
+        }
+        blocks.extend(script_blocks);
     }
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
