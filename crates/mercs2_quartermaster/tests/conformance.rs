@@ -79,6 +79,10 @@ contributions:
     name: my_hud_widgets
     movie: src/ui/widgets.gfx
 
+  - kind: add_ui
+    name: my_hud_overlay
+    movie: src/ui/overlay.gfx
+
   - kind: patch_lua
     target: wifpmcinterior
     append: src/scripts/my_append.lua
@@ -175,6 +179,11 @@ const JSON: &str = r#"
       "kind": "add_movie",
       "name": "my_hud_widgets",
       "movie": "src/ui/widgets.gfx"
+    },
+    {
+      "kind": "add_ui",
+      "name": "my_hud_overlay",
+      "movie": "src/ui/overlay.gfx"
     },
     {
       "kind": "patch_lua",
@@ -280,6 +289,11 @@ name = "my_hud_widgets"
 movie = "src/ui/widgets.gfx"
 
 [[contributions]]
+kind = "add_ui"
+name = "my_hud_overlay"
+movie = "src/ui/overlay.gfx"
+
+[[contributions]]
 kind = "patch_lua"
 target = "wifpmcinterior"
 append = "src/scripts/my_append.lua"
@@ -329,6 +343,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "edit_state_machine",
             "edit_stringdb",
             "add_movie",
+            "add_ui",
             "patch_lua",
             "native_hook",
             "place_file",

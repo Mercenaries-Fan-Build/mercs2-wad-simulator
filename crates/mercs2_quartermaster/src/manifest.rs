@@ -441,6 +441,25 @@ pub enum Contribution {
         /// uncompressed `GFX` both ship in retail, so neither is converted to the other.
         movie: PathBuf,
     },
+    /// Data(movie) + Script(the Lua that shows it). The Easy face over `add_movie` + `patch_lua`.
+    ///
+    /// `add_movie` mints the `cfx_pack`; nothing displays it until Lua binds it to a `FlashWidget`.
+    /// This kind generates that binding, so a whole custom UI element is one contribution. The
+    /// engine loads a movie onto a widget by NAME — the shipped `loadingscreen_standalone` is loaded
+    /// exactly this way (`mrxgui.lua`): `w = FlashWidget:new(); w:SetSwfFile(<name>); w:Play()`. It
+    /// is a PROVEN capability.
+    ///
+    /// The show is hooked into `wifpmcinterior`'s `_OnEnter` — the moment the player enters the PMC
+    /// HQ, GUI fully up, every session — because that is the ONE resident script the linker is
+    /// proven to merge (`add_outfit` uses it too). A once-guard means the widget is created a single
+    /// time. Where the widget sits and when it hides are the author's to tune; the generated Lua is
+    /// a working default, not a finished HUD.
+    AddUi {
+        /// The movie asset name minted as a `cfx_pack` and passed to `SetSwfFile`.
+        name: String,
+        /// The `.gfx` movie, `src/`-relative — verbatim, exactly like `add_movie`.
+        movie: PathBuf,
+    },
     /// Data, same-hash, FULLY RESIDENT. Non-destructive means the base WAD is never modified — not
     /// that the asset's appearance is preserved.
     ReplaceTexture { target: String, image: PathBuf },
@@ -529,6 +548,7 @@ impl Contribution {
         "add_texture",
         "add_sound",
         "add_movie",
+        "add_ui",
         "replace_texture",
         "patch_lua",
         "edit_state_machine",
@@ -546,6 +566,7 @@ impl Contribution {
             Contribution::AddTexture { .. } => "add_texture",
             Contribution::AddSound { .. } => "add_sound",
             Contribution::AddMovie { .. } => "add_movie",
+            Contribution::AddUi { .. } => "add_ui",
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",

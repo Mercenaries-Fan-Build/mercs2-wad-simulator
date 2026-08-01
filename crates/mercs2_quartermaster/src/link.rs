@@ -237,6 +237,108 @@ pub fn outfit_row_append(wearer: &str, slug: &str, model: &str, display: &str) -
     )
 }
 
+/// The name of the Quartermaster mod-loader script — a NEW `scripts_vz` script the linker mints and
+/// `add_script`s into the block, distinct from any retail script. Its ASET row (type 35, primary)
+/// is emitted automatically by `script_patch_blocks`' new-entry branch, which is the other half of
+/// the DLC's own recipe for a new importable script (`dlc_aset_normalize.py`).
+///
+/// `import` resolves by name → `pandemic_hash_m2` → ASET lookup, and is **scripts_vz only**, so this
+/// lands in the same `scripts_vz` block as its trampoline host `wifpmcinterior`, never the resident.
+pub const QM_MODLOADER_NAME: &str = "qm_modloader";
+
+/// One `add_ui` registration, resolved to the movie the loader must show. The linker collects these
+/// across every Shipment and bakes them into a single generated `qm_modloader` script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiRegistration {
+    /// Which Shipment asked for it — the tie-break for the deterministic bake order.
+    pub shipment: String,
+    /// The `cfx_pack` movie name the FlashWidget plays (`add_movie`'s asset name).
+    pub movie: String,
+}
+
+/// The whole `qm_modloader` script, baked from every UI registration.
+///
+/// This is the "expandable load space" the user asked for: the game's resident scripts stay
+/// untouched but for a one-line trampoline (see [`qm_trampoline_append`]); everything a mod adds
+/// lives *here*, in a script Quartermaster owns and re-mints each link. It defines the global `_QM`
+/// (matching how `import` publishes a module — `import("MrxPlayer")` then `MrxPlayer.Start()`), so
+/// the trampoline depends on the side effect, not on `import`'s return value.
+///
+/// Idempotent and fail-soft: `_registered`/`_ran` guards make a re-import or a re-entered interior a
+/// no-op, and each registration runs under `pcall` so one bad movie cannot wedge the loader.
+///
+/// Registrations are ordered by `(shipment, movie)` so the same set bakes byte-identically whatever
+/// order they arrive in — the same determinism rule [`linked_source`] holds.
+pub fn qm_modloader_source(regs: &[UiRegistration]) -> String {
+    let mut ordered: Vec<&UiRegistration> = regs.iter().collect();
+    ordered.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.movie.cmp(&b.movie)));
+
+    let mut inits = String::new();
+    for r in &ordered {
+        let n = lua_string(&r.movie);
+        // The creation sequence — new → SetSwfFile → Play → SetVisible — is the proven one from
+        // decompiled mrxgui.lua (`loadingscreen_standalone`). Existence-checked so a stripped widget
+        // table degrades rather than errors; the handle is parked in `_QM.ui[name]` for the author.
+        inits.push_str(&format!(
+            "  -- {shipment}: {movie}\n  \
+             table.insert(_QM._inits, function()\n    \
+             local w = FlashWidget:new(); w:SetSwfFile({n})\n    \
+             if w.Play then w:Play() end\n    \
+             if w.SetVisible then w:SetVisible(true) end\n    \
+             _QM.ui[{n}] = w\n  \
+             end)\n",
+            shipment = r.shipment,
+            movie = r.movie,
+        ));
+    }
+
+    format!(
+        "-- {name} — Quartermaster's expandable mod load space (generated; do not hand-edit).\n\
+         --\n\
+         -- The resident scripts import this by name; it defines the global _QM and its run() entry.\n\
+         -- All modded UI registrations live here, so the resident carries only a one-line trampoline\n\
+         -- into this script (see the [Quartermaster] trampoline appended to wifpmcinterior).\n\
+         _QM = _QM or {{}}\n\
+         _QM.ui = _QM.ui or {{}}\n\
+         if not _QM._registered then\n\
+         \x20 _QM._registered = true\n\
+         \x20 _QM._inits = {{}}\n\
+         {inits}\
+         \x20 function _QM.run()\n\
+         \x20   if _QM._ran then return end\n\
+         \x20   _QM._ran = true\n\
+         \x20   for _, f in ipairs(_QM._inits) do pcall(f) end\n\
+         \x20 end\n\
+         end\n",
+        name = QM_MODLOADER_NAME,
+    )
+}
+
+/// The one-line trampoline appended to `wifpmcinterior` — the ONLY thing the resident carries.
+///
+/// It wraps `_OnEnter` (the PMC-interior entry hook: GUI is fully up by then, it fires every
+/// session, and it is file-local so this concatenated append can wrap it — the same property the
+/// `_tOutfits` append relies on), synchronously `import`s `qm_modloader`, and runs it once. `import`
+/// is scripts_vz-only and synchronous, so by the time `_QM.run()` is reached the module is loaded
+/// and `_QM` is defined. Guarded through `_QM.run`'s own `_ran`, so re-entering the interior is a
+/// no-op. Nothing here grows as mods are added — new mods only enlarge `qm_modloader`.
+pub fn qm_trampoline_append() -> String {
+    format!(
+        "\n-- [Quartermaster] mod-loader trampoline. The expandable load space is {name} (a\n\
+         -- scripts_vz script imported by ASET hash); this is the only line the resident carries.\n\
+         do\n\
+         \x20 local _qm_prev_OnEnter = _OnEnter\n\
+         \x20 _OnEnter = function(...)\n\
+         \x20   if _qm_prev_OnEnter then _qm_prev_OnEnter(...) end\n\
+         \x20   import({name_lit})\n\
+         \x20   if _QM and _QM.run then _QM.run() end\n\
+         \x20 end\n\
+         end\n",
+        name = QM_MODLOADER_NAME,
+        name_lit = lua_string(QM_MODLOADER_NAME),
+    )
+}
+
 /// A Lua string literal with quotes and backslashes escaped, so an author-supplied `display:`
 /// cannot terminate the string and inject code into the block we compile.
 fn lua_string(s: &str) -> String {
@@ -301,7 +403,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations)
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[])
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -317,11 +419,24 @@ pub fn link_into_blocks(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
     mutations: &[ScriptMutation],
+    ui_regs: &[UiRegistration],
 ) -> Result<Vec<LinkedScript>, LinkError> {
+    // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any UI mod
+    // registered — ONE line regardless of how many, so the resident never grows with mod count.
+    // The expandable part is `qm_modloader`, minted after the base scripts link (below).
+    let mut all_mutations: Vec<ScriptMutation> = mutations.to_vec();
+    if !ui_regs.is_empty() {
+        all_mutations.push(ScriptMutation {
+            shipment: "quartermaster-modloader".into(),
+            target: "wifpmcinterior".into(),
+            append: qm_trampoline_append(),
+        });
+    }
+
     // Group by target so each script is compiled ONCE with all its appends, which is the entire
     // point — compiling per Shipment would mean the last one wins again, just more slowly.
     let mut by_target: BTreeMap<&str, Vec<&ScriptMutation>> = BTreeMap::new();
-    for m in mutations {
+    for m in &all_mutations {
         by_target.entry(m.target.as_str()).or_default().push(m);
     }
 
@@ -370,6 +485,45 @@ pub fn link_into_blocks(
             target: target.to_string(),
             contributors,
             base_source_bytes: base.len(),
+            linked_source_bytes: source.len(),
+            bytecode_bytes: bytecode.len(),
+            block: bi,
+        });
+    }
+
+    // Mint the mod loader. It is a NEW `scripts_vz` script — `add_script` appends its container and
+    // (via `script_patch_blocks`' new-entry branch) its primary type-35 ASET row, the two halves the
+    // DLC's own recipe ships. It goes in the block carrying `wifpmcinterior`, because `import` is
+    // scripts_vz-only and that is where the trampoline calls it from.
+    if !ui_regs.is_empty() {
+        let source = qm_modloader_source(ui_regs);
+        // BARE chunk name, like every other script here — see the module note.
+        let bytecode =
+            mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
+                target: QM_MODLOADER_NAME.to_string(),
+                message: e,
+            })?;
+        let bi = blocks
+            .iter()
+            .position(|tb| tb.block.find_script_by_name("wifpmcinterior").is_some())
+            .ok_or_else(|| LinkError::UnknownScript {
+                target: "wifpmcinterior".to_string(),
+                shipment: "quartermaster-modloader".to_string(),
+            })?;
+        blocks[bi]
+            .block
+            .add_script(QM_MODLOADER_NAME, &bytecode)
+            .map_err(|m| LinkError::Splice {
+                target: QM_MODLOADER_NAME.to_string(),
+                message: m,
+            })?;
+        let mut contributors: Vec<String> = ui_regs.iter().map(|r| r.shipment.clone()).collect();
+        contributors.sort();
+        contributors.dedup();
+        linked.push(LinkedScript {
+            target: QM_MODLOADER_NAME.to_string(),
+            contributors,
+            base_source_bytes: 0,
             linked_source_bytes: source.len(),
             bytecode_bytes: bytecode.len(),
             block: bi,
@@ -444,5 +598,62 @@ mod tests {
         let m = mutation("sean-devlin", "s", "-- outfit\n");
         let (src, _) = linked_source("base\n", &[&m]);
         assert!(src.contains("appended by Shipment: sean-devlin"), "{src}");
+    }
+
+    fn reg(shipment: &str, movie: &str) -> UiRegistration {
+        UiRegistration {
+            shipment: shipment.into(),
+            movie: movie.into(),
+        }
+    }
+
+    /// The loader defines the global the trampoline depends on, exposes `run`, and enrols each
+    /// movie's FlashWidget under the proven creation sequence.
+    #[test]
+    fn the_mod_loader_defines_qm_and_registers_each_movie() {
+        let src = qm_modloader_source(&[reg("mod-a", "my_hud"), reg("mod-b", "my_map")]);
+        assert!(src.contains("_QM = _QM or"), "must define the _QM global: {src}");
+        assert!(src.contains("function _QM.run()"), "must expose run(): {src}");
+        // Each movie enrols via the loadingscreen_standalone sequence.
+        for movie in ["my_hud", "my_map"] {
+            assert!(src.contains(&format!("w:SetSwfFile(\"{movie}\")")), "missing {movie}: {src}");
+        }
+        assert_eq!(src.matches("FlashWidget:new()").count(), 2, "one widget per movie: {src}");
+        // Guarded so a re-import or a re-entered interior is a no-op, and one bad movie is contained.
+        assert!(src.contains("if _QM._ran then return end"), "run must be once-only: {src}");
+        assert!(src.contains("pcall(f)"), "each init must be fail-soft: {src}");
+    }
+
+    /// Same registrations, same bytes, whatever order they arrive in — the determinism rule the whole
+    /// linker rests on, applied to the bake.
+    #[test]
+    fn the_bake_is_order_independent() {
+        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")]);
+        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")]);
+        assert_eq!(a, b, "install order must not change the baked loader");
+        // ordered by (shipment, movie): aaa/one appears before zzz/two.
+        assert!(a.find("one").unwrap() < a.find("two").unwrap(), "{a}");
+    }
+
+    /// A movie name cannot break out of its Lua string and inject code into the block we compile.
+    #[test]
+    fn a_movie_name_is_escaped_in_the_bake() {
+        let src = qm_modloader_source(&[reg("m", "evil\") os.exit() --")]);
+        // The escaped form keeps the payload INSIDE the string literal ...
+        assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
+        // ... and the unescaped breakout (a bare `evil") ` that would end the string early) is absent.
+        assert!(!src.contains("(\"evil\") os"), "the injection must not close the string: {src}");
+    }
+
+    /// The trampoline is exactly what the resident carries: it wraps `_OnEnter`, imports the loader
+    /// by name (so `import` hashes it to the ASET row `add_script` mints), and runs it once.
+    #[test]
+    fn the_trampoline_is_one_self_contained_hook() {
+        let t = qm_trampoline_append();
+        assert!(t.contains("_OnEnter = function"), "must wrap the entry hook: {t}");
+        assert!(t.contains("import(\"qm_modloader\")"), "must import by name: {t}");
+        assert!(t.contains("_QM.run()"), "must run the loader: {t}");
+        // It calls the previous _OnEnter, so wrapping it never drops the game's own behaviour.
+        assert!(t.contains("_qm_prev_OnEnter"), "must chain the prior hook: {t}");
     }
 }

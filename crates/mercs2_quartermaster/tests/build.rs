@@ -2494,4 +2494,19 @@ fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
             .any(|d| d.rule.code == "M0192"),
         "a novel movie name must warn that nothing references it"
     );
+
+    // ★ The SAME novel name via `add_ui` must stay quiet — add_ui bakes the FlashWidget that plays
+    // it, so the movie IS referenced. This is exactly the gap M0192 exists to catch, now closed by a
+    // typed kind rather than a hand-written patch_lua.
+    let dir3 = scratch("m0192_add_ui_quiet");
+    let ui = shipment(
+        &dir3,
+        "  - kind: add_ui\n    name: qm_totally_novel_movie\n    movie: src/x.gfx\n",
+    );
+    assert!(
+        !lint::game_checks(&ui.manifest, &game)
+            .iter()
+            .any(|d| d.rule.code == "M0192"),
+        "add_ui wires its own movie up, so a novel name must NOT warn"
+    );
 }

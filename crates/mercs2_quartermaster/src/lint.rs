@@ -323,7 +323,15 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
                     rule: M0192_MOVIE_UNREFERENCED,
                     severity: Severity::Warning,
                     message: format!(
-                        "no shipped movie is named {name:?}, so nothing in the game references it —                          the engine looks movies up by fixed names (`shell`, `topbar`, `MINIMAP`,                          a `*_briefing`, …). To REPLACE one, use its exact name. To add a NEW movie,                          also ship a `patch_lua` that points a UI site at it, or it will sit in the                          WAD and never display."
+                        "no shipped movie is named {name:?}, so nothing in the game references it \
+                         yet — the engine binds a movie to a `FlashWidget` by NAME. To REPLACE a \
+                         shipped movie use its exact name; to ADD a new one that appears on screen, \
+                         use `add_ui` instead of `add_movie` — it ships this same movie AND bakes \
+                         the `FlashWidget` that plays it into the mod loader for you. (By hand it is \
+                         an `add_movie` plus a `patch_lua` doing `w = FlashWidget:new(); \
+                         w:SetSwfFile(<name>); w:Play(); w:SetVisible(true)`, the way `mrxgui.lua` \
+                         loads `loadingscreen_standalone`.) Without one of these the movie sits in \
+                         the WAD unshown."
                     ),
                     at: Some(index),
                     fix: None,

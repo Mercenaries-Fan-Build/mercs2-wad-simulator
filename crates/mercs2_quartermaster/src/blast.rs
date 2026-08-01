@@ -262,6 +262,21 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddMovie { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
+            // add_ui is a movie (Additive write on its new hash, same first-writer-wins rule as
+            // AddMovie) PLUS a Script-layer touch: it appends the one-line mod-loader trampoline to
+            // `wifpmcinterior`. That claim is Additive, so two UI mods merge (both trampolines fold
+            // to one; both registrations bake into `qm_modloader`) rather than conflicting — the same
+            // shape as an outfit's wardrobe-row append.
+            Contribution::AddUi { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+                push(
+                    Access::Write,
+                    bare(Claim::Script {
+                        name: "wifpmcinterior".into(),
+                    }),
+                    Intent::Additive,
+                );
+            }
             Contribution::AddModel { name, donor, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
                 if let Some(d) = donor {

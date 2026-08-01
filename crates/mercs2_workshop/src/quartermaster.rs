@@ -476,7 +476,8 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddModel { name, .. }
         | Contribution::AddTexture { name, .. }
         | Contribution::AddSound { name, .. }
-        | Contribution::AddMovie { name, .. } => name.clone(),
+        | Contribution::AddMovie { name, .. }
+        | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
         | Contribution::EditStateMachine { target, .. }
@@ -602,6 +603,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("add_texture", "A new texture under a name you choose"),
             ("add_sound", "A new audio bank (wavebank / soundbank / sounddb)"),
             ("add_movie", "A Scaleform movie"),
+            ("add_ui", "A Scaleform movie, wired up so it appears on screen"),
             ("replace_texture", "Replace a shipped texture, same hash"),
             ("edit_state_machine", "Rewrite a destructible's states"),
             ("edit_stringdb", "Correct or localise UI text"),
@@ -698,6 +700,10 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             strings: PathBuf::from("src/strings.txt"),
         },
         "add_movie" => Contribution::AddMovie {
+            name,
+            movie: PathBuf::from("src/movie.gfx"),
+        },
+        "add_ui" => Contribution::AddUi {
             name,
             movie: PathBuf::from("src/movie.gfx"),
         },
@@ -1325,6 +1331,21 @@ fn contribution_form(
             );
             commit |= source_row(ui, "Movie", movie, root, &["gfx", "cfx", "swf"]);
         }
+        Contribution::AddUi { name, movie } => {
+            commit |= text_row(ui, "Asset name", name, "my_menu", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "a NAME, not a filename — retail's are bare (`topbar`, `pause_menu`)",
+            );
+            commit |= source_row(ui, "Movie", movie, root, &["gfx", "cfx", "swf"]);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "add_movie + a FlashWidget that plays it, baked into the mod loader — the movie \
+                 appears; its rect and hide trigger are yours to add in Lua",
+            );
+        }
         Contribution::ReplaceTexture { target, image } => {
             commit |= asset_row(ui, "Target", target, names);
             commit |= source_row(ui, "Image", image, root, &["png"]);
@@ -1682,6 +1703,13 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::AddMovie { name, .. } => {
             vec![("Writes".to_string(), format!("cfx_pack {name}  (new hash)"))]
         }
+        Contribution::AddUi { name, .. } => vec![
+            ("Writes".to_string(), format!("cfx_pack {name}  (new hash)")),
+            (
+                "Script".to_string(),
+                "qm_modloader plays it; one trampoline in wifpmcinterior".to_string(),
+            ),
+        ],
         Contribution::AddTexture { name, .. } => {
             vec![("Writes".to_string(), format!("texture {name}  (new hash)"))]
         }

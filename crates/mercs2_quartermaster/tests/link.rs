@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::sges::decompress_block;
-use mercs2_quartermaster::link::{self, ScriptMutation};
+use mercs2_quartermaster::link::{self, ScriptMutation, UiRegistration};
 
 fn corpus_root() -> Option<PathBuf> {
     let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -121,7 +121,7 @@ fn a_resident_script_links_into_the_resident_block() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts).expect("link must succeed");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[]).expect("link must succeed");
     drop(targets);
 
     assert_eq!(linked.len(), 1);
@@ -147,6 +147,71 @@ fn a_resident_script_links_into_the_resident_block() {
         .extract_lua(idx)
         .expect("extract")
         .starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER));
+}
+
+/// ★ add_ui's mod-loader mechanism, end-to-end against retail: a UI registration with NO plain
+/// mutation mints a brand-new `qm_modloader` script into `scripts_vz`, wires the one-line trampoline
+/// into `wifpmcinterior`, and leaves the block valid — the "expandable load space + stable trampoline"
+/// the whole design is for. This is the half the heli experiment got wrong (it edited the resident
+/// block directly); the fix is a new scripts_vz script reached by `import`.
+#[test]
+fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
+    let (Some(mut loaded), Some(corpus)) = (retail_blocks(), corpus_root()) else {
+        eprintln!("SKIPPING: need a vz.wad and the Lua corpus");
+        return;
+    };
+    let counts: Vec<usize> = loaded.iter().map(|(_, b)| b.entries.len()).collect();
+    // The scripts_vz block is index 0 in SCRIPT_BLOCKS order, and `import` is scripts_vz-only, so the
+    // loader must land there — pin which block we expect to grow.
+    let vz = 0usize;
+    assert!(loaded[vz].0.to_lowercase().contains("scripts_vz"));
+    assert!(loaded[vz].1.find_script_by_name("qm_modloader").is_none(), "must start novel");
+
+    // NO ScriptMutation — the whole edit is driven by the UI registration, proving add_ui does not
+    // depend on any other script contribution to reach the game.
+    let regs = vec![UiRegistration {
+        shipment: "hud-mod".into(),
+        movie: "my_hud_overlay".into(),
+    }];
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
+        .collect();
+    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs).expect("link must succeed");
+    drop(targets);
+
+    // Both the trampoline host and the minted loader come back as linked, both in scripts_vz.
+    let host = linked.iter().find(|l| l.target == "wifpmcinterior").expect("trampoline host linked");
+    let loader = linked.iter().find(|l| l.target == "qm_modloader").expect("loader minted");
+    assert_eq!(host.block, vz, "the trampoline lands in scripts_vz");
+    assert_eq!(loader.block, vz, "the loader lands in scripts_vz (import is scripts_vz-only)");
+    assert_eq!(loader.base_source_bytes, 0, "the loader has no base — it is newly minted");
+    assert_eq!(loader.contributors, vec!["hud-mod".to_string()]);
+
+    // Exactly one block grew, by exactly one entry (the loader); nothing else was disturbed.
+    for (i, ((path, block), before)) in loaded.iter().zip(counts).enumerate() {
+        let expected = if i == vz { before + 1 } else { before };
+        assert_eq!(block.entries.len(), expected, "{path} entry count wrong");
+    }
+
+    // The edited scripts_vz block re-parses, every container (loader included) CSUM-verifies, and the
+    // loader resolves by name and carries real Lua bytecode.
+    let (_, vz_block) = &loaded[vz];
+    let reparsed = ScriptsBlock::parse(&vz_block.serialize()).expect("scripts_vz must re-parse");
+    reparsed.verify_csums().expect("CSUMs must verify, new container included");
+    let idx = reparsed.find_script_by_name("qm_modloader").expect("loader resolves by name");
+    assert!(reparsed
+        .extract_lua(idx)
+        .expect("extract loader")
+        .starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER));
+    // wifpmcinterior is still present and still a script (the trampoline appended, not replaced).
+    assert!(reparsed.find_script_by_name("wifpmcinterior").is_some());
+
+    // The loader's ASET row is emitted by `script_patch_blocks`' new-entry branch: its name hash has
+    // no row in the base block, which is precisely the condition that mints a PRIMARY type-35 row.
+    // (Proven directly in build.rs; asserted here at the source — a novel entry the base never had.)
+    let loader_hash = mercs2_formats::hash::pandemic_hash_m2("qm_modloader");
+    assert_eq!(reparsed.entries[idx].name_hash, loader_hash, "entry keyed by the import name");
 }
 
 /// A `vz` target and a `resident` target in one Shipment must each land in their own block.
@@ -175,7 +240,7 @@ fn vz_and_resident_targets_split_across_two_blocks() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts).expect("link");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[]).expect("link");
     drop(targets);
 
     assert_eq!(linked.len(), 2);
@@ -402,12 +467,14 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
         &mut [link::TargetBlock { path: path.clone(), block: &mut fwd }],
         &corpus,
         &[a.clone(), z.clone()],
+        &[],
     )
     .expect("link forward");
     let two = link::link_into_blocks(
         &mut [link::TargetBlock { path, block: &mut rev }],
         &corpus,
         &[z, a],
+        &[],
     )
     .expect("link reversed");
 

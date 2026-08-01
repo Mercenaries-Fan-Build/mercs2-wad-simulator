@@ -547,6 +547,11 @@ pub fn script_mutations(
                     append: link::outfit_row_append(wearer, slug, name, display),
                 });
             }
+            // add_ui's Script half is NOT a plain append. Its FlashWidget registration is baked into
+            // the generated `qm_modloader` script and reached through a one-line trampoline the
+            // linker synthesizes — so the resident never grows with mod count. Collected separately
+            // by `ui_registrations`; the Data half (the cfx_pack movie) is in `lower`.
+            Contribution::AddUi { .. } => {}
             Contribution::PatchLua { target, append } => {
                 let path = root.join(append);
                 let source = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
@@ -564,6 +569,106 @@ pub fn script_mutations(
         }
     }
     Ok(out)
+}
+
+/// Every `add_ui`'s FlashWidget registration, for the linker to bake into `qm_modloader`.
+///
+/// Kept separate from [`script_mutations`] because a UI mod does NOT append to a base script — its
+/// registration lives in the Quartermaster-owned load space, reached by a trampoline the linker
+/// synthesizes once. Returning an empty vec (no `add_ui`) means no loader is minted at all.
+pub fn ui_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::UiRegistration> {
+    let shipment = manifest.shipment.name.clone();
+    manifest
+        .contributions
+        .iter()
+        .filter_map(|c| match c {
+            Contribution::AddUi { name, .. } => Some(link::UiRegistration {
+                shipment: shipment.clone(),
+                // `SetSwfFile` hashes this name to find the cfx_pack, so it must be the SAME `name`
+                // the movie block is registered under (see the AddMovie/AddUi arm in `lower`, which
+                // mints the pack at `asset_hash(name)`), not the source file's stem.
+                movie: name.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Mint a Scaleform movie as a `cfx_pack` patch block under `name`, from the file at `root/movie`.
+///
+/// Shared by `add_movie` and `add_ui` so the two ship byte-identical Data — the only difference is
+/// that `add_ui` also bakes a FlashWidget registration into `qm_modloader`. Parses before wrapping
+/// (a non-movie leaf still checksums and resolves — the loader is the first to notice, and it names
+/// nothing), then emits the pack with its ADDITIVE, PRIMARY cfx_pack ASET row.
+fn lower_movie(
+    root: &Path,
+    name: &str,
+    movie: &Path,
+    index: usize,
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<PatchBlock, BuildError> {
+    let path = root.join(movie);
+    let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+        index,
+        kind,
+        message: format!("reading {}: {e}", path.display()),
+    })?;
+
+    let parsed = mercs2_formats::gfx::GfxMovie::parse(&bytes).map_err(|m| BuildError::Lower {
+        index,
+        kind,
+        message: format!(
+            "{} is not a Scaleform movie this build can read: {m}. Expected a `.gfx` beginning \
+             with `GFX` or `CFX` (or the SWF spellings `FWS`/`CWS`) — retail ships 61 `CFX` and 3 \
+             `GFX`, so either is fine, but a project file, an already-wrapped container or a \
+             truncated export is not.",
+            path.display()
+        ),
+    })?;
+
+    let hash = crate::manifest::asset_hash(name);
+    let block_bytes = mercs2_formats::gfx::build_cfx_pack_block(hash, &bytes);
+
+    // The tag census is logged rather than merely counted: an emitter that silently dropped the
+    // movie's content still produces a valid header, and "0 tags" in the log is the only place that
+    // would show.
+    let features = parsed.features();
+    let [w, h] = parsed.stage_px();
+    log.push(format!(
+        "contributions[{index}] {kind} {name} 0x{hash:08X} ← {} \
+         {} v{} {}x{} px, {} tag(s): {} shape(s), {} sprite(s), {} button(s), \
+         {} edit-text, {} DoAction, {} import(s), {} GFx-ext → {} bytes",
+        path.display(),
+        String::from_utf8_lossy(&parsed.magic),
+        parsed.version,
+        w,
+        h,
+        parsed.tags.len(),
+        features.shapes,
+        features.sprites,
+        features.buttons,
+        features.edit_texts,
+        features.do_action,
+        features.imports,
+        features.gfx_ext_tags,
+        block_bytes.len()
+    ));
+
+    // ADDITIVE and PRIMARY. A movie has no LOD chain at all, so both rung halves stay at their
+    // sentinels — `0x0000` in the low 16 is the dangling-rung HANG, not "no rung".
+    let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_CFX_PACK);
+    PatchBlock::from_decompressed(
+        &block_bytes,
+        format!("blocks\\VZ\\mod_{hash:08x}.block"),
+        vec![aset],
+        None,
+    )
+    .map_err(|m| BuildError::Lower {
+        index,
+        kind,
+        message: m,
+    })
 }
 
 /// Encode one authored image into a `TYPE_ID_TEXTURE` patch block under `asset_name`.
@@ -1409,72 +1514,15 @@ fn lower(
         }
 
         Contribution::AddMovie { name, movie } => {
-            let path = root.join(movie);
-            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", path.display()),
-            })?;
+            Ok(Lowering::Block(lower_movie(root, name, movie, index, kind, log)?))
+        }
 
-            // Parse before wrapping. A container whose `data` leaf is not a movie still checksums,
-            // still walks, and still resolves — the loader is the first thing that finds out, and it
-            // reports `GFxLoader read failed` with no reference to which asset.
-            let parsed =
-                mercs2_formats::gfx::GfxMovie::parse(&bytes).map_err(|m| BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{} is not a Scaleform movie this build can read: {m}. Expected a `.gfx` \
-                         beginning with `GFX` or `CFX` (or the SWF spellings `FWS`/`CWS`) — retail \
-                         ships 61 `CFX` and 3 `GFX`, so either is fine, but a project file, an \
-                         already-wrapped container or a truncated export is not.",
-                        path.display()
-                    ),
-                })?;
-
-            let hash = crate::manifest::asset_hash(name);
-            let block_bytes = mercs2_formats::gfx::build_cfx_pack_block(hash, &bytes);
-
-            // The tag census is logged rather than merely counted: an emitter that silently dropped
-            // the movie's content still produces a valid header, and "0 tags" in the log is the only
-            // place that would show.
-            let features = parsed.features();
-            let [w, h] = parsed.stage_px();
-            log.push(format!(
-                "contributions[{index}] add_movie {name} 0x{hash:08X} ← {} \
-                 {} v{} {}x{} px, {} tag(s): {} shape(s), {} sprite(s), {} button(s), \
-                 {} edit-text, {} DoAction, {} import(s), {} GFx-ext → {} bytes",
-                path.display(),
-                String::from_utf8_lossy(&parsed.magic),
-                parsed.version,
-                w,
-                h,
-                parsed.tags.len(),
-                features.shapes,
-                features.sprites,
-                features.buttons,
-                features.edit_texts,
-                features.do_action,
-                features.imports,
-                features.gfx_ext_tags,
-                block_bytes.len()
-            ));
-
-            // ADDITIVE and PRIMARY. A movie has no LOD chain at all, so both rung halves stay at
-            // their sentinels — `0x0000` in the low 16 is the dangling-rung HANG, not "no rung".
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_CFX_PACK);
-            let block = PatchBlock::from_decompressed(
-                &block_bytes,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower {
-                index,
-                kind,
-                message: m,
-            })?;
-            Ok(Lowering::Block(block))
+        // add_ui = the Data half of add_movie (this cfx_pack) + a Script half the linker bakes into
+        // `qm_modloader` (collected by `ui_registrations`). Its block IS a movie block — same encoder,
+        // same primary cfx_pack ASET row — so a hand-authored `add_movie` + trampoline and an `add_ui`
+        // ship byte-identical Data. The composition, not a new format, is what makes the movie appear.
+        Contribution::AddUi { name, movie } => {
+            Ok(Lowering::Block(lower_movie(root, name, movie, index, kind, log)?))
         }
 
         // Contributes no block: its whole effect is a declared mutation, collected by
@@ -2208,6 +2256,7 @@ pub fn build(
         }
     }
     let mutations = script_mutations(manifest, &shipment.root)?;
+    let ui_regs = ui_registrations(manifest);
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -2219,7 +2268,10 @@ pub fn build(
     // mounted wins and the others' Lua disappears, which is the failure the linker exists to
     // prevent. That cross-Shipment relink belongs to deploy (Modkit), and this is deliberately only
     // its single-Shipment case.
-    if !mutations.is_empty() {
+    //
+    // `ui_regs` counts too: an add_ui with no other script edit still mints `qm_modloader` and the
+    // one-line trampoline, so the link must run for it even when `mutations` is empty.
+    if !mutations.is_empty() || !ui_regs.is_empty() {
         let Some(game) = game.as_deref_mut() else {
             return Err(BuildError::GameRequired {
                 index: 0,
@@ -2246,7 +2298,7 @@ pub fn build(
             })
             .collect();
         let linked =
-            link::link_into_blocks(&mut targets, corpus, &mutations).map_err(|e| {
+            link::link_into_blocks(&mut targets, corpus, &mutations, &ui_regs).map_err(|e| {
                 BuildError::Lower {
                     index: 0,
                     kind: "patch_lua",
@@ -2475,10 +2527,14 @@ pub fn link_installed(
             names.join(", ")
         ));
     }
+    let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
+        ui_regs.extend(ui_registrations(&s.manifest));
     }
-    if mutations.is_empty() {
+    // A UI mod touches the Script layer too — it mints `qm_modloader` and the trampoline — so an
+    // install of nothing but add_ui Shipments still has script work to do.
+    if mutations.is_empty() && ui_regs.is_empty() {
         log.push("no installed Shipment touches a script — nothing to link".into());
         return Ok(LinkReport {
             wad: None,
@@ -2488,8 +2544,9 @@ pub fn link_installed(
         });
     }
     log.push(format!(
-        "linking {} mutation(s) from {} Shipment(s)",
+        "linking {} mutation(s) and {} UI registration(s) from {} Shipment(s)",
         mutations.len(),
+        ui_regs.len(),
         shipments.len()
     ));
 
@@ -2501,13 +2558,14 @@ pub fn link_installed(
             block: &mut lb.block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, corpus_root, &mutations).map_err(|e| {
-        BuildError::Lower {
-            index: 0,
-            kind: "link",
-            message: e.to_string(),
-        }
-    })?;
+    let linked =
+        link::link_into_blocks(&mut targets, corpus_root, &mutations, &ui_regs).map_err(|e| {
+            BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: e.to_string(),
+            }
+        })?;
     drop(targets);
     for l in &linked {
         log.push(format!(

@@ -126,28 +126,93 @@ impl ScriptsBlock {
     /// CSUM, and the entry `chunk_size` change — the UCFX header / descriptor
     /// offsets / INFO+DEPS bodies are untouched.
     pub fn replace_lua(&mut self, idx: usize, new_luaq: &[u8]) -> Result<(), String> {
-        let c = &self.entries[idx].bytes;
-        let lay = parse_container(c)?;
-        if lay.binn_body_size as usize != lay.luaq_len {
-            return Err(format!(
-                "BINN.body_size ({}) != LuaQ length ({}); metadata-bearing BINN not yet supported",
-                lay.binn_body_size, lay.luaq_len
-            ));
-        }
-        // Rebuild: [prefix up to LuaQ] + [new LuaQ], patch body_size, append CSUM.
-        let mut nc = Vec::with_capacity(lay.luaq_off + new_luaq.len() + 8);
-        nc.extend_from_slice(&c[..lay.luaq_off]);
-        nc.extend_from_slice(new_luaq);
-        // BINN descriptor body_size lives at binn_desc_off + 8.
-        let bs_off = lay.binn_desc_off + 8;
-        nc[bs_off..bs_off + 4].copy_from_slice(&(new_luaq.len() as u32).to_le_bytes());
-        // Recompute CSUM over [UCFX .. pre-CSUM] and append the 8-byte trailer.
-        let csum = crc32_mercs2(&nc);
-        nc.extend_from_slice(b"CSUM");
-        nc.extend_from_slice(&csum.to_le_bytes());
-        self.entries[idx].bytes = nc;
+        self.entries[idx].bytes = rebuild_container_with_luaq(&self.entries[idx].bytes, new_luaq)?;
         Ok(())
     }
+
+    /// Add a BRAND-NEW script entry carrying `luaq`, named `name`. Returns its index.
+    ///
+    /// This is what lets a Shipment ship a new resident script (a mod loader) instead of only
+    /// appending to an existing one. The recipe is not speculative — it is the one the shipped DLC
+    /// uses. Confirmed from four angles:
+    ///
+    /// * the exe's own bootstrap: `import(m)` → `_SYS._IMPORT(getfenv(2), m)`, and the engine
+    ///   resolves a module **by ASET hash across all loaded WADs**
+    ///   (`docs/vanilla_mission_lifecycle_analysis.md` Open-Q1);
+    /// * every one of the 114 retail `scripts_vz` scripts carries a primary type-35 ASET row;
+    /// * `dlc_aset_normalize.py` adds `script_aset_entry(pandemic_hash_m2(name))` for each NEW DLC
+    ///   script precisely so `import`/`dynamic_import` can find it — a shipped, working case;
+    /// * the heli experiment's documented lesson is this same recipe; its hangs were a MISSING ASET
+    ///   row, use of the *resident* block (worldentity double-registration) and a DEPS cycle — all
+    ///   avoided here by targeting `scripts_vz` and resolving via `import` (no DEPS edge).
+    ///
+    /// **This method only builds the block entry.** The caller MUST also emit the matching ASET row
+    /// (type 35, this block, primary `0xFFFF`), or the loader wedges silently when the import is
+    /// resolved — that is step 4, the one that bites.
+    ///
+    /// The container is CLONED from an existing INFO/BINN script in this block, then its LuaQ is
+    /// swapped, so it reuses the exact container shape the engine already accepts. `luaq` must be
+    /// compiled with the BARE `name` as its chunk name (retail's convention, which `mercs2_luac`
+    /// follows). Refuses a duplicate name — two entries for one hash make the import ambiguous.
+    pub fn add_script(&mut self, name: &str, luaq: &[u8]) -> Result<usize, String> {
+        let h = pandemic_hash_m2(name);
+        if self.entries.iter().any(|e| e.name_hash == h) {
+            return Err(format!(
+                "a container named {name:?} (0x{h:08X}) already exists; use replace_lua to edit it"
+            ));
+        }
+        // A plain INFO/BINN script (no DEPS): the new script declares no dependencies — its load
+        // timing is controlled by whoever imports it, not by a DEPS edge.
+        let (field_c, template) = self
+            .entries
+            .iter()
+            .find(|e| {
+                e.type_hash == crate::types::TYPE_HASH_SCRIPT && !container_has_chunk(&e.bytes, b"DEPS")
+            })
+            .map(|e| (e.field_c, e.bytes.clone()))
+            .ok_or("no plain INFO/BINN script in this block to use as a template")?;
+        let bytes = rebuild_container_with_luaq(&template, luaq)?;
+        self.entries.push(Entry {
+            name_hash: h,
+            type_hash: crate::types::TYPE_HASH_SCRIPT,
+            field_c,
+            bytes,
+        });
+        Ok(self.entries.len() - 1)
+    }
+}
+
+/// True if a UCFX container's descriptor table carries a chunk tagged `tag`.
+fn container_has_chunk(c: &[u8], tag: &[u8; 4]) -> bool {
+    if c.len() < 20 || &c[0..4] != b"UCFX" {
+        return false;
+    }
+    let n_desc = rd_u32(c, 16) as usize;
+    (0..n_desc).any(|d| {
+        let off = 20 + d * 20;
+        off + 4 <= c.len() && &c[off..off + 4] == tag
+    })
+}
+
+/// Swap a container's LuaQ tail for `new_luaq`, fixing the BINN `body_size` and re-stamping the
+/// CSUM. Shared by [`ScriptsBlock::replace_lua`] and [`ScriptsBlock::add_script`].
+fn rebuild_container_with_luaq(c: &[u8], new_luaq: &[u8]) -> Result<Vec<u8>, String> {
+    let lay = parse_container(c)?;
+    if lay.binn_body_size as usize != lay.luaq_len {
+        return Err(format!(
+            "BINN.body_size ({}) != LuaQ length ({}); metadata-bearing BINN not yet supported",
+            lay.binn_body_size, lay.luaq_len
+        ));
+    }
+    let mut nc = Vec::with_capacity(lay.luaq_off + new_luaq.len() + 8);
+    nc.extend_from_slice(&c[..lay.luaq_off]);
+    nc.extend_from_slice(new_luaq);
+    let bs_off = lay.binn_desc_off + 8; // BINN descriptor body_size
+    nc[bs_off..bs_off + 4].copy_from_slice(&(new_luaq.len() as u32).to_le_bytes());
+    let csum = crc32_mercs2(&nc);
+    nc.extend_from_slice(b"CSUM");
+    nc.extend_from_slice(&csum.to_le_bytes());
+    Ok(nc)
 }
 
 /// Parse a single container and return field offsets we need for editing.
