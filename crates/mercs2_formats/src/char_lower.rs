@@ -68,6 +68,13 @@ pub struct LowerOpts {
     /// bones and fit one group. Implies no per-material textures (one group carries one material) and
     /// forgoes the donor-resampled limb polish — the trade for placement stability.
     pub single_host: bool,
+
+    /// `single_host` diffuse-atlas UV remap: glTF material index → `[u0, v0, su, sv]`, the cell that
+    /// material's texture occupies in the baked atlas (fractions of the atlas). When present, each
+    /// vertex's UV is folded into `[0,1]` and mapped into its material's cell, so ONE atlas texture
+    /// on the single group skins every part correctly. Built by the Quartermaster from the GLB's own
+    /// per-material maps; empty for the single-texture / donor-skin cases. `single_host` only.
+    pub atlas_cells: std::collections::HashMap<usize, [f32; 4]>,
 }
 
 /// What the lowering produced, for a caller that wants to report on it.
@@ -424,6 +431,34 @@ pub fn character_into_donor(
             })
             .collect(),
     };
+
+    // SINGLE-HOST DIFFUSE ATLAS: fold every part's UVs into its cell of the one atlas texture, so a
+    // multi-material import wears its whole correct skin from ONE material. The conform leaves UVs
+    // untouched (it re-poses positions/normals), so remapping `mesh.uvs` here is faithful. A vertex
+    // belongs to exactly one source part (the parts are vertex-separable — the same property that
+    // lets each carry its own material), so its material is unambiguous.
+    let mut mesh = mesh;
+    if opts.single_host && !opts.atlas_cells.is_empty() {
+        let mut vert_mat: Vec<Option<usize>> = vec![None; mesh.uvs.len()];
+        for part in &glb.parts {
+            let Some(m) = part.material else { continue };
+            let end = (part.tri_start + part.tri_count).min(glb.tris.len());
+            for t in part.tri_start..end {
+                for &v in &glb.tris[t] {
+                    if let Some(slot) = vert_mat.get_mut(v as usize) {
+                        *slot = Some(m);
+                    }
+                }
+            }
+        }
+        for (vi, uv) in mesh.uvs.iter_mut().enumerate() {
+            let Some(m) = vert_mat[vi] else { continue };
+            let Some(&[u0, v0, su, sv]) = opts.atlas_cells.get(&m) else { continue };
+            // Fold into [0,1] (the source maps tile the face parts, V in [1,2] etc.) then into the cell.
+            let frac = |x: f32| (x - x.floor()).clamp(0.0, 1.0);
+            *uv = [u0 + frac(uv[0]) * su, v0 + frac(uv[1]) * sv];
+        }
+    }
 
     let (block, stats, audits) = if hosts.len() == 1 {
         // The single-host path hands the WHOLE-MODEL palette straight to `patch_skin_info56`, which

@@ -7010,6 +7010,7 @@ pub(crate) fn faithful_lower_opts(
         // The Workshop preview/export always uses the faithful multi-group path; single-group is a
         // Quartermaster build choice (`AddOutfit::single_group`) for placement-stable foreign rigs.
         single_host: false,
+        atlas_cells: std::collections::HashMap::new(),
     };
     Ok((glb, donor, opts))
 }

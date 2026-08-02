@@ -816,6 +816,113 @@ fn build_texture_from_rgba(
     Ok((block, to))
 }
 
+/// Bilinear-resample an [`Rgba`] to `(w, h)`. Straight (non-premultiplied) RGBA; a clone when the
+/// dimensions already match. The build has no `image` crate, so the one resampler it needs for the
+/// single-group atlas lives here.
+fn resize_rgba(src: &Rgba, w: usize, h: usize) -> Rgba {
+    if src.width == w && src.height == h {
+        return Rgba { width: w, height: h, pixels: src.pixels.clone() };
+    }
+    let (sw, sh) = (src.width.max(1), src.height.max(1));
+    let mut px = vec![0.0f32; w * h * 4];
+    let sx = sw as f32 / w as f32;
+    let sy = sh as f32 / h as f32;
+    let at = |xx: usize, yy: usize, c: usize| src.pixels[(yy * sw + xx) * 4 + c];
+    for y in 0..h {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).max(0.0);
+        let y0 = fy.floor() as usize;
+        let y1 = (y0 + 1).min(sh - 1);
+        let ty = fy - y0 as f32;
+        for x in 0..w {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).max(0.0);
+            let x0 = fx.floor() as usize;
+            let x1 = (x0 + 1).min(sw - 1);
+            let tx = fx - x0 as f32;
+            for c in 0..4 {
+                let top = at(x0, y0, c) * (1.0 - tx) + at(x1, y0, c) * tx;
+                let bot = at(x0, y1, c) * (1.0 - tx) + at(x1, y1, c) * tx;
+                px[(y * w + x) * 4 + c] = top * (1.0 - ty) + bot * ty;
+            }
+        }
+    }
+    Rgba { width: w, height: h, pixels: px }
+}
+
+/// Bake the used materials' diffuse maps into ONE atlas texture, returning the atlas image and each
+/// material's cell as `[u0, v0, su, sv]` (fractions of the atlas). This is what lets `single_group`
+/// wear a MULTI-material import's whole correct skin from one draw group / one material: the caller
+/// remaps each part's UVs into its cell (see `char_lower::LowerOpts::atlas_cells`).
+///
+/// A shelf packer into a fixed 2048-wide atlas, tallest-first, each cell capped so the pack fits in
+/// 2048 tall (dropping the cap 1024→512→… on overflow). Deterministic given the same inputs, which
+/// keeps the build reproducible.
+fn bake_diffuse_atlas(mats: &[(usize, Rgba)]) -> (Rgba, std::collections::HashMap<usize, [f32; 4]>) {
+    use std::collections::HashMap;
+    const WIDTH: usize = 2048;
+    const MAXH: usize = 2048;
+    for &cap in &[1024usize, 512, 256, 128, 64] {
+        // Cell size = native, capped to `cap` and to the atlas width.
+        let mut cells: Vec<(usize, usize, usize)> = mats
+            .iter()
+            .map(|(m, img)| (*m, img.width.min(cap).min(WIDTH).max(4), img.height.min(cap).max(4)))
+            .collect();
+        cells.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        let mut placed: HashMap<usize, (usize, usize, usize, usize)> = HashMap::new();
+        let (mut x, mut y, mut row_h, mut used_h, mut ok) = (0usize, 0usize, 0usize, 0usize, true);
+        for &(m, cw, ch) in &cells {
+            if x + cw > WIDTH {
+                x = 0;
+                y += row_h;
+                row_h = 0;
+            }
+            if y + ch > MAXH {
+                ok = false;
+                break;
+            }
+            placed.insert(m, (x, y, cw, ch));
+            x += cw;
+            row_h = row_h.max(ch);
+            used_h = used_h.max(y + ch);
+        }
+        if !ok {
+            continue;
+        }
+        let atlas_h = ((used_h + 3) / 4 * 4).max(4);
+        let mut atlas = Rgba { width: WIDTH, height: atlas_h, pixels: vec![0.0; WIDTH * atlas_h * 4] };
+        for i in 0..WIDTH * atlas_h {
+            atlas.pixels[i * 4 + 3] = 255.0; // opaque
+        }
+        let mut cellmap = HashMap::new();
+        for (m, img) in mats {
+            let (px, py, cw, ch) = placed[m];
+            let r = resize_rgba(img, cw, ch);
+            for ry in 0..ch {
+                for rx in 0..cw {
+                    let s = (ry * cw + rx) * 4;
+                    let dst = ((py + ry) * WIDTH + (px + rx)) * 4;
+                    atlas.pixels[dst..dst + 4].copy_from_slice(&r.pixels[s..s + 4]);
+                }
+            }
+            cellmap.insert(
+                *m,
+                [
+                    px as f32 / WIDTH as f32,
+                    py as f32 / atlas_h as f32,
+                    cw as f32 / WIDTH as f32,
+                    ch as f32 / atlas_h as f32,
+                ],
+            );
+        }
+        return (atlas, cellmap);
+    }
+    // Unreachable for any real input (cap 64 fits thousands of cells); a valid 4x4 keeps it total.
+    let mut px = vec![0.0f32; 64];
+    for i in 0..16 {
+        px[i * 4 + 3] = 255.0;
+    }
+    (Rgba { width: 4, height: 4, pixels: px }, std::collections::HashMap::new())
+}
+
 /// Lower a rigged `.glb` onto a donor — the SKINNED path, shared by `add_model` and `add_outfit`.
 ///
 /// This used to be a flat refusal (`BuildError::Unsupported`), because everything it needs lived in
@@ -1122,6 +1229,67 @@ fn lower_skinned(
         }
     }
 
+    // SINGLE-GROUP DIFFUSE ATLAS. Per-material skins need one host group per material, which
+    // `single_group` collapses away — so instead bake all the used materials' diffuse maps into ONE
+    // atlas texture and let the lowering remap each part's UVs into its cell. That is what makes a
+    // MULTI-material import wear its whole correct skin on one draw group, entirely from the GLB's own
+    // embedded textures and the manifest — no hand-massaged source asset. Built here so the whole
+    // Shipment stays reproducible from `single_group: true` + the original model.
+    let mut atlas_cells: std::collections::HashMap<usize, [f32; 4]> = std::collections::HashMap::new();
+    if !author_supplied_skin && single_group {
+        let used: std::collections::BTreeSet<usize> =
+            glb.parts.iter().filter_map(|p| p.material).collect();
+        if !used.is_empty() {
+            let mat_tex =
+                mercs2_formats::char_import::load_char_material_textures(&root.join(model))
+                    .map_err(lower_err)?;
+            let mut decoded: Vec<(usize, Rgba)> = Vec::new();
+            for &m in &used {
+                let Some(mt) = mat_tex.get(m) else { continue };
+                let Some(bytes) = &mt.diffuse else { continue };
+                match read_png_rgba_bytes(bytes, &format!("{name} material {m} diffuse")) {
+                    Ok(img) => decoded.push((m, img)),
+                    Err(e) => log.push(format!(
+                        "contributions[{index}] {kind} {name}: material {m} diffuse skipped ({e})"
+                    )),
+                }
+            }
+            if !decoded.is_empty() {
+                let (atlas_img, cells) = bake_diffuse_atlas(&decoded);
+                let (aw, ah) = (atlas_img.width, atlas_img.height);
+                match build_texture_from_rgba(
+                    index,
+                    kind,
+                    &format!("{name}_dm"),
+                    atlas_img,
+                    false,
+                    Some(0.6),
+                    &format!("{name}_dm atlas"),
+                ) {
+                    Ok((block, to)) => {
+                        let froms = mercs2_formats::texture::material_slot_hashes(donor_ucfx, 0);
+                        for from in froms {
+                            repoints.push(mercs2_formats::model_inject::MtrlRepoint { from, to });
+                        }
+                        tex_blocks.push(block);
+                        atlas_cells = cells;
+                        log.push(format!(
+                            "contributions[{index}] {kind} {name}: baked a {}x{} diffuse atlas over \
+                             {} materials for the single group (0x{to:08X})",
+                            aw,
+                            ah,
+                            decoded.len()
+                        ));
+                    }
+                    Err(e) => log.push(format!(
+                        "contributions[{index}] {kind} {name}: diffuse atlas skipped ({e:?}); wears \
+                         the donor's skin"
+                    )),
+                }
+            }
+        }
+    }
+
     // Say what a skin-less outfit actually ships. `wad_simulator` reports this after the fact —
     // "material[N] diffuse 0x… is base-resident but not shipped by the patch (fallback render) …
     // flags fallback-render risk in menu/wardrobe scenes" — and an author who never runs it has no
@@ -1145,6 +1313,7 @@ fn lower_skinned(
         repoints,
         part_material_textures,
         single_host: single_group,
+        atlas_cells,
     };
 
     let hash = crate::manifest::asset_hash(name);
