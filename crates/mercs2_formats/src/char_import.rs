@@ -354,3 +354,48 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
         ibm,
     })
 }
+
+/// One glTF material's embedded texture image bytes — the raw PNG/JPEG the file carries, ready to be
+/// decoded and encoded to a game texture. `None` for a slot the material does not use (or one that
+/// references an external file rather than an embedded image, which an authoring GLB never does).
+#[derive(Default, Clone)]
+pub struct MaterialTextures {
+    pub diffuse: Option<Vec<u8>>,
+    pub normal: Option<Vec<u8>>,
+}
+
+/// The embedded texture bytes of every glTF material, indexed by material index (the same index
+/// [`MeshPart::material`] carries). This is what lets an imported character wear its OWN per-part
+/// skins: each part names a material, and this hands back that material's diffuse + normal images.
+///
+/// Reads the GLB's own buffers (no image DECODE here — that is the texture encoder's job downstream),
+/// so it needs only the `gltf` reader already used by [`load_char_glb`], not the `import` feature.
+pub fn load_char_material_textures(path: &Path) -> Result<Vec<MaterialTextures>, String> {
+    let (doc, buffers) = crate::mesh_import::open_gltf(path)?;
+    // The raw bytes behind an image, when it is embedded in a buffer view (the GLB case).
+    let bytes_of = |img: gltf::Image| -> Option<Vec<u8>> {
+        match img.source() {
+            gltf::image::Source::View { view, .. } => {
+                let buf = buffers.get(view.buffer().index())?;
+                let (off, len) = (view.offset(), view.length());
+                buf.get(off..off + len).map(|s| s.to_vec())
+            }
+            gltf::image::Source::Uri { .. } => None,
+        }
+    };
+    let mut out = vec![MaterialTextures::default(); doc.materials().count()];
+    for m in doc.materials() {
+        let Some(idx) = m.index() else { continue }; // the default material has no index / no part
+        if idx >= out.len() {
+            continue;
+        }
+        out[idx] = MaterialTextures {
+            diffuse: m
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .and_then(|t| bytes_of(t.texture().source())),
+            normal: m.normal_texture().and_then(|t| bytes_of(t.texture().source())),
+        };
+    }
+    Ok(out)
+}

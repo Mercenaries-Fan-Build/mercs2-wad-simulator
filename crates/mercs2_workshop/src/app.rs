@@ -7006,6 +7006,7 @@ pub(crate) fn faithful_lower_opts(
         // The Workshop export writes a bare model block, not a WAD, so there is nowhere to put a
         // texture block beside it. Skins are bound by the Quartermaster's `textures:`.
         repoints: Vec::new(),
+        part_material_textures: std::collections::HashMap::new(),
     };
     Ok((glb, donor, opts))
 }

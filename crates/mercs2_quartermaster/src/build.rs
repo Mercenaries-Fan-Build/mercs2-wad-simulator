@@ -719,17 +719,45 @@ fn build_named_texture(
     path: &Path,
     is_normal: bool,
 ) -> Result<(PatchBlock, u32), BuildError> {
+    let err = |m: String| BuildError::Lower { index, kind, message: m };
+    let img = read_png_rgba(path).map_err(err)?;
+    build_texture_from_rgba(index, kind, asset_name, img, is_normal, &path.display().to_string())
+}
+
+/// Build a texture block from a GLB's embedded PNG bytes — the per-material skin path. `label` names
+/// the material for any error.
+fn build_named_texture_bytes(
+    index: usize,
+    kind: &'static str,
+    asset_name: &str,
+    png_bytes: &[u8],
+    is_normal: bool,
+    label: &str,
+) -> Result<(PatchBlock, u32), BuildError> {
+    let err = |m: String| BuildError::Lower { index, kind, message: m };
+    let img = read_png_rgba_bytes(png_bytes, label).map_err(err)?;
+    build_texture_from_rgba(index, kind, asset_name, img, is_normal, label)
+}
+
+/// The encoder half: already-decoded RGBA → a resident texture block + its asset hash. Shared by the
+/// file-path and embedded-bytes callers.
+fn build_texture_from_rgba(
+    index: usize,
+    kind: &'static str,
+    asset_name: &str,
+    img: Rgba,
+    is_normal: bool,
+    label: &str,
+) -> Result<(PatchBlock, u32), BuildError> {
     let err = |m: String| BuildError::Lower {
         index,
         kind,
         message: m,
     };
-    let img = read_png_rgba(path).map_err(err)?;
     let (w, h) = (img.width, img.height);
     if w == 0 || h == 0 || w % 4 != 0 || h % 4 != 0 {
         return Err(err(format!(
-            "{}: {w}x{h} — a block-compressed texture needs both dimensions to be multiples of 4",
-            path.display()
+            "{label}: {w}x{h} — a block-compressed texture needs both dimensions to be multiples of 4"
         )));
     }
 
@@ -1004,18 +1032,70 @@ fn lower_skinned(
         tex_blocks.push(block);
     }
 
+    // PER-MATERIAL skins from the GLB's OWN embedded textures. When the author supplies no manual
+    // `textures:`, a multi-material import wears each source material on the body region its triangles
+    // host — separate head / torso / legs maps instead of one skin smeared over all of it (or the
+    // donor's). The blocks + hashes are built here; the per-group repointing happens in
+    // `character_into_donor`, where the host of each source part is known. Only materials a part
+    // actually references are built.
+    let mut part_material_textures: std::collections::HashMap<usize, [Option<u32>; 3]> =
+        std::collections::HashMap::new();
+    let author_supplied_skin =
+        textures.diffuse.is_some() || textures.specular.is_some() || textures.normal.is_some();
+    if !author_supplied_skin {
+        let used: std::collections::BTreeSet<usize> =
+            glb.parts.iter().filter_map(|p| p.material).collect();
+        if !used.is_empty() {
+            let mat_tex =
+                mercs2_formats::char_import::load_char_material_textures(&root.join(model))
+                    .map_err(lower_err)?;
+            for &m in &used {
+                let Some(tex) = mat_tex.get(m) else { continue };
+                let mut slots: [Option<u32>; 3] = [None; 3];
+                for (slot, suffix, png, is_normal) in
+                    [(0usize, "dm", &tex.diffuse, false), (2, "nm", &tex.normal, true)]
+                {
+                    let Some(bytes) = png else { continue };
+                    let tex_name = format!("{name}_m{m}_{suffix}");
+                    match build_named_texture_bytes(index, kind, &tex_name, bytes, is_normal, &tex_name)
+                    {
+                        Ok((block, to)) => {
+                            slots[slot] = Some(to);
+                            tex_blocks.push(block);
+                        }
+                        // A material whose image is not 4-aligned (or is a codec we can't read) is
+                        // skipped, not fatal — that part just keeps the donor's skin.
+                        Err(e) => log.push(format!(
+                            "contributions[{index}] {kind} {name}: material {m} {suffix} skipped ({e})"
+                        )),
+                    }
+                }
+                if slots.iter().any(|s| s.is_some()) {
+                    part_material_textures.insert(m, slots);
+                }
+            }
+            if !part_material_textures.is_empty() {
+                log.push(format!(
+                    "contributions[{index}] {kind} {name}: shipping {} per-material skin(s) from the \
+                     GLB's own embedded textures",
+                    part_material_textures.len()
+                ));
+            }
+        }
+    }
+
     // Say what a skin-less outfit actually ships. `wad_simulator` reports this after the fact —
     // "material[N] diffuse 0x… is base-resident but not shipped by the patch (fallback render) …
     // flags fallback-render risk in menu/wardrobe scenes" — and an author who never runs it has no
     // way to know. The materials are the DONOR's, resolved out of the base WAD at runtime, so the
     // outfit depends on those textures being resident wherever it is drawn. When the donor is also
     // the wearer that is nearly always true; when it is not, the wardrobe is where it shows.
-    if repoints.is_empty() {
+    if repoints.is_empty() && part_material_textures.is_empty() {
         log.push(format!(
-            "contributions[{index}] {kind} {name}: no `textures:` — wears donor {donor_name}'s \
-             materials, which this patch does not ship. Fine in-world where they are resident; \
-             the wardrobe/menu scene is where a fallback render would show. Supply `textures:` to \
-             carry its own."
+            "contributions[{index}] {kind} {name}: no `textures:` and no embedded GLB textures — \
+             wears donor {donor_name}'s materials, which this patch does not ship. Fine in-world \
+             where they are resident; the wardrobe/menu scene is where a fallback render would show. \
+             Supply `textures:` or embed maps in the GLB to carry its own."
         ));
     }
 
@@ -1025,6 +1105,7 @@ fn lower_skinned(
         // to repair, and resampling would discard everything painted on new geometry.
         native_rig: detected == mercs2_formats::retarget::SourceRig::Pandemic,
         repoints,
+        part_material_textures,
     };
 
     let hash = crate::manifest::asset_hash(name);
@@ -2418,18 +2499,25 @@ struct Rgba {
 
 fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let decoder = png::Decoder::new(file);
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    read_png_rgba_from(file, &path.display().to_string())
+}
+
+/// Decode a PNG from an in-memory buffer — the embedded-image path (a GLB carries its textures as
+/// PNG bytes in a buffer view, so there is no file to open).
+fn read_png_rgba_bytes(bytes: &[u8], label: &str) -> Result<Rgba, String> {
+    read_png_rgba_from(std::io::Cursor::new(bytes), label)
+}
+
+/// Shared decoder over any reader, so a file path and an embedded buffer share one code path.
+fn read_png_rgba_from<R: std::io::Read>(r: R, label: &str) -> Result<Rgba, String> {
+    let decoder = png::Decoder::new(r);
+    let mut reader = decoder.read_info().map_err(|e| format!("{label}: {e}"))?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let info = reader.next_frame(&mut buf).map_err(|e| format!("{label}: {e}"))?;
     let (w, h) = (info.width as usize, info.height as usize);
     let channels = info.color_type.samples();
     if info.bit_depth != png::BitDepth::Eight {
-        return Err(format!("{}: only 8-bit PNGs are supported", path.display()));
+        return Err(format!("{label}: only 8-bit PNGs are supported"));
     }
     let mut pixels = vec![0f32; w * h * 4];
     for i in 0..w * h {

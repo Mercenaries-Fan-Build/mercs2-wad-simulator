@@ -49,6 +49,13 @@ pub struct LowerOpts {
     /// MTRL repoints applied to the host group, so the injected geometry wears its own skin rather
     /// than the donor's. Slot order is `0 = diffuse, 1 = SPECULAR, 2 = NORMAL`.
     pub repoints: Vec<MtrlRepoint>,
+
+    /// PER-MATERIAL skins: glTF material index → `[diffuse, specular, normal]` texture asset hashes
+    /// (`None` = keep the donor's for that slot). Because the faithful partition puts ONE source part
+    /// (hence one material) per host draw group, and a repoint is a global 4-byte hash swap, resolving
+    /// each host group's own material hash and repointing it here lets every body part wear its own
+    /// texture — the reason `faithful_partition` keeps parts un-merged. Empty = single-skin behaviour.
+    pub part_material_textures: std::collections::HashMap<usize, [Option<u32>; 3]>,
 }
 
 /// What the lowering produced, for a caller that wants to report on it.
@@ -288,6 +295,43 @@ pub fn character_into_donor(
     // preference rather than a constraint, but a bigger donor group still means less growth.
     let hosts: Vec<usize> = caps.iter().take(nseg).map(|&(ord, _, _)| ord).collect();
 
+    // PER-MATERIAL skins. Now that the host of every source part is known, resolve each host group's
+    // OWN donor material hash and repoint it onto that part's texture — so a multi-material import
+    // (separate head / torso / legs maps) wears each on the right region instead of one skin smeared
+    // over all of it. A repoint is a global 4-byte swap, and distinct donor groups carry distinct
+    // material hashes, so per-group targeting falls out for free. Appended to the caller's repoints.
+    let repoints: Vec<MtrlRepoint> = if opts.part_material_textures.is_empty() {
+        opts.repoints.clone()
+    } else {
+        let ucfx_len = u32::from_le_bytes(donor_block.get(16..20).and_then(|s| s.try_into().ok()).unwrap_or([0; 4])) as usize;
+        let donor_ucfx = donor_block.get(20..20 + ucfx_len).unwrap_or(&[]);
+        let donor_mtrls = crate::texture::parse_mtrl(donor_ucfx);
+        let gmi = crate::texture::group_material_indices(donor_ucfx);
+        let mut rp = opts.repoints.clone();
+        // A repoint is a GLOBAL 4-byte hash swap, so a donor material hash can be repointed only ONCE.
+        // Where two host groups share a donor material (several of the donor's body groups do), the
+        // FIRST part to claim it wins and the rest keep that skin — repointing the same `from` twice
+        // would leave the second matching nothing, which the injector rejects. `from`-keyed, not
+        // `(from,to)`. Also honour any `from` the caller's own repoints already scheduled.
+        let mut claimed: std::collections::HashSet<u32> =
+            rp.iter().map(|r| r.from).collect();
+        for (slot_i, &group) in hosts.iter().enumerate() {
+            let part_i = part.seg_part[slot_i];
+            let Some(glb_mat) = glb.parts.get(part_i).and_then(|p| p.material) else { continue };
+            let Some(tex) = opts.part_material_textures.get(&glb_mat) else { continue };
+            let Some(&dmat) = gmi.get(group) else { continue };
+            let Some(dm) = donor_mtrls.get(dmat) else { continue };
+            for slot in 0..3 {
+                if let (Some(to), Some(&from)) = (tex[slot], dm.textures.get(slot)) {
+                    if from != 0 && to != 0 && claimed.insert(from) {
+                        rp.push(MtrlRepoint { from, to });
+                    }
+                }
+            }
+        }
+        rp
+    };
+
     // `grow` removes the DONOR's budget as a limit but not the format's: a group's index buffer is
     // u16, so no host can hold more than ~21.8k triangles however large the donor group was. Check
     // it here, where the source part is still nameable, rather than letting the injector report
@@ -376,7 +420,7 @@ pub fn character_into_donor(
             &mesh,
             &skin.ranges,
             hosts[0],
-            &opts.repoints,
+            &repoints,
             new_name_hash,
         )?;
         (b, s, Vec::new())
@@ -399,7 +443,7 @@ pub fn character_into_donor(
             donor_block,
             &gmesh,
             &hosts,
-            &opts.repoints,
+            &repoints,
             new_name_hash,
             true, // grow: an import is denser than the donor; the packager recomputes page_count
             // The faithful partition: one source part per host, cut again wherever a palette would
