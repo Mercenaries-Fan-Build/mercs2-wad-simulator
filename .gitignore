@@ -21,3 +21,8 @@ __pycache__/
 
 # macOS Finder metadata.
 .DS_Store
+
+# Vendored source data for the workshop/quartermaster: game corpus dumps, ECS/lua
+# schemas, and modder Shipments (manifest + source GLBs/textures). Large, machine-local,
+# and often derived from retail assets we do not redistribute — kept out of the repo.
+/workshop_data/
