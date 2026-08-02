@@ -1889,13 +1889,24 @@ fn inject_multi_into_donor_block_ex(
         if &rows[i].tag != b"INFO" || rows[i].u0 == 0xFFFF_FFFF {
             continue;
         }
-        // A PRMG bounds INFO is 60 bytes; the 56-byte skin-palette INFO and 72-byte top INFO are not
-        // touched here (rows[0] is handled above).
         let mut pi = new_bodies
             .get(&i)
             .cloned()
             .unwrap_or_else(|| leaf(ucfx, data_off, &rows[i]).to_vec());
         if pi.len() < 60 {
+            continue;
+        }
+        // ★ CRITICAL: a 60-byte length is NOT enough to identify a PRMG bounds INFO. A SKIN-palette
+        // INFO carries `u32 range_count @+20` then a range table, and with enough ranges it is ALSO
+        // 60 bytes — and +20 is exactly where a bounds INFO has its sphere centre. Overwriting a skin
+        // INFO's range_count with a centre float makes the engine allocate a wrong-sized palette buffer
+        // and overrun it (the render-time ACCESS_VIOLATION). A PRMG bounds INFO's preamble is the
+        // fixed `u32(1), u32(1), u32(0), u32 hash` (docs/ucfx_model_from_scratch.md); gate on it so only
+        // genuine bounds records are touched.
+        let is_prmg_bounds = read_u32_le(&pi, 0) == 1
+            && read_u32_le(&pi, 4) == 1
+            && read_u32_le(&pi, 8) == 0;
+        if !is_prmg_bounds {
             continue;
         }
         for k in 0..3 {
