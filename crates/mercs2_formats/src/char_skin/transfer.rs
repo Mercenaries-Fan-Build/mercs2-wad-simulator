@@ -183,6 +183,14 @@ pub fn clamp_to_donor_reach(
             .iter()
             .copied()
             .filter(|&(b, _)| {
+                // NEVER clamp the vertex's DOMINANT bone. Dropping it is what strands the vertex: it
+                // gets re-weighted onto whatever far bone survives, and when the pose animation moves
+                // that bone the vertex flies off into a spike (the "sucked into the light pole" the
+                // import showed). An over-long lever arm on the correct bone is strictly better than a
+                // vertex anchored to the wrong one — the same reasoning as "never strip bare" below.
+                if dom == Some(b) {
+                    return true;
+                }
                 let (Some(r), Some(p)) = (reach.get(&b), bone_pos.get(b as usize)) else {
                     return true; // no evidence either way - leave it
                 };
