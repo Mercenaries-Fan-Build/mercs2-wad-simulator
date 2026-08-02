@@ -65,6 +65,43 @@ pub fn set_state_lua(target: &str, state: &str) -> Result<String, String> {
     ))
 }
 
+/// Read a target's CURRENT destruction state — the typed read the game does serve (unlike a generic
+/// per-component read, which waits on Ess). `Object.GetState` returns the live state hash; this
+/// resolves it to a vocabulary name the same way [`watch_lua`] does, so the console prints
+/// `PristineState` rather than bare hex. `GetStateName` (the engine's own string) is printed beside
+/// it when present, so a state outside our cracked vocabulary is still legible.
+pub fn read_state_lua(target: &str) -> String {
+    let g = guid_expr(target);
+    let mut table = String::from("local NAMES = {\n");
+    for (name, hash) in states() {
+        table.push_str(&format!("  [0x{hash:08X}] = \"{name}\",\n"));
+    }
+    table.push_str("}\n");
+    format!(
+        "{table}\
+         local g = {g}\n\
+         local st = Object.GetState(g)\n\
+         local nm = NAMES[st] or (Object.GetStateName and Object.GetStateName(g)) or \
+         string.format(\"0x%08X\", st)\n\
+         Loader.Printf(\"state: 0x%08X -> %s\", g, nm)\n"
+    )
+}
+
+/// Read a target's HEALTH — current and max, through the Ess wrappers that front the engine's
+/// `GetHealth`/`GetMaxHealth`. Health is the lever the engine converts into a destruction transition,
+/// so reading it is the companion to reading state. A per-node read (`Object.GetNodeHealth`) is
+/// emitted as an optional commented line, because a node index is entity-specific.
+pub fn read_health_lua(target: &str) -> String {
+    let g = guid_expr(target);
+    format!(
+        "-- read health (cur / max); the engine turns 0 health into a Destroyed transition\n\
+         local g = {g}\n\
+         Loader.Printf(\"health: %s / %s\", tostring(Ess.Object.health(g)), \
+         tostring(Ess.Object.maxHealth(g)))\n\
+         -- per-node: Object.GetNodeHealth(g, <nodeIndex>)\n"
+    )
+}
+
 /// Demolish a target now — the engine's force-destroy path, reached through the health lever Ess
 /// already wraps (`Object.Kill` → `FUN_004d05c0` → `SetState(InitDestroyedState)` + break pieces).
 pub fn demolish_lua(target: &str) -> String {
@@ -139,6 +176,22 @@ mod tests {
         let w = watch_lua();
         assert!(w.contains("[0xACB51200] = \"PristineState\""), "{w}");
         assert!(w.contains("function OnStateChange(guid, node, state)"), "{w}");
+    }
+
+    #[test]
+    fn reads_use_the_real_getters_and_resolve_state_names() {
+        let s = read_state_lua("mytank");
+        // The guid is bound once and read through `g`.
+        assert!(s.contains("local g = Ess.Guid(\"mytank\")"), "{s}");
+        assert!(s.contains("Object.GetState(g)"), "{s}");
+        // Resolves to the vocabulary name, and falls back to the engine's own GetStateName.
+        assert!(s.contains("[0xACB51200] = \"PristineState\""), "{s}");
+        assert!(s.contains("Object.GetStateName"), "{s}");
+        let h = read_health_lua("t");
+        assert!(h.contains("local g = Ess.Guid(\"t\")"), "{h}");
+        assert!(h.contains("Ess.Object.health(g)") && h.contains("Ess.Object.maxHealth(g)"), "{h}");
+        // A guid expression is passed through, not re-wrapped.
+        assert!(read_state_lua("Ess.Player.guid()").contains("local g = Ess.Player.guid()"));
     }
 
     #[test]

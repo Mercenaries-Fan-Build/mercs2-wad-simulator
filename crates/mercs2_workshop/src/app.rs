@@ -1259,6 +1259,11 @@ pub fn run(opts: Options) {
     let ess_api = crate::essapi::ApiIndex::load(
         &crate::index::data_home().unwrap_or_default(),
     );
+    // The native ECS component-class registry — the *typed* half of the reference (what a live entity
+    // is made of), searched alongside the callables.
+    let ecs_reg = crate::ecsreg::EcsRegistry::load(
+        &crate::index::data_home().unwrap_or_default(),
+    );
     let mut console_search = String::new();
     // Destruction poke: a target (object name or guid expr) + the chosen vocabulary state.
     let mut destruct_target = String::new();
@@ -4256,6 +4261,25 @@ pub fn run(opts: Options) {
                                                     send_chunk = Some(mercs2_destruction::live::watch_lua());
                                                 }
                                             });
+                                            // The typed READS — the state and health the game actually
+                                            // serves (GetState / GetHealth), resolved to vocabulary
+                                            // names. The read side of phase 4.
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .add_enabled(has_target, egui::Button::new("Read state"))
+                                                    .on_hover_text("print the target's current destruction state, by vocabulary name")
+                                                    .clicked()
+                                                {
+                                                    send_chunk = Some(mercs2_destruction::live::read_state_lua(&destruct_target));
+                                                }
+                                                if ui
+                                                    .add_enabled(has_target, egui::Button::new("Read health"))
+                                                    .on_hover_text("print the target's current / max health")
+                                                    .clicked()
+                                                {
+                                                    send_chunk = Some(mercs2_destruction::live::read_health_lua(&destruct_target));
+                                                }
+                                            });
                                             ui.label(
                                                 egui::RichText::new(
                                                     "Set state uses the cracked SetState vocabulary; demolish/repair use the health lever.",
@@ -4323,6 +4347,42 @@ pub fn run(opts: Options) {
                                                                     con.input.push(' ');
                                                                 }
                                                                 con.input.push_str(&e.name);
+                                                            }
+                                                        }
+                                                    });
+                                            }
+                                            // The typed half: engine ECS component classes. What a
+                                            // live entity is MADE of, so a modder writing a read knows
+                                            // the vocabulary (RuntimeHealth, StateMachine, …).
+                                            let ecs_hits = ecs_reg.search(&console_search, 6);
+                                            if !ecs_hits.is_empty() {
+                                                ui.add_space(2.0);
+                                                theme::eyebrow(ui, "ECS components");
+                                                egui::Frame::none()
+                                                    .fill(theme::G0)
+                                                    .stroke(egui::Stroke::new(1.0, theme::LINE))
+                                                    .rounding(4.0)
+                                                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                                    .show(ui, |ui| {
+                                                        for c in ecs_hits {
+                                                            let clicked = ui.horizontal(|ui| {
+                                                                ui.label(egui::RichText::new("C").monospace().size(9.0).color(theme::BRASS_DK));
+                                                                let r = ui.add(
+                                                                    egui::Label::new(
+                                                                        egui::RichText::new(&c.name).monospace().size(10.5).color(theme::DIM),
+                                                                    )
+                                                                    .sense(egui::Sense::click()),
+                                                                );
+                                                                r.on_hover_text(format!(
+                                                                    "ECS component class \u{2014} family {}\n(reflection registry; a generic per-component read waits on Ess)",
+                                                                    c.family
+                                                                )).clicked()
+                                                            }).inner;
+                                                            if clicked {
+                                                                if !con.input.is_empty() && !con.input.ends_with(char::is_whitespace) {
+                                                                    con.input.push(' ');
+                                                                }
+                                                                con.input.push_str(&c.name);
                                                             }
                                                         }
                                                     });

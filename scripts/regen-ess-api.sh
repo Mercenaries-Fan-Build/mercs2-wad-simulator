@@ -28,3 +28,19 @@ cp "$TMP/api/ess.json"     "$OUT/ess_api.json"
 cp "$TMP/api/natives.json" "$OUT/ess_natives.json"
 cp "$TMP/api/nodes.json"    "$OUT/ess_nodes.json"
 echo "bundled $(basename "$ZIP") -> ess_api.json ($(grep -c '"tier"' "$OUT/ess_api.json") tiered fns) + ess_natives.json"
+
+# The native ECS component-class registry (the *typed* half of the console reference — what a live
+# entity is made of). This is OUR cracked doc set, not Wally's, so it is generated from the vendored
+# `docs/mercs2-ecs/_manifests/` partitions rather than downloaded: one row per class,
+# family<TAB>name<TAB>registrar-global<TAB>descriptor-vtable. Consumed by `crate::ecsreg`.
+ECS_SRC="$(cd "$(dirname "$0")/../../.." && pwd)/docs/mercs2-ecs/_manifests"
+if [ -d "$ECS_SRC" ]; then
+  : > "$OUT/ecs_registry.tsv"
+  for f in "$ECS_SRC"/*.tsv; do
+    fam="$(basename "$f" .tsv | sed -E 's/^[0-9]+_//')"
+    awk -v fam="$fam" 'NF>=1 && $1!="" {print fam"\t"$0}' "$f" >> "$OUT/ecs_registry.tsv"
+  done
+  echo "bundled ecs_registry.tsv ($(wc -l < "$OUT/ecs_registry.tsv") classes across $(cut -f1 "$OUT/ecs_registry.tsv" | sort -u | wc -l) families)"
+else
+  echo "note: docs/mercs2-ecs/_manifests not found — kept existing ecs_registry.tsv" >&2
+fi

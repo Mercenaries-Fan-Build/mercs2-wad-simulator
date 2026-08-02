@@ -57,6 +57,7 @@
 mod app;
 mod bundle;
 mod console;
+mod ecsreg;
 mod essapi;
 mod domain;
 mod fetch;
