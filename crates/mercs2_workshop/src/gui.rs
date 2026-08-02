@@ -690,7 +690,7 @@ pub mod theme {
     }
 
     /// A left-aligned caption cell of the shared width; truncates long text (full text on hover).
-    fn field_label(ui: &mut egui::Ui, label: &str) {
+    pub fn field_label(ui: &mut egui::Ui, label: &str) {
         let lw = field_label_w(ui.available_width());
         ui.allocate_ui_with_layout(
             egui::vec2(lw, 20.0),

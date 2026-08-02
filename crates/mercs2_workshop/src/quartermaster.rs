@@ -1409,18 +1409,10 @@ fn contribution_form(
             );
             commit |= text_row(ui, "Wardrobe slug", slug, "MyOutfit", true);
             commit |= text_row(ui, "Display", display, "My outfit", true);
-            // A CLOSED set: `_tOutfits` has one list per hero, so a fourth name creates a wardrobe
-            // nothing reads. M0140 is unrepresentable here rather than merely checked.
-            ui.horizontal(|ui| {
-                let lw = theme::field_label_w(ui.available_width());
-                ui.add_space(lw + 4.0);
-                for w in WEARERS {
-                    if theme::pill(ui, w, w == wearer.as_str()).clicked() {
-                        *wearer = w.to_string();
-                        commit = true;
-                    }
-                }
-            });
+            // Wearer is chosen once, in the WARDROBE section above — it owns the (wearer, slug) merge
+            // key and the single `_tOutfits` writer. Duplicating the pills here made two writers of the
+            // same field, the exact split that section's comment exists to prevent. `wearer` is still
+            // read below for the donor auto-pick note.
             if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
                 commit = true;
                 // The model just changed — read what the GLB actually declares and pre-fill from it.
@@ -1451,14 +1443,13 @@ fn contribution_form(
                     &format!("optional — auto-picks pmc_hum_{wearer}. Set one for a variant host."),
                 );
             }
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             // Single-group: the placement-stable path for a DENSE foreign rig (>~48 bones), which
             // otherwise takes the multi-group split and can cull/teleport. It bakes the GLB's own
-            // per-material maps into one atlas, so the manual Skin slots below no longer apply.
+            // per-material maps into one atlas — so the manual Skin slots are replaced, not ignored.
             ui.horizontal(|ui| {
-                let lw = theme::field_label_w(ui.available_width());
-                ui.add_space(lw + 4.0);
-                if theme::pill(ui, "single group", *single_group).clicked() {
+                theme::field_label(ui, "Single group");
+                if theme::pill(ui, if *single_group { "on" } else { "off" }, *single_group).clicked() {
                     *single_group = !*single_group;
                     commit = true;
                 }
@@ -1467,14 +1458,14 @@ fn contribution_form(
                 ui,
                 theme::FieldState::Neutral,
                 if *single_group {
-                    "one draw group on the source's own weights — auto-atlases the GLB's own maps; \
-                     the manual Skin slots below are ignored"
+                    "one draw group on the source's own weights; wears an atlas baked from the GLB's \
+                     own materials. For a dense foreign rig that would otherwise cull or teleport."
                 } else {
-                    "off: faithful multi-group split. Turn on for a dense foreign rig that culls or \
-                     teleports as the camera moves"
+                    "faithful multi-group split (per-material skins below). Turn on for a dense \
+                     foreign rig that culls or teleports as the camera moves."
                 },
             );
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             // With single_group the atlas is baked from the GLB's own materials, so the manual slots
             // do nothing — hide them rather than offer dead controls.
             if !*single_group {
@@ -1944,14 +1935,22 @@ fn retarget_summary(
         }
         Some(r) => {
             let n = r.bones.as_ref().map(|b| b.len()).unwrap_or(0);
-            theme::kv(ui, "retarget from", egui::RichText::new(&r.from));
-            theme::kv(ui, "bone rows", egui::RichText::new(n.to_string()));
+            theme::kv(ui, "Retarget", egui::RichText::new(format!("{} rig", r.from)));
             if n == 0 {
+                // A convention (valve/mixamo/…) has a deterministic table, so from-only is complete
+                // and reproducible — informational, not a warning. Only hand-adjusted bones need to
+                // be recorded, and Edit rig is where you do (and save) that.
                 theme::field_note(
                     ui,
-                    theme::FieldState::Warn,
-                    "no bone map recorded — a rebuild will re-derive it and may differ from what \
-                     you approved",
+                    theme::FieldState::Neutral,
+                    "the build derives the bone map from this convention's table. Use Edit rig to \
+                     hand-adjust and record specific bones.",
+                );
+            } else {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Neutral,
+                    &format!("{n} hand-recorded bone rows — the build uses these exactly"),
                 );
             }
             false
