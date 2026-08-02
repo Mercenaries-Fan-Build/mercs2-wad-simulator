@@ -2291,6 +2291,29 @@ mod tests {
         d
     }
 
+    /// ★ The World-domain → Shipment path: routing a LAYER by name through the two overlay kinds
+    /// must seed the `layer` field of the resulting contribution, or the scaffolded edit would name
+    /// the stub's placeholder instead of the layer the author clicked.
+    #[test]
+    fn a_routed_layer_seeds_the_layer_field_of_its_kind() {
+        // The routes the World domain's layer menu offers.
+        let kinds: Vec<&str> = routes_for_layer().iter().map(|(k, _)| *k).collect();
+        assert_eq!(kinds, vec!["activate_layer", "edit_world"]);
+
+        match seeded("activate_layer", "vz_state_pmccon004_destroyed", 1).unwrap() {
+            Contribution::ActivateLayer { layer, .. } => {
+                assert_eq!(layer, "vz_state_pmccon004_destroyed", "the routed layer name must seed `layer`")
+            }
+            other => panic!("activate_layer seeded the wrong kind: {other:?}"),
+        }
+        match seeded("edit_world", "vz_state_pmccon004", 1).unwrap() {
+            Contribution::EditWorld { layer, .. } => {
+                assert_eq!(layer, "vz_state_pmccon004", "the routed layer name must seed `layer`")
+            }
+            other => panic!("edit_world seeded the wrong kind: {other:?}"),
+        }
+    }
+
     fn outfit(model: &str, bone_target: &str) -> Contribution {
         let mut bones = std::collections::BTreeMap::new();
         bones.insert("bip01_spine".to_string(), Some(bone_target.to_string()));
