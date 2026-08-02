@@ -796,15 +796,22 @@ fn build_texture_from_rgba(
     };
 
     let to = crate::manifest::asset_hash(asset_name);
-    let td = TextureData {
-        width: w as u32,
-        height: h as u32,
-        format,
-        mip0: body[..mip0_len(w, h, format).min(body.len())].to_vec(),
-        all_mips: body,
-        mip_count: texture_encode::mip_count(w, h) as u32,
-    };
-    let block_bytes = build_texture_block(to, &td);
+    // Ship the FULLY-RESIDENT container shape the engine's texture binder actually reads —
+    // NAME / INFO / BODY with the `0xFFFF` sentinel at INFO@32 and INFO[26..32]=0. The old
+    // `build_texture_block` emitted only INFO/BODY (no NAME, no sentinel), so its texture LOADED but
+    // never BOUND: the injected model sampled it black. This is the obama skin recipe — ship a texture
+    // block shaped like a real resident texture. `build_resident_texture` enforces the exact mip-chain
+    // length too (a short body hangs the world load), so it validates `body` on the way through.
+    let container =
+        mercs2_formats::texture::build_resident_texture(asset_name, w as u32, h as u32, format, &body)
+            .map_err(|e| err(format!("{label}: {e}")))?;
+    let mut block_bytes = Vec::with_capacity(20 + container.len());
+    block_bytes.extend_from_slice(&1u32.to_le_bytes()); // flags/version
+    block_bytes.extend_from_slice(&to.to_le_bytes()); // asset name hash
+    block_bytes.extend_from_slice(&mercs2_formats::types::TYPE_HASH_TEXTURE.to_le_bytes());
+    block_bytes.extend_from_slice(&0u32.to_le_bytes());
+    block_bytes.extend_from_slice(&(container.len() as u32).to_le_bytes());
+    block_bytes.extend_from_slice(&container);
     let aset = AsetEntry::new(to, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_TEXTURE);
     let block = PatchBlock::from_decompressed(
         &block_bytes,
