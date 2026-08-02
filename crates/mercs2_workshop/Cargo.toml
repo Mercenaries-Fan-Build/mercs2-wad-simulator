@@ -35,6 +35,9 @@ rfd = "0.14"
 # rustls) rather than reqwest — a winit event loop wants no async runtime, and rustls keeps the
 # Linux build off a system OpenSSL. `zip` reads the published asset; flate2 is already in the tree.
 ureq = "2"
+# The game's audio decoders (IMA ADPCM → PCM16) and cpal output, for playing VO straight from the
+# game's own vo_stream.english.pws — no download, no re-encode.
+mercs2_audio = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Offscreen `--shot` renderer: POD vertex/buffer casts.
 bytemuck = { version = "1", features = ["derive"] }

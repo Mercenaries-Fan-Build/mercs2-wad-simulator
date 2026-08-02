@@ -507,8 +507,11 @@ pub fn extract_container_typed(
         .aset
         .iter()
         .find(|e| e.asset_hash == name_hash && e.is_primary())
+        // Not every asset carries a PRIMARY row — the `vo_stream.english` wavebank, for one, is only
+        // reachable through a plain row. Fall back to any row for the name, like `extract_container`.
+        .or_else(|| wad.archive.aset.iter().find(|e| e.asset_hash == name_hash))
         .map(|e| e.block_index())
-        .ok_or_else(|| format!("no primary ASET for 0x{name_hash:08X}"))?;
+        .ok_or_else(|| format!("no ASET for 0x{name_hash:08X}"))?;
     let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
     let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
     let mut pos = 4 + count as usize * 16;

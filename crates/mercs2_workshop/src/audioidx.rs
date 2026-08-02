@@ -26,6 +26,10 @@ pub struct AudioClip {
     pub caption: String,
     /// Duration in seconds.
     pub duration_s: f32,
+    /// The clip's index into the `vo_stream.english` wavebank, parsed from the leading number of
+    /// `original` (`vo_Chris/01595__…` → 1595). That record's `(offset, size)` locates the PCM in
+    /// `vo_stream.english.pws`, so this is how a browsed clip becomes playable audio.
+    pub wave_index: Option<u32>,
 }
 
 impl AudioClip {
@@ -36,6 +40,13 @@ impl AudioClip {
             .next()
             .unwrap_or(&self.original)
             .trim_end_matches(".wav")
+    }
+
+    /// The wave index encoded in the filename's leading digits (`01595__…` → 1595).
+    fn parse_wave_index(original: &str) -> Option<u32> {
+        let file = original.rsplit(['/', '\\']).next().unwrap_or(original);
+        let digits: String = file.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
     }
 }
 
@@ -69,6 +80,7 @@ impl AudioIndex {
                 speaker: s(e, "speaker"),
                 caption: s(e, "caption"),
                 duration_s: e.get("duration_s").and_then(|d| d.as_f64()).unwrap_or(0.0) as f32,
+                wave_index: AudioClip::parse_wave_index(&original),
                 original,
             });
         }
@@ -123,9 +135,9 @@ mod tests {
     fn idx() -> AudioIndex {
         let mut i = AudioIndex {
             clips: vec![
-                AudioClip { original: "vo_Chris/1.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Now the CIA.".into(), duration_s: 4.9 },
-                AudioClip { original: "vo_Chris/2.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Rat bastard.".into(), duration_s: 2.0 },
-                AudioClip { original: "vo_Jen/1.wav".into(), bank: "vo_Jen".into(), speaker: "Jen".into(), caption: "Now the CIA.".into(), duration_s: 3.1 },
+                AudioClip { original: "vo_Chris/1.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Now the CIA.".into(), duration_s: 4.9, wave_index: Some(1) },
+                AudioClip { original: "vo_Chris/2.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Rat bastard.".into(), duration_s: 2.0, wave_index: Some(2) },
+                AudioClip { original: "vo_Jen/1.wav".into(), bank: "vo_Jen".into(), speaker: "Jen".into(), caption: "Now the CIA.".into(), duration_s: 3.1, wave_index: Some(1) },
             ],
             keys: vec![],
         };
