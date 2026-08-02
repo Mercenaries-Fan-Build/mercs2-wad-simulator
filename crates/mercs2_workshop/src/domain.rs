@@ -118,6 +118,26 @@ impl Domain {
         matches!(self, Domain::World)
     }
 
+    /// Whether this domain browses the AUDIO catalog (`index::Kind::Audio`). Audio's subjects are the
+    /// wavebanks / soundbanks / sound tables the game ships, not model rows.
+    pub fn browses_audio(self) -> bool {
+        matches!(self, Domain::Audio)
+    }
+
+    /// Whether this domain browses the decompiled Lua CORPUS. Missions and Systems are script/host
+    /// surfaces — their subjects are the contracts, jobs and framework modules that drive play, keyed
+    /// off [`governing_scripts`](Domain::governing_scripts) matched against each script's path.
+    pub fn browses_scripts(self) -> bool {
+        matches!(self, Domain::Missions | Domain::Systems)
+    }
+
+    /// Does a corpus script at `path` belong to this domain's script lens? True when the path contains
+    /// any governing needle (case-insensitive). Only meaningful for the script domains.
+    pub fn script_lens(self, path: &str) -> bool {
+        let p = path.to_ascii_lowercase();
+        self.governing_scripts().iter().any(|n| p.contains(n))
+    }
+
     /// Corpus path/name needles for the Lua that governs this domain — the scripts a domain edit is
     /// likely to touch. Empty where the domain is asset-only. Matched case-insensitively against a
     /// corpus entry's path by the caller.

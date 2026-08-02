@@ -1264,6 +1264,10 @@ pub fn run(opts: Options) {
     let ecs_reg = crate::ecsreg::EcsRegistry::load(
         &crate::index::data_home().unwrap_or_default(),
     );
+    // The captioned audio inventory — the Audio domain browses this (banks → clips with captions).
+    let audio_idx = crate::audioidx::AudioIndex::load(
+        &crate::index::data_home().unwrap_or_default(),
+    );
     let mut console_search = String::new();
     // Destruction poke: a target (object name or guid expr) + the chosen vocabulary state.
     let mut destruct_target = String::new();
@@ -2655,20 +2659,99 @@ pub fn run(opts: Options) {
                                         ).size(10.0).color(theme::FAINT));
                                     }
                                 } else {
-                                    // Audio / Missions / Systems: not model rows. Name the Lua that
-                                    // governs the domain and the kinds an edit here would write, so
-                                    // the browser is honest about being a thin script/host surface.
-                                    theme::eyebrow(ui, "Governing scripts");
-                                    ui.add_space(3.0);
-                                    for needle in d.governing_scripts() {
-                                        ui.label(egui::RichText::new(format!("· {needle}"))
-                                            .monospace().size(10.5).color(theme::DIM));
+                                    // Audio / Missions / Systems: not model rows, but NOT empty either
+                                    // — each browses the real base-game content it governs.
+                                    // Reserve a footer for the always-present "Add to this domain" row.
+                                    let list_h = (ui.available_height() - 52.0).max(80.0);
+                                    if d.browses_audio() {
+                                        // The captioned inventory: 12,988 clips across 27 banks. Grouped
+                                        // by bank, each expandable to its lines with speaker + caption —
+                                        // what the game actually SAYS, not opaque bank hashes. Falls back
+                                        // to the WAD's bank assets if the manifest is not bundled.
+                                        let banks = audio_idx.banks();
+                                        if banks.is_empty() {
+                                            let rows = index.rows(crate::index::Kind::Audio);
+                                            ui.label(theme::disp_text(format!("{} bank asset(s)", rows.len()), 10.0, theme::FAINT));
+                                            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                                                for r in rows {
+                                                    theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
+                                                        ui.label(egui::RichText::new(r.label()).monospace().size(10.5).color(theme::TX));
+                                                    });
+                                                }
+                                            });
+                                        } else {
+                                            let total: usize = banks.iter().map(|(_, n)| *n).sum();
+                                            ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), 10.0, theme::FAINT));
+                                            ui.add_space(3.0);
+                                            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                                                for (bank, n) in banks {
+                                                    egui::CollapsingHeader::new(
+                                                        egui::RichText::new(format!("{bank}  ·  {n}")).monospace().size(11.0).color(theme::TX)
+                                                    ).id_source(("audiobank", &bank)).show(ui, |ui| {
+                                                        for clip in audio_idx.by_bank(&bank).into_iter().take(300) {
+                                                            let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
+                                                            let line = if clip.speaker.is_empty() { cap.clone() } else { format!("{}: {}", clip.speaker, cap) };
+                                                            ui.label(egui::RichText::new(line).size(10.0).color(theme::DIM))
+                                                                .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
+                                                        }
+                                                        if n > 300 {
+                                                            ui.label(egui::RichText::new(format!("+{} more…", n - 300)).size(9.5).color(theme::FAINT));
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                        }
+                                    } else if d.browses_scripts() {
+                                        // Missions / Systems: the decompiled Lua that governs this
+                                        // domain, keyed off the governing needles. Click to read; right-
+                                        // click to patch it (patch_lua seeded with the script name).
+                                        let mut hits: Vec<&(String, String, String)> =
+                                            lua_corpus.iter().filter(|(p, _, _)| d.script_lens(p)).collect();
+                                        hits.sort_by(|a, b| a.0.cmp(&b.0));
+                                        ui.label(theme::disp_text(format!("{} script(s)", hits.len()), 10.0, theme::FAINT));
+                                        ui.add_space(3.0);
+                                        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                                            for (path, _, _) in hits {
+                                                let stem = path.rsplit(['/', '\\']).next().unwrap_or(path).trim_end_matches(".lua").to_string();
+                                                let resp = theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
+                                                    ui.label(egui::RichText::new(&stem).monospace().size(10.5).color(theme::TX));
+                                                });
+                                                if resp.clicked() {
+                                                    actions.push(Act::LuaOpen(path.clone()));
+                                                }
+                                                let stem2 = stem.clone();
+                                                let kinds = d.kinds();
+                                                resp.context_menu(|ui| {
+                                                    ui.label(theme::disp_text(stem2.to_uppercase(), 10.0, theme::BRASS));
+                                                    ui.separator();
+                                                    if ui.button("Open in Lua viewer").clicked() {
+                                                        actions.push(Act::LuaOpen(path.clone()));
+                                                        ui.close_menu();
+                                                    }
+                                                    ui.menu_button("Add to Shipment", |ui| {
+                                                        for kind in kinds {
+                                                            if ui.button(*kind).clicked() {
+                                                                actions.push(Act::AddToShipment(kind, 0, stem2.clone()));
+                                                                ui.close_menu();
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                            }
+                                        });
                                     }
-                                    ui.add_space(8.0);
-                                    theme::eyebrow(ui, "Adds");
-                                    ui.add_space(3.0);
-                                    ui.label(egui::RichText::new(d.kinds().join(", "))
-                                        .size(10.5).color(theme::FAINT));
+
+                                    // Always-present footer: the kinds this domain writes, one click to
+                                    // scaffold. The visible twin of the background right-click above.
+                                    ui.add_space(6.0);
+                                    theme::eyebrow(ui, "Add to this domain");
+                                    ui.horizontal_wrapped(|ui| {
+                                        for kind in d.kinds() {
+                                            if ui.small_button(*kind).clicked() {
+                                                actions.push(Act::AddToShipment(kind, 0, String::new()));
+                                            }
+                                        }
+                                    });
                                 }
                             }
                             // ── SETTINGS: the two paths the tool cannot always discover. ──

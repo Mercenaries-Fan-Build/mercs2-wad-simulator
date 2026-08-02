@@ -55,6 +55,7 @@
 //! - [`texpng`]  — CPU BC1/BC3 decode + PNG write for the headless texture dumps.
 
 mod app;
+mod audioidx; // Captioned audio inventory (the Audio domain's real content)
 mod bundle;
 mod console;
 mod ecsreg;

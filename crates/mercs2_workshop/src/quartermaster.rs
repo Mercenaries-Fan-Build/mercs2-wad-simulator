@@ -652,6 +652,11 @@ pub fn routes_for(is_texture: bool) -> &'static [(&'static str, &'static str)] {
 /// A stub for `kind` with an existing asset wired in as its donor or target.
 pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
     let mut c = stub(kind, n)?;
+    // An empty subject (a blank "Add to this domain") keeps the stub's own placeholder — better a
+    // named example than an empty field. Only a real routed subject overrides.
+    if asset.is_empty() {
+        return Some(c);
+    }
     match &mut c {
         Contribution::AddOutfit { donor, .. } | Contribution::AddModel { donor, .. } => {
             *donor = Some(asset.to_string());
@@ -661,6 +666,12 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
         // actually operates on (the stub's placeholder replaces/edits stay as authored defaults).
         Contribution::EditWorld { layer, .. } | Contribution::ActivateLayer { layer, .. } => {
             *layer = asset.to_string()
+        }
+        // A script routed from the Missions / Systems domain, or a table from anywhere: `asset` is the
+        // script / table name, so it becomes the patch target. (`add_sound` is deliberately NOT seeded
+        // from an existing bank — it ADDS a new one from a file, so a blank scaffold is correct.)
+        Contribution::PatchLua { target, .. } | Contribution::EditStringDb { target, .. } => {
+            *target = asset.to_string()
         }
         _ => {}
     }
