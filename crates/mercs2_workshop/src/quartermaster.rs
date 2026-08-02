@@ -1252,7 +1252,7 @@ fn contribution_form(
 
     match c {
         Contribution::AddOutfit {
-            name, slug, display, wearer, model, donor, textures, retarget, ..
+            name, slug, display, wearer, model, donor, textures, retarget, single_group,
         } => {
             commit |= text_row(ui, "Asset name", name, "pmc_hum_my_outfit", true);
             theme::field_note(
@@ -1293,13 +1293,40 @@ fn contribution_form(
                 );
             }
             ui.add_space(4.0);
-            theme::eyebrow(ui, "Skin — omit a slot to keep the donor's");
-            for (lbl, slot) in [
-                ("Diffuse", &mut textures.diffuse),
-                ("Normal", &mut textures.normal),
-                ("Specular", &mut textures.specular),
-            ] {
-                commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
+            // Single-group: the placement-stable path for a DENSE foreign rig (>~48 bones), which
+            // otherwise takes the multi-group split and can cull/teleport. It bakes the GLB's own
+            // per-material maps into one atlas, so the manual Skin slots below no longer apply.
+            ui.horizontal(|ui| {
+                let lw = theme::field_label_w(ui.available_width());
+                ui.add_space(lw + 4.0);
+                if theme::pill(ui, "single group", *single_group).clicked() {
+                    *single_group = !*single_group;
+                    commit = true;
+                }
+            });
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                if *single_group {
+                    "one draw group on the source's own weights — auto-atlases the GLB's own maps; \
+                     the manual Skin slots below are ignored"
+                } else {
+                    "off: faithful multi-group split. Turn on for a dense foreign rig that culls or \
+                     teleports as the camera moves"
+                },
+            );
+            ui.add_space(4.0);
+            // With single_group the atlas is baked from the GLB's own materials, so the manual slots
+            // do nothing — hide them rather than offer dead controls.
+            if !*single_group {
+                theme::eyebrow(ui, "Skin — omit a slot to keep the donor's");
+                for (lbl, slot) in [
+                    ("Diffuse", &mut textures.diffuse),
+                    ("Normal", &mut textures.normal),
+                    ("Specular", &mut textures.specular),
+                ] {
+                    commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
+                }
             }
             commit |= retarget_summary(ui, retarget);
         }
