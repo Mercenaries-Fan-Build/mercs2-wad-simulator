@@ -715,9 +715,8 @@ impl Workbench {
             Workbench::Skeleton => crate::gui::theme::RailIcon::Skeleton,
             Workbench::Quartermaster => crate::gui::theme::RailIcon::Quartermaster,
             Workbench::Settings => crate::gui::theme::RailIcon::Settings,
-            // Craft took the slot Sandbox held, and keeps its glyph.
-            Workbench::Craft => crate::gui::theme::RailIcon::Sandbox,
-            Workbench::Domain(d) => crate::gui::theme::RailIcon::Glyph(d.short()),
+            Workbench::Craft => crate::gui::theme::RailIcon::Craft,
+            Workbench::Domain(d) => d.rail_icon(),
         }
     }
     /// The command-bar breadcrumb verb.

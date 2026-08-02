@@ -58,7 +58,21 @@ impl Domain {
         }
     }
 
-    /// A 2-char monogram for the rail — line-art-free (drawn as text by `RailIcon::Glyph`).
+    /// The rail's hand-drawn icon for this domain — a shape the eye reads faster than a monogram.
+    pub fn rail_icon(self) -> crate::gui::theme::RailIcon {
+        use crate::gui::theme::RailIcon;
+        match self {
+            Domain::World => RailIcon::World,
+            Domain::Characters => RailIcon::Characters,
+            Domain::Weapons => RailIcon::Weapons,
+            Domain::Driving => RailIcon::Driving,
+            Domain::Audio => RailIcon::Audio,
+            Domain::Missions => RailIcon::Missions,
+            Domain::Systems => RailIcon::Systems,
+        }
+    }
+
+    /// A 2-char monogram for the rail — the fallback label, still shown under the icon.
     pub fn short(self) -> &'static str {
         match self {
             Domain::World => "Wd",

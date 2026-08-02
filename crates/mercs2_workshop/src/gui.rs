@@ -1113,8 +1113,18 @@ pub mod theme {
         Quartermaster,
         Settings,
         Log,
-        /// A short (1-2 char) monogram, drawn as text — the domain-spine rail entries share this one
-        /// variant rather than each minting bespoke line-art, so adding a domain costs no drawing.
+        // The Craft bench and the seven domain surfaces — hand-drawn line-art so the rail reads by
+        // shape, not by a two-letter monogram.
+        Craft,
+        World,
+        Characters,
+        Weapons,
+        Driving,
+        Audio,
+        Missions,
+        Systems,
+        /// A short (1-2 char) monogram, drawn as text — the last-resort fallback for a surface with no
+        /// bespoke icon yet.
         Glyph(&'static str),
     }
 
@@ -1175,6 +1185,85 @@ pub mod theme {
                 p.circle_stroke(c, 6.0, s);
                 p.line_segment([c, c + vec2(0.0, -3.5)], s);
                 p.line_segment([c, c + vec2(2.8, 1.5)], s);
+            }
+            // Craft — a wrench: a diagonal handle ending in a hex nut.
+            RailIcon::Craft => {
+                p.line_segment([c + vec2(-6.0, 6.0), c + vec2(1.5, -1.5)], s);
+                let nut = c + vec2(3.2, -3.2);
+                let mut pts = Vec::new();
+                for k in 0..=6 {
+                    let a = std::f32::consts::TAU * k as f32 / 6.0 + 0.5;
+                    pts.push(nut + vec2(a.cos() * 3.2, a.sin() * 3.2));
+                }
+                p.add(egui::Shape::line(pts, s));
+            }
+            // World — a globe: circle with an equator, two latitudes and a meridian.
+            RailIcon::World => {
+                p.circle_stroke(c, 6.5, s);
+                p.line_segment([c + vec2(-6.5, 0.0), c + vec2(6.5, 0.0)], s);
+                p.line_segment([c + vec2(-5.2, -3.2), c + vec2(5.2, -3.2)], s);
+                p.line_segment([c + vec2(-5.2, 3.2), c + vec2(5.2, 3.2)], s);
+                p.line_segment([c + vec2(0.0, -6.5), c + vec2(0.0, 6.5)], s);
+            }
+            // Characters — a head over a shoulders arc.
+            RailIcon::Characters => {
+                p.circle_stroke(c + vec2(0.0, -3.6), 2.6, s);
+                p.add(egui::Shape::line(
+                    vec![
+                        c + vec2(-5.2, 6.2),
+                        c + vec2(-4.2, 1.4),
+                        c + vec2(0.0, 0.2),
+                        c + vec2(4.2, 1.4),
+                        c + vec2(5.2, 6.2),
+                    ],
+                    s,
+                ));
+            }
+            // Weapons — crossed blades with crossguards.
+            RailIcon::Weapons => {
+                p.line_segment([c + vec2(-6.0, 6.0), c + vec2(5.2, -5.2)], s);
+                p.line_segment([c + vec2(6.0, 6.0), c + vec2(-5.2, -5.2)], s);
+                p.line_segment([c + vec2(-6.6, 3.4), c + vec2(-3.4, 6.6)], s);
+                p.line_segment([c + vec2(6.6, 3.4), c + vec2(3.4, 6.6)], s);
+            }
+            // Driving — a tire: rim, hub and four spokes.
+            RailIcon::Driving => {
+                p.circle_stroke(c, 6.6, s);
+                p.circle_stroke(c, 2.3, s);
+                for k in 0..4 {
+                    let a = std::f32::consts::TAU * k as f32 / 4.0 + 0.78;
+                    let (sn, cs) = a.sin_cos();
+                    p.line_segment([c + vec2(cs * 2.3, sn * 2.3), c + vec2(cs * 6.6, sn * 6.6)], s);
+                }
+            }
+            // Audio — a speaker cone with a sound chevron.
+            RailIcon::Audio => {
+                p.line_segment([c + vec2(-6.0, -2.2), c + vec2(-6.0, 2.2)], s);
+                p.line_segment([c + vec2(-6.0, -2.2), c + vec2(-3.0, -2.2)], s);
+                p.line_segment([c + vec2(-6.0, 2.2), c + vec2(-3.0, 2.2)], s);
+                p.line_segment([c + vec2(-3.0, -2.2), c + vec2(0.5, -5.2)], s);
+                p.line_segment([c + vec2(-3.0, 2.2), c + vec2(0.5, 5.2)], s);
+                p.line_segment([c + vec2(0.5, -5.2), c + vec2(0.5, 5.2)], s);
+                p.line_segment([c + vec2(3.2, -3.2), c + vec2(5.4, 0.0)], s);
+                p.line_segment([c + vec2(5.4, 0.0), c + vec2(3.2, 3.2)], s);
+            }
+            // Missions — a pennant flag on a pole.
+            RailIcon::Missions => {
+                p.line_segment([c + vec2(-3.6, -6.6), c + vec2(-3.6, 6.6)], s);
+                p.line_segment([c + vec2(-3.6, -6.6), c + vec2(5.6, -4.0)], s);
+                p.line_segment([c + vec2(5.6, -4.0), c + vec2(-3.6, -1.4)], s);
+            }
+            // Systems — a microchip: body, die and pins on all four sides.
+            RailIcon::Systems => {
+                p.rect_stroke(egui::Rect::from_center_size(c, vec2(9.5, 9.5)), 1.0, s);
+                p.rect_stroke(egui::Rect::from_center_size(c, vec2(3.6, 3.6)), 0.0, s);
+                for k in 0..2 {
+                    let o = -2.2 + k as f32 * 4.4;
+                    p.line_segment([c + vec2(o, -4.75), c + vec2(o, -6.6)], s); // top
+                    p.line_segment([c + vec2(o, 4.75), c + vec2(o, 6.6)], s); // bottom
+                    p.line_segment([c + vec2(-4.75, o), c + vec2(-6.6, o)], s); // left
+                    p.line_segment([c + vec2(4.75, o), c + vec2(6.6, o)], s); // right
+                }
             }
             RailIcon::Glyph(text) => {
                 p.text(
