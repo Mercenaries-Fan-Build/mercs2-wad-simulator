@@ -950,6 +950,43 @@ pub mod theme {
     /// gets drawn INSIDE it. `scrub_cell` paints its own chrome for exactly the same reason.
     ///
     /// Returns `(chose_a_new_path, cleared)`.
+    /// Copy a source file chosen from OUTSIDE the Shipment into its `src/` dir, returning the
+    /// `src/`-relative path. Keeps the source travelling with the manifest instead of storing an
+    /// absolute path that trips M0111. On a name collision with a DIFFERENT file it suffixes
+    /// `-2`, `-3`, … rather than clobbering an existing source. Errs (caller keeps the raw path) if
+    /// the file has no name or the copy fails.
+    fn copy_into_src(
+        root: &std::path::Path,
+        src: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        use std::io::{Error, ErrorKind};
+        let name = src
+            .file_name()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "chosen path has no file name"))?;
+        let dst_dir = root.join("src");
+        std::fs::create_dir_all(&dst_dir)?;
+        // Pick a non-colliding destination: reuse the name if it's byte-identical to `src`, else
+        // suffix a counter so two different files named `skin.png` can both live under src/.
+        let same = |a: &std::path::Path, b: &std::path::Path| -> bool {
+            match (std::fs::read(a), std::fs::read(b)) {
+                (Ok(x), Ok(y)) => x == y,
+                _ => false,
+            }
+        };
+        let stem = std::path::Path::new(name).file_stem().unwrap_or(name).to_string_lossy().to_string();
+        let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+        let mut chosen = dst_dir.join(name);
+        let mut i = 2;
+        while chosen.exists() && !same(&chosen, src) {
+            chosen = dst_dir.join(format!("{stem}-{i}{ext}"));
+            i += 1;
+        }
+        if !(chosen.exists() && same(&chosen, src)) {
+            std::fs::copy(src, &chosen)?;
+        }
+        Ok(std::path::Path::new("src").join(chosen.file_name().unwrap()))
+    }
+
     fn path_row(
         ui: &mut egui::Ui,
         label: &str,
@@ -1002,10 +1039,17 @@ pub mod theme {
                     d = d.add_filter(label, filters);
                 }
                 if let Some(p) = d.pick_file() {
-                    // Made relative when it IS under the root; otherwise stored as given, so the
-                    // M0111 "leaves the Shipment root" rule has something to fire on rather than the
-                    // widget silently rewriting a bad choice into a plausible one.
-                    *value = p.strip_prefix(root).map(|r| r.to_path_buf()).unwrap_or(p);
+                    // Made relative when it IS already under the root. When it is OUTSIDE, COPY it
+                    // into `src/` and store the `src/`-relative path: a Shipment must carry its own
+                    // sources (the reproducibility rule the manifest exists for), and an author who
+                    // picked a file in Downloads means "use this", not "leave a red M0111 absolute
+                    // path". If there is no Shipment dir yet, or the copy fails, fall back to the raw
+                    // path so the linter still flags it rather than the widget silently swallowing it.
+                    *value = match p.strip_prefix(root) {
+                        Ok(rel) => rel.to_path_buf(),
+                        Err(_) if root.is_dir() => copy_into_src(root, &p).unwrap_or(p),
+                        Err(_) => p,
+                    };
                     changed = true;
                 }
             }
