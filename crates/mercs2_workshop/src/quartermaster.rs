@@ -1415,10 +1415,23 @@ fn contribution_form(
             // read below for the donor auto-pick note.
             if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
                 commit = true;
-                // The model just changed — read what the GLB actually declares and pre-fill from it.
-                // A FOREIGN rig with no `retarget:` would be lowered rigidly (won't animate), so add
-                // the detected convention rather than leave the author to know it needs one. Detection
-                // reads the joint names in the file; it is not a guess.
+                // Name the asset after the model file, while the fields still hold their `stub()`
+                // placeholders — an author who picks RuMerc1.glb means the outfit is RuMerc1, not
+                // my_asset_2. Only the mint-pattern defaults are replaced; a real value is left alone.
+                if let Some(stem) = model.file_stem().map(|s| s.to_string_lossy().to_string()) {
+                    if name.is_empty() || name.starts_with("my_asset") {
+                        *name = stem.clone();
+                    }
+                    if slug.is_empty() || slug.starts_with("MyOutfit") {
+                        *slug = stem.clone();
+                    }
+                    if display.is_empty() || display == "My outfit" {
+                        *display = stem;
+                    }
+                }
+                // Also read what the GLB declares: a FOREIGN rig with no `retarget:` would be lowered
+                // rigidly (won't animate), so fill in the detected convention. Detection reads the
+                // joint names in the file; it is not a guess.
                 if let Some(f) = probe_glb(&root.join(&*model)) {
                     if f.foreign() && retarget.is_none() {
                         *retarget = Some(mercs2_quartermaster::manifest::Retarget {
@@ -1482,7 +1495,15 @@ fn contribution_form(
         }
         Contribution::AddModel { name, model, donor, group, textures, retarget } => {
             commit |= text_row(ui, "Asset name", name, "my_custom_helipad", true);
-            commit |= source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]);
+            if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
+                commit = true;
+                // Name the asset after the model file while the name is still the stub placeholder.
+                if let Some(stem) = model.file_stem().map(|s| s.to_string_lossy().to_string()) {
+                    if name.is_empty() || name.starts_with("my_asset") {
+                        *name = stem;
+                    }
+                }
+            }
             glb_facts_note(ui, facts, GlbAdvice::Model);
             let mut d = donor.clone().unwrap_or_default();
             if asset_row(ui, "Donor", &mut d, names) {
