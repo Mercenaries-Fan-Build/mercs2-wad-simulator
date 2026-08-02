@@ -5143,9 +5143,12 @@ pub fn run(opts: Options) {
                                 });
                             log_open = open;
                         }
+                        }
+                        // The Lua viewer is a floating window and must render on EVERY page — gating
+                        // it behind the viewport (above) meant a script opened from Missions / Systems
+                        // never appeared. `ctx` is captured from `gui.run`, so it is in scope here.
                         if let Some(v) = &mut lua_view {
                             v.show(ctx);
-                        }
                         }
                     });
 
