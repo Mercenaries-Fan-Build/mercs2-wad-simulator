@@ -2496,11 +2496,18 @@ pub fn run(opts: Options) {
                                 });
                             }
                             Workbench::Skeleton => {
+                                // The twin-tree view needs BOTH a target skeleton AND an imported
+                                // (retargeted) source. Gating only on the target left a dead state:
+                                // enter Rig with a target set but no mesh imported and the inner
+                                // `if let` on `retarget` failed with no `else`, so the whole navigator
+                                // rendered NOTHING — the panel looked like it vanished. Require the
+                                // import here, so every other state falls through to the picker branch
+                                // below (which shows "no rigged import loaded" + the target list).
                                 let have_target = retarget_target.is_some();
                                 // TWIN-TREE view once a target skeleton is chosen: donor (Mercs2) on top,
                                 // imported (foreign) on the bottom. Hovering any bone highlights it (and the
                                 // mesh it drives) in the viewer. The picker returns via "change target".
-                                if have_target && !show_target_picker {
+                                if have_target && !show_target_picker && retarget.is_some() {
                                     if let (Some(r), Some((_, tl))) = (&retarget, &retarget_target) {
                                         ui.horizontal(|ui| {
                                             ui.label(theme::disp_text("Skeletons", 15.0, theme::TX));
