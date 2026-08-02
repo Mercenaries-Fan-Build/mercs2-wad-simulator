@@ -29,6 +29,7 @@ pub mod lint;
 pub mod manifest;
 pub mod names;
 pub mod states;
+pub mod world;
 
 pub use blast::{
     claims, conflicts, merge_class, self_conflicts, unsatisfied_reads, Access, Claim, ClaimRecord,

@@ -2665,3 +2665,62 @@ fn edit_world_emits_a_shadowing_layer_overlay_and_no_op_round_trips() {
     let noop_decoded = mercs2_formats::sges::decompress_sges(&noop.compressed_data).expect("sges");
     assert_eq!(noop_decoded, inputs.block, "a no-op layer edit must reproduce the block's decoded bytes");
 }
+
+/// ★ edit_world end to end: a Shipment that moves one entity in a real layer builds into an overlay
+/// that shadows the base layer and reads the entity back at its new position.
+#[test]
+fn edit_world_builds_an_overlay_that_moves_an_entity() {
+    let Some(mut game) = discovered_game() else {
+        eprintln!("SKIPPING: no game stack");
+        return;
+    };
+    // Find a layer needle that resolves to a block with placements.
+    let mut found = None;
+    for needle in ["vz_state_pmccon004", "vz_state_pmc", "vz_state"] {
+        if let Some(inp) = game.layer_block_for_edit(needle) {
+            if let Ok(p) = mercs2_formats::placement::load_placements(&inp.block) {
+                if !p.is_empty() {
+                    found = Some((needle.to_string(), inp.block.clone(), p[0].clone(), inp.path.clone()));
+                    break;
+                }
+            }
+        }
+    }
+    let Some((needle, base_block, target, base_path)) = found else {
+        eprintln!("SKIPPING: no vz_state layer with placements");
+        return;
+    };
+    let new_pos = [target.pos[0] + 55.0, target.pos[1], target.pos[2] - 10.0];
+
+    let dir = scratch("edit_world");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/world.yaml"),
+        format!(
+            "edits:\n  - entity: \"0x{:08X}\"\n    pos: [{}, {}, {}]\n",
+            target.key, new_pos[0], new_pos[1], new_pos[2]
+        ),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: edit_world\n    layer: \"{needle}\"\n    edits: src/world.yaml\n"),
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit_world must build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    // The overlay shadows the base layer block at its PTHS path.
+    let block = contents.blocks.iter().find(|b| b.path_string == base_path).expect("layer overlay present");
+    let decoded = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let after = mercs2_formats::placement::load_placements(&decoded).expect("re-parse");
+    let moved = after.iter().find(|p| p.key == target.key).expect("entity present");
+    assert_eq!(moved.pos, new_pos, "the entity must read back at the new position");
+    // Every other entity is where it was.
+    let before = mercs2_formats::placement::load_placements(&base_block).unwrap();
+    for (a, b) in before.iter().zip(&after) {
+        if a.key != target.key {
+            assert_eq!(a.pos, b.pos, "a non-target entity moved");
+        }
+    }
+}

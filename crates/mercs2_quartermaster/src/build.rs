@@ -2124,6 +2124,112 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
+        // Edit a placement LAYER (vz_state / layers_static): move / rotate / re-model its entities in
+        // place. Loads the whole layer block from the stack, applies each edit with the proven
+        // in-place `placement::patch_*` writer (matched by entity key, or by name via the layer's own
+        // Name COMP), and re-emits the block as an overlay shadowing the base path.
+        Contribution::EditWorld { layer, edits } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            let inputs = game.layer_block_for_edit(layer).ok_or_else(|| BuildError::Lower {
+                index,
+                kind,
+                message: format!(
+                    "no layer matching {layer:?} in the game stack — the target is a PTHS-path needle \
+                     like \"vz_state_pmccon004\" or \"layers_static\""
+                ),
+            })?;
+
+            let text = std::fs::read_to_string(root.join(edits)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(edits).display()),
+            })?;
+            let doc = crate::world::parse(&text).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: format!("{}: {m}", root.join(edits).display()),
+            })?;
+
+            // Name → key, from the layer's own placements, so an author can target by entity name.
+            let places = mercs2_formats::placement::load_placements(&inputs.block).unwrap_or_default();
+            let key_by_name: std::collections::HashMap<&str, u32> = places
+                .iter()
+                .filter_map(|p| p.name.as_deref().map(|n| (n, p.key)))
+                .collect();
+
+            let mut edited = inputs.block.clone();
+            let (mut moved, mut reskinned) = (0usize, 0usize);
+            for e in &doc.edits {
+                // Resolve the target to a Transform record key.
+                let key = crate::manifest::bare_hash(&e.entity)
+                    .or_else(|| key_by_name.get(e.entity.as_str()).copied())
+                    .ok_or_else(|| BuildError::Lower {
+                        index,
+                        kind,
+                        message: format!(
+                            "edit_world: entity {:?} is neither a bare 0xKEY nor a name in {layer:?} \
+                             — extract a baseline with `qm extract-world` and edit that",
+                            e.entity
+                        ),
+                    })?;
+                if e.pos.is_some() || e.quat.is_some() {
+                    let n = mercs2_formats::placement::patch_transform(&mut edited, key, e.pos, e.quat);
+                    if n == 0 {
+                        return Err(BuildError::Lower {
+                            index,
+                            kind,
+                            message: format!(
+                                "edit_world: no Transform for entity {:?} (0x{key:08X}) in {layer:?}",
+                                e.entity
+                            ),
+                        });
+                    }
+                    moved += n;
+                }
+                if let Some(m) = &e.model {
+                    let mh = crate::manifest::asset_hash(m);
+                    let n = mercs2_formats::placement::patch_model(&mut edited, key, mh);
+                    if n == 0 {
+                        return Err(BuildError::Lower {
+                            index,
+                            kind,
+                            message: format!(
+                                "edit_world: entity {:?} (0x{key:08X}) has no ModelName to re-model in \
+                                 {layer:?}",
+                                e.entity
+                            ),
+                        });
+                    }
+                    reskinned += n;
+                }
+            }
+            if edited == inputs.block {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} declares no effective change to {layer:?} — an edit_world that moves nothing \
+                         would ship an overlay that only restates the base layer",
+                        root.join(edits).display()
+                    ),
+                });
+            }
+            log.push(format!(
+                "contributions[{index}] edit_world {layer}: {} edit(s) \u{2192} {moved} moved, \
+                 {reskinned} re-modelled; layer block {} B, shadowed at {}",
+                doc.edits.len(),
+                inputs.block.len(),
+                inputs.path
+            ));
+            Ok(Lowering::Block(emit_edited_layer(&inputs, &edited).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?))
+        }
+
         // Same-hash string-table edit. Reads the base container from the stack (like
         // replace_texture reads a texture's dims), applies the author's key→text edits through the
         // proven codec, and emits an overlay copy that wins by mount order.

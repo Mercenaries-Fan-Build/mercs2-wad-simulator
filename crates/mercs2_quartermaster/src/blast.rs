@@ -299,6 +299,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::EditStateMachine { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
+            // Edits the WHOLE layer block, emitted as an overlay — last-mounted-wins, like editing a
+            // model's states. Two Shipments editing one layer is a load-order question here (the later
+            // overlay's edits win); a real layer-merge would be the linker's job, not this claim's.
+            Contribution::EditWorld { layer, .. } => {
+                push(Access::Write, Claim::asset(layer), Intent::Replace);
+            }
             // Same-hash edit of a shipped table: a Write on the asset, last-wins (like
             // replace_texture). Two Shipments editing the same table is a load-order question, not
             // a conflict — whichever mounts last serves the lookup.

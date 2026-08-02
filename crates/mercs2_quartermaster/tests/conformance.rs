@@ -71,6 +71,10 @@ contributions:
     target: al_veh_boat_destroyer
     states: src/destroyer/states.yaml
 
+  - kind: edit_world
+    layer: vz_state_pmccon004
+    edits: src/world.yaml
+
   - kind: edit_stringdb
     target: english
     strings: src/text/english.txt
@@ -169,6 +173,11 @@ const JSON: &str = r#"
       "kind": "edit_state_machine",
       "target": "al_veh_boat_destroyer",
       "states": "src/destroyer/states.yaml"
+    },
+    {
+      "kind": "edit_world",
+      "layer": "vz_state_pmccon004",
+      "edits": "src/world.yaml"
     },
     {
       "kind": "edit_stringdb",
@@ -279,6 +288,11 @@ target = "al_veh_boat_destroyer"
 states = "src/destroyer/states.yaml"
 
 [[contributions]]
+kind = "edit_world"
+layer = "vz_state_pmccon004"
+edits = "src/world.yaml"
+
+[[contributions]]
 kind = "edit_stringdb"
 target = "english"
 strings = "src/text/english.txt"
@@ -341,6 +355,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_texture",
             "add_sound",
             "edit_state_machine",
+            "edit_world",
             "edit_stringdb",
             "add_movie",
             "add_ui",

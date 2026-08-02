@@ -482,6 +482,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::PatchLua { target, .. }
         | Contribution::EditStateMachine { target, .. }
         | Contribution::EditStringDb { target, .. } => target.clone(),
+        Contribution::EditWorld { layer, .. } => layer.clone(),
         // `NativeHook.target` is the ENGINE, not an asset — so name it by what it actually is.
         Contribution::NativeHook { plugin, symbol, .. } => plugin
             .as_ref()
@@ -606,6 +607,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("add_ui", "A Scaleform movie, wired up so it appears on screen"),
             ("replace_texture", "Replace a shipped texture, same hash"),
             ("edit_state_machine", "Rewrite a destructible's states"),
+            ("edit_world", "Move / rotate / re-model a layer's placed entities"),
             ("edit_stringdb", "Correct or localise UI text"),
         ],
     ),
@@ -694,6 +696,10 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "edit_state_machine" => Contribution::EditStateMachine {
             target: "al_veh_boat_destroyer".into(),
             states: PathBuf::from("src/states.yaml"),
+        },
+        "edit_world" => Contribution::EditWorld {
+            layer: "vz_state_pmccon004".into(),
+            edits: PathBuf::from("src/world.yaml"),
         },
         "edit_stringdb" => Contribution::EditStringDb {
             target: "english".into(),
@@ -1373,6 +1379,20 @@ fn contribution_form(
             commit |= asset_row(ui, "Target", target, names);
             commit |= source_row(ui, "States", states, root, &["yaml", "yml"]);
         }
+        Contribution::EditWorld { layer, edits } => {
+            commit |= text_row(ui, "Layer", layer, "vz_state_pmccon004", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "a PTHS-path needle: a vz_state overlay, or `layers_static`",
+            );
+            commit |= source_row(ui, "Edits", edits, root, &["yaml", "yml"]);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "per-entity pos / quat / model. Extract a baseline: `qm extract-world <layer>`",
+            );
+        }
         Contribution::EditStringDb { target, strings } => {
             commit |= asset_row(ui, "Target table", target, names);
             commit |= source_row(ui, "Strings", strings, root, &["txt"]);
@@ -1744,6 +1764,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::EditStateMachine { target, .. } => {
             vec![("Writes".to_string(), format!("state machine {target}"))]
         }
+        Contribution::EditWorld { layer, .. } => vec![
+            ("Writes".to_string(), format!("placement layer {layer}")),
+            ("Merge".to_string(), "last-wins \u{2014} the later overlay's edits win".to_string()),
+        ],
         Contribution::EditStringDb { target, .. } => vec![
             ("Writes".to_string(), format!("stringdb {target}")),
             ("Merge".to_string(), "last-wins \u{2014} load order is the answer".to_string()),

@@ -468,6 +468,12 @@ pub enum Contribution {
     PatchLua { target: String, append: PathBuf },
     /// Data. SWIT/STAT/CHDR/CEXE rewrite (`FUN_004cf340`, decoded).
     EditStateMachine { target: String, states: PathBuf },
+    /// Data. Edit a placement LAYER (`vz_state` overlay or `layers_static`): move / rotate / re-model
+    /// its entities in place. `layer` is a PTHS-path needle (`vz_state_pmccon004`, `layers_static`);
+    /// `edits` is a `src/`-relative YAML of per-entity changes (extract a baseline with
+    /// `qm extract-world`). Emitted as an overlay that shadows the base layer block; the
+    /// `placement::patch_*` writer is proven byte-identical on a no-op across 747 retail layers.
+    EditWorld { layer: String, edits: PathBuf },
     /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
     ///
     /// Same-hash and last-wins, like [`Contribution::ReplaceTexture`]: the overlay carries an
@@ -552,6 +558,7 @@ impl Contribution {
         "replace_texture",
         "patch_lua",
         "edit_state_machine",
+        "edit_world",
         "edit_stringdb",
         "native_hook",
         "place_file",
@@ -570,6 +577,7 @@ impl Contribution {
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
+            Contribution::EditWorld { .. } => "edit_world",
             Contribution::EditStringDb { .. } => "edit_stringdb",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",

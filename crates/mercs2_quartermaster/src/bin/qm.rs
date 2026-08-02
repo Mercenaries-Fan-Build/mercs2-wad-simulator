@@ -118,6 +118,20 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
+    /// Extract a placement layer's entities as an editable `edit_world` file.
+    ///
+    /// The baseline for `edit_world`: dump a `vz_state` overlay or `layers_static`'s placements (each
+    /// entity's key, name, position, rotation, model), redirect it to a file, edit the ones you want,
+    /// and point `edits:` at it.
+    ExtractWorld {
+        /// The layer — a PTHS-path needle (`vz_state_pmccon004`, `layers_static`).
+        layer: String,
+        #[arg(long, value_name = "DIR")]
+        game: Option<PathBuf>,
+        /// hash → name lookup, so a model reads by name. Defaults to the workspace's names.
+        #[arg(long, value_name = "FILE")]
+        names: Option<PathBuf>,
+    },
     /// List every rule: what is checked, what is known-but-unchecked, and where each is documented.
     Rules,
 }
@@ -154,6 +168,11 @@ fn main() -> ExitCode {
             game,
             names,
         } => cmd_extract_states(&target, game.as_deref(), names.as_deref()),
+        Command::ExtractWorld {
+            layer,
+            game,
+            names,
+        } => cmd_extract_world(&layer, game.as_deref(), names.as_deref()),
         Command::Rules => cmd_rules(),
     }
 }
@@ -324,6 +343,47 @@ fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<
     let names = resolve_names(names_path);
     let name_of = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
     print!("{}", mercs2_quartermaster::states::extract(&sm, name_of));
+    ExitCode::SUCCESS
+}
+
+fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
+    let mut stack = match resolve_game(game_dir) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let Some(inputs) = stack.layer_block_for_edit(layer) else {
+        eprintln!(
+            "error: no layer matching {layer:?} in the game stack — try a needle like \
+             \"vz_state_pmccon004\" or \"layers_static\""
+        );
+        return ExitCode::from(EXIT_UNUSABLE);
+    };
+    let places = match mercs2_formats::placement::load_placements(&inputs.block) {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("error: {layer:?} carries no readable placements");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    };
+    // Merge in each entity's model hash (only some placements carry a ModelName).
+    let model_by_key: std::collections::HashMap<u32, u32> =
+        mercs2_formats::placement::load_model_placements(&inputs.block)
+            .into_iter()
+            .map(|m| (m.key, m.model_hash))
+            .collect();
+    let dumped: Vec<mercs2_quartermaster::world::Placed> = places
+        .into_iter()
+        .map(|p| mercs2_quartermaster::world::Placed {
+            key: p.key,
+            name: p.name,
+            pos: p.pos,
+            quat: p.quat,
+            model: model_by_key.get(&p.key).copied(),
+        })
+        .collect();
+    let names = resolve_names(names_path);
+    let model_name = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
+    print!("{}", mercs2_quartermaster::world::extract(&dumped, model_name));
     ExitCode::SUCCESS
 }
 
