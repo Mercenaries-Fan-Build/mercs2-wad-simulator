@@ -1052,8 +1052,12 @@ fn lower_skinned(
             for &m in &used {
                 let Some(tex) = mat_tex.get(m) else { continue };
                 let mut slots: [Option<u32>; 3] = [None; 3];
+                // DIFFUSE ONLY for now. Shipping the GLB's own NORMAL map turned the model black —
+                // its tangent-space normal does not survive our swizzle/encode the way a hand-authored
+                // one does, so lighting collapsed. Keep the donor's normal (which lit fine) until the
+                // normal path is verified; the diffuse is what carries the recognisable skin anyway.
                 for (slot, suffix, png, is_normal) in
-                    [(0usize, "dm", &tex.diffuse, false), (2, "nm", &tex.normal, true)]
+                    [(0usize, "dm", &tex.diffuse, false)]
                 {
                     let Some(bytes) = png else { continue };
                     let tex_name = format!("{name}_m{m}_{suffix}");
