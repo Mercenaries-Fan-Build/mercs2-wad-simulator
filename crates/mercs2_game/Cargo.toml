@@ -18,6 +18,9 @@ mercs2_formats = { workspace = true }
 mercs2_engine = { workspace = true }
 # ECS components (Transform/ModelRef/AnimState/SkinPalette) the game spawns into the engine's World.
 mercs2_core = { workspace = true }
+# Serve the live-bridge REPL protocol from the reimpl engine (Plan 03 phase 5): the console that
+# drives the retail game through Wally's ASI can drive this engine over the same socket.
+mercs2_bridge = { workspace = true }
 # The game depends ONLY on the engine for all mercs2 mechanisms: the engine owns + re-exports every
 # subsystem crate (physics/combat/ai/anim/audio/vehicle/decal/population/faction/water/ui + the Lua
 # script host), so the game reaches them through `mercs2_engine::<name>::…`. The game's systems

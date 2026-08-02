@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::save;
 
+mod bridge_host; // Serve the live-bridge REPL protocol from the reimpl engine (Plan 03 phase 5)
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)

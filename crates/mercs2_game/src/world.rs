@@ -1326,6 +1326,9 @@ pub struct Mercs2Game {
     weapon_player_model: u32,
     game_start: std::time::Instant,
     mouse_dbg_frames: u32,
+    /// The live-bridge server (Plan 03 phase 5), if the REPL port was free at boot. `update` drains
+    /// its queued chunks each frame and evaluates them on this (the main) thread's Lua VM.
+    bridge: Option<crate::bridge_host::BridgeHost>,
 }
 
 impl Mercs2Game {
@@ -1406,6 +1409,22 @@ impl Mercs2Game {
             weapon_player_model: 0,
             game_start: std::time::Instant::now(),
             mouse_dbg_frames: 0,
+            // Start the live-bridge server (Plan 03 phase 5). `None` if the port is busy (the retail
+            // ASI is running, or another instance) — the game boots regardless.
+            bridge: {
+                let b = crate::bridge_host::BridgeHost::start();
+                match &b {
+                    Some(_) => println!(
+                        "[mercs2_game] live bridge listening on {} — the Workshop console can attach",
+                        mercs2_bridge::DEFAULT_ADDR
+                    ),
+                    None => println!(
+                        "[mercs2_game] live bridge port {} busy — running without a console attach",
+                        mercs2_bridge::DEFAULT_ADDR
+                    ),
+                }
+                b
+            },
         }
     }
 
@@ -1887,6 +1906,24 @@ impl mercs2_engine::app::Game for Mercs2Game {
 
     fn update(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::Camera {
         use mercs2_engine::input::Action;
+        // ── Live bridge (Plan 03 phase 5): answer any REPL chunks the worker thread queued since the
+        // last frame, HERE on the main thread — the only one that may touch the Lua VM. Collect first
+        // so the immutable borrow of `self.bridge` is released before we reach for `self.script`. ──
+        let pending = self.bridge.as_ref().map(|b| b.take_pending()).unwrap_or_default();
+        for req in pending {
+            let out = match &self.script {
+                // `exec` runs the chunk in the game's own VM; the reply is what the console sees. A
+                // call the reimpl has not bound yet (`Loader.Printf`, an unimplemented `Object.*`)
+                // returns its Lua error verbatim — an honest report of what this engine serves today,
+                // which grows as the bindings do.
+                Some(sh) => match sh.exec(req.chunk(), "bridge") {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error: {e}"),
+                },
+                None => "<no script host loaded>".to_string(),
+            };
+            req.respond(out);
+        }
         // Tab toggles the free / third-person camera (rising edge).
         if ctx.pressed.contains(&KeyCode::Tab) {
             self.mode = if self.mode == CamMode::Free { CamMode::ThirdPerson } else { CamMode::Free };

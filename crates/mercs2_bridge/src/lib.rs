@@ -26,7 +26,7 @@
 //! loop — the same shape as the Workshop's other background loaders.
 
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 /// Where the ASI listens by default — loopback only, matching its bind.
@@ -191,6 +191,86 @@ impl Bridge {
     }
 }
 
+/// The **server** half of the bridge protocol — the counterpart to [`Bridge`].
+///
+/// Wally's ASI is one host that answers this protocol; our reimpl engine ([`mercs2_game`]) is meant
+/// to be another (Plan 03 phase 5, "serve the same protocol from the reimpl engine"), so the Workshop
+/// console can drive either. This is the shared transport: it speaks the identical `<<<RUN>>>` /
+/// `<<<END>>>` framing, so a [`Bridge`] client cannot tell a `Server`-backed host from the ASI.
+///
+/// It is transport only. What a chunk *means* is the host's business: [`serve`](Server::serve) hands
+/// each request to a handler and frames whatever it returns. The reimpl's handler queues the chunk to
+/// its next engine frame and evaluates it on the Lua VM's own thread — exactly as the ASI does
+/// ("chunk queues to the next engine frame and runs on the main thread") — because that VM is not
+/// `Send`.
+pub struct Server {
+    listener: TcpListener,
+}
+
+impl Server {
+    /// Bind the default loopback REPL port (`127.0.0.1:27050`) — the address a [`Bridge`] reaches with
+    /// [`Bridge::connect_default`]. Fails if the port is already held (e.g. the retail ASI is live).
+    pub fn bind_default() -> std::io::Result<Server> {
+        Self::bind(DEFAULT_ADDR)
+    }
+
+    /// Bind a specific address. Pass `127.0.0.1:0` to take an ephemeral port (read it back with
+    /// [`local_addr`](Server::local_addr)) — how the tests avoid colliding with a real game.
+    pub fn bind(addr: impl ToSocketAddrs) -> std::io::Result<Server> {
+        Ok(Server {
+            listener: TcpListener::bind(addr)?,
+        })
+    }
+
+    /// The address actually bound — needed when [`bind`](Server::bind) took an ephemeral port.
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// Serve connections forever, calling `handler(chunk)` for every `<<<RUN>>>`-terminated request
+    /// and writing its return framed by `<<<END>>>`. Blocking — run it on a thread.
+    ///
+    /// One connection is serviced fully (all its sequential requests) before the next is accepted: a
+    /// REPL is a serialized conversation, and this matches the ASI's single-client model. A read error
+    /// or EOF ends that connection and moves on; only a fatal accept error returns.
+    pub fn serve<F: FnMut(&str) -> String>(&self, mut handler: F) -> std::io::Result<()> {
+        for stream in self.listener.incoming() {
+            let mut stream = stream?;
+            let _ = stream.set_nodelay(true);
+            // Service every request on this connection until the client hangs up.
+            let _ = Self::serve_conn(&mut stream, &mut handler);
+        }
+        Ok(())
+    }
+
+    /// Read `<<<RUN>>>`-framed chunks off one connection, answering each with `<<<END>>>`-framed
+    /// output, until EOF or an I/O error. Split out so a host can drive a single accepted socket.
+    fn serve_conn<F: FnMut(&str) -> String>(
+        stream: &mut TcpStream,
+        handler: &mut F,
+    ) -> std::io::Result<()> {
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 4096];
+        loop {
+            // Consume any whole requests already buffered before reading more.
+            while let Some(pos) = find_subslice(&buf, RUN) {
+                let req = String::from_utf8_lossy(&buf[..pos]).into_owned();
+                buf.drain(..pos + RUN.len());
+                let out = handler(&req);
+                stream.write_all(out.as_bytes())?;
+                stream.write_all(END)?;
+                stream.flush()?;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return Ok(()), // client closed
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
 /// The first index at which `needle` occurs in `hay`.
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
@@ -212,5 +292,28 @@ mod tests {
         assert_eq!(find_subslice(&buf, END), None);
         buf.extend_from_slice(b"D>>>");
         assert_eq!(find_subslice(&buf, END), Some(6));
+    }
+
+    /// ★ The two halves speak the same protocol: a real [`Bridge`] client, pointed at a [`Server`] on
+    /// an ephemeral port, gets each chunk handled and framed back — the property that lets the reimpl
+    /// stand in for the ASI. Two sequential evals prove the connection is reused, not one-shot.
+    #[test]
+    fn a_client_talks_to_the_server_over_the_real_protocol() {
+        let server = Server::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr = server.local_addr().unwrap();
+        // The handler stands in for the engine: it echoes the chunk uppercased, so the roundtrip is
+        // observable and order-preserving.
+        let h = std::thread::spawn(move || {
+            let _ = server.serve(|chunk| format!("ran: {}", chunk.to_uppercase()));
+        });
+
+        let mut client = Bridge::connect_at(addr).expect("connect");
+        assert_eq!(client.eval("print('hi')").unwrap(), "ran: PRINT('HI')");
+        // Same connection, second turn — the server loops per request.
+        assert_eq!(client.eval("x = 1").unwrap(), "ran: X = 1");
+        drop(client);
+        // The server thread ends when the last connection closes only if we stop accepting; it is a
+        // daemon here, so just detach — the test's assertions are what matter.
+        drop(h);
     }
 }
