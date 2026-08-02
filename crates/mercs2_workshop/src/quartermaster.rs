@@ -657,9 +657,24 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
             *donor = Some(asset.to_string());
         }
         Contribution::ReplaceTexture { target, .. } => *target = asset.to_string(),
+        // A layer routed from the World domain: `asset` is the layer NAME, so seed the field the kind
+        // actually operates on (the stub's placeholder replaces/edits stay as authored defaults).
+        Contribution::EditWorld { layer, .. } | Contribution::ActivateLayer { layer, .. } => {
+            *layer = asset.to_string()
+        }
         _ => {}
     }
     Some(c)
+}
+
+/// The kinds a world-state LAYER can be routed into — the layer analogue of [`routes_for`]. A layer
+/// is never the thing overwritten wholesale; it is moved in place (`edit_world`) or switched on
+/// (`activate_layer`).
+pub fn routes_for_layer() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("activate_layer", "Activate this overlay"),
+        ("edit_world", "Edit this layer's placements"),
+    ]
 }
 
 /// A schema-valid stub for `kind`.

@@ -74,7 +74,8 @@ impl Domain {
     /// One line for the domain's header — what it is, and that it is a thin browser today.
     pub fn blurb(self) -> &'static str {
         match self {
-            Domain::World => "Buildings, props and world state — the environment you fight in.",
+            Domain::World => "Buildings, props and world state — including the vz_state overlays you \
+                              move (edit_world) and switch on (activate_layer).",
             Domain::Characters => "Heroes, mercs and civilians. Edit a rig from here.",
             Domain::Weapons => "Guns and ordnance.",
             Domain::Driving => "Vehicles of every class — the donor pool for a new ride.",
@@ -111,6 +112,12 @@ impl Domain {
         )
     }
 
+    /// Whether this domain also browses the world-state placement layers (`index::Kind::Layer`).
+    /// World alone does: the `vz_state` overlays are its subject as much as buildings and props are.
+    pub fn browses_layers(self) -> bool {
+        matches!(self, Domain::World)
+    }
+
     /// Corpus path/name needles for the Lua that governs this domain — the scripts a domain edit is
     /// likely to touch. Empty where the domain is asset-only. Matched case-insensitively against a
     /// corpus entry's path by the caller.
@@ -129,7 +136,14 @@ impl Domain {
     /// The contribution kinds that make sense in this domain — what "Add to Shipment" offers here.
     pub fn kinds(self) -> &'static [&'static str] {
         match self {
-            Domain::World => &["add_model", "replace_texture", "add_texture", "edit_state_machine"],
+            Domain::World => &[
+                "add_model",
+                "replace_texture",
+                "add_texture",
+                "edit_state_machine",
+                "edit_world",
+                "activate_layer",
+            ],
             Domain::Characters => &["add_outfit", "add_model", "add_texture", "replace_texture"],
             Domain::Weapons => &["add_model", "replace_texture", "add_texture"],
             Domain::Driving => &["add_model", "replace_texture", "add_texture", "edit_state_machine"],
@@ -178,6 +192,16 @@ mod tests {
             assert!(!d.model_lens(&anything));
             assert!(!d.browses_models());
         }
+    }
+
+    /// World owns the vz_state overlays: it offers the two world-scale kinds and is the one domain
+    /// that browses the layer catalog. Without this, the kinds ship but the domain never routes them.
+    #[test]
+    fn world_routes_the_overlay_kinds_and_alone_browses_layers() {
+        assert!(Domain::World.kinds().contains(&"edit_world"));
+        assert!(Domain::World.kinds().contains(&"activate_layer"));
+        assert!(Domain::World.browses_layers());
+        assert!(Domain::ALL.iter().filter(|d| d.browses_layers()).count() == 1);
     }
 
     /// An unnamed (hash-only) row belongs to no domain lens — there is nothing to classify on.

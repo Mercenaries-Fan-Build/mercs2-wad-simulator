@@ -40,10 +40,13 @@ pub enum Kind {
     UiGfx,
     FaceFx,
     Text,
+    /// World-state placement layers (`vz_state_*` / `layers_static`) — the overlays `edit_world`
+    /// and `activate_layer` operate on. Browse-only: a layer is a set of placements, not a render.
+    Layer,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Model,
         Kind::Texture,
         Kind::Animation,
@@ -52,6 +55,7 @@ impl Kind {
         Kind::UiGfx,
         Kind::FaceFx,
         Kind::Text,
+        Kind::Layer,
     ];
 
     pub fn label(self) -> &'static str {
@@ -64,6 +68,7 @@ impl Kind {
             Kind::UiGfx => "UI / GFX",
             Kind::FaceFx => "FACEFX",
             Kind::Text => "FONTS & TEXT",
+            Kind::Layer => "WORLD LAYERS",
         }
     }
 
@@ -78,6 +83,7 @@ impl Kind {
             Kind::UiGfx => "UI",
             Kind::FaceFx => "FaceFX",
             Kind::Text => "Text",
+            Kind::Layer => "Layers",
         }
     }
 
@@ -98,6 +104,7 @@ impl Kind {
             // facefx_animset(5), facefx_actor(34)
             Kind::FaceFx => &[5, 34],
             Kind::Text => &[TYPE_ID_FONT, TYPE_ID_STRINGDB],
+            Kind::Layer => &[TYPE_ID_LAYER],
         }
     }
 
@@ -117,6 +124,9 @@ impl Kind {
             Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
             Kind::FaceFx => Preview::None("needs a head to drive"),
             Kind::Text => Preview::None("fonts render as a plate; string tables as a list"),
+            Kind::Layer => Preview::None(
+                "a layer is a placement set — browse it, then edit_world / activate_layer",
+            ),
         }
     }
 }
@@ -272,6 +282,12 @@ impl AssetIndex {
 
     pub fn textures(&self) -> &[AssetRow] {
         self.rows(Kind::Texture)
+    }
+
+    /// The world-state placement layers (`vz_state_*` / `layers_static`) — what `edit_world` and
+    /// `activate_layer` act on. The World domain browses these directly.
+    pub fn layers(&self) -> &[AssetRow] {
+        self.rows(Kind::Layer)
     }
 
     /// How many assets a category holds — for the category strip's counts.

@@ -887,6 +887,35 @@ fn asset_menu(
     }
 }
 
+/// The context menu for a world-state LAYER — the World domain's second subject.
+///
+/// A layer is never a donor or a render target, so it gets its own menu (not [`asset_menu`]): it can
+/// only be switched on (`activate_layer`) or have its placements moved (`edit_world`). Both route the
+/// layer by NAME through the same `Act::AddToShipment` path assets use — `seeded` seeds the layer
+/// field from the label, so the resulting contribution names this exact layer.
+fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, actions: &mut Vec<Act>) {
+    use crate::gui::theme;
+    ui.label(theme::disp_text(label.to_uppercase(), 10.0, theme::BRASS));
+    ui.separator();
+    ui.menu_button("Add to Shipment", |ui| {
+        for (kind, what) in crate::quartermaster::routes_for_layer() {
+            if ui.button(*what).clicked() {
+                actions.push(Act::AddToShipment(kind, hash, label.to_string()));
+                ui.close_menu();
+            }
+        }
+    });
+    ui.separator();
+    if ui.button("Copy name").clicked() {
+        ui.ctx().copy_text(label.to_string());
+        ui.close_menu();
+    }
+    if ui.button(format!("Copy hash 0x{hash:08X}")).clicked() {
+        ui.ctx().copy_text(format!("0x{hash:08X}"));
+        ui.close_menu();
+    }
+}
+
 /// A secondary-click-only handle over the viewport rect.
 ///
 /// `Sense::click()` alone would swallow the LEFT button too and kill the camera drag, so this
@@ -2579,6 +2608,37 @@ pub fn run(opts: Options) {
                                             resp.context_menu(|ui| {
                                                 asset_menu(ui, r.hash, &r.label(), false, &mut actions);
                                             });
+                                        }
+                                        // ── World-state overlays. The vz_state layers are the World
+                                        // domain's other subject: not models to render, but placement
+                                        // sets you switch on (activate_layer) or move (edit_world).
+                                        // Rendered in the same scroll so the two fit one column.
+                                        if d.browses_layers() {
+                                            let layers = index.layers();
+                                            ui.add_space(8.0);
+                                            theme::eyebrow(ui, "World-state overlays");
+                                            ui.label(theme::disp_text(
+                                                format!("{} layer(s) — right-click to route", layers.len()),
+                                                10.0,
+                                                theme::FAINT,
+                                            ));
+                                            ui.add_space(3.0);
+                                            let mut sorted: Vec<&crate::index::AssetRow> = layers.iter().collect();
+                                            sorted.sort_by(|a, b| a.label().cmp(&b.label()));
+                                            for r in sorted {
+                                                let resp = theme::row_chip(
+                                                    ui,
+                                                    egui::Color32::TRANSPARENT,
+                                                    theme::LINE,
+                                                    |ui| {
+                                                        ui.label(egui::RichText::new(r.label())
+                                                            .monospace().size(10.5).color(theme::TX));
+                                                    },
+                                                );
+                                                resp.context_menu(|ui| {
+                                                    layer_menu(ui, r.hash, &r.label(), &mut actions);
+                                                });
+                                            }
                                         }
                                     });
                                     // Characters thickens toward the wardrobe: an outfit edit routes
