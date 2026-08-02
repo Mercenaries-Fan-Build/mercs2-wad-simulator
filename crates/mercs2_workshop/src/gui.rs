@@ -1186,16 +1186,15 @@ pub mod theme {
                 p.line_segment([c, c + vec2(0.0, -3.5)], s);
                 p.line_segment([c, c + vec2(2.8, 1.5)], s);
             }
-            // Craft — a wrench: a diagonal handle ending in a hex nut.
+            // Craft — a hammer: a head bar up top with a handle dropping from it. (A single tool, so
+            // it never reads as the crossed-blades Weapons icon.)
             RailIcon::Craft => {
-                p.line_segment([c + vec2(-6.0, 6.0), c + vec2(1.5, -1.5)], s);
-                let nut = c + vec2(3.2, -3.2);
-                let mut pts = Vec::new();
-                for k in 0..=6 {
-                    let a = std::f32::consts::TAU * k as f32 / 6.0 + 0.5;
-                    pts.push(nut + vec2(a.cos() * 3.2, a.sin() * 3.2));
-                }
-                p.add(egui::Shape::line(pts, s));
+                // head
+                p.rect_stroke(egui::Rect::from_center_size(c + vec2(0.0, -4.0), vec2(11.0, 3.8)), 0.8, s);
+                // a peen notch so the block reads as a hammer head, not a bar
+                p.line_segment([c + vec2(3.5, -5.9), c + vec2(3.5, -2.1)], s);
+                // handle
+                p.line_segment([c + vec2(-0.5, -2.1), c + vec2(0.8, 6.6)], s);
             }
             // World — a globe: circle with an equator, two latitudes and a meridian.
             RailIcon::World => {
@@ -1219,12 +1218,22 @@ pub mod theme {
                     s,
                 ));
             }
-            // Weapons — crossed blades with crossguards.
+            // Weapons — a pistol in side profile (guns and bombs, not swords).
             RailIcon::Weapons => {
-                p.line_segment([c + vec2(-6.0, 6.0), c + vec2(5.2, -5.2)], s);
-                p.line_segment([c + vec2(6.0, 6.0), c + vec2(-5.2, -5.2)], s);
-                p.line_segment([c + vec2(-6.6, 3.4), c + vec2(-3.4, 6.6)], s);
-                p.line_segment([c + vec2(6.6, 3.4), c + vec2(3.4, 6.6)], s);
+                let pts = vec![
+                    c + vec2(-7.0, -4.0), // muzzle, top
+                    c + vec2(5.5, -4.0),  // slide, back-top
+                    c + vec2(5.5, -1.2),  // back, down
+                    c + vec2(2.8, -1.2),  // in to the grip
+                    c + vec2(4.2, 6.2),   // grip, back edge
+                    c + vec2(1.2, 6.2),   // grip, bottom
+                    c + vec2(0.6, -1.2),  // grip, front
+                    c + vec2(-7.0, -1.2), // frame underside back to the muzzle
+                    c + vec2(-7.0, -4.0), // close
+                ];
+                p.add(egui::Shape::line(pts, s));
+                // trigger
+                p.line_segment([c + vec2(1.4, -1.2), c + vec2(1.8, 1.8)], s);
             }
             // Driving — a tire: rim, hub and four spokes.
             RailIcon::Driving => {
