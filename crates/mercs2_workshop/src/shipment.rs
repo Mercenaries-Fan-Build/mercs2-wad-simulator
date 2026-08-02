@@ -168,6 +168,7 @@ pub fn outfit_contribution(
             from: rt.convention.slug().to_string(),
             bones: (!rows.is_empty()).then_some(rows),
         }),
+        single_group: false,
     };
     Ok((c, stats))
 }

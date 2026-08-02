@@ -7007,6 +7007,9 @@ pub(crate) fn faithful_lower_opts(
         // texture block beside it. Skins are bound by the Quartermaster's `textures:`.
         repoints: Vec::new(),
         part_material_textures: std::collections::HashMap::new(),
+        // The Workshop preview/export always uses the faithful multi-group path; single-group is a
+        // Quartermaster build choice (`AddOutfit::single_group`) for placement-stable foreign rigs.
+        single_host: false,
     };
     Ok((glb, donor, opts))
 }

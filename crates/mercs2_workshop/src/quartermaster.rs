@@ -707,6 +707,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
             retarget: None,
+            single_group: false,
         },
         "add_model" => Contribution::AddModel {
             name,
@@ -1251,7 +1252,7 @@ fn contribution_form(
 
     match c {
         Contribution::AddOutfit {
-            name, slug, display, wearer, model, donor, textures, retarget,
+            name, slug, display, wearer, model, donor, textures, retarget, ..
         } => {
             commit |= text_row(ui, "Asset name", name, "pmc_hum_my_outfit", true);
             theme::field_note(
@@ -2338,6 +2339,7 @@ mod tests {
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
             retarget: Some(QmRetarget { from: "mixamo".into(), bones: Some(bones) }),
+            single_group: false,
         }
     }
 

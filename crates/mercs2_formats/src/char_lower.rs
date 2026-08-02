@@ -56,6 +56,18 @@ pub struct LowerOpts {
     /// each host group's own material hash and repointing it here lets every body part wear its own
     /// texture — the reason `faithful_partition` keeps parts un-merged. Empty = single-skin behaviour.
     pub part_material_textures: std::collections::HashMap<usize, [Option<u32>; 3]>,
+
+    /// Force the WHOLE mesh into ONE donor draw group, wearing the source's OWN retargeted weights.
+    ///
+    /// A draw group caps at ~48 distinct bones / 8 palette ranges. `donor_transfer` resamples the
+    /// retail rig and can pull a dense import past that (RuMerc1: 53 bones), which then forces the
+    /// multi-group balanced split — where we fill a few host groups and neuter the donor's others, a
+    /// donor-structure-dependent setup a foreign-rig character has rendered unstably on. This flag
+    /// takes the proven single-host path instead: it SKIPS donor transfer, so the conform's own
+    /// weights (limbs mapped 1:1 by the convention table, fingers folded to the hand) use ~half the
+    /// bones and fit one group. Implies no per-material textures (one group carries one material) and
+    /// forgoes the donor-resampled limb polish — the trade for placement stability.
+    pub single_host: bool,
 }
 
 /// What the lowering produced, for a caller that wants to report on it.
@@ -217,6 +229,12 @@ pub fn character_into_donor(
 
     let transfer = if opts.native_rig {
         "native rig — kept the author's own weights (no donor transfer)".to_string()
+    } else if opts.single_host {
+        // Single-host deliberately skips donor transfer: the resample is what inflates the palette
+        // past one group's bone/range ceiling. Keeping the conform's own weights is what lets the
+        // whole mesh fit one group and take the proven single-host path.
+        "single group — kept the conform's own weights (donor transfer skipped to fit one group)"
+            .to_string()
     } else {
         match donor_transfer::apply_donor_transfer(
             &mut skin,
@@ -281,19 +299,34 @@ pub fn character_into_donor(
     //
     // The faithful partition discovers how many groups are needed instead: one per source part,
     // split further only where a palette would overflow.
-    let part = faithful_partition(glb, &skin, &global_joints);
-    let nseg = part.seg_part.len();
-    if nseg > caps.len() {
-        return Err(format!(
-            "the split needs {nseg} host groups (one per source part, plus a cut wherever a bone \
-             palette would overflow) but the donor has only {} drawing groups. Merge source parts, \
-             or pick a donor with more groups.",
-            caps.len()
-        ));
-    }
-    // Biggest first — `grow` lifts the per-group vertex/index ceiling, so capacity ordering is a
-    // preference rather than a constraint, but a bigger donor group still means less growth.
-    let hosts: Vec<usize> = caps.iter().take(nseg).map(|&(ord, _, _)| ord).collect();
+    //
+    // `single_host` overrides all of this: ONE group holding the whole mesh, on the largest donor
+    // group. The per-part split exists only to give each material its own group, and single-host
+    // forgoes per-material skins by definition — so a trivial one-segment partition is correct, and
+    // it routes the build to the proven `inject_character_into_donor_block` path below.
+    let (part, hosts): (Partition, Vec<usize>) = if opts.single_host {
+        let trivial = Partition {
+            tris: glb.tris.clone(),
+            tri_group: vec![0usize; glb.tris.len()],
+            seg_part: vec![0usize],
+        };
+        (trivial, vec![caps[0].0])
+    } else {
+        let part = faithful_partition(glb, &skin, &global_joints);
+        let nseg = part.seg_part.len();
+        if nseg > caps.len() {
+            return Err(format!(
+                "the split needs {nseg} host groups (one per source part, plus a cut wherever a \
+                 bone palette would overflow) but the donor has only {} drawing groups. Merge \
+                 source parts, or pick a donor with more groups.",
+                caps.len()
+            ));
+        }
+        // Biggest first — `grow` lifts the per-group vertex/index ceiling, so capacity ordering is a
+        // preference rather than a constraint, but a bigger donor group still means less growth.
+        let hosts: Vec<usize> = caps.iter().take(nseg).map(|&(ord, _, _)| ord).collect();
+        (part, hosts)
+    };
 
     // PER-MATERIAL skins. Now that the host of every source part is known, resolve each host group's
     // OWN donor material hash and repoint it onto that part's texture — so a multi-material import
@@ -337,7 +370,7 @@ pub fn character_into_donor(
     // it here, where the source part is still nameable, rather than letting the injector report
     // "group 3 budget violated: ic 85381>65534" — true, and no use to whoever has to fix it.
     const MAX_TRIS_PER_GROUP: usize = 65534 / 3;
-    let mut per_slot = vec![0usize; nseg];
+    let mut per_slot = vec![0usize; part.seg_part.len()];
     for &g in &part.tri_group {
         per_slot[g] += 1;
     }

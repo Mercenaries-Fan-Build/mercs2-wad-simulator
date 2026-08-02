@@ -360,6 +360,21 @@ pub enum Contribution {
         textures: Textures,
         #[serde(default)]
         retarget: Option<Retarget>,
+        /// Force the whole mesh into ONE donor draw group, wearing the source's OWN retargeted
+        /// weights (no donor-weight resample, no per-material split).
+        ///
+        /// A draw group caps at ~48 distinct bones / 8 palette ranges, so a DENSE import
+        /// (`donor_transfer` resampling the retail rig can pull in 50+ bones) is otherwise forced
+        /// onto the multi-group balanced split, where our injector fills a few host groups and
+        /// neuters the donor's others — a donor-structure-dependent setup a foreign-rig character
+        /// has been observed to render unstably (culls/teleports on camera rotation). This flag
+        /// takes the proven single-host path instead: the conform maps limbs 1:1 through the
+        /// convention table and fingers fold to the hand, so the source's own weights use ~half the
+        /// bones and fit one group. The cost is per-material textures (one group carries one
+        /// material) and the donor-resampled limb polish — accept it when placement stability
+        /// matters more than skin fidelity.
+        #[serde(default)]
+        single_group: bool,
     },
     /// Data, new-hash additive.
     AddModel {

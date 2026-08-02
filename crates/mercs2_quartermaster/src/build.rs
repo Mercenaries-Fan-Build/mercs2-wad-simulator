@@ -834,6 +834,9 @@ fn lower_skinned(
     names: Option<&NameTable>,
     // The author's own skin. Empty for `add_model`, which has no `textures:` field.
     textures: &crate::manifest::Textures,
+    // Force one draw group + the source's own weights (see `AddOutfit::single_group`). `add_model`
+    // passes `false`.
+    single_group: bool,
     log: &mut Vec<String>,
 ) -> Result<(Vec<u8>, Vec<PatchBlock>), BuildError> {
     let lower_err = |m: String| BuildError::Lower {
@@ -1053,7 +1056,10 @@ fn lower_skinned(
         std::collections::HashMap::new();
     let author_supplied_skin =
         textures.diffuse.is_some() || textures.specular.is_some() || textures.normal.is_some();
-    if !author_supplied_skin {
+    // Per-material skins need one host draw group PER source part, which is exactly what
+    // `single_group` collapses away. When it is set the whole mesh shares one material, so building
+    // per-material blocks would ship textures nothing repoints onto — skip them.
+    if !author_supplied_skin && !single_group {
         let used: std::collections::BTreeSet<usize> =
             glb.parts.iter().filter_map(|p| p.material).collect();
         if !used.is_empty() {
@@ -1138,6 +1144,7 @@ fn lower_skinned(
         native_rig: detected == mercs2_formats::retarget::SourceRig::Pandemic,
         repoints,
         part_material_textures,
+        single_host: single_group,
     };
 
     let hash = crate::manifest::asset_hash(name);
@@ -1347,7 +1354,8 @@ fn lower(
                 // wears the donor's materials, which is right for a prop and was wrong for a novel
                 // mesh, the case the field was added for.
                 let (new_block, tex_blocks) = lower_skinned(
-                    index, kind, name, model, donor_name, rt, root, game, names, textures, log,
+                    index, kind, name, model, donor_name, rt, root, game, names, textures, false,
+                    log,
                 )?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
@@ -1453,6 +1461,7 @@ fn lower(
             donor,
             retarget,
             textures,
+            single_group,
             ..
         } => {
             let Some(game) = game else {
@@ -1518,7 +1527,8 @@ fn lower(
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
             if let Some(rt) = retarget {
                 let (new_block, tex_blocks) = lower_skinned(
-                    index, kind, name, model, donor_name, rt, root, game, names, textures, log,
+                    index, kind, name, model, donor_name, rt, root, game, names, textures,
+                    *single_group, log,
                 )?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
