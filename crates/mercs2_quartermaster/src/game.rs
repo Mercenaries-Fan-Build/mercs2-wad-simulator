@@ -289,6 +289,25 @@ struct OpenWad {
     archive: FfcsArchive,
 }
 
+/// One ASET registration row, restated verbatim when re-emitting a block as an overlay.
+#[derive(Debug, Clone)]
+pub struct AsetRow {
+    pub asset_hash: u32,
+    pub packed_block_ref: u32,
+    pub secondary_ref: u32,
+    pub type_id: u32,
+}
+
+/// What [`GameStack::layer_block_for_edit`] hands back: the whole placement layer block, the PTHS
+/// path to shadow, its archive index, and its ASET rows to restate.
+#[derive(Debug, Clone)]
+pub struct LayerEditInputs {
+    pub block: Vec<u8>,
+    pub path: String,
+    pub block_index: u32,
+    pub rows: Vec<AsetRow>,
+}
+
 /// What [`GameStack::model_container_for_edit`] hands back: the model's container plus the exact
 /// bytes an overlay copy must reproduce (its `field_c` and its ASET LOD-chain refs) and the source
 /// block index the rung remap needs.
@@ -523,6 +542,47 @@ impl GameStack {
                 })
                 .collect();
             return Some((dec, rows));
+        }
+        None
+    }
+
+    /// Everything an in-place LAYER edit (`edit_world` — a vz_state / layers_static placement patch)
+    /// needs to re-emit the whole layer block as an overlay that shadows the base by PTHS path.
+    ///
+    /// Unlike a model, a placement layer is edited AS A WHOLE block (one block holds the layer's COMP
+    /// sub-blocks), so there is no minimal-container trick — the overlay carries the edited block at
+    /// the base's own path, with its ASET rows restated. Returns the decompressed block, its PTHS
+    /// path, its archive block index (for the rung remap), and its ASET rows.
+    pub fn layer_block_for_edit(&mut self, needle: &str) -> Option<LayerEditInputs> {
+        let needle = needle.to_lowercase();
+        for wad in self.wads.iter_mut().rev() {
+            let Some(idx) = wad.archive.paths.iter().position(|p| p.to_lowercase().contains(&needle))
+            else {
+                continue;
+            };
+            let Ok(dec) =
+                mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
+            else {
+                continue;
+            };
+            let rows = wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.block_index() as usize == idx)
+                .map(|e| AsetRow {
+                    asset_hash: e.asset_hash,
+                    packed_block_ref: e.packed_block_ref,
+                    secondary_ref: e.secondary_ref,
+                    type_id: e.type_id,
+                })
+                .collect();
+            return Some(LayerEditInputs {
+                block: dec,
+                path: wad.archive.paths[idx].clone(),
+                block_index: idx as u32,
+                rows,
+            });
         }
         None
     }

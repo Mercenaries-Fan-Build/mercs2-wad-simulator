@@ -1050,6 +1050,28 @@ fn lower_skinned(
     Ok((out.block, tex_blocks))
 }
 
+/// Re-emit an edited placement LAYER block as an overlay that shadows the base by PTHS path.
+///
+/// A layer (vz_state / layers_static) is edited as a whole block — the placement records live in its
+/// COMP sub-blocks, patched in place by `placement::patch_transform` / `patch_model`. The overlay
+/// carries the edited block at the base's own path, its ASET rows restated verbatim, and the source
+/// block index recorded so `build_patch_wad_multi` re-points any block refs. On a no-op the decoded
+/// content is byte-identical to the base (the writer's proven property), which is what makes shadowing
+/// the whole block safe.
+pub fn emit_edited_layer(
+    inputs: &crate::game::LayerEditInputs,
+    edited_block: &[u8],
+) -> Result<PatchBlock, String> {
+    let aset: Vec<AsetEntry> = inputs
+        .rows
+        .iter()
+        .map(|r| AsetEntry::new(r.asset_hash, r.secondary_ref, r.packed_block_ref, r.type_id))
+        .collect();
+    let mut block = PatchBlock::from_decompressed(edited_block, inputs.path.clone(), aset, None)?;
+    block.source_block_index = Some(inputs.block_index);
+    Ok(block)
+}
+
 /// Lower a single contribution into a patch block.
 fn lower(
     index: usize,

@@ -2610,3 +2610,58 @@ fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
         "add_ui wires its own movie up, so a novel name must NOT warn"
     );
 }
+
+// ---------------------------------------------------------------------------
+// edit_world — the placement-layer overlay (vz_state / layers_static)
+// ---------------------------------------------------------------------------
+
+/// ★ Editing a placement layer, end to end: load a real vz_state block, move one entity in place,
+/// and emit an overlay that shadows the base by PTHS path — the edited placement reads back moved,
+/// and a NO-OP emit reproduces the layer's decoded bytes exactly.
+#[test]
+fn edit_world_emits_a_shadowing_layer_overlay_and_no_op_round_trips() {
+    let Some(mut game) = discovered_game() else {
+        eprintln!("SKIPPING: no game stack");
+        return;
+    };
+    // A vz_state block is small and carries placements; find one.
+    let mut inputs = None;
+    for needle in ["vz_state_pmccon004", "vz_state_pmc", "vz_state"] {
+        if let Some(i) = game.layer_block_for_edit(needle) {
+            if mercs2_formats::placement::load_placements(&i.block).map(|v| !v.is_empty()).unwrap_or(false) {
+                inputs = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(inputs) = inputs else {
+        eprintln!("SKIPPING: no vz_state block with placements");
+        return;
+    };
+
+    let places = mercs2_formats::placement::load_placements(&inputs.block).expect("parse");
+    let target = places[0].clone();
+
+    // Move it, emit the overlay.
+    let mut edited = inputs.block.clone();
+    let new_pos = [target.pos[0] + 40.0, target.pos[1], target.pos[2] - 15.0];
+    let moved_n = mercs2_formats::placement::patch_transform(&mut edited, target.key, Some(new_pos), None);
+    assert!(moved_n >= 1);
+    let block = build::emit_edited_layer(&inputs, &edited).expect("emit the overlay");
+
+    // The overlay shadows the base block at its own PTHS path, and restates its ASET rows.
+    assert_eq!(block.path_string, inputs.path, "the overlay must carry the base's path to shadow it");
+    assert_eq!(block.aset_entries.len(), inputs.rows.len(), "every ASET row must be restated");
+
+    // The emitted block decodes to the edited content, and the moved entity reads back.
+    let decoded = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    assert_eq!(decoded, edited, "the overlay must carry exactly the edited block");
+    let after = mercs2_formats::placement::load_placements(&decoded).expect("re-parse");
+    let m = after.iter().find(|p| p.key == target.key).expect("entity present");
+    assert_eq!(m.pos, new_pos, "the moved entity must read back at the new position");
+
+    // NO-OP: emitting the unedited layer decodes byte-for-byte to the base.
+    let noop = build::emit_edited_layer(&inputs, &inputs.block).expect("emit no-op");
+    let noop_decoded = mercs2_formats::sges::decompress_sges(&noop.compressed_data).expect("sges");
+    assert_eq!(noop_decoded, inputs.block, "a no-op layer edit must reproduce the block's decoded bytes");
+}
