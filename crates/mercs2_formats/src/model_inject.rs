@@ -1860,30 +1860,28 @@ fn inject_multi_into_donor_block_ex(
     }
     new_bodies.insert(0, top);
 
-    // ---- PRMG bounding sphere + AABB over ALL injected verts ----
+    // ---- PRMG per-group cull bounds: keep the donor's BONE-LOCAL centre, only enlarge ----
     //
-    // This is the fix for the character being frustum-culled the moment the camera rotated / looked
-    // up-down / panned sideways (but not forward-back): every PRMG INFO carried the DONOR's original
-    // bounding sphere, which the injected mesh does not fit, so each drawing group tested false against
-    // the view frustum and vanished. `docs/ucfx_model_from_scratch.md` requires "Author bounds from the
-    // group's verts", and `model_cubeize` does exactly this — rewrite EVERY 60-byte PRMG INFO's bounds.
-    // The single-host and kitbash injectors updated per-group bounds, but this balanced-split path (the
-    // one dense skinned characters take) never did. Setting every 60-byte PRMG INFO to the whole-model
-    // bounds is what `model_cubeize` ships and is safe: a group only culls once the whole character is
-    // off-screen. Layout (@+20 center.xyz, +32 radius, +36 min.xyz, +48 max.xyz — all f32).
-    let all_center = [
-        (all_min[0] + all_max[0]) * 0.5,
-        (all_min[1] + all_max[1]) * 0.5,
-        (all_min[2] + all_max[2]) * 0.5,
-    ];
-    let all_radius = {
-        let (dx, dy, dz) = (
-            (all_max[0] - all_min[0]) * 0.5,
-            (all_max[1] - all_min[1]) * 0.5,
-            (all_max[2] - all_min[2]) * 0.5,
-        );
-        (dx * dx + dy * dy + dz * dz).sqrt()
-    };
+    // The character was frustum-culled when the camera rotated / looked up-down / panned sideways: the
+    // injected mesh is bulkier than the donor group it replaces, so it pokes outside the donor's
+    // (tight) per-group cull sphere and each drawing group tests false against the frustum and vanishes.
+    //
+    // A PRIOR fix here overwrote each 60-byte PRMG INFO with the WHOLE-MODEL bbox, the way `model_cubeize`
+    // does — and that was wrong, because `model_cubeize` is for a STATIC model with ONE model-space
+    // frame, whereas a skinned character's per-group PRMG bounds are stored **bone-local**: the engine
+    // transforms each group's sphere by that group's bone matrix at render time. Measured on this donor,
+    // the per-group centres sit at the ORIGIN (r 0.02–0.14 m); writing a model-space centre of Y≈0.92 m
+    // into a bone-local slot puts every cull sphere ~0.92 m off its bone and drags it around as the
+    // skeleton animates, so the sphere and the mesh diverge — the model "teleports"/vanishes with no
+    // relation to the camera. So do NOT move the centre out of its frame.
+    //
+    // Keep the donor's bone-local centre exactly, and only GROW the radius + AABB to a generous local
+    // box so the bulkier injected geometry can never fall outside it. Over-large per-group bounds only
+    // make culling less aggressive (a group stays drawn until it is well off screen), which for a single
+    // hero character costs nothing; a wrong centre is what breaks it. Layout (@+20 centre.xyz, +32
+    // radius, +36 min.xyz, +48 max.xyz — all f32). The top INFO (row 0, above) still carries the true
+    // model-space bbox, which is the correct frame for the whole-model cull.
+    const LOCAL_CULL_RADIUS: f32 = 1.5; // metres, bone-local; covers any body region in any pose
     let mut prmg_bounds_written = 0usize;
     for i in 0..rows.len() {
         if &rows[i].tag != b"INFO" || rows[i].u0 == 0xFFFF_FFFF {
@@ -1909,12 +1907,19 @@ fn inject_multi_into_donor_block_ex(
         if !is_prmg_bounds {
             continue;
         }
+        // Read and KEEP the donor's bone-local centre; grow only the radius + AABB around it.
+        let old_center = [
+            f32::from_le_bytes(pi[20..24].try_into().unwrap()),
+            f32::from_le_bytes(pi[24..28].try_into().unwrap()),
+            f32::from_le_bytes(pi[28..32].try_into().unwrap()),
+        ];
+        let old_radius = f32::from_le_bytes(pi[32..36].try_into().unwrap());
+        let r = old_radius.max(LOCAL_CULL_RADIUS);
+        pi[32..36].copy_from_slice(&r.to_le_bytes());
         for k in 0..3 {
-            pi[20 + k * 4..24 + k * 4].copy_from_slice(&all_center[k].to_le_bytes());
-            pi[36 + k * 4..40 + k * 4].copy_from_slice(&all_min[k].to_le_bytes());
-            pi[48 + k * 4..52 + k * 4].copy_from_slice(&all_max[k].to_le_bytes());
+            pi[36 + k * 4..40 + k * 4].copy_from_slice(&(old_center[k] - r).to_le_bytes());
+            pi[48 + k * 4..52 + k * 4].copy_from_slice(&(old_center[k] + r).to_le_bytes());
         }
-        pi[32..36].copy_from_slice(&all_radius.to_le_bytes());
         new_bodies.insert(i, pi);
         prmg_bounds_written += 1;
     }
