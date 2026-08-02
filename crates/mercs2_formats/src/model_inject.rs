@@ -1860,70 +1860,26 @@ fn inject_multi_into_donor_block_ex(
     }
     new_bodies.insert(0, top);
 
-    // ---- PRMG per-group cull bounds: keep the donor's BONE-LOCAL centre, only enlarge ----
+    // ---- per-group PRMG bounds: LEFT AS THE DONOR AUTHORED THEM (deliberately not rewritten) ----
     //
-    // The character was frustum-culled when the camera rotated / looked up-down / panned sideways: the
-    // injected mesh is bulkier than the donor group it replaces, so it pokes outside the donor's
-    // (tight) per-group cull sphere and each drawing group tests false against the frustum and vanishes.
+    // History, so this is not "fixed" a fourth time by someone who assumes it was an oversight:
+    // three attempts to rewrite the six `(1,1,0)`-preamble INFO records in this container each made an
+    // injected character render WORSE, in vivo:
+    //   1. whole-model bbox (model_cubeize style)  → teleported / flashed
+    //   2. bone-local centre kept, model-space vals → teleported / flashed
+    //   3. bone-local centre kept, radius+AABB grown to 1.5 m → GONE ENTIRELY (no flashing)
+    // Leaving them at the donor's own values gave the BEST observed result: the character holds its
+    // shape and position and only culls when the camera rotates far. A larger cull sphere culls LESS,
+    // so "gone entirely" cannot be a bigger frustum sphere — it is the signature of CORRUPTING a record
+    // the engine needs to draw. There are only six of these records (four are 2 cm spheres), which is
+    // not the one-per-drawing-group shape a frustum-bounds table would have, so `+36..+60` is NOT an
+    // AABB and writing floats there breaks drawing. Until these records are positively identified (see
+    // the note below), the correct action is to not touch them: the top INFO (row 0, above) carries the
+    // real model-space bbox and is the frame the whole-model cull uses.
     //
-    // A PRIOR fix here overwrote each 60-byte PRMG INFO with the WHOLE-MODEL bbox, the way `model_cubeize`
-    // does — and that was wrong, because `model_cubeize` is for a STATIC model with ONE model-space
-    // frame, whereas a skinned character's per-group PRMG bounds are stored **bone-local**: the engine
-    // transforms each group's sphere by that group's bone matrix at render time. Measured on this donor,
-    // the per-group centres sit at the ORIGIN (r 0.02–0.14 m); writing a model-space centre of Y≈0.92 m
-    // into a bone-local slot puts every cull sphere ~0.92 m off its bone and drags it around as the
-    // skeleton animates, so the sphere and the mesh diverge — the model "teleports"/vanishes with no
-    // relation to the camera. So do NOT move the centre out of its frame.
-    //
-    // Keep the donor's bone-local centre exactly, and only GROW the radius + AABB to a generous local
-    // box so the bulkier injected geometry can never fall outside it. Over-large per-group bounds only
-    // make culling less aggressive (a group stays drawn until it is well off screen), which for a single
-    // hero character costs nothing; a wrong centre is what breaks it. Layout (@+20 centre.xyz, +32
-    // radius, +36 min.xyz, +48 max.xyz — all f32). The top INFO (row 0, above) still carries the true
-    // model-space bbox, which is the correct frame for the whole-model cull.
-    const LOCAL_CULL_RADIUS: f32 = 1.5; // metres, bone-local; covers any body region in any pose
-    let mut prmg_bounds_written = 0usize;
-    for i in 0..rows.len() {
-        if &rows[i].tag != b"INFO" || rows[i].u0 == 0xFFFF_FFFF {
-            continue;
-        }
-        let mut pi = new_bodies
-            .get(&i)
-            .cloned()
-            .unwrap_or_else(|| leaf(ucfx, data_off, &rows[i]).to_vec());
-        if pi.len() < 60 {
-            continue;
-        }
-        // ★ CRITICAL: a 60-byte length is NOT enough to identify a PRMG bounds INFO. A SKIN-palette
-        // INFO carries `u32 range_count @+20` then a range table, and with enough ranges it is ALSO
-        // 60 bytes — and +20 is exactly where a bounds INFO has its sphere centre. Overwriting a skin
-        // INFO's range_count with a centre float makes the engine allocate a wrong-sized palette buffer
-        // and overrun it (the render-time ACCESS_VIOLATION). A PRMG bounds INFO's preamble is the
-        // fixed `u32(1), u32(1), u32(0), u32 hash` (docs/ucfx_model_from_scratch.md); gate on it so only
-        // genuine bounds records are touched.
-        let is_prmg_bounds = read_u32_le(&pi, 0) == 1
-            && read_u32_le(&pi, 4) == 1
-            && read_u32_le(&pi, 8) == 0;
-        if !is_prmg_bounds {
-            continue;
-        }
-        // Read and KEEP the donor's bone-local centre; grow only the radius + AABB around it.
-        let old_center = [
-            f32::from_le_bytes(pi[20..24].try_into().unwrap()),
-            f32::from_le_bytes(pi[24..28].try_into().unwrap()),
-            f32::from_le_bytes(pi[28..32].try_into().unwrap()),
-        ];
-        let old_radius = f32::from_le_bytes(pi[32..36].try_into().unwrap());
-        let r = old_radius.max(LOCAL_CULL_RADIUS);
-        pi[32..36].copy_from_slice(&r.to_le_bytes());
-        for k in 0..3 {
-            pi[36 + k * 4..40 + k * 4].copy_from_slice(&(old_center[k] - r).to_le_bytes());
-            pi[48 + k * 4..52 + k * 4].copy_from_slice(&(old_center[k] + r).to_le_bytes());
-        }
-        new_bodies.insert(i, pi);
-        prmg_bounds_written += 1;
-    }
-    let _ = prmg_bounds_written;
+    // The residual disappear-on-far-rotation is a SEPARATE, milder issue and must be diagnosed against
+    // the running engine (what actually reads these bytes) rather than by editing bytes whose meaning is
+    // still a guess — every guess here has regressed it.
 
     // ---- ★UNBIND EVERY HOST SEGM ROW ----
     //
