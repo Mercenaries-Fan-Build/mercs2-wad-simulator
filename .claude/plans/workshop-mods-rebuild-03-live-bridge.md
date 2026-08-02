@@ -1,6 +1,9 @@
 # Workshop "Mods" rebuild — Plan 03: the live bridge
 
-**Status:** ★ LANDED phases 1–3 (2026-08-01). Phase 1 obviated; 2–3 built; 4–5 open (external).
+**Status:** ★ LANDED phases 1–3 (2026-08-01); phases 4–5 substantially landed. Phase 1 obviated;
+2–3 built; **4 (typed reads + the 220-class ECS registry) and 5 (reimpl serves the protocol) built —
+the remaining slivers (a GENERIC per-component read in Ess; full Object.*/Ess.* binding parity in the
+reimpl VM) are the only external-dependent parts left.**
 **Siblings:** `-01-mod-model.md`, `-02-navigation.md`, `-04-manifest-format.md`
 
 > ## What landed (2026-08-01)
@@ -14,9 +17,20 @@
 > - **Phase 3 (Lua console) — built.** `Craft ▸ Console`: a chunk runs in the live game, the result
 >   returns, `0xHASH` is enriched to `0xHASH (name)` from the Workshop's name pack. Worker thread +
 >   mpsc so the frame loop never blocks.
-> - **Phases 4–5 stay open** (enrich Wally's Ess Lua — his repo; serve the protocol from the reimpl
->   engine), marked here, not moved. The one thing unit tests cannot cover is a live game at the far
->   end of the socket.
+> - **Phase 4 (typed reads + ECS registry) — built (2026-08-01).** `mercs2_destruction::live` gained
+>   `read_state_lua` / `read_health_lua` (the current destruction state, resolved to the cracked
+>   vocabulary, and health — via the real `GetState`/`GetHealth` natives). The **220-class native ECS
+>   component registry** (`mercs2_workshop::ecsreg`, 232 classes / 9 families, bundled from the
+>   vendored `docs/mercs2-ecs/`) is the typed vocabulary; the console reference searches it alongside
+>   the Ess callables, and the destruction poke gained Read-state / Read-health buttons. Open sliver: a
+>   GENERIC per-component read (arbitrary ECS class of an arbitrary entity) waits on Ess growing a
+>   component-read verb — Wally's repo.
+> - **Phase 5 (reimpl serves the protocol) — built (2026-08-01).** `mercs2_bridge::Server` is the
+>   transport counterpart to `Bridge` (client↔server roundtrip tested). `mercs2_game` hosts it: a
+>   worker thread accepts connections and hands each chunk to `Mercs2Game::update`, which evaluates it
+>   on the main thread's Lua VM and answers — the ASI's own "queues to the next frame" model. The same
+>   console drives retail or the reimpl over one socket. Open sliver: full `Object.*`/`Ess.*` binding
+>   parity in the reimpl VM, which widens as the engine's bindings do.
 
 > ## Standing (2026-08-01) — ★ CORRECTED against Wally's v0.5.0+ ASI
 >
