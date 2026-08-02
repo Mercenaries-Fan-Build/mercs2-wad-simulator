@@ -56,6 +56,7 @@
 
 mod app;
 mod audioidx; // Captioned audio inventory (the Audio domain's real content)
+mod audioplay; // One-shot audio preview on the default output device (cpal)
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
 mod console;

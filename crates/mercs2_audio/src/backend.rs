@@ -34,6 +34,9 @@ pub trait AudioSink {
     fn sample_rate(&self) -> u32;
     /// Output channel count.
     fn channels(&self) -> usize;
+    /// Drop everything still queued — for a one-shot preview that should interrupt the last clip
+    /// rather than play after it. Default no-op (a continuous mixer never wants this).
+    fn clear(&mut self) {}
 }
 
 /// A headless sink — discards everything. The default; keeps the mixer fully functional with no
@@ -202,5 +205,10 @@ impl AudioSink for CpalSink {
     }
     fn channels(&self) -> usize {
         self.channels
+    }
+    fn clear(&mut self) {
+        if let Ok(mut r) = self.ring.lock() {
+            r.clear();
+        }
     }
 }

@@ -496,6 +496,9 @@ enum Act {
     AddToShipment(&'static str, u32, String),
     /// Library routing: open a craft bench on this asset.
     CraftOn(CraftMode, u32, String),
+    /// Audio domain: preview a VO clip by its wave index — decode it from the game's
+    /// `vo_stream.english.pws` and play it on the default output device.
+    PlayClip(u32),
     /// Skeleton workbench: set the target character skeleton and (re)compute the bone map.
     RetargetSetTarget(u32, String),
     /// Skeleton workbench: recompute the source→target bone map from the current source + target.
@@ -1268,6 +1271,12 @@ pub fn run(opts: Options) {
     let audio_idx = crate::audioidx::AudioIndex::load(
         &crate::index::data_home().unwrap_or_default(),
     );
+    // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
+    // most sessions never touch audio). `vo_stream` is the record index; `vo_player` the device.
+    let mut vo_stream: Option<crate::vostream::VoStream> = None;
+    let mut vo_player: Option<crate::audioplay::Player> = None;
+    // Remembered so a failed open (missing English.wad / .pws / device) is reported once, not per click.
+    let mut vo_error: Option<String> = None;
     let mut console_search = String::new();
     // Destruction poke: a target (object name or guid expr) + the chosen vocabulary state.
     let mut destruct_target = String::new();
@@ -2691,8 +2700,19 @@ pub fn run(opts: Options) {
                                                         for clip in audio_idx.by_bank(&bank).into_iter().take(300) {
                                                             let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
                                                             let line = if clip.speaker.is_empty() { cap.clone() } else { format!("{}: {}", clip.speaker, cap) };
-                                                            ui.label(egui::RichText::new(line).size(10.0).color(theme::DIM))
-                                                                .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
+                                                            ui.horizontal(|ui| {
+                                                                // ▶ streams the clip straight from vo_stream.english.pws.
+                                                                if let Some(wi) = clip.wave_index {
+                                                                    if ui.add(egui::Button::new(egui::RichText::new("\u{25B6}").size(9.0)).small())
+                                                                        .on_hover_text(format!("play \u{2014} {:.1}s from vo_stream.english.pws", clip.duration_s))
+                                                                        .clicked()
+                                                                    {
+                                                                        actions.push(Act::PlayClip(wi));
+                                                                    }
+                                                                }
+                                                                ui.label(egui::RichText::new(&line).size(10.0).color(theme::DIM))
+                                                                    .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
+                                                            });
                                                         }
                                                         if n > 300 {
                                                             ui.label(egui::RichText::new(format!("+{} more…", n - 300)).size(9.5).color(theme::FAINT));
@@ -6173,6 +6193,41 @@ pub fn run(opts: Options) {
                                     let n = tv.hashes.len() as i32;
                                     tv.idx = (tv.idx as i32 + d).rem_euclid(n) as usize;
                                     bind_tex_plate(&mut w, &mut scene, tv);
+                                }
+                            }
+                            Act::PlayClip(wave_index) => {
+                                // Lazily open the record index (English.wad + .pws) and the device on
+                                // the first play — both are heavy and most sessions never play audio.
+                                if vo_error.is_none() && vo_stream.is_none() {
+                                    let data_dir = std::path::Path::new(&opts.wadpath)
+                                        .parent()
+                                        .map(|p| p.to_path_buf())
+                                        .unwrap_or_default();
+                                    match crate::vostream::VoStream::open(&data_dir) {
+                                        Ok(s) => vo_stream = Some(s),
+                                        Err(e) => vo_error = Some(e),
+                                    }
+                                }
+                                if vo_error.is_none() && vo_player.is_none() {
+                                    match crate::audioplay::Player::start() {
+                                        Some(p) => vo_player = Some(p),
+                                        None => vo_error = Some("no audio output device".into()),
+                                    }
+                                }
+                                match (&vo_stream, &vo_player, &vo_error) {
+                                    (_, _, Some(e)) => status = format!("AUDIO: {e}"),
+                                    (Some(vo), Some(player), None) => match vo.clip_pcm(wave_index) {
+                                        Ok(pcm) => {
+                                            status = format!(
+                                                "\u{25B6} clip {wave_index} \u{2014} {:.1}s @ {} Hz",
+                                                pcm.duration_s(),
+                                                pcm.rate
+                                            );
+                                            player.play(pcm.samples, pcm.rate, pcm.channels);
+                                        }
+                                        Err(e) => status = format!("AUDIO: {e}"),
+                                    },
+                                    _ => {}
                                 }
                             }
                             Act::LuaOpen(path) => {
