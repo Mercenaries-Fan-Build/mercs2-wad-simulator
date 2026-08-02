@@ -66,6 +66,83 @@ pub struct CompInfo {
     pub data_size: Option<usize>,
 }
 
+/// The `Transform` COMP record stride: `u32 key + XYZ + pad + quat(xyzw) + 6-byte tail`. Established
+/// empirically, NOT from the `schm` word — see `tests/placement_roundtrip_survey.rs`, which found the
+/// schema stride reads 52 while the operative record is 42 (100,491 records tiled and cross-checked).
+pub const TRANSFORM_STRIDE: usize = 42;
+/// The `ModelName` COMP record stride: `u32 entity_key + u32 model_hash`.
+pub const MODELNAME_STRIDE: usize = 8;
+
+/// Patch a `Transform` record's position and/or rotation IN PLACE, matched by entity `key`.
+///
+/// This is the write half the survey proved bounded: it rewrites only the pos (`+4/+8/+12`) and quat
+/// (`+20..+32`) fields, leaving the `+16` pad, the `+36` tail, and every other byte exactly where they
+/// were — so a no-op reproduces the block, and an edit changes nothing but the two fields. Returns
+/// the number of records patched (0 if the key is not a placement in this block).
+pub fn patch_transform(
+    block: &mut [u8],
+    key: u32,
+    pos: Option<[f32; 3]>,
+    quat: Option<[f32; 4]>,
+) -> usize {
+    let spans = transform_record_offsets(block, key);
+    for o in &spans {
+        if let Some(p) = pos {
+            block[o + 4..o + 8].copy_from_slice(&p[0].to_le_bytes());
+            block[o + 8..o + 12].copy_from_slice(&p[1].to_le_bytes());
+            block[o + 12..o + 16].copy_from_slice(&p[2].to_le_bytes());
+        }
+        if let Some(q) = quat {
+            block[o + 20..o + 24].copy_from_slice(&q[0].to_le_bytes());
+            block[o + 24..o + 28].copy_from_slice(&q[1].to_le_bytes());
+            block[o + 28..o + 32].copy_from_slice(&q[2].to_le_bytes());
+            block[o + 32..o + 36].copy_from_slice(&q[3].to_le_bytes());
+        }
+    }
+    spans.len()
+}
+
+/// Patch a `ModelName` record's `model_hash` IN PLACE, matched by entity `key` — the reskin edit
+/// (point a placed entity at a different model). Returns the number of records patched.
+pub fn patch_model(block: &mut [u8], key: u32, model_hash: u32) -> usize {
+    let mut patched = 0;
+    for (off, size) in comp_data_spans(block, "ModelName") {
+        let mut o = off;
+        while o + MODELNAME_STRIDE <= off + size && o + MODELNAME_STRIDE <= block.len() {
+            if read_u32_le(block, o) == key {
+                block[o + 4..o + 8].copy_from_slice(&model_hash.to_le_bytes());
+                patched += 1;
+            }
+            o += MODELNAME_STRIDE;
+        }
+    }
+    patched
+}
+
+/// Byte offset of every `Transform` record whose entity key is `key`.
+fn transform_record_offsets(block: &[u8], key: u32) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (off, size) in comp_data_spans(block, "Transform") {
+        let mut o = off;
+        while o + TRANSFORM_STRIDE <= off + size && o + TRANSFORM_STRIDE <= block.len() {
+            if read_u32_le(block, o) == key {
+                out.push(o);
+            }
+            o += TRANSFORM_STRIDE;
+        }
+    }
+    out
+}
+
+/// The `(data_off, data_size)` of every COMP with a given info type-name.
+fn comp_data_spans(block: &[u8], info_name: &str) -> Vec<(usize, usize)> {
+    comp_inventory(block)
+        .into_iter()
+        .filter(|c| c.info_name.as_deref() == Some(info_name))
+        .filter_map(|c| Some((c.data_off?, c.data_size?)))
+        .collect()
+}
+
 /// Enumerate EVERY COMP across every UCFX sub-block of a decompressed block (both
 /// `layers_static` and `vz_state`-style overlay blocks use the same UCFX/CHDR/COMP
 /// layout with data-relative child offsets). Reports each COMP's info type-name,
