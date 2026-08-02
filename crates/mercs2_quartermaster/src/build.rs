@@ -721,22 +721,23 @@ fn build_named_texture(
 ) -> Result<(PatchBlock, u32), BuildError> {
     let err = |m: String| BuildError::Lower { index, kind, message: m };
     let img = read_png_rgba(path).map_err(err)?;
-    build_texture_from_rgba(index, kind, asset_name, img, is_normal, &path.display().to_string())
+    build_texture_from_rgba(index, kind, asset_name, img, is_normal, None, &path.display().to_string())
 }
 
-/// Build a texture block from a GLB's embedded PNG bytes — the per-material skin path. `label` names
-/// the material for any error.
+/// Build a texture block from a GLB's embedded PNG bytes — the per-material skin path. `brighten`
+/// gamma-lifts a too-dark imported diffuse; `label` names the material for any error.
 fn build_named_texture_bytes(
     index: usize,
     kind: &'static str,
     asset_name: &str,
     png_bytes: &[u8],
     is_normal: bool,
+    brighten: Option<f32>,
     label: &str,
 ) -> Result<(PatchBlock, u32), BuildError> {
     let err = |m: String| BuildError::Lower { index, kind, message: m };
     let img = read_png_rgba_bytes(png_bytes, label).map_err(err)?;
-    build_texture_from_rgba(index, kind, asset_name, img, is_normal, label)
+    build_texture_from_rgba(index, kind, asset_name, img, is_normal, brighten, label)
 }
 
 /// The encoder half: already-decoded RGBA → a resident texture block + its asset hash. Shared by the
@@ -747,6 +748,10 @@ fn build_texture_from_rgba(
     asset_name: &str,
     img: Rgba,
     is_normal: bool,
+    // Gamma < 1 brightens the RGB (alpha untouched). Imported diffuse maps are often authored much
+    // darker than the game's dim interior lighting can show; a lift brings them into the range retail
+    // albedos sit in. `None` for a hand-authored `textures:` map, which is presumed already correct.
+    brighten: Option<f32>,
     label: &str,
 ) -> Result<(PatchBlock, u32), BuildError> {
     let err = |m: String| BuildError::Lower {
@@ -766,6 +771,12 @@ fn build_texture_from_rgba(
         img.pixels
             .chunks_exact(4)
             .flat_map(|p| [255.0, p[1], 255.0, p[0]])
+            .collect()
+    } else if let Some(g) = brighten {
+        let lift = |v: f32| ((v / 255.0).powf(g) * 255.0).clamp(0.0, 255.0);
+        img.pixels
+            .chunks_exact(4)
+            .flat_map(|p| [lift(p[0]), lift(p[1]), lift(p[2]), p[3]])
             .collect()
     } else {
         img.pixels.clone()
@@ -1049,19 +1060,34 @@ fn lower_skinned(
             let mat_tex =
                 mercs2_formats::char_import::load_char_material_textures(&root.join(model))
                     .map_err(lower_err)?;
+
+            // A shared FLAT-MATTE specular. The donor's spec map lit the imported UVs with the wrong
+            // (Mattias) highlights — the glitchy green blooms. Repointing every host material's spec
+            // slot onto one near-black texture makes the import matte, which is right for tactical
+            // gear (its glTF specularFactor is ~0.01) and kills the blooms. Built once, shared.
+            let flat_spec: Option<u32> = {
+                let px = vec![10.0f32; 4 * 4 * 4]; // 4x4 near-black RGBA
+                let img = Rgba { width: 4, height: 4, pixels: px };
+                match build_texture_from_rgba(index, kind, &format!("{name}_matte_sm"), img, false, None, "matte spec") {
+                    Ok((block, to)) => { tex_blocks.push(block); Some(to) }
+                    Err(_) => None,
+                }
+            };
+
             for &m in &used {
                 let Some(tex) = mat_tex.get(m) else { continue };
                 let mut slots: [Option<u32>; 3] = [None; 3];
-                // DIFFUSE ONLY for now. Shipping the GLB's own NORMAL map turned the model black —
-                // its tangent-space normal does not survive our swizzle/encode the way a hand-authored
-                // one does, so lighting collapsed. Keep the donor's normal (which lit fine) until the
-                // normal path is verified; the diffuse is what carries the recognisable skin anyway.
-                for (slot, suffix, png, is_normal) in
-                    [(0usize, "dm", &tex.diffuse, false)]
+                // DIFFUSE, brightened. Imported maps are authored far darker than the game's dim
+                // interior lighting shows (measured ~18% average), so a gamma lift brings them into
+                // the visible range. The NORMAL is still held back — shipping the GLB's own turned the
+                // model black — so the donor's normal lights it; the flat spec below kills the wrong
+                // highlights that produced.
+                for (slot, suffix, png, is_normal, gamma) in
+                    [(0usize, "dm", &tex.diffuse, false, Some(0.6f32))]
                 {
                     let Some(bytes) = png else { continue };
                     let tex_name = format!("{name}_m{m}_{suffix}");
-                    match build_named_texture_bytes(index, kind, &tex_name, bytes, is_normal, &tex_name)
+                    match build_named_texture_bytes(index, kind, &tex_name, bytes, is_normal, gamma, &tex_name)
                     {
                         Ok((block, to)) => {
                             slots[slot] = Some(to);
@@ -1074,6 +1100,8 @@ fn lower_skinned(
                         )),
                     }
                 }
+                // Every host material goes matte via the shared flat spec.
+                slots[1] = flat_spec;
                 if slots.iter().any(|s| s.is_some()) {
                     part_material_textures.insert(m, slots);
                 }
