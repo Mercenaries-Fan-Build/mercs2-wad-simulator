@@ -336,6 +336,19 @@ pub struct UiRegistration {
     pub movie: String,
 }
 
+/// One `activate_layer` registration, resolved to the layer marks the loader must apply. The linker
+/// collects these across every Shipment and bakes them into the same `qm_modloader` script `add_ui`
+/// uses, so a UI mod and a layer mod share one load space and one trampoline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerRegistration {
+    /// Which Shipment asked for it — the tie-break for the deterministic bake order.
+    pub shipment: String,
+    /// The layer to `MrxLayerManager.MarkForAddition`.
+    pub add: String,
+    /// Layers to `MrxLayerManager.MarkForRemoval` first — the overlay(s) this one supersedes.
+    pub remove: Vec<String>,
+}
+
 /// The whole `qm_modloader` script, baked from every UI registration.
 ///
 /// This is the "expandable load space" the user asked for: the game's resident scripts stay
@@ -347,9 +360,9 @@ pub struct UiRegistration {
 /// Idempotent and fail-soft: `_registered`/`_ran` guards make a re-import or a re-entered interior a
 /// no-op, and each registration runs under `pcall` so one bad movie cannot wedge the loader.
 ///
-/// Registrations are ordered by `(shipment, movie)` so the same set bakes byte-identically whatever
-/// order they arrive in — the same determinism rule [`linked_source`] holds.
-pub fn qm_modloader_source(regs: &[UiRegistration]) -> String {
+/// Registrations are ordered by `(shipment, movie)` / `(shipment, add)` so the same set bakes
+/// byte-identically whatever order they arrive in — the same determinism rule [`linked_source`] holds.
+pub fn qm_modloader_source(regs: &[UiRegistration], layers: &[LayerRegistration]) -> String {
     let mut ordered: Vec<&UiRegistration> = regs.iter().collect();
     ordered.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.movie.cmp(&b.movie)));
 
@@ -369,6 +382,35 @@ pub fn qm_modloader_source(regs: &[UiRegistration]) -> String {
              end)\n",
             shipment = r.shipment,
             movie = r.movie,
+        ));
+    }
+
+    // Layer activations bake into the SAME `_QM._inits` list, so they run under the same once-guard
+    // and the same `pcall` as the UI widgets. Each is `MarkForRemoval`(old) then `MarkForAddition`
+    // (new) — the vanilla-contract order (remove pristine, add act) so the two never both apply.
+    // Ordered by `(shipment, add)` for the byte-identical bake. `MarkForAddition`/`MarkForRemoval`
+    // are the immediate mark forms (no callback), existence-checked so a stripped table degrades.
+    let mut ordered_layers: Vec<&LayerRegistration> = layers.iter().collect();
+    ordered_layers.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.add.cmp(&b.add)));
+    for r in &ordered_layers {
+        let add = lua_string(&r.add);
+        let mut body = String::new();
+        for rem in &r.remove {
+            body.push_str(&format!(
+                "      if MrxLayerManager.MarkForRemoval then MrxLayerManager.MarkForRemoval({}) end\n",
+                lua_string(rem),
+            ));
+        }
+        body.push_str(&format!(
+            "      if MrxLayerManager.MarkForAddition then MrxLayerManager.MarkForAddition({add}) end\n"
+        ));
+        inits.push_str(&format!(
+            "  -- {shipment}: activate {layer}\n  \
+             table.insert(_QM._inits, function()\n    \
+             if MrxLayerManager then\n{body}    end\n  \
+             end)\n",
+            shipment = r.shipment,
+            layer = r.add,
         ));
     }
 
@@ -483,7 +525,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[])
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[])
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -500,13 +542,17 @@ pub fn link_into_blocks(
     corpus_root: &Path,
     mutations: &[ScriptMutation],
     ui_regs: &[UiRegistration],
+    layer_regs: &[LayerRegistration],
     order: &[String],
 ) -> Result<Vec<LinkedScript>, LinkError> {
-    // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any UI mod
-    // registered — ONE line regardless of how many, so the resident never grows with mod count.
+    // Anything that lives in the load space — a UI widget or a layer activation — needs the loader
+    // minted and the resident trampoline installed.
+    let needs_loader = !ui_regs.is_empty() || !layer_regs.is_empty();
+    // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any load-space
+    // mod registered — ONE line regardless of how many, so the resident never grows with mod count.
     // The expandable part is `qm_modloader`, minted after the base scripts link (below).
     let mut all_mutations: Vec<ScriptMutation> = mutations.to_vec();
-    if !ui_regs.is_empty() {
+    if needs_loader {
         all_mutations.push(ScriptMutation {
             shipment: "quartermaster-modloader".into(),
             target: "wifpmcinterior".into(),
@@ -576,8 +622,8 @@ pub fn link_into_blocks(
     // (via `script_patch_blocks`' new-entry branch) its primary type-35 ASET row, the two halves the
     // DLC's own recipe ships. It goes in the block carrying `wifpmcinterior`, because `import` is
     // scripts_vz-only and that is where the trampoline calls it from.
-    if !ui_regs.is_empty() {
-        let source = qm_modloader_source(ui_regs);
+    if needs_loader {
+        let source = qm_modloader_source(ui_regs, layer_regs);
         // BARE chunk name, like every other script here — see the module note.
         let bytecode =
             mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
@@ -598,7 +644,11 @@ pub fn link_into_blocks(
                 target: QM_MODLOADER_NAME.to_string(),
                 message: m,
             })?;
-        let mut contributors: Vec<String> = ui_regs.iter().map(|r| r.shipment.clone()).collect();
+        let mut contributors: Vec<String> = ui_regs
+            .iter()
+            .map(|r| r.shipment.clone())
+            .chain(layer_regs.iter().map(|r| r.shipment.clone()))
+            .collect();
         contributors.sort();
         contributors.dedup();
         linked.push(LinkedScript {
@@ -777,7 +827,7 @@ mod tests {
     /// movie's FlashWidget under the proven creation sequence.
     #[test]
     fn the_mod_loader_defines_qm_and_registers_each_movie() {
-        let src = qm_modloader_source(&[reg("mod-a", "my_hud"), reg("mod-b", "my_map")]);
+        let src = qm_modloader_source(&[reg("mod-a", "my_hud"), reg("mod-b", "my_map")], &[]);
         assert!(src.contains("_QM = _QM or"), "must define the _QM global: {src}");
         assert!(src.contains("function _QM.run()"), "must expose run(): {src}");
         // Each movie enrols via the loadingscreen_standalone sequence.
@@ -794,8 +844,8 @@ mod tests {
     /// linker rests on, applied to the bake.
     #[test]
     fn the_bake_is_order_independent() {
-        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")]);
-        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")]);
+        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[]);
+        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[]);
         assert_eq!(a, b, "install order must not change the baked loader");
         // ordered by (shipment, movie): aaa/one appears before zzz/two.
         assert!(a.find("one").unwrap() < a.find("two").unwrap(), "{a}");
@@ -804,11 +854,71 @@ mod tests {
     /// A movie name cannot break out of its Lua string and inject code into the block we compile.
     #[test]
     fn a_movie_name_is_escaped_in_the_bake() {
-        let src = qm_modloader_source(&[reg("m", "evil\") os.exit() --")]);
+        let src = qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[]);
         // The escaped form keeps the payload INSIDE the string literal ...
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         // ... and the unescaped breakout (a bare `evil") ` that would end the string early) is absent.
         assert!(!src.contains("(\"evil\") os"), "the injection must not close the string: {src}");
+    }
+
+    fn layer(shipment: &str, add: &str, remove: &[&str]) -> LayerRegistration {
+        LayerRegistration {
+            shipment: shipment.into(),
+            add: add.into(),
+            remove: remove.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A layer activation bakes MarkForRemoval(old) then MarkForAddition(new) into the same guarded,
+    /// pcall-wrapped `_QM._inits` list the UI widgets use — the vanilla contract order.
+    #[test]
+    fn the_mod_loader_marks_layers_for_addition_and_removal() {
+        let src = qm_modloader_source(
+            &[],
+            &[layer("act-mod", "vz_state_pmccon004_destroyed", &["vz_state_pmccon004_pristine"])],
+        );
+        assert!(src.contains("_QM = _QM or"), "must still define the _QM global: {src}");
+        assert!(
+            src.contains("MrxLayerManager.MarkForAddition(\"vz_state_pmccon004_destroyed\")"),
+            "must add the new layer: {src}"
+        );
+        assert!(
+            src.contains("MrxLayerManager.MarkForRemoval(\"vz_state_pmccon004_pristine\")"),
+            "must remove the superseded layer: {src}"
+        );
+        // Remove precedes add — the vanilla order so the two never both apply.
+        assert!(
+            src.find("MarkForRemoval").unwrap() < src.find("MarkForAddition").unwrap(),
+            "removal must be baked before addition: {src}"
+        );
+        // Guarded and fail-soft like the widgets.
+        assert!(src.contains("if MrxLayerManager then"), "existence-checked: {src}");
+        assert!(src.contains("pcall(f)"), "runs under the shared pcall: {src}");
+    }
+
+    /// UI and layer registrations coexist in one loader, and the same set bakes byte-identically
+    /// whatever order it arrives in.
+    #[test]
+    fn ui_and_layer_registrations_share_one_deterministic_loader() {
+        let a = qm_modloader_source(
+            &[reg("ui-mod", "my_hud")],
+            &[layer("aaa", "layer_a", &[]), layer("zzz", "layer_z", &[])],
+        );
+        let b = qm_modloader_source(
+            &[reg("ui-mod", "my_hud")],
+            &[layer("zzz", "layer_z", &[]), layer("aaa", "layer_a", &[])],
+        );
+        assert_eq!(a, b, "install order must not change the baked loader");
+        assert!(a.contains("w:SetSwfFile(\"my_hud\")"), "the widget is still baked: {a}");
+        assert!(a.find("layer_a").unwrap() < a.find("layer_z").unwrap(), "ordered by (shipment,add): {a}");
+    }
+
+    /// A layer name cannot break out of its Lua string and inject code into the block we compile.
+    #[test]
+    fn a_layer_name_is_escaped_in_the_bake() {
+        let src = qm_modloader_source(&[], &[layer("m", "evil\") os.exit() --", &[])]);
+        assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
+        assert!(!src.contains("Addition(\"evil\") os"), "the injection must not close the string: {src}");
     }
 
     /// The trampoline is exactly what the resident carries: it wraps `_OnEnter`, imports the loader

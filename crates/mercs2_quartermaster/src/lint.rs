@@ -185,6 +185,16 @@ pub const M0193_STATE_OFF_VOCABULARY: Rule = Rule {
     doc: "docs/modding/manifest_format.md#edit_state_machine",
 };
 
+/// An `activate_layer` names a layer with no `type_id 9` (layer) ASET row in the game stack, so the
+/// runtime `MrxLayerManager.MarkForAddition`/`MarkForRemoval` reaches nothing — the activation ships
+/// but is a no-op. Advisory, like M0192: a companion `edit_world`/`raw` in the same install MAY ship
+/// the layer, which this cannot see. Needs the game stack, so it lives in [`game_checks`].
+pub const M0194_LAYER_UNKNOWN: Rule = Rule {
+    code: "M0194",
+    title: "an activated world layer is not in the game stack — MarkForAddition reaches nothing",
+    doc: "docs/modding/manifest_format.md#activate_layer",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -352,6 +362,31 @@ pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
                     at: Some(index),
                     fix: None,
                 });
+            }
+        }
+
+        // activate_layer marks a layer at runtime; if no layer-typed (type_id 9) ASET row carries
+        // that name, the mark reaches nothing and the activation is a silent no-op. Same advisory
+        // shape as M0192: a companion edit_world/raw MAY ship the layer, which this cannot see.
+        if let Contribution::ActivateLayer { layer, replaces } = c {
+            for name in std::iter::once(layer).chain(replaces.iter()) {
+                let hash = crate::manifest::asset_hash(name);
+                if !game.has_asset(hash, mercs2_formats::types::TYPE_ID_LAYER) {
+                    out.push(Diagnostic {
+                        rule: M0194_LAYER_UNKNOWN,
+                        severity: Severity::Warning,
+                        message: format!(
+                            "no layer named {name:?} is in the game stack (no type_id 9 ASET row), \
+                             so `MrxLayerManager.MarkForAddition`/`MarkForRemoval` reaches nothing \
+                             at runtime — the activation ships but does nothing. Layer names are \
+                             CASE-SENSITIVE; a `vz_state_*` name must match retail exactly. If a \
+                             companion `edit_world` or `raw` in this install ships this layer, \
+                             ignore this."
+                        ),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
             }
         }
     }

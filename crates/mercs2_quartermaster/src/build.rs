@@ -552,6 +552,9 @@ pub fn script_mutations(
             // linker synthesizes — so the resident never grows with mod count. Collected separately
             // by `ui_registrations`; the Data half (the cfx_pack movie) is in `lower`.
             Contribution::AddUi { .. } => {}
+            // activate_layer contributes no script APPEND either — its marks are baked into
+            // `qm_modloader` from `layer_registrations`, not concatenated onto a base script.
+            Contribution::ActivateLayer { .. } => {}
             Contribution::PatchLua { target, append } => {
                 let path = root.join(append);
                 let source = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
@@ -588,6 +591,28 @@ pub fn ui_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::UiReg
                 // the movie block is registered under (see the AddMovie/AddUi arm in `lower`, which
                 // mints the pack at `asset_hash(name)`), not the source file's stem.
                 movie: name.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `activate_layer`'s `MrxLayerManager` marks, for the linker to bake into `qm_modloader`.
+///
+/// Kept separate from [`script_mutations`] for the same reason as [`ui_registrations`]: it does not
+/// append to a base script but lives in the Quartermaster-owned load space, reached by the one
+/// synthesized trampoline. A UI mod and a layer mod both feed this loader, so either alone is enough
+/// to mint it.
+pub fn layer_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::LayerRegistration> {
+    let shipment = manifest.shipment.name.clone();
+    manifest
+        .contributions
+        .iter()
+        .filter_map(|c| match c {
+            Contribution::ActivateLayer { layer, replaces } => Some(link::LayerRegistration {
+                shipment: shipment.clone(),
+                add: layer.clone(),
+                remove: replaces.clone(),
             }),
             _ => None,
         })
@@ -1551,6 +1576,11 @@ fn lower(
         // `script_mutations` and realised at link time.
         Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
 
+        // Contributes no block either: its effect is a layer registration baked into `qm_modloader`,
+        // collected by `layer_registrations` and realised at link time — exactly like `add_ui`'s
+        // Script half, but with no Data movie of its own.
+        Contribution::ActivateLayer { .. } => Ok(Lowering::Nothing),
+
         // The OPEN LOWER BOUND: bytes we cannot interpret, plus a radius the author DECLARED.
         //
         // Every other kind has a second line of defence — an encoder that knows the shape, a donor
@@ -2495,6 +2525,7 @@ pub fn build(
     }
     let mutations = script_mutations(manifest, &shipment.root)?;
     let ui_regs = ui_registrations(manifest);
+    let layer_regs = layer_registrations(manifest);
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -2507,9 +2538,10 @@ pub fn build(
     // prevent. That cross-Shipment relink belongs to deploy (Modkit), and this is deliberately only
     // its single-Shipment case.
     //
-    // `ui_regs` counts too: an add_ui with no other script edit still mints `qm_modloader` and the
-    // one-line trampoline, so the link must run for it even when `mutations` is empty.
-    if !mutations.is_empty() || !ui_regs.is_empty() {
+    // `ui_regs` / `layer_regs` count too: an add_ui or activate_layer with no other script edit
+    // still mints `qm_modloader` and the trampoline, so the link must run for it even when
+    // `mutations` is empty.
+    if !mutations.is_empty() || !ui_regs.is_empty() || !layer_regs.is_empty() {
         let Some(game) = game.as_deref_mut() else {
             return Err(BuildError::GameRequired {
                 index: 0,
@@ -2537,14 +2569,19 @@ pub fn build(
             .collect();
         // A single Shipment has nothing to order against, so the resolved order is trivially itself
         // and `&[]` (name-sort fallback) is correct. Cross-Shipment order is `link_installed`'s job.
-        let linked =
-            link::link_into_blocks(&mut targets, corpus, &mutations, &ui_regs, &[]).map_err(|e| {
-                BuildError::Lower {
-                    index: 0,
-                    kind: "patch_lua",
-                    message: e.to_string(),
-                }
-            })?;
+        let linked = link::link_into_blocks(
+            &mut targets,
+            corpus,
+            &mutations,
+            &ui_regs,
+            &layer_regs,
+            &[],
+        )
+        .map_err(|e| BuildError::Lower {
+            index: 0,
+            kind: "patch_lua",
+            message: e.to_string(),
+        })?;
         drop(targets);
         for l in &linked {
             log.push(format!(
@@ -2808,13 +2845,15 @@ pub fn link_installed(
     }
 
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
+    let mut layer_regs: Vec<link::LayerRegistration> = Vec::new();
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
+        layer_regs.extend(layer_registrations(&s.manifest));
     }
-    // A UI mod touches the Script layer too — it mints `qm_modloader` and the trampoline — so an
-    // install of nothing but add_ui Shipments still has script work to do.
-    if mutations.is_empty() && ui_regs.is_empty() {
+    // A UI or layer mod touches the Script layer too — it mints `qm_modloader` and the trampoline —
+    // so an install of nothing but add_ui / activate_layer Shipments still has script work to do.
+    if mutations.is_empty() && ui_regs.is_empty() && layer_regs.is_empty() {
         log.push("no installed Shipment touches a script — nothing to link".into());
         // A Data-only install still has cross-Shipment conflicts worth reporting (two mods minting
         // the same texture name), so carry them even when there is no script overlay to emit.
@@ -2827,9 +2866,10 @@ pub fn link_installed(
         });
     }
     log.push(format!(
-        "linking {} mutation(s) and {} UI registration(s) from {} Shipment(s)",
+        "linking {} mutation(s), {} UI and {} layer registration(s) from {} Shipment(s)",
         mutations.len(),
         ui_regs.len(),
+        layer_regs.len(),
         shipments.len()
     ));
 
@@ -2841,14 +2881,19 @@ pub fn link_installed(
             block: &mut lb.block,
         })
         .collect();
-    let linked =
-        link::link_into_blocks(&mut targets, corpus_root, &mutations, &ui_regs, &order).map_err(
-            |e| BuildError::Lower {
-                index: 0,
-                kind: "link",
-                message: e.to_string(),
-            },
-        )?;
+    let linked = link::link_into_blocks(
+        &mut targets,
+        corpus_root,
+        &mutations,
+        &ui_regs,
+        &layer_regs,
+        &order,
+    )
+    .map_err(|e| BuildError::Lower {
+        index: 0,
+        kind: "link",
+        message: e.to_string(),
+    })?;
     drop(targets);
     for l in &linked {
         log.push(format!(

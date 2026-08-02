@@ -305,6 +305,18 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::EditWorld { layer, .. } => {
                 push(Access::Write, Claim::asset(layer), Intent::Replace);
             }
+            // No Data half — its whole effect is a registration baked into `qm_modloader`, reached by
+            // the same one-line trampoline `add_ui` appends to `wifpmcinterior`. Additive, so N layer
+            // mods (and UI mods) fold to one trampoline and one loader rather than conflicting.
+            Contribution::ActivateLayer { .. } => {
+                push(
+                    Access::Write,
+                    bare(Claim::Script {
+                        name: "wifpmcinterior".into(),
+                    }),
+                    Intent::Additive,
+                );
+            }
             // Same-hash edit of a shipped table: a Write on the asset, last-wins (like
             // replace_texture). Two Shipments editing the same table is a load-order question, not
             // a conflict — whichever mounts last serves the lookup.

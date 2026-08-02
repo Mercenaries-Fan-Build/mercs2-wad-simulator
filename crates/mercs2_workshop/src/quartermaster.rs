@@ -483,6 +483,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::EditStateMachine { target, .. }
         | Contribution::EditStringDb { target, .. } => target.clone(),
         Contribution::EditWorld { layer, .. } => layer.clone(),
+        Contribution::ActivateLayer { layer, .. } => layer.clone(),
         // `NativeHook.target` is the ENGINE, not an asset — so name it by what it actually is.
         Contribution::NativeHook { plugin, symbol, .. } => plugin
             .as_ref()
@@ -611,7 +612,13 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("edit_stringdb", "Correct or localise UI text"),
         ],
     ),
-    ("Script", &[("patch_lua", "Append to a shipped script")]),
+    (
+        "Script",
+        &[
+            ("patch_lua", "Append to a shipped script"),
+            ("activate_layer", "Turn a hidden world-state layer on (permanent)"),
+        ],
+    ),
     (
         "Code",
         &[
@@ -700,6 +707,10 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "edit_world" => Contribution::EditWorld {
             layer: "vz_state_pmccon004".into(),
             edits: PathBuf::from("src/world.yaml"),
+        },
+        "activate_layer" => Contribution::ActivateLayer {
+            layer: "vz_state_pmccon004_destroyed".into(),
+            replaces: vec!["vz_state_pmccon004_pristine".into()],
         },
         "edit_stringdb" => Contribution::EditStringDb {
             target: "english".into(),
@@ -1393,6 +1404,33 @@ fn contribution_form(
                 "per-entity pos / quat / model. Extract a baseline: `qm extract-world <layer>`",
             );
         }
+        Contribution::ActivateLayer { layer, replaces } => {
+            commit |= text_row(ui, "Layer", layer, "vz_state_pmccon004_destroyed", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "MarkForAddition at runtime — a CASE-SENSITIVE layer name, not a path. Baked into \
+                 the mod loader; the world never grows a per-mod script.",
+            );
+            // `replaces` is a list of layer NAMES (MarkForRemoval, in order). Names carry no commas,
+            // so a comma-separated row is a faithful, reversible edit.
+            let mut joined = replaces.join(", ");
+            if text_row(ui, "Replaces", &mut joined, "vz_state_pmccon004_pristine", false) {
+                *replaces = joined
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                commit = true;
+            }
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "the pristine / prior overlay this one supersedes (MarkForRemoval) — comma-separated, \
+                 optional",
+            );
+        }
         Contribution::EditStringDb { target, strings } => {
             commit |= asset_row(ui, "Target table", target, names);
             commit |= source_row(ui, "Strings", strings, root, &["txt"]);
@@ -1767,6 +1805,13 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::EditWorld { layer, .. } => vec![
             ("Writes".to_string(), format!("placement layer {layer}")),
             ("Merge".to_string(), "last-wins \u{2014} the later overlay's edits win".to_string()),
+        ],
+        Contribution::ActivateLayer { layer, .. } => vec![
+            ("Activates".to_string(), format!("world layer {layer}")),
+            (
+                "Merge".to_string(),
+                "baked into the mod loader \u{2014} N activations share one trampoline".to_string(),
+            ),
         ],
         Contribution::EditStringDb { target, .. } => vec![
             ("Writes".to_string(), format!("stringdb {target}")),

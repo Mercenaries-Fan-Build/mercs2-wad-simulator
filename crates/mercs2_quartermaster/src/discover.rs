@@ -314,6 +314,9 @@ impl Contribution {
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
+            // No `src/` artifact: `layer` / `replaces` are layer NAMES the loader marks at runtime,
+            // not files to pack.
+            Contribution::ActivateLayer { .. } => {}
             Contribution::EditStringDb { strings, .. } => out.push(("strings", strings.as_path())),
             Contribution::NativeHook { plugin, .. } => {
                 if let Some(p) = plugin {

@@ -75,6 +75,11 @@ contributions:
     layer: vz_state_pmccon004
     edits: src/world.yaml
 
+  - kind: activate_layer
+    layer: vz_state_pmccon004_destroyed
+    replaces:
+      - vz_state_pmccon004_pristine
+
   - kind: edit_stringdb
     target: english
     strings: src/text/english.txt
@@ -178,6 +183,11 @@ const JSON: &str = r#"
       "kind": "edit_world",
       "layer": "vz_state_pmccon004",
       "edits": "src/world.yaml"
+    },
+    {
+      "kind": "activate_layer",
+      "layer": "vz_state_pmccon004_destroyed",
+      "replaces": ["vz_state_pmccon004_pristine"]
     },
     {
       "kind": "edit_stringdb",
@@ -293,6 +303,11 @@ layer = "vz_state_pmccon004"
 edits = "src/world.yaml"
 
 [[contributions]]
+kind = "activate_layer"
+layer = "vz_state_pmccon004_destroyed"
+replaces = ["vz_state_pmccon004_pristine"]
+
+[[contributions]]
 kind = "edit_stringdb"
 target = "english"
 strings = "src/text/english.txt"
@@ -356,6 +371,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_sound",
             "edit_state_machine",
             "edit_world",
+            "activate_layer",
             "edit_stringdb",
             "add_movie",
             "add_ui",

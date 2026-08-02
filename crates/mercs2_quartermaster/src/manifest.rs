@@ -474,6 +474,25 @@ pub enum Contribution {
     /// `qm extract-world`). Emitted as an overlay that shadows the base layer block; the
     /// `placement::patch_*` writer is proven byte-identical on a no-op across 747 retail layers.
     EditWorld { layer: String, edits: PathBuf },
+    /// Script. Turn a normally-hidden world-state layer ON — the PERMANENT, whole-mission
+    /// counterpart to [`Contribution::EditWorld`]'s in-place placement edits.
+    ///
+    /// A `vz_state` overlay is switched at runtime by `MrxLayerManager.MarkForAddition("<layer>")`
+    /// (and `MarkForRemoval` for the layer it supersedes) — the exact calls a vanilla contract makes
+    /// (`OilCon001.Activated`: add `_act1`, remove `_pristine`; `mrxtaskcontractoutpost`: add
+    /// captured, remove defense). The registration is baked into the Quartermaster-owned
+    /// `qm_modloader` and reached by the same one-line trampoline `add_ui` uses, so N activations
+    /// merge cleanly and the resident script never grows with mod count. Each mark runs under `pcall`,
+    /// so a mistyped layer name cannot wedge the loader (it silently does nothing — M0194 warns).
+    ActivateLayer {
+        /// The layer to `MarkForAddition`, e.g. `vz_state_pmccon004_destroyed`. CASE-SENSITIVE — the
+        /// name hashes to a UCFX block in the ASET, and a wrong case reaches no layer.
+        layer: String,
+        /// Layers to `MarkForRemoval` first — the pristine / prior overlay this one replaces. Omit to
+        /// only add.
+        #[serde(default)]
+        replaces: Vec<String>,
+    },
     /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
     ///
     /// Same-hash and last-wins, like [`Contribution::ReplaceTexture`]: the overlay carries an
@@ -559,6 +578,7 @@ impl Contribution {
         "patch_lua",
         "edit_state_machine",
         "edit_world",
+        "activate_layer",
         "edit_stringdb",
         "native_hook",
         "place_file",
@@ -578,6 +598,7 @@ impl Contribution {
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
+            Contribution::ActivateLayer { .. } => "activate_layer",
             Contribution::EditStringDb { .. } => "edit_stringdb",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",

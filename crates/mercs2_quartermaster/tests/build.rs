@@ -2611,6 +2611,140 @@ fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
     );
 }
 
+// ──────────────────────────────────────────────────────────────────────── M0194 (activate_layer)
+
+/// M0194: activating a layer retail actually ships stays quiet; a name no layer carries warns,
+/// because `MrxLayerManager.MarkForAddition` keys on the layer NAME and a wrong one reaches nothing.
+#[test]
+fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
+    let Some(game) = discovered_game() else {
+        eprintln!("SKIPPING: no game stack");
+        return;
+    };
+    use mercs2_quartermaster::lint;
+    use mercs2_quartermaster::manifest::asset_hash;
+    use mercs2_quartermaster::names::NameTable;
+
+    // Reverse a real layer hash to the name that produced it, so the quiet fixture names a layer the
+    // stack genuinely carries — verified by re-hashing (the name→hash→row round-trip M0194 walks).
+    let names = NameTable::load(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/production_names.json"),
+    )
+    .expect("the vendored name table must load");
+    let layer_type = mercs2_formats::types::TYPE_ID_LAYER;
+    let real_layer = game
+        .asset_hashes(layer_type)
+        .into_iter()
+        .find_map(|h| {
+            let n = names.reverse(h)?;
+            (n.starts_with("vz_state") && asset_hash(n) == h).then(|| n.to_string())
+        })
+        .expect("at least one vz_state layer hash must reverse to its name");
+
+    let dir = scratch("m0194_quiet");
+    let quiet = shipment(&dir, &format!("  - kind: activate_layer\n    layer: {real_layer}\n"));
+    assert!(
+        !lint::game_checks(&quiet.manifest, &game)
+            .iter()
+            .any(|d| d.rule.code == "M0194"),
+        "activating a layer the stack ships ({real_layer}) must not warn"
+    );
+
+    // A name no layer carries — MarkForAddition would reach nothing at runtime.
+    let dir2 = scratch("m0194_fires");
+    let fires = shipment(
+        &dir2,
+        "  - kind: activate_layer\n    layer: vz_state_qm_totally_novel\n",
+    );
+    assert!(
+        lint::game_checks(&fires.manifest, &game)
+            .iter()
+            .any(|d| d.rule.code == "M0194"),
+        "an unknown layer name must warn that MarkForAddition reaches nothing"
+    );
+
+    // The warning also covers `replaces:` names — a typo in the layer being removed is just as dead.
+    let dir3 = scratch("m0194_replaces");
+    let repl = shipment(
+        &dir3,
+        &format!(
+            "  - kind: activate_layer\n    layer: {real_layer}\n    replaces:\n      - vz_state_qm_no_such_layer\n"
+        ),
+    );
+    assert!(
+        lint::game_checks(&repl.manifest, &game)
+            .iter()
+            .any(|d| d.rule.code == "M0194"),
+        "an unknown replaces: name must warn too"
+    );
+}
+
+/// ★ activate_layer end to end: a Shipment with no Data half builds into the same `qm_modloader`
+/// script `add_ui` mints, whose compiled bytecode carries the `MrxLayerManager` marks — the layer to
+/// add and the one it replaces — reached by the one-line trampoline on `wifpmcinterior`.
+#[test]
+fn activate_layer_builds_the_layer_marks_into_the_mod_loader() {
+    let Some(mut game) = discovered_game() else {
+        eprintln!("SKIPPING: no game stack");
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        eprintln!("SKIPPING: no corpus");
+        return;
+    };
+    let root = scratch("activate_layer_e2e");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("manifest.yaml"),
+        "format: 1\nshipment: { name: layer-mod, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: activate_layer\n    layer: vz_state_pmccon004_destroyed\n\
+         \x20   replaces:\n      - vz_state_pmccon004_pristine\n",
+    )
+    .unwrap();
+    let s = discover::open(&root).expect("open shipment");
+
+    let out = root.join("build");
+    let report =
+        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus)).expect("build");
+    eprintln!("{}", report.log.join("\n"));
+
+    let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+
+    // The block carrying `wifpmcinterior` (scripts_vz) is republished, now with `qm_modloader`.
+    let mut found = false;
+    for blk in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+        let Ok(parsed) = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec) else {
+            continue;
+        };
+        parsed.verify_csums().expect("CSUMs");
+        let Some(idx) = parsed.find_script_by_name("qm_modloader") else {
+            continue;
+        };
+        found = true;
+        let luaq = parsed.extract_lua(idx).unwrap();
+        // Lua 5.1 keeps string constants in the clear, so the marks and layer names are in the bytes.
+        let text = String::from_utf8_lossy(&luaq);
+        for needle in [
+            "MrxLayerManager",
+            "MarkForAddition",
+            "vz_state_pmccon004_destroyed",
+            "MarkForRemoval",
+            "vz_state_pmccon004_pristine",
+        ] {
+            assert!(text.contains(needle), "qm_modloader bytecode missing {needle:?}");
+        }
+        // The resident still gets the one-line trampoline that imports and runs it.
+        let ti = parsed
+            .find_script_by_name("wifpmcinterior")
+            .expect("wifpmcinterior present in the same block");
+        let tramp = String::from_utf8_lossy(&parsed.extract_lua(ti).unwrap()).to_string();
+        assert!(tramp.contains("qm_modloader"), "the trampoline must import qm_modloader");
+    }
+    assert!(found, "the build must mint a qm_modloader script");
+}
+
 // ---------------------------------------------------------------------------
 // edit_world — the placement-layer overlay (vz_state / layers_static)
 // ---------------------------------------------------------------------------
