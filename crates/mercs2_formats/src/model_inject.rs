@@ -1860,6 +1860,55 @@ fn inject_multi_into_donor_block_ex(
     }
     new_bodies.insert(0, top);
 
+    // ---- PRMG bounding sphere + AABB over ALL injected verts ----
+    //
+    // This is the fix for the character being frustum-culled the moment the camera rotated / looked
+    // up-down / panned sideways (but not forward-back): every PRMG INFO carried the DONOR's original
+    // bounding sphere, which the injected mesh does not fit, so each drawing group tested false against
+    // the view frustum and vanished. `docs/ucfx_model_from_scratch.md` requires "Author bounds from the
+    // group's verts", and `model_cubeize` does exactly this — rewrite EVERY 60-byte PRMG INFO's bounds.
+    // The single-host and kitbash injectors updated per-group bounds, but this balanced-split path (the
+    // one dense skinned characters take) never did. Setting every 60-byte PRMG INFO to the whole-model
+    // bounds is what `model_cubeize` ships and is safe: a group only culls once the whole character is
+    // off-screen. Layout (@+20 center.xyz, +32 radius, +36 min.xyz, +48 max.xyz — all f32).
+    let all_center = [
+        (all_min[0] + all_max[0]) * 0.5,
+        (all_min[1] + all_max[1]) * 0.5,
+        (all_min[2] + all_max[2]) * 0.5,
+    ];
+    let all_radius = {
+        let (dx, dy, dz) = (
+            (all_max[0] - all_min[0]) * 0.5,
+            (all_max[1] - all_min[1]) * 0.5,
+            (all_max[2] - all_min[2]) * 0.5,
+        );
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    let mut prmg_bounds_written = 0usize;
+    for i in 0..rows.len() {
+        if &rows[i].tag != b"INFO" || rows[i].u0 == 0xFFFF_FFFF {
+            continue;
+        }
+        // A PRMG bounds INFO is 60 bytes; the 56-byte skin-palette INFO and 72-byte top INFO are not
+        // touched here (rows[0] is handled above).
+        let mut pi = new_bodies
+            .get(&i)
+            .cloned()
+            .unwrap_or_else(|| leaf(ucfx, data_off, &rows[i]).to_vec());
+        if pi.len() < 60 {
+            continue;
+        }
+        for k in 0..3 {
+            pi[20 + k * 4..24 + k * 4].copy_from_slice(&all_center[k].to_le_bytes());
+            pi[36 + k * 4..40 + k * 4].copy_from_slice(&all_min[k].to_le_bytes());
+            pi[48 + k * 4..52 + k * 4].copy_from_slice(&all_max[k].to_le_bytes());
+        }
+        pi[32..36].copy_from_slice(&all_radius.to_le_bytes());
+        new_bodies.insert(i, pi);
+        prmg_bounds_written += 1;
+    }
+    let _ = prmg_bounds_written;
+
     // ---- ★UNBIND EVERY HOST SEGM ROW ----
     //
     // This function had NO SEGM handling at all, which is a silent-invisibility bug rather than a
