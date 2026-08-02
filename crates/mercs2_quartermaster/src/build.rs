@@ -1273,9 +1273,33 @@ fn lower_skinned(
                         }
                         tex_blocks.push(block);
                         atlas_cells = cells;
+                        // MATTE SPEC. Without this the donor's (Mattias's) specular map lights the
+                        // atlas, so the import renders as shiny dark metal — the same wrong-highlight
+                        // failure the per-material path kills with a flat spec. Repoint the donor's
+                        // whole specular slot onto one near-black 4x4, which is right for tactical
+                        // gear (its glTF specularFactor is ~0.01) and matte's out the metal sheen.
+                        let matte: Vec<f32> = vec![10.0; 4 * 4 * 4];
+                        let matte_img = Rgba { width: 4, height: 4, pixels: matte };
+                        if let Ok((sblock, sto)) = build_texture_from_rgba(
+                            index,
+                            kind,
+                            &format!("{name}_matte_sm"),
+                            matte_img,
+                            false,
+                            None,
+                            "matte spec",
+                        ) {
+                            for from in mercs2_formats::texture::material_slot_hashes(donor_ucfx, 1) {
+                                repoints.push(mercs2_formats::model_inject::MtrlRepoint {
+                                    from,
+                                    to: sto,
+                                });
+                            }
+                            tex_blocks.push(sblock);
+                        }
                         log.push(format!(
                             "contributions[{index}] {kind} {name}: baked a {}x{} diffuse atlas over \
-                             {} materials for the single group (0x{to:08X})",
+                             {} materials for the single group (0x{to:08X}) + matte spec",
                             aw,
                             ah,
                             decoded.len()
