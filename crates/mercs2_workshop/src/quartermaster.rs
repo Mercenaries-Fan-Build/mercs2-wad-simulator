@@ -115,6 +115,126 @@ pub enum Act {
     OpenDoc(String),
 }
 
+/// Facts read straight out of a source GLB — the "what is this file" an outfit/model form shows so an
+/// author is not staring at blank fields for things baked into the asset (its rig, its materials, its
+/// size). A LIGHT probe: it parses only the glTF JSON via [`gltf::Gltf::open`], never the model's
+/// buffers or images, so it is cheap enough to cache per path and render live.
+#[derive(Clone)]
+pub struct GlbFacts {
+    pub rig: mercs2_formats::retarget::SourceRig,
+    pub joints: usize,
+    pub materials: usize,
+    pub embedded_textures: bool,
+    pub verts: usize,
+    pub tris: usize,
+}
+
+impl GlbFacts {
+    /// A FOREIGN rig needs a `retarget:` to animate on the donor; a native/generic one does not.
+    pub fn foreign(&self) -> bool {
+        use mercs2_formats::retarget::SourceRig::*;
+        matches!(self.rig, ValveBiped | Mixamo | Unreal | CallOfDuty)
+    }
+
+    /// One-line summary for a field note.
+    fn summary(&self) -> String {
+        format!(
+            "{} \u{b7} {} joint{} \u{b7} {} material{} {}\u{b7} {} verts / {} tris",
+            self.rig.label(),
+            self.joints,
+            if self.joints == 1 { "" } else { "s" },
+            self.materials,
+            if self.materials == 1 { "" } else { "s" },
+            if self.embedded_textures { "(embedded textures) " } else { "" },
+            self.verts,
+            self.tris,
+        )
+    }
+}
+
+/// Read a source GLB's shape without decoding its payload. `None` when it is not a readable glTF (an
+/// OBJ, or an unreadable file) — the caller simply shows nothing.
+fn probe_glb(abs: &Path) -> Option<GlbFacts> {
+    let g = gltf::Gltf::open(abs).ok()?;
+    let mut names: Vec<String> = Vec::new();
+    for skin in g.skins() {
+        for joint in skin.joints() {
+            if let Some(n) = joint.name() {
+                names.push(n.to_string());
+            }
+        }
+    }
+    let materials = g.materials().count();
+    let embedded_textures = g
+        .materials()
+        .any(|m| m.pbr_metallic_roughness().base_color_texture().is_some());
+    let (mut verts, mut tris) = (0usize, 0usize);
+    for mesh in g.meshes() {
+        for prim in mesh.primitives() {
+            if let Some(a) = prim.get(&gltf::Semantic::Positions) {
+                verts += a.count();
+            }
+            tris += prim.indices().map(|a| a.count() / 3).unwrap_or(0);
+        }
+    }
+    Some(GlbFacts {
+        rig: mercs2_formats::retarget::SourceRig::detect(&names),
+        joints: names.len(),
+        materials,
+        embedded_textures,
+        verts,
+        tris,
+    })
+}
+
+/// The source model an outfit/model contribution imports, if it has one.
+fn model_source(c: &Contribution) -> Option<&Path> {
+    match c {
+        Contribution::AddOutfit { model, .. } | Contribution::AddModel { model, .. } => {
+            Some(model.as_path())
+        }
+        _ => None,
+    }
+}
+
+/// Which contribution the facts note is advising, so the recommendation fits the kind.
+enum GlbAdvice {
+    Outfit { single_group: bool },
+    Model,
+}
+
+/// Render the GLB facts line under the Model field plus a recommendation keyed to the kind — so the
+/// author sees what the file IS (rig, materials, size) and what to do about it, instead of blank
+/// fields for things the GLB already answers.
+fn glb_facts_note(ui: &mut egui::Ui, facts: Option<&GlbFacts>, advice: GlbAdvice) {
+    let Some(f) = facts else { return };
+    theme::field_note(ui, theme::FieldState::Neutral, &f.summary());
+    match advice {
+        GlbAdvice::Outfit { single_group } => {
+            if f.foreign() && !single_group {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Warn,
+                    "foreign rig — if it culls or teleports in-game, turn on single group",
+                );
+            }
+        }
+        GlbAdvice::Model => {
+            if f.foreign() {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Warn,
+                    &format!(
+                        "this GLB carries a {} rig — a character that animates belongs in \
+                         add_outfit (which retargets it onto a hero); add_model hosts it rigidly",
+                        f.rig.label()
+                    ),
+                );
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Panel {
     shipment: Option<LoadedShipment>,
@@ -124,9 +244,25 @@ pub struct Panel {
     error: Option<String>,
     selected: Option<usize>,
     status: String,
+    /// Cache of light GLB probes keyed by ABSOLUTE source path, so the facts card does not re-read a
+    /// 16 MB file every frame. A `None` value = probed and not a readable glTF.
+    model_facts: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<GlbFacts>>>,
 }
 
 impl Panel {
+    /// Light GLB facts for an absolute source path, probed once and cached (interior mutability, so
+    /// it works through the `&Panel` the render borrows).
+    fn model_facts_for(&self, abs: &Path) -> Option<GlbFacts> {
+        if let Some(hit) = self.model_facts.borrow().get(abs) {
+            return hit.clone();
+        }
+        let facts = probe_glb(abs);
+        self.model_facts
+            .borrow_mut()
+            .insert(abs.to_path_buf(), facts.clone());
+        facts
+    }
+
     pub(crate) fn blocks(&self) -> bool {
         self.diagnostics
             .iter()
@@ -987,8 +1123,15 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                 // loop; there is no separate "check" button to forget to press.
                 let root = s.root.as_path();
                 theme::section(ui, "Fields", Some(c.kind()), true, |ui| {
+                    // Light facts read straight from the source GLB, so the form can SHOW what the
+                    // asset actually is (rig, materials, size) instead of blank fields, and pre-fill
+                    // the retarget convention it detects. Cached per path, so it is read once.
+                    let facts = model_source(c)
+                        .map(|m| root.join(m))
+                        .filter(|a| a.is_file())
+                        .and_then(|a| p.model_facts_for(&a));
                     let mut edited = c.clone();
-                    let commit = contribution_form(ui, &mut edited, root, names);
+                    let commit = contribution_form(ui, &mut edited, root, names, facts.as_ref());
                     if commit && edited != *c {
                         acts.push(Act::Edit(i, Box::new(edited)));
                     }
@@ -1246,6 +1389,7 @@ fn contribution_form(
     c: &mut Contribution,
     root: &Path,
     names: Option<&NameTable>,
+    facts: Option<&GlbFacts>,
 ) -> bool {
     use mercs2_quartermaster::manifest::{Layer, PlaceIn, Target};
     let mut commit = false;
@@ -1277,7 +1421,22 @@ fn contribution_form(
                     }
                 }
             });
-            commit |= source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]);
+            if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
+                commit = true;
+                // The model just changed — read what the GLB actually declares and pre-fill from it.
+                // A FOREIGN rig with no `retarget:` would be lowered rigidly (won't animate), so add
+                // the detected convention rather than leave the author to know it needs one. Detection
+                // reads the joint names in the file; it is not a guess.
+                if let Some(f) = probe_glb(&root.join(&*model)) {
+                    if f.foreign() && retarget.is_none() {
+                        *retarget = Some(mercs2_quartermaster::manifest::Retarget {
+                            from: f.rig.slug().to_string(),
+                            bones: None,
+                        });
+                    }
+                }
+            }
+            glb_facts_note(ui, facts, GlbAdvice::Outfit { single_group: *single_group });
             let mut d = donor.clone().unwrap_or_default();
             if asset_row(ui, "Donor", &mut d, names) {
                 *donor = (!d.trim().is_empty()).then_some(d);
@@ -1333,6 +1492,7 @@ fn contribution_form(
         Contribution::AddModel { name, model, donor, group, textures, retarget } => {
             commit |= text_row(ui, "Asset name", name, "my_custom_helipad", true);
             commit |= source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]);
+            glb_facts_note(ui, facts, GlbAdvice::Model);
             let mut d = donor.clone().unwrap_or_default();
             if asset_row(ui, "Donor", &mut d, names) {
                 *donor = (!d.trim().is_empty()).then_some(d);
