@@ -1297,9 +1297,40 @@ fn lower_skinned(
                             }
                             tex_blocks.push(sblock);
                         }
+                        // FLAT NORMAL. The mesh has ONE UV set, remapped into the atlas for the
+                        // DIFFUSE — but the donor's normal map lives in the donor's UV layout, so
+                        // sampling it with atlas UVs reads garbage normals and lights whole regions as
+                        // if they faced away: the model goes black. Repoint the normal slot onto a flat
+                        // tangent-space normal (0,0,1) so lighting falls back to the mesh's own
+                        // (conformed, correct) geometry normals instead. `is_normal` swizzles the
+                        // input, so a (128,128,255) texel encodes the neutral normal.
+                        let flatn: Vec<f32> = [128.0f32, 128.0, 255.0, 255.0]
+                            .iter()
+                            .cycle()
+                            .take(4 * 4 * 4)
+                            .copied()
+                            .collect();
+                        let flatn_img = Rgba { width: 4, height: 4, pixels: flatn };
+                        if let Ok((nblock, nto)) = build_texture_from_rgba(
+                            index,
+                            kind,
+                            &format!("{name}_flat_nm"),
+                            flatn_img,
+                            true,
+                            None,
+                            "flat normal",
+                        ) {
+                            for from in mercs2_formats::texture::material_slot_hashes(donor_ucfx, 2) {
+                                repoints.push(mercs2_formats::model_inject::MtrlRepoint {
+                                    from,
+                                    to: nto,
+                                });
+                            }
+                            tex_blocks.push(nblock);
+                        }
                         log.push(format!(
                             "contributions[{index}] {kind} {name}: baked a {}x{} diffuse atlas over \
-                             {} materials for the single group (0x{to:08X}) + matte spec",
+                             {} materials for the single group (0x{to:08X}) + matte spec + flat normal",
                             aw,
                             ah,
                             decoded.len()
