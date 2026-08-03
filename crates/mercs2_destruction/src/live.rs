@@ -12,6 +12,16 @@
 //! These functions only GENERATE Lua; the console runs it. That keeps them pure and unit-testable —
 //! the correctness of a chunk is its bytes, checked here — while the live game is the one thing a
 //! test cannot stand in for.
+//!
+//! ★ **Bindings verified live over the bridge (2026-08-02).** The write path is
+//! `ObjectState.SetState(guid, nodeHash, stateHash)` — **3-arg and node-keyed** (this file previously
+//! emitted `Object.SetState(guid, state)`, which is *not a real native* and silently did nothing). There
+//! is **no Lua getter** for an object's destruction state — the read side is `ObjectState.PrintStateMachine`
+//! (a log dump) plus the `OnStateChange` watcher. And `SetState` drives the machine's LOGICAL state (it
+//! fires `OnStateChange`) but is NOT a destroy: the object stays alive. Visible destruction is the health
+//! path (`Ess.Object.kill`, asynchronous break-pieces), and `StartDestroyedState` is the state that plays
+//! the wreck. The state/node hashes arrive at `OnStateChange` as GUIDs, so names resolve through
+//! `Sys.GuidToString` against a STRING-keyed table (a numeric-keyed one collides under Lua 5.1 floats).
 
 use mercs2_formats::orchestrator::{state_name, STATE_VOCABULARY};
 
@@ -50,40 +60,55 @@ pub fn guid_expr(target: &str) -> String {
     }
 }
 
-/// Force a destructible into a named state via the engine's `SetState`. `state` must be in the
-/// cracked vocabulary; the chunk carries the resolved name as a comment so a decompile of the
-/// console log stays legible.
-pub fn set_state_lua(target: &str, state: &str) -> Result<String, String> {
+/// Turn a user-typed node into the Lua hash expression `ObjectState.SetState` wants. A bare word is a
+/// node / hardpoint NAME, hashed in-engine with `String.GetHash`; a `0x…` is turned back into the hash
+/// value with `Sys.StringToGuid` — the same split [`guid_expr`] makes, and the shape verified live (a name
+/// node and a `0x…` node both drove a real building's machine over the bridge).
+pub fn node_expr(node: &str) -> String {
+    let n = node.trim();
+    if n.starts_with("0x") || n.starts_with("0X") {
+        format!("Sys.StringToGuid(\"{n}\")")
+    } else {
+        format!("String.GetHash(\"{n}\")")
+    }
+}
+
+/// Force a destructible NODE into a named state via `ObjectState.SetState(guid, node, state)` — the real
+/// 3-arg, node-keyed native (verified live; the `Object.SetState(guid, state)` this once emitted does not
+/// exist). `state` must be in the cracked vocabulary. A destructible has MANY nodes (a building's structural
+/// pieces), and `SetState` is per-node — enumerate them with [`print_machine_lua`] or [`watch_lua`]; node
+/// `0x0` is not valid. This drives the machine's LOGICAL state and fires `OnStateChange`; it is NOT a destroy
+/// (the object stays alive) — for visible destruction use [`demolish_lua`], and `StartDestroyedState` is the
+/// state that plays the wreck. The chunk carries the resolved name + hash as a comment for a legible log.
+pub fn set_state_lua(target: &str, node: &str, state: &str) -> Result<String, String> {
+    if node.trim().is_empty() {
+        return Err("a node is required — ObjectState.SetState is node-keyed; use \"Dump machine\" \
+                    to list a destructible's nodes"
+            .into());
+    }
     let h = state_hash(state).ok_or_else(|| {
         let known: Vec<&str> = states().iter().map(|(n, _)| *n).collect();
         format!("{state:?} is not a known destruction state. Pick one of: {}", known.join(", "))
     })?;
     let named = state_name(h).unwrap_or(state);
     Ok(format!(
-        "-- force {named} (0x{h:08X}) on the target\nObject.SetState({}, 0x{h:08X})\n",
-        guid_expr(target)
+        "-- force {named} (0x{h:08X}) on node {node} of the target (logical state, not a destroy)\n\
+         ObjectState.SetState({}, {}, String.GetHash(\"{named}\"))\n",
+        guid_expr(target),
+        node_expr(node),
     ))
 }
 
-/// Read a target's CURRENT destruction state — the typed read the game does serve (unlike a generic
-/// per-component read, which waits on Ess). `Object.GetState` returns the live state hash; this
-/// resolves it to a vocabulary name the same way [`watch_lua`] does, so the console prints
-/// `PristineState` rather than bare hex. `GetStateName` (the engine's own string) is printed beside
-/// it when present, so a state outside our cracked vocabulary is still legible.
-pub fn read_state_lua(target: &str) -> String {
-    let g = guid_expr(target);
-    let mut table = String::from("local NAMES = {\n");
-    for (name, hash) in states() {
-        table.push_str(&format!("  [0x{hash:08X}] = \"{name}\",\n"));
-    }
-    table.push_str("}\n");
+/// Dump a target's live state machine — every node and its current state — to the game log via the
+/// engine's own `ObjectState.PrintStateMachine`. This is how you INSPECT: there is no Lua getter for an
+/// object's destruction state (the `Object.GetState`/`GetStateName` this once used do not exist — verified
+/// against the live capture), so the read side is this dump plus the reactive [`watch_lua`]. It is also how
+/// you discover the node hashes [`set_state_lua`] needs.
+pub fn print_machine_lua(target: &str) -> String {
     format!(
-        "{table}\
-         local g = {g}\n\
-         local st = Object.GetState(g)\n\
-         local nm = NAMES[st] or (Object.GetStateName and Object.GetStateName(g)) or \
-         string.format(\"0x%08X\", st)\n\
-         Loader.Printf(\"state: 0x%08X -> %s\", g, nm)\n"
+        "-- dump the machine (nodes + current states) to the log; there is no state getter to return one\n\
+         ObjectState.PrintStateMachine({})\n",
+        guid_expr(target)
     )
 }
 
@@ -121,13 +146,19 @@ pub fn repair_lua(target: &str) -> String {
     )
 }
 
-/// Install a reporter for `OnStateChange(guid, node, state)` — the Lua callback the engine fires on
-/// every destruction transition — printing each with the state resolved to its vocabulary NAME. This
-/// is the read side Ess has no equivalent for: watch the world's destructibles change state, legibly.
+/// Install a reporter for `OnStateChange(guid, node, state)` — the Lua callback the engine fires on every
+/// destruction transition — printing each with the state resolved to its vocabulary NAME. This is the read
+/// side Ess has no equivalent for: watch the world's destructibles change state, legibly. Verified live —
+/// the engine calls this global for every destructible as the world streams, and chaining `_prev` extends
+/// any existing handler rather than clobbering it.
+///
+/// The args arrive as GUIDs, so this stringifies them with `Sys.GuidToString` and looks names up in a
+/// STRING-keyed table: a numeric-keyed table would never match (the key is a guid, not a number) and
+/// `string.format("%X", guid)` would error. Unknown states fall back to the bare `0x…`, never a guess.
 pub fn watch_lua() -> String {
     let mut table = String::from("local NAMES = {\n");
     for (name, hash) in states() {
-        table.push_str(&format!("  [0x{hash:08X}] = \"{name}\",\n"));
+        table.push_str(&format!("  [\"0x{hash:08X}\"] = \"{name}\",\n"));
     }
     table.push_str("}\n");
     format!(
@@ -135,8 +166,8 @@ pub fn watch_lua() -> String {
          local _prev = OnStateChange\n\
          function OnStateChange(guid, node, state)\n\
          \x20 if _prev then _prev(guid, node, state) end\n\
-         \x20 local s = NAMES[state] or string.format(\"0x%08X\", state)\n\
-         \x20 Loader.Printf(\"destruct: 0x%08X node 0x%08X -> %s\", guid, node, s)\n\
+         \x20 local ss = Sys.GuidToString(state)\n\
+         \x20 Loader.Printf(\"destruct: %s node %s -> %s\", Sys.GuidToString(guid), Sys.GuidToString(node), NAMES[ss] or ss)\n\
          end\n\
          Loader.Printf(\"destruct watcher installed\")\n"
     )
@@ -156,15 +187,26 @@ mod tests {
     }
 
     #[test]
-    fn set_state_emits_the_right_hash_and_refuses_a_bad_name() {
-        let lua = set_state_lua("mytank", "PristineState").unwrap();
-        assert!(lua.contains("Object.SetState(Ess.Guid(\"mytank\"), 0xACB51200)"), "{lua}");
-        assert!(lua.contains("PristineState"), "{lua}");
-        // A guid expression is passed through, not re-wrapped.
-        assert!(set_state_lua("g", "DestroyedState").unwrap().contains("Object.SetState(Ess.Guid(\"g\")"));
-        assert!(set_state_lua("Ess.Player.guid()", "GoneState").unwrap().contains("Object.SetState(Ess.Player.guid(), "));
+    fn set_state_is_node_keyed_on_the_real_native_and_refuses_bad_input() {
+        // The real native: ObjectState.SetState(guid, nodeHash, stateHash) — 3-arg, node-keyed. A node NAME
+        // is hashed with String.GetHash, the state carried as String.GetHash("Name").
+        let lua = set_state_lua("mytank", "hp_snap_tower", "PristineState").unwrap();
+        assert!(
+            lua.contains(
+                "ObjectState.SetState(Ess.Guid(\"mytank\"), String.GetHash(\"hp_snap_tower\"), String.GetHash(\"PristineState\"))"
+            ),
+            "{lua}"
+        );
+        assert!(lua.contains("PristineState") && lua.contains("0xACB51200"), "{lua}");
+        // NOT the nonexistent 2-arg Object.SetState this used to emit.
+        assert!(!lua.contains("Object.SetState("), "{lua}");
+        // A 0x… node goes through Sys.StringToGuid; a guid-expression target is passed through, not re-wrapped.
+        let byhash = set_state_lua("Ess.Player.guid()", "0x8DCB305A", "DestroyedState").unwrap();
+        assert!(byhash.contains("ObjectState.SetState(Ess.Player.guid(), Sys.StringToGuid(\"0x8DCB305A\"), String.GetHash(\"DestroyedState\"))"), "{byhash}");
+        // A missing node is refused — SetState is node-keyed.
+        assert!(set_state_lua("t", "", "PristineState").unwrap_err().contains("node is required"));
         // A name outside the vocabulary is refused with the list.
-        let err = set_state_lua("t", "KaboomState").unwrap_err();
+        let err = set_state_lua("t", "n", "KaboomState").unwrap_err();
         assert!(err.contains("PristineState") && err.contains("not a known"), "{err}");
     }
 
@@ -174,24 +216,32 @@ mod tests {
         let r = repair_lua("t");
         assert!(r.contains("Ess.Object.setHealth(g, Ess.Object.maxHealth(g))") && r.contains("Ess.Object.revive(g)"), "{r}");
         let w = watch_lua();
-        assert!(w.contains("[0xACB51200] = \"PristineState\""), "{w}");
+        // STRING-keyed NAMES (the callback args are guids), resolved through Sys.GuidToString.
+        assert!(w.contains("[\"0xACB51200\"] = \"PristineState\""), "{w}");
         assert!(w.contains("function OnStateChange(guid, node, state)"), "{w}");
+        assert!(w.contains("Sys.GuidToString(state)") && w.contains("NAMES[ss]"), "{w}");
+        // The broken numeric key / raw-guid format is gone.
+        assert!(!w.contains("[0xACB51200]") && !w.contains("string.format(\"0x%08X\", state)"), "{w}");
     }
 
     #[test]
-    fn reads_use_the_real_getters_and_resolve_state_names() {
-        let s = read_state_lua("mytank");
-        // The guid is bound once and read through `g`.
-        assert!(s.contains("local g = Ess.Guid(\"mytank\")"), "{s}");
-        assert!(s.contains("Object.GetState(g)"), "{s}");
-        // Resolves to the vocabulary name, and falls back to the engine's own GetStateName.
-        assert!(s.contains("[0xACB51200] = \"PristineState\""), "{s}");
-        assert!(s.contains("Object.GetStateName"), "{s}");
+    fn inspect_dumps_the_machine_since_there_is_no_state_getter() {
+        // There is no Object.GetState — inspecting is a PrintStateMachine dump.
+        let s = print_machine_lua("mytank");
+        assert!(s.contains("ObjectState.PrintStateMachine(Ess.Guid(\"mytank\"))"), "{s}");
+        assert!(!s.contains("Object.GetState") && !s.contains("GetStateName"), "{s}");
+        // Health reads through the Ess wrappers, unchanged.
         let h = read_health_lua("t");
         assert!(h.contains("local g = Ess.Guid(\"t\")"), "{h}");
         assert!(h.contains("Ess.Object.health(g)") && h.contains("Ess.Object.maxHealth(g)"), "{h}");
         // A guid expression is passed through, not re-wrapped.
-        assert!(read_state_lua("Ess.Player.guid()").contains("local g = Ess.Player.guid()"));
+        assert!(print_machine_lua("Ess.Player.guid()").contains("ObjectState.PrintStateMachine(Ess.Player.guid())"));
+    }
+
+    #[test]
+    fn node_expr_hashes_names_but_stringtoguids_hashes() {
+        assert_eq!(node_expr("hp_snap_tower"), "String.GetHash(\"hp_snap_tower\")");
+        assert_eq!(node_expr("0x8DCB305A"), "Sys.StringToGuid(\"0x8DCB305A\")");
     }
 
     #[test]

@@ -1277,8 +1277,10 @@ pub fn run(opts: Options) {
     // Remembered so a failed open (missing English.wad / .pws / device) is reported once, not per click.
     let mut vo_error: Option<String> = None;
     let mut console_search = String::new();
-    // Destruction poke: a target (object name or guid expr) + the chosen vocabulary state.
+    // Destruction poke: a target (object name or guid expr), a NODE (hardpoint name or 0x… hash —
+    // ObjectState.SetState is node-keyed), and the chosen vocabulary state.
     let mut destruct_target = String::new();
+    let mut destruct_node = String::new();
     let mut destruct_state = 0usize;
     let destruct_states = mercs2_destruction::live::states();
     // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
@@ -4338,6 +4340,15 @@ pub fn run(opts: Options) {
                                             });
                                             let has_target = !destruct_target.trim().is_empty();
                                             ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("node").size(10.0).color(theme::FAINT));
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut destruct_node)
+                                                        .hint_text("hardpoint name or 0x… (see Dump machine)")
+                                                        .desired_width(190.0),
+                                                );
+                                            });
+                                            let has_node = !destruct_node.trim().is_empty();
+                                            ui.horizontal(|ui| {
                                                 egui::ComboBox::from_id_source("destruct_state")
                                                     .selected_text(
                                                         destruct_states.get(destruct_state).map(|(n, _)| *n).unwrap_or("state"),
@@ -4347,9 +4358,20 @@ pub fn run(opts: Options) {
                                                             ui.selectable_value(&mut destruct_state, i, *n);
                                                         }
                                                     });
-                                                if ui.add_enabled(has_target, egui::Button::new("Set state")).clicked() {
+                                                // SetState is node-keyed and is a LOGICAL state change (not a
+                                                // destroy — use Demolish for that), so it needs both a target
+                                                // and a node.
+                                                if ui
+                                                    .add_enabled(has_target && has_node, egui::Button::new("Set state"))
+                                                    .on_hover_text("force this node's logical state (ObjectState.SetState); not a destroy")
+                                                    .clicked()
+                                                {
                                                     if let Some((name, _)) = destruct_states.get(destruct_state) {
-                                                        if let Ok(lua) = mercs2_destruction::live::set_state_lua(&destruct_target, name) {
+                                                        if let Ok(lua) = mercs2_destruction::live::set_state_lua(
+                                                            &destruct_target,
+                                                            &destruct_node,
+                                                            name,
+                                                        ) {
                                                             send_chunk = Some(lua);
                                                         }
                                                     }
@@ -4370,16 +4392,17 @@ pub fn run(opts: Options) {
                                                     send_chunk = Some(mercs2_destruction::live::watch_lua());
                                                 }
                                             });
-                                            // The typed READS — the state and health the game actually
-                                            // serves (GetState / GetHealth), resolved to vocabulary
-                                            // names. The read side of phase 4.
+                                            // The READS. There is no Lua getter for an object's destruction
+                                            // state, so inspecting is a machine DUMP (nodes + current states)
+                                            // to the log — which is also where the node hashes for Set state
+                                            // come from. Health does have real getters (GetHealth).
                                             ui.horizontal(|ui| {
                                                 if ui
-                                                    .add_enabled(has_target, egui::Button::new("Read state"))
-                                                    .on_hover_text("print the target's current destruction state, by vocabulary name")
+                                                    .add_enabled(has_target, egui::Button::new("Dump machine"))
+                                                    .on_hover_text("log every node + its current state (ObjectState.PrintStateMachine) — the node source for Set state")
                                                     .clicked()
                                                 {
-                                                    send_chunk = Some(mercs2_destruction::live::read_state_lua(&destruct_target));
+                                                    send_chunk = Some(mercs2_destruction::live::print_machine_lua(&destruct_target));
                                                 }
                                                 if ui
                                                     .add_enabled(has_target, egui::Button::new("Read health"))
@@ -4391,7 +4414,7 @@ pub fn run(opts: Options) {
                                             });
                                             ui.label(
                                                 egui::RichText::new(
-                                                    "Set state uses the cracked SetState vocabulary; demolish/repair use the health lever.",
+                                                    "Set state is node-keyed (logical, not a destroy); Demolish/Repair use the health lever. Dump machine lists a target's nodes.",
                                                 )
                                                 .size(9.0)
                                                 .color(theme::FAINT),
