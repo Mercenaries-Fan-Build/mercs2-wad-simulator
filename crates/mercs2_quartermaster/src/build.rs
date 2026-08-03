@@ -1695,6 +1695,12 @@ fn lower(
             single_group,
             ..
         } => {
+            // No model FILE → wear a model the game already ships (named by `name`): nothing to
+            // inject here; the `_tOutfits` row is emitted by `script_mutations`. The injection-only
+            // fields (donor / textures / retarget / single_group) do not apply.
+            let Some(model) = model.as_ref() else {
+                return Ok(Lowering::Nothing);
+            };
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
@@ -3344,6 +3350,46 @@ fn placement_json(placements: &[Placement]) -> String {
     }))
     .unwrap_or_else(|_| "{}".into())
         + "\n"
+}
+
+#[cfg(test)]
+mod existing_model_outfit {
+    use crate::manifest::Contribution;
+
+    /// An `add_outfit` with no `model` file is the "wear an existing in-game model" form: it parses
+    /// with `model: None`, injects nothing, yet still emits the `_tOutfits` wardrobe row — the
+    /// residency-safe Script mutation the linker reconciles.
+    #[test]
+    fn add_outfit_without_a_model_file_still_appends_the_wardrobe_row() {
+        let yaml = r#"
+format: 1
+shipment:
+  name: wear-solano
+  version: "1.0.0"
+  target: retail
+contributions:
+  - kind: add_outfit
+    name: vz_hum_solano
+    slug: Solano
+    display: Solano
+    wearer: chris
+"#;
+        let m = crate::from_str(yaml, crate::Format::Yaml).expect("parses");
+        match &m.contributions[0] {
+            Contribution::AddOutfit { model, name, .. } => {
+                assert!(model.is_none(), "no model file -> existing-model outfit");
+                assert_eq!(name, "vz_hum_solano");
+            }
+            other => panic!("wrong kind: {}", other.kind()),
+        }
+
+        // The Script half is unchanged: a wardrobe row on wifpmcinterior for the existing model.
+        let muts = super::script_mutations(&m, std::path::Path::new(".")).unwrap();
+        assert_eq!(muts.len(), 1);
+        assert_eq!(muts[0].target, "wifpmcinterior");
+        assert!(muts[0].append.contains("_tOutfits.chris"));
+        assert!(muts[0].append.contains("vz_hum_solano"));
+    }
 }
 
 #[cfg(test)]

@@ -210,9 +210,9 @@ fn probe_glb(abs: &Path) -> Option<GlbFacts> {
 /// The source model an outfit/model contribution imports, if it has one.
 fn model_source(c: &Contribution) -> Option<&Path> {
     match c {
-        Contribution::AddOutfit { model, .. } | Contribution::AddModel { model, .. } => {
-            Some(model.as_path())
-        }
+        // An existing-model outfit carries no source file, so it has no model to import.
+        Contribution::AddOutfit { model, .. } => model.as_deref(),
+        Contribution::AddModel { model, .. } => Some(model.as_path()),
         _ => None,
     }
 }
@@ -267,6 +267,11 @@ pub struct Panel {
     /// Cache of light GLB probes keyed by ABSOLUTE source path, so the facts card does not re-read a
     /// 16 MB file every frame. A `None` value = probed and not a readable glTF.
     model_facts: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<GlbFacts>>>,
+    /// In-flight background build. The worker sends its [`BuildOutcome`] here; [`Panel::poll_build`]
+    /// drains it. `building` is what the verb bar reads to show a spinner instead of the Build
+    /// button. Both are `Default` (`None`/`false`), so the `#[derive(Default)]` above still holds.
+    build_rx: Option<std::sync::mpsc::Receiver<BuildOutcome>>,
+    building: bool,
 }
 
 impl Panel {
@@ -287,6 +292,63 @@ impl Panel {
         self.diagnostics
             .iter()
             .any(|d| matches!(d.severity, Severity::Error | Severity::Hang))
+    }
+
+    /// True while a background build is running — the verb bar shows a spinner instead of Build, and
+    /// the app polls [`Panel::poll_build`] every frame until it clears.
+    pub fn building(&self) -> bool {
+        self.building
+    }
+
+    /// Fold a finished build's outcome back into the panel. Shared by the synchronous [`run_build`]
+    /// and the async [`Panel::poll_build`], so the report/blocked/failed classification lives once.
+    fn apply_build_outcome(&mut self, outcome: BuildOutcome) {
+        match outcome {
+            BuildOutcome::Report(r) => {
+                self.status = match &r.wad {
+                    Some(w) => format!("built {}", leaf(w)),
+                    None => "built (no overlay)".into(),
+                };
+                self.diagnostics = r.diagnostics.clone();
+                self.error = None;
+                self.report = Some(r);
+            }
+            BuildOutcome::Blocked(ds) => {
+                self.diagnostics = ds;
+                self.report = None;
+                self.error = None;
+                self.status = "blocked".into();
+            }
+            BuildOutcome::Failed(msg) => {
+                self.report = None;
+                self.error = Some(msg);
+                self.status = "build failed".into();
+            }
+        }
+    }
+
+    /// Drain the in-flight build if it has finished. Returns `true` on the frame it completes, so the
+    /// caller can sync its own status line. A cheap no-op when no build is running.
+    pub fn poll_build(&mut self) -> bool {
+        let Some(rx) = &self.build_rx else { return false };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.build_rx = None;
+                self.building = false;
+                self.apply_build_outcome(outcome);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            // The worker panicked and dropped its sender without sending. Surface it rather than
+            // spin forever showing a spinner for a build that will never report.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.build_rx = None;
+                self.building = false;
+                self.error = Some("the build thread stopped unexpectedly".into());
+                self.status = "build failed".into();
+                true
+            }
+        }
     }
 
     pub fn gate(&self, has_game: bool) -> Gate {
@@ -568,8 +630,12 @@ impl Panel {
         let sh = self.shipment.as_ref()?;
         let c = sh.manifest.contributions.get(i)?;
         let (model, donor, retarget) = match c {
-            Contribution::AddOutfit { model, donor, retarget, .. }
-            | Contribution::AddModel { model, donor, retarget, .. } => (model, donor, retarget),
+            // An existing-model outfit (no `model` file) has no source mesh to conform, so there is
+            // no craft bench for it.
+            Contribution::AddOutfit { model: Some(model), donor, retarget, .. } => {
+                (model, donor, retarget)
+            }
+            Contribution::AddModel { model, donor, retarget, .. } => (model, donor, retarget),
             _ => return None,
         };
         let donor = donor.as_ref().map(|d| {
@@ -889,7 +955,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             slug: format!("MyOutfit{n}"),
             display: "My outfit".into(),
             wearer: "mattias".into(),
-            model: PathBuf::from("src/model.glb"),
+            model: Some(PathBuf::from("src/model.glb")),
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
             retarget: None,
@@ -1463,12 +1529,16 @@ fn contribution_form(
             // key and the single `_tOutfits` writer. Duplicating the pills here made two writers of the
             // same field, the exact split that section's comment exists to prevent. `wearer` is still
             // read below for the donor auto-pick note.
-            if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
+            // The model FILE is OPTIONAL: pick one to INJECT a new mesh, or leave it empty to wear a
+            // model the game already ships (named by "Asset name" above). Edited through a temp since
+            // the field is `Option<PathBuf>`; an empty path maps back to `None`.
+            let mut model_path = model.clone().unwrap_or_default();
+            if source_row(ui, "Model (optional)", &mut model_path, root, &["glb", "gltf", "obj"]) {
                 commit = true;
                 // Name the asset after the model file, while the fields still hold their `stub()`
                 // placeholders — an author who picks RuMerc1.glb means the outfit is RuMerc1, not
                 // my_asset_2. Only the mint-pattern defaults are replaced; a real value is left alone.
-                if let Some(stem) = model.file_stem().map(|s| s.to_string_lossy().to_string()) {
+                if let Some(stem) = model_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
                     if name.is_empty() || name.starts_with("my_asset") {
                         *name = stem.clone();
                     }
@@ -1482,7 +1552,7 @@ fn contribution_form(
                 // Also read what the GLB declares: a FOREIGN rig with no `retarget:` would be lowered
                 // rigidly (won't animate), so fill in the detected convention. Detection reads the
                 // joint names in the file; it is not a guess.
-                if let Some(f) = probe_glb(&root.join(&*model)) {
+                if let Some(f) = probe_glb(&root.join(&model_path)) {
                     if f.foreign() && retarget.is_none() {
                         *retarget = Some(mercs2_quartermaster::manifest::Retarget {
                             from: f.rig.slug().to_string(),
@@ -1490,6 +1560,15 @@ fn contribution_form(
                         });
                     }
                 }
+            }
+            // Empty path -> wear an existing model (no injection); a file -> inject it.
+            *model = (!model_path.as_os_str().is_empty()).then_some(model_path);
+            if model.is_none() {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Neutral,
+                    "empty — wear the existing in-game model named above (nothing is injected)",
+                );
             }
             glb_facts_note(ui, facts, GlbAdvice::Outfit { single_group: *single_group });
             let mut d = donor.clone().unwrap_or_default();
@@ -2267,7 +2346,13 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, has_game: bool) -> Vec<Act> {
         acts.push(Act::Reveal);
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if p.report.is_some() {
+        if p.building {
+            // Build is off on a worker thread. Show a live spinner + label in place of the button,
+            // and keep egui repainting so the spinner animates and the app polls for completion.
+            ui.add(egui::Spinner::new());
+            ui.label(egui::RichText::new("Building…").color(theme::BRASS));
+            ui.ctx().request_repaint();
+        } else if p.report.is_some() {
             // A handoff, not a deploy: Modkit owns install and undo, so this is reversible and does
             // not wear the hazard treatment.
             if theme::primary_button(ui, "Send to Modkit", true).clicked() {
@@ -2403,17 +2488,46 @@ pub fn apply(
             }
         }
         Act::Build => {
+            // Ignore a re-click while one is already running rather than spawn a second.
+            if p.building {
+                return;
+            }
+            let Some(s) = p.shipment.clone() else {
+                *status = "no Shipment open to build".into();
+                return;
+            };
+            // Everything the build reads is cloned so it can move to a worker thread. Opening the
+            // WADs, linting and linking Lua takes seconds; doing it inline froze the frame (and any
+            // "Building…" spinner with it), which is the whole bug. The game stack is opened ON the
+            // worker for the same reason — `GameStack::open` decompresses index tables.
             let paths: Vec<PathBuf> = wad_stack.iter().map(PathBuf::from).collect();
-            match mercs2_quartermaster::game::GameStack::open(&paths) {
-                Ok(mut g) => {
-                    run_build(p, Some(&mut g), names, corpus);
-                    *status = p.status.clone();
+            let names = names.cloned();
+            let corpus = corpus.map(Path::to_path_buf);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("qm-build".into())
+                .spawn(move || {
+                    let outcome = match mercs2_quartermaster::game::GameStack::open(&paths) {
+                        Ok(mut g) => {
+                            run_build_outcome(&s, Some(&mut g), names.as_ref(), corpus.as_deref())
+                        }
+                        Err(e) => BuildOutcome::Failed(format!("build needs a readable game stack: {e:?}")),
+                    };
+                    // A send error just means the panel was dropped (app closing) — nothing to do.
+                    let _ = tx.send(outcome);
+                });
+            match spawned {
+                Ok(_) => {
+                    p.build_rx = Some(rx);
+                    p.building = true;
+                    p.status = "Building…".into();
                 }
                 Err(e) => {
-                    p.error = Some(format!("game stack: {e:?}"));
-                    *status = "build needs a readable game stack".into();
+                    p.error = Some(format!("could not start the build thread: {e}"));
+                    p.status = "build failed".into();
                 }
             }
+            *status = p.status.clone();
         }
         Act::Reveal => {
             if let Some(w) = p.report.as_ref().and_then(|r| r.wad.as_ref()) {
@@ -2436,39 +2550,45 @@ pub fn apply(
     }
 }
 
-/// Run a build and fold the outcome back in.
+/// The classified result of one build, sent from the worker thread back to the UI.
 ///
-/// `Blocked` is not an error here — it is the linter doing its job, so the findings replace the
-/// current set and the gate turns red rather than a dialog appearing.
+/// Distinct from `Result<BuildReport, BuildError>` on purpose: `Blocked` is the linter doing its job
+/// (findings replace the current set, the gate turns red — not a failure), and this type only holds
+/// thread-sendable data, so a `BuildError` is rendered to a `String` on the worker rather than
+/// carried across the channel.
+enum BuildOutcome {
+    Report(BuildReport),
+    Blocked(Vec<Diagnostic>),
+    Failed(String),
+}
+
+/// Run a build and classify its result. Runs on the worker thread for [`Act::Build`]; also the body
+/// of the synchronous [`run_build`].
+fn run_build_outcome(
+    s: &LoadedShipment,
+    game: Option<&mut mercs2_quartermaster::game::GameStack>,
+    names: Option<&NameTable>,
+    corpus: Option<&Path>,
+) -> BuildOutcome {
+    match build::build(s, game, names, None, corpus) {
+        Ok(r) => BuildOutcome::Report(r),
+        Err(BuildError::Blocked(ds)) => BuildOutcome::Blocked(ds),
+        Err(e) => BuildOutcome::Failed(format!("{e:?}")),
+    }
+}
+
+/// Run a build synchronously and fold the outcome back in. Retained for callers that already hold an
+/// open `GameStack`; the interactive verb-bar path builds on a worker thread instead (see
+/// [`Act::Build`]) so the UI keeps painting.
 pub fn run_build(
     p: &mut Panel,
     game: Option<&mut mercs2_quartermaster::game::GameStack>,
     names: Option<&NameTable>,
     corpus: Option<&Path>,
 ) {
-    let Some(s) = &p.shipment else { return };
-    match build::build(s, game, names, None, corpus) {
-        Ok(r) => {
-            p.status = match &r.wad {
-                Some(w) => format!("built {}", leaf(w)),
-                None => "built (no overlay)".into(),
-            };
-            p.diagnostics = r.diagnostics.clone();
-            p.error = None;
-            p.report = Some(r);
-        }
-        Err(BuildError::Blocked(ds)) => {
-            p.diagnostics = ds;
-            p.report = None;
-            p.error = None;
-            p.status = "blocked".into();
-        }
-        Err(e) => {
-            p.report = None;
-            p.error = Some(format!("{e:?}"));
-            p.status = "build failed".into();
-        }
-    }
+    let Some(s) = p.shipment.clone() else { return };
+    let outcome = run_build_outcome(&s, game, names, corpus);
+    p.apply_build_outcome(outcome);
 }
 
 /// Where the Workshop drops a Shipment for Modkit to find: **Modkit's own data root**.
@@ -2478,9 +2598,10 @@ pub fn run_build(
 /// `%APPDATA%/mercs2-modkit/` (`staging`, `deployed`, `bin`, …), so `shipments/` belongs beside
 /// those, in the layout Modkit already owns.
 ///
-/// A folder both apps agree on IS the integration. A deep link would only be convenience over it,
-/// and needs two Tauri plugins Modkit does not carry. Nothing here writes into a game folder —
-/// install and undo stay Modkit's job, with the placement record to match.
+/// A folder both apps agree on is the durable contract; the deep link (`mercs2-modkit://ship`) is
+/// fired over it so Modkit ingests the drop immediately instead of waiting for a hand-add. Nothing
+/// here writes into a game folder — install and undo stay Modkit's job, with the placement record to
+/// match.
 pub fn shipments_library() -> Option<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
@@ -2504,9 +2625,18 @@ fn send_to_modkit(p: &Panel) -> Result<PathBuf, String> {
         ));
     }
     copy_tree(root, &dest).map_err(|e| format!("copying the shipment: {e}"))?;
-    // Open it, because Modkit has no watcher and no deep link: the handoff ends with a person
-    // adding it, so the folder had better be in front of them.
-    let _ = open_in_os(&dest);
+    // Hand off via the deep link so Modkit ingests the Shipment through Quartermaster and merges it
+    // into the deployed WAD — the point of this button over Reveal. Only when Modkit is clearly not
+    // installed (its scheme is unregistered) do we fall back to opening the folder, which is the old
+    // manual-add behavior and avoids an OS "no app for this link" dialog.
+    if modkit_scheme_registered() {
+        let url = modkit_ship_url(&dest);
+        if fire_deep_link(&url).is_err() {
+            let _ = open_in_os(&dest);
+        }
+    } else {
+        let _ = open_in_os(&dest);
+    }
     Ok(dest)
 }
 
@@ -2542,6 +2672,80 @@ pub fn open_in_os(target: &Path) -> std::io::Result<()> {
     }
 }
 
+/// The custom URL scheme Modkit registers. `send_to_modkit` fires `<scheme>://ship?path=…` so Modkit
+/// ingests the handed-off Shipment through Quartermaster instead of the user re-adding it by hand.
+const MODKIT_SCHEME: &str = "mercs2-modkit";
+
+/// Build the deep-link URL that tells Modkit to ingest the Shipment at `dest`.
+///
+/// Shape: `mercs2-modkit://ship?path=<percent-encoded absolute path>`. Split out from the firing so
+/// the (fiddly, Windows-path) encoding is unit-testable without spawning anything.
+fn modkit_ship_url(dest: &Path) -> String {
+    format!(
+        "{MODKIT_SCHEME}://ship?path={}",
+        percent_encode(&dest.to_string_lossy())
+    )
+}
+
+/// Percent-encode everything outside the RFC 3986 unreserved set, so a Windows path (spaces,
+/// backslashes, the drive colon) survives inside a URL query. Deliberately tiny — a whole crate for
+/// one query parameter is not worth the dependency.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Best-effort check that Modkit has registered its URL scheme. Only definitive on Windows, via the
+/// HKCR key the installer writes; elsewhere we assume yes and let the OS URL handler sort it out.
+///
+/// The point is the fallback: without this, firing the link on a machine that has never installed
+/// Modkit pops an OS "no app for this link" dialog. When the key is absent we open the folder
+/// instead — the same manual-add path this button had before it learned the deep link.
+fn modkit_scheme_registered() -> bool {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("reg")
+            .args(["query", &format!("HKCR\\{MODKIT_SCHEME}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            // If the probe itself won't run, prefer firing the link — that is the intended path, and
+            // the OS handler is the next line of defense.
+            .unwrap_or(true)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+/// Fire a URL through the OS's registered handler for its scheme. Mirrors [`open_in_os`] but hands
+/// the shell a URL rather than a filesystem path.
+fn fire_deep_link(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────── tests
 //
 // Unit tests rather than an integration test: `mercs2_workshop` is a BINARY crate with no
@@ -2557,6 +2761,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The deep-link URL Modkit receives must survive a Windows path: spaces, backslashes and the
+    /// drive colon are all reserved in a query and have to come back byte-for-byte, or Modkit
+    /// resolves the wrong folder (or none).
+    #[test]
+    fn modkit_ship_url_percent_encodes_a_windows_path() {
+        let url = modkit_ship_url(Path::new(r"C:\Users\Ada\AppData\Roaming\mercs2-modkit\shipments\My Mod"));
+        assert_eq!(
+            url,
+            "mercs2-modkit://ship?path=C%3A%5CUsers%5CAda%5CAppData%5CRoaming%5Cmercs2-modkit%5Cshipments%5CMy%20Mod"
+        );
+        // Unreserved characters (letters, digits, - _ . ~) are left as-is; everything else is %XX.
+        assert!(percent_encode("aZ0-_.~").eq("aZ0-_.~"));
+        assert_eq!(percent_encode("/ :\\"), "%2F%20%3A%5C");
     }
 
     /// ★ The World-domain → Shipment path: routing a LAYER by name through the two overlay kinds
@@ -2591,7 +2810,7 @@ mod tests {
             slug: "MyAsset".into(),
             display: "My asset".into(),
             wearer: "mattias".into(),
-            model: PathBuf::from(model),
+            model: Some(PathBuf::from(model)),
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
             retarget: Some(QmRetarget { from: "mixamo".into(), bones: Some(bones) }),
@@ -2653,7 +2872,9 @@ mod tests {
         let m = &p.shipment.as_ref().unwrap().manifest;
         assert_eq!(m.contributions.len(), 2, "replace must not append");
         match &m.contributions[0] {
-            Contribution::AddOutfit { model, .. } => assert_eq!(model, &PathBuf::from("src/c.glb")),
+            Contribution::AddOutfit { model, .. } => {
+                assert_eq!(model, &Some(PathBuf::from("src/c.glb")))
+            }
             other => panic!("wrong kind: {}", other.kind()),
         }
     }

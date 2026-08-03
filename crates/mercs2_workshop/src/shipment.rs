@@ -161,7 +161,8 @@ pub fn outfit_contribution(
         slug: wardrobe_slug(asset_name),
         display: asset_name.to_string(),
         wearer: wearer.to_string(),
-        model,
+        // This scaffolds an INJECTED outfit from a craft bench, so it always carries a model file.
+        model: Some(model),
         donor: Some(donor_name.to_string()),
         textures: Textures::default(),
         retarget: Some(QmRetarget {

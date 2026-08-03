@@ -2075,6 +2075,12 @@ pub fn run(opts: Options) {
                         let navigator_resp = egui::SidePanel::left("navigator")
                             .resizable(true)
                             .default_width(navigator_width)
+                            // Finite max: egui 0.28's SidePanel never clamps content to the panel
+                            // width, and stores the CONTENT rect back as the width (panel.rs:279,328).
+                            // With the default INFINITY max, one long asset name or hash grows the
+                            // panel permanently. A bounded range caps that and gives egui a real wrap
+                            // width, so content wraps to the panel instead of forcing it wider.
+                            .width_range(egui::Rangef::new(220.0, 360.0))
                             .frame(
                                 egui::Frame::side_top_panel(&ctx.style())
                                     .inner_margin(egui::Margin { left: 13.0, right: 10.0, top: 12.0, bottom: 0.0 }),
@@ -2844,6 +2850,9 @@ pub fn run(opts: Options) {
                         let inspector_resp = (wb != Workbench::Settings).then(|| egui::SidePanel::right("inspector")
                             .resizable(true)
                             .default_width(inspector_width)
+                            // See the navigator's note: bound the width so content wraps to the panel
+                            // rather than growing it (egui 0.28 stores the content rect as the width).
+                            .width_range(egui::Rangef::new(300.0, 480.0))
                             .frame(
                                 egui::Frame::side_top_panel(&ctx.style())
                                     .inner_margin(egui::Margin { left: 13.0, right: 12.0, top: 12.0, bottom: 0.0 }),
@@ -5266,6 +5275,12 @@ pub fn run(opts: Options) {
                             qm_corpus.as_deref(),
                             &mut status,
                         );
+                    }
+                    // A background build (Act::Build) reports back here. While it runs, the verb
+                    // bar's spinner keeps egui repainting, so this polls every frame until it lands;
+                    // the frame it completes, sync the app's status line to the panel's.
+                    if qm.poll_build() {
+                        status = qm.status().to_string();
                     }
                     if lua_view.as_ref().is_some_and(|v| !v.open) {
                         lua_view = None;

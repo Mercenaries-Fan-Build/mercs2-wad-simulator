@@ -283,7 +283,10 @@ impl Contribution {
             Contribution::AddOutfit {
                 model, textures, ..
             } => {
-                out.push(("model", model.as_path()));
+                // Only an INJECTED outfit ships a model file; an existing-model outfit has none.
+                if let Some(m) = model {
+                    out.push(("model", m.as_path()));
+                }
                 if let Some(p) = &textures.diffuse {
                     out.push(("textures.diffuse", p.as_path()));
                 }

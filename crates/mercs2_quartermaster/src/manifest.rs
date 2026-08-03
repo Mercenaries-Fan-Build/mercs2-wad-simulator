@@ -341,9 +341,20 @@ impl SoundKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Contribution {
-    /// Data(new model) + Script(`_tOutfits` entry).
+    /// A wardrobe outfit. **Two sides of one coin, decided by whether a `model` FILE is supplied:**
+    ///
+    /// * **With `model`** (a `src/`-relative model file): Data(new model) + Script(`_tOutfits` entry).
+    ///   A novel mesh is injected onto a donor rig and its wardrobe row added — the custom-skin path.
+    /// * **Without `model`**: Script(`_tOutfits` entry) only. `name` is the name of a model the game
+    ///   ALREADY ships, so nothing is injected and no new hash is minted — the base game's own re-skin
+    ///   ("wear an existing character"). `donor`/`textures`/`retarget`/`single_group` are injection-only
+    ///   and ignored here.
+    ///
+    /// Either way the Script half is the SAME `_tOutfits` append on `wifpmcinterior`, which the linker
+    /// reconciles across the installed set — so outfits of both kinds compose instead of clobbering.
     AddOutfit {
         /// ASSET identity → `pandemic_hash_m2` → `_tOutfits.Model`; what `Player.SetOutfit` receives.
+        /// With `model`, this is the minted new asset's name; without it, an existing model's name.
         name: String,
         /// `_tOutfits.Name` — the unlock/tracking key. Merge key is `(wearer, slug)`, NOT `slug`
         /// alone: retail reuses `Original` and `ChickenSuit` across all three heroes.
@@ -352,8 +363,12 @@ pub enum Contribution {
         display: String,
         /// `_tOutfits` key: `chris` | `jennifer` | `mattias`.
         wearer: String,
-        model: PathBuf,
+        /// The `src/`-relative model FILE to inject. Omit to wear a model the game already ships
+        /// (named by `name`) — no injection, no new hash.
+        #[serde(default)]
+        model: Option<PathBuf>,
         /// Host whose rig/materials are BORROWED — read-only, never written. Omit to auto-pick.
+        /// Injection-only; ignored when `model` is omitted.
         #[serde(default)]
         donor: Option<String>,
         #[serde(default)]

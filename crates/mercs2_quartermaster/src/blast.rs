@@ -219,11 +219,15 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 name,
                 slug,
                 wearer,
+                model,
                 donor,
                 ..
             } => {
-                // Additive: a brand-new hash of our own.
-                push(Access::Write, Claim::asset(name), Intent::Additive);
+                // Only INJECTED outfits mint a new hash. An existing-model outfit (`model` omitted)
+                // references a model that already exists, so it makes no Additive asset claim.
+                if model.is_some() {
+                    push(Access::Write, Claim::asset(name), Intent::Additive);
+                }
                 push(
                     Access::Write,
                     bare(Claim::OutfitSlot {
@@ -232,7 +236,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     }),
                     Intent::Additive,
                 );
-                // The wardrobe table lives here, so the script is claimed too.
+                // The wardrobe table lives here, so the script is claimed too — both kinds append a row.
                 push(
                     Access::Write,
                     bare(Claim::Script {
