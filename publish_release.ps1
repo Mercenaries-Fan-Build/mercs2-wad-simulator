@@ -27,6 +27,7 @@ $Order = @(
   'mercs2_core',      # NEW - foundational
   'loadprobe',        # existing 2.0.0 - standalone
   'ucfx_byteswap',    # existing 2.0.0 - needs formats
+  'mercs2_bridge',
   'mercs2_audio','mercs2_ai','mercs2_anim','mercs2_combat','mercs2_decal','mercs2_destruction',
   'mercs2_faction','mercs2_jobs','mercs2_net','mercs2_physics','mercs2_player','mercs2_population',
   'mercs2_vehicle','mercs2_water','mercs2_ui',              # NEW - need core+formats
@@ -39,6 +40,15 @@ $Order = @(
   'mercs2_probe','mercs2_game','mercs2_workshop'            # NEW - need engine
 )
 
+# Crates we deliberately keep out of the crates.io release, even though their Cargo.toml does NOT
+# carry `publish = false` (e.g. dev/analysis tooling that still needs to be a normal workspace member).
+# Listing one here is an explicit "yes, we know, don't publish it" that silences the missing-from-$Order
+# guard below. The convention for everything else is `publish = false` in the crate's Cargo.toml; use
+# this list only when that isn't appropriate.
+$NoPublish = @(
+  'densify'   # density-injection tooling; workspace-local, never released
+)
+
 # A crate missing from $Order is invisible to this script: it is never published, never reported as
 # needing a bump, and the omission only surfaces MUCH later as "no matching package named X found"
 # while packaging whatever depends on it — by which point earlier crates are already live and the
@@ -48,10 +58,21 @@ $publishable = Get-ChildItem -Path 'crates' -Directory | Where-Object {
   $t = Join-Path $_.FullName 'Cargo.toml'
   (Test-Path $t) -and -not (Select-String -Path $t -Pattern '^publish\s*=\s*false' -Quiet)
 } | ForEach-Object { $_.Name }
-$absent = $publishable | Where-Object { $Order -notcontains $_ }
+
+# A crate can't be both intentionally skipped and in the publish order - that's a contradiction that
+# would publish something the $NoPublish list says to hold back. Catch it before uploading anything.
+$conflict = $NoPublish | Where-Object { $Order -contains $_ }
+if ($conflict) {
+  Write-Host "!! Crate(s) in both `$Order and `$NoPublish: $($conflict -join ', ')"
+  Write-Host "!! Remove them from one list - they cannot be published and skipped at once."
+  exit 1
+}
+
+$absent = $publishable | Where-Object { $Order -notcontains $_ -and $NoPublish -notcontains $_ }
 if ($absent) {
   Write-Host "!! Publishable crate(s) missing from `$Order: $($absent -join ', ')"
-  Write-Host "!! Add them in dependency-valid position (each crate's internal deps must appear EARLIER)."
+  Write-Host "!! Add them in dependency-valid position (each crate's internal deps must appear EARLIER),"
+  Write-Host "!! or add to `$NoPublish (with `publish = false` preferred) if they are intentionally unreleased."
   exit 1
 }
 
