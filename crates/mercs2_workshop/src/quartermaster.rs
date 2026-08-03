@@ -68,6 +68,26 @@ impl Gate {
     }
 }
 
+/// What a craft bench needs in order to open ON the contribution it was entered from, rather than
+/// blank. Resolved by [`Panel::craft_subject`] from the manifest at the moment of entry.
+///
+/// This closes the gap that made "Edit rig" / "Conform" land on an empty page: `Act::Craft` carried
+/// the contribution INDEX (so a commit could write back) but nothing ever read the contribution to
+/// LOAD its model and donor into the bench. The subject is that missing half.
+pub(crate) struct CraftSubject {
+    /// Absolute path to the source model GLB (the Shipment root joined with the `src/`-relative
+    /// `model`). This is what the bench imports as its pedestal / retarget source.
+    pub model: PathBuf,
+    /// The donor host, resolved to `(asset hash, label)` the same way the CLI does — a `0x…` donor
+    /// is parsed as hex, otherwise it is `pandemic_hash_m2` of the name (leading `_` trimmed). This
+    /// is the retarget TARGET (Rig bench) or the conform HOST (Conform bench). `None` when the
+    /// contribution left `donor` to be auto-picked at build time.
+    pub donor: Option<(u32, String)>,
+    /// The convention the saved `retarget:` recorded, if any — so the bench can note that a bone map
+    /// already exists (its hand edits are not yet re-applied; the import re-derives the auto map).
+    pub from: Option<String>,
+}
+
 /// A craft surface — a bench that edits ONE contribution, entered from it and returning to it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Craft {
@@ -536,6 +556,36 @@ impl Panel {
 
     pub fn root(&self) -> Option<&Path> {
         self.shipment.as_ref().map(|s| s.root.as_path())
+    }
+
+    /// The load target for a craft bench entered from contribution `i`: its source model and its
+    /// resolved donor. `None` when there is no open Shipment, no such contribution, or the
+    /// contribution is not one a bench edits (only `add_outfit` / `add_model` carry a model + donor).
+    ///
+    /// Without this, entering a bench was a page flip that carried an index and nothing else — the
+    /// bench had the identity of what it was editing but not the bytes, so it opened empty.
+    pub(crate) fn craft_subject(&self, i: usize) -> Option<CraftSubject> {
+        let sh = self.shipment.as_ref()?;
+        let c = sh.manifest.contributions.get(i)?;
+        let (model, donor, retarget) = match c {
+            Contribution::AddOutfit { model, donor, retarget, .. }
+            | Contribution::AddModel { model, donor, retarget, .. } => (model, donor, retarget),
+            _ => return None,
+        };
+        let donor = donor.as_ref().map(|d| {
+            let h = d
+                .strip_prefix("0x")
+                .and_then(|x| u32::from_str_radix(x, 16).ok())
+                .unwrap_or_else(|| {
+                    mercs2_formats::hash::pandemic_hash_m2(d.trim_start_matches('_'))
+                });
+            (h, d.clone())
+        });
+        Some(CraftSubject {
+            model: sh.root.join(model),
+            donor,
+            from: retarget.as_ref().map(|r| r.from.clone()),
+        })
     }
 
     pub fn status(&self) -> &str {
@@ -2241,20 +2291,19 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, has_game: bool) -> Vec<Act> {
 
 // ──────────────────────────────────────────────────────────────────────────── actions
 
-/// The decompiled Lua corpus, needed by any script-touching contribution.
+/// The decompiled Lua corpus, needed by any script-touching contribution. It rides in the reference
+/// bundle as `workshop_data/lua` — the same `vz/resident/shell` tree
+/// [`mercs2_quartermaster::link::base_source_path`] walks, copied verbatim by `--pack-data` — and is
+/// resolved through [`crate::index::data_home`], the one place every other bundled input already
+/// comes from (names, ECS, Ess).
 ///
-/// Walked for rather than configured: it is vendored in-tree, and a build that silently skipped the
-/// script half would produce a WAD that looks complete and does nothing.
+/// No source-tree fallback: a Workshop that cannot find its bundle should fail loudly (the linker's
+/// own "needs the corpus" error), not quietly link against a checkout path a released build could
+/// never reach. That guess is exactly what let the released `qm`/Workshop ship unable to link while
+/// "working" in dev.
 pub fn corpus_root() -> Option<PathBuf> {
-    let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
-    while let Some(d) = dir {
-        let c = d.join("crates/mercs2_script/corpus/mercs2-luacd/src");
-        if c.is_dir() {
-            return Some(c);
-        }
-        dir = d.parent();
-    }
-    None
+    let lua = crate::index::data_home()?.join("lua");
+    lua.is_dir().then_some(lua)
 }
 
 /// Execute one queued action.

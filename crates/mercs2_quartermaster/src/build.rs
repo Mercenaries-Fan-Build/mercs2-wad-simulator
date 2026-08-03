@@ -2914,9 +2914,9 @@ pub fn build(
                 index: 0,
                 kind: "patch_lua",
                 message:
-                    "linking Lua needs the decompiled corpus (the base source to append to) — \
-                          pass its root; it is vendored at \
-                          crates/mercs2_script/corpus/mercs2-luacd/src"
+                    "linking Lua needs the decompiled corpus (the base source to append to). It \
+                          ships in the reference bundle as workshop_data/lua; for `qm`, pass \
+                          --corpus <dir> or --workshop-data <dir> (env MERCS2_WORKSHOP_DATA)."
                         .into(),
             });
         };

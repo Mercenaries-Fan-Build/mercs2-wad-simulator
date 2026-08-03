@@ -5189,16 +5189,73 @@ pub fn run(opts: Options) {
                         // one-way, index-less page flip — the bench never learned its subject and
                         // there was no route back, which is how a "dissolved" page became a trap.
                         if let crate::quartermaster::Act::Craft(c, at) = act {
-                            wb = Workbench::Craft;
-                            craft_mode = match c {
+                            let mode = match c {
                                 crate::quartermaster::Craft::Rig => CraftMode::Rig,
                                 crate::quartermaster::Craft::Conform => CraftMode::Conform,
                             };
+                            craft_mode = mode;
                             craft_subject = Some(at);
-                            status = format!(
-                                "{} bench — editing contributions[{at}]",
-                                craft_mode.label()
-                            );
+
+                            // Load the contribution's OWN model and donor into the bench, so it
+                            // opens on what you clicked instead of blank. Carrying only the index
+                            // told the bench WHICH contribution a commit writes back to; it never
+                            // read that contribution to pull its bytes IN. That missing half is why
+                            // "Edit rig" / "Conform" landed on an empty page — the bench knew its
+                            // subject's identity but had none of its content.
+                            match qm.craft_subject(at) {
+                                Some(subject) if subject.model.is_file() => {
+                                    // The import becomes the pedestal (Conform) / retarget source
+                                    // (Rig). `import_file` flips the workbench to Skeleton for a
+                                    // rigged model; we re-assert Craft below, after the load.
+                                    let s = import_file(
+                                        &subject.model, &mut w, &mut scene, &mut world,
+                                        &mut imported, &mut preview, &mut cam_target, &mut cam_dist,
+                                        &mut retarget, &retarget_target, &mut retarget_src_path,
+                                        &mut wb, &mut sel_bone, &placed, &index, &anim_sel,
+                                        &lua_corpus,
+                                    );
+                                    // The donor is the retarget TARGET (Rig) or the conform HOST
+                                    // (Conform), resolved from the manifest name in `craft_subject`.
+                                    let donor_note = match (&subject.donor, mode) {
+                                        (Some((dh, dl)), CraftMode::Rig) => {
+                                            actions.push(Act::RetargetSetTarget(*dh, dl.clone()));
+                                            format!("donor {dl}")
+                                        }
+                                        (Some((dh, dl)), CraftMode::Conform) => {
+                                            mod_donor = Some((*dh, dl.clone()));
+                                            format!("donor {dl}")
+                                        }
+                                        _ => "no donor (auto-pick at build)".into(),
+                                    };
+                                    // The saved bone map's hand edits are not re-applied yet — the
+                                    // import re-derives the auto map — so say the map exists rather
+                                    // than imply it was restored.
+                                    let map_note = subject
+                                        .from
+                                        .as_ref()
+                                        .map(|f| format!(" · saved map from {f} (re-derived)"))
+                                        .unwrap_or_default();
+                                    status = format!(
+                                        "{} bench — contributions[{at}]: {s} · {donor_note}{map_note}",
+                                        mode.label()
+                                    );
+                                }
+                                Some(subject) => {
+                                    status = format!(
+                                        "{} bench — contributions[{at}]: source model missing at {}",
+                                        mode.label(),
+                                        subject.model.display()
+                                    );
+                                }
+                                None => {
+                                    status = format!(
+                                        "{} bench — contributions[{at}] carries no model to load",
+                                        mode.label()
+                                    );
+                                }
+                            }
+                            // A CRAFT bench regardless of what `import_file` set the workbench to.
+                            wb = Workbench::Craft;
                             continue;
                         }
                         crate::quartermaster::apply(

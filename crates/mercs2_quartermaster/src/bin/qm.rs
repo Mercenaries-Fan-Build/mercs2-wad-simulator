@@ -82,6 +82,10 @@ enum Command {
         /// The decompiled Lua corpus root, for script-touching contributions.
         #[arg(long, value_name = "DIR")]
         corpus: Option<PathBuf>,
+        /// The reference bundle whose `lua/` subtree is the corpus (as `mercs2_workshop --pack-data`
+        /// ships it). Used only when --corpus is absent. Env: MERCS2_WORKSHOP_DATA.
+        #[arg(long, value_name = "DIR")]
+        workshop_data: Option<PathBuf>,
         /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
@@ -101,6 +105,10 @@ enum Command {
         out: PathBuf,
         #[arg(long, value_name = "DIR")]
         corpus: Option<PathBuf>,
+        /// The reference bundle whose `lua/` subtree is the corpus (as `mercs2_workshop --pack-data`
+        /// ships it). Used only when --corpus is absent. Env: MERCS2_WORKSHOP_DATA.
+        #[arg(long, value_name = "DIR")]
+        workshop_data: Option<PathBuf>,
     },
     /// Extract a destructible's state machine as an editable `states:` file.
     ///
@@ -149,12 +157,14 @@ fn main() -> ExitCode {
             game,
             out,
             corpus,
+            workshop_data,
             names,
         } => cmd_build(
             &shipment,
             game.as_deref(),
             out.as_deref(),
             corpus.as_deref(),
+            workshop_data.as_deref(),
             names.as_deref(),
         ),
         Command::Link {
@@ -162,7 +172,14 @@ fn main() -> ExitCode {
             game,
             out,
             corpus,
-        } => cmd_link(&shipments, game.as_deref(), &out, corpus.as_deref()),
+            workshop_data,
+        } => cmd_link(
+            &shipments,
+            game.as_deref(),
+            &out,
+            corpus.as_deref(),
+            workshop_data.as_deref(),
+        ),
         Command::ExtractStates {
             target,
             game,
@@ -287,11 +304,22 @@ fn cmd_build(
     game_dir: Option<&Path>,
     out: Option<&Path>,
     corpus: Option<&Path>,
+    workshop_data: Option<&Path>,
     names_path: Option<&Path>,
 ) -> ExitCode {
     let shipment = match load(root) {
         Ok(s) => s,
         Err(code) => return code,
+    };
+    // A corpus is only REQUIRED for a script-touching Shipment, so `None` is passed through and
+    // `build` decides. But a corpus path that WAS given and is unusable is a loud error now, not at
+    // the point some patch_lua happens to need it.
+    let corpus = match resolve_corpus(corpus, workshop_data) {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
     };
     let mut stack = match resolve_game(game_dir) {
         Ok(s) => s,
@@ -299,7 +327,13 @@ fn cmd_build(
     };
     let names = resolve_names(names_path);
 
-    match build::build(&shipment, Some(&mut stack), names.as_ref(), out, corpus) {
+    match build::build(
+        &shipment,
+        Some(&mut stack),
+        names.as_ref(),
+        out,
+        corpus.as_deref(),
+    ) {
         Ok(report_) => {
             for line in &report_.log {
                 println!("{line}");
@@ -392,6 +426,7 @@ fn cmd_link(
     game_dir: Option<&Path>,
     out: &Path,
     corpus: Option<&Path>,
+    workshop_data: Option<&Path>,
 ) -> ExitCode {
     let mut loaded = Vec::new();
     for root in roots {
@@ -404,12 +439,21 @@ fn cmd_link(
         Ok(s) => s,
         Err(code) => return code,
     };
-    let Some(corpus) = corpus.map(Path::to_path_buf).or_else(default_corpus) else {
-        eprintln!(
-            "error: the Lua corpus is required to link scripts. Pass --corpus <dir> \
-             (the decompiled corpus under crates/mercs2_script/corpus/mercs2-luacd/src)."
-        );
-        return ExitCode::from(EXIT_UNUSABLE);
+    // Linking IS the script step, so a corpus is always required here.
+    let corpus = match resolve_corpus(corpus, workshop_data) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            eprintln!(
+                "error: linking Lua needs the decompiled corpus. Pass --corpus <dir>, or \
+                 --workshop-data <dir> / set MERCS2_WORKSHOP_DATA to your reference bundle — its \
+                 lua/ subtree is the corpus, shipped by `mercs2_workshop --pack-data`."
+            );
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
     };
 
     let refs: Vec<&LoadedShipment> = loaded.iter().collect();
@@ -453,11 +497,45 @@ fn cmd_link(
 }
 
 /// The corpus vendored in this workspace, when `qm` is run from inside it.
-fn default_corpus() -> Option<PathBuf> {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .join("mercs2_script/corpus/mercs2-luacd/src");
-    p.is_dir().then_some(p)
+/// The decompiled Lua corpus root the linker appends to. Resolution, highest first — and with NO
+/// silent fallback: the corpus is either named explicitly or found in a named bundle, and anything
+/// else fails loudly. The old `CARGO_MANIFEST_DIR` guess resolved to the AUTHOR's checkout and
+/// nowhere else, so it "worked" in dev and left every released `qm` unable to link — the exact trap
+/// a fallback becomes.
+///
+/// 1. `--corpus <dir>` — an explicit corpus root
+/// 2. `--workshop-data <dir>` or `$MERCS2_WORKSHOP_DATA` — the reference bundle; the corpus is its
+///    `lua/` subtree, exactly what `mercs2_workshop --pack-data` ships and the Workshop reads
+///
+/// `Ok(None)` means nothing was named (the caller decides whether that is fatal — `build` only needs
+/// a corpus for a script-touching Shipment). `Err` means a path WAS named but is not a usable
+/// corpus, which is always an error worth stopping for.
+fn resolve_corpus(
+    corpus: Option<&Path>,
+    workshop_data: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(c) = corpus {
+        if !c.is_dir() {
+            return Err(format!("--corpus {}: not a directory", c.display()));
+        }
+        return Ok(Some(c.to_path_buf()));
+    }
+    let bundle = workshop_data.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os("MERCS2_WORKSHOP_DATA")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+    });
+    let Some(bundle) = bundle else {
+        return Ok(None);
+    };
+    let lua = bundle.join("lua");
+    if !lua.is_dir() {
+        return Err(format!(
+            "{}: no lua/ corpus in this bundle — build it with `mercs2_workshop --pack-data`",
+            bundle.display()
+        ));
+    }
+    Ok(Some(lua))
 }
 
 fn cmd_rules() -> ExitCode {

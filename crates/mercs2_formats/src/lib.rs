@@ -107,6 +107,7 @@ pub mod save;
 pub mod save_write;
 pub mod schema;
 pub mod scripts_block;
+pub mod shader3;
 pub mod sges;
 pub mod skeleton;
 pub mod stringdb;
