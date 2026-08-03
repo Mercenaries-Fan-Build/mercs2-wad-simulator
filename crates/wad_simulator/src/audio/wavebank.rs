@@ -195,15 +195,12 @@ pub fn consume_wavebank_with_options(
                             ),
                         });
                     }
-                } else {
-                    return Err(ConsumeError::Decode {
-                        clip_index: i,
-                        detail: format!(
-                            "streaming clip 0x{clip_hash:08X} external ref \
-                             0x{off:X}+0x{sz:X} but no --audios-dir"
-                        ),
-                    });
                 }
+                // No --audios-dir: the external audio is not available to decode offline, and that is
+                // NOT a defect — a streaming clip streams from the game at runtime and the engine has
+                // it. (This is base-game audio; a patch that ships no wavebank never reaches here.)
+                // Skip the decode — the clip is already counted in `streaming_clip_count`, so the
+                // report still knows it exists. Pass --audios-dir to actually verify the .pws.
             } else {
                 let audio = body.slice(off, sz, &format!("clip[{i}].audio_blob"))?;
                 if codec == CODEC_IMA || codec == 0x01 {

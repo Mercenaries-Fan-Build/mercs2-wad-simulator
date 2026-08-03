@@ -149,6 +149,7 @@ pub struct SimulateReport {
     pub pws_files_validated: usize,
     pub streaming_clips: usize,
     pub has_base_wad: bool,
+    pub has_audios_dir: bool,
     pub placements_checked: usize,
     pub position_violations: usize,
     pub flgs_placements_checked: usize,
@@ -257,6 +258,7 @@ pub fn run_simulate_with_options(
     let mut report = SimulateReport {
         overlay_total_aset: total,
         has_base_wad: base_wad.is_some(),
+        has_audios_dir: opts.audios_dir.is_some(),
         ..Default::default()
     };
 
@@ -923,8 +925,17 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
     );
     if report.streaming_clips > 0 {
         println!(
-            "  Streaming clips:      {}",
-            report.streaming_clips.to_string().bright_white()
+            "  Streaming clips:      {}{}",
+            report.streaming_clips.to_string().bright_white(),
+            if report.has_audios_dir {
+                String::new()
+            } else {
+                // Not decoded, and NOT a defect: streaming clips stream from the game's audio at
+                // runtime. Hedge like the no-base-wad case rather than faulting on a missing input.
+                " (not decoded — no --audios-dir; they stream from the game at runtime)"
+                    .dimmed()
+                    .to_string()
+            }
         );
     }
     if report.pws_files_found > 0 {

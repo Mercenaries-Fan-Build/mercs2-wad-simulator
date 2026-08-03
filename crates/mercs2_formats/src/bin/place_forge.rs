@@ -3,10 +3,19 @@
 //!
 //! Usage:
 //!   place_forge <in_block.bin> <out_block.bin> --template <sub_idx> \
-//!       --name <entity_name> --model 0x<hash> --pos X,Y,Z [--quat X,Y,Z,W]
+//!       --name <entity_name> --model 0x<hash> --pos X,Y,Z [--quat X,Y,Z,W] \
+//!       [--layer-name <layer> | --layer-hash 0x<H>]
+//!
+//! `--layer-name`/`--layer-hash` set the appended sub-block's ENTRY-TABLE NAME to a
+//! chosen layer hash `H`. The retail engine loads a layer by name-hash through the
+//! asset system, so `H` must ALSO be advertised by a matching ASET row (feed the
+//! printed `H` to `override_base_blocks --add-layer 0xH`). Without a flag, `H`
+//! defaults to the first authored entity key (a self-referential name that no ASET
+//! row advertises — the sub-block will parse but the engine can never resolve it).
 
-use mercs2_formats::placement::load_model_placements;
-use mercs2_formats::placement_build::append_placement;
+use mercs2_formats::hash::pandemic_hash_m2;
+use mercs2_formats::placement::{entity_key_set, load_model_placements};
+use mercs2_formats::placement_build::{append_placements, NewEntity};
 
 fn parse_vec3(s: &str) -> [f32; 3] {
     let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -95,24 +104,44 @@ fn run() -> i32 {
     }
     let mut args = std::env::args().skip(1);
     let mut pos_args: Vec<String> = Vec::new();
-    let (mut template, mut name, mut model, mut pos, mut quat) = (
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let (mut template, mut name, mut model, mut quat) = (
         15usize,
         String::new(),
         0u32,
-        [0.0f32; 3],
         [0.0f32, 0.0, 0.0, 1.0],
     );
+    // The appended sub-block's entry-table name (the layer's ASET asset hash H). When
+    // unset it falls back to the first entity key (prior behaviour). `--layer-name`
+    // derives H = pandemic_hash_m2(name); `--layer-hash` sets it directly.
+    let mut layer_hash: Option<u32> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--template" => template = args.next().and_then(|s| s.parse().ok()).unwrap_or(15),
             "--name" => name = args.next().unwrap_or_default(),
+            "--layer-name" => layer_hash = args.next().map(|s| pandemic_hash_m2(&s)),
+            "--layer-hash" => {
+                layer_hash = args
+                    .next()
+                    .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            }
             "--model" => {
                 model = args
                     .next()
                     .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
                     .unwrap_or(0)
             }
-            "--pos" => pos = parse_vec3(&args.next().unwrap_or_default()),
+            // Repeatable single position.
+            "--pos" => positions.push(parse_vec3(&args.next().unwrap_or_default())),
+            // `X,Y,Z;X,Y,Z;...` — N positions in one flag (place N entities at once).
+            "--pos-list" => {
+                for tri in args.next().unwrap_or_default().split(';') {
+                    let t = tri.trim();
+                    if !t.is_empty() {
+                        positions.push(parse_vec3(t));
+                    }
+                }
+            }
             "--quat" => {
                 let v: Vec<f32> = args
                     .next()
@@ -127,8 +156,8 @@ fn run() -> i32 {
             s => pos_args.push(s.to_string()),
         }
     }
-    if pos_args.len() != 2 || name.is_empty() || model == 0 {
-        eprintln!("usage: place_forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z [--quat X,Y,Z,W]");
+    if pos_args.len() != 2 || name.is_empty() || model == 0 || positions.is_empty() {
+        eprintln!("usage: place_forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z [--pos ...] [--pos-list X,Y,Z;X,Y,Z] [--quat X,Y,Z,W]");
         return 2;
     }
     let block = match std::fs::read(&pos_args[0]) {
@@ -138,42 +167,91 @@ fn run() -> i32 {
             return 1;
         }
     };
-    // Entity key: derive a stable id from the name hash (never 0x00/0x01 low byte).
-    let key = {
-        let h = mercs2_formats::hash::pandemic_hash_m2(&name);
-        (h & 0x00FF_FFFF) | 0x0020_0000 | 0x0000_0002 // mid-range, low byte != 0/1
-    };
+
+    // Allocate one fresh entity key per position: dense mid-range ids from the free
+    // 0x00F0_0000.. band, skipping any that collide with an existing block key and
+    // any whose low byte is 0x00/0x01 (the Name-parser reserves those as flags).
+    let used = entity_key_set(&block);
+    let mut keys: Vec<u32> = Vec::with_capacity(positions.len());
+    let mut cand = 0x00F0_0000u32;
+    while keys.len() < positions.len() {
+        let low = cand & 0xFF;
+        if low != 0x00 && low != 0x01 && !used.contains(&cand) {
+            keys.push(cand);
+        }
+        cand += 1;
+    }
+
+    let ents: Vec<NewEntity> = keys
+        .iter()
+        .zip(&positions)
+        .enumerate()
+        .map(|(i, (&key, &pos))| NewEntity {
+            key,
+            model_hash: model,
+            pos,
+            quat,
+            name: if positions.len() == 1 {
+                name.clone()
+            } else {
+                format!("{name}_{i}")
+            },
+        })
+        .collect();
+
+    // The layer's ASET asset hash H (entry-table name of the appended sub-block). Feed
+    // this to `override_base_blocks --add-layer 0xH` so the engine can resolve it.
+    let h = layer_hash.unwrap_or(ents[0].key);
+
     let before = load_model_placements(&block).len();
-    let out = match append_placement(&block, template, key, &name, model, pos, quat) {
+    let out = match append_placements(&block, template, &ents, h) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("append_placement: {e}");
+            eprintln!("append_placements: {e}");
             return 1;
         }
     };
-    // round-trip verify: our (key -> model) must now parse.
+    // round-trip verify: every (key -> model) we authored must now parse back.
     let placements = load_model_placements(&out);
-    let found = placements
+    let missing: Vec<u32> = ents
         .iter()
-        .find(|p| p.key == key && p.model_hash == model);
-    match found {
-        Some(p) => {
-            if let Err(e) = std::fs::write(&pos_args[1], &out) {
-                eprintln!("write {}: {e}", pos_args[1]);
-                return 1;
-            }
-            println!(
-                "placed '{name}' key=0x{key:08X} model=0x{model:08X} at {:?}; ModelName placements {} -> {} (round-trip OK) -> {} ({} bytes)",
-                p.pos, before, placements.len(), pos_args[1], out.len()
-            );
-            0
+        .filter(|e| {
+            !placements
+                .iter()
+                .any(|p| p.key == e.key && p.model_hash == e.model_hash && p.pos == e.pos)
+        })
+        .map(|e| e.key)
+        .collect();
+    if missing.is_empty() {
+        if let Err(e) = std::fs::write(&pos_args[1], &out) {
+            eprintln!("write {}: {e}", pos_args[1]);
+            return 1;
         }
-        None => {
-            eprintln!(
-                "ROUND-TRIP FAILED: our entity key=0x{key:08X} model=0x{model:08X} not found after append ({} model placements parsed)",
-                placements.len()
-            );
-            1
-        }
+        println!(
+            "placed {} entity(ies) '{name}' model=0x{model:08X} keys=0x{:08X}..=0x{:08X}; ModelName placements {} -> {} (round-trip OK) -> {} ({} bytes)",
+            ents.len(),
+            ents.first().map(|e| e.key).unwrap_or(0),
+            ents.last().map(|e| e.key).unwrap_or(0),
+            before,
+            placements.len(),
+            pos_args[1],
+            out.len()
+        );
+        println!(
+            "  layer entry-table name (H) = 0x{h:08X}{}  <- pass to `override_base_blocks --add-layer 0x{h:08X}`",
+            layer_hash
+                .map(|_| String::new())
+                .unwrap_or_else(|| " (defaulted to first entity key; no ASET row advertises this)".into())
+        );
+        0
+    } else {
+        eprintln!(
+            "ROUND-TRIP FAILED: {} of {} authored entities not found after append (e.g. 0x{:08X}); {} model placements parsed",
+            missing.len(),
+            ents.len(),
+            missing[0],
+            placements.len()
+        );
+        1
     }
 }
