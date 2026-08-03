@@ -188,21 +188,22 @@ mod tests {
 
     #[test]
     fn set_state_is_node_keyed_on_the_real_native_and_refuses_bad_input() {
-        // The real native: ObjectState.SetState(guid, nodeHash, stateHash) — 3-arg, node-keyed. A node NAME
-        // is hashed with String.GetHash, the state carried as String.GetHash("Name").
-        let lua = set_state_lua("mytank", "hp_snap_tower", "PristineState").unwrap();
-        assert!(
-            lua.contains(
-                "ObjectState.SetState(Ess.Guid(\"mytank\"), String.GetHash(\"hp_snap_tower\"), String.GetHash(\"PristineState\"))"
-            ),
-            "{lua}"
+        // Pin the WHOLE emitted chunk, not just fragments: a node NAME is hashed with String.GetHash, the
+        // state carried as String.GetHash("Name"), on the real 3-arg node-keyed ObjectState.SetState.
+        assert_eq!(
+            set_state_lua("mytank", "hp_snap_tower", "PristineState").unwrap(),
+            "-- force PristineState (0xACB51200) on node hp_snap_tower of the target (logical state, not a destroy)\n\
+             ObjectState.SetState(Ess.Guid(\"mytank\"), String.GetHash(\"hp_snap_tower\"), String.GetHash(\"PristineState\"))\n",
         );
-        assert!(lua.contains("PristineState") && lua.contains("0xACB51200"), "{lua}");
-        // NOT the nonexistent 2-arg Object.SetState this used to emit.
-        assert!(!lua.contains("Object.SetState("), "{lua}");
         // A 0x… node goes through Sys.StringToGuid; a guid-expression target is passed through, not re-wrapped.
-        let byhash = set_state_lua("Ess.Player.guid()", "0x8DCB305A", "DestroyedState").unwrap();
-        assert!(byhash.contains("ObjectState.SetState(Ess.Player.guid(), Sys.StringToGuid(\"0x8DCB305A\"), String.GetHash(\"DestroyedState\"))"), "{byhash}");
+        assert_eq!(
+            set_state_lua("Ess.Player.guid()", "0x8DCB305A", "DestroyedState").unwrap(),
+            "-- force DestroyedState (0x7687DF41) on node 0x8DCB305A of the target (logical state, not a destroy)\n\
+             ObjectState.SetState(Ess.Player.guid(), Sys.StringToGuid(\"0x8DCB305A\"), String.GetHash(\"DestroyedState\"))\n",
+        );
+        // Belt-and-suspenders: the nonexistent 2-arg Object.SetState this used to emit is gone (this alone
+        // proves nothing — the exact-match assertions above are what pin the correct call).
+        assert!(!set_state_lua("t", "n", "GoneState").unwrap().contains("Object.SetState("));
         // A missing node is refused — SetState is node-keyed.
         assert!(set_state_lua("t", "", "PristineState").unwrap_err().contains("node is required"));
         // A name outside the vocabulary is refused with the list.
@@ -216,26 +217,39 @@ mod tests {
         let r = repair_lua("t");
         assert!(r.contains("Ess.Object.setHealth(g, Ess.Object.maxHealth(g))") && r.contains("Ess.Object.revive(g)"), "{r}");
         let w = watch_lua();
-        // STRING-keyed NAMES (the callback args are guids), resolved through Sys.GuidToString.
-        assert!(w.contains("[\"0xACB51200\"] = \"PristineState\""), "{w}");
-        assert!(w.contains("function OnStateChange(guid, node, state)"), "{w}");
-        assert!(w.contains("Sys.GuidToString(state)") && w.contains("NAMES[ss]"), "{w}");
-        // The broken numeric key / raw-guid format is gone.
+        // Pin the exact fixed logic: STRING-keyed NAMES (the callback args are GUIDs), and every arg
+        // stringified through Sys.GuidToString — not a numeric key or a raw-guid %X format.
+        assert!(w.contains("  [\"0xACB51200\"] = \"PristineState\",\n"), "{w}");
+        assert!(w.contains("function OnStateChange(guid, node, state)\n"), "{w}");
+        assert!(w.contains("local ss = Sys.GuidToString(state)\n"), "{w}");
+        assert!(
+            w.contains(
+                "Loader.Printf(\"destruct: %s node %s -> %s\", Sys.GuidToString(guid), Sys.GuidToString(node), NAMES[ss] or ss)\n"
+            ),
+            "{w}"
+        );
+        // The broken numeric key / raw-guid format must be gone (redundant given the exact positives above).
         assert!(!w.contains("[0xACB51200]") && !w.contains("string.format(\"0x%08X\", state)"), "{w}");
     }
 
     #[test]
     fn inspect_dumps_the_machine_since_there_is_no_state_getter() {
-        // There is no Object.GetState — inspecting is a PrintStateMachine dump.
-        let s = print_machine_lua("mytank");
-        assert!(s.contains("ObjectState.PrintStateMachine(Ess.Guid(\"mytank\"))"), "{s}");
-        assert!(!s.contains("Object.GetState") && !s.contains("GetStateName"), "{s}");
-        // Health reads through the Ess wrappers, unchanged.
+        // There is no Object.GetState — inspecting is a PrintStateMachine dump. Pin the whole chunk.
+        assert_eq!(
+            print_machine_lua("mytank"),
+            "-- dump the machine (nodes + current states) to the log; there is no state getter to return one\n\
+             ObjectState.PrintStateMachine(Ess.Guid(\"mytank\"))\n",
+        );
+        // A guid expression is passed through, not re-wrapped.
+        assert_eq!(
+            print_machine_lua("Ess.Player.guid()"),
+            "-- dump the machine (nodes + current states) to the log; there is no state getter to return one\n\
+             ObjectState.PrintStateMachine(Ess.Player.guid())\n",
+        );
+        // Health reads through the Ess wrappers (unchanged, and real — GetHealth exists).
         let h = read_health_lua("t");
         assert!(h.contains("local g = Ess.Guid(\"t\")"), "{h}");
         assert!(h.contains("Ess.Object.health(g)") && h.contains("Ess.Object.maxHealth(g)"), "{h}");
-        // A guid expression is passed through, not re-wrapped.
-        assert!(print_machine_lua("Ess.Player.guid()").contains("ObjectState.PrintStateMachine(Ess.Player.guid())"));
     }
 
     #[test]
