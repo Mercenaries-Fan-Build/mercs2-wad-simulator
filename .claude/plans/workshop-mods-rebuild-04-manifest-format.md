@@ -550,7 +550,18 @@ stable iteration order — or verify-by-hash means nothing.
     `Platform::BigEndianConsole`, and `build` refuses with `ConsoleOutputUnsupported` naming the
     real reason. Mixing platforms in one stack is an error, since resolution walks the whole stack.
 
-7. **Localization of `display:` — STILL OPEN, but the resolver is now READ (decomp, 2026-07-25).**
+7. **Localization of `display:` — ✅ RESOLVED LIVE (2026-08-03): a raw `PlayerVisibleName` RENDERS the
+   literal.** Tested in a running game over the bridge by building the wardrobe's own menu
+   (`MrxMultiPageMenu.AddOption(text, …)` — the exact `PlayerVisibleName` display path,
+   `wifpmcinterior.lua:1427/1431`) with three rows: `[SHELL.Misc.41]` drew **"Default"** (token resolves),
+   `RAWTEST Sean Devlin` drew **"RAWTEST Sean Devlin"** (raw literal drawn as-is), and `[SHELL.Misc.99999]`
+   drew **"[SHELL.Misc.99999]"** (a token-shaped MISS also draws its literal, brackets and all). So the
+   Scaleform/menu path above `FUN_0046423e` **falls back to the literal on a NULL resolve — it does NOT draw
+   nothing.** `display: "Sean Devlin"` shows "Sean Devlin"; it is *unlocalized*, not broken. **New verdict:**
+   a raw `display:` is USABLE — keep the lint as **informational** ("shows the literal, not localized"), not a
+   warning that it won't render. The decomp facts below stand (they describe the lookup layer; the caller's
+   literal-fallback is what this live test pinned).
+
    The lookup is `FUN_0046423e` (reached via `FUN_00464230` → `FUN_004dd6f1`). Established facts:
    - It takes a **key HASH**, walks the registered DBs **in REVERSE — last-registered wins** — then
      falls back to the base language DB, and **returns 0 (NULL) on a total miss.** There is no
@@ -562,10 +573,8 @@ stable iteration order — or verify-by-hash means nothing.
    So our notes' "resolver keys on the leading-`[` prefix" (exe_analysis_agent_a.md:534) is **NOT
    confirmed at this layer** — the bracket is stripped or tested by a caller, and which caller does
    what for `PlayerVisibleName` is in the Scaleform/menu path above `FUN_0046423e`, still unread.
-   A raw `Sean Devlin` is a perfectly well-formed key that simply MISSES; whether the GUI then draws
-   the literal or draws nothing is the one unproven step.
-   **Verdict unchanged, evidence much stronger:** do not rely on raw strings. Accept raw + lint
-   "unlocalized" until one outfit is shipped and looked at.
+   A raw `Sean Devlin` is a well-formed key that simply MISSES at this layer — and the **live test above
+   settled the once-unproven step: the caller draws the literal on that miss.**
    Written up in full: `docs/format_reference.md` §4.1 "Lookup semantics (runtime)".
 8. ~~DLC context as a manifest concept~~ — **RESOLVED (docs, 2026-07-25): not a manifest concept at
    all.** `g_bIsDlc` is a plain Lua global, and it is read in **exactly one place in the entire
@@ -647,4 +656,5 @@ hashes + bind pose, memory `pandemic-shared-human-rig-mercs2-saboteur`), so it i
 general cross-rig source (CoD/Mixamo/GTA) adds `retarget: { from: mixamo }`.
 
 **Still unverified and needing a real build:** donor auto-pick feasibility, `retarget: from: mixamo`
-semantics, whether a raw `PlayerVisibleName` renders, and the whole composition model end-to-end.
+semantics, and the whole composition model end-to-end. (Whether a raw `PlayerVisibleName` renders — ✅
+answered live 2026-08-03: it draws the literal; see Open-Q7.)

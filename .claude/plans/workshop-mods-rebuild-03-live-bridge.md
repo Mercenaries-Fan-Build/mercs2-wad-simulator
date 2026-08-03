@@ -1,10 +1,44 @@
 # Workshop "Mods" rebuild — Plan 03: the live bridge
 
-**Status:** ★ LANDED phases 1–3 (2026-08-01); phases 4–5 substantially landed. Phase 1 obviated;
-2–3 built; **4 (typed reads + the 220-class ECS registry) and 5 (reimpl serves the protocol) built —
-the remaining slivers (a GENERIC per-component read in Ess; full Object.*/Ess.* binding parity in the
-reimpl VM) are the only external-dependent parts left.**
+**Status:** ★ WRAPPED (2026-08-03) — bridge built from Wally's C source, and the enrichment thesis shipped as
+three live-validated Ess PRs (`Ess.Names` MERGED, `Ess.Machine` + `Ess.Inspect` OPEN). See the WRAPPED block
+below (it also corrects a Phase-4 binding error). All phases 1–5 built; only a generic ECS-component read (a
+native, Wally's side) is left.
 **Siblings:** `-01-mod-model.md`, `-02-navigation.md`, `-04-manifest-format.md`
+
+> ## ★ WRAPPED (2026-08-03) — the bridge was BUILT and the enrichment thesis SHIPPED, live-validated
+>
+> The "last unbuilt pillar" is built. Wally's lua-bridge was compiled from
+> `Desktop/Merc2-Mods-Exp/mods/lua-bridge-DEV` (i686 MinGW), deployed into the retail install, and driven
+> live over `mercs2_bridge` / `tools/lua_repl.py` — used to VALIDATE everything below in a running game, not
+> just compose it. (Repro + gotchas: memory [[ess-names-pr-contribution]].)
+>
+> **The enrichment thesis (§"REPL → remote inspector") is delivered as three PRs to Wally's Ess library —
+> "his layer = the wire, our layer = the meaning" — all live-validated over that bridge:**
+> - **Names on the wire → `Ess.Names`** (hash→name, the committed 23k table). **MERGED** (loganw234 PR #1).
+> - **State machine as a live control surface → `Ess.Machine`** (`set`/`onChange`/`link`/`print` over the real
+>   `ObjectState.*`). Live: forced a real building's 8 nodes to `DestroyedState`, engine fired `OnStateChange`
+>   back. **OPEN** (PR #2).
+> - **Typed reads, not eval → `Ess.Inspect`** (a typed entity record; recovers the readable name/model from the
+>   opaque `Object.GetName`/`GetModelName` handles via `Sys.GuidToString` + `Ess.Names`). Live: Veyron →
+>   `civ_veh_car_veyron`. **OPEN** (PR #3).
+>
+> **★ CORRECTION to Phase 4 below.** "read_state … via the real `GetState`/`GetHealth` natives" is WRONG:
+> there is **no `Object.GetState`/`ObjectState.GetState`** — verified against the live-captured `api/natives.json`.
+> `GetHealth` is real; object *state* has no getter (inspect via `ObjectState.PrintStateMachine` or the
+> `OnStateChange` watcher). `mercs2_destruction/live.rs` was emitting three non-existent bindings
+> (`Object.SetState` 2-arg, `Object.GetState`, `Object.GetStateName`) and is now **fixed** (`ObjectState.SetState`
+> 3-arg node-keyed; `print_machine_lua`; `OnStateChange` + `Sys.GuidToString`); the Workshop destruction panel
+> gained a `node` field and "Read state" → "Dump machine".
+>
+> **The generic ECS read — split and half-shipped.** Its NAMING half is delivered: **`Ess.Ecs`** (PR #4) ships
+> the 232-class component registry as a typed vocabulary (name / family / `pandemic_hash_m2` hash — the key the
+> resolver takes). `Ess.Inspect` covers the CURATED read (components the engine exposes via getters). **The only
+> genuinely-open residual is the RAW per-entity read** — dump an arbitrary component's fields off an arbitrary
+> entity — which needs a native memory-read verb the bridge doesn't expose. The path is fully reversed
+> (object→component resolver `FUN_005857e0`; entity 256-slot component table at `+8`; `0x9e3779b9` pools) and
+> `Ess.Ecs`'s hashes are its keys, so a future native (a PR to a fork of the C bridge `Merc2-Mods-Exp`) plugs
+> straight in.
 
 > ## What landed (2026-08-01)
 >
