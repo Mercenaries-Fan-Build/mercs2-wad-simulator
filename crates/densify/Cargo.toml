@@ -1,0 +1,17 @@
+[package]
+name = "densify"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 vegetation densifier — authors NOVEL canopy+understory scatter placements around existing treed areas (ground-snapped, water/road/slope/building aware) and emits a deployable overlay WAD + coverage report. Base vz.wad stays pristine."
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "densify"
+path = "src/main.rs"
+
+[dependencies]
+# vz.wad discovery + block decompression + rainbow-name resolution (mirrors mercs2_probe).
+mercs2_engine = { workspace = true }
+# placement read/author, veg classifier, hashing, patch-WAD build (mirrors override_base_blocks).
+mercs2_formats = { workspace = true }

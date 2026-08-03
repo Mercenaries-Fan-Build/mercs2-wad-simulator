@@ -118,5 +118,6 @@ pub mod texture;
 pub mod texture_encode;
 pub mod types;
 pub mod ucfx;
+pub mod veg;
 pub mod world;
 pub mod world_index;

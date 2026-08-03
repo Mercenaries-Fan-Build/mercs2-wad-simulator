@@ -55,6 +55,8 @@ fn usage() -> ! {
          \x20 entity-find [0xKEY ...]       comp-probe                    comp-dump [Name]\n\
          \x20 block-grep <needle>           scan-hash <0xH ...>           find-ref <0xH ...>\n\
          \x20 block-probe <index>           placement-names               hier --model H [names.txt] [--csv P]\n\
+         \x20 veg-census                    (foliage-instancing Phase 1: understory coverage + tag-set)\n\
+         \x20 tree-census                   (foliage-instancing Phase 1: c3-cell canopy trees + instance list)\n\
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
          \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
@@ -410,6 +412,8 @@ fn main() {
             }
         },
         "placement-names" => diag::placement_names(&wadpath),
+        "veg-census" => diag::veg_census(&wadpath),
+        "tree-census" => diag::tree_census(&wadpath),
         "gfx-extract" => {
             let out = first_positional(&args).unwrap_or_else(|| {
                 "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/gfx_movies".into()
@@ -441,6 +445,32 @@ fn main() {
                 let dec = wad::decompress_block_index(&mut w, bi).map_err(|e| format!("block {bi}: {e}"))?;
                 std::fs::write(&out, &dec).map_err(|e| format!("write {out}: {e}"))?;
                 println!("block {bi}: {} bytes decompressed -> {out}", dec.len());
+                Ok(())
+            })());
+        }
+        "ucfx-check" => {
+            let path = first_positional(&args).unwrap_or_default();
+            let entry: Option<usize> = args.iter().position(|a| a == "--entry")
+                .and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok());
+            run((|| -> Result<(), String> {
+                let data = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+                let (parsed, issues) = mercs2_formats::ucfx::walk_decompressed_block(&data, "blk");
+                println!("[ucfx-check] {} entries; {} UCFX issues", parsed.entry_count, issues.len());
+                for iss in issues.iter().take(12) {
+                    println!("  {}: {}", iss.context, iss.detail);
+                }
+                if issues.len() > 12 {
+                    println!("  ... and {} more", issues.len() - 12);
+                }
+                if let Some(ei) = entry {
+                    if let Some(c) = parsed.containers.get(ei) {
+                        if c.len() >= 20 {
+                            let daf = u32::from_le_bytes([c[4], c[5], c[6], c[7]]);
+                            let nd = u32::from_le_bytes([c[16], c[17], c[18], c[19]]);
+                            println!("[ucfx-check] entry[{ei}]: container_len={} field@4(data_area_off?)={} n_desc={}", c.len(), daf, nd);
+                        }
+                    }
+                }
                 Ok(())
             })());
         }

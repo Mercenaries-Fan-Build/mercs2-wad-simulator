@@ -409,6 +409,43 @@ fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)
     out
 }
 
+/// Every entity key present in a decompressed placement block — the union of the
+/// `Transform`, `ModelName` and `Name` COMP keys across all UCFX sub-blocks. Used
+/// when authoring new placements to allocate fresh, non-colliding entity keys.
+pub fn entity_key_set(block: &[u8]) -> std::collections::HashSet<u32> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut keys = std::collections::HashSet::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = if si + 1 < ucfx_positions.len() {
+            ucfx_positions[si + 1]
+        } else {
+            block.len()
+        };
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let Some((off, size)) = c.data else { continue };
+            match c.info_name.as_deref() {
+                Some("Transform") => {
+                    for (k, _, _) in parse_transform_records(block, off, size) {
+                        keys.insert(k);
+                    }
+                }
+                Some("ModelName") => {
+                    for (k, _) in parse_model_name_records(block, off, size) {
+                        keys.insert(k);
+                    }
+                }
+                Some("Name") => {
+                    for (k, _) in parse_name_records(block, off, size) {
+                        keys.insert(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    keys
+}
+
 /// Load all world placements from a decompressed `layers_static` block.
 ///
 /// Iterates every UCFX sub-block, walks its COMP table, matches `Name` COMP

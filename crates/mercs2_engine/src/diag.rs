@@ -3132,3 +3132,331 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
     );
     Ok(())
 }
+
+/// Vegetation census (foliage-instancing project Phase 1). Classifies every named `layers_static`
+/// placement with `mercs2_formats::veg`, then reports: coverage %, per-class + per-species counts,
+/// name-hash resolution, and a coarse 500 m XZ density grid (the "treed areas" for the density
+/// stretch goal). Emits the `pandemic_hash_m2` tag-set to `output/foliage/veg_tagset.json`.
+pub fn veg_census(wadpath: &str) {
+    use mercs2_formats::veg::{classify, VegClass};
+    use std::collections::{HashMap, HashSet};
+
+    let Ok(mut w) = wad::open(wadpath) else {
+        eprintln!("[veg] cannot open {wadpath}");
+        return;
+    };
+    let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
+        eprintln!("[veg] no terrain blocks in {wadpath}");
+        return;
+    };
+    let places = mercs2_formats::placement::load_placements(&ls).unwrap_or_default();
+
+    const CELL: f32 = 500.0; // density-grid cell size, metres
+
+    let mut named = 0usize;
+    let mut veg_total = 0usize;
+    // base name -> (count, class, imposter)
+    let mut species: HashMap<String, (usize, VegClass, bool)> = HashMap::new();
+    let mut class_places: HashMap<&'static str, usize> = HashMap::new();
+    let mut class_species: HashMap<&'static str, HashSet<String>> = HashMap::new();
+    let mut grid: HashMap<(i32, i32), usize> = HashMap::new();
+    let (mut minx, mut minz, mut maxx, mut maxz) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+
+    for p in &places {
+        let Some(n) = &p.name else { continue };
+        named += 1;
+        let base = n.trim_start_matches('_');
+        if let Some(tag) = classify(base) {
+            veg_total += 1;
+            let e = species.entry(base.to_string()).or_insert((0, tag.class, tag.imposter));
+            e.0 += 1;
+            *class_places.entry(tag.class.label()).or_insert(0) += 1;
+            class_species.entry(tag.class.label()).or_default().insert(base.to_string());
+            let gx = (p.pos[0] / CELL).floor() as i32;
+            let gz = (p.pos[2] / CELL).floor() as i32;
+            *grid.entry((gx, gz)).or_insert(0) += 1;
+            minx = minx.min(p.pos[0]);
+            maxx = maxx.max(p.pos[0]);
+            minz = minz.min(p.pos[2]);
+            maxz = maxz.max(p.pos[2]);
+        }
+    }
+
+    // Name-hash resolution: how many species/instances resolve to a real container (instanceable).
+    let mut resolved_species = 0usize;
+    let mut resolved_places = 0usize;
+    for (name, (count, _, _)) in &species {
+        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+        if wad::extract_container(&mut w, h).is_ok() {
+            resolved_species += 1;
+            resolved_places += count;
+        }
+    }
+
+    println!(
+        "[veg] {named} named placements; {veg_total} vegetation ({:.1}%); {} distinct species",
+        100.0 * veg_total as f32 / named.max(1) as f32,
+        species.len()
+    );
+    println!(
+        "[veg] name-hash RESOLVE: {resolved_species}/{} species, {resolved_places}/{veg_total} placements ({:.0}%) resolve to a model",
+        species.len(),
+        100.0 * resolved_places as f32 / veg_total.max(1) as f32
+    );
+
+    let mut classes: Vec<(&&'static str, &usize)> = class_places.iter().collect();
+    classes.sort_by(|a, b| b.1.cmp(a.1));
+    println!("[veg] by class:");
+    for (label, cnt) in classes {
+        let sp = class_species.get(*label).map(|s| s.len()).unwrap_or(0);
+        println!("[veg]   {label:<9} {cnt:>7} placements  ({sp} species)");
+    }
+
+    let mut top: Vec<(&String, &(usize, VegClass, bool))> = species.iter().collect();
+    top.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    println!("[veg] top 30 species:");
+    for (name, (count, class, imposter)) in top.iter().take(30) {
+        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+        let resolves = wad::extract_container(&mut w, h).is_ok();
+        println!(
+            "[veg]   x{count:<5} {name:<42} {:<8} 0x{h:08X} {}{}",
+            class.label(),
+            if resolves { "MODEL" } else { "-----" },
+            if *imposter { " [imposter]" } else { "" }
+        );
+    }
+
+    let mut cells: Vec<(&(i32, i32), &usize)> = grid.iter().collect();
+    cells.sort_by(|a, b| b.1.cmp(a.1));
+    println!(
+        "[veg] world XZ bounds ({minx:.0},{minz:.0})..({maxx:.0},{maxz:.0}); densest {CELL:.0}m cells:"
+    );
+    for ((gx, gz), cnt) in cells.iter().take(15) {
+        println!(
+            "[veg]   cell ({:>7},{:>7})m  {cnt} veg",
+            (*gx as f32 * CELL) as i32,
+            (*gz as f32 * CELL) as i32
+        );
+    }
+
+    // Emit the tag-set JSON (Phase 2 consumes this: name -> {hash, class, count, imposter, resolves}).
+    let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/veg_tagset.json";
+    let n_species = species.len();
+    let mut json = String::new();
+    json.push_str("{\n");
+    json.push_str(&format!(
+        "  \"summary\": {{ \"named_placements\": {named}, \"veg_placements\": {veg_total}, \"distinct_species\": {n_species}, \"resolved_species\": {resolved_species}, \"resolved_placements\": {resolved_places} }},\n"
+    ));
+    json.push_str("  \"species\": {\n");
+    for (i, (name, (count, class, imposter))) in top.iter().enumerate() {
+        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+        let resolves = wad::extract_container(&mut w, h).is_ok();
+        json.push_str(&format!(
+            "    \"{name}\": {{ \"hash\": \"0x{h:08X}\", \"class\": \"{}\", \"count\": {count}, \"imposter\": {imposter}, \"resolves\": {resolves} }}{}\n",
+            class.label(),
+            if i + 1 < n_species { "," } else { "" }
+        ));
+    }
+    json.push_str("  }\n}\n");
+    if let Some(parent) = std::path::Path::new(out_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(out_path, &json) {
+        Ok(()) => println!("[veg] tag-set written: {out_path}"),
+        Err(e) => eprintln!("[veg] could not write {out_path}: {e}"),
+    }
+}
+
+/// Tree census (foliage-instancing Phase 1, the CANOPY layer). The trees are NOT placement records —
+/// they are veg MODELS bundled in the c3 quad-tree streaming cells, positioned by their cell's grid
+/// ID (see `docs/reverse_engineer/foliage_instancing_plan.md` §4.0.1). This walks the `WorldIndex`
+/// c3 cells, resolves each cell's model hashes to names (rainbow table), keeps the vegetation ones
+/// (`mercs2_formats::veg`), and reports the real tree count by species/region — counting instances at
+/// the near (P000) tier only so LOD variants aren't double-counted — plus how many cells also carry
+/// coarse imposter tiers (the resident-horizon potential). Emits per-instance transforms to
+/// `output/foliage/tree_instances.json`.
+pub fn tree_census(wadpath: &str) {
+    use mercs2_formats::veg::{classify, VegClass};
+    use mercs2_formats::world_index::{c3_cell_centre, BlockClass, WorldIndex};
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    let Ok(mut w) = wad::open(wadpath) else {
+        eprintln!("[tree] cannot open {wadpath}");
+        return;
+    };
+    let idx = {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        WorldIndex::build(archive, file)
+    };
+
+    use mercs2_formats::ucfx::parse_block_entry_table;
+    const CELL: f32 = 500.0;
+    let c3_blocks = idx.blocks.iter().filter(|b| b.class == BlockClass::C3Cell).count();
+
+    // Base cells that carry a coarse (non-P000) LOD tier — the resident-imposter potential.
+    let mut base_coarse: HashSet<u32> = HashSet::new();
+    for b in &idx.blocks {
+        if b.class == BlockClass::C3Cell && b.lod.p != Some(0) {
+            if let Some(cid) = b.lod.base_cell_id {
+                base_coarse.insert(cid);
+            }
+        }
+    }
+
+    // Scan EVERY c3 cell's entry table (cheap 16 KB head-decompress) for MODEL chunks. `name_hash` is
+    // the per-chunk model identity (incl. non-primary sub-entries that WorldIndex.model_hashes drops —
+    // [[world-terrain-loader]]). Tier-agnostic: we dedup per base cell afterwards, so we don't have to
+    // guess which LOD tier holds the full model.
+    let mut cell_hash: Vec<(u32, u32)> = Vec::new(); // (base_cell_id, model name_hash)
+    let mut all_hashes: BTreeSet<u32> = BTreeSet::new();
+    let mut type_hist: HashMap<u32, usize> = HashMap::new(); // chunk type_hash -> count across c3 cells
+    {
+        let (archive, file) = wad::archive_and_file(&mut w);
+        for b in &idx.blocks {
+            if b.class != BlockClass::C3Cell {
+                continue;
+            }
+            let Some(cid) = b.lod.base_cell_id else { continue };
+            let Ok(head) = mercs2_formats::sges::decompress_block_head(
+                file,
+                &archive.indx,
+                b.block_index,
+                262144,
+            ) else {
+                continue;
+            };
+            let (_c, entries) = parse_block_entry_table(&head);
+            for e in &entries {
+                *type_hist.entry(e.type_hash).or_insert(0) += 1;
+                if e.type_hash == wad::MODEL_TYPE_HASH {
+                    cell_hash.push((cid, e.name_hash));
+                    all_hashes.insert(e.name_hash);
+                }
+            }
+        }
+    }
+    {
+        let mut th: Vec<(&u32, &usize)> = type_hist.iter().collect();
+        th.sort_by(|a, b| b.1.cmp(a.1));
+        println!("[tree] c3-cell chunk type_hash histogram (top 15):");
+        for (t, c) in th.iter().take(15) {
+            println!("[tree]   0x{:08X}  {c}", *t);
+        }
+    }
+    println!(
+        "[tree] {c3_blocks} c3 cells scanned; {} distinct model hashes; {} (cell,model) refs",
+        all_hashes.len(),
+        cell_hash.len()
+    );
+
+    let names = crate::worldutil::rainbow_names(&all_hashes);
+    println!(
+        "[tree] {} of {} model hashes name-resolved via rainbow table",
+        names.len(),
+        all_hashes.len()
+    );
+    // hash -> (name, class, imposter)
+    let mut veg_hash: HashMap<u32, (String, VegClass, bool)> = HashMap::new();
+    for (&h, name) in &names {
+        if let Some(tag) = classify(name.trim_start_matches('_')) {
+            veg_hash.insert(h, (name.clone(), tag.class, tag.imposter));
+        }
+    }
+    println!("[tree] {} distinct vegetation species in c3 cells", veg_hash.len());
+
+    // Per base cell: the distinct FULL (non-imposter) veg model hashes = the trees placed there. Dedup
+    // per (cell,hash) so a model repeated across LOD tiers counts once. Imposter refs counted apart.
+    let mut per_cell_full: HashMap<u32, HashSet<u32>> = HashMap::new();
+    let mut imposter_refs = 0usize;
+    for (cid, h) in &cell_hash {
+        if let Some((_, _, imposter)) = veg_hash.get(h) {
+            if *imposter {
+                imposter_refs += 1;
+            } else {
+                per_cell_full.entry(*cid).or_default().insert(*h);
+            }
+        }
+    }
+
+    let mut veg_units = 0usize;
+    let mut species: HashMap<String, (usize, VegClass)> = HashMap::new();
+    let mut class_units: HashMap<&'static str, usize> = HashMap::new();
+    let mut grid: HashMap<(i32, i32), usize> = HashMap::new();
+    let (mut minx, mut minz, mut maxx, mut maxz) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut instances: Vec<(u32, f32, f32, u32, String, &'static str)> = Vec::new();
+    for (cid, hashes) in &per_cell_full {
+        let (x, z) = c3_cell_centre(*cid);
+        for h in hashes {
+            let (name, class, _) = &veg_hash[h];
+            veg_units += 1;
+            species.entry(name.clone()).or_insert((0, *class)).0 += 1;
+            *class_units.entry(class.label()).or_insert(0) += 1;
+            let gx = (x / CELL).floor() as i32;
+            let gz = (z / CELL).floor() as i32;
+            *grid.entry((gx, gz)).or_insert(0) += 1;
+            minx = minx.min(x);
+            maxx = maxx.max(x);
+            minz = minz.min(z);
+            maxz = maxz.max(z);
+            instances.push((*cid, x, z, *h, name.clone(), class.label()));
+        }
+    }
+    let base_near: HashSet<u32> = per_cell_full.keys().copied().collect();
+    println!("[tree] imposter (cell,model) refs across all tiers: {imposter_refs}");
+
+    println!(
+        "[tree] {veg_units} full-detail tree draw-units across {} cells; {} cells also carry a coarse imposter tier",
+        base_near.len(),
+        base_coarse.len()
+    );
+    let mut classes: Vec<(&&'static str, &usize)> = class_units.iter().collect();
+    classes.sort_by(|a, b| b.1.cmp(a.1));
+    println!("[tree] by class (full-detail):");
+    for (label, cnt) in classes {
+        println!("[tree]   {label:<9} {cnt:>6} units");
+    }
+    let mut top: Vec<(&String, &(usize, VegClass))> = species.iter().collect();
+    top.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    println!("[tree] top 25 species (near tier):");
+    for (name, (count, class)) in top.iter().take(25) {
+        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+        println!("[tree]   x{count:<5} {name:<42} {:<8} 0x{h:08X}", class.label());
+    }
+    let mut cells: Vec<(&(i32, i32), &usize)> = grid.iter().collect();
+    cells.sort_by(|a, b| b.1.cmp(a.1));
+    println!("[tree] world XZ bounds ({minx:.0},{minz:.0})..({maxx:.0},{maxz:.0}); densest {CELL:.0}m cells:");
+    for ((gx, gz), cnt) in cells.iter().take(12) {
+        println!(
+            "[tree]   cell ({:>7},{:>7})m  {cnt} trees",
+            (*gx as f32 * CELL) as i32,
+            (*gz as f32 * CELL) as i32
+        );
+    }
+
+    // Emit per-instance transforms (Phase 2 consumes this).
+    let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/tree_instances.json";
+    let mut json = String::new();
+    json.push_str("{\n");
+    json.push_str(&format!(
+        "  \"summary\": {{ \"c3_cells\": {c3_blocks}, \"veg_species\": {}, \"near_units\": {veg_units}, \"near_cells\": {}, \"coarse_cells\": {} }},\n",
+        veg_hash.len(),
+        base_near.len(),
+        base_coarse.len()
+    ));
+    json.push_str("  \"instances\": [\n");
+    let n = instances.len();
+    for (i, (cid, x, z, h, name, class)) in instances.iter().enumerate() {
+        json.push_str(&format!(
+            "    {{ \"cell\": {cid}, \"x\": {x:.2}, \"z\": {z:.2}, \"hash\": \"0x{h:08X}\", \"name\": \"{name}\", \"class\": \"{class}\" }}{}\n",
+            if i + 1 < n { "," } else { "" }
+        ));
+    }
+    json.push_str("  ]\n}\n");
+    if let Some(parent) = std::path::Path::new(out_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(out_path, &json) {
+        Ok(()) => println!("[tree] instance list written: {out_path} ({n} instances)"),
+        Err(e) => eprintln!("[tree] could not write {out_path}: {e}"),
+    }
+}
