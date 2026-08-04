@@ -15,10 +15,10 @@
 //! # Why it lives in `mercs2_player`
 //!
 //! It was inside `mercs2_engine`'s world loop, then extracted into `mercs2_engine::player`. It belongs
-//! with the player concern (`wave0_seam_review.md` seam G), and moving it here is what lets the engine
+//! with the player concern, and moving it here is what lets the engine
 //! re-export the whole concern as one crate. Its three world reads — collision soup, terrain
 //! heightfield, watermap — go through [`LocomotionQuery`] rather than direct crate edges, because a leaf
-//! crate may not depend on another leaf (the carve rule, plan §4).
+//! crate may not depend on another leaf (the carve rule).
 
 use std::f32::consts::PI;
 

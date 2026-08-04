@@ -55,8 +55,8 @@ fn usage() -> ! {
          \x20 entity-find [0xKEY ...]       comp-probe                    comp-dump [Name]\n\
          \x20 block-grep <needle>           scan-hash <0xH ...>           find-ref <0xH ...>\n\
          \x20 block-probe <index>           placement-names               hier --model H [names.txt] [--csv P]\n\
-         \x20 veg-census                    (foliage-instancing Phase 1: understory coverage + tag-set)\n\
-         \x20 tree-census                   (foliage-instancing Phase 1: c3-cell canopy trees + instance list)\n\
+         \x20 veg-census                    (foliage instancing: understory coverage + tag-set)\n\
+         \x20 tree-census                   (foliage instancing: c3-cell canopy trees + instance list)\n\
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
          \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\

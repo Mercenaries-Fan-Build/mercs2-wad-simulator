@@ -228,7 +228,7 @@ pub fn camera_mode(world: &World, owner: Entity) -> CameraMode {
 }
 
 /// Resolve the chase-cam pose for the vehicle `owner` is riding, given the look axis. Returns `None`
-/// when `owner` is on foot (the on-foot camera is another silo's).
+/// when `owner` is on foot (the on-foot camera is another system's).
 pub fn vehicle_camera_pose(
     world: &World,
     owner: Entity,
@@ -264,7 +264,7 @@ pub fn vehicle_camera_pose(
 /// materialises a `_CarPhysicsV2` / `_TankPhysics` object.
 ///
 /// The bundle includes a [`Health`](mercs2_core::Health) pool of [`DEFAULT_VEHICLE_HEALTH`] — a vehicle
-/// is a damageable body, and the combat silo's hit applier and radial-blast sweep both select on
+/// is a damageable body, and the combat system's hit applier and radial-blast sweep both select on
 /// `Health`, so a vehicle without one is simply invulnerable. Being health-bearing does *not* make it a
 /// character: the person predicate is `mercs2_core::Human`, which vehicles do not carry (so shots spark
 /// rather than bleed). Reaching zero currently just parks the pool at 0 — turning that into wreckage

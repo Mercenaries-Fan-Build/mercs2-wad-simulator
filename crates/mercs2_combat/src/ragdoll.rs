@@ -1,4 +1,4 @@
-//! Ragdoll death reaction — **single-body stand-in** for the physics-silo constrained ragdoll.
+//! Ragdoll death reaction — **single-body stand-in** for the physics-system constrained ragdoll.
 //!
 //! # Provenance & honesty boundary
 //! WILDSTAR-sourced from `WSHumanRagdoll` + the explosion apply
@@ -6,11 +6,11 @@
 //! `WSHumanRagdoll::SetBodyToRagdoll` snaps each rigid body onto its current animated bone pose and
 //! then releases it to Havok, and `WSExplosion::Update` applies a **7-bone impulse spread** floored at
 //! `damage::wildstar::FORCE_FLOOR` (200). The faithful engine target is that multi-body Havok ragdoll —
-//! which needs the physics silo's constrained rigid bodies (`mercs2_physics` / `mercs2_anim` both mark
+//! which needs the physics system's constrained rigid bodies (`mercs2_physics` / `mercs2_anim` both mark
 //! ragdoll DEFERRED). Until then this is a **clearly-marked single-body stand-in**: on a lethal blast a
 //! character is released from animation into one rigid body launched by the blast impulse, integrated
 //! under gravity, and settled on the ground. It closes the damage → death → visible-reaction loop with
-//! the *shape* of the real system (handoff + impulse + settle); the per-bone articulation is the silo.
+//! the *shape* of the real system (handoff + impulse + settle); the per-bone articulation is the system.
 
 use glam::{Quat, Vec3};
 use hecs::{Entity, World};
@@ -32,7 +32,7 @@ pub enum RagdollState {
 }
 
 /// Single-body death-physics state. Drives the entity's [`Transform`] once animation releases it (the
-/// `SetBodyToRagdoll` handoff). Replaced wholesale when the physics-silo ragdoll lands.
+/// `SetBodyToRagdoll` handoff). Replaced wholesale when the physics-system ragdoll lands.
 pub struct Ragdoll {
     /// Linear velocity (m/s), seeded from the blast impulse.
     pub lin_vel: Vec3,

@@ -54,7 +54,7 @@ reintroduced by someone who remembers the old behaviour:
   touching a `Players`/`SeatLink` global was disassembled and every `mov [reg+0x24]` hit turned out to be
   a local argument struct, a generic list-insert, or an unrelated ctor. Consequence: `GetSeat`,
   `GetControlledObject`, `GetControlBindingType` and `Object.IsPlayerControlled` have no authentic
-  producer, so the seat/ride silo pushes it in via `PlayerWorld::set_control_source`.
+  producer, so the seat/ride system pushes it in via `PlayerWorld::set_control_source`.
   *Runtime recipe:* one-shot bp at `0x005DA9F7` to capture `playerObj`, then a HW **write** watchpoint on
   `+0x24`, then walk into a vehicle. `[faithful-blocker: yes]`
 - **S3 — two unnamed hashes block `FUN_0041FE20`** (the per-player world probe): `0x892CF579` (feature
@@ -104,4 +104,4 @@ reintroduced by someone who remembers the old behaviour:
   observable symptom is "the game forgets you bought something".
 - The `LocomotionQuery`-backed controller in `locomotion.rs` is a **modern stand-in**, not a recovered
   body: retail is `hkpCharacterProxy` + the 5-state `hkpCharacterContext` machine
-  (`physics_code_map.md`). Replacing it is silo 7's work, and the seam is sized for exactly that swap.
+  (`physics_code_map.md`). Replacing it is the physics system's work, and the seam is sized for exactly that swap.

@@ -1217,7 +1217,7 @@ fn load_from_wad(
 
 
 // ===========================================================================
-//   Mercs2Game — the TPS boot as a `mercs2_engine::app::Game` (Phase 5b).
+//   Mercs2Game — the TPS boot as a `mercs2_engine::app::Game` (relocated onto the unified engine loop).
 //
 //   This is the relocation of `run_scene_world_loading`'s body onto the unified engine loop: the ~30
 //   `let mut` locals become fields; the world-realize block becomes `setup`; the variable-rate camera +
@@ -1326,7 +1326,7 @@ pub struct Mercs2Game {
     weapon_player_model: u32,
     game_start: std::time::Instant,
     mouse_dbg_frames: u32,
-    /// The live-bridge server (Plan 03 phase 5), if the REPL port was free at boot. `update` drains
+    /// The live-bridge server (see [`crate::bridge_host`]), if the REPL port was free at boot. `update` drains
     /// its queued chunks each frame and evaluates them on this (the main) thread's Lua VM.
     bridge: Option<crate::bridge_host::BridgeHost>,
 }
@@ -1409,7 +1409,7 @@ impl Mercs2Game {
             weapon_player_model: 0,
             game_start: std::time::Instant::now(),
             mouse_dbg_frames: 0,
-            // Start the live-bridge server (Plan 03 phase 5). `None` if the port is busy (the retail
+            // Start the live-bridge server (see `bridge_host`). `None` if the port is busy (the retail
             // ASI is running, or another instance) — the game boots regardless.
             bridge: {
                 let b = crate::bridge_host::BridgeHost::start();
@@ -1832,7 +1832,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         }
         self.hmap = Some(data.hmap);
         self.watermap = data.watermap;
-        // The sim silo's water mechanism gets the same map. Without this `WaterWorld::tick` is a
+        // The sim system's water mechanism gets the same map. Without this `WaterWorld::tick` is a
         // permanent no-op (it idles on `watermap: None`), so every `Swimmer` in the ECS — NPCs and
         // anything else that floats — stays OnLand no matter how deep it is. The player controller
         // reads the map through `SceneLocomotion` instead; both now see one loaded watermap.
@@ -1906,7 +1906,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
 
     fn update(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::Camera {
         use mercs2_engine::input::Action;
-        // ── Live bridge (Plan 03 phase 5): answer any REPL chunks the worker thread queued since the
+        // ── Live bridge (see `bridge_host`): answer any REPL chunks the worker thread queued since the
         // last frame, HERE on the main thread — the only one that may touch the Lua VM. Collect first
         // so the immutable borrow of `self.bridge` is released before we reach for `self.script`. ──
         let pending = self.bridge.as_ref().map(|b| b.take_pending()).unwrap_or_default();

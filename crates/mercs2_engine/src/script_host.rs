@@ -573,7 +573,7 @@ impl GameScriptHost {
         true
     }
 
-    /// A copy of `guid`'s live `Health` component (the SAME component the combat silo reads/writes), if
+    /// A copy of `guid`'s live `Health` component (the SAME component the combat system reads/writes), if
     /// the entity carries one — so Lua `Object.*Health` and combat damage never diverge for live actors.
     fn health_of(&self, guid: u64) -> Option<mercs2_core::Health> {
         let e = self.entity_of(guid)?;
@@ -941,7 +941,7 @@ impl EngineHost for GameScriptHost {
             .map(|r| r.pos)
             .unwrap_or([0.0; 3])
     }
-    // ===== The player concern → `mercs2_player` (silo 17). =====
+    // ===== The player concern → `mercs2_player`. =====
     //
     // These two accessors replace 21 bespoke overrides. Three of the old ones encoded behaviour the
     // code map contradicts and which is now deliberately gone:
@@ -3102,7 +3102,7 @@ mod tests {
         // heroes → `EnsureHeroesInBoat` sees the last one in → `AssetsLoaded` →
         // `MrxMissionFlow._OnAssetsLoaded` (`:261-266`).
         //
-        // (This note used to say "needs layer streaming — different silo". That was wrong three times
+        // (This note used to say "needs layer streaming — different system". That was wrong three times
         // over: the boat was a placement in a block `load_placements` already read, the layer that
         // brings it in was one ASET lookup away, and the seat event needed state this host could simply
         // keep. None of it needed new parsing or new data.)
@@ -3431,7 +3431,7 @@ mod tests {
     /// This is the acceptance test for the whole name-index path. `VzaCon001.StandardSetup`
     /// (`vz/vzacon001.lua:66-119`) does `Event.ObjectHibernation(Pg.GetGuidByName(...), "a")` and waits;
     /// with the boat resolving to nil the boot parked there forever, and the note in
-    /// `boot_flow_runs_real_game_lua` used to call this "layer streaming, different silo". It was not —
+    /// `boot_flow_runs_real_game_lua` used to call this "layer streaming, different system". It was not —
     /// the boat is a placement in block 179 that `load_placements` already read; we were only indexing
     /// block 29. Nothing was missing but the identification.
     ///
@@ -3734,7 +3734,7 @@ mod tests {
         assert_eq!(host.borrow_mut().object_get_position(guid), [1.0, 2.0, 3.0]);
     }
 
-    /// Lua `Object.*Health` and the combat silo read/write the SAME `Health` component on a live entity —
+    /// Lua `Object.*Health` and the combat system read/write the SAME `Health` component on a live entity —
     /// no divergence. The old shadow HashMap and the combat `Health` were disjoint; now Lua damage is
     /// visible to combat and vice-versa.
     #[test]
@@ -3749,7 +3749,7 @@ mod tests {
         host.borrow().register_entity(e, g, None);
 
         assert_eq!(host.borrow().object_health(g), 100.0);
-        // Lua damage writes the SAME component the combat silo reads.
+        // Lua damage writes the SAME component the combat system reads.
         assert!(!host.borrow_mut().object_send_damage(g, 30.0));
         assert_eq!(host.borrow().object_health(g), 70.0);
         assert_eq!(world.borrow().get::<&mercs2_core::Health>(e).unwrap().cur, 70.0, "combat sees the Lua damage");

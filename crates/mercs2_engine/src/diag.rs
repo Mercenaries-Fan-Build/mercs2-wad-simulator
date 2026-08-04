@@ -3133,7 +3133,7 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Vegetation census (foliage-instancing project Phase 1). Classifies every named `layers_static`
+/// Vegetation census (foliage instancing, `docs/reverse_engineer/foliage_instancing_plan.md`). Classifies every named `layers_static`
 /// placement with `mercs2_formats::veg`, then reports: coverage %, per-class + per-species counts,
 /// name-hash resolution, and a coarse 500 m XZ density grid (the "treed areas" for the density
 /// stretch goal). Emits the `pandemic_hash_m2` tag-set to `output/foliage/veg_tagset.json`.
@@ -3239,7 +3239,7 @@ pub fn veg_census(wadpath: &str) {
         );
     }
 
-    // Emit the tag-set JSON (Phase 2 consumes this: name -> {hash, class, count, imposter, resolves}).
+    // Emit the tag-set JSON (the instancing pass consumes this: name -> {hash, class, count, imposter, resolves}).
     let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/veg_tagset.json";
     let n_species = species.len();
     let mut json = String::new();
@@ -3267,7 +3267,7 @@ pub fn veg_census(wadpath: &str) {
     }
 }
 
-/// Tree census (foliage-instancing Phase 1, the CANOPY layer). The trees are NOT placement records —
+/// Tree census (foliage instancing, the CANOPY layer). The trees are NOT placement records —
 /// they are veg MODELS bundled in the c3 quad-tree streaming cells, positioned by their cell's grid
 /// ID (see `docs/reverse_engineer/foliage_instancing_plan.md` §4.0.1). This walks the `WorldIndex`
 /// c3 cells, resolves each cell's model hashes to names (rainbow table), keeps the vegetation ones
@@ -3433,7 +3433,7 @@ pub fn tree_census(wadpath: &str) {
         );
     }
 
-    // Emit per-instance transforms (Phase 2 consumes this).
+    // Emit per-instance transforms (the instancing pass consumes this).
     let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/tree_instances.json";
     let mut json = String::new();
     json.push_str("{\n");

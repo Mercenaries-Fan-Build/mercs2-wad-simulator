@@ -92,7 +92,7 @@ impl CheatFlags {
 ///
 /// The `CheatInfiniteAmmo` re-application is deliberately **not** modelled as a possession effect — see
 /// the module docs. `cheats` is accepted so the decision point is visible and testable, and so a later
-/// cheat silo has the hook it needs.
+/// cheat system has the hook it needs.
 pub fn attach_to_character(
     roster: &mut PlayerRoster,
     slot: u32,

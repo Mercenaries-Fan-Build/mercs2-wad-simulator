@@ -1,6 +1,6 @@
 //! Audio ECS components — attached to `mercs2_core::World` entities.
 //!
-//! These are the audio-silo's own components (the plan lets silo 14 define its ECS comps here). They
+//! These are the audio system's own components. They
 //! mirror the runtime sound components the exe's Pg layer collects each frame
 //! (`RuntimeSoundUpdates / Rt*Collect` **`FUN_005fa720`**, 3 ECS pools; audio_code_map.md §4.1) and
 //! the listener the engine tracks for 3D (`UpdateListeners` `FUN_00608aa0`).
@@ -16,7 +16,7 @@ use crate::voice::VoiceId;
 pub struct AudioListener {
     /// Engine listener index (0..4).
     pub slot: usize,
-    /// Velocity for Doppler (world units/sec); the streaming/physics silo fills this.
+    /// Velocity for Doppler (world units/sec); the streaming/physics system fills this.
     pub velocity: Vec3,
 }
 

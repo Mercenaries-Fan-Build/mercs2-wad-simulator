@@ -1,6 +1,6 @@
 # mercs2_decal
 
-Decals (scoreboard row 6) for the Mercenaries 2 reimplementation: the `decaltable` loader plus the
+Decals for the Mercenaries 2 reimplementation: the `decaltable` loader plus the
 projected-decal instance pool and its lifetime bookkeeping. Render integration is a seam against
 `mercs2_engine`.
 

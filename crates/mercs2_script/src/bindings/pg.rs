@@ -1,11 +1,11 @@
 //! `Pg` engine binding namespace — luaL_Reg table VA 0x00b99328, 80 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
+//! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
@@ -106,7 +106,7 @@ pub const REQUIRED: &[Required] = &[
 
 /// Boot slice: `Pg.GetGuidByName` (name → runtime GUID; 0 → Lua `nil` so the game's `if not uGuid`
 /// is authentic) and `Pg.Spawn` (the bottom-out of `MrxUtil.SpawnActor`). The rest of the `Pg` world
-/// surface (regions, homing projectiles, heli waves, skirmish tables) is for later silos — note the
+/// surface (regions, homing projectiles, heli waves, skirmish tables) is for later systems — note the
 /// dev/asset-dump bindings that share the `Pg` global live in `pg_world` (table 0x00b99e28).
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
@@ -250,7 +250,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // ===== Side-effect actions (return value the game ignores) → faithful no-ops. =====
     // Layer/asset streaming, context actions, region radii, rumble, roads, save/contract signals,
     // achievements, the whole pursuit-director surface, heli-wave + skirmish spawners. Wired to real
-    // behavior by later world/AI silos; the game's Lua control flow runs unchanged here.
+    // behavior by later world/AI systems; the game's Lua control flow runs unchanged here.
     // Layer/asset load, context actions, boundary + pursuit control, contract lifecycle, heli-wave/
     // skirmish spawners → recorded Pg commands the world/pursuit/streaming runtime drains.
     // Layer load/unload/reload → the real async completion: register the status-change callback (arg 3)

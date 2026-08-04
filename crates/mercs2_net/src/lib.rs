@@ -1,7 +1,5 @@
 //! `mercs2_net` — Networking / replication. **Layer 1 is the reimpl target** (row 28).
 //!
-//! **Silo 16** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
-//! **Scoreboard row(s):** 28.
 //! **Code map:** `docs/reverse_engineer/networking_code_map.md`, with `event_bus_code_map.md` §4
 //! (the shared bus the wire branch rides) and `ai_code_map.md` §2.2 (the `DirectAction` replicate gate).
 //! **Owned Lua namespace(s):** `Net`.

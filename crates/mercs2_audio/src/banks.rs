@@ -12,7 +12,7 @@
 //! Bank *file* I/O goes through the WAD streaming manager on PC (`FUN_00872f80` etc.), which this
 //! crate does not own; here the state machine is faithful (request → loading → loaded/unloaded, with
 //! a completion callback) and [`BankManager::complete_load`]/[`complete_unload`] stand in for the
-//! async completion the streaming silo will drive.
+//! async completion the streaming system will drive.
 
 use std::collections::HashMap;
 

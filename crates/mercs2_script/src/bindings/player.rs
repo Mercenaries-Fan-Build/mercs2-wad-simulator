@@ -1,6 +1,6 @@
 //! `Player` engine binding namespace — luaL_Reg table VA 0x00b98fc0, 107 cfuncs.
 //!
-//! Backed by **`mercs2_player`** (silo 17) through the `EngineHost::player_world()` seam. `REQUIRED` is
+//! Backed by **`mercs2_player`** through the `EngineHost::player_world()` seam. `REQUIRED` is
 //! the full cfunc surface, from the Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites across the base corpus **plus** `docs/mercs2-dlc-luacd/src` (the base-only recipe an earlier revision named is retracted — it undercounts by 75 files). The exe is the oracle — do not trim
 //! this list.
@@ -960,7 +960,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(on_player(&h, player, None, |p| if p.is_joined() { Some(i64::from(p.viewport)) } else { None }))
     })?)?;
     let h = host.clone();
-    // The player→camera HANDLE. The camera itself belongs to `camera_code_map.md` / silo 9; until a
+    // The player→camera HANDLE. The camera itself belongs to `camera_code_map.md`; until a
     // camera object exists per viewport there is nothing to hand back, and `nil` keeps the shipped
     // `if not uCamera` flow authentic.
     b.real("GetCamera", lua.create_function(move |_, _: MultiValue| { let _ = &h; Ok(Value::Nil) })?)?;

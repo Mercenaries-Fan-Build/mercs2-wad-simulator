@@ -1,6 +1,6 @@
 # mercs2_vehicle
 
-Silo 25 of the Mercenaries 2 reimplementation: the vehicle actor family, the game's custom raycast
+The vehicle actor family of the Mercenaries 2 reimplementation: the game's custom raycast
 drive model, the command-ring control transport, and the vehicle/on-foot camera modes.
 
 ## What it is
@@ -25,7 +25,7 @@ A leaf library crate. It owns everything a drivable vehicle is in the reimplemen
   `Camera.*` Lua namespaces (`lua_surface.rs`).
 - **The ECS glue** (`system.rs`) — `pump_car_ring` / `pump_boat_heli_ring` then `drive_step_system`.
 
-Wheel raycasts go through `mercs2_core::PhysicsQuery` (the silo-7 seam), so the crate never depends
+Wheel raycasts go through `mercs2_core::PhysicsQuery`, so the crate never depends
 on a physics engine crate.
 
 ## Where it comes from
@@ -101,7 +101,7 @@ let channel = ring.subscribe().expect("ring has a free subscriber slot");
 ring.enqueue(CommandRecord::new(0x1000, cmd::TURN, 0.25));
 
 let lut = DonutLut::new();
-// `phys` is any &dyn mercs2_core::PhysicsQuery (the silo-7 seam) — the wheel rays land on it.
+// `phys` is any &dyn mercs2_core::PhysicsQuery — the wheel rays land on it.
 pump_car_ring(&mut world, &mut ring, channel);
 drive_step_system(&mut world, phys, &lut, 1.0 / 60.0);
 
@@ -128,7 +128,7 @@ sits relative to the vehicle drive step in the master tick (`system.rs`).
 |---|---|
 | `lut` | the donut/turn sine LUT (`DAT_00cf2900`, 8192 entries, `& 0x1fff`). |
 | `tuning` | the `_CarPhysicsV2` (0x18c) / `_TankPhysics` (0x78) tuning-block → actor-field map. |
-| `components` | the vehicle ECS component set (defined here, per the silo carve rule). |
+| `components` | the vehicle ECS component set (defined here, per the crate carve rule). |
 | `command` | the broadcast command rings + the per-class `HandleCommand` switch. |
 | `drive` | the decoded raycast/suspension/per-axle-friction/torque-falloff/donut drive math. |
 | `camera` | the data-driven camera modes, presets, and the chase pose. |

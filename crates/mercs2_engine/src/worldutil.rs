@@ -321,7 +321,7 @@ pub fn build_streaming_catalog(
     // separate unsolved RCA (its position source is not the c3 cell-id); until it's recovered, we do
     // NOT stream it rather than render floating geometry. Re-enable once that placement is known.
     //
-    // CONFIRM-LIVE (Wave-0 S5 investigation, 2026-07-06) — WHY it stays disabled + what unblocks it:
+    // CONFIRM-LIVE (investigation 2026-07-06) — WHY it stays disabled + what unblocks it:
     //   Grounded in three independent facts, the c3 building `Model` placement is genuinely
     //   unrecovered from the shipped data, NOT merely un-wired:
     //   (1) `--comp-probe` (d) proved "exterior buildings ARE baked into c3 cell geometry (not placed
@@ -450,7 +450,7 @@ pub fn add_overlay_to_catalog(
 }
 
 // ===========================================================================================
-//  E1 schema → world-loader wiring (Wave-1 seam A) + region cache activation (seam B).
+//  `schm` schema → world-loader wiring + region cache activation.
 //
 //  The bespoke `placement::*` loaders remain the correctness ORACLE for the props/terrain/regions
 //  the executor instantiates (they still drive `build_streaming_catalog` unchanged). This section
@@ -1563,7 +1563,7 @@ pub(crate) mod schema_wire_tests {
     }
 
     /// Live end-to-end proof that the E1 schema deserializer is wired into the world-load path and
-    /// that the S5 RegionCache is populated (seams A + B). SKIPS (passes) when vz.wad is absent so CI
+    /// that the RegionCache is populated. SKIPS (passes) when vz.wad is absent so CI
     /// stays green — matching the other live tests in this workspace.
     ///
     /// Asserts, against the real retail `layers_static` block:

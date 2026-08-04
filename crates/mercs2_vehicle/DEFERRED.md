@@ -16,7 +16,7 @@ with whether it blocks a faithful reimplementation.
   `[faithful-blocker: no]`
 
 - **Rapier/Havok-backed rigid body instead of the trait raycast.** We integrate a minimal chassis
-  body against `&dyn PhysicsQuery` (the silo-7 seam). Swapping in a full physics engine solver is a
+  body against `&dyn PhysicsQuery` (the `PhysicsQuery` seam). Swapping in a full physics engine solver is a
   later integration choice, not required for faithfulness.
   `[faithful-blocker: no]`
 
@@ -24,7 +24,7 @@ with whether it blocks a faithful reimplementation.
   `mercs2_core::Health`, so it takes bullet/blast damage and can reach zero. What happens *then* is
   deliberately out of scope here: the retail chain is per-node `RuntimeNodeHealth` → the destruction
   state machine → `node_enable` toggling model nodes → part detach + debris spawn + burning wreck.
-  That lands as its own subsystem (a future `mercs2_destruction` crate), not inside the drive silo.
+  That lands as its own subsystem (a future `mercs2_destruction` crate), not inside the drive system.
   References: `docs/reverse_engineer/state_machine_destruction_code_map.md` and
   `docs/modernization/vehicle_model_spec.md` §5.
   `[faithful-blocker: yes — a vehicle at 0 HP currently just sits at 0]`

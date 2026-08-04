@@ -4,7 +4,7 @@ Weapons and combat for the Mercenaries 2 reimplementation: `wpn_*` gun stats, th
 
 ## What it is
 
-A leaf simulation crate (**silo 10**, scoreboard **row 26**) holding the whole per-frame combat pipeline as ECS components plus systems over a `hecs::World`:
+A leaf simulation crate holding the whole per-frame combat pipeline as ECS components plus systems over a `hecs::World`:
 
 * `WeaponSystem` — the per-frame driver. One `tick` sequences the combat passes in the exe's order: **homing lock FSM → firing → guided flight → projectiles → explosions**.
 * Firing: fire-rate cooldown, `iClipSize` magazine / reload gating, `iBulletsPerShot`, hitscan-vs-projectile dispatch.
@@ -14,7 +14,7 @@ A leaf simulation crate (**silo 10**, scoreboard **row 26**) holding the whole p
 * Impacts: an output channel of resolved-hit records (bullet hole / blood splatter / explosion mark) for the decal and particle consumers to spawn FX from.
 * `wpn_*` stat loading and the engine-side bodies for the `Weapon` / `Airstrike` / inventory Lua cfuncs.
 
-Hit tests go through `mercs2_core::PhysicsQuery` (silo 7); events go on the `mercs2_core` event bus. It depends only on `mercs2_core` + `mercs2_formats` — no leaf→leaf edge.
+Hit tests go through `mercs2_core::PhysicsQuery`; events go on the `mercs2_core` event bus. It depends only on `mercs2_core` + `mercs2_formats` — no leaf→leaf edge.
 
 ## Where it comes from
 
@@ -106,8 +106,8 @@ if let Some(blob) = parse_weapon_block(block, false) {
 
 * **Do not read `damage` as recovered math.** The falloff curve and mitigation are a stand-in; only the taxonomy and the emitted messages are recovered. Anything marked `// CONFIRM-LIVE:` is a modern choice awaiting a live capture.
 * **`WeaponStats` values are schema defaults, not per-weapon values.** The blob is parsed, but the positional field order is not pinned on disk, so naming offsets would mean inventing numbers. Sub-objects are exposed raw for the follow-up.
-* Passing `physics: None` is legal and degrades predictably (hitscans miss; projectiles fly to lifetime; explosions still damage by ECS overlap) — it is how the crate ran before the physics silo landed.
+* Passing `physics: None` is legal and degrades predictably (hitscans miss; projectiles fly to lifetime; explosions still damage by ECS overlap) — it is how the crate ran before the physics system landed.
 * Explosion `Impact` normals are a fixed world-up (`+Y`, canonical game space) FX convention, not a measured surface; degenerate `RayHit` normals fall back to the negated travel direction.
 * The Lua *bindings* live in `mercs2_script`; this crate only supplies the bodies they call, because a leaf sim crate may not depend on the script host.
-* `Health` is a local stand-in for the destruction silo's `RuntimeHealth`; the event contract (`DamageMsg`/`DestroyMsg`) is already faithful, so retargeting later is a swap, not a rewrite.
+* `Health` is a local stand-in for the destruction system's `RuntimeHealth`; the event contract (`DamageMsg`/`DestroyMsg`) is already faithful, so retargeting later is a swap, not a rewrite.
 * Equip/weapon-visibility, skill-weighted scatter sampling, and the full airstrike flight path are explicitly out of scope (`DEFERRED.md`, all non-blockers).

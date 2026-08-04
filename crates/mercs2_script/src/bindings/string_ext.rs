@@ -1,6 +1,6 @@
 //! `String` engine binding namespace — luaL_Reg table VA 0x00dfda70, 13 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.

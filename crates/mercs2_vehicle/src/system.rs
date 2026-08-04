@@ -17,7 +17,7 @@ use crate::lut::DonutLut;
 
 /// Advance every simulated vehicle one fixed step. Iterates entities carrying the full drive
 /// component set and dispatches by [`Vehicle::class`] to the matching actor (`applyAction`). Wheel
-/// rays are grounded on `phys` (the silo-7 `PhysicsQuery` seam).
+/// rays are grounded on `phys` (the `PhysicsQuery` seam).
 pub fn drive_step_system(world: &mut World, phys: &dyn PhysicsQuery, lut: &DonutLut, dt: f32) {
     for (_e, (veh, xform, body, ctrl, wheels, tuning, rt)) in world
         .query::<(

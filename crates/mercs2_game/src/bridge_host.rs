@@ -1,8 +1,8 @@
-//! Serving the live-bridge protocol FROM the reimpl engine (Plan 03 phase 5).
+//! Serving the live-bridge protocol FROM the reimpl engine (`.claude/plans/workshop-mods-rebuild-03-live-bridge.md`).
 //!
 //! The Workshop console drives the retail game through Wally's ASI, which answers the `<<<RUN>>>` /
 //! `<<<END>>>` REPL protocol on loopback `127.0.0.1:27050`. This module makes *our* engine answer the
-//! same protocol, so the same console can inspect and drive the reimpl — the phase-5 goal.
+//! same protocol, so the same console can inspect and drive the reimpl.
 //!
 //! The one constraint that shapes everything: the Lua VM ([`mercs2_engine::script::ScriptHost`]) is
 //! `Rc<RefCell<…>>`, so it lives on and may only be touched from the engine's **main thread**. The

@@ -1,10 +1,9 @@
 //! `mercs2_combat` — Weapons/combat: `wpn_*` gun stats, the projectile lifecycle, the homing/lock-on
 //! FSM, and a damage/explosion applier.
 //!
-//! **Silo 10** (`docs/modernization/reimplementation_parallelization_plan.md` §3), **scoreboard row
-//! 26**, **code map** `docs/reverse_engineer/weapons_combat_code_map.md`. Owned Lua namespaces:
+//! **Code map** `docs/reverse_engineer/weapons_combat_code_map.md`. Owned Lua namespaces:
 //! `Weapon`, `Airstrike` (+ `Human.Inventory`/`Object` ammo cfuncs). Hard edges: hit-tests consume
-//! `mercs2_core::PhysicsQuery` (silo 7); firing/damage post on the `mercs2_core` event bus (Keystone
+//! `mercs2_core::PhysicsQuery`; firing/damage post on the `mercs2_core` event bus (Keystone
 //! B). Depends only on `mercs2_core` + `mercs2_formats` — no leaf→leaf edge (carve rule §4).
 //!
 //! # What is decoded-faithful vs. confirm-live (the exe is the oracle)
@@ -91,7 +90,7 @@ impl WeaponSystem {
     /// Advance the whole weapon system one fixed step `dt`, **discarding impact FX records** — the
     /// legacy stateless entry point (kept for callers that don't consume the impact channel). `physics`
     /// is the [`PhysicsQuery`] seam for hitscan/projectile/explosion line tests (pass `None` before the
-    /// physics silo lands — hitscans then simply miss, projectiles fly to lifetime, explosions still
+    /// physics system lands — hitscans then simply miss, projectiles fly to lifetime, explosions still
     /// damage by ECS overlap).
     ///
     /// To capture the impact channel, construct a [`WeaponSystem`] and call [`WeaponSystem::tick`].

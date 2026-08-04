@@ -4,7 +4,7 @@
 //! `AnimController` is the playback state machine (current/target clip, time, crossfade, speed).
 //! [`animation_system`] runs each fixed tick: resolve the state to a clip via the data-driven
 //! [`ClipPicker`], drive a crossfade on clip changes, advance time, sample+blend the pose, and write
-//! the [`SkinPalette`] the render silo consumes.
+//! the [`SkinPalette`] the render system consumes.
 
 use crate::pose::{
     havok_palette, havok_palette_blend_in_place, havok_palette_in_place, BoneRig,

@@ -489,7 +489,7 @@ mod tests {
         }
     }
 
-    /// The standard library must open — Phase 3's bindings assume `table`, `string`, `math`, and
+    /// The standard library must open — the engine's Lua bindings assume `table`, `string`, `math`, and
     /// the corpus additionally uses `os.*` and `io.*`.
     #[test]
     fn openlibs_provides_the_stdlib_the_corpus_uses() {

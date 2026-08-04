@@ -2,17 +2,17 @@
 
 Backlog for the animation runtime. Every entry is tagged with whether it blocks a *faithful* reimpl
 (`[faithful-blocker: yes]` = the retail game does this and we don't yet; `no` = polish/optimization
-beyond what the exe demonstrably does or a cross-silo dependency).
+beyond what the exe demonstrably does or a cross-system dependency).
 
 ---
 
 ## Ragdoll — physics rigid-body driven
-`[faithful-blocker: yes]` (but gated on another silo)
+`[faithful-blocker: yes]` (but gated on another system)
 
-Ragdoll consumes physics rigid bodies + constraints from **silo 7** (`mercs2_physics`,
+Ragdoll consumes physics rigid bodies + constraints from **`mercs2_physics`** (
 `docs/reverse_engineer/physics_code_map.md`). The Havok anchor is `hkaRagdollInstance` / the
 `hkpRigidBody` chain the death/impact path activates. This crate must NOT build it (no leaf→leaf
-edge, and there are no rigid bodies to drive yet). When silo 7 lands `PhysicsQuery`-adjacent
+edge, and there are no rigid bodies to drive yet). When `mercs2_physics` lands `PhysicsQuery`-adjacent
 rigid-body access, add a `Ragdoll` component + a system that: (1) on trigger, seeds body transforms
 from the current `SkinPalette`; (2) each tick reads body transforms back into the bone locals
 (blend `animated → ragdoll` over a short window); (3) exposes a get-up blend back to animation.
@@ -58,7 +58,7 @@ pass (align toe bone to `RayHit::normal`) and a pelvis-drop pre-pass across both
 `[faithful-blocker: yes]`
 
 FaceFX evaluator `FUN_00686ce0` (`animation_code_map.md`) drives face/lip-sync bones from audio
-cues — a separate curve-eval path from skeletal clips. Out of scope for the Wave-1 body-animation
+cues — a separate curve-eval path from skeletal clips. Out of scope for the body-animation
 runtime; add a `facefx` module when the FaceFX curve format is decoded.
 
 ## Perf — precomputed state→clip acceleration structure

@@ -170,7 +170,7 @@ pub struct PlayerObject {
     ///
     /// ⚠ **Only the *clear* is faithful.** `FUN_006A4060` zeroes it on attach (`0x006A4279`); the write
     /// that sets it to a ridden vehicle is not statically reachable (map §9.1 S1 — every candidate was
-    /// disassembled and ruled out). The seat/ride silo pushes it in via
+    /// disassembled and ruled out). The seat/ride system pushes it in via
     /// [`crate::PlayerWorld::set_control_source`], which is a seam, not a recovered call.
     // CONFIRM-LIVE (§9.1 S1): one-shot bp at 0x005DA9F7 to capture playerObj, then a HW write
     // watchpoint on +0x24, then walk into a vehicle.

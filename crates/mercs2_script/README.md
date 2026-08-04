@@ -7,12 +7,12 @@ tables (`Sys.*`, `Pg.*`, `Object.*`, …) that the game's Mercenaries Lua runs o
 
 A library crate with three parts:
 
-* **The VM.** `ScriptHost` embeds Lua 5.4 (`mlua`, `vendored` — Lua is built from source by the same
-  `cc` toolchain wgpu uses, so no system Lua is required) and loads a **5.1 → 5.4 compat prelude**:
-  `unpack`, `loadstring`, `table.getn`, `math.mod`, `string.gfind`, plus `getfenv`/`setfenv` shims
-  implemented over 5.4's `_ENV`-as-upvalue model via `debug.getupvalue`/`setupvalue`. The prelude also
-  supplies the engine's own math extension `math.randi(n)` / `math.randi(a,b)` and aliases the engine's
-  capitalized `Math` namespace onto it.
+* **The VM.** `ScriptHost` runs the game's own **Lua 5.1.5** (`mercs2_luac`, vendored with Pandemic's
+  float-`lua_Number` patches and built from source by the same `cc` toolchain wgpu uses, so no system
+  Lua is required). Because it *is* 5.1.5, there is no compat prelude: `unpack`, `loadstring`,
+  `table.getn`, `getfenv`/`setfenv` and friends are native. The host still installs the engine's own
+  math extension `math.randi(n)` / `math.randi(a,b)` and aliases the engine's capitalized `Math`
+  namespace onto it.
 * **The module system.** `import(name)` / `dynamic_import(name)` resolve a module name to a `.lua` file
   under the configured roots (index is by **lowercased file stem**; first root wins), execute it in its
   own environment table whose metatable `__index` chains to `_G`, cache it in `_MODULES`, and bind it as
@@ -46,8 +46,9 @@ modules are *game* Lua and arrive from the decompiled corpus through `import`, n
 * `stub` bodies model the retail engine's deliberate no-ops (on retail every `Debug.*` routes to the
   `0x006D5640` return-0 stub) *and* mark bindings whose engine system isn't built yet; the burn-down is
   tracked in `docs/modernization/binding_burndown.md`.
-* Realizes charter **Phase 3** (embed Lua 5.4, run migrated scripts validated by Surface B) and the
-  engine/game split in `docs/modernization/pangea_engine_alignment.md`.
+* Realizes the charter's embedded-Lua goal (run migrated scripts validated by Surface B;
+  `docs/modernization/00_charter.md`) and the engine/game split in
+  `docs/modernization/pangea_engine_alignment.md`.
 
 ## Usage
 

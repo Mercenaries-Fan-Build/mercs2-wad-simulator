@@ -60,12 +60,12 @@ pub struct ModelRef {
 ///
 /// The destruction system reads [`fraction()`](Health::fraction) to drive each destructible node
 /// through its state graph (pristine → damaged/on-fire → wreck), exactly as the game drives it from
-/// damage messages against this component; the combat silo's damage applier writes `cur` and posts
+/// damage messages against this component; the combat system's damage applier writes `cur` and posts
 /// `DamageMsg`/`DestroyMsg` off [`is_dead()`](Health::is_dead). `RuntimeNodeHealth` (per-node health,
 /// for parts that die independently) will hang off the destructible component when we model
 /// part-shedding.
 ///
-/// **This is the single definition.** It lives in core rather than in a silo because damage
+/// **This is the single definition.** It lives in core rather than in a system because damage
 /// (`mercs2_combat`), destruction, and any health-bearing query are separate leaves that must agree
 /// on one component type — a per-crate copy would make an entity damaged by combat invisible to
 /// destruction. Being a *character* in the combat sense is "carries a `Health`", so the type is part

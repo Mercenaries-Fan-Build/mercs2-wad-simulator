@@ -4,9 +4,9 @@
 //! `dynamic_import`), and the *mechanism* for exposing engine services to Lua (the `Sys.*` / `Debug.*`
 //! / `Pg.*` / `Event.*` C-binding tables). It is asset-agnostic — it knows nothing about Mercenaries.
 //! The game's Mercenaries Lua (`docs/mercs2-luacd/`, the `Mrx*`/mission/contract modules) runs *on*
-//! this host and drives the engine through it. This realizes charter **Phase 3** ("embed Lua 5.4; run
-//! migrated scripts validated by Surface B") and the engine/game split in
-//! `docs/modernization/pangea_engine_alignment.md`.
+//! this host and drives the engine through it. This is the charter's embedded-Lua goal
+//! (`docs/modernization/00_charter.md` — run migrated scripts validated by Surface B) and the
+//! engine/game split in `docs/modernization/pangea_engine_alignment.md`.
 //!
 //! ## Seam: inversion of control
 //! The host never calls the engine directly. Instead the engine implements [`EngineHost`] and hands it
@@ -80,7 +80,7 @@ pub mod corpus;
 /// script host only ever talks to the engine through it. Every method here corresponds to an original
 /// engine C-binding (or a small cluster of them) that Mercenaries Lua invokes.
 ///
-/// Phase 1 covers the boot + PMC-interior-spawn slice; methods are added as the binding surface widens.
+/// Methods are added as the binding surface widens; it began with the boot + PMC-interior-spawn slice.
 pub trait EngineHost {
     /// `Debug.Printf` / `Debug.Print` sink (the game's Lua log stream — the `[lua]` lines).
     fn log(&mut self, source: &str, msg: &str);
@@ -144,7 +144,7 @@ pub trait EngineHost {
     // `hud()`/`hud_ref()` above: the leaf crate owns the state and the binding bodies call it directly,
     // so widening the `Player` surface never widens this trait again.
     //
-    // Silo 17 rewrote all 107 bodies against `player_code_map.md`. The old methods encoded several
+    // The Player rewrite reworked all 107 bodies against `player_code_map.md`. The old methods encoded several
     // things the map contradicts — a native 1e9 cash clamp (it is a Lua soft-clamp scoped to
     // `MrxPmc.AddCashQty`), `GetAnyCharacter` as a lookup (it pushes a constant sentinel), and
     // `player_max_players`/`player_current_players` conflating four independent retail numbers.
@@ -1877,16 +1877,16 @@ mod tests {
         assert_eq!(hb.yaws, vec![(1u64, 0.0)]);
     }
 
-    /// The Wave-0 E3 **coverage gate**. Installs the whole binding surface, writes the machine-readable
-    /// `binding_coverage.json` next to the crate, and asserts the current baseline so any later silo's
+    /// The **coverage gate**. Installs the whole binding surface, writes the machine-readable
+    /// `binding_coverage.json` next to the crate, and asserts the current baseline so later
     /// progress (or a regression) is visible as a diff. `remaining` = required cfuncs still lacking a
     /// real body — the "N stubs remaining" metric, which must only ever go **down**.
     ///
-    /// Later silos: when you fill a namespace, re-run this test to regenerate the JSON, then bump the
+    /// When you fill a namespace, re-run this test to regenerate the JSON, then bump the
     /// asserted `EXPECTED_REAL` / `EXPECTED_REMAINING` below (they should move in opposite directions).
     #[test]
     fn coverage_report() {
-        // Baseline of the current build. Update as silos land bodies (the Lua-hook TDD pass added the
+        // Baseline of the current build. Update as namespaces land bodies (the Lua-hook TDD pass added the
         // Event system + Player economy/getters + Object health/labels + Sys game-state handshake).
         // +1 namespace / +2 required / +2 real: the `Table` engine global (`Table.Create`,
         // `Table.InsertI`). Not in the Surface-B trace — recovered from its only call sites, in
@@ -1934,7 +1934,7 @@ mod tests {
         // animation/menu/spawner/param/marker-category verbs) → recorded command logs (real +231).
         // Remaining unbacked = genuine dev stubs (debug menu, asset dumps) + a few getters/subsystem gaps.
         //
-        // Silo 17 (2026-07-26) rewrote all 107 `Player` bodies against `player_code_map.md` and moved
+        // The Player rewrite (2026-07-26) reworked all 107 `Player` bodies against `player_code_map.md` and moved
         // three verbs off the recorded-command log onto retained-callback registries — `Player`'s eight
         // callback registrations, plus `Hud.SetMovieEndCallback` and `Hud.InterpolateWidget`. **The
         // counts below do not move**: `record_all` already counted as `real`, and that was the problem.
@@ -1964,7 +1964,7 @@ mod tests {
         );
         assert_eq!(
             t.real, EXPECTED_REAL,
-            "real-body count regressed/changed — bump EXPECTED_REAL when a silo lands bodies"
+            "real-body count regressed/changed — bump EXPECTED_REAL when a system lands bodies"
         );
         assert_eq!(t.stub, EXPECTED_STUB, "stub count changed");
         assert_eq!(
@@ -1987,7 +1987,7 @@ mod tests {
         // Pg.Spawn/GetGuidByName really live in table 0x00b99328 (the trace corrects the doc label).
         assert_eq!(by("Pg").table_va, 0x00B99328);
 
-        // Emit the machine-readable report for CI / later silos to watch trend to zero.
+        // Emit the machine-readable report for CI / later systems to watch trend to zero.
         let json = coverage_json(&cov);
         let out =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binding_coverage.json");

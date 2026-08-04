@@ -1,7 +1,5 @@
 //! `mercs2_faction` — the faction / reputation / pursuit ("heat") mechanism.
 //!
-//! **Silo 13** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
-//! **Scoreboard row(s):** cross-cutting (AI 23 / population 24 / HUD 27 / music 21) — no row of its own.
 //! **Code map:** `docs/reverse_engineer/faction_reputation_code_map.md` (§10 = the reimpl target),
 //! with `ai_code_map.md` for the `Suspect` per-faction wanted component.
 //! **Owned Lua surface:** `Ai.AddInfraction`, `Ai.Get/SetRelation`, `Ai.SetInfractionMultiplier`,

@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::save;
 
-mod bridge_host; // Serve the live-bridge REPL protocol from the reimpl engine (Plan 03 phase 5)
+mod bridge_host; // Serve the live-bridge REPL protocol from the reimpl engine
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
@@ -385,7 +385,7 @@ const VALUE_FLAGS: &[&str] = &["--game-dir", "--wad", "--saves-dir", "--saves"];
 /// concept of a "PMC interior". Runs the authentic `MrxUtil.SpawnActor` path (`run_interior_boot`)
 /// then realizes the resolved geometry (`load_pmc_interior`) as ECS entities.
 ///
-/// (Phase-1 seam: `load_pmc_interior` / `run_interior_boot` still physically live in `mercs2_engine`
+/// (Seam: `load_pmc_interior` / `run_interior_boot` still physically live in `mercs2_engine`
 /// and are called here through its public API; a follow-up moves those bodies into this crate so the
 /// engine holds none of it.)
 fn populate_pmc_interior(

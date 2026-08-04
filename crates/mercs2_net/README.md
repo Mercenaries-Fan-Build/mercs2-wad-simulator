@@ -32,7 +32,6 @@ them; the online-restore mod stands in for that surface.
 
 Derived from `docs/reverse_engineer/networking_code_map.md`, with `event_bus_code_map.md` §4 (the
 shared bus the wire branch rides) and `ai_code_map.md` §2.2 (the `DirectAction` replicate gate).
-Silo 16 / scoreboard row 28 of `docs/modernization/reimplementation_parallelization_plan.md`.
 
 What is recovered first-hand and modeled here:
 

@@ -1,11 +1,11 @@
 //! `Weapon` engine binding namespace — luaL_Reg table VA 0x00b98860, 9 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
+//! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Weapon")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
@@ -35,7 +35,7 @@ pub const REQUIRED: &[Required] = &[
 
 /// Per-weapon ammo/loadout accessors. The native `RuntimeWeapon` component isn't owned yet, so ammo
 /// getters return a faithful `0` (empty) and the predicate getters return `false`; the setters/reload
-/// are accepted no-ops. A later silo backs these with the real weapon component (see report — needs
+/// are accepted no-ops. A later system backs these with the real weapon component (see report — needs
 /// `weapon_*` host methods).
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;

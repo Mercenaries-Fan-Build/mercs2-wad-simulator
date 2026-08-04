@@ -1,7 +1,7 @@
 //! Impact-output channel — the **producer side** of the hit-FX pipeline.
 //!
 //! Every resolved combat hit (a hitscan bullet striking a surface, a projectile's direct impact, an
-//! explosion detonating) emits an [`Impact`] record. Downstream presentation silos — the **decal**
+//! explosion detonating) emits an [`Impact`] record. Downstream presentation systems — the **decal**
 //! table (`decaltable 0x3B0AABF8`: bullet holes / explosion marks / blood splatter) and the **PgFX
 //! particle** system (impact sprays / scorch puffs) — consume these to spawn their world FX. This crate
 //! only *produces* the records; the decal/particle consumers are wired in the game layer (no
@@ -10,10 +10,10 @@
 //! The three [`ImpactKind`] variants are exactly the combat-produced entries the `decaltable`
 //! definition enumerates (`docs/type_hash_registry.md` §`0x3B0AABF8`): bullet holes, explosion marks,
 //! and blood splatter. Tyre-track / burnout decals exist in the same table but are produced by the
-//! vehicle silo, not combat, so they are intentionally out of scope here.
+//! vehicle system, not combat, so they are intentionally out of scope here.
 //!
 //! # Surface-normal derivation (honesty boundary)
-//! The combat silo does not know a struck surface's material, and only the physics `RayHit` carries a
+//! The combat system does not know a struck surface's material, and only the physics `RayHit` carries a
 //! true geometric normal. So:
 //! - **Hitscan / projectile surface & body hits** use the physics `RayHit.normal` when it is a valid
 //!   unit-ish vector; if the query returns a degenerate (zero) normal, we fall back to the **negated
@@ -22,7 +22,7 @@
 //! - **Explosions** have no single surface (a radial blast), so the normal is a fixed **world-up**
 //!   (`+Y`, canonical game space) — an FX-orientation convention, not a measured surface.
 //! `// CONFIRM-LIVE:` the exe's decal/particle placement reads the actual struck triangle's normal and
-//! material id from the physics contact; that contact data lands with the physics silo (`DEFERRED.md`).
+//! material id from the physics contact; that contact data lands with the physics system (`DEFERRED.md`).
 
 use glam::Vec3;
 

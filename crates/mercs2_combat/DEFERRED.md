@@ -24,7 +24,7 @@ section below), not a blind live capture.
 
 - **The other two ASET entries** `[faithful-blocker: no]` — a `wpn_*` block's entries [1] `sounddb`
   (`0xe5273c14`) and [2] `wavebank` (`0xf753f6d0`) are the weapon's audio; parsing them belongs to the
-  audio silo, not combat.
+  audio system, not combat.
 
 ## Damage / explosion
 
@@ -44,22 +44,22 @@ section below), not a blind live capture.
   instantaneous: `WSExplosion::Update` runs the victim list over `wildstar::LIFETIME_SECS` (1.5 s),
   applying each victim at `dist × wildstar::STAGGER_SECS_PER_METER` (blast travels 30 u/s) and applying
   force (`ApplyHitForce` impulse / ragdoll spread) before damage. `detonate_explosion` applies the same
-  *total* damage immediately; the timing + impulse are the physics-silo follow-up. Constants are named in
+  *total* damage immediately; the timing + impulse are the physics-system follow-up. Constants are named in
   `damage::wildstar` so the deferred system can consume them directly.
 
 - **Explosion body-set query** `[faithful-blocker: no]` — `detonate_explosion` finds targets by an ECS
   spatial sweep over entities carrying a `Health` (the local `RuntimeHealth` analog) within the blast
   radius, with an optional `PhysicsQuery` line-of-sight raycast for cover. The exe's
   `PhysicsCreateExplosion` queries the Havok broadphase for `hkpRigidBody` overlap; the precise body set
-  (and impulse application) lands with the physics silo. The gameplay-damage overlap is faithful.
+  (and impulse application) lands with the physics system. The gameplay-damage overlap is faithful.
 
-- ~~**RuntimeHealth ownership**~~ **DONE.** The destruction silo landed and produced no competing type:
+- ~~**RuntimeHealth ownership**~~ **DONE.** The destruction system landed and produced no competing type:
   `Health` is now single-defined in `mercs2_core::components`, this crate imports it, and
-  `mercs2_destruction` consumes `mercs2_core::{Health, Destructible}`. Wave-1 seam item 5's first half is
+  `mercs2_destruction` consumes `mercs2_core::{Health, Destructible}`. The seam item 5's first half is
   closed, and there was never a `RuntimeHealth` to retarget at.
 
 - **Hoisting the inventory types to `mercs2_core`** `[faithful-blocker: no]` — `RuntimeInventory` /
-  `Equipment` / `CarriedBy` live here, and the Wave-1 seam review anticipated hoisting them alongside
+  `Equipment` / `CarriedBy` live here, and the seam review anticipated hoisting them alongside
   `Health`. **Deliberately not done**, because that item's trigger has not fired: there is exactly one
   `struct Inventory`-shaped type in the workspace, and nothing outside this crate reads a loadout.
   Hoisting now would also drag the `Entity`-typed carry relation into the crate that "deliberately

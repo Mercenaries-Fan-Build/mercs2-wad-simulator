@@ -103,7 +103,7 @@ pub use mercs2_vehicle as vehicle;
 pub use mercs2_ui as widgets;
 pub use mercs2_water as water_sim;
 
-/// Wave-0 Tier-2 seam guard (seam F, `docs/modernization/wave0_seam_review.md`).
+/// Schema type-code mirror guard.
 ///
 /// The `schm` type-code table exists as two **parallel enums** by architectural necessity —
 /// `mercs2_formats::schema::SchemaFieldType` (the on-disk/asset side) and

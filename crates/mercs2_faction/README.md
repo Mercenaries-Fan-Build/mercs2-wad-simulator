@@ -1,6 +1,6 @@
 # mercs2_faction
 
-Silo 13 of the Mercenaries 2 reimplementation: the faction / reputation / pursuit ("heat") mechanism —
+The faction / reputation / pursuit ("heat") mechanism of the Mercenaries 2 reimplementation —
 the combat → infraction → attitude → pursuit loop recovered in `faction_reputation_code_map.md`.
 
 ## What it is

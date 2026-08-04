@@ -1,15 +1,13 @@
 //! `mercs2_physics` — Havok character controller, rigid bodies, collision queries, MOPP/heightfield.
 //!
-//! **Silo 7** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
-//! **Scoreboard row(s):** 22.
 //! **Code map:** `docs/reverse_engineer/physics_code_map.md`.
-//! **Owned Lua namespace(s):** — (none; this silo has no Lua surface of its own — it backs the `PhysicsQuery` seam in `mercs2_core` for vehicle/combat/anim).
+//! **Owned Lua namespace(s):** — (none; this system has no Lua surface of its own — it backs the `PhysicsQuery` seam in `mercs2_core` for vehicle/combat/anim).
 //! Implements `mercs2_core::PhysicsQuery` (raycast / getClosestPoints / hkpCharacterProxy move).
 //!
-//! # Wave-1 bridge — static triangle soup + heightmap
+//! # The static-soup bridge — static triangle soup + heightmap
 //!
 //! [`StaticSoupPhysics`] is the **first concrete [`PhysicsQuery`] impl**: the cheap-but-real
-//! collision bridge that lets the vehicle / combat / anim silos run against *live* geometry queries
+//! collision bridge that lets the vehicle / combat / anim systems run against *live* geometry queries
 //! before the full Havok world exists. It is backed by a static world-space triangle soup (buildings,
 //! terrain mesh, roads) plus an optional [`Heightmap`] for low-res terrain — a faithful stand-in for
 //! the retail engine's `hkpMoppBvTreeShape` + `hkpSampledHeightFieldShape` world.
@@ -28,21 +26,21 @@
 //! [`CharacterController`]; minimal prop/debris dynamics live in [`RigidBody`] +
 //! [`StaticSoupPhysics::step_rigid_body`].
 //!
-//! ## Fidelity note (what the physics silo must replace for full Havok)
+//! ## Fidelity note (what the physics system must replace for full Havok)
 //!
 //! * `move_character` is now a **swept linear cast** ([`StaticSoupPhysics::move_swept`] via
 //!   [conservative advancement][`StaticSoupPhysics::linear_cast`]): it never steps further than the
 //!   current wall clearance, so the capsule cannot tunnel a thin wall regardless of `|delta|` (the
-//!   tunnel-free upgrade over W1-C's depenetration). This matches the retail `hkpCharacterProxy` /
+//!   tunnel-free upgrade over the earlier depenetration). This matches the retail `hkpCharacterProxy` /
 //!   `HumanLinearCastJob` sweep *behaviour*; row 22 swaps the static soup for the real
 //!   MOPP/heightfield world + the full 5-state controller (adding the Climbing/Ladder game states).
 //!   `// CONFIRM-LIVE:` the per-frame integrator (`hkpWorld::step`) is VMX128-undecoded — the
 //!   semi-implicit Euler here is a faithful equivalent, not the exe's exact solver.
 //! * There is no broadphase acceleration structure (MOPP BV-tree); this is a linear scan with a cheap
-//!   sphere cull. Fine for Wave-1 sim silos; the Havok path brings the BV-tree.
+//!   sphere cull. Fine for the current sim systems; the Havok path brings the BV-tree.
 //! * Only static world geometry is modelled, so [`RayHit::entity`] / `ClosestPoint::entity` are always
 //!   `None` (per the trait doc — MOPP/heightfield report no owning entity). Dynamic rigid bodies
-//!   (`hkpRigidBody`) and ragdolls arrive with the physics silo.
+//!   (`hkpRigidBody`) and ragdolls arrive with the physics system.
 //!
 //! # Module map
 //!
@@ -222,7 +220,7 @@ fn seg_tri_closest(a: Vec3, b: Vec3, t0: Vec3, t1: Vec3, t2: Vec3) -> (Vec3, Vec
 //   Heightmap — low-res terrain stand-in for hkpSampledHeightFieldShape
 // ---------------------------------------------------------------------------
 
-/// A regular-grid terrain heightfield: the Wave-1 stand-in for `hkpSampledHeightFieldShape`.
+/// A regular-grid terrain heightfield: the stand-in for `hkpSampledHeightFieldShape`.
 ///
 /// Heights are stored row-major (`heights[z * width + x]`) over a grid whose cell `(0,0)` sits at
 /// world `(origin.x, _, origin.z)` with `cell` spacing on both axes. [`Heightmap::sample`] does
@@ -297,13 +295,13 @@ pub struct GroundHit {
 // ---------------------------------------------------------------------------
 
 /// A [`PhysicsQuery`] backed by a static world-space triangle soup plus an optional terrain
-/// [`Heightmap`]. This is the Wave-1 collision bridge (see the crate docs): real ray/closest/character
+/// [`Heightmap`]. This is the collision bridge (see the crate docs): real ray/closest/character
 /// queries against baked geometry, standing in for the retail Havok MOPP + heightfield world until the
-/// physics silo (row 22) swaps in the full `hkpWorld`.
+/// full `hkpWorld` is swapped in.
 ///
 /// Construct one with [`StaticSoupPhysics::new`] (soup only), [`StaticSoupPhysics::from_heightmap`]
 /// (terrain only), or [`StaticSoupPhysics::with_heightmap`] (both), then hand a `&dyn PhysicsQuery`
-/// to the vehicle / combat / anim silos.
+/// to the vehicle / combat / anim systems.
 #[derive(Clone, Debug, Default)]
 pub struct StaticSoupPhysics {
     tris: Vec<[Vec3; 3]>,
@@ -532,7 +530,7 @@ impl StaticSoupPhysics {
 
     /// Public slope-aware ground probe: highest walkable surface under `pos` in the band
     /// `[pos.y - down, pos.y + up]`, rejecting surfaces steeper than `acos(min_cos)`. See
-    /// [`GroundHit`]. Used by the character controller and available to sim silos.
+    /// [`GroundHit`]. Used by the character controller and available to sim systems.
     pub fn ground_hit(&self, pos: Vec3, radius: f32, up: f32, down: f32, min_cos: f32) -> Option<GroundHit> {
         self.ground_probe(pos, radius, up, down, min_cos)
     }

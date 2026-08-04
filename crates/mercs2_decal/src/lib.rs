@@ -1,4 +1,4 @@
-//! `mercs2_decal` — Decals (scoreboard row 6).
+//! `mercs2_decal` — Decals.
 //!
 //! **Code map:** `docs/reverse_engineer/decal_code_map.md` (the sky/decal/water PC code maps: the
 //! `decaltable` loader + the decal pass driver).

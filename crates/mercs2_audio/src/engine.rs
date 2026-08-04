@@ -7,10 +7,10 @@
 //! (11) Lua surface (audio_code_map.md §5, luacd 08_audio_presentation).
 //!
 //! ## Binding-wiring seam (how the Lua tables reach these bodies)
-//! The `Sound`/`VO` luaL_Reg tables live in **`mercs2_script::bindings::{sound,vo}`** (Wave-0 E3),
+//! The `Sound`/`VO` luaL_Reg tables live in **`mercs2_script::bindings::{sound,vo}`**,
 //! whose `install(&Lua, &SharedHost)` closures call the engine through the `mercs2_script::EngineHost`
-//! trait — the script host never touches the engine directly (crate `mercs2_script` lib docs). Silo 14
-//! does **not** edit that crate. Instead:
+//! trait — the script host never touches the engine directly (crate `mercs2_script` lib docs). This
+//! crate does **not** edit `mercs2_script`. Instead:
 //!   1. `mercs2_engine`'s `EngineHost` impl holds an [`AudioEngine`] (e.g. `Rc<RefCell<AudioEngine>>`).
 //!   2. `EngineHost` gains audio methods (`sound_cue`, `sound_transition_music`, `vo_cue`, …) that
 //!      forward 1:1 to the [`AudioEngine`] methods below.
@@ -248,7 +248,7 @@ impl AudioEngine {
     /// // CONFIRM-LIVE: the exe's cue queue-post is SecuROM-morphed (`thunk_FUN_024b65e0`). This models
     /// the observable result: resolve the cue in the sound DB, allocate a voice (priority-steal if the
     /// pool is full), and — if `position` is given and the cue is positional — compute 3D channel
-    /// gains against the closest listener. `source` is the decoded wave (from the wave-bank silo); pass
+    /// gains against the closest listener. `source` is the decoded wave (from the wave-bank system); pass
     /// `None` to allocate a silent voice (the wave-bind is the streaming seam). Returns the voice id,
     /// or `None` if the cue is unknown or the pool denied it (outranked).
     pub fn cue_sound(
@@ -446,7 +446,7 @@ impl AudioEngine {
         &self.audio_dir
     }
     /// `Sound.OpenStreamFile(name)` (`FUN_005e4020` → `thunk_FUN_035f0000`).
-    /// // CONFIRM-LIVE: stream open is SecuROM-thunked; here it records intent (the WAD-streaming silo
+    /// // CONFIRM-LIVE: stream open is SecuROM-thunked; here it records intent (the WAD-streaming system
     /// binds the actual `.pws` stream). Returns a stream handle id.
     pub fn open_stream_file(&mut self, _name: &str) -> u32 {
         0 // CONFIRM-LIVE: real handle comes from the stream I/O mgr (DAT_011763f4)

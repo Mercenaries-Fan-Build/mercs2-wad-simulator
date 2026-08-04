@@ -673,7 +673,7 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
     }
 }
 
-/// ★ `add_outfit` end to end — the recipe Plan 01 phase 5 is defined by.
+/// ★ `add_outfit` end to end — the recipe from the mod-model plan (`workshop-mods-rebuild-01-mod-model.md`).
 ///
 /// It is the composed case: a Data half (the model, injected into a hero-rigged donor) and a Script
 /// half (the `_tOutfits` row), and the Script half only works because it goes through the linker

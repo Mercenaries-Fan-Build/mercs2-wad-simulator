@@ -1,9 +1,9 @@
 # mercs2_physics — deferred work
 
-Improvements deliberately left for the physics silo (row 22) or later Wave-1 passes. None of these is a
-faithfulness blocker for the Wave-1 `PhysicsQuery` bridge (`StaticSoupPhysics`); each is tagged.
+Improvements deliberately left for the physics system or later passes. None of these is a
+faithfulness blocker for the `PhysicsQuery` bridge (`StaticSoupPhysics`); each is tagged.
 
-- **DONE (W1 silo-7 controller pass).** `move_character` is now a **swept linear cast** (conservative
+- **DONE (controller pass).** `move_character` is now a **swept linear cast** (conservative
   advancement, `StaticSoupPhysics::linear_cast` / `move_swept`) — tunnel-free at any speed — and a
   faithful **3-locomotion-state machine** (`CharacterController`: OnGround/InAir/Jumping per the
   recovered `hkpCharacterContext FUN_0094d2e0`) with gravity, jump, slope limit (`max_slope_cos`
@@ -35,7 +35,7 @@ faithfulness blocker for the Wave-1 `PhysicsQuery` bridge (`StaticSoupPhysics`);
 
 - **Dynamic bodies + entity attribution.** Only static world geometry is modelled, so `RayHit::entity`
   / `ClosestPoint::entity` are always `None`. Dynamic `hkpRigidBody` props/debris and per-shape entity
-  ownership arrive with the physics silo. `[faithful-blocker: no]`
+  ownership arrive with the physics system. `[faithful-blocker: no]`
 
 - **Closest-point sign for arbitrary soup.** `closest_point`'s inside/outside sign is taken from the
   nearest triangle's wound normal, which is only meaningful for consistently-wound (outward-facing)

@@ -1,9 +1,9 @@
-//! `PhysicsQuery` — the collision-query seam between the sim silos and the physics impl.
+//! `PhysicsQuery` — the collision-query seam between the sim systems and the physics impl.
 //!
 //! This trait is the **interface** that `mercs2_vehicle`, `mercs2_combat`, and `mercs2_anim`
 //! (ragdoll) depend on, so those leaf crates compile against the *contract*, never against
 //! `mercs2_physics` directly (no leaf→leaf edge; the carve rule in
-//! `reimplementation_parallelization_plan.md` §4). The physics silo (row 22,
+//! `reimplementation_parallelization_plan.md` §4). The physics system (row 22,
 //! `docs/reverse_engineer/physics_code_map.md`) implements it; an early impl can be backed by the
 //! existing terrain-heightmap + `collision_tris` raycast we already have and later swapped for the
 //! full Havok `hkpCharacterProxy` path.
@@ -54,7 +54,7 @@ pub struct ClosestPoint {
 }
 
 /// The read-only collision-query surface shared by AI, camera, weapons, vehicles, and character
-/// movement. The physics silo owns the implementation; sim silos take `&dyn PhysicsQuery`.
+/// movement. The physics system owns the implementation; sim systems take `&dyn PhysicsQuery`.
 pub trait PhysicsQuery {
     /// Cast a ray from `origin` along unit `dir` for up to `max` units. Returns the nearest hit,
     /// or `None` if the ray reaches `max` unobstructed. (`hkpWorldRayCaster` / `CastRay`.)

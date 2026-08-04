@@ -1,6 +1,6 @@
 //! `_SYS` engine binding namespace — luaL_Reg table VA 0x00b9a854, 6 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
@@ -38,8 +38,8 @@ pub const REQUIRED: &[Required] = &[
 pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // _GETFENV(level) -> environment table. Lua 5.4 has no per-level function environments; the
-    // authentic single shared script env is the globals table, which is what callers read/write.
+    // _GETFENV(level) -> environment table. The authentic engine env is a single shared script env —
+    // the globals table — returned regardless of `level`, which is what callers read/write.
     b.real(
         "_GETFENV",
         lua.create_function(|lua, _level: Option<i64>| Ok(lua.globals()))?,

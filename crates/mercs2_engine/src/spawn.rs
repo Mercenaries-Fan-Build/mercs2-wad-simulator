@@ -101,7 +101,7 @@ pub fn spawn_default_vehicle(
 /// Spawn a living AI actor — the full cross-system component bundle a person needs so it participates
 /// in every actor subsystem at once (keystone K3):
 /// - **humanoid** (`mercs2_core`): the `Human` marker + a default `HumanState` — this is what makes the
-///   entity a *person* to every silo that acts on people (combat's blood-vs-spark impact pick, the
+///   entity a *person* to every system that acts on people (combat's blood-vs-spark impact pick, the
 ///   animation selection key, the AI's people goals). Deliberately **not** `PlayerControlled`: retail
 ///   possession is applied on *attach* (`FUN_006A4060` writes the character GUID to the possession
 ///   field `player+0x20` at `0x006A422E`), never at spawn — `mercs2_player` owns that pairing;
@@ -198,7 +198,7 @@ mod tests {
     }
 
     /// A spawned character is a **person**: it carries the `Human` marker + a default `HumanState`, the
-    /// vocabulary every people-acting silo queries. It is deliberately NOT `PlayerControlled` — retail
+    /// vocabulary every people-acting system queries. It is deliberately NOT `PlayerControlled` — retail
     /// possession is applied on attach (`FUN_006A4060` writes the character GUID to `player+0x20`),
     /// never at spawn.
     #[test]
@@ -220,7 +220,7 @@ mod tests {
         );
     }
 
-    /// Cross-silo: a vehicle is damageable. Bullets lower its pool and a big enough hit destroys it —
+    /// Cross-system: a vehicle is damageable. Bullets lower its pool and a big enough hit destroys it —
     /// the combat applier finds it because `spawn_vehicle` now bundles `Health`.
     #[test]
     fn vehicle_takes_damage_and_dies() {
@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(apply_hit(&mut world, &mut bus, car, None, 25.0, DamageKey::BulletLarge), 0.0);
     }
 
-    /// Cross-silo FX predicate: shooting a **vehicle** sparks a bullet hole, shooting a **character**
+    /// Cross-system FX predicate: shooting a **vehicle** sparks a bullet hole, shooting a **character**
     /// sprays blood. Both are `Health`-bearing, so this can only be right if the predicate is `Human`.
     #[test]
     fn shooting_a_vehicle_sparks_but_shooting_a_character_bleeds() {

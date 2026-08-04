@@ -4,7 +4,7 @@
 //! per-frame VMX solve body is vtable-dispatched (confirm-live), so the numeric solve here is the
 //! standard analytic two-bone (law-of-cosines) IK Havok's foot-placement solver reduces to — hip /
 //! knee / ankle three-joint chain, planted onto a ground height the caller supplies. Kept behind a
-//! clean API so the ground query comes from the physics silo via [`PhysicsQuery`] (no leaf→leaf
+//! clean API so the ground query comes from the physics system via [`PhysicsQuery`] (no leaf→leaf
 //! edge). This positions the ankle; the ankle→toe orientation pass (aligning the foot to the
 //! surface normal) is a follow-up — see `DEFERRED.md`.
 

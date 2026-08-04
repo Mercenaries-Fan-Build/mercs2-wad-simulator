@@ -1,6 +1,6 @@
 # mercs2_audio — deferred improvements
 
-Non-blocking improvements intentionally left for a later silo. Each is tagged `[faithful-blocker: no]`
+Non-blocking improvements intentionally left for a later system. Each is tagged `[faithful-blocker: no]`
 — omitting it does **not** make the current behaviour less faithful to the exe oracle
 (`docs/reverse_engineer/audio_code_map.md`); it is scope/quality, not correctness. Things the exe does
 that we do not yet (parity gaps) belong in the code map's confirm-live list (see §10) and are marked
@@ -48,7 +48,7 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
 - **Action-level / faction-mood music drivers** `[faithful-blocker: no]` — `SetActionLevelsMusic`,
   `LockActionLevelMusic`, `SetHostilityDecayRateMusic`, faction music (`AddFactionMusic`,
   `SetFactionMusic`) and source-music playlists (`AddMusicSourcePlaylist`) are surfaced as state but do
-  not yet auto-drive transitions from the faction/pursuit silo's action level. The crossfade mechanic
+  not yet auto-drive transitions from the faction/pursuit system's action level. The crossfade mechanic
   they feed is complete.
 - **Music decks routed as mixer voices** `[faithful-blocker: no]` — deck cues + gains are exposed
   (`MusicStateMachine::decks`); binding each live deck to a `vo`/`music`-category mixer voice with its
@@ -63,7 +63,7 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
 - **Collision / ambience / group passes** `[faithful-blocker: no]` — `CollisionHandling` (`FUN_005fd5f0`),
   `SoundAmbience.Update` (`thunk_FUN_024f2850`), `GroupManager::Update` (`FUN_00607700`) and
   `CacheCharacters` (`FUN_00600240`) are named in the Pg tick order but not implemented; they need the
-  physics/world silos to feed them.
+  physics/world systems to feed them.
 
 ## Category / pitch surface
 

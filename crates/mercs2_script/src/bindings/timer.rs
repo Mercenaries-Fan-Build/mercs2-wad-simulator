@@ -1,6 +1,6 @@
 //! `Timer` engine binding namespace — luaL_Reg table VA 0x00b99bbc, 4 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
@@ -10,7 +10,7 @@
 //! elapsed-time query — so the *faithful, deterministic* body is the run/pause **state machine** these
 //! four controls drive. State is held in a table-owned map keyed by the timer's first argument (a name
 //! or handle; the no-arg form uses a single default slot), so `Start`→`Pause`→`Resume`→`Stop`
-//! transitions are modelled exactly with no host clock. When a later silo wires a monotonic frame
+//! transitions are modelled exactly with no host clock. When a later system wires a monotonic frame
 //! clock, elapsed accounting hangs off this same map without changing the Lua-visible surface.
 
 use std::cell::RefCell;

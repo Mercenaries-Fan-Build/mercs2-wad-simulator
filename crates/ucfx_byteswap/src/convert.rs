@@ -1416,7 +1416,7 @@ fn convert_generic_bodies(
                     }
                     ChunkTag::Body if is_texture => {
                         // DXT compressed pixel data — leave as-is.
-                        // Proper texture BODY conversion (untiling) is Phase 3+.
+                        // Proper texture BODY conversion (untiling) is not implemented yet.
                     }
                     ChunkTag::Schm | ChunkTag::Flgs => {
                         swap_u32_array(&mut data_area[body_local_start..body_local_end]);

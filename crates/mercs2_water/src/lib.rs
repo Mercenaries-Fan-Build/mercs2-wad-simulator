@@ -1,8 +1,8 @@
-//! `mercs2_water` — Water (scoreboard row 7): the engine-owned water *mechanism*.
+//! `mercs2_water` — Water: the engine-owned water *mechanism*.
 //!
 //! **Code map:** `docs/reverse_engineer/water_code_map.md` (the sky/decal/water PC code maps), with
 //! `docs/watermap_format.md` for the static watermap layout and `vehicle_code_map.md` §3/§5 for the
-//! boat buoyancy tunables. **Scoreboard row:** 7. **Scope:** the water-and-swimming scope
+//! boat buoyancy tunables. **Scope:** the water-and-swimming scope
 //! ([[water-and-swimming-scope]]).
 //!
 //! This crate implements the parts of the water system the **engine owns as compiled logic**, not the
@@ -125,7 +125,7 @@ impl WaterWorld {
 
     /// Per-fixed-step water update: advance the wave phase by `dt`, then advance every [`Swimmer`]'s
     /// FSM against the **wave-displaced** surface. No-op (beyond the clock) until a watermap is loaded.
-    /// Returns the number of swimmers updated. Buoyancy/drag are applied by the physics silo using
+    /// Returns the number of swimmers updated. Buoyancy/drag are applied by the physics system using
     /// [`Buoyancy`]/[`WaterDragTunables`] against [`sample`](Self::sample); they are pure math, not a
     /// per-frame system here.
     pub fn tick(&mut self, world: &mut World, dt: f32) -> usize {

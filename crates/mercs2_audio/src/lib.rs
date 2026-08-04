@@ -1,6 +1,5 @@
 //! `mercs2_audio` — Audio backend, software mixer, dual-deck music FSM, banks, VO, 3D positional.
 //!
-//! **Silo 14** (`docs/modernization/reimplementation_parallelization_plan.md` §3), scoreboard **row 21**.
 //! **Code map:** `docs/reverse_engineer/audio_code_map.md` (+ `docs/data/audio_code_map.json`).
 //! **Owned Lua namespaces:** `Sound` (88 cfuncs @0xB98C98), `VO` (11 cfuncs @0xB988B0).
 //!

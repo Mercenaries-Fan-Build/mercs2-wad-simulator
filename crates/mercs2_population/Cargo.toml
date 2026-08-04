@@ -2,7 +2,7 @@
 name = "mercs2_population"
 version = "1.0.1"
 edition = "2021"
-description = "Mercenaries 2 reimpl — Population / spawners (row 24): SkirmishSpawnList, living-world crowd/traffic density, dynamic-road flow. Feeds AI actors through the spawn resolver. WAVE-2 scaffold."
+description = "Mercenaries 2 reimpl — Population / spawners: SkirmishSpawnList, living-world crowd/traffic density, dynamic-road flow. Feeds AI actors through the spawn resolver."
 readme = "README.md"
 license.workspace = true
 repository.workspace = true

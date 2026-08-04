@@ -1,7 +1,7 @@
 # mercs2_anim
 
 The human animation runtime for the Mercenaries 2 reimplementation — data-driven clip selection,
-per-entity playback with crossfade, and two-bone foot-placement IK (Wave-1 silo 8, scoreboard row 20).
+per-entity playback with crossfade, and two-bone foot-placement IK.
 
 ## What it is
 

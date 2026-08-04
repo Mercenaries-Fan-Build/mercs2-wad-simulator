@@ -1,7 +1,7 @@
-//! `GameplaySystems` — the Wave-1 fleet gameplay systems wired into the running engine's fixed tick.
+//! `GameplaySystems` — the fleet gameplay systems wired into the running engine's fixed tick.
 //!
 //! The fleet crates (physics / vehicle / combat / audio) shipped as tested subsystems, but nothing in
-//! the engine drove them (the Wave-1 seam review's "everything DANGLING at the engine-loop boundary").
+//! the engine drove them — everything DANGLING at the engine-loop boundary.
 //! This bundle owns their shared per-frame state — a static-soup physics world built from the streamed
 //! collision geometry (the `PhysicsQuery` every sim system uses), the engine event bus, the vehicle
 //! steering LUT, and the shared audio engine — and runs them each fixed step over the ECS `World`.
@@ -112,7 +112,7 @@ impl GameplaySystems {
         self.weapons.tick(world, dt, &mut self.bus, Some(phys));
         // Integrate death ragdolls (WILDSTAR single-body stand-in): a lethal blast launches a
         // `Ragdollable` character (in `detonate_explosion`); here it falls + settles against the
-        // terrain height. Replaced by the constrained Havok ragdoll when the physics silo lands.
+        // terrain height. Replaced by the constrained Havok ragdoll when the physics system lands.
         {
             let hm = self.physics.heightmap();
             crate::combat::ragdoll::ragdoll_system(world, dt, |p| {
@@ -221,7 +221,7 @@ mod tests {
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
         let mut gp = GameplaySystems::new(audio);
         // Tiled flat ground (1 m tiles) — real world geometry streams as small triangles, and the
-        // physics proximity cull is tuned for that (giant quads get culled; W1-C DEFERRED note).
+        // physics proximity cull is tuned for that (giant quads get culled; see the DEFERRED note).
         let mut tris = Vec::new();
         for xi in -15..15 {
             for zi in -15..15 {

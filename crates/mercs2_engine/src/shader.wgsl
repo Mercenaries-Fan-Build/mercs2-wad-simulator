@@ -1,4 +1,4 @@
-// Phase-1e.2c shader: textured + tangent-space normal mapping + Blinn-Phong specular + a sun/ambient
+// Shader: textured + tangent-space normal mapping + Blinn-Phong specular + a sun/ambient
 // term + a forward array of up to 32 dynamic point lights (radius/distance attenuated).
 // Game space is left-handed, +Y up (docs/coordinate_systems.md); MVP built LH.
 

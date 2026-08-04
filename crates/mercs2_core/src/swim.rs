@@ -1,9 +1,9 @@
 //! The character swim-state FSM — depth-driven water state for any TPS actor that can enter water.
 //!
 //! **Why this lives in `mercs2_core`.** Two leaves need it and neither may depend on the other: the
-//! water silo drives it over the ECS from the watermap (`mercs2_water::swim`, which owns the
+//! water system drives it over the ECS from the watermap (`mercs2_water::swim`, which owns the
 //! [`Swimmer`](../../mercs2_water/swim/struct.Swimmer.html) component and the per-tick system), and
-//! the player silo's on-foot controller switches locomotion mode on it. It is pure `f32` policy —
+//! the player system's on-foot controller switches locomotion mode on it. It is pure `f32` policy —
 //! no `hecs`, no `glam`, no watermap — so it costs this crate nothing. `mercs2_water` re-exports both
 //! types, so its existing consumers see no API change.
 //!

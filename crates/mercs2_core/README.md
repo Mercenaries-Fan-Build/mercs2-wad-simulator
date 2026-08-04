@@ -109,7 +109,7 @@ instead of a `Schedule` calls `Time::advance_frame(real_dt)` and loops that many
 | `guidmap` | `GuidMap`: name-hash → `Entity` and guid ↔ `Entity`, plus the reserved `HERO_GUID` / `LOCAL_PLAYER_GUID` handles and `FIRST_DYNAMIC_GUID` mint base. |
 | `object_filter` | `ObjectFilter` / `ObjectFilterRegistry` / `eval_label_expr`: the `ObjectFilter.*` label boolean-expression + include/exclude sets, minted through a handle registry. |
 | `render_state` | `RenderState` and its `AtmosphereState` / `BloomState` / `GraphicsState` / `FadeState` sub-states — the parameters the presentation Lua sets and the render passes read. |
-| `physics_query` | The `PhysicsQuery` trait + `RayHit` / `ClosestPoint`: the collision-query contract the sim silos compile against instead of depending on `mercs2_physics`. |
+| `physics_query` | The `PhysicsQuery` trait + `RayHit` / `ClosestPoint`: the collision-query contract the sim systems compile against instead of depending on `mercs2_physics`. |
 
 ## Notes / gotchas
 

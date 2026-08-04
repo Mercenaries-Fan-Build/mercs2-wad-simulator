@@ -1,11 +1,8 @@
 //! `mercs2_player` — the player concern: the per-slot player object, the persistent profile/economy
 //! singleton, possession, and the disguise feature gate.
 //!
-//! **Silo 17** (`docs/modernization/reimplementation_parallelization_plan.md` §3 lists 16 silos and
-//! routes `Player` cross-cutting; `wave0_seam_review.md:40` seam G overrode that and gave the namespace
-//! its own crate — `Player` is the 2nd-highest-traffic Lua namespace at 107 cfuncs and spans economy +
-//! player-controller, so it does not fold into vehicle or faction).
-//! **Scoreboard row(s):** cross-cutting — there is no player row in the 32-row scoreboard.
+//! `Player` has its own crate rather than folding into vehicle or faction: it is the 2nd-highest-traffic
+//! Lua namespace at 107 cfuncs and spans economy + player-controller, which cuts across both.
 //! **Code map:** `docs/reverse_engineer/player_code_map.md` (all 107 cfunc bodies read; §10 is a
 //! requirements list written for this crate), with `save_serialize_code_map.md` owning the `.profile`
 //! disk layout and `camera_code_map.md` the viewport arrays.
@@ -215,7 +212,7 @@ impl PlayerWorld {
     /// that `+0x24` holds a `SeatLink` key whose entity carries a `Controller*` component, so the writer
     /// lives in the seat/ride subsystem.
     ///
-    /// So the vehicle silo calls this on enter/exit rather than this crate depending on
+    /// So the vehicle system calls this on enter/exit rather than this crate depending on
     /// `mercs2_vehicle` — the carve rule forbids that edge, and an `EventBus` message would work equally
     /// well if a queue is ever wanted.
     ///

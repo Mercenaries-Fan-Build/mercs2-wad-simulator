@@ -14,10 +14,10 @@
 //! - `docs/reverse_engineer/shadow_code_map.md` §4 (the `while(i<4)` cascade emit around `FUN_00468ca0`).
 //!
 //! This module encodes that order as a list of **named nodes** so the engine's frame recording follows
-//! the oracle, and so the Band-A silos (reflection / water / decals / sky-as-pass / particles-as-pass)
+//! the oracle, and so the reflection / water / decals / sky-as-pass / particles-as-pass passes
 //! have documented seams to plug into (see [`RenderNode`]).
 //!
-//! ## Carve note (Wave-0 silo E2)
+//! ## Carve note
 //! Only a subset of the canonical nodes is realized today; the rest are **seams that render nothing**
 //! (NOT faked). The engine's current single-forward realization maps onto the graph like so:
 //! - [`PassId::ShadowCascade`] — our single directional shadow-depth pass (one cascade, not four).
@@ -79,7 +79,7 @@ pub enum PassId {
     Blob,
 
     // --- engine-added composite tail (NOT in FUN_00466d40) ---
-    /// Canonical particle system draw (PgFX). Seam for the Band-A particles-as-pass silo; the engine
+    /// Canonical particle system draw (PgFX). Seam for the particles-as-pass; the engine
     /// currently draws billboards through [`PassId::TransparentFx`] instead.
     Particles,
     /// Engine transparent-FX pass: billboard particles + additive glow cards, blended over the final
@@ -116,7 +116,7 @@ impl PassId {
         }
     }
 
-    /// Whether this node is a not-yet-implemented **seam** (renders nothing today). Band-A silos flip
+    /// Whether this node is a not-yet-implemented **seam** (renders nothing today). Render passes flip
     /// these to real passes; [`is_seam`] false means the engine records real GPU commands for it.
     pub fn is_seam(self) -> bool {
         matches!(
@@ -178,26 +178,26 @@ pub type RenderItem = (mercs2_core::Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)
 /// Frame context handed to a [`RenderNode`] when it records — the shared per-frame handles the
 /// canonical per-viewport driver `FUN_00466d40` hands each pass (render_core_code_map.md §5: the
 /// driver gives every pass the **camera**, the per-frame **light constants**, the collected
-/// **renderable list**, and the **render targets**). E2's carve shipped only
-/// device/queue/encoder/color/depth/size; Wave-1 seam D adds the camera + lights + surface-format +
-/// collected-list handles the Band-A render silos consume, so all four can plug in without each
+/// **renderable list**, and the **render targets**). Beyond
+/// device/queue/encoder/color/depth/size, it carries the camera + lights + surface-format +
+/// collected-list handles the render passes consume, so all four can plug in without each
 /// re-extending this one struct.
 ///
-/// ## What each Band-A silo now has vs still needs
-/// - **Silo 2 — lighting / shadow cascades:** HAS `lights_bind` (group-3 dynamic-light array + folded
+/// ## What each render pass now has vs still needs
+/// - **Lighting / shadow cascades:** HAS `lights_bind` (group-3 dynamic-light array + folded
 ///   directional shadow map + light view-proj), the camera (`view_proj` / `view` / `cam_pos`) and
 ///   `depth`. STILL NEEDS extra per-cascade shadow RTs of its own (create via `device` +
 ///   `surface_format`) — the engine exposes ONE directional shadow map, not the exe's 4-cascade
 ///   1024×4096 atlas (shadow_code_map.md §4).
-/// - **Silo 3 — fx / decals:** HAS the camera + `depth` + `color` (project decal quads, depth-test
+/// - **FX / decals:** HAS the camera + `depth` + `color` (project decal quads, depth-test
 ///   against the scene) and `items` (find the affected surfaces). STILL NEEDS a decal atlas / decal
 ///   material binding of its own (decal_code_map.md) — no shared decal texture handle is exposed here.
-/// - **Silo 4 — sky / water:** HAS the camera — `view` = the raw (un-flipped) camera view the
+/// - **Sky / water:** HAS the camera — `view` = the raw (un-flipped) camera view the
 ///   reflection pass mirrors against the water plane (`FUN_004677d0`, water_code_map.md §2), `view_proj`
 ///   = the handedness-flipped world clip matrix all opaque draws use, `cam_pos` = camera world
 ///   position — plus `items` to re-render into the reflection RT and `device` + `surface_format` to
 ///   allocate the transient wake / clip / reflection RTs. STILL NEEDS the water-plane params + water
-///   material bindings (owned by the water silo, not render-core).
+///   material bindings (owned by the water pass, not render-core).
 ///
 /// > **No standalone camera bind group exists in the engine today** — the camera is folded per-entity
 /// > into each draw's MVP uniform, and the sky pass carries its own inverse-VP — so the camera is
@@ -217,41 +217,41 @@ pub struct PassCtx<'a> {
     /// Surface size in pixels `[w, h]`.
     pub size: [u32; 2],
 
-    // --- Wave-1 seam D: the camera + lights + surface-format + collected-list the driver hands each
+    // --- The camera + lights + surface-format + collected-list the driver hands each
     //     pass (render_core §5). ---
     /// Camera **view-projection** — the handedness-flipped world clip matrix EVERY opaque draw uses
     /// (`scale(-1,1,1) * proj * view`; see `Scene::render_with`). A reflection / z-prepass / decal
     /// pass that re-renders `items` must transform with this to register with the color pass.
-    /// Consumed by silo 4 (water/reflection) + silo 3 (decals).
+    /// Consumed by the water/reflection + decal passes.
     pub view_proj: glam::Mat4,
     /// Camera **view** matrix, raw (un-flipped, left-handed). The water reflection pass mirrors THIS
     /// against the water plane to build the reflected view (`FUN_004677d0`, water_code_map.md §2); the
-    /// bare projection is recoverable as `view_proj * view.inverse()`. Consumed by silo 4.
+    /// bare projection is recoverable as `view_proj * view.inverse()`. Consumed by the water/reflection pass.
     pub view: glam::Mat4,
     /// Camera **world position** (Mercs2 game space, pre-handedness-flip). Reflection-plane distance
-    /// math + the specular/Fresnel view vector. Consumed by silo 4 (water) + silo 2 (specular lights).
+    /// math + the specular/Fresnel view vector. Consumed by the water + lighting (specular) passes.
     pub cam_pos: glam::Vec3,
     /// The per-frame **dynamic-light** bind group (wgpu group 3): the `MAX_LIGHTS` nearest lights +
     /// the folded directional shadow map (depth) + comparison sampler + light view-proj. A pass that
     /// re-shades geometry (reflection, water surface, a future forward-lit decal) binds this at group
-    /// 3 exactly as the color pass does. Consumed by silo 2 (lighting) + silo 4 (water).
+    /// 3 exactly as the color pass does. Consumed by the lighting + water passes.
     pub lights_bind: &'a wgpu::BindGroup,
     /// The swapchain **surface format** — the format a transient RT (reflection / wake / clip /
-    /// cascade) must use to be sampled back into the color/post chain. Consumed by all silos that
+    /// cascade) must use to be sampled back into the color/post chain. Consumed by all systems that
     /// allocate their own render targets.
     pub surface_format: wgpu::TextureFormat,
     /// The collected **renderable list** for this frame (the [`PassId::Collect`] output). Passes that
     /// re-draw the scene (reflection, z-prepass, shadow cascade, fading-trees) walk this instead of
-    /// re-querying the ECS `World`. See [`RenderItem`]. Consumed by silos 2, 3, 4.
+    /// re-querying the ECS `World`. See [`RenderItem`]. Consumed by the lighting, decal, and water passes.
     pub items: &'a [RenderItem],
     /// Frame time in seconds since scene start — for animated passes (water ripple, UV scroll). Consumed
-    /// by silo 4 (water surface).
+    /// by the water-surface pass.
     pub time: f32,
 }
 
-/// A pluggable scene pass. **Band-A seam:** the reflection / water / decal / sky / particle silos
+/// A pluggable scene pass. **Seam:** the reflection / water / decal / sky / particle passes
 /// implement this and register the node against its canonical [`PassId`] slot; the engine executes it
-/// in [`SCENE_ORDER`] position. Wave-0 (silo E2) ships the ordering + the seams only — no external
+/// in [`SCENE_ORDER`] position. The engine ships the ordering + the seams only — no external
 /// `RenderNode` is registered yet, so the trait exists purely as the documented plug-in point.
 pub trait RenderNode {
     /// The canonical slot this node fills.
@@ -265,7 +265,7 @@ mod tests {
     use super::*;
 
     /// `SCENE_ORDER` lists the canonical driver body in the recovered `FUN_00466d40` sequence, before
-    /// the engine composite tail — the load-bearing invariant Band-A silos rely on for correct pass
+    /// the engine composite tail — the load-bearing invariant the render passes rely on for correct pass
     /// ordering. Guard the two anchor transitions the fidelity bar cares about.
     #[test]
     fn scene_order_follows_fun_00466d40() {

@@ -1,6 +1,6 @@
 # mercs2_jobs
 
-A faithful reimplementation of Mercenaries 2's in-house **"Pimp"** job system (scoreboard row 15) — the per-CPU worker pool and the CS-guarded job ring that were the engine's parallel-work spine.
+A faithful reimplementation of Mercenaries 2's in-house **"Pimp"** job system — the per-CPU worker pool and the CS-guarded job ring that were the engine's parallel-work spine.
 
 ## What it is
 
@@ -28,7 +28,7 @@ it is modeled first-class.
 ## Where it comes from
 
 Pandemic's Pimp multi-CPU job library (Xbox source path `d:\mainline\mercs2\pimp\`) was the
-scoreboard's "true novel system" — **100% string-only on the Xbox build** (zero decomp hits). The PC
+a "true novel system" — **100% string-only on the Xbox build** (zero decomp hits). The PC
 build keeps the real architecture, and that is what was recovered:
 
 - Code map: `docs/reverse_engineer/pimp_job_system_code_map.md` (companion to the Keystone PC

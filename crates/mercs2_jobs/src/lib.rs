@@ -1,11 +1,11 @@
-//! `mercs2_jobs` — the **Pimp job system** (scoreboard row 15), the engine's parallel-work spine.
+//! `mercs2_jobs` — the **Pimp job system**, the engine's parallel-work spine.
 //!
 //! **Code map:** `docs/reverse_engineer/pimp_job_system_code_map.md` (companion to the Keystone PC
 //! code-map recovery — master tick order, event bus, Pimp jobs). Xbox oracle
 //! `docs/mercs2-pdb-analysis/jobs-threading.md`.
 //!
 //! Pandemic's in-house **"Pimp"** multi-CPU job library (Xbox source `d:\mainline\mercs2\pimp\`) was
-//! the scoreboard's *"true novel system"* — **100% string-only on Xbox** (0 decomp hits). The PC build
+//! a *"true novel system"* — **100% string-only on Xbox** (0 decomp hits). The PC build
 //! keeps the real architecture, recovered in the code map:
 //!
 //! - a **per-CPU worker pool** ([`WorkerPool`], §1) — one worker per CPU (`FUN_00876400`), CPU count

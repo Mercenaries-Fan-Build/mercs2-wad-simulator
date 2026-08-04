@@ -140,7 +140,7 @@ fn post_damage_events(
 /// (a per-target vulnerability multiplier), gated by `AcceptsDamageOfThisType`, and calls `Die()` at
 /// `<= 0`. Here `amount` arrives already-scaled (the caller applies the target's vulnerability); the
 /// Mercs2 prototype additionally splits Primary vs per-node health (`ApplyDamageTo{Primary,Node}Health`)
-/// — modelled as one `Health` pool until the node-health silo lands.
+/// — modelled as one `Health` pool until the node-health system lands.
 pub fn apply_hit(
     world: &mut World,
     bus: &mut EventBus,
@@ -192,7 +192,7 @@ pub fn radius_falloff(dist: f32, radius: f32, damage: f32, min_falloff: f32) -> 
 /// below), then applies **deferred + staggered by distance** (`dist * wildstar::STAGGER_SECS_PER_METER`
 /// over `wildstar::LIFETIME_SECS`): force via `ApplyHitForce` (impulse to dynamic bodies, or a 7-bone
 /// ragdoll spread floored at `wildstar::FORCE_FLOOR`) then `ApplyHitDamage`. This applies immediately —
-/// the *total* damage is identical; the stagger timing + impulse land with the physics silo
+/// the *total* damage is identical; the stagger timing + impulse land with the physics system
 /// (`DEFERRED.md`).
 pub fn detonate_explosion(
     world: &mut World,

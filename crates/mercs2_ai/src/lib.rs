@@ -1,7 +1,5 @@
 //! `mercs2_ai` — AI: the hash-addressed action bus + per-entity perception + component families.
 //!
-//! **Silo 11** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
-//! **Scoreboard row(s):** 23.
 //! **Code map:** `docs/reverse_engineer/ai_code_map.md` (the recovered runtime spine + component
 //! census), with `road_graph_ai_driving_code_map.md` for vehicle-AI actuation.
 //! **Owned Lua namespace(s):** `Ai`.

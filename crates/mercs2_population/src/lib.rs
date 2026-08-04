@@ -1,4 +1,4 @@
-//! `mercs2_population` — Population / spawners (scoreboard row 24).
+//! `mercs2_population` — Population / spawners.
 //!
 //! **Code map:** `docs/reverse_engineer/population_spawner_code_map.md` (the recovered
 //! `PgSysPopulation` runtime, married Xbox↔PC), plus the component census in

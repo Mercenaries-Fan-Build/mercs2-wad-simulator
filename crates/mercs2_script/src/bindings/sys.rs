@@ -1,11 +1,11 @@
 //! `Sys` engine binding namespace — luaL_Reg table VA 0x00b98a78, 64 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
+//! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Sys")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
@@ -89,8 +89,8 @@ pub const REQUIRED: &[Required] = &[
 ];
 
 /// Boot slice: the level/master-script queries the bring-up path needs. `GetMasterScriptName`
-/// currently returns the level name (same as `GetLevelName`) per the Phase-1 host. The other ~61
-/// `Sys.*` cfuncs (console, asset/layer load, guid marshalling, save-version) are for later silos.
+/// currently returns the level name (same as `GetLevelName`) as a stand-in. The other ~61
+/// `Sys.*` cfuncs (console, asset/layer load, guid marshalling, save-version) are not yet backed.
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 

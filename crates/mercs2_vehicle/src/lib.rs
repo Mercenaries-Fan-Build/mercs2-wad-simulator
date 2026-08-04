@@ -1,7 +1,7 @@
 //! `mercs2_vehicle` — the Vehicle actor family + custom **raycast** drive model, command-ring
 //! control transport, and vehicle/on-foot camera modes.
 //!
-//! **Silo 25** (rows 25/19). The exe is the oracle: `docs/reverse_engineer/vehicle_code_map.md`
+//! The exe is the oracle: `docs/reverse_engineer/vehicle_code_map.md`
 //! (+ `docs/data/vehicle_code_map.json`, `camera_code_map.md`). The drive model is DECODED as a
 //! **custom raycast car / tank / boat / heli sim** — nine `hkpUnaryAction`-derived actor classes —
 //! **NOT** the Havok Vehicle Kit (there are zero `hkpVehicle*` classes on PC). A prior Ghidra
@@ -28,7 +28,7 @@
 //! [`VehicleClass::Tank`] ([`TankActor`]). Boat / Helicopter / Jet are recognised for command-ring
 //! routing and camera-mode selection; their `applyAction` sims land in a later pass (`DEFERRED.md`).
 //!
-//! Wheel raycasts are grounded on `mercs2_core::PhysicsQuery` (the silo-7 seam); this crate never
+//! Wheel raycasts are grounded on `mercs2_core::PhysicsQuery`; this crate never
 //! depends on `mercs2_physics`.
 //!
 //! The authored tuning defaults and the camera preset float layout are NOT decoded (field names /
@@ -116,7 +116,7 @@ mod tests {
         )
     }
 
-    /// A spawned vehicle is a damageable body: it carries a `Health` pool, so the combat silo's hit
+    /// A spawned vehicle is a damageable body: it carries a `Health` pool, so the combat system's hit
     /// applier and radial-blast sweep (both of which select on `mercs2_core::Health`) can see it. It is
     /// NOT a person — no `Human` marker — so shots spark off it rather than draw blood.
     #[test]

@@ -1,15 +1,16 @@
-//! `mercs2_quartermaster` — the Shipment format: read, validate, (later) lint and build.
+//! `mercs2_quartermaster` — the Shipment format: read, validate, lint, and build.
 //!
 //! A **Shipment** is a mod package; the **Quartermaster** is the engine that works it. Neither the
 //! Workshop nor Modkit owns the format — this crate does, and both are clients.
 //!
-//! Spec: `.claude/plans/workshop-mods-rebuild-04-manifest-format.md` (rev 3, DRAFT — not frozen).
+//! Spec: `.claude/plans/workshop-mods-rebuild-04-dossier-format.md` (DRAFT — not frozen).
 //!
-//! ## What is here so far
+//! ## What is here
 //!
-//! Phase 1, first increment: the manifest model plus the cross-format read path. This deliberately
-//! leads with the part that de-risks the schema — if TOML cannot carry an internally-tagged enum,
-//! that is a *format* change, and it is far cheaper to learn now than after a builder exists.
+//! The full pipeline: the manifest model and cross-format read path ([`manifest`], [`discover`]),
+//! [`lint`] rules, [`blast`]-radius (claim/conflict) computation, and the [`build`] path with its
+//! [`link`]er. The read path leads on an internally-tagged enum across YAML/JSON/TOML — the schema
+//! risk that shaped the format.
 //!
 //! ## What is deliberately NOT here
 //!
@@ -18,7 +19,6 @@
 //!   `wad_paths`). Resolution is the HOST's job — a Workshop Settings page, `qm --game`, or nothing
 //!   at all in CI. Everything in [`manifest`] runs with no game present, which is what makes
 //!   lint-only CI possible for the template repo.
-//! * The linter, blast-radius computation, and the builder — later increments.
 
 pub mod blast;
 pub mod build;

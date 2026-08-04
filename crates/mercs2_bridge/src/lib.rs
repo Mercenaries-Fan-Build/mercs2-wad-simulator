@@ -193,8 +193,8 @@ impl Bridge {
 
 /// The **server** half of the bridge protocol — the counterpart to [`Bridge`].
 ///
-/// Wally's ASI is one host that answers this protocol; our reimpl engine ([`mercs2_game`]) is meant
-/// to be another (Plan 03 phase 5, "serve the same protocol from the reimpl engine"), so the Workshop
+/// Wally's ASI is one host that answers this protocol; our reimpl engine ([`mercs2_game`]) is
+/// another (the live-bridge plan, `workshop-mods-rebuild-03-live-bridge.md`), so the Workshop
 /// console can drive either. This is the shared transport: it speaks the identical `<<<RUN>>>` /
 /// `<<<END>>>` framing, so a [`Bridge`] client cannot tell a `Server`-backed host from the ASI.
 ///

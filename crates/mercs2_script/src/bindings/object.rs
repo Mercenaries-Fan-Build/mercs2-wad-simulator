@@ -1,11 +1,11 @@
 //! `Object` engine binding namespace — luaL_Reg table VA 0x00b99608, 87 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
+//! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Object")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
@@ -113,8 +113,8 @@ pub const REQUIRED: &[Required] = &[
 
 /// Boot slice: the transform/name mutators the `MrxUtil.SpawnActor` recipe uses. `SetTransformToObject`
 /// / `Attach` / `DisablePhysics` are accepted as no-ops so the full `SpawnActor` + `_SpawnActorComplete`
-/// body runs without erroring (wired to real behavior by a later silo). The other ~79 `Object.*` cfuncs
-/// (health, physics impulses, animation, winch, hibernation) are for later silos.
+/// body runs without erroring (wired to real behavior by a later system). The other ~79 `Object.*` cfuncs
+/// (health, physics impulses, animation, winch, hibernation) are for later systems.
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 

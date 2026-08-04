@@ -5,7 +5,7 @@ The AI mechanism of the Mercenaries 2 reimplementation: the hash-addressed 1024-
 
 ## What it is
 
-Silo 11 / scoreboard row 23. This crate supplies the engine-side **mechanism** for AI — deliberately
+This crate supplies the engine-side **mechanism** for AI — deliberately
 *not* a compiled planner, because Mercenaries 2 does not have one. Per the AI code map's §8 reimpl
 disposition, the AI "brain" (goal selection, cover FSM, squad tactics) is a **data/Lua goal vocabulary
 dispatched over a hash-addressed action bus**, so what the engine owns — and what this crate
@@ -46,8 +46,7 @@ Provenance as the crate's own sources state it:
 | Relation matrix | AI code map §5 + `docs/reverse_engineer/faction_reputation_code_map.md` — the directed `[-100,100]` attitude matrix the combat→faction loop reads for price scaling / pursuit / HUD colour. |
 | Vehicle-AI actuation | `docs/reverse_engineer/road_graph_ai_driving_code_map.md` (referenced by the crate; the actuation itself is not in this crate). |
 
-Code map: `docs/reverse_engineer/ai_code_map.md`. Silo definition:
-`docs/modernization/reimplementation_parallelization_plan.md` §3. Owned Lua namespace: `Ai`.
+Code map: `docs/reverse_engineer/ai_code_map.md`. Owned Lua namespace: `Ai`.
 
 ## Usage
 

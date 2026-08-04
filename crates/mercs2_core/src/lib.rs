@@ -24,7 +24,7 @@
 //! | [`guidmap`] | Name-hash → `Entity` and guid ↔ `Entity` (the engine's resident guidmap singleton). |
 //! | [`object_filter`] | The `ObjectFilter.*` script query: label boolean-expression + include/exclude sets. |
 //! | [`render_state`] | The `Atmosphere` / `Bloom` / `Graphics` / `Fade` parameter state the render passes read. |
-//! | [`physics_query`] | The `PhysicsQuery` collision-query seam the sim silos compile against (no leaf→leaf edge to `mercs2_physics`). |
+//! | [`physics_query`] | The `PhysicsQuery` collision-query seam the sim systems compile against (no leaf→leaf edge to `mercs2_physics`). |
 //!
 //! Name hashing is **caller-supplied** throughout: [`registry`], [`event`] and [`guidmap`] all key on
 //! a precomputed `u32` (the engine hash lives at the byte-decode boundary in `mercs2_formats`), so
@@ -54,7 +54,7 @@ pub use guidmap::{GuidMap, FIRST_DYNAMIC_GUID, HERO_GUID, LOCAL_PLAYER_GUID};
 
 pub mod streaming;
 
-/// The `PhysicsQuery` seam (see `physics_query.rs`): the collision-query interface the sim silos
+/// The `PhysicsQuery` seam (see `physics_query.rs`): the collision-query interface the sim systems
 /// (`mercs2_vehicle`/`mercs2_combat`/`mercs2_anim`) depend on so they compile against the contract,
 /// not the `mercs2_physics` impl. Grounded in `physics_code_map.md` §3/§4 (raycast / getClosestPoints
 /// / hkpCharacterProxy move).

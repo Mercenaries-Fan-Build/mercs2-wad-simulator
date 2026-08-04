@@ -1,7 +1,5 @@
 //! `mercs2_ui` — GUI / HUD / Scaleform GFx + input extensions.
 //!
-//! **Silo 15** (`docs/modernization/reimplementation_parallelization_plan.md` §3).
-//! **Scoreboard row(s):** 27, 18.
 //! **Code map:** `docs/reverse_engineer/hud_widget_code_map.md` — the widget tree, its memory
 //! layout and the `_GuiInternal` surface. Secondary: `scaleform_gfx_class_map.md` (the GFx/renderer
 //! side) and `input_code_map.md`.
@@ -25,7 +23,7 @@
 //! owns the instances and re-exports this crate as `mercs2_engine::widgets`. Hosts that return `None`
 //! from that seam (the smoke/test hosts) turn the `Hud.*` mutators into no-ops.
 //!
-//! Not implemented here: the GFx rasterizer, and the silo's input-extension half (row 18).
+//! Not implemented here: the GFx rasterizer, and the system's input-extension half (row 18).
 
 pub mod marker;
 pub mod widget;

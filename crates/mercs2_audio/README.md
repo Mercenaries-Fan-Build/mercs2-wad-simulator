@@ -5,7 +5,7 @@ machine, bank loader, voice-over arbitration and 3D positional audio.
 
 ## What it is
 
-`mercs2_audio` is **silo 14** (scoreboard **row 21**) of the Mercenaries 2 reimplementation. It owns
+`mercs2_audio` owns
 everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving the process:
 
 * **`sounddb` parsing** — the `'\x1d'`-tagged cue catalog that routes a cue GUID to

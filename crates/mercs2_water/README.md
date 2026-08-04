@@ -1,6 +1,6 @@
 # mercs2_water
 
-Water (scoreboard row 7) for the Mercenaries 2 reimplementation: the static watermap query, the
+Water for the Mercenaries 2 reimplementation: the static watermap query, the
 third-person swim-state FSM, and the buoyancy / water-drag force math, plus the `AiWaterZone` tag.
 
 ## What it is
@@ -31,7 +31,7 @@ Concretely the crate provides:
 
 Provenance as the source states it:
 
-- `docs/reverse_engineer/water_code_map.md` (the sky/decal/water PC code maps) — scoreboard row 7.
+- `docs/reverse_engineer/water_code_map.md` (the sky/decal/water PC code maps).
 - `docs/watermap_format.md` — the recovered `watr` layout: header (`layer_count`, `grid_width` 257,
   `grid_height` 257, `cell_size_m` 32.0, `height_min_m` −50.0, `height_max_m` ≈325.26, 3 unknown
   trailing fields), Layer 0 heights, Layer 1 wet mask. The type hash is asserted in-crate to equal
@@ -77,7 +77,7 @@ assert_eq!(world.get::<&Swimmer>(swimmer).unwrap().state, SwimState::Submerged);
 let (positions, indices) = water.watermap.as_ref().unwrap().surface_mesh();
 ```
 
-Buoyancy and water drag are **pure math**, applied by the physics silo rather than by a system here:
+Buoyancy and water drag are **pure math**, applied by the physics system rather than by a system here:
 
 ```rust
 use mercs2_core::glam::Vec3;

@@ -30,12 +30,11 @@ return `None` from that seam (smoke/test hosts) make the `Hud.*` mutators no-ops
 
 ## Where it comes from
 
-Silo 15 of `docs/modernization/reimplementation_parallelization_plan.md` §3, covering scoreboard rows
-27 and 18. The code map the crate cites is
+The code map the crate cites is
 `docs/reverse_engineer/scaleform_gfx_class_map.md` (plus `docs/reverse_engineer/input_code_map.md`).
 
 Retail drives the HUD through a Scaleform GFx overlay; the shape of the model here is taken from the
-`Hud.*` / `Gui.*` cfunc surface those maps describe. Owned Lua namespaces for the silo: `Hud`, `Pda`,
+`Hud.*` / `Gui.*` cfunc surface those maps describe. Owned Lua namespaces for the system: `Hud`, `Pda`,
 `Gui`, `Marker`, `_GuiInternal`.
 
 ## Usage
@@ -94,5 +93,5 @@ Both are re-exported at the crate root.
   from its parent and clears each child's `parent` link, leaving the children live in the registry.
 - **`push_to_back` restamps to `min_z - 1`**, so z values drift negative over repeated calls. Only the
   relative order is meaningful; do not persist z as a stable identifier.
-- The silo's **input-extension** half (row 18) is scoped to this crate but not implemented here yet;
+- The **input-extension** half is scoped to this crate but not implemented here yet;
   only the HUD/marker state models exist. Likewise there is no GFx rasterizer in this crate.

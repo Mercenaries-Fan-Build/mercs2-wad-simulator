@@ -1,4 +1,4 @@
-//! Per-namespace engine binding harness + coverage gate (Wave-0 silo E3).
+//! Per-namespace engine binding harness + coverage gate.
 //!
 //! # The nil-handle contract — hold this in every binding you write
 //!
@@ -34,11 +34,11 @@
 //! Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`; the human index is
 //! `docs/reverse_engineer/scripting_host_binding_code_map.md` §3). Program rule: **no stubbed Lua
 //! streams** — every one of those bindings the game's Lua calls eventually needs a real body. This
-//! module makes that surface *modular* (one file per namespace, so each later silo fills exactly one)
+//! module makes that surface *modular* (one file per namespace, so each later system fills exactly one)
 //! and *measurable* (a machine-readable coverage report so "N stubs remaining" is CI-checkable and
 //! trends to zero).
 //!
-//! ## The convention every later silo follows
+//! ## The convention every later system follows
 //! Each `bindings/<ns>.rs` is self-contained and declares:
 //! - `NAMESPACE: &str` — stable coverage key (unique per luaL_Reg table).
 //! - `GLOBAL: &str` — the Lua global table it installs as (two tables may share a global, e.g. `Pg`).
@@ -325,7 +325,7 @@ impl NsCoverage {
         self.required_count() - self.real_count()
     }
     /// Required cfuncs the game Lua actually calls (`corpus_calls > 0`) that still lack a real body.
-    /// These are the faithful blockers a silo should knock out first.
+    /// These are the faithful blockers a system should knock out first.
     pub fn called_missing(&self) -> Vec<&'static str> {
         self.required
             .iter()
@@ -438,7 +438,7 @@ pub fn coverage_json(cov: &[NsCoverage]) -> String {
     out.push_str("{\n");
     out.push_str("  \"schema\": \"mercs2_script.binding_coverage/1\",\n");
     out.push_str(
-        "  \"note\": \"Wave-0 E3 Lua binding harness. required=Surface-B cfunc surface; real=engine-backed body; stub=deliberate no-op; missing=no body. remaining=required-real (the stubs-remaining gate, trend to zero). Regenerate: cargo test -p mercs2_script coverage_report.\",\n",
+        "  \"note\": \"Lua binding harness. required=Surface-B cfunc surface; real=engine-backed body; stub=deliberate no-op; missing=no body. remaining=required-real (the stubs-remaining gate, trend to zero). Regenerate: cargo test -p mercs2_script coverage_report.\",\n",
     );
     out.push_str(&format!(
         "  \"totals\": {{ \"namespaces\": {}, \"required\": {}, \"real\": {}, \"stub\": {}, \"missing\": {}, \"remaining\": {}, \"called_missing\": {} }},\n",

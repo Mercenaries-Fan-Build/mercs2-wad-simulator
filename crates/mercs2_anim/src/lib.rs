@@ -1,4 +1,4 @@
-//! `mercs2_anim` — Animation runtime (Wave-1 silo 8, scoreboard row 20).
+//! `mercs2_anim` — Animation runtime.
 //!
 //! The faithful, data-driven human animation runtime, built on the already-solved wavelet/Havok
 //! clip DECODE (`mercs2_formats::anim`, 168/168 tests) and the proven pose/skinning path. The exe is
@@ -29,9 +29,9 @@
 //!
 //! Assets reach the runtime through the [`AnimAssets`] trait (rig / clip duration / sampled pose) and
 //! ground through `mercs2_core::PhysicsQuery`, so the only dependencies are `mercs2_core` +
-//! `mercs2_formats` — no renderer, no loader, no leaf→leaf edge to the physics silo.
+//! `mercs2_formats` — no renderer, no loader, no leaf→leaf edge to the physics system.
 //!
-//! **Ragdoll and FaceFX are DEFERRED** — ragdoll needs physics rigid bodies from silo 7; FaceFX
+//! **Ragdoll and FaceFX are DEFERRED** — ragdoll needs physics rigid bodies from the physics system; FaceFX
 //! (evaluator `FUN_00686ce0`) needs its curve format decoded. Neither exists in this crate despite
 //! the package description listing them. Other known faithfulness gaps: the per-transition crossfade
 //! table (`AnimationTransition 0xAB8FE34B` — the controller uses a fixed [`ANIM_BLEND_SEC`] instead),

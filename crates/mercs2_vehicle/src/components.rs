@@ -1,4 +1,4 @@
-//! Vehicle ECS components (defined in **this** crate per the silo carve rule).
+//! Vehicle ECS components (defined in **this** crate per the crate carve rule).
 //!
 //! These mirror the retail `hkpUnaryAction`-derived actor runtime layout (`vehicle_code_map.md`
 //! §3/§4). An in-world vehicle entity carries: [`Vehicle`] (class tag), [`ChassisBody`] (the chassis
@@ -56,7 +56,7 @@ impl Vehicle {
 
 /// The chassis rigid body — `hkpUnaryAction.m_entity` (`+0x18`), with the motion fields the
 /// applyAction path touches: linvel `+0x1a0`, angvel `+0x1b0`, gravityFactor `+0x84`, and the
-/// motion vtbl setLinVel/applyImpulse ops. We integrate it ourselves (the physics silo owns the
+/// motion vtbl setLinVel/applyImpulse ops. We integrate it ourselves (the physics system owns the
 /// full solver; we only need a chassis + the `PhysicsQuery` wheel rays).
 #[derive(Clone, Copy, Debug)]
 pub struct ChassisBody {
@@ -227,7 +227,7 @@ impl VehicleRuntime {
     }
 }
 
-/// Hit points a freshly-spawned vehicle carries, so it is visible to the combat silo's damage applier
+/// Hit points a freshly-spawned vehicle carries, so it is visible to the combat system's damage applier
 /// and to the explosion sweep (both select on `mercs2_core::Health`). Without this a vehicle simply
 /// absorbed every bullet and blast with no effect.
 ///

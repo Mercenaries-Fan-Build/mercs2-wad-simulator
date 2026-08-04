@@ -1,11 +1,11 @@
 //! `Inventory` engine binding namespace — luaL_Reg table VA 0x00b99fa0, 9 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites across the base corpus **plus** `docs/mercs2-dlc-luacd/src` (the base-only recipe an earlier revision named is retracted — it undercounts by 75 files)). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! A later silo owns filling this file: add real bindings inside [`install`] via `b.real(..)` (or
+//! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_child("Human", "Inventory")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 

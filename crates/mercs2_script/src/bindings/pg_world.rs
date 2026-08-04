@@ -1,6 +1,6 @@
 //! `Junk` engine binding namespace — luaL_Reg table VA 0x00b99e28, 24 cfuncs.
 //!
-//! Wave-0 silo E3 seed. `REQUIRED` is the full cfunc surface this namespace must eventually back with
+//! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
 //! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
@@ -18,7 +18,7 @@
 //! no `EngineHost` seam yet, so they are faithful `b.stub`s: the dev/diagnostic dumps (`DumpAssets`,
 //! `DumpTextures`, `DumpMemory`, `DumpStats`, …) mirror retail's return-0 dev stubs, and the
 //! spawn/region/alarm/install cfuncs no-op with sensible defaults (spawns → guid 0, `IsInstallable`
-//! → false, `Search` → empty table) so callers don't fault on a nil. A later world/asset silo backs
+//! → false, `Search` → empty table) so callers don't fault on a nil. A later world/asset system backs
 //! these once the host exposes the streaming + asset DB.
 
 use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Value};

@@ -2,7 +2,7 @@
 name = "mercs2_jobs"
 version = "1.0.1"
 edition = "2021"
-description = "Mercenaries 2 reimpl — Pimp job system (row 15): worker pool + CS-guarded job ring, the engine's parallel-work spine. WAVE-2 scaffold."
+description = "Mercenaries 2 reimpl — Pimp job system: worker pool + CS-guarded job ring, the engine's parallel-work spine."
 readme = "README.md"
 license.workspace = true
 repository.workspace = true

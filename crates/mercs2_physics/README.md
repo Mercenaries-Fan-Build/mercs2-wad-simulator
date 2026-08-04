@@ -1,6 +1,6 @@
 # mercs2_physics
 
-Silo 7 (scoreboard row 22) of the Mercenaries 2 reimplementation: the character controller, collision
+The Mercenaries 2 reimplementation's character controller, collision
 queries and minimal rigid-body dynamics that stand in for the retail Havok world.
 
 ## What it is
@@ -32,12 +32,11 @@ distance to one vertex — that vertex-distance cull was the "fell through the f
 when a player stood in the middle of a large floor triangle.
 
 The crate has no Lua surface of its own; it backs the `PhysicsQuery` seam that the vehicle / combat /
-anim silos query. `mercs2_engine` re-exports it as `mercs2_engine::physics`.
+anim systems query. `mercs2_engine` re-exports it as `mercs2_engine::physics`.
 
 ## Where it comes from
 
-Provenance as recorded in the source (`docs/reverse_engineer/physics_code_map.md`, silo plan
-`docs/modernization/reimplementation_parallelization_plan.md` §3):
+Provenance as recorded in the source (`docs/reverse_engineer/physics_code_map.md`):
 
 | Reimpl item | Retail oracle |
 | --- | --- |
@@ -115,7 +114,7 @@ let boom = soup::raycast(&tris, feet, Vec3::Z, 5.0);             // camera boom
 ## Notes / gotchas
 
 * **No broadphase.** Every query is a linear scan over the triangle list with a cheap proximity cull.
-  The retail engine uses `hkpMoppBvTreeShape`. Fine at Wave-1 triangle counts; swap in a BVH when they
+  The retail engine uses `hkpMoppBvTreeShape`. Fine at current triangle counts; swap in a BVH when they
   grow.
 * **The two culls have different tuning.** The crate-root `StaticSoupPhysics` culls by distance to a
   triangle's *first vertex* — it is tuned for the game's **small** world triangles (the tests build

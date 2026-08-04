@@ -1,6 +1,6 @@
 {
   "schema": "mercs2_script.binding_coverage/1",
-  "note": "Wave-0 E3 Lua binding harness. required=Surface-B cfunc surface; real=engine-backed body; stub=deliberate no-op; missing=no body. remaining=required-real (the stubs-remaining gate, trend to zero). Regenerate: cargo test -p mercs2_script coverage_report.",
+  "note": "Lua binding harness. required=Surface-B cfunc surface; real=engine-backed body; stub=deliberate no-op; missing=no body. remaining=required-real (the stubs-remaining gate, trend to zero). Regenerate: cargo test -p mercs2_script coverage_report.",
   "totals": { "namespaces": 37, "required": 1092, "real": 1060, "stub": 32, "missing": 0, "remaining": 32, "called_missing": 4 },
   "namespaces": [
     { "namespace": "TableExt", "global": "Table", "table_va": "0x00000000", "required": 2, "real": 2, "stub": 0, "missing": 0, "remaining": 0, "real_fns": ["Create", "InsertI"], "stub_fns": [], "called_missing": [] },

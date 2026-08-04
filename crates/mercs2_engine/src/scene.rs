@@ -335,10 +335,10 @@ pub struct Scene {
     particles: crate::particles::ParticleSystem,
     /// Last-frame timestamp for the particle sim's per-frame dt.
     last_frame: std::time::Instant,
-    /// Registered Band-A render nodes (reflection / water / decals / sky-as-pass silos), each plugged
+    /// Registered render nodes (reflection / water / decals / sky-as-pass), each plugged
     /// into a canonical [`crate::render_graph::PassId`] slot. EMPTY by default → the `SCENE_ORDER`
-    /// walk records nothing extra, so the E2 carve stays behaviour-preserving until a silo plugs in.
-    /// A silo registers via [`Scene::add_render_node`]; the frame builds a [`crate::render_graph::PassCtx`]
+    /// walk records nothing extra, so the carve stays behaviour-preserving until a system plugs in.
+    /// A system registers via [`Scene::add_render_node`]; the frame builds a [`crate::render_graph::PassCtx`]
     /// and calls each matching node in its slot (see `dispatch_nodes`).
     render_nodes: Vec<Box<dyn crate::render_graph::RenderNode>>,
 }
@@ -1053,7 +1053,7 @@ impl Scene {
         }
     }
 
-    /// Register a Band-A [`crate::render_graph::RenderNode`] (reflection / water / decal / sky silo).
+    /// Register a [`crate::render_graph::RenderNode`] (reflection / water / decal / sky).
     /// It runs in its declared [`crate::render_graph::PassId`] slot during the `SCENE_ORDER` walk,
     /// handed a fully-populated [`crate::render_graph::PassCtx`] (camera + lights + surface format +
     /// the collected renderable list). Multiple nodes may share a slot (registration order preserved).
@@ -1825,10 +1825,10 @@ impl Scene {
         self.ui.draw(&mut upass, ui_count);
     }
 
-    /// Run any registered Band-A [`crate::render_graph::RenderNode`] whose slot is `slot`, building a
+    /// Run any registered [`crate::render_graph::RenderNode`] whose slot is `slot`, building a
     /// fully-populated [`crate::render_graph::PassCtx`] for each (camera + lights + surface format +
     /// the collected renderable list). No-op when `render_nodes` is empty (the default) → the frame is
-    /// byte-identical to the E2 carve. `color` is this frame's swapchain view; `depth`/lights/format
+    /// byte-identical to the carve. `color` is this frame's swapchain view; `depth`/lights/format
     /// come from `self`; the camera + `items` are this frame's locals.
     #[allow(clippy::too_many_arguments)]
     fn dispatch_nodes(
@@ -2097,7 +2097,7 @@ impl Scene {
         // Phase 2: record the frame's passes by walking the canonical per-viewport scene order
         // (`render_graph::SCENE_ORDER`, the recovered `FUN_00466d40` body sequence — render_core §5).
         // The not-yet-implemented canonical passes (wake/occlusion/reflection/water/z-prepass/
-        // fading-trees/mirror/blob) are no-op SEAMS the Band-A silos fill next wave: they record
+        // fading-trees/mirror/blob) are no-op SEAMS to be filled later: they record
         // NOTHING today, so this loop reduces to the engine's prior command sequence (shadow-depth →
         // color → transparent-fx → ui → overlay) — a behaviour-preserving carve. Each node's Xbox↔PC
         // anchor lives on `render_graph::PassId::anchor`.
@@ -2143,25 +2143,25 @@ impl Scene {
                         );
                     }
                 }
-                // --- canonical FUN_00466d40 seams: Band-A silos fill these; they render NOTHING yet ---
-                // SILO water (Band-A): wake-map / occlusion / reflection / water-surface seams.
+                // --- canonical FUN_00466d40 seams: to be filled later; they render NOTHING yet ---
+                // Water pass: wake-map / occlusion / reflection / water-surface seams.
                 PassId::WakeMap | PassId::Occlusion | PassId::Reflection | PassId::WaterSurface => {}
-                // SILO z-prepass (Band-A): depth-only main-list pass seam.
+                // Z-prepass: depth-only main-list pass seam.
                 PassId::ZOpaque => {}
-                // SILO vegetation-fade (Band-A): RenderFadingTrees seam.
+                // Vegetation-fade: RenderFadingTrees seam.
                 PassId::FadingTrees => {}
-                // SILO mirror/sub-scene (Band-A): planar-mirror render seam.
+                // Mirror/sub-scene: planar-mirror render seam.
                 PassId::Mirror => {}
                 // Blob-shadow fallback (`FUN_00853710`): darken projected discs under casters the
                 // cascade atlas doesn't cover. No-op when `self.blobs` is empty (default paths).
                 PassId::Blob => self.record_blob(&mut encoder, &view_tex),
-                // SILO particles-as-pass (Band-A): canonical PgFX pass; engine draws via TransparentFx.
+                // Particles-as-pass: canonical PgFX pass; engine draws via TransparentFx.
                 PassId::Particles => {}
                 // Collect / scene-begin / shadow-collect are folded into phase-1 CPU setup and the
                 // color/shadow passes' own RT bind + clear — no standalone GPU pass to record.
                 PassId::SceneBegin | PassId::Collect | PassId::ShadowCollect => {}
             }
-            // After the built-in pass for this slot, run any Band-A silo node plugged into it, handed
+            // After the built-in pass for this slot, run any node plugged into it, handed
             // the fully-populated PassCtx (camera + lights + surface format + the collected `items`
             // list). No registered nodes yet → this is a no-op and the frame stays byte-identical.
             self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
@@ -2175,8 +2175,8 @@ impl Scene {
 
 /// A snapshot of one drawable entity for a frame: `(entity, model-space transform, model hash,
 /// bone palette)`. Copied out of the ECS `World` each frame so the world borrow is released before
-/// `Scene` records the passes. This IS the [`crate::render_graph::PassId::Collect`] list the Band-A
-/// silos read via [`crate::render_graph::PassCtx::items`] (aliased so the exposure is zero-copy).
+/// `Scene` records the passes. This IS the [`crate::render_graph::PassId::Collect`] list the
+/// systems read via [`crate::render_graph::PassCtx::items`] (aliased so the exposure is zero-copy).
 type DrawItem = crate::render_graph::RenderItem;
 
 /// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,

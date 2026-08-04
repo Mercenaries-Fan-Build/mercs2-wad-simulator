@@ -5,7 +5,7 @@
 //! *mechanism*). This is the BBOX-culled variant: the broad phase culls by each triangle's bounding box,
 //! not the distance to one vertex — a large floor/wall triangle a player stands in the middle of is kept
 //! (the "fell through the floor after moving" fix). It complements [`crate::StaticSoupPhysics`] (the
-//! `PhysicsQuery` seam for the vehicle/combat/anim silos); this module is the lightweight direct-soup API
+//! `PhysicsQuery` seam for the vehicle/combat/anim systems); this module is the lightweight direct-soup API
 //! the on-foot player controller + camera boom use.
 //!
 //! The player is a vertical CAPSULE (a core segment from `feet+radius` to `feet+height-radius`, swept by

@@ -1,20 +1,20 @@
 # mercs2_engine — deferred render-graph work
 
-Wave-0 silo **E2 (render-graph carve)** established `render_graph::SCENE_ORDER` — the recovered
+The render-graph carve established `render_graph::SCENE_ORDER` — the recovered
 `FUN_00466d40` per-viewport pass order (render_core_code_map.md §5/§11) — and moved the engine's
 existing passes (shadow-depth, color/HDR, transparent-FX, UI) into ordered nodes with **zero
 behaviour change**. The following canonical passes are registered as **no-op seams** in the correct
-order and are left for the Band-A silos to implement next wave. Each is a real faithful gap, but by
-design out of E2's carve scope.
+order and are left to implement later. Each is a real faithful gap, but by
+design out of the carve's scope.
 
 | Seam node (`render_graph::PassId`) | Anchor | Owner |
 |---|---|---|
-| `WakeMap` / `Occlusion` / `Reflection` / `WaterSurface` | `FUN_00486390` / `FUN_00482fa0` / `FUN_00486fa0`→`FUN_004677d0` / `FUN_00487540`+`FUN_00487dd0` (water_code_map.md §2) | Band-A water/reflection silo |
-| `ZOpaque` | `FUN_00468e40` vtbl+0x1c (Render/RenderZPass) | Band-A z-prepass silo |
-| `FadingTrees` | `FUN_00468bb0` (RenderFadingTrees, Xbox 0x16a2c) | Band-A vegetation silo |
-| `Mirror` | `PTR_PTR_01175a10` iterate, obj vtbl+0x40/+0x14 | Band-A mirror/sub-scene silo |
-| `Blob` | `FUN_00853710` (BlobShadow fallback) | Band-A shadow silo |
-| `Particles` (canonical PgFX pass) | particle_fx_code_map.md | Band-A particles silo |
+| `WakeMap` / `Occlusion` / `Reflection` / `WaterSurface` | `FUN_00486390` / `FUN_00482fa0` / `FUN_00486fa0`→`FUN_004677d0` / `FUN_00487540`+`FUN_00487dd0` (water_code_map.md §2) | water/reflection pass |
+| `ZOpaque` | `FUN_00468e40` vtbl+0x1c (Render/RenderZPass) | z-prepass |
+| `FadingTrees` | `FUN_00468bb0` (RenderFadingTrees, Xbox 0x16a2c) | vegetation pass |
+| `Mirror` | `PTR_PTR_01175a10` iterate, obj vtbl+0x40/+0x14 | mirror/sub-scene pass |
+| `Blob` | `FUN_00853710` (BlobShadow fallback) | shadow pass |
+| `Particles` (canonical PgFX pass) | particle_fx_code_map.md | particles pass |
 
 Plug-in seam: implement `render_graph::RenderNode` against the node's `PassId` slot and record into
 `render_graph::PassCtx`.
@@ -23,16 +23,16 @@ Plug-in seam: implement `render_graph::RenderNode` against the node's `PassId` s
 
 - **4× shadow cascades.** ~~The exe emits four cascades into a 1024×4096 atlas (`while(i<4)` around
   `FUN_00468ca0`, shadow_code_map.md §4); the engine realizes a single directional cascade.~~ **DONE
-  (Wave-1 silo 2 — lighting/shadows).** `PassId::ShadowCascade` now renders the DYNAMIC scene into a
+  (lighting/shadows).** `PassId::ShadowCascade` now renders the DYNAMIC scene into a
   **1024×4096 depth atlas** (four stacked 1024² tiles, faithful to `FUN_00755d90` §1), one viewport +
   light-VP per cascade via a dynamic-offset uniform; casters are distance-LOD gated into only the
   cascade boxes that contain them (`FUN_00858150` analog). The color pass (`shader.wgsl` `shadow_factor`)
   selects the tightest containing cascade per fragment and PCF-samples its tile. `[faithful-blocker: no]`
 - **Sky-as-a-pass.** The engine draws the sky as the first fullscreen triangle inside the color pass
   rather than as the canonical standalone sky/atmosphere pass. Splitting it out belongs with the
-  sky/HDR silo. `[faithful-blocker: no]`
-- **`PassCtx` surface.** ~~Intentionally minimal (device/queue/encoder/color/depth/size).~~ **DONE
-  (Wave-1 seam D).** Extended with the camera (`view_proj` / `view` / `cam_pos`), the per-frame
+  sky/HDR system. `[faithful-blocker: no]`
+- **`PassCtx` surface.** ~~Intentionally minimal (device/queue/encoder/color/depth/size).~~ **DONE.**
+  Extended with the camera (`view_proj` / `view` / `cam_pos`), the per-frame
   `lights_bind` (group-3 dynamic lights + folded shadow map), `surface_format` (for transient RTs),
   and `items` — the collected renderable list (`PassId::Collect` output, [`RenderItem`]). `Scene`
   populates a `PassCtx` per registered node in `dispatch_nodes`; register via `Scene::add_render_node`.
@@ -41,13 +41,13 @@ Plug-in seam: implement `render_graph::RenderNode` against the node's `PassId` s
   `PassCtx` and IS the same `Vec` the engine's existing `Color`/`ShadowCascade` passes draw from
   (zero-copy alias), but those passes still index it via their own private path rather than reading it
   back through `PassCtx`. Re-driving `Color` from `ctx.items` is a mechanical follow-up left untouched
-  here to keep the carve byte-identical (fidelity bar). A newly-registered Band-A node already reads
+  here to keep the carve byte-identical (fidelity bar). A newly-registered node already reads
   the fully-populated `items`. `[faithful-blocker: no]`
 
-## Wave-1 seam A/B (schema loader + region cache) — confirm-live follow-ups
+## Schema loader + region cache — confirm-live follow-ups
 
-The E1 `schm` deserializer is now wired into the world loader (`worldutil::load_schema_components`)
-and the S5 RegionCache is populated from authored `PopulationDensity` anchors
+The `schm` deserializer is now wired into the world loader (`worldutil::load_schema_components`)
+and the RegionCache is populated from authored `PopulationDensity` anchors
 (`worldutil::register_population_regions`, driven each tick in `game_world`). Grounded facts and the
 items left for a live/x32dbg read:
 
@@ -68,9 +68,9 @@ items left for a live/x32dbg read:
   which field drives the density-selection priority gate. `[faithful-blocker: no]`
 - **The population-lump executor.** `update_regions` decisions (CacheIn/CacheOut) are computed each
   tick but not yet acted on (no spawn/despawn of an ambient-population lump). That executor is the
-  population silo's job; the decision layer is now live and correct. `[faithful-blocker: no]`
+  population system's job; the decision layer is now live and correct. `[faithful-blocker: no]`
 
-## Wave-1 silo 2 (lighting + shadows) — confirm-live follow-ups
+## Lighting + shadows — confirm-live follow-ups
 
 The 4-cascade directional atlas, the `_pl`/`_sl`/`_pl_sl` per-pixel light-class permutation (ShaderLevel
 gate), the BlobShadow fallback, and the `Rt*Animation` light-tween update are now wired into `scene.rs`
@@ -87,7 +87,7 @@ gate), the BlobShadow fallback, and the `Rt*Animation` light-tween update are no
   (pos/range/color/intensity/**cone axis + inner/outer cos**) + the `_sl` shader path are all wired, but
   `placement::light_inventory` only emits omni `render::GpuLight` point records today — the `LightObject`
   stride-0x34 `int` type field (point vs spot) and the cone-angle floats are not decoded into spot
-  records. On retail data the spot set is empty (point lights only). **CONFIRM-LIVE / cross-silo:** decode
+  records. On retail data the spot set is empty (point lights only). **CONFIRM-LIVE / cross-system:** decode
   the `LightObject` type + cone floats in the harvest (`FUN_006622e0`, presentation-ECS §LightObject) and
   route spots to `set_spot_lights`. `[faithful-blocker: no]`
 - **`Rt{Light,Color,Scale,Alpha}Animation` descriptors are not decoded from the COMP stream.** The tween

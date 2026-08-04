@@ -1,6 +1,6 @@
 # mercs2_player
 
-Silo 17 of the Mercenaries 2 reimplementation: the **player concern** — the per-slot player object, the
+The **player concern** of the Mercenaries 2 reimplementation: the per-slot player object, the
 persistent profile/economy singleton, possession, disguise, the play-area fence, PDA/satellite mode, and
 on-foot locomotion.
 
@@ -130,7 +130,7 @@ assert!(!w.profile.autosave_due());
 
 `mercs2_core` + `mercs2_formats` only — never another leaf crate (plan §4). The two edges that would
 otherwise be needed go through `mercs2_core` traits instead: `LocomotionQuery` for the controller's world
-reads, and `PlayerWorld::set_control_source` as the seam the seat/ride silo pushes through.
+reads, and `PlayerWorld::set_control_source` as the seam the seat/ride system pushes through.
 
 Deliberately unimplemented items, and the shipped bugs reproduced on purpose, are in
 [`DEFERRED.md`](DEFERRED.md).

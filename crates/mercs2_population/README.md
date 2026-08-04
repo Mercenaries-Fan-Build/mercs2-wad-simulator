@@ -1,6 +1,6 @@
 # mercs2_population
 
-The population / spawner system of the Mercenaries 2 reimplementation (scoreboard row 24): the
+The population / spawner system of the Mercenaries 2 reimplementation: the
 `PgSysPopulation` per-frame tick — budgeted death retirement, ambient crowd/traffic density budgeting,
 and the four-family simple-spawner pool that emits spawn requests.
 
