@@ -15,13 +15,22 @@
 //!   [`projectile::projectile_system`]); the firing pipeline (`RateOfFire`/`iClipSize`/reload,
 //!   [`firing::weapon_firing_system`]); the `wpn_*` reflection-blob container parse
 //!   ([`stats::parse_weapon_block`]); the `Weapon`/`Airstrike` Lua-cfunc bodies ([`lua_surface`]).
-//! - **Confirm-live stand-in** (the one documented wall, code map §5): the **per-hit damage/explosion
-//!   solver** ([`damage`]) — the exe's `ApplyDamage*`/`UpdateExplosions`/`PhysicsCreateExplosion` math
-//!   is string-only/SecuROM on both builds and is **unread**. The applier here is a faithful modern
-//!   stand-in from the *authored* dropoff/radius fields, with every stand-in choice marked
-//!   `// CONFIRM-LIVE:`; its **outputs** (`DamageMsg`/`DestroyMsg` into the destruction FSM) are the
-//!   exe's known outputs. Also confirm-live: the exact `wpn_*` byte offset → named-stat binding
-//!   (`stats`), so per-weapon stats fall back to the recovered exe schema defaults. See `DEFERRED.md`.
+//! - **Recovered sibling-engine solver** ([`damage`]): the exe's own
+//!   `ApplyDamage*`/`UpdateExplosions`/`PhysicsCreateExplosion` math is SecuROM-thunked/unread, but the
+//!   **algorithm** is recovered first-hand from the fully-decompiled sibling WildStar solver (24 fns, 0
+//!   bad instr) and **structurally confirmed for Mercs2** by the Jul-08 Xenon prototype's profiler
+//!   scopes (`ApplyDamageToPrimaryHealth`/`ApplyDamageToNodeHealth`/`ApplyExplosionToBodies`/…). Here:
+//!   the `health -= amount * damageScale` core, the two-tier hull/[`NodeHealth`] split, the linear
+//!   box-nearest-point falloff, and the deferred + distance-staggered blast apply. Only the *numeric
+//!   constants* (`1/30` stagger, `1.5 s`, force floor `200`) remain WildStar's and are marked
+//!   `// CONFIRM-LIVE:` (the Mercs2 numeric bodies are VMX128/BSim-blocked). Its **outputs**
+//!   (`DamageMsg`/`DestroyMsg` into the destruction FSM) are the exe's known outputs.
+//! - **Weapon stats** (`stats`): the reflection schemas (order/types/defaults) are recovered from the
+//!   declarator bodies (`FUN_0065ca70` et al.), so [`WeaponStats::apply_component_record`] decodes a
+//!   genuine component record to NAMED per-weapon stats. **CONFIRM-LIVE:** the retail `wpn_*` entry[0]
+//!   `0x787c0871` sub-objects are the weapon's scene-graph nodes, not those components, so the per-weapon
+//!   stat *source* (a `vz_state` overlay or the live deserializer) is the remaining confirm; a
+//!   non-overriding weapon uses the declarator-recovered defaults. See `stats` module docs + `DEFERRED.md`.
 //!
 //! # Module map
 //! - [`components`] — the live ECS instances ([`RuntimeWeapon`], [`RuntimeProjectile`],
@@ -63,7 +72,9 @@ pub use components::{
     CarriedBy, Equipment, EquipmentType, HomingState, InventoryFlags, PendingDestroy, RuntimeExplosion,
     RuntimeHomingWeapon, RuntimeInventory, RuntimeProjectile, RuntimeWeapon, WeaponVisibility,
 };
-pub use damage::{DamageKey, ExplosionSize};
+pub use damage::{
+    Bounds, DamageKey, DamageScale, ExplosionSize, Invulnerable, NodeHealth, PendingBlastVictim,
+};
 pub use impact::{Impact, ImpactKind};
 pub use ragdoll::{Ragdoll, Ragdollable, RagdollState};
 pub use stats::{ExplosiveStats, FireType, HomingStats, WeaponDefBlob, WeaponStats, WeaponSubObject};

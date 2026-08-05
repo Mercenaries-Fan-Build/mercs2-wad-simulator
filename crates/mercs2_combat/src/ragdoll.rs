@@ -1,114 +1,77 @@
-//! Ragdoll death reaction — **single-body stand-in** for the physics-system constrained ragdoll.
+//! Ragdoll death reaction — the leaf-side **death-reaction request** that hands a killed character off
+//! to the constrained multi-body Havok ragdoll (`mercs2_physics::ragdoll`, driven engine-side).
 //!
 //! # Provenance & honesty boundary
 //! WILDSTAR-sourced from `WSHumanRagdoll` + the explosion apply
 //! (`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`): the recovered
-//! `WSHumanRagdoll::SetBodyToRagdoll` snaps each rigid body onto its current animated bone pose and
-//! then releases it to Havok, and `WSExplosion::Update` applies a **7-bone impulse spread** floored at
-//! `damage::wildstar::FORCE_FLOOR` (200). The faithful engine target is that multi-body Havok ragdoll —
-//! which needs the physics system's constrained rigid bodies (`mercs2_physics` / `mercs2_anim` both mark
-//! ragdoll DEFERRED). Until then this is a **clearly-marked single-body stand-in**: on a lethal blast a
-//! character is released from animation into one rigid body launched by the blast impulse, integrated
-//! under gravity, and settled on the ground. It closes the damage → death → visible-reaction loop with
-//! the *shape* of the real system (handoff + impulse + settle); the per-bone articulation is the system.
+//! `WSHumanRagdoll::SetBodyToRagdoll` snaps each rigid body onto its current animated bone pose and then
+//! releases it to Havok, and `WSExplosion::Update` applies a **7-bone impulse spread** floored at
+//! `damage::wildstar::FORCE_FLOOR` (200).
+//!
+//! # Why this module is now a thin handoff (superseded single-body stand-in)
+//! `mercs2_combat` is a **leaf** crate (`mercs2_core` + `mercs2_formats` only; carve rule §4), so it
+//! cannot reference the physics-system ragdoll. The faithful **constrained multi-body** ragdoll lives in
+//! [`mercs2_physics::ragdoll`] (`RagdollDef::human` — the recovered 11-capsule body/bone map — plus the
+//! XPBD `Ragdoll` sim) and is snapped onto the posed skeleton through the
+//! [`mercs2_anim::ragdoll`] seam. This module therefore owns only the **decision + seed**: flag a killed
+//! [`Ragdollable`] for ragdolling and record the killing blast's initial velocity. The engine layer
+//! (`mercs2_engine`) reads that [`Ragdoll`] handoff, spawns the multi-body ragdoll seeded from the
+//! victim's current posed skeleton, steps it against the world each fixed tick, and writes it back to the
+//! skin. The former single-rigid-body integrator (`Ragdoll { lin_vel, spin_axis, .. }` + `ragdoll_system`)
+//! that lived here is **superseded** by that sim and removed; `blast_impulse` (the recovered magnitude /
+//! loft) is kept intact because `damage.rs` seeds the handoff through it.
 
-use glam::{Quat, Vec3};
+use glam::Vec3;
 use hecs::{Entity, World};
 
-use mercs2_core::Transform;
-
 /// Opt-in marker: entities the game flags as ragdoll-capable (humans with a skeleton). Props react
-/// through the destruction FSM instead, so only `Ragdollable` entities are launched on a lethal blast.
+/// through the destruction FSM instead, so only `Ragdollable` entities are handed to the ragdoll on a
+/// lethal hit.
 pub struct Ragdollable;
 
-/// Where a ragdolling body is in the alive→dynamic→settled lifecycle (mirrors `WSHumanRagdoll`'s
-/// body state: `SetBodyToRagdoll`/`SetBodyDynamic` → motored fall → at rest).
+/// Where a ragdolling body is in its lifecycle (mirrors `WSHumanRagdoll`'s body state: released into the
+/// dynamic ragdoll → at rest). The engine flips [`Ragdoll::state`] to `Settled` once the multi-body sim
+/// comes to rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RagdollState {
-    /// Airborne / falling — integrating under gravity.
+    /// The multi-body ragdoll is active — articulating / falling under its constraints.
     Launched,
-    /// At rest on the ground — no longer integrated.
+    /// It has come to rest.
     Settled,
 }
 
-/// Single-body death-physics state. Drives the entity's [`Transform`] once animation releases it (the
-/// `SetBodyToRagdoll` handoff). Replaced wholesale when the physics-system ragdoll lands.
+/// The **death-reaction handoff** placed on a killed [`Ragdollable`]. It is the leaf→engine seam for the
+/// constrained multi-body Havok ragdoll: the engine detects this on a dead entity, spawns
+/// `mercs2_physics::ragdoll::Ragdoll::human()` snapped onto the victim's posed skeleton, and seeds every
+/// ragdoll body's initial velocity from [`seed_velocity`](Ragdoll::seed_velocity).
+///
+/// Supersedes the old single-rigid-body stand-in that integrated on this component directly — the real
+/// per-bone articulation now lives in `mercs2_physics::ragdoll`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ragdoll {
-    /// Linear velocity (m/s), seeded from the blast impulse.
-    pub lin_vel: Vec3,
-    /// Tumble axis (unit) and rate (rad/s) — the coarse stand-in for per-bone articulation.
-    pub spin_axis: Vec3,
-    pub spin_rate: f32,
+    /// Initial per-body velocity (m/s) the engine seeds every ragdoll body with — the killing blast
+    /// impulse (`blast_impulse`, N·s) over the nominal body mass. `ZERO` for a non-blast kill (the body
+    /// simply goes limp and falls).
+    pub seed_velocity: Vec3,
+    /// Lifecycle state; the engine flips this to [`RagdollState::Settled`] once the multi-body sim rests.
     pub state: RagdollState,
 }
 
 /// Nominal body mass (kg) converting the WildStar **impulse** (N·s, `max(damage, FORCE_FLOOR)`) into a
 /// launch velocity `v = J / m`. `// WILDSTAR/CONFIRM-LIVE:` the real ragdoll distributes the impulse
-/// across 7 weighted bones; this lumps it into one 70 kg body.
+/// across 7 weighted bones; this lumps it into one 70 kg body to seed the whole ragdoll's initial motion.
 const NOMINAL_MASS: f32 = 70.0;
-/// Gravity (m/s²). `// CONFIRM-LIVE:` the exe uses the Havok world gravity vector.
-const GRAVITY: f32 = -9.81;
-/// Fraction of velocity retained on ground contact (skid/settle damping).
-const GROUND_DAMP: f32 = 0.35;
-/// Ground speed below which a grounded body is considered [`RagdollState::Settled`].
-const SETTLE_SPEED: f32 = 0.4;
 
-/// The `WSHumanRagdoll::SetBodyToRagdoll` handoff: release `victim` from animation into a launched
-/// rigid body whose initial velocity is `impulse / NOMINAL_MASS`. No-op if the entity isn't
-/// [`Ragdollable`] or is already ragdolling. The spin axis is derived from the impulse (a body thrown
-/// sideways tumbles about the axis perpendicular to its travel and up).
+/// The `WSHumanRagdoll::SetBodyToRagdoll` handoff: flag `victim` for the constrained multi-body ragdoll,
+/// recording the initial per-body velocity `impulse / NOMINAL_MASS`. No-op if the entity isn't
+/// [`Ragdollable`] or is already flagged. The engine layer consumes this [`Ragdoll`] to spawn + step the
+/// physics ragdoll seeded on the victim's posed skeleton.
 pub fn trigger_ragdoll(world: &mut World, victim: Entity, impulse: Vec3) {
     if world.get::<&Ragdollable>(victim).is_err() || world.get::<&Ragdoll>(victim).is_ok() {
         return;
     }
-    let lin_vel = impulse / NOMINAL_MASS;
-    // Tumble about the horizontal axis perpendicular to travel; rate scales with launch speed.
-    let horiz = Vec3::new(lin_vel.x, 0.0, lin_vel.z);
-    let spin_axis = if horiz.length_squared() > 1e-6 {
-        horiz.normalize().cross(Vec3::Y).normalize_or_zero()
-    } else {
-        Vec3::X
-    };
-    let spin_rate = (lin_vel.length() * 0.4).min(12.0); // rad/s, capped so it doesn't blur
-    let _ = world.insert_one(
-        victim,
-        Ragdoll { lin_vel, spin_axis, spin_rate, state: RagdollState::Launched },
-    );
-}
-
-/// Integrate every launched [`Ragdoll`] one step: gravity, tumble, and ground collision via
-/// `ground_at(pos) -> ground height`. On contact the body damps and, once slow, settles. Call each
-/// frame from the engine with its heightmap/collision sampler (tests pass a flat `|_| 0.0`).
-pub fn ragdoll_system(world: &mut World, dt: f32, ground_at: impl Fn(Vec3) -> f32) {
-    if dt <= 0.0 {
-        return;
-    }
-    for (_e, (tf, rd)) in world.query::<(&mut Transform, &mut Ragdoll)>().iter() {
-        if rd.state == RagdollState::Settled {
-            continue;
-        }
-        rd.lin_vel.y += GRAVITY * dt;
-        tf.translation += rd.lin_vel * dt;
-        if rd.spin_rate.abs() > 1e-4 {
-            let spin = Quat::from_axis_angle(rd.spin_axis, rd.spin_rate * dt);
-            tf.rotation = (spin * tf.rotation).normalize();
-        }
-        let ground = ground_at(tf.translation);
-        if tf.translation.y <= ground {
-            tf.translation.y = ground;
-            // Skid + damp on contact; never keep driving into the floor.
-            rd.lin_vel *= GROUND_DAMP;
-            if rd.lin_vel.y < 0.0 {
-                rd.lin_vel.y = 0.0;
-            }
-            rd.spin_rate *= GROUND_DAMP;
-            if rd.lin_vel.length() < SETTLE_SPEED {
-                rd.state = RagdollState::Settled;
-                rd.lin_vel = Vec3::ZERO;
-                rd.spin_rate = 0.0;
-            }
-        }
-    }
+    let seed_velocity = impulse / NOMINAL_MASS;
+    let _ = world.insert_one(victim, Ragdoll { seed_velocity, state: RagdollState::Launched });
 }
 
 /// Compute the blast impulse to launch a body caught in an explosion: outward from `center`, lofted
@@ -128,7 +91,7 @@ pub fn blast_impulse(center: Vec3, victim_pos: Vec3, damage: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mercs2_core::Health;
+    use mercs2_core::{Health, Transform};
 
     fn spawn_body(world: &mut World, pos: Vec3, ragdollable: bool) -> Entity {
         let tf = Transform { translation: pos, ..Transform::IDENTITY };
@@ -140,15 +103,30 @@ mod tests {
     }
 
     #[test]
-    fn only_ragdollable_entities_launch() {
+    fn only_ragdollable_entities_are_flagged() {
         let mut world = World::new();
         let human = spawn_body(&mut world, Vec3::new(2.0, 0.0, 0.0), true);
         let prop = spawn_body(&mut world, Vec3::new(2.0, 0.0, 0.0), false);
         let imp = blast_impulse(Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0), 300.0);
         trigger_ragdoll(&mut world, human, imp);
         trigger_ragdoll(&mut world, prop, imp);
-        assert!(world.get::<&Ragdoll>(human).is_ok(), "human launches");
+        assert!(world.get::<&Ragdoll>(human).is_ok(), "human is handed off to the ragdoll");
         assert!(world.get::<&Ragdoll>(prop).is_err(), "prop does not ragdoll");
+        assert_eq!(world.get::<&Ragdoll>(human).unwrap().state, RagdollState::Launched);
+    }
+
+    #[test]
+    fn trigger_seeds_per_body_velocity_from_impulse() {
+        let mut world = World::new();
+        let e = spawn_body(&mut world, Vec3::ZERO, true);
+        let impulse = Vec3::new(140.0, 700.0, 0.0);
+        trigger_ragdoll(&mut world, e, impulse);
+        let rd = *world.get::<&Ragdoll>(e).unwrap();
+        // The engine seeds every ragdoll body with impulse / nominal mass.
+        assert!((rd.seed_velocity - impulse / NOMINAL_MASS).length() < 1e-4);
+        // Re-triggering is a no-op (already handed off).
+        trigger_ragdoll(&mut world, e, Vec3::ZERO);
+        assert!((world.get::<&Ragdoll>(e).unwrap().seed_velocity - impulse / NOMINAL_MASS).length() < 1e-4);
     }
 
     #[test]
@@ -158,21 +136,5 @@ mod tests {
         assert!((imp.length() - crate::damage::wildstar::FORCE_FLOOR).abs() < 1e-3);
         assert!(imp.x > 0.0, "outward (+x)");
         assert!(imp.y > 0.0, "lofted (+y)");
-    }
-
-    #[test]
-    fn launched_body_falls_and_settles_on_ground() {
-        let mut world = World::new();
-        let e = spawn_body(&mut world, Vec3::new(0.0, 3.0, 0.0), true);
-        // Launch mostly upward/sideways.
-        trigger_ragdoll(&mut world, e, Vec3::new(140.0, 700.0, 0.0));
-        assert_eq!(world.get::<&Ragdoll>(e).unwrap().state, RagdollState::Launched);
-        // Integrate a few seconds against a flat ground at y=0.
-        for _ in 0..600 {
-            ragdoll_system(&mut world, 1.0 / 60.0, |_| 0.0);
-        }
-        let tf = world.get::<&Transform>(e).unwrap();
-        assert!((tf.translation.y).abs() < 1e-3, "rests on ground y=0, got {}", tf.translation.y);
-        assert_eq!(world.get::<&Ragdoll>(e).unwrap().state, RagdollState::Settled);
     }
 }

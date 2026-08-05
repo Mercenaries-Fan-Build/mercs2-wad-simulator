@@ -15,12 +15,17 @@
 //!    (`wifpmcinterior.lua`), i.e. near 0.3 / far 500 in the PMC interior.
 //!  - **On-foot blend + weights:** `HumanCameraModifier` reflection-schema defaults read from the exe
 //!    `.rdata` (`FUN_0065eaf0`): blend `DAT_00bbb99c` = 0.5; weight scalars 0.6 / 0.75.
-//!  - **Car FOV / blend / far:** `CameraCarPreset` schema defaults (`FUN_0065e1d0`): f11 = 55 & f12 = 65
-//!    (FOV min/max, deg), f8/f10 = 0.1 (blend), f13 = 150 (far). Its three boom **offset vec3s** are a
-//!    reflection *stream* default that lives in per-vehicle WAD component data, not an exe literal — so
-//!    the vehicle offsets are pinned by a **live trace while driving** (same method as on-foot), NOT
-//!    guessed. Until that trace, vehicle modes fall back to the on-foot geometry rather than shipping
-//!    fabricated numbers.
+//!  - **Car FOV / blend / far:** `CameraCarPreset` schema defaults (`FUN_0065e1d0`, values read from
+//!    `image.bin`): f0 = 7.5, f3 = 3.25, f4 = −0.25, f5 = 2.0, f6 = 1.0, f8/f10 = 0.1 (blend),
+//!    f11 = 55 & f12 = 65 (DefaultFov/MaxFov, deg), f13 = 150 (far). Its three boom **offset vec3s**
+//!    (`FUN_00656610(0)`) are all **`(0,0,0)` in the schema** — the real per-vehicle boom offset lives
+//!    in the per-vehicle WAD component stream, not an exe literal, so it is `CONFIRM-LIVE` (pin by a
+//!    paused drive-trace, same method as on-foot). The vehicle presets below therefore carry the
+//!    **recovered scalars** (FOV 55, far 150, blend 0.1) with a clearly-marked chase-offset stand-in.
+//!  - **One camera class serves every vehicle.** On PC only `CameraCarPreset` (`s_CameraCarPreset_00bc4e7c`)
+//!    exists as a reflection class — there is **no** `CameraTank` / `CameraTurret` / `CameraHelicopter`
+//!    schema. Per-mode framing differences are entirely in the per-vehicle WAD offsets, so the Tank /
+//!    Turret / Helicopter presets share the recovered Car scalars and differ only in the stand-in boom.
 
 use mercs2_core::glam::{Mat4, Vec3};
 
@@ -56,6 +61,51 @@ impl CameraPreset {
         near: 0.3,             // wifpmcinterior.lua SetNearFar
         far: 500.0,
     };
+
+    /// Car / generic-vehicle chase preset. **Recovered `CameraCarPreset` scalars** (`FUN_0065e1d0`):
+    /// `fov` = DefaultFov f11 = 55°, `far` = f13 = 150, `blend_time` = f8/f10 = 0.1. `near` reuses the
+    /// PMC 0.3 (the car schema does not emit a near). The `offset` boom is the schema `(0,0,0)` vec3 →
+    /// `// CONFIRM-LIVE:` per-vehicle WAD / paused drive-trace; the value here is a usable chase
+    /// stand-in (behind + above), NOT a recovered number.
+    pub const CAR: CameraPreset = CameraPreset {
+        offset: Vec3::new(0.0, 2.2, 6.0), // CONFIRM-LIVE boom (schema vec3 = 0,0,0)
+        pitch_offset: -0.1309,
+        blend_time: 0.1, // recovered CameraCarPreset f8/f10
+        fov: 55.0,       // recovered f11 DefaultFov
+        near: 0.3,
+        far: 150.0, // recovered f13
+    };
+
+    /// Tank chase preset. Same recovered `CameraCarPreset` scalars (no distinct tank schema on PC);
+    /// only the CONFIRM-LIVE boom stand-in differs (higher + further back for the hull).
+    pub const TANK: CameraPreset = CameraPreset {
+        offset: Vec3::new(0.0, 3.5, 8.5), // CONFIRM-LIVE boom (schema vec3 = 0,0,0)
+        pitch_offset: -0.15,
+        blend_time: 0.1,
+        fov: 55.0,
+        near: 0.3,
+        far: 150.0,
+    };
+
+    /// Turret preset — tight boom (CONFIRM-LIVE), recovered Car scalars.
+    pub const TURRET: CameraPreset = CameraPreset {
+        offset: Vec3::new(0.0, 1.6, 3.5), // CONFIRM-LIVE boom (schema vec3 = 0,0,0)
+        pitch_offset: -0.1309,
+        blend_time: 0.1,
+        fov: 55.0,
+        near: 0.3,
+        far: 150.0,
+    };
+
+    /// Helicopter preset — pulled further back (CONFIRM-LIVE), recovered Car scalars.
+    pub const HELICOPTER: CameraPreset = CameraPreset {
+        offset: Vec3::new(0.0, 3.0, 10.0), // CONFIRM-LIVE boom (schema vec3 = 0,0,0)
+        pitch_offset: -0.1,
+        blend_time: 0.1,
+        fov: 55.0,
+        near: 0.3,
+        far: 150.0,
+    };
 }
 
 /// The camera mode, selected by the object the player is riding (on foot → `OnFoot`). Mirrors the
@@ -83,15 +133,17 @@ impl CameraMode {
         }
     }
 
-    /// The reflected preset for this mode. Only `OnFoot` is RE-pinned today; vehicle presets await a
-    /// live drive-trace (their boom offsets live in per-vehicle WAD data) and reuse the on-foot geometry
-    /// until then — a placeholder that is honest RE-sourced data, never a fabricated vehicle offset.
+    /// The reflected preset for this mode. `OnFoot` is RE-pinned; the vehicle modes carry the
+    /// **recovered `CameraCarPreset` scalars** (FOV 55, far 150, blend 0.1) — the only camera-preset
+    /// reflection class on PC — with a `CONFIRM-LIVE` chase-boom stand-in (the schema offset vec3s are
+    /// `(0,0,0)`; the real per-vehicle boom is WAD-stream data, pinned by a paused drive-trace).
     pub fn preset(self) -> CameraPreset {
         match self {
             CameraMode::OnFoot => CameraPreset::ON_FOOT,
-            // TODO(live-trace): pin CameraCarPreset / CameraTank / CameraTurret / CameraHelicopter boom
-            // offsets from a paused capture while riding, exactly as on-foot was pinned.
-            _ => CameraPreset::ON_FOOT,
+            CameraMode::Car => CameraPreset::CAR,
+            CameraMode::Tank => CameraPreset::TANK,
+            CameraMode::Turret => CameraPreset::TURRET,
+            CameraMode::Helicopter => CameraPreset::HELICOPTER,
         }
     }
 }
@@ -135,6 +187,65 @@ pub fn view_with_preset(
 /// Back-compat convenience: the on-foot third-person view (the `CameraMode::OnFoot` preset).
 pub fn third_person_view(player_pos: Vec3, yaw: f32, pitch: f32, collision: &[[Vec3; 3]]) -> Mat4 {
     view_with_preset(&CameraPreset::ON_FOOT, player_pos, yaw, pitch, collision)
+}
+
+/// A dev / debug **free-fly** camera: eye position + yaw/pitch, driven by mouse-look + WASDQE fly
+/// movement. This is the engine's fly-cam mechanism (the yaw/pitch trig, the pitch clamp, the movement
+/// integration + view matrix); the game keeps only the input mapping. Yaw `0` looks toward `+Z`; pitch
+/// is clamped to ±[`PITCH_LIMIT`](Self::PITCH_LIMIT). Relocated from the inline `update` math in
+/// `mercs2_game::world`.
+#[derive(Clone, Copy, Debug)]
+pub struct FreeCamera {
+    pub pos: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl FreeCamera {
+    /// Pitch clamp (radians) — the fly-cam can look nearly straight up/down but not past it.
+    pub const PITCH_LIMIT: f32 = 1.5;
+
+    pub fn new(pos: Vec3, yaw: f32, pitch: f32) -> FreeCamera {
+        FreeCamera { pos, yaw, pitch }
+    }
+
+    /// Apply a mouse-look delta (already scaled to radians by the caller's sensitivity/invert-Y):
+    /// yaw += `dyaw`, pitch −= `dpitch` (clamped). Matches the mouse-look convention where a downward
+    /// mouse move lowers the pitch.
+    pub fn apply_mouse(&mut self, dyaw: f32, dpitch: f32) {
+        self.yaw += dyaw;
+        self.pitch = (self.pitch - dpitch).clamp(-Self::PITCH_LIMIT, Self::PITCH_LIMIT);
+    }
+
+    /// Add a look delta from keys / gamepad (yaw += `dyaw`, pitch += `dpitch`), clamping pitch once at
+    /// the end — equivalent to the game's per-key adjust followed by a single clamp.
+    pub fn add_look(&mut self, dyaw: f32, dpitch: f32) {
+        self.yaw += dyaw;
+        self.pitch = (self.pitch + dpitch).clamp(-Self::PITCH_LIMIT, Self::PITCH_LIMIT);
+    }
+
+    /// The forward unit vector for the current yaw/pitch (LH; yaw `0` → `+Z`).
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(
+            self.pitch.cos() * self.yaw.sin(),
+            self.pitch.sin(),
+            self.pitch.cos() * self.yaw.cos(),
+        )
+        .normalize()
+    }
+
+    /// Integrate a movement request `mv` (already composed in world space from forward/right/up) at
+    /// `speed` m/s over `dt`, clamped to unit length so diagonals don't move faster.
+    pub fn translate(&mut self, mv: Vec3, speed: f32, dt: f32) {
+        if mv.length_squared() > 1e-6 {
+            self.pos += mv.clamp_length_max(1.0) * speed * dt;
+        }
+    }
+
+    /// The view matrix looking along `forward()` from `pos`.
+    pub fn view(&self) -> Mat4 {
+        Mat4::look_to_lh(self.pos, self.forward(), Vec3::Y)
+    }
 }
 
 #[cfg(test)]

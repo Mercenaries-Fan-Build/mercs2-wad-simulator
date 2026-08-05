@@ -67,6 +67,36 @@ pub struct ConvexHull {
     pub planes: Vec<[f32; 4]>,
 }
 
+/// A `hkpCapsuleShape` — the collider Havok uses for a ragdoll limb/torso body.
+///
+/// Layout **verified against 11 real instances** in retail `vz.wad` block 3185 (the resident
+/// human/animation block) by `ragdoll_probe` and the `capsule_layout_*` tests below:
+/// ```text
+///  +16  f32       m_radius            (shared hkpConvexShape::m_radius)
+///  +32  hkVector4 m_vertexA           (x,y,z ; .w duplicates m_radius)
+///  +48  hkVector4 m_vertexB
+/// ```
+/// Every human-ragdoll capsule is a segment along **local Y**: `m_vertexA = (0,+h,0)`,
+/// `m_vertexB = (0,-h,0)`, so it is fully described by `radius` + `half_len = |vertexA.y|`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Capsule {
+    pub radius: f32,
+    pub vertex_a: [f32; 3],
+    pub vertex_b: [f32; 3],
+}
+
+impl Capsule {
+    /// Half the distance between the two segment endpoints — the capsule's cylindrical half-length.
+    pub fn half_len(&self) -> f32 {
+        let d = [
+            self.vertex_a[0] - self.vertex_b[0],
+            self.vertex_a[1] - self.vertex_b[1],
+            self.vertex_a[2] - self.vertex_b[2],
+        ];
+        0.5 * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+}
+
 /// A collision shape recovered from a packfile.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
@@ -74,6 +104,11 @@ pub enum Shape {
     Convex(ConvexHull),
     /// `hkpBoxShape` — half-extents (best-effort: m_halfExtents @ +16).
     Box { half_extents: [f32; 3] },
+    /// `hkpCapsuleShape` — a swept-segment body collider (ragdoll limbs; `+16` radius, `+32/+48`
+    /// endpoints). Verified against block 3185. See [`Capsule`].
+    Capsule(Capsule),
+    /// `hkpSphereShape` — `+16` m_radius (verified: 1.0964 / 0.1500 in vz.wad).
+    Sphere { radius: f32 },
     /// `hkpMoppBvTreeShape` / `hkpMoppCode` — static non-convex mesh BV-tree.
     Mopp,
     /// `WpMeshShape16` — Pandemic 16-bit-indexed static collision mesh.
@@ -100,6 +135,37 @@ impl Packfile {
             _ => None,
         })
     }
+
+    /// Iterate the `hkpCapsuleShape` bodies (ragdoll limb/torso colliders), in packfile order.
+    pub fn capsules(&self) -> impl Iterator<Item = &Capsule> {
+        self.shapes.iter().filter_map(|s| match s {
+            Shape::Capsule(c) => Some(c),
+            _ => None,
+        })
+    }
+}
+
+/// Recover the **human ragdoll body colliders** from a decompressed WAD block.
+///
+/// Faithful recovery, not fabrication: the retail PC `vz.wad` serializes **no** `hkpRigidBody`,
+/// `hkpRagdollConstraintData`, `hkaRagdollInstance` or skeleton mapper (a full-WAD census found
+/// **zero** instances — the ragdoll rigid-body chain + constraints are built procedurally at load,
+/// Havok-side). What it *does* ship is the set of `hkpCapsuleShape` colliders the ragdoll bodies
+/// attach to. The resident human/animation block (3185) carries exactly **11** — the classic
+/// humanoid ragdoll body count (pelvis, spine, head, 2×upper-arm, 2×fore-arm, 2×thigh, 2×shin).
+///
+/// Returns every capsule in the first packfile that holds exactly 11 (the human ragdoll set), or all
+/// capsules across all packfiles if none has 11. Empty when the block carries no capsule.
+pub fn human_ragdoll_capsules(block: &[u8]) -> Vec<Capsule> {
+    let mut all: Vec<Capsule> = Vec::new();
+    for (_off, pf) in find_packfiles(block) {
+        let caps: Vec<Capsule> = pf.capsules().copied().collect();
+        if caps.len() == 11 {
+            return caps;
+        }
+        all.extend(caps);
+    }
+    all
 }
 
 /// The structural skeleton of a parsed packfile, shared by every class decoder.
@@ -289,6 +355,12 @@ pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
                     f32_le(pk, obj + 24),
                 ],
             }),
+            "hkpCapsuleShape" => shapes.push(Shape::Capsule(Capsule {
+                radius: f32_le(pk, obj + 16),
+                vertex_a: [f32_le(pk, obj + 32), f32_le(pk, obj + 36), f32_le(pk, obj + 40)],
+                vertex_b: [f32_le(pk, obj + 48), f32_le(pk, obj + 52), f32_le(pk, obj + 56)],
+            })),
+            "hkpSphereShape" => shapes.push(Shape::Sphere { radius: f32_le(pk, obj + 16) }),
             "hkpMoppBvTreeShape" | "hkpMoppCode" => shapes.push(Shape::Mopp),
             "WpMeshShape16" => shapes.push(Shape::Mesh),
             other if other.contains("Shape") => shapes.push(Shape::Other(other.to_string())),
@@ -449,5 +521,70 @@ mod tests {
         let found = find_packfiles(body);
         assert_eq!(found.len(), 1, "one embedded packfile");
         assert_eq!(found[0].1.hulls().count(), 6);
+    }
+
+    /// The 11 human-ragdoll `hkpCapsuleShape` bodies, decoded from the packfile carved out of retail
+    /// `vz.wad` block 3185 (the resident human/animation block). Pins the `+16`/`+32`/`+48` layout
+    /// against real bytes and records the exact recovered per-body radius + half-length.
+    #[test]
+    fn ragdoll_capsule_layout_decodes_from_block3185_fixture() {
+        let body = include_bytes!("../tests/fixtures/ragdoll_capsules_le.bin");
+        let pf = parse_packfile(body).expect("parse ragdoll capsule packfile");
+        assert!(pf.version.starts_with("Havok-5.5"), "version {:?}", pf.version);
+        assert_eq!(
+            pf.class_counts.get("hkpCapsuleShape"),
+            Some(&11),
+            "the human ragdoll has 11 capsule bodies"
+        );
+
+        let caps = human_ragdoll_capsules(body);
+        assert_eq!(caps.len(), 11);
+
+        // Every capsule is a segment on local Y, symmetric about the origin (vertexA=+h, vertexB=-h).
+        for c in &caps {
+            assert!(c.vertex_a[0].abs() < 1e-4 && c.vertex_a[2].abs() < 1e-4, "A off-Y: {:?}", c.vertex_a);
+            assert!(c.vertex_b[0].abs() < 1e-4 && c.vertex_b[2].abs() < 1e-4, "B off-Y: {:?}", c.vertex_b);
+            assert!((c.vertex_a[1] + c.vertex_b[1]).abs() < 1e-4, "not centred: {:?}/{:?}", c.vertex_a, c.vertex_b);
+            assert!(c.radius > 0.0 && c.radius < 0.5, "implausible radius {}", c.radius);
+        }
+
+        // Exact recovered (radius, half_len) multiset — the faithful per-body dimensions.
+        let mut got: Vec<(f32, f32)> = caps.iter().map(|c| (c.radius, c.half_len())).collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut want: Vec<(f32, f32)> = vec![
+            (0.1194, 0.1148), (0.0914, 0.1088), (0.1194, 0.1148), (0.0914, 0.1088),
+            (0.0750, 0.0815), (0.0750, 0.0867), (0.0750, 0.0929), (0.0750, 0.0867),
+            (0.0999, 0.0297), (0.1700, 0.0188), (0.1449, 0.0490),
+        ];
+        want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g.0 - w.0).abs() < 5e-4 && (g.1 - w.1).abs() < 5e-4, "capsule {g:?} != {w:?}");
+        }
+
+        // The head is the fattest, shortest body; the thighs are the thickest limbs.
+        let head = caps.iter().max_by(|a, b| a.radius.partial_cmp(&b.radius).unwrap()).unwrap();
+        assert!((head.radius - 0.1700).abs() < 5e-4, "head radius {}", head.radius);
+    }
+
+    /// Live re-decode from the retail WAD: block 3185 yields exactly 11 ragdoll capsules matching the
+    /// fixture. SKIPS (stays green) when `vz.wad` is absent — same pattern as the anim live test.
+    #[test]
+    fn ragdoll_capsules_live_from_vz_wad_if_present() {
+        use crate::ffcs::load_ffcs_archive;
+        use crate::sges::decompress_block;
+        let Some(path) = crate::game_paths::vz_wad_from_env()
+            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
+        else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            return eprintln!("skip: vz.wad not readable");
+        };
+        let size = f.metadata().unwrap().len();
+        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+        let dec = decompress_block(&mut f, &arch.indx, 3185).expect("decompress block 3185");
+        let caps = human_ragdoll_capsules(&dec);
+        assert_eq!(caps.len(), 11, "block 3185 must carry the 11-body human ragdoll");
+        assert!(caps.iter().any(|c| (c.radius - 0.1700).abs() < 5e-4), "head capsule present");
     }
 }

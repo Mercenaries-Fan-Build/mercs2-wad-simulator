@@ -7,7 +7,9 @@
 //! pointing at a loaded model, and a `SkinPalette`. Two entities can share one model asset (instancing)
 //! yet hold independent poses and world transforms.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -40,6 +42,16 @@ const MAX_SPOT: usize = 16;
 /// shadowed radius grows near→far — the engine realization of the exe's near/far cascade split. The
 /// per-fragment shader picks the SMALLEST cascade that contains the point (see `shader.wgsl`).
 const CASCADE_SPLIT_FACTORS: [f32; SHADOW_CASCADES] = [1.0, 2.5, 6.0, 15.0];
+
+/// Model hash of the merged low-res base terrain (`game_world::load_streaming_world`). Its diffuse is
+/// the `vz_lrterrain` composite OVERVIEW atlas — a pre-shaded, display-referred (already-lit) far-LOD
+/// ground map, not a linear surface albedo. Measured stored luma is only ~0.13–0.18 (sRGB-encoded);
+/// decoding it through the sRGB→linear hardware path (as we do for every other diffuse) collapses the
+/// albedo to ~0.014 linear, so re-lighting it renders the ground near-BLACK (only distance fog lifts
+/// the far terrain to grey). We therefore upload THIS atlas as LINEAR (`Bc1RgbaUnorm`), reading the
+/// authored ~0.17 value directly so the base terrain shows as a dim-but-visible lit ground. Keep in
+/// sync with the terrain hash in `game_world`.
+const BASE_TERRAIN_MODEL_HASH: u32 = 0x7E44_A100;
 
 /// Pure cascade-split helper: the four nested half-extents for a base extent. Exposed for unit tests
 /// (the split math is CPU-deterministic; the GPU projection is not testable headless).
@@ -174,6 +186,53 @@ pub struct ModelAnim {
 #[derive(Default)]
 pub struct AssetStore {
     pub models: HashMap<u32, ModelAnim>,
+}
+
+/// Fixed-timestep clip playback + Havok crossfade over an [`AssetStore`]: for every entity carrying
+/// `(AnimState, SkinPalette, ModelRef)` that is playing, advance its clip time (and the fading-out
+/// `prev_clip` while `blend < 1`), sample + blend the pose via the shared `pose::` Havok math, and
+/// write the [`SkinPalette`]. `blend_sec` is the crossfade duration on clip switches. Relocated from
+/// `mercs2_game::world::animate_world` — the game entities use `mercs2_core::AnimState` + this store,
+/// so the loop lives next to the store/`ModelAnim`/`pose` it drives.
+pub fn animate_assetstore(
+    world: &mut mercs2_core::World,
+    store: &AssetStore,
+    dt: f32,
+    blend_sec: f32,
+) {
+    use mercs2_core::{AnimState, ModelRef, SkinPalette};
+    for (_e, (state, palette, mref)) in world
+        .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
+        .iter()
+    {
+        if !state.playing {
+            continue;
+        }
+        let Some(ma) = store.models.get(&mref.model) else { continue };
+        let Some(ca) = ma.clips.get(&state.clip).or_else(|| ma.clips.values().next()) else { continue };
+        let dur = ca.clip.duration.max(1e-3);
+        state.time = (state.time + dt * state.speed) % dur;
+        if state.blend < 1.0 {
+            if let Some(cp) = ma.clips.get(&state.prev_clip) {
+                let pdur = cp.clip.duration.max(1e-3);
+                state.prev_time = (state.prev_time + dt * state.speed) % pdur;
+                state.blend = (state.blend + dt / blend_sec).min(1.0);
+                let sa = cp.clip.sample_local(state.prev_time);
+                let sb = ca.clip.sample_local(state.time);
+                palette.mats = crate::pose::havok_palette_blend_in_place(
+                    &ma.rig,
+                    &sa, &cp.track_to_hier, cp.num_transform_tracks,
+                    &sb, &ca.track_to_hier, ca.num_transform_tracks,
+                    state.blend,
+                );
+                continue;
+            }
+            state.blend = 1.0;
+        }
+        let sample = ca.clip.sample_local(state.time);
+        palette.mats =
+            crate::pose::havok_palette_in_place(&ma.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks);
+    }
 }
 
 /// GPU-side per-model resources (geometry + materials). Built once per distinct model.
@@ -341,6 +400,10 @@ pub struct Scene {
     /// A system registers via [`Scene::add_render_node`]; the frame builds a [`crate::render_graph::PassCtx`]
     /// and calls each matching node in its slot (see `dispatch_nodes`).
     render_nodes: Vec<Box<dyn crate::render_graph::RenderNode>>,
+    /// Shared per-frame decal quad feed, present once [`Scene::enable_decals`] registers the decal
+    /// [`DecalNode`] at the `PassId::Blob` seam. `Scene::set_decals` writes projected quads here; the
+    /// node reads them at record. `None` = decals not enabled (default) → the decal node is absent.
+    decal_feed: Option<Rc<RefCell<Vec<DecalVertex>>>>,
 }
 
 impl Scene {
@@ -830,10 +893,11 @@ impl Scene {
                 count: None,
             }],
         });
-        // mat4 inv_view_proj (64) + sun_dir (16) + horizon (16) + zenith (16) + scatter (16) = 128 B.
+        // mat4 inv_view_proj (64) + sun_dir (16) + horizon (16) + zenith (16) + scatter (16) +
+        // moon (16) + cloud (16) = 160 B. (moon/cloud added for the PgMoon + PgCloud analytic layers.)
         let sky_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sky uniform"),
-            size: 128,
+            size: 160,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1050,6 +1114,7 @@ impl Scene {
             particles,
             last_frame: std::time::Instant::now(),
             render_nodes: Vec::new(),
+            decal_feed: None,
         }
     }
 
@@ -1059,6 +1124,33 @@ impl Scene {
     /// the collected renderable list). Multiple nodes may share a slot (registration order preserved).
     pub fn add_render_node(&mut self, node: Box<dyn crate::render_graph::RenderNode>) {
         self.render_nodes.push(node);
+    }
+
+    /// Register the projected-decal pass — a [`DecalNode`] plugged into the canonical
+    /// [`crate::render_graph::PassId::Blob`] seam (`render_graph.rs`), so it records after the world
+    /// is composited and depth-tests each decal quad against the scene depth. Idempotent-ish: calling
+    /// twice registers a second node (avoid). After this, feed live decals each frame via
+    /// [`Scene::set_decals`]. This is the first real [`crate::render_graph::RenderNode`] the engine
+    /// registers — it exercises the render-graph seam end to end.
+    pub fn enable_decals(&mut self) {
+        let feed: Rc<RefCell<Vec<DecalVertex>>> = Rc::new(RefCell::new(Vec::new()));
+        let node = DecalNode::new(&self.device, self.config.format, feed.clone());
+        self.decal_feed = Some(feed);
+        self.render_nodes.push(Box::new(node));
+    }
+
+    /// Set this frame's live projected decals (from `mercs2_decal`'s pool: each `DecalInstance`'s
+    /// position / normal / tangent / size / category / `alpha()` fade → a [`DecalDraw`]). Builds the
+    /// oriented world-space quads CPU-side into the shared feed the [`DecalNode`] draws. No-op if
+    /// [`Scene::enable_decals`] was never called. An empty slice clears the decals this frame.
+    pub fn set_decals(&mut self, draws: &[DecalDraw]) {
+        if let Some(feed) = &self.decal_feed {
+            let mut v = feed.borrow_mut();
+            v.clear();
+            for d in draws {
+                v.extend_from_slice(&decal_quad(d));
+            }
+        }
     }
 
     /// The wgpu device (external overlay layers create their GPU resources against it).
@@ -1346,12 +1438,16 @@ impl Scene {
         if self.models.contains_key(&hash) {
             return;
         }
-        // Decode each texture to a view (normal + specular maps linear, diffuse sRGB).
+        // Decode each texture to a view (normal + specular maps linear, diffuse sRGB). The base
+        // terrain's overview atlas is the exception: it is a pre-shaded, display-referred far-LOD map
+        // (~0.17 authored luma) that must NOT go through sRGB→linear, or its albedo collapses to ~0.014
+        // and the ground renders near-black — so force its diffuse LINEAR. See BASE_TERRAIN_MODEL_HASH.
+        let terrain_atlas = hash == BASE_TERRAIN_MODEL_HASH;
         let normal_hashes: HashSet<u32> = draws.iter().filter_map(|d| d.normal).collect();
         let spec_hashes: HashSet<u32> = draws.iter().filter_map(|d| d.specular).collect();
         let mut views: HashMap<u32, wgpu::TextureView> = HashMap::new();
         for (h, td) in textures {
-            let srgb = !normal_hashes.contains(h) && !spec_hashes.contains(h);
+            let srgb = !terrain_atlas && !normal_hashes.contains(h) && !spec_hashes.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
                 views.insert(*h, v);
             } else if std::env::var("MERCS2_TEXDBG").is_ok() {
@@ -1960,12 +2056,25 @@ impl Scene {
             let horizon = self.fog.map(|(c, _, _)| c).unwrap_or([0.70, 0.66, 0.58]);
             let zenith = [0.16, 0.33, 0.60];
             let li = self.atmo.light_intensity.max(0.05);
-            let mut su = [0f32; 32];
+            // Night factor from the sun's elevation (the atmosphere `sun_dir` clamps the sun just above
+            // the horizon; a low sun = dusk/night). Drives the PgMoon layer + the sky/cloud night tint.
+            let night = (1.0 - sun[1] * 3.0).clamp(0.0, 1.0);
+            // Moon: opposite the sun in azimuth, held above the horizon; brightens at night (PgMoon).
+            let moon = glam::Vec3::new(-sun[0], sun[1] * 0.4 + 0.3, -sun[2])
+                .normalize_or_zero()
+                .to_array();
+            let moon_b = night * 0.6;
+            // Cloud coverage rises with the atmosphere particulate force (ash/overcast, `fAtmosphereForce`);
+            // `t` scrolls the layer; density fixed. (Exact PgCloud coverage source is confirm-live.)
+            let coverage = (0.32 + self.atmo.atmosphere_force * 0.30).clamp(0.0, 0.9);
+            let mut su = [0f32; 40];
             su[..16].copy_from_slice(&inv.to_cols_array());
             su[16..20].copy_from_slice(&[sun[0], sun[1], sun[2], 6.0]); // w = sun-disc intensity (HDR)
             su[20..24].copy_from_slice(&[horizon[0], horizon[1], horizon[2], li]);
             su[24..28].copy_from_slice(&[zenith[0], zenith[1], zenith[2], sc.henyey_greenstein]);
             su[28..32].copy_from_slice(&[sc.beta_ray, sc.beta_mie, sc.inscattering, sc.extinction]);
+            su[32..36].copy_from_slice(&[moon[0], moon[1], moon[2], moon_b]);
+            su[36..40].copy_from_slice(&[coverage, t, 1.0, night]);
             self.queue.write_buffer(&self.sky_buf, 0, bytemuck::cast_slice(&su));
         }
 
@@ -2179,6 +2288,224 @@ impl Scene {
 /// systems read via [`crate::render_graph::PassCtx::items`] (aliased so the exposure is zero-copy).
 type DrawItem = crate::render_graph::RenderItem;
 
+// ── Projected decals (PassId::Blob RenderNode) ───────────────────────────────────────────────────
+
+/// One live projected decal handed to [`Scene::set_decals`]. Built from a `mercs2_decal` pool
+/// [`DecalInstance`](mercs2_decal::DecalInstance): world hit point + surface normal (projection axis)
+/// + roll tangent + footprint size (from the `decaltable` def), the recovered category index (0..4 in
+/// `PgDecalTable` order — BulletHole/Blood/Scorch/TireTrack/DamageShadow — selecting the look) and the
+/// pool's per-instance fade `alpha()`.
+#[derive(Clone, Copy, Debug)]
+pub struct DecalDraw {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub tangent: [f32; 3],
+    pub size: f32,
+    pub category: u32,
+    pub alpha: f32,
+}
+
+/// One vertex of a projected-decal quad: world position + centred UV (-1..1) + category + fade alpha.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DecalVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
+    category: f32,
+    alpha: f32,
+}
+
+/// Build the six vertices (two triangles) of one decal's oriented quad in WORLD space: the quad lies
+/// in the surface plane (spanned by an orthonormalised tangent + bitangent), sized by the def, and
+/// lifted a hair along the normal to avoid z-fighting with the surface it sits on. Pure + deterministic
+/// (unit-tested); the GPU only transforms these by the view-proj.
+fn decal_quad(d: &DecalDraw) -> [DecalVertex; 6] {
+    let n = glam::Vec3::from(d.normal).normalize_or_zero();
+    let n = if n == glam::Vec3::ZERO { glam::Vec3::Y } else { n };
+    // Orthonormalise the tangent against the normal (Gram-Schmidt); fall back to any perpendicular.
+    let mut t = glam::Vec3::from(d.tangent);
+    t = (t - n * t.dot(n)).normalize_or_zero();
+    if t == glam::Vec3::ZERO {
+        t = n.any_orthonormal_vector();
+    }
+    let b = n.cross(t).normalize_or_zero();
+    let hs = d.size * 0.5;
+    let center = glam::Vec3::from(d.position) + n * (0.02 + d.size * 0.01); // lift off the surface
+    let corner = |u: f32, v: f32| -> DecalVertex {
+        let p = center + t * (u * hs) + b * (v * hs);
+        DecalVertex {
+            pos: p.to_array(),
+            uv: [u, v],
+            category: d.category as f32,
+            alpha: d.alpha,
+        }
+    };
+    [
+        corner(-1.0, -1.0),
+        corner(1.0, -1.0),
+        corner(1.0, 1.0),
+        corner(-1.0, -1.0),
+        corner(1.0, 1.0),
+        corner(-1.0, 1.0),
+    ]
+}
+
+/// The projected-decal [`crate::render_graph::RenderNode`], filling the canonical
+/// [`crate::render_graph::PassId::Blob`] seam (`render_graph.rs` §Blob/decal). It owns its pipeline +
+/// a camera uniform + a growable vertex buffer, and reads the per-frame quad feed shared with `Scene`.
+/// `record` opens a load pass on the frame's color + scene depth (depth-tested, no depth write,
+/// alpha-blended) so decals only appear on surfaces in front of them. Uses the recovered
+/// `decalNormal`/`decalParam` material *concept* via a procedural per-category look (real decal
+/// textures = confirm-live). No-op when the feed is empty.
+pub struct DecalNode {
+    pipeline: wgpu::RenderPipeline,
+    cam_buf: wgpu::Buffer,
+    cam_bind: wgpu::BindGroup,
+    vbuf: RefCell<wgpu::Buffer>,
+    /// Capacity of `vbuf` in vertices (grown on demand).
+    cap: Cell<usize>,
+    feed: Rc<RefCell<Vec<DecalVertex>>>,
+}
+
+impl DecalNode {
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        feed: Rc<RefCell<Vec<DecalVertex>>>,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("decal.wgsl"));
+        let cam_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("decal cam bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("decal cam uniform (view_proj)"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cam_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("decal cam bind"),
+            layout: &cam_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: cam_buf.as_entire_binding() }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("decal pipeline layout"),
+            bind_group_layouts: &[&cam_bgl],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("decal pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_decal",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<DecalVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32, 3 => Float32],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_decal",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::COLOR,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None, // a decal quad may face either way; the shader is view-agnostic
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false, // a surface overlay, not occluding geometry
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let cap = 6 * 64; // 64 decals worth of verts to start
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("decal vbuf"),
+            size: (cap * std::mem::size_of::<DecalVertex>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        DecalNode {
+            pipeline,
+            cam_buf,
+            cam_bind,
+            vbuf: RefCell::new(vbuf),
+            cap: Cell::new(cap),
+            feed,
+        }
+    }
+}
+
+impl crate::render_graph::RenderNode for DecalNode {
+    fn id(&self) -> crate::render_graph::PassId {
+        crate::render_graph::PassId::Blob
+    }
+
+    fn record(&self, ctx: &mut crate::render_graph::PassCtx<'_>) {
+        let verts = self.feed.borrow();
+        if verts.is_empty() {
+            return;
+        }
+        // Grow the vertex buffer if this frame has more decal verts than the current capacity.
+        if verts.len() > self.cap.get() {
+            let newcap = verts.len().next_power_of_two();
+            *self.vbuf.borrow_mut() = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("decal vbuf"),
+                size: (newcap * std::mem::size_of::<DecalVertex>()) as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.cap.set(newcap);
+        }
+        let vb = self.vbuf.borrow();
+        ctx.queue.write_buffer(&vb, 0, bytemuck::cast_slice(verts.as_slice()));
+        ctx.queue
+            .write_buffer(&self.cam_buf, 0, bytemuck::cast_slice(&ctx.view_proj.to_cols_array()));
+        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("decal pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ctx.color,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.cam_bind, &[]);
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+}
+
 /// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,
 /// swapchain view, surface size in pixels.
 pub type Overlay<'a> = &'a mut dyn FnMut(
@@ -2240,10 +2567,11 @@ mod tests {
     fn shaders_parse_and_validate() {
         validate_wgsl("shader.wgsl", include_str!("shader.wgsl"));
         validate_wgsl("shadow.wgsl", include_str!("shadow.wgsl"));
-        validate_wgsl("sky.wgsl", include_str!("sky.wgsl"));
+        validate_wgsl("sky.wgsl", include_str!("sky.wgsl")); // now carries PgMoon + PgCloud layers
         validate_wgsl("loading.wgsl", include_str!("loading.wgsl"));
         validate_wgsl("blob.wgsl", include_str!("blob.wgsl"));
         validate_wgsl("water.wgsl", include_str!("water.wgsl"));
+        validate_wgsl("decal.wgsl", include_str!("decal.wgsl")); // projected-decal DecalNode pass
     }
 
     /// The camera uniform we upload (44 f32 = 176 B) matches the shader `Camera` struct size, the point
@@ -2349,5 +2677,50 @@ mod tests {
         assert!(point_on(1) && !spot_on(1)); // _pl
         assert!(!point_on(2) && spot_on(2)); // _sl
         assert!(point_on(3) && spot_on(3)); // _pl_sl
+    }
+
+    /// The projected-decal quad lies in the surface plane (perpendicular to the normal), is centred at
+    /// the hit point lifted slightly along the normal, and carries the category + fade to every vertex.
+    #[test]
+    fn decal_quad_lies_in_surface_plane() {
+        let d = DecalDraw {
+            position: [2.0, 0.0, -1.0],
+            normal: [0.0, 1.0, 0.0],   // ground: quad should lie in the XZ plane
+            tangent: [1.0, 0.0, 0.0],
+            size: 2.0,
+            category: 2,
+            alpha: 0.5,
+        };
+        let q = decal_quad(&d);
+        // Every vertex sits at the same (lifted) height and spans ±size/2 in X and Z.
+        let y0 = q[0].pos[1];
+        assert!(y0 > 0.0, "quad lifted off the surface to avoid z-fighting");
+        for v in &q {
+            assert!((v.pos[1] - y0).abs() < 1e-5, "all verts coplanar in XZ");
+            assert!((v.pos[0] - 2.0).abs() <= 1.0 + 1e-4, "spans +/- size/2 in X");
+            assert!((v.pos[2] + 1.0).abs() <= 1.0 + 1e-4, "spans +/- size/2 in Z");
+            assert_eq!(v.category, 2.0);
+            assert_eq!(v.alpha, 0.5);
+        }
+        // The centred UVs cover the full quad corners (-1..1).
+        assert!(q.iter().any(|v| v.uv == [-1.0, -1.0]));
+        assert!(q.iter().any(|v| v.uv == [1.0, 1.0]));
+    }
+
+    /// A degenerate (zero) normal falls back to +Y rather than producing NaNs.
+    #[test]
+    fn decal_quad_handles_degenerate_normal() {
+        let d = DecalDraw {
+            position: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 0.0],
+            tangent: [0.0, 0.0, 0.0],
+            size: 1.0,
+            category: 0,
+            alpha: 1.0,
+        };
+        let q = decal_quad(&d);
+        for v in &q {
+            assert!(v.pos.iter().all(|c| c.is_finite()), "no NaNs from a degenerate normal");
+        }
     }
 }

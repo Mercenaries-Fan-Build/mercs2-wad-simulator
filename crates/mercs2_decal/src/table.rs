@@ -131,6 +131,67 @@ impl DecalDef {
             super_decal: false,
         }
     }
+
+    /// A per-category **faithful-look** definition — distinct size / lifetime / super-flag per decal
+    /// category so the projected-decal pass reads correctly per type (a small tight bullet hole vs a
+    /// broad scorch, a permanent damage shadow vs a fading tire track).
+    ///
+    /// `// CONFIRM-LIVE:` the exact retail size/lifetime numbers are stripped — the `decaltable`
+    /// rows are read via computed offsets inside `FUN_004cb1f0`, never by name (decal_code_map §1/§6:
+    /// bp `FUN_004cb1f0`, read the `0x400` resident block). These are **reimpl look-tuning**, chosen
+    /// per-category to be plausible, NOT recovered retail values — [`DecalTable::load_resident_block`]
+    /// overwrites them from a live capture. The category *set* and the size>tire, permanent-shadow
+    /// *shape* are recovered (§1/§4); the scalars are the confirm-live remainder.
+    pub fn for_category(ty: DecalType) -> Self {
+        // (size_m, lifetime_s, super) per recovered category. Permanent = lifetime <= 0.
+        let (size, lifetime, sup) = match ty {
+            DecalType::BulletHole => (0.20, 45.0, false), // small, long-lived pockmark
+            DecalType::Blood => (0.45, 25.0, false),      // broad splat, fades sooner
+            DecalType::Scorch => (0.80, 60.0, false),     // large explosion burn
+            DecalType::TireTrack => (0.35, 20.0, false),  // narrow, shortest-lived
+            DecalType::DamageShadow => (1.20, 0.0, true), // permanent damage-darkening, super variant
+        };
+        DecalDef { size, lifetime, super_decal: sup, ..DecalDef::placeholder(ty.hash()) }
+    }
+}
+
+/// The on-disk column layout of one `PgDecalTable` row in the `0x400` resident block. Because the
+/// engine addresses the block by **computed offsets inside stripped functions** (never by name), the
+/// exact stride and field offsets are `// CONFIRM-LIVE:` (bp `FUN_004cb1f0`, read the block).
+/// [`DecalRowLayout::candidate`] is a documented decode hypothesis (the recovered 4-column shape:
+/// texture handle / size / lifetime / super flag) a live capture confirms or corrects; a loader takes
+/// it as a parameter rather than hard-coding it, so correcting the layout is a one-value change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecalRowLayout {
+    /// Bytes per row (the array stride within the block).
+    pub stride: usize,
+    /// Byte offset of the texture-handle `u32` within a row.
+    pub texture_off: usize,
+    /// Byte offset of the `f32` projection size.
+    pub size_off: usize,
+    /// Byte offset of the `f32` lifetime (seconds; `<= 0` = permanent).
+    pub lifetime_off: usize,
+    /// Byte offset of the `u32` super-decal flag (non-zero = `_super`).
+    pub super_off: usize,
+    /// Number of rows to read from the block.
+    pub rows: usize,
+}
+
+impl DecalRowLayout {
+    /// A documented decode **hypothesis** for the `0x400` `PgDecalTable` block: a `0x40`-byte row
+    /// carrying `[texture:u32 @0][size:f32 @4][lifetime:f32 @8][super:u32 @0xc]`, 5 rows (the recovered
+    /// category set). `// CONFIRM-LIVE:` this stride/offset set is unproven — the block is accessed by
+    /// computed offset, so a live read of `FUN_004cb1f0`'s resident block is what pins it.
+    pub fn candidate() -> Self {
+        DecalRowLayout {
+            stride: 0x40,
+            texture_off: 0x0,
+            size_off: 0x4,
+            lifetime_off: 0x8,
+            super_off: 0xc,
+            rows: 5,
+        }
+    }
 }
 
 /// The `decaltable` resident singleton — the array of [`DecalDef`] rows keyed by material hash.
@@ -149,20 +210,62 @@ impl DecalTable {
         DecalTable { rows: Vec::new() }
     }
 
-    /// The recovered category set seeded with **placeholder** parameters (see [`DecalDef::placeholder`]).
-    /// `DamageShadow` is seeded as a `super_decal` (it is the higher-coverage damage-darkening variant).
-    /// The numbers are data-driven, not retail — this makes the pool/lookup mechanism exercisable and
-    /// end-to-end testable without claiming the confirm-live values.
+    /// The recovered category set seeded with per-category **faithful-look** parameters
+    /// ([`DecalDef::for_category`]): distinct size/lifetime per type and the permanent super
+    /// `DamageShadow`. `// CONFIRM-LIVE:` the scalars are reimpl look-tuning, not retail numbers — the
+    /// category *set* and *shape* are recovered; [`load_resident_block`](Self::load_resident_block)
+    /// overwrites the scalars from a live `0x400`-block capture. This makes the projection pass read
+    /// correctly per type and stays end-to-end testable without claiming the confirm-live values.
     pub fn stock() -> Self {
         let mut t = DecalTable::new();
         for ty in DecalType::all() {
-            let mut def = DecalDef::placeholder(ty.hash());
-            if ty == DecalType::DamageShadow {
-                def.super_decal = true;
-            }
-            t.rows.push(def);
+            t.rows.push(DecalDef::for_category(ty));
         }
         t
+    }
+
+    /// Load rows from a captured `0x400` resident `PgDecalTable` block, decoded per `layout`. This is
+    /// the **mechanism** the engine uses (`FUN_004cb1f0` allocates the block; the table is read by
+    /// computed offset) realized as a data loader: given a live-captured block + the confirmed
+    /// [`DecalRowLayout`], it fills the recovered category rows in `PgDecalTable` order. Rows that
+    /// would read past the block end are skipped. Returns how many rows were decoded.
+    ///
+    /// `// CONFIRM-LIVE:` `block` must be a real capture and `layout` must be the confirmed byte
+    /// layout — neither is statically recoverable (decal_code_map §1/§6). With
+    /// [`DecalRowLayout::candidate`] and a placeholder block this exercises the path; on retail data it
+    /// yields the real per-type params.
+    pub fn load_resident_block(&mut self, block: &[u8], layout: DecalRowLayout) -> usize {
+        let rd_u32 = |o: usize| -> u32 {
+            u32::from_le_bytes([block[o], block[o + 1], block[o + 2], block[o + 3]])
+        };
+        let rd_f32 = |o: usize| -> f32 { f32::from_bits(rd_u32(o)) };
+        let cats = DecalType::all();
+        let mut n = 0;
+        for (i, ty) in cats.iter().enumerate().take(layout.rows) {
+            let base = i * layout.stride;
+            // Bounds: every field the layout names must fit inside the block.
+            let end = base
+                + layout
+                    .texture_off
+                    .max(layout.size_off)
+                    .max(layout.lifetime_off)
+                    .max(layout.super_off)
+                + 4;
+            if end > block.len() {
+                break;
+            }
+            self.insert(DecalDef {
+                key: ty.hash(),
+                texture: rd_u32(base + layout.texture_off),
+                normal_map: 0,
+                param_map: 0,
+                size: rd_f32(base + layout.size_off),
+                lifetime: rd_f32(base + layout.lifetime_off),
+                super_decal: rd_u32(base + layout.super_off) != 0,
+            });
+            n += 1;
+        }
+        n
     }
 
     /// Append / register a row. If a row with the same key exists it is replaced (a re-load).
@@ -239,6 +342,47 @@ mod tests {
         let t = DecalTable::stock();
         assert!(t.get_type(DecalType::DamageShadow).unwrap().super_decal);
         assert!(!t.get_type(DecalType::BulletHole).unwrap().super_decal);
+    }
+
+    #[test]
+    fn for_category_has_distinct_faithful_shapes() {
+        // Recovered *shape* invariants (not the confirm-live scalars): scorch is the broadest of the
+        // fading decals, tire tracks the shortest-lived, and the damage shadow is permanent + super.
+        let scorch = DecalDef::for_category(DecalType::Scorch);
+        let tire = DecalDef::for_category(DecalType::TireTrack);
+        let bullet = DecalDef::for_category(DecalType::BulletHole);
+        let shadow = DecalDef::for_category(DecalType::DamageShadow);
+        assert!(scorch.size > bullet.size, "scorch broader than a bullet hole");
+        assert!(tire.lifetime < scorch.lifetime, "tire track shorter-lived than scorch");
+        assert!(shadow.lifetime <= 0.0 && shadow.super_decal, "damage shadow permanent + super");
+        assert!(!bullet.super_decal);
+    }
+
+    #[test]
+    fn load_resident_block_decodes_rows_per_layout() {
+        // Build a synthetic 0x400 block in the candidate layout and confirm the loader overwrites the
+        // stock scalars from it (the mechanism; retail numbers stay confirm-live).
+        let layout = DecalRowLayout::candidate();
+        let mut block = vec![0u8; DECALTABLE_RESIDENT_ALLOC];
+        for (i, _ty) in DecalType::all().iter().enumerate() {
+            let base = i * layout.stride;
+            let tex = 0x1000_0000u32 + i as u32;
+            let size = 0.5 + i as f32; // distinct per row
+            let life = 10.0 + i as f32;
+            block[base..base + 4].copy_from_slice(&tex.to_le_bytes());
+            block[base + 4..base + 8].copy_from_slice(&size.to_le_bytes());
+            block[base + 8..base + 12].copy_from_slice(&life.to_le_bytes());
+            block[base + 12..base + 16].copy_from_slice(&((i as u32) & 1).to_le_bytes());
+        }
+        let mut t = DecalTable::stock();
+        let n = t.load_resident_block(&block, layout);
+        assert_eq!(n, 5, "all recovered rows decoded");
+        let bullet = t.get_type(DecalType::BulletHole).unwrap();
+        assert_eq!(bullet.texture, 0x1000_0000);
+        assert_eq!(bullet.size, 0.5);
+        assert_eq!(bullet.lifetime, 10.0);
+        // row 1 (Blood) had super flag bit set.
+        assert!(t.get_type(DecalType::Blood).unwrap().super_decal);
     }
 
     #[test]

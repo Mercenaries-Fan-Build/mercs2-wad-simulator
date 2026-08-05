@@ -152,8 +152,9 @@ pub struct RuntimeHomingWeapon {
 }
 
 /// `RuntimeExplosion` (hash `0x5529dd38`, exe stride `0x40`; producer `FUN_0066ae30`). A live blast that
-/// applies radial damage/force to bodies within its radius over its (short) life, then despawns. The
-/// applier is the confirm-live stand-in (`crate::damage`).
+/// applies radial damage/force to bodies within its radius, **deferred and staggered by distance** over
+/// its life (the recovered `WSExplosion::CreateExplosion` → `Update` cadence — near victims first), then
+/// despawns. The applier is `crate::damage` (recovered sibling-engine solver).
 #[derive(Clone, Debug)]
 pub struct RuntimeExplosion {
     /// The instigator, for damage attribution.
@@ -164,10 +165,27 @@ pub struct RuntimeExplosion {
     pub stats: crate::stats::ExplosiveStats,
     /// Damage taxonomy key.
     pub damage_key: crate::damage::DamageKey,
-    /// Whether this blast has already applied its damage (a blast applies once, on its first tick).
+    /// Whether this blast has gathered its victim list yet (the `CreateExplosion` pass runs once, on the
+    /// first tick, then `Update` drains the list). Named `applied` for compatibility.
     pub applied: bool,
-    /// Remaining lifetime (s) for the visual/force to linger before despawn.
+    /// Age since detonation (`WSExplosion.timer@0x1c`); the blast frees itself at
+    /// [`wildstar::LIFETIME_SECS`](crate::damage::wildstar::LIFETIME_SECS).
     pub life: f32,
+    /// The gathered, distance-staggered victim queue (empty until `applied`); drained by
+    /// [`crate::damage::update_explosion`].
+    pub victims: Vec<crate::damage::PendingBlastVictim>,
+}
+
+impl RuntimeExplosion {
+    /// A freshly-detonated blast: victims un-gathered, timer at zero.
+    pub fn new(
+        owner: Option<Entity>,
+        pos: Vec3,
+        stats: crate::stats::ExplosiveStats,
+        damage_key: crate::damage::DamageKey,
+    ) -> Self {
+        Self { owner, pos, stats, damage_key, applied: false, life: 0.0, victims: Vec::new() }
+    }
 }
 
 // `Health` is **not** defined here. It is the shared `RuntimeHealth {cur,max}` analog owned by

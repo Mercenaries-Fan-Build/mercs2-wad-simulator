@@ -322,6 +322,16 @@ pub struct SaveState {
     pub flow_chain: Vec<String>,
     /// `tFlowData.tActiveMissions` — in-progress missions. FACT.
     pub active_missions: Vec<ActiveMission>,
+    /// `tRetryLocations` — the active contract's retry-checkpoint spawn marker(s). Written by
+    /// `GenerateSaveData` (`vz/xQ!L.lua:640-643`) ONLY when `WifMissionFlow.GetRetryLocations()` is
+    /// non-nil at save time — i.e. a save taken while a contract with a live checkpoint is in progress; a
+    /// between-contracts (PMC hub) save omits the key entirely. FACT (key name + shape).
+    ///
+    /// This is the field the master script's `LoadSingleton` (`vz/xQ!L.lua:645-652`) branches on to
+    /// choose the resume spawn: a save WITH it resumes at the checkpoint (mid-mission, in the world), a
+    /// save WITHOUT it falls through to `{"Pmc_Entry1","Pmc_Entry2"}` + `_bPmcRequired` (the PMC HQ
+    /// entrance). Empty here means "no key in the save".
+    pub retry_locations: Vec<String>,
     /// `tFlowData.tMyFlowData` — completed / advanced flow flags, mission-id →
     /// flag value (`1` = seen/complete, higher = later stage). FACT (key name);
     /// per-value meaning INFERRED. Sorted by id (`BTreeMap`).
@@ -647,6 +657,18 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         }
     }
 
+    // `tRetryLocations` = { [1.000000] = "Checkpoint_...", … } — a 1-based array of marker names, same
+    // shape as `tLayerData`. Present only for a mid-contract save (see the field doc); absent → empty,
+    // which is the signal that sends a resume to the PMC hub (`Pmc_Entry1`).
+    let retry_locations = table_body(lua, "tRetryLocations")
+        .map(|b| {
+            parse_table(b)
+                .into_iter()
+                .map(|(_, v)| unquote(&v))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let completed_flow = table_body(lua, "tMyFlowData")
         .map(|b| {
             parse_table(b)
@@ -691,6 +713,7 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
     Ok(SaveState {
         flow_chain,
         active_missions,
+        retry_locations,
         completed_flow,
         layers,
         time_elapsed_secs,

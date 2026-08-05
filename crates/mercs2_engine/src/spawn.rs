@@ -35,8 +35,60 @@ pub enum Archetype {
     Character,
 }
 
-/// Template name-hash → [`Archetype`]. Populated from the reflection registry / spawn-list data;
-/// `register` until that's threaded.
+/// Classify a spawn *template* to its [`Archetype`] from its authored name (Task A).
+///
+/// GROUNDING: `docs/modernization/object_assembly_model.md §3` — `Pg.Spawn(name|hash)` resolves the
+/// name registry (`@0xDF6B88`) to a **template = a COMP set on disk**, and the archetype follows that
+/// COMP set: a class carrying a vehicle-physics/controller component (`_CarPhysicsV2`/`TankPhysics`/…)
+/// is a Vehicle; one carrying the Human/AI components is a Character; everything else is a Prop. The
+/// component-membership signal we can read WITHOUT a per-template COMP-set extraction is the retail
+/// **naming convention** (memory `aset-name-export`, hash-verified, proven): models are named
+/// `<faction>_veh_<class>_<airframe>` for vehicles (classes car/truck/apc/semi/motorcycle/tank/boat/
+/// helicopter/vtol/plane) and `<faction>_hum_<…>` for people. The `_veh_`/`_hum_` token IS the
+/// authored membership marker (the physics-actor COMP is attached by the vehicle system keyed off it),
+/// and the class token selects the [`VehicleClass`]. Names hash via `pandemic_hash_m2`, so a template
+/// hash keys back to the same archetype. Anything that matches neither token stays a `Prop` — the safe
+/// default (a bare rendered entity), never a fabricated vehicle/character.
+pub fn classify_template(name: &str) -> Archetype {
+    let n = name.to_ascii_lowercase();
+    let seg = |t: &str| n.split(|c| c == '_' || c == ' ').any(|s| s == t);
+    // Vehicle: the `_veh_` token, with the class token immediately after it picking the actor class.
+    if let Some(class) = vehicle_class_after_veh(&n) {
+        return Archetype::Vehicle(class);
+    }
+    // Person: the `_hum_` token (retail human-model convention).
+    if seg("hum") {
+        return Archetype::Character;
+    }
+    Archetype::Prop
+}
+
+/// The [`VehicleClass`] named by the token right after a `veh` segment, or `None` if the name carries
+/// no `veh` segment. An unrecognised class token defaults to `Car` (the primary simulated actor).
+fn vehicle_class_after_veh(lower_name: &str) -> Option<VehicleClass> {
+    let mut segs = lower_name.split(|c| c == '_' || c == ' ');
+    while let Some(s) = segs.next() {
+        if s == "veh" {
+            let token = segs.next().unwrap_or("");
+            return Some(match token {
+                "motorcycle" | "motorbike" | "bike" => VehicleClass::Bike,
+                "tank" => VehicleClass::Tank,
+                "boat" | "ship" | "jetski" => VehicleClass::Boat,
+                "helicopter" | "heli" | "vtol" | "chopper" => VehicleClass::Helicopter,
+                "plane" | "jet" => VehicleClass::Jet,
+                // car/truck/apc/semi/suv/van and any other vehicle token → the Car actor.
+                _ => VehicleClass::Car,
+            });
+        }
+    }
+    None
+}
+
+/// Template name-hash → [`Archetype`]. Populated from template names by [`classify_template`]
+/// ([`register_name`](SpawnResolver::register_name) / [`populate_from_names`](SpawnResolver::populate_from_names)),
+/// or by explicit [`register`](SpawnResolver::register). A script `Pg.Spawn` whose template name is in
+/// hand also resolves through [`classify_template`] on the fly ([`resolve`](SpawnResolver::resolve)),
+/// so it need not be pre-registered.
 #[derive(Default)]
 pub struct SpawnResolver {
     by_template: HashMap<u32, Archetype>,
@@ -52,9 +104,58 @@ impl SpawnResolver {
         self.by_template.insert(template_hash, arch);
     }
 
+    /// Classify `name` via [`classify_template`] and record it under `pandemic_hash_m2(name)` so a
+    /// later hash-only spawn (e.g. a population request carrying a template hash) resolves to the same
+    /// archetype. Returns the archetype. `Prop` results are not stored (that is `archetype`'s default),
+    /// keeping the table to the vehicles/characters that actually need an override.
+    pub fn register_name(&mut self, name: &str) -> Archetype {
+        let arch = classify_template(name);
+        if arch != Archetype::Prop {
+            self.by_template
+                .insert(mercs2_formats::hash::pandemic_hash_m2(name), arch);
+        }
+        arch
+    }
+
+    /// Bulk-populate `by_template` from a set of template names (e.g. the ASET/name-registry roster),
+    /// classifying each by [`classify_template`]. Returns how many resolved to a non-`Prop` archetype
+    /// (the ones actually recorded).
+    pub fn populate_from_names<I, S>(&mut self, names: I) -> usize
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        names
+            .into_iter()
+            .filter(|n| self.register_name(n.as_ref()) != Archetype::Prop)
+            .count()
+    }
+
+    /// Number of templates with a recorded (non-`Prop`) archetype.
+    pub fn len(&self) -> usize {
+        self.by_template.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_template.is_empty()
+    }
+
     /// The archetype a template resolves to (`Prop` if unregistered).
     pub fn archetype(&self, template_hash: u32) -> Archetype {
         self.by_template.get(&template_hash).copied().unwrap_or(Archetype::Prop)
+    }
+
+    /// Resolve a spawn to its archetype, preferring a recorded `by_template` entry and otherwise
+    /// classifying the template *name* on the fly (so a script `Pg.Spawn("civ_veh_car_…")` becomes a
+    /// `Vehicle` without pre-registration). `Prop` when neither a record nor a name is available.
+    pub fn resolve(&self, template_hash: u32, name: Option<&str>) -> Archetype {
+        if let Some(a) = self.by_template.get(&template_hash) {
+            return *a;
+        }
+        match name {
+            Some(n) => classify_template(n),
+            None => Archetype::Prop,
+        }
     }
 
     /// Materialize `template_hash` into `world` at `transform`, returning the entity. A `Vehicle`
@@ -67,7 +168,21 @@ impl SpawnResolver {
         handle: u32,
         transform: Transform,
     ) -> Entity {
-        match self.archetype(template_hash) {
+        self.spawn_named(world, template_hash, None, handle, transform)
+    }
+
+    /// Like [`spawn`](Self::spawn), but with the template *name* in hand so an unregistered template is
+    /// classified on the fly via [`classify_template`] (the script `Pg.Spawn` path). `template_hash`
+    /// should be `pandemic_hash_m2(name)` when `name` is `Some`.
+    pub fn spawn_named(
+        &self,
+        world: &mut World,
+        template_hash: u32,
+        name: Option<&str>,
+        handle: u32,
+        transform: Transform,
+    ) -> Entity {
+        match self.resolve(template_hash, name) {
             Archetype::Vehicle(class) => spawn_default_vehicle(world, class, handle, transform),
             Archetype::Character => spawn_character(world, template_hash, transform),
             Archetype::Prop => world.spawn((transform,)),
@@ -112,14 +227,18 @@ pub fn spawn_default_vehicle(
 /// - **animation** (`mercs2_anim`): `HumanAnimationSet` (keyed by the template hash as the character id)
 ///   + `AnimController`, so the data-driven clip picker can drive it.
 ///
-/// The render layer adds `ModelRef`/`SkinPalette` (model resolution is the render seam). `template_hash`
+/// The character's `ModelRef` IS attached here — a faction human's mesh is stored in the WAD under its
+/// template hash, so `ModelRef{ model: template_hash }` names the model the render loop draws the moment
+/// that model is resident. The `SkinPalette` is attached where the resident bone count is known (the
+/// population preload path in [`crate::runtime::GameRuntime::tick_population`], which sizes it to the
+/// template's rig); `animation_system` then rewrites it each tick from the sampled pose. `template_hash`
 /// doubles as the animation character id until a template→character map lands.
 pub fn spawn_character(world: &mut World, template_hash: u32, transform: Transform) -> Entity {
     use crate::ai::{AiBehavior, AiFaction, AiSkill, Perception, PerceptionRecord, Squad, Stimulus, Target};
     use crate::anim::{AnimController, HumanAnimationSet};
     use mercs2_core::{Health, Human, HumanState};
 
-    world.spawn((
+    let e = world.spawn((
         transform,
         // humanoid identity (see the doc comment: possession is added on attach, not here)
         Human,
@@ -141,7 +260,12 @@ pub fn spawn_character(world: &mut World, template_hash: u32, transform: Transfo
         // animation
         HumanAnimationSet::new(template_hash),
         AnimController::default(),
-    ))
+    ));
+    // The model IS the template (faction human mesh keyed by the template hash). Attached separately —
+    // the bundle above is already at hecs's max tuple arity. The render loop draws it once the model is
+    // resident; the population preload path attaches the rig-sized `SkinPalette`.
+    let _ = world.insert_one(e, mercs2_core::ModelRef { model: template_hash });
+    e
 }
 
 /// Set (override) a spawned actor's AI faction — the caller maps the population/script spawn's faction
@@ -299,6 +423,59 @@ mod tests {
         let tpl = mercs2_formats::hash::pandemic_hash_m2("vz_soldier");
         let npc = spawn_character(&mut world, tpl, Transform::IDENTITY);
         assert_eq!(shoot_at(&mut world, npc), ImpactKind::Blood, "a person bleeds");
+    }
+
+    /// The name-convention classifier (Task A): `_veh_<class>` → the right `VehicleClass`, `_hum_` →
+    /// Character, anything else → Prop. Grounded in the retail naming convention (`aset-name-export`).
+    #[test]
+    fn classify_template_by_naming_convention() {
+        use VehicleClass::*;
+        assert_eq!(classify_template("civ_veh_car_sedan_a"), Archetype::Vehicle(Car));
+        assert_eq!(classify_template("pmc_veh_truck_flatbed"), Archetype::Vehicle(Car));
+        assert_eq!(classify_template("ch_veh_tank_t72"), Archetype::Vehicle(Tank));
+        assert_eq!(classify_template("vz_veh_apc_stryker"), Archetype::Vehicle(Car));
+        assert_eq!(classify_template("civ_veh_motorcycle_a"), Archetype::Vehicle(Bike));
+        assert_eq!(classify_template("pr_veh_boat_patrol"), Archetype::Vehicle(Boat));
+        assert_eq!(classify_template("oc_veh_helicopter_mi26"), Archetype::Vehicle(Helicopter));
+        assert_eq!(classify_template("al_veh_vtol_harrier"), Archetype::Vehicle(Helicopter));
+        assert_eq!(classify_template("pmc_veh_plane_c130"), Archetype::Vehicle(Jet));
+        assert_eq!(classify_template("vz_hum_soldier_a"), Archetype::Character);
+        assert_eq!(classify_template("civ_hum_male_business"), Archetype::Character);
+        // Non-vehicle/non-human tokens (incl. the tricky "vehicle depot" prop) stay Prop.
+        assert_eq!(classify_template("global_trashcana"), Archetype::Prop);
+        assert_eq!(classify_template("jungle_env_plantlarge04"), Archetype::Prop);
+    }
+
+    /// `register_name`/`populate_from_names` record the classified archetype under the template hash,
+    /// and `resolve` also classifies an unregistered name on the fly.
+    #[test]
+    fn resolver_populates_and_resolves_by_name() {
+        let mut r = SpawnResolver::new();
+        let n = r.populate_from_names(["ch_veh_tank_t72", "vz_hum_soldier_a", "global_barrel"]);
+        assert_eq!(n, 2, "only the tank + soldier are non-Prop");
+        assert_eq!(r.len(), 2, "Props are not stored");
+
+        // Recorded: hash-only lookup resolves.
+        let tank = mercs2_formats::hash::pandemic_hash_m2("ch_veh_tank_t72");
+        assert_eq!(r.archetype(tank), Archetype::Vehicle(VehicleClass::Tank));
+        // On-the-fly: an unregistered name still classifies through resolve().
+        let car = mercs2_formats::hash::pandemic_hash_m2("civ_veh_car_sedan_a");
+        assert_eq!(r.resolve(car, Some("civ_veh_car_sedan_a")), Archetype::Vehicle(VehicleClass::Car));
+        // Hash-only with no name and no record → Prop.
+        assert_eq!(r.resolve(0xDEAD_BEEF, None), Archetype::Prop);
+    }
+
+    /// `spawn_named` materializes a Vehicle from a bare template NAME (no pre-registration) — the
+    /// script `Pg.Spawn` path.
+    #[test]
+    fn spawn_named_classifies_and_spawns_a_vehicle() {
+        let r = SpawnResolver::new();
+        let name = "pmc_veh_car_sedan";
+        let h = mercs2_formats::hash::pandemic_hash_m2(name);
+        let mut world = World::new();
+        let car = r.spawn_named(&mut world, h, Some(name), 0x9000, Transform::IDENTITY);
+        assert!(world.get::<&Vehicle>(car).is_ok(), "named vehicle template spawns a Vehicle");
+        assert!(world.get::<&WheelSet>(car).is_ok());
     }
 
     /// The resolver routes a registered vehicle template to a `Vehicle` entity and everything else to

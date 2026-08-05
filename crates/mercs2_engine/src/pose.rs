@@ -261,6 +261,26 @@ pub fn bone_model_matrix(
     ])
 }
 
+/// Compose the WORLD matrix for an object attached to `bone` of a rig posed by this clip sample:
+/// `entity_world · bone_model · grip`. Sample the bone's model-space matrix via [`bone_model_matrix`],
+/// lift the row-major array into a glam `Mat4` (`from_cols_array_2d` reads its rows as glam columns ==
+/// the transpose == the correct column-major matrix for the render pipeline), then chain the entity's
+/// world transform and the grip offset. The caller decomposes/writes the result into the held object's
+/// `Transform`. Relocated from the compose glue in `mercs2_game::world::update_held_weapon`.
+pub fn attach_to_bone(
+    rig: &[BoneRig],
+    sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+    bone: usize,
+    entity_world: mercs2_core::glam::Mat4,
+    grip: mercs2_core::glam::Mat4,
+) -> mercs2_core::glam::Mat4 {
+    let hand_rm = bone_model_matrix(rig, sample, track_to_hier, num_transform_tracks, bone);
+    let hand = mercs2_core::glam::Mat4::from_cols_array_2d(&hand_rm);
+    entity_world * hand * grip
+}
+
 /// The horizontal distance the ROOT bone travels between two clip samples (its BAKED locomotion),
 /// divided by the elapsed time = the clip's authentic ground SPEED (m/s). The world movement code
 /// uses this to advance the entity Transform exactly as fast as the feet stride — so nothing slides

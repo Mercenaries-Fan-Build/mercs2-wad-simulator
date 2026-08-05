@@ -312,6 +312,71 @@ impl AssetSource {
     pub fn loading_plate(&self) -> Result<TextureData, String> {
         wad::shell_loading_plate(&self.base_path)
     }
+
+    /// Load the static watermap singleton (type `0x4D7D30C4`) out of the resident block: resolve its
+    /// UCFX container **by type**, pull the `watr` chunk body, and parse the height-field + wet mask.
+    ///
+    /// By type, not by name: `0x4D7D30C4` is `pandemic_hash_m2("watermap")` — the *type* hash. There is
+    /// no asset named "watermap"; retail's watermap sits in `resident_P000_Q3` under an unrelated
+    /// authored name hash inside an ASET row named for the resident group, so a name-keyed lookup misses
+    /// it every time. [`extract_singleton`](Self::extract_singleton) walks the type-0 ASET rows the way
+    /// the engine walks the resident entry table. See `docs/watermap_format.md`. Relocated from
+    /// `mercs2_game::world::load_watermap`.
+    pub fn load_watermap(&mut self) -> Option<crate::water_sim::Watermap> {
+        let ty = mercs2_formats::types::TYPE_HASH_WATERMAP;
+        let Some((name_hash, container)) = self.extract_singleton(ty) else {
+            println!("[world] no watermap chunk (type 0x{ty:08X}) in any mounted WAD");
+            return None;
+        };
+        let Some(watr) = mercs2_formats::ucfx::extract_chunk_body(&container, b"watr") else {
+            println!("[world] watermap 0x{name_hash:08X}: container carries no `watr` chunk");
+            return None;
+        };
+        match crate::water_sim::Watermap::from_watr_bytes(&watr) {
+            Ok(wm) => {
+                println!(
+                    "[world] watermap 0x{name_hash:08X}: {}x{} @ {} m ({} B watr), origin ({:.0}, {:.0})",
+                    wm.width(), wm.height(), wm.cell_size(), watr.len(), wm.origin_x, wm.origin_z
+                );
+                Some(wm)
+            }
+            Err(e) => {
+                println!("[world] watermap 0x{name_hash:08X}: watr parse failed: {e:?}");
+                None
+            }
+        }
+    }
+}
+
+/// The always-resident gameplay / UI / ambience sound banks (`MrxSoundBootstrap.LoadBanks`) — loaded
+/// as both a `wavebank` (PCM) and a `sounddb` (cue routing) under the same asset name.
+pub const RESIDENT_SOUND_BANKS: &[&str] = &[
+    "ui_hud", "ui_shell", "wpn_shared", "veh_shared", "veh_support", "ambience", "amb_birds",
+    "amb_shared", "collision_shared", "destruction_shared", "fol_shared", "music",
+];
+
+/// Extract the resident wavebank + sounddb bodies from the WAD (best-effort per bank). A bank that
+/// doesn't resolve is skipped; a partial set is still useful — every bank that loads adds audible cues.
+/// Runs on the load thread, so it hands back raw bytes the main thread feeds the engine. Decode stays
+/// in `mercs2_audio`. Relocated from `mercs2_game::world::load_resident_audio`.
+pub fn load_resident_audio(w: &mut Wad) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    const SOUNDDB_TYPE: u32 = 0xE527_3C14;
+    let mut wavebanks = Vec::new();
+    let mut sounddbs = Vec::new();
+    for name in RESIDENT_SOUND_BANKS {
+        let nh = mercs2_formats::hash::pandemic_hash_m2(name);
+        if let Ok(c) = wad::extract_container_typed(w, nh, mercs2_formats::types::TYPE_HASH_WAVEBANK) {
+            if let Some(body) = mercs2_formats::ucfx::extract_chunk_body(&c, b"data") {
+                wavebanks.push(body);
+            }
+        }
+        // The per-bank sounddb body is a `data` chunk or the raw container (starts with the 0x1D tag).
+        if let Ok(c) = wad::extract_container_typed(w, nh, SOUNDDB_TYPE) {
+            let body = mercs2_formats::ucfx::extract_chunk_body(&c, b"data").unwrap_or(c);
+            sounddbs.push(body);
+        }
+    }
+    (wavebanks, sounddbs)
 }
 
 /// The standard patch-WAD path for a base: `vz-patch.wad` alongside `vz.wad`. Kept separate so the

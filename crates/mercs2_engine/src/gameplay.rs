@@ -86,6 +86,13 @@ impl GameplaySystems {
         self.physics.set_heightmap(heightmap);
     }
 
+    /// The shared static-world `PhysicsQuery` (the fleet collision soup + terrain heightfield). The game
+    /// layer steps the constrained multi-body death ragdoll ([`death_ragdoll`]) against THIS same query,
+    /// so a settling corpse collides with the identical world geometry the player and vehicles do.
+    pub fn physics(&self) -> &StaticSoupPhysics {
+        &self.physics
+    }
+
     /// Run one fixed simulation step of the fleet systems over `world`, in the recovered layer-4 order
     /// (player roster → vehicle → weapons → destruction — `FUN_004c9740`), drain the event bus, then
     /// advance audio. No-op over a World carrying none of the fleet components yet.
@@ -110,15 +117,13 @@ impl GameplaySystems {
         crate::vehicle::drive_step_system(world, phys, &self.lut, dt);
         // Instance tick (not the static `update`) so the impact channel accumulates for draining.
         self.weapons.tick(world, dt, &mut self.bus, Some(phys));
-        // Integrate death ragdolls (WILDSTAR single-body stand-in): a lethal blast launches a
-        // `Ragdollable` character (in `detonate_explosion`); here it falls + settles against the
-        // terrain height. Replaced by the constrained Havok ragdoll when the physics system lands.
-        {
-            let hm = self.physics.heightmap();
-            crate::combat::ragdoll::ragdoll_system(world, dt, |p| {
-                hm.and_then(|h| h.sample(p.x, p.z)).unwrap_or(0.0)
-            });
-        }
+        // Death ragdolls: the weapon/damage pass above lowers `Health` and (on a lethal blast, in
+        // `detonate_explosion`) flags the victim with `combat::Ragdoll` carrying its blast-seed velocity.
+        // The faithful **constrained multi-body** ragdoll is snapped onto the victim's posed skeleton and
+        // stepped by the GAME layer (`world.rs`), which owns the model rigs the seed/read-back need — see
+        // [`death_ragdoll`]. It steps against THIS same `physics` soup (via [`GameplaySystems::physics`]),
+        // so corpses collide with the identical world the player/vehicles do. (The old single-rigid-body
+        // stand-in that ran here is superseded.)
         // Destruction runs AFTER the weapon system, so this step's damage is already on `Health`
         // when the machines are advanced — retail drives transitions from damage messages, not from
         // a poll one frame stale. Produces the node-enable tables the render side mirrors onto the
@@ -141,6 +146,113 @@ impl GameplaySystems {
     /// runtime turns each into a projected decal and a particle burst. Drain-then-clear.
     pub fn take_impacts(&mut self) -> Vec<crate::combat::Impact> {
         self.weapons.take_impacts()
+    }
+}
+
+/// The **death → constrained multi-body ragdoll** seam: snap the recovered
+/// [`mercs2_physics::ragdoll::Ragdoll`] onto a killed character's current posed skeleton, step it against
+/// the world, and read it back into the skin. It lives here (engine, which owns both the physics ragdoll
+/// and the [`mercs2_anim::ragdoll`] skeleton seam) but is DRIVEN by the game layer (`world.rs`), which
+/// supplies the per-model rig + posed skin the seed/read-back need. No new ragdoll math — this is pure
+/// glue over the W6 API.
+///
+/// Spaces: the anim seam works in the entity's **model space** (`model_pose[b]` = bone `b`'s model-space
+/// matrix, the pose before the inverse-bind skin multiply). The physics ragdoll simulates in **world
+/// space** so it collides with the real world soup. This module bridges the two by the entity's
+/// `Transform`: seeds are pushed model→world at spawn, and the stepped bodies are pulled world→model
+/// before the write-back. `SkinPalette.mats` holds the SKIN palette (`InvBind[b] · model[b]`), so
+/// [`model_pose_from_skin`] reconstructs the model pose to seed from, and [`recompose_skin`] rebuilds the
+/// palette after the write-back.
+pub mod death_ragdoll {
+    use mercs2_anim::pose::BoneRig;
+    use mercs2_anim::ragdoll::{body_seeds, write_back_model_pose};
+    use mercs2_core::glam::{Quat, Vec3};
+    use mercs2_core::{PhysicsQuery, Transform};
+    use mercs2_formats::skeleton::mat4_mul;
+    use mercs2_physics::ragdoll::{BodySeed, Ragdoll, RagdollDef};
+
+    /// Componentwise scale, guarding against a zero component (degenerate transforms).
+    fn safe_scale(s: Vec3) -> Vec3 {
+        Vec3::new(
+            if s.x.abs() > 1e-6 { s.x } else { 1.0 },
+            if s.y.abs() > 1e-6 { s.y } else { 1.0 },
+            if s.z.abs() > 1e-6 { s.z } else { 1.0 },
+        )
+    }
+
+    /// Model-space `(pos, rot)` → world, by the entity `Transform` (scale ⊙, then rotate, then translate).
+    fn to_world(tf: &Transform, mp: Vec3, mr: Quat) -> (Vec3, Quat) {
+        (tf.translation + tf.rotation * (safe_scale(tf.scale) * mp), tf.rotation * mr)
+    }
+
+    /// World-space `(pos, rot)` → model space (the inverse of [`to_world`]).
+    fn to_model(tf: &Transform, wp: Vec3, wr: Quat) -> (Vec3, Quat) {
+        let inv = tf.rotation.inverse();
+        ((inv * (wp - tf.translation)) / safe_scale(tf.scale), inv * wr)
+    }
+
+    /// Reconstruct the model-space pose from a skin palette: `model[b] = WorldBind[b] · Skin[b]` (the
+    /// inverse of the `Skin[b] = InvBind[b] · model[b]` the pose pipeline stored in `SkinPalette.mats`).
+    pub fn model_pose_from_skin(rig: &[BoneRig], skin: &[[[f32; 4]; 4]]) -> Vec<[[f32; 4]; 4]> {
+        let n = rig.len().min(skin.len());
+        (0..n).map(|b| mat4_mul(&rig[b].world_bind, &skin[b])).collect()
+    }
+
+    /// Rebuild the skin palette from a model-space pose: `Skin[b] = InvBind[b] · model[b]` — what the
+    /// renderer consumes from `SkinPalette.mats`. Writes `rig.len().min(model_pose.len())` entries.
+    pub fn recompose_skin(rig: &[BoneRig], model_pose: &[[[f32; 4]; 4]], out: &mut Vec<[[f32; 4]; 4]>) {
+        let n = rig.len().min(model_pose.len());
+        out.clear();
+        out.reserve(n);
+        for b in 0..n {
+            out.push(mat4_mul(&rig[b].inv_bind, &model_pose[b]));
+        }
+    }
+
+    /// **Alive → ragdoll snap** (`SetBodyToRagdoll`). Spawn the recovered 11-body human ragdoll seeded
+    /// from `model_pose` (the victim's current posed skeleton) via [`body_seeds`], lifted model→world by
+    /// `tf`, with every body's initial velocity `seed_velocity` (the blast seed, or zero). Returns the
+    /// live ragdoll plus a working model-pose buffer (a copy of `model_pose`; its non-ragdoll bones stay
+    /// frozen at the death frame while the driven bones are overwritten each step). `None` when any of the
+    /// 11 ragdoll bones is absent from this rig — i.e. the character isn't ragdollable.
+    pub fn spawn(
+        rig: &[BoneRig],
+        model_pose: &[[[f32; 4]; 4]],
+        tf: &Transform,
+        seed_velocity: Vec3,
+    ) -> Option<(Ragdoll, Vec<[[f32; 4]; 4]>)> {
+        let def = RagdollDef::human();
+        let seeds_model = body_seeds(rig, model_pose, &def.bone_hashes());
+        let mut seeds = Vec::with_capacity(seeds_model.len());
+        for s in &seeds_model {
+            let (mp, mr) = (*s)?; // any missing ragdoll bone => not ragdollable
+            let (wp, wr) = to_world(tf, mp, mr);
+            seeds.push(BodySeed { position: wp, orientation: wr, velocity: seed_velocity });
+        }
+        Some((Ragdoll::spawn(&def, &seeds), model_pose.to_vec()))
+    }
+
+    /// **Ragdoll → skin read-back.** Step the ragdoll one fixed tick against `phys`, pull each driven body
+    /// world→model by `tf`, and write it into `model_pose` via [`write_back_model_pose`] (non-ragdoll
+    /// bones untouched). Recompose the skin palette from `model_pose` afterwards with [`recompose_skin`].
+    pub fn step_writeback(
+        rd: &mut Ragdoll,
+        rig: &[BoneRig],
+        model_pose: &mut [[[f32; 4]; 4]],
+        tf: &Transform,
+        phys: &dyn PhysicsQuery,
+        dt: f32,
+    ) {
+        rd.step(phys, dt);
+        let driven: Vec<(u32, Vec3, Quat)> = rd
+            .bone_transforms()
+            .into_iter()
+            .map(|(h, wp, wr)| {
+                let (mp, mr) = to_model(tf, wp, wr);
+                (h, mp, mr)
+            })
+            .collect();
+        write_back_model_pose(rig, model_pose, &driven);
     }
 }
 
@@ -279,5 +391,93 @@ mod tests {
         // The shared audio engine advanced (dynamic-music toggle is observable through the same Rc).
         audio.borrow_mut().set_dynamic_music(true);
         assert!(audio.borrow().is_dynamic_music());
+    }
+
+    /// End-to-end **death → multi-body ragdoll** over the [`death_ragdoll`] seam the game layer drives: a
+    /// killed rigged character is snapped onto its posed skeleton, spawns the recovered 11-body ragdoll,
+    /// and — stepped against a floor — its bone transforms **diverge** from the seeded (bind) pose and
+    /// then **settle**, with the read-back landing on the entity's model pose.
+    #[test]
+    fn killed_rigged_entity_ragdoll_diverges_then_settles() {
+        use crate::physics::StaticSoupPhysics;
+        use mercs2_anim::pose::BoneRig;
+        use mercs2_core::glam::Vec3;
+        use mercs2_core::Transform;
+        use mercs2_physics::ragdoll::RagdollDef;
+
+        const ID: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+
+        // A rig carrying the 11 recovered ragdoll bones; the model pose stands them upright (identity
+        // rotation, anatomical heights) — the "current posed skeleton" the death path snaps onto.
+        let def = RagdollDef::human();
+        let ys = [1.0, 1.35, 1.65, 1.45, 1.20, 1.45, 1.20, 0.70, 0.35, 0.70, 0.35];
+        let xs = [0.0, 0.0, 0.0, 0.2, 0.25, -0.2, -0.25, 0.1, 0.1, -0.1, -0.1];
+        let rig: Vec<BoneRig> = def
+            .bodies
+            .iter()
+            .map(|b| BoneRig {
+                parent: -1,
+                name_hash: b.name_hash,
+                world_bind: ID,
+                inv_bind: ID,
+                local_bind: ID,
+            })
+            .collect();
+        let model_pose: Vec<[[f32; 4]; 4]> = (0..11)
+            .map(|k| {
+                let mut m = ID;
+                m[3] = [xs[k], ys[k], 0.0, 1.0];
+                m
+            })
+            .collect();
+
+        // Flat floor of small triangles for the corpse to settle on.
+        let mut tris = Vec::new();
+        let mut x = -3.0f32;
+        while x < 3.0 {
+            let mut z = -3.0f32;
+            while z < 3.0 {
+                let a = Vec3::new(x, 0.0, z);
+                let b = Vec3::new(x + 0.5, 0.0, z);
+                let c = Vec3::new(x + 0.5, 0.0, z + 0.5);
+                let d = Vec3::new(x, 0.0, z + 0.5);
+                tris.push([a, c, b]);
+                tris.push([a, d, c]);
+                z += 0.5;
+            }
+            x += 0.5;
+        }
+        let phys = StaticSoupPhysics::new(tris);
+        let tf = Transform::IDENTITY;
+
+        let (mut rd, mut work_pose) =
+            death_ragdoll::spawn(&rig, &model_pose, &tf, Vec3::ZERO).expect("all 11 bones present");
+        assert_eq!(rd.body_count(), 11);
+        let seeded = rd.bone_transforms();
+
+        let mut steps = 0;
+        while !rd.settled() && steps < 2000 {
+            death_ragdoll::step_writeback(&mut rd, &rig, &mut work_pose, &tf, &phys, 1.0 / 60.0);
+            steps += 1;
+        }
+        assert!(rd.settled(), "the ragdoll came to rest ({steps} steps)");
+
+        // Diverged: the settled bodies are no longer at their seeded (upright/bind) positions.
+        let settled = rd.bone_transforms();
+        let moved: f32 = seeded
+            .iter()
+            .zip(&settled)
+            .map(|((_, p0, _), (_, p1, _))| (*p1 - *p0).length())
+            .sum();
+        assert!(moved > 0.1, "ragdoll bones diverged from the seeded pose (moved {moved})");
+
+        // Read-back landed on the model pose: at least one driven bone's model matrix changed from the
+        // frozen death-frame pose, and the recomposed skin palette has an entry per bone.
+        let changed = (0..11).any(|b| work_pose[b][3] != model_pose[b][3]);
+        assert!(changed, "the write-back overwrote the driven bones' model pose");
+        let mut skin = Vec::new();
+        death_ragdoll::recompose_skin(&rig, &work_pose, &mut skin);
+        assert_eq!(skin.len(), rig.len(), "one skin matrix per bone");
     }
 }

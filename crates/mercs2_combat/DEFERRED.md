@@ -9,18 +9,34 @@ section below), not a blind live capture.
 
 ## wpn_* stat data
 
-- **Exact offset→field binding inside the weapon-def reflection blob** `[faithful-blocker: no]` — the
-  loader (`stats::parse_weapon_block`) faithfully unwraps a `wpn_*` block down to the weapon-def UCFX
-  `data` chunk and enumerates its `0x787c0871` (`= pandemic_hash_m2("weapon")`) sub-objects with their
-  raw field words. It does **not** yet map each sub-object word to a named stat (RateOfFire@word-N …),
-  because the field order is positional reflection replayed by the exe schema declarators
-  (`FUN_0065ca70` et al., ecs-01 §schemas) and the byte offsets are not pinned by any on-disk name —
-  the RE memory note [[weapon-definitions-wpn-blocks]] reached the same honest conclusion ("can't
-  reliably name offsets by eyeballing"). Pinning it needs one x32dbg trace of the deserializer against a
-  `wpn_*` block. Until then `WeaponStats` carries the **documented exe schema defaults** (real values
-  from ecs-01, not invented): `iClipSize 30`, `MaxAmmoReserve 60`, `iBulletsPerShot 1`, `RateOfFire
-  120`, `MaxAimAngleAi 15`, scatter/projectile/homing/explosive defaults. Per-weapon overrides are the
-  confirm-live follow-up.
+- **Reflection schemas recovered; per-weapon stat SOURCE is the remaining confirm** `[faithful-blocker: no]`
+  — the exact slot→named-field order + types + defaults for the five gun-stat classes are now recovered
+  first-hand from the schema-declarator bodies (`FUN_0065ca70` WeaponProjectileBase, `FUN_0065cc50`
+  WeaponScatter, `FUN_0065dc00` ProjectilePhysics, `FUN_0065d6e0` Explosive, `FUN_0065d930`
+  HomingWeapon) and encoded in `stats::schema`. `WeaponStats::apply_component_record(class_hash, words)`
+  decodes a genuine component record to NAMED per-weapon stats.
+  **⚠ Correction (verified 2026-08-04, retail `vz.wad` LE):** the `0x787c0871`
+  (`= pandemic_hash_m2("weapon")`) sub-objects that `parse_weapon_block` enumerates are **NOT** the
+  `WeaponProjectileBase`/`WeaponScatter`/… stat components — they are the weapon's **scene-graph nodes**.
+  Extracting the real weapon-def data chunks (sniperrifle 8 / combatrifle 10 / shotgun 8 / rocketlauncher
+  2 / antiair 1 records — matching the documented counts) shows every record shares a node header
+  (`0, flag, 0.96, flag, near, far, 1, 1, 1, …`), back-refs the weapon's own asset name-hash (e.g.
+  `0x071faae2` for sniperrifle) as an owner pointer, and carries `name_hash,child_index` slot pairs — a
+  render/attach graph (LOD near/far, tint, muzzle hardpoints). The proof they are not the stat classes:
+  in the whole weapon-def data chunk the stat class-hashes (`0xeb505c8b` …) appear **0×**,
+  `RateOfFire = 120.0` appears **0×**, and `iRoundsPerReload`/`FirstMagazine = -1` (`0xffffffff`, two
+  guaranteed `WeaponProjectileBase` fields) appear **0×**. So the per-weapon stat *values* are not in
+  this chunk; they live in a `vz_state` weapon overlay or a hand-rolled `.rdata` table
+  (`combat_vehicle_economy_gaps.md`, `data-defaults.md §1.4`), OR the reflection stream is delta-encoded
+  and the field-mask is unread. The prior memory note [[weapon-definitions-wpn-blocks]] read those node
+  words as "stat floats at fixed offsets" and observed real per-weapon diffs — but those are diffs in
+  LOD/transform node values, and the note itself admitted the offsets "misalign after ~0x100".
+  Naming node words as stats would invent numbers, which this loader refuses to do.
+  **CONFIRM-LIVE (the per-weapon stat source):** x32dbg BP on the `WeaponProjectileBase` `CopyFromStream`
+  (`PTR_CopyFromStream_00bbe328`) / `FUN_0064a600` while a `wpn_*` block loads, read the freshly-written
+  `0x28`-byte record, and cross-ref its `iClipSize`/`RateOfFire` against `stats::schema`. Until then a
+  non-overriding weapon genuinely uses the **declarator-recovered defaults** (`iClipSize 30`,
+  `MaxAmmoReserve 60`, `iBulletsPerShot 1`, `RateOfFire 120`, `MaxAimAngleAi 15`, scatter 1.5, etc.).
 
 - **The other two ASET entries** `[faithful-blocker: no]` — a `wpn_*` block's entries [1] `sounddb`
   (`0xe5273c14`) and [2] `wavebank` (`0xf753f6d0`) are the weapon's audio; parsing them belongs to the
@@ -40,12 +56,28 @@ section below), not a blind live capture.
   `ApplyDamageToNodeHealth`, decompilable, no SecuROM) via the Havok-AABB-phantom anchor, and pin the
   Mercs2 two-tier Primary/Node health split.
 
-- **Deferred + staggered blast application** `[faithful-blocker: no]` — the WildStar blast is not
-  instantaneous: `WSExplosion::Update` runs the victim list over `wildstar::LIFETIME_SECS` (1.5 s),
-  applying each victim at `dist × wildstar::STAGGER_SECS_PER_METER` (blast travels 30 u/s) and applying
-  force (`ApplyHitForce` impulse / ragdoll spread) before damage. `detonate_explosion` applies the same
-  *total* damage immediately; the timing + impulse are the physics-system follow-up. Constants are named in
-  `damage::wildstar` so the deferred system can consume them directly.
+- ~~**Deferred + staggered blast application**~~ **DONE.** `RuntimeExplosion` now gathers its victim
+  list once (`gather_explosion_victims` = `WSExplosion::CreateExplosion`), then `update_explosion`
+  (= `WSExplosion::Update`, driven by `projectile::explosion_system`) counts each victim's
+  `dist × wildstar::STAGGER_SECS_PER_METER` countdown down and applies force+damage as it elapses, over
+  `wildstar::LIFETIME_SECS`. Near victims fire first; the ragdoll blast-impulse (floor 200) lands on the
+  lethal frame. `detonate_explosion` is kept as the immediate all-at-once path (same *total* damage) for
+  simple callers/tests.
+
+- **Two-tier Primary/Node health split** `[faithful-blocker: no]` — modelled: `apply_hit`
+  = `ApplyDamageToPrimaryHealth` (hull `Health`), `apply_node_hit` = `ApplyDamageToNodeHealth`
+  (per-node `NodeHealth`; part nodes **tally** `hits` rather than killing the hull, matching the recovered
+  `flags & 0x80` part-node behaviour). Which authored parts get a `NodeHealth` pool, and the
+  `LookupNodeIdFromBodyId` body→node map, come from the destruction/vehicle asset data — the remaining
+  wiring, not a solver gap.
+
+- **The exact Mercs2 numeric constants** `[faithful-blocker: CONFIRM-LIVE]` — the *algorithm* is
+  recovered and structurally confirmed for Mercs2 (Xenon prototype scope names), but the numbers
+  (`1/30` stagger, `1.5 s` lifetime, force floor `200`, `amount × damageScale` per-target scale values,
+  the `DamageKey × ModifierKey` matrix) are the sibling WildStar's — the Mercs2 numeric bodies are
+  genuine VMX128 in the prototype and a BSim cross-fork match fell below the noise floor. Each is marked
+  `// CONFIRM-LIVE:` in `damage.rs`. The check: HW write-BP on the player's `RuntimeHealth.cur`
+  (`FUN_0066f220 → … → FUN_006696a0`, `cur@+0x04`, stride `0xc`) in x32dbg and read the applied delta.
 
 - **Explosion body-set query** `[faithful-blocker: no]` — `detonate_explosion` finds targets by an ECS
   spatial sweep over entities carrying a `Health` (the local `RuntimeHealth` analog) within the blast

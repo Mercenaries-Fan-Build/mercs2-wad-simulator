@@ -36,8 +36,12 @@
 //!   MOPP/heightfield world + the full 5-state controller (adding the Climbing/Ladder game states).
 //!   `// CONFIRM-LIVE:` the per-frame integrator (`hkpWorld::step`) is VMX128-undecoded — the
 //!   semi-implicit Euler here is a faithful equivalent, not the exe's exact solver.
-//! * There is no broadphase acceleration structure (MOPP BV-tree); this is a linear scan with a cheap
-//!   sphere cull. Fine for the current sim systems; the Havok path brings the BV-tree.
+//! * The broadphase is a **uniform XZ spatial grid** (`soup::Grid`, crate-internal) — the faithful acceleration of
+//!   retail's `hkpMoppBvTreeShape` BV-tree: a query touches only the cells the probe/ray/capsule covers
+//!   (`O(local)`), not the whole soup. The exact per-triangle math is unchanged and still runs on the
+//!   survivors, so results are identical to the old linear scan; only the triangle count visited drops.
+//!   Rebuilt whenever the soup changes ([`StaticSoupPhysics::set_tris`]). The full Havok path would swap
+//!   this uniform grid for the real MOPP BV-tree.
 //! * Only static world geometry is modelled, so [`RayHit::entity`] / `ClosestPoint::entity` are always
 //!   `None` (per the trait doc — MOPP/heightfield report no owning entity). Dynamic rigid bodies
 //!   (`hkpRigidBody`) and ragdolls arrive with the physics system.
@@ -50,7 +54,7 @@
 //! | [`Heightmap`] / [`GroundHit`] (root) | bilinear terrain grid (`hkpSampledHeightFieldShape` stand-in) + the walkable-ground probe result |
 //! | [`CharacterController`] / [`CharacterState`] / [`CharacterInput`] (root) | the OnGround/Jumping/InAir locomotion state machine, gravity, jump, slope + step limits ([`DEFAULT_GRAVITY`], [`DEFAULT_MAX_SLOPE_COS`]) |
 //! | [`RigidBody`] (root) | minimal sphere-body props/debris dynamics, stepped by [`StaticSoupPhysics::step_rigid_body`] |
-//! | [`soup`] | the lighter *direct-soup* API — free functions over a raw `&[[Vec3; 3]]` with no world object ([`soup::raycast`], [`soup::move_character`], [`soup::ground_below`], [`soup::ray_tri`]), used by the engine's on-foot player controller + camera boom. **Bbox-culled** broad phase, so a large floor/wall triangle a player stands in the middle of is kept (the root impl's culls are tuned for the game's small world triangles). |
+//! | [`soup`] | the lighter *direct-soup* API — free functions over a raw `&[[Vec3; 3]]` with no world object ([`soup::raycast`], [`soup::move_character`], [`soup::ground_below`], [`soup::ray_tri`]), used by the engine's on-foot player controller + camera boom. Accelerated by the same uniform-grid broadphase (cached per soup slice, since these functions don't own their triangles), with the exact **bbox-culled** per-triangle tests unchanged — so a large floor/wall triangle a player stands in the middle of is still kept. |
 //!
 //! `mercs2_engine` re-exports this crate as `mercs2_engine::physics`. Deferred work (Climbing/Ladder
 //! states, MOPP broadphase, full rigid-body dynamics) is itemised in `DEFERRED.md`.
@@ -61,6 +65,13 @@ use mercs2_core::physics_query::{ClosestPoint, PhysicsQuery, RayHit};
 /// Lightweight direct-triangle-soup collision (capsule controller + camera raycast over `&[[Vec3;3]]`),
 /// folded from the game's on-foot collision. Bbox-culled (large-triangle-safe). See [`soup`].
 pub mod soup;
+
+/// Constrained multi-body ragdoll (XPBD articulated bodies + swing/twist limits), driven by the
+/// ragdoll capsule shapes recovered from the WAD. Supersedes the single-body death stand-in. See
+/// [`ragdoll::Ragdoll`] / [`ragdoll::RagdollDef`].
+pub mod ragdoll;
+
+pub use ragdoll::{BodySeed, Ragdoll, RagdollBody, RagdollBodyDef, RagdollDef};
 
 // ---------------------------------------------------------------------------
 //   Triangle primitives (ported from mercs2_game::collision — leaf crate must
@@ -306,22 +317,29 @@ pub struct GroundHit {
 pub struct StaticSoupPhysics {
     tris: Vec<[Vec3; 3]>,
     heightmap: Option<Heightmap>,
+    /// Broadphase over `tris` — a uniform XZ spatial grid (the faithful acceleration of retail's
+    /// `hkpMoppBvTreeShape` BV-tree; see [`soup::Grid`]). Rebuilt whenever `tris` changes so every query
+    /// touches only the local cells, not the whole soup. Owned here (unlike the free-function soup API,
+    /// which caches per-slice) because this type owns its triangles.
+    grid: soup::Grid,
 }
 
 impl StaticSoupPhysics {
     /// Build from a world-space triangle list (buildings/roads/terrain mesh). No terrain heightmap.
     pub fn new(tris: Vec<[Vec3; 3]>) -> Self {
-        Self { tris, heightmap: None }
+        let grid = soup::Grid::build(&tris);
+        Self { tris, heightmap: None, grid }
     }
 
     /// Build from a terrain heightmap only (no triangle geometry).
     pub fn from_heightmap(heightmap: Heightmap) -> Self {
-        Self { tris: Vec::new(), heightmap: Some(heightmap) }
+        Self { tris: Vec::new(), heightmap: Some(heightmap), grid: soup::Grid::default() }
     }
 
     /// Build from both a triangle soup and a terrain heightmap.
     pub fn with_heightmap(tris: Vec<[Vec3; 3]>, heightmap: Heightmap) -> Self {
-        Self { tris, heightmap: Some(heightmap) }
+        let grid = soup::Grid::build(&tris);
+        Self { tris, heightmap: Some(heightmap), grid }
     }
 
     /// The triangle soup this impl queries.
@@ -334,8 +352,10 @@ impl StaticSoupPhysics {
         self.heightmap.as_ref()
     }
 
-    /// Replace the triangle soup (e.g. after a world-streaming block loads/unloads).
+    /// Replace the triangle soup (e.g. after a world-streaming block loads/unloads). Rebuilds the
+    /// broadphase grid for the new triangle set.
     pub fn set_tris(&mut self, tris: Vec<[Vec3; 3]>) {
+        self.grid = soup::Grid::build(&tris);
         self.tris = tris;
     }
 
@@ -351,9 +371,16 @@ impl StaticSoupPhysics {
     /// walls. A few relaxation passes resolve inside corners. Floors are excluded (ground snap owns Y).
     fn depenetrate(&self, mut pos: Vec3, radius: f32, height: f32) -> Vec3 {
         let cull2 = (radius + height + 4.0) * (radius + height + 4.0);
+        // Broadphase: gather the triangles in the cells under the capsule's cull footprint (the vertex
+        // cull reaches `radius+height+4`, plus a drift margin for the relaxation passes). The original
+        // per-triangle cull + push-out below is unchanged, so the depenetrated position is identical.
+        let reach = radius + height + 4.0 + 2.0;
+        let mut cand: Vec<u32> = Vec::new();
+        self.grid.gather_rect(&mut cand, pos.x - reach, pos.x + reach, pos.z - reach, pos.z + reach);
         for _ in 0..4 {
             let mut moved = false;
-            for t in &self.tris {
+            for &ci in &cand {
+                let t = &self.tris[ci as usize];
                 if (t[0] - pos).length_squared() > cull2 || !is_wall(t) {
                     continue;
                 }
@@ -390,8 +417,14 @@ impl StaticSoupPhysics {
         let origin = pos + Vec3::Y * up;
         let max_t = up + down;
         let cull2 = (radius + 2.0) * (radius + 2.0);
+        // Broadphase: the feet footprint (the vertex cull reaches `radius+2` in XZ). The unchanged
+        // per-triangle cull + slope test + ray probe below run over the survivors → identical ground.
+        let reach = radius + 2.0;
+        let mut cand: Vec<u32> = Vec::new();
+        self.grid.gather_rect(&mut cand, pos.x - reach, pos.x + reach, pos.z - reach, pos.z + reach);
         let mut best: Option<GroundHit> = None;
-        for t in &self.tris {
+        for &ci in &cand {
+            let t = &self.tris[ci as usize];
             let n = tri_normal(t);
             let nl = n.length();
             if nl <= 1e-6 {
@@ -430,11 +463,18 @@ impl StaticSoupPhysics {
     /// contact `normal` (unit, pointing from the wall toward the capsule / into free space). `None`
     /// when there is no wall geometry. Floors are excluded (they never block horizontal motion; the
     /// ground probe owns Y). This is the primitive the swept linear cast advances against.
-    fn closest_wall(&self, pos: Vec3, radius: f32, height: f32) -> Option<(f32, Vec3)> {
+    ///
+    /// `cand` is the broadphase candidate set (triangle indices) for the swept region — a superset of
+    /// every wall the capsule can come within reach of along its sweep. Restricting to it is
+    /// result-preserving for the conservative-advancement caller: a wall outside the swept region is
+    /// never within the capsule's clearance, so it never limits an advance nor becomes a blocking
+    /// contact. See [`Self::linear_cast`].
+    fn closest_wall(&self, pos: Vec3, radius: f32, height: f32, cand: &[u32]) -> Option<(f32, Vec3)> {
         let a = pos + Vec3::Y * radius;
         let b = pos + Vec3::Y * (height - radius);
         let mut best: Option<(f32, Vec3)> = None; // (surface-to-surface distance, normal)
-        for t in &self.tris {
+        for &ci in cand {
+            let t = &self.tris[ci as usize];
             if !is_wall(t) {
                 continue;
             }
@@ -474,10 +514,24 @@ impl StaticSoupPhysics {
         }
         let dir = delta / dist;
         const SKIN: f32 = 1e-3;
+        // Broadphase once for the whole sweep: the walls in the cells the swept capsule covers (its XZ
+        // bbox expanded by the capsule radius + a small margin). Any wall outside this can never be
+        // within the capsule's reach along the sweep, so restricting `closest_wall` to it leaves the
+        // conservative-advancement result unchanged.
+        let end = pos + delta;
+        let m = radius + 0.5;
+        let mut cand: Vec<u32> = Vec::new();
+        self.grid.gather_rect(
+            &mut cand,
+            pos.x.min(end.x) - m,
+            pos.x.max(end.x) + m,
+            pos.z.min(end.z) - m,
+            pos.z.max(end.z) + m,
+        );
         let mut t = 0.0f32;
         for _ in 0..64 {
             let p = pos + delta * t;
-            let (gap, n) = match self.closest_wall(p, radius, height) {
+            let (gap, n) = match self.closest_wall(p, radius, height, &cand) {
                 Some(g) => g,
                 None => return None, // no walls at all → clear
             };
@@ -542,8 +596,13 @@ impl PhysicsQuery for StaticSoupPhysics {
     /// the ray (front-facing to the caster). `entity` is `None` — static world geometry.
     fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<RayHit> {
         let cull2 = (max + 30.0) * (max + 30.0);
+        // Broadphase: only the cells the ray traverses. The unchanged vertex cull + Möller–Trumbore run
+        // over the survivors, so the nearest hit is identical to the full linear scan.
+        let mut cand: Vec<u32> = Vec::new();
+        self.grid.gather_ray(&mut cand, origin, origin + dir * max);
         let mut best: Option<(f32, &[Vec3; 3])> = None;
-        for t in &self.tris {
+        for &ci in &cand {
+            let t = &self.tris[ci as usize];
             if (t[0] - origin).length_squared() > cull2 {
                 continue;
             }
@@ -571,8 +630,14 @@ impl PhysicsQuery for StaticSoupPhysics {
     /// (outward-facing) closed shells. `entity` is `None` — static world geometry.
     fn closest_point(&self, point: Vec3, max: f32) -> Option<ClosestPoint> {
         let cull2 = (max + 30.0) * (max + 30.0);
+        // Broadphase: only the cells within `max` of the query point in XZ. Any triangle with a point
+        // within `max` (the only ones that can be the kept nearest) has its XZ bbox in this rectangle,
+        // so the unchanged cull + closest-point test over the survivors is identical to the full scan.
+        let mut cand: Vec<u32> = Vec::new();
+        self.grid.gather_rect(&mut cand, point.x - max, point.x + max, point.z - max, point.z + max);
         let mut best: Option<(f32, Vec3, &[Vec3; 3])> = None; // (unsigned dist², cp, tri)
-        for t in &self.tris {
+        for &ci in &cand {
+            let t = &self.tris[ci as usize];
             if (t[0] - point).length_squared() > cull2 {
                 continue;
             }
@@ -899,11 +964,25 @@ impl StaticSoupPhysics {
         body.position += body.velocity * dt;
 
         let mut grounded = false;
+        // Broadphase: the cells within the body's cull reach (`radius+4`) plus a drift margin for the
+        // relaxation passes (each push-out is at most `radius`, over 4 passes). The unchanged
+        // per-triangle cull + penetration resolve run over the survivors, so the settled
+        // position/velocity are identical to the full scan.
+        let reach = body.radius * 5.0 + 4.0;
+        let mut cand: Vec<u32> = Vec::new();
+        self.grid.gather_rect(
+            &mut cand,
+            body.position.x - reach,
+            body.position.x + reach,
+            body.position.z - reach,
+            body.position.z + reach,
+        );
         // Resolve the deepest penetration a few times (relaxation for corners/multiple contacts).
         for _ in 0..4 {
             let mut best: Option<(f32, Vec3)> = None; // (penetration depth, contact normal)
             let cull2 = (body.radius + 4.0) * (body.radius + 4.0);
-            for t in &self.tris {
+            for &ci in &cand {
+                let t = &self.tris[ci as usize];
                 if (t[0] - body.position).length_squared() > cull2 {
                     continue;
                 }
@@ -1086,6 +1165,116 @@ mod tests {
     fn closest_point_out_of_range_returns_none() {
         let phys = StaticSoupPhysics::new(unit_box());
         assert!(phys.closest_point(Vec3::new(100.0, 0.0, 0.0), 1.0).is_none());
+    }
+
+    // Brute-force reference = the ORIGINAL (pre-broadphase) linear scans, kept here to prove the
+    // grid-accelerated `StaticSoupPhysics` queries are bit-identical over a large soup.
+    fn raycast_brute(tris: &[[Vec3; 3]], origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3, Vec3)> {
+        let cull2 = (max + 30.0) * (max + 30.0);
+        let mut best: Option<(f32, &[Vec3; 3])> = None;
+        for t in tris {
+            if (t[0] - origin).length_squared() > cull2 {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, dir, t[0], t[1], t[2]) {
+                if d <= max && best.map_or(true, |(b, _)| d < b) {
+                    best = Some((d, t));
+                }
+            }
+        }
+        best.map(|(d, t)| {
+            let mut n = tri_normal(t);
+            let nl = n.length();
+            n = if nl > 1e-6 { n / nl } else { -dir };
+            if n.dot(dir) > 0.0 {
+                n = -n;
+            }
+            (d, origin + dir * d, n)
+        })
+    }
+
+    fn closest_point_brute(tris: &[[Vec3; 3]], point: Vec3, max: f32) -> Option<(f32, Vec3)> {
+        let cull2 = (max + 30.0) * (max + 30.0);
+        let mut best: Option<(f32, Vec3, &[Vec3; 3])> = None;
+        for t in tris {
+            if (t[0] - point).length_squared() > cull2 {
+                continue;
+            }
+            let cp = closest_on_tri(point, t[0], t[1], t[2]);
+            let d2 = (point - cp).length_squared();
+            if best.map_or(true, |(b, _, _)| d2 < b) {
+                best = Some((d2, cp, t));
+            }
+        }
+        best.and_then(|(d2, cp, t)| {
+            let dist = d2.sqrt();
+            if dist > max {
+                return None;
+            }
+            let mut n = tri_normal(t);
+            let nl = n.length();
+            n = if nl > 1e-6 { n / nl } else { Vec3::Y };
+            let signed = if (point - cp).dot(n) < 0.0 { -dist } else { dist };
+            Some((signed, cp))
+        })
+    }
+
+    /// The grid-accelerated `StaticSoupPhysics::raycast` / `closest_point` return results bit-identical
+    /// to the brute-force linear scan over a 50k+ triangle soup — the vertex cull is preserved, so
+    /// restricting to local cells is a pure acceleration, not a behaviour change.
+    #[test]
+    fn static_soup_grid_matches_bruteforce() {
+        // A 160×160 grid of small triangles (≈51k tris) plus a raised block, so rays and proximity
+        // queries hit varied geometry.
+        let mut tris: Vec<[Vec3; 3]> = Vec::new();
+        let n = 160usize;
+        let s = 2.0f32;
+        let h = |x: f32, z: f32| (x * 0.04).cos() * 1.3 + (z * 0.06).sin() * 1.1;
+        for xi in 0..n {
+            for zi in 0..n {
+                let x0 = (xi as f32 - 80.0) * s;
+                let x1 = x0 + s;
+                let z0 = (zi as f32 - 80.0) * s;
+                let z1 = z0 + s;
+                let a = Vec3::new(x0, h(x0, z0), z0);
+                let b = Vec3::new(x1, h(x1, z0), z0);
+                let c = Vec3::new(x1, h(x1, z1), z1);
+                let d = Vec3::new(x0, h(x0, z1), z1);
+                tris.push([a, c, b]);
+                tris.push([a, d, c]);
+            }
+        }
+        assert!(tris.len() > 50_000);
+        let phys = StaticSoupPhysics::new(tris.clone());
+
+        // A tiny deterministic PRNG (no `rand` dependency).
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rng = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 33) as u32 as f32) / (u32::MAX as f32)
+        };
+        let f = |r: f32, lo: f32, hi: f32| lo + r * (hi - lo);
+
+        for _ in 0..500 {
+            let x = f(rng(), -168.0, 168.0);
+            let z = f(rng(), -168.0, 168.0);
+
+            // raycast: random origin, direction, length.
+            let o = Vec3::new(x, f(rng(), -2.0, 12.0), z);
+            let dir = Vec3::new(f(rng(), -1.0, 1.0), f(rng(), -1.0, 1.0), f(rng(), -1.0, 1.0));
+            if dir.length_squared() > 1e-4 {
+                let dir = dir.normalize();
+                let max = f(rng(), 1.0, 250.0);
+                let got = phys.raycast(o, dir, max).map(|h| (h.distance, h.point, h.normal));
+                assert_eq!(got, raycast_brute(&tris, o, dir, max), "raycast mismatch o={o:?} dir={dir:?}");
+            }
+
+            // closest_point: random query point + range.
+            let p = Vec3::new(x, f(rng(), -4.0, 6.0), z);
+            let max = f(rng(), 0.5, 40.0);
+            let got = phys.closest_point(p, max).map(|c| (c.distance, c.point));
+            assert_eq!(got, closest_point_brute(&tris, p, max), "closest_point mismatch p={p:?} max={max}");
+        }
     }
 
     #[test]

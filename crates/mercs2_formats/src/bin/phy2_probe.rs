@@ -59,6 +59,10 @@ fn main() {
                         Shape::Box { half_extents } => {
                             println!("  box half-extents {half_extents:?}")
                         }
+                        Shape::Capsule(c) => {
+                            println!("  capsule r={:.4} half_len={:.4}", c.radius, c.half_len())
+                        }
+                        Shape::Sphere { radius } => println!("  sphere r={radius:.4}"),
                         Shape::Mopp => println!("  MOPP BV-tree (static non-convex mesh)"),
                         Shape::Mesh => println!("  WpMeshShape16 (16-bit indexed collision mesh)"),
                         Shape::Other(n) => println!("  undecoded shape: {n}"),

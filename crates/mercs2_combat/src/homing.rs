@@ -273,14 +273,7 @@ pub fn homing_flight_system(
             .ok()
             .map(|m| (m.owner, m.explosive, m.damage_key));
         if let Some((owner, exp, key)) = payload {
-            world.spawn((RuntimeExplosion {
-                owner: Some(owner),
-                pos: point,
-                stats: exp,
-                damage_key: key,
-                applied: false,
-                life: 0.25,
-            },));
+            world.spawn((RuntimeExplosion::new(Some(owner), point, exp, key),));
             let _ = world.despawn(missile);
             n += 1;
         }
@@ -361,6 +354,12 @@ mod tests {
             let _ = i;
         }
         assert_eq!(detonated, 1, "missile detonated on proximity");
+        // The blast is now deferred + distance-staggered (recovered WSExplosion::Update): a victim a
+        // few metres from the centre is applied `dist/30` s later, not on the detonation tick. Pump the
+        // explosion system past that stagger window so the staggered damage lands.
+        for _ in 0..16 {
+            crate::projectile::explosion_system(&mut world, 1.0 / 60.0, &mut bus, Some(&NoPhysics));
+        }
         assert!(
             world.get::<&Health>(target).unwrap().cur < 100.0,
             "target took blast damage"

@@ -663,6 +663,183 @@ fn register_population_regions(
     n
 }
 
+// ---- PopulationSimpleSpawner recovered on-disk schema (offline COMP-probe, retail vz.wad) ----
+//
+// PROBE RESULT (this session): `PopulationSimpleSpawner` IS A PLAIN KEYED COMP, not a bucketed
+// hashmap. Confirmed over BOTH layers_static block 29 (6 sub-block groups, 29 records) and multiple
+// `vz_state_*` overlay blocks (e.g. `vz_state_gurcon002` 14 records, `vz_state_pmccon004` 1): every
+// group carries a `schm` declaring `payload_stride = 112` (0x70) with 27 fields, `is_variable_length
+// = false`, and `schema.deserialize_records` divides the `data` blob exactly (`4 + 112 = 116`-byte
+// records) and yields records cleanly. So it reads through the SAME generic keyed-COMP path as
+// `PopulationDensity`/`ModelName` (`register_population_regions` above) — NOT the fixed-stride trap
+// `jc2-arc-recon-detour` warns about. (The code map's "class-manager, not a flat descriptor" note is
+// about the RUNTIME reflection *registry* — why it is absent from the 231-class TSVs — not about the
+// on-disk serialization, which is an ordinary `schm`-declared COMP.)
+//
+// RECOVERED FIELD NAME-HASHES (`pandemic_hash_m2` of the field name, cracked by matching candidate
+// names against the on-disk `schm` name-hashes — the schema is the recovered field layout, NOT the
+// runtime `+0x20..+0x8c` instance offsets the task warns against):
+//   * `Position`          0x05D7FC60  Blob32 @ payload+0   — ALWAYS identity `[0,0,0, 0,0,0,0, 1]`
+//                                                            on disk (29/29 records); the spawner's
+//                                                            real world anchor is the entity's joined
+//                                                            `Transform` COMP (join hit 29/29, 0 miss).
+//   * `SpawnerType`       0x6FF203C7  Flags  @ payload+84  — `SimpleSpawnerTypeEnum` discriminator
+//                                                            (observed values {0, 2}).
+//   * `SpawnerGroup`      0xD1A03B34  Flags  @ payload+88  — group index (observed 0..3, all < 8 ✓,
+//                                                            matches `SPAWNER_GROUP_COUNT`).
+//   * `SpawnerRadiusType` 0xC377497D  Flags  @ payload+76  — `SpawnerRadiusTypeEnum` (radius mode).
+//   * `Hardpoint`         0xC780F3A8  U32    @ payload+36  — hardpoint id/ref.
+// The schema has ZERO f32 fields: the runtime interval/countdown/reload/radii (`+0x5c..+0x7c`) and the
+// faction/list index (`+0x58`) are NOT authored per-instance on disk — they are runtime/type-default
+// values, consistent with code map §10.2. Those are the CONFIRM-LIVE gaps below.
+
+/// Recovered `PopulationSimpleSpawner` field name-hashes (see the block comment above).
+pub const PSS_FIELD_POSITION: u32 = 0x05D7_FC60;
+pub const PSS_FIELD_SPAWNER_TYPE: u32 = 0x6FF2_03C7;
+pub const PSS_FIELD_SPAWNER_GROUP: u32 = 0xD1A0_3B34;
+pub const PSS_FIELD_SPAWNER_RADIUS_TYPE: u32 = 0xC377_497D;
+
+/// Read the world block's authored `PopulationSimpleSpawner` COMP and register each spawner instance
+/// into `mgr` (the ambient-population content feed — Task B). Mirrors [`register_population_regions`]:
+/// walks the block's `COMP` groups, deserializes each `PopulationSimpleSpawner` record through the
+/// recovered `schm` (plain keyed, stride 112 — see the block comment above), joins each record by
+/// entity key to the `Transform` oracle for its world anchor, and reads the grounded `SpawnerGroup` /
+/// `SpawnerType` fields by name-hash. Returns how many spawners were registered (bounded by the 768-cap
+/// pool — a full pool refuses further registers, exactly as `cdbsizes.ini` bounds it).
+///
+/// GROUNDING / FIDELITY: the transform anchor and the group/type discriminators are recovered from the
+/// shipped block. Three things are deliberately left at their defaults with a **CONFIRM-LIVE** marker,
+/// because they are provably NOT in the placed COMP (the `schm` has no f32 fields and no cracked
+/// faction field — they are runtime/type defaults, code map §10.2):
+///   1. **family** (Window/NoModel/Hardpoint/Path) — the `SpawnerType`→family fold is unproven
+///      (§10.2, the four updaters are structurally interchangeable); registered as `NoModel` (the
+///      neutral ambient/off-screen family) pending a live capture of the fold.
+///   2. **interval/countdown/reload** — not authored on disk; kept at the [`SimpleSpawner`] defaults.
+///   3. **faction/list index** — not a cracked on-disk field (runtime `+0x58`); kept at the default.
+/// Fabricating these from heuristics is declined, exactly as `register_population_regions` declines to
+/// fabricate a region rect.
+pub fn register_population_spawners(
+    block: &[u8],
+    mgr: &mut crate::population::SimpleSpawnerManager,
+) -> usize {
+    use crate::population::{SimpleSpawner, SpawnerFamily};
+    use mercs2_core::glam::{Quat, Vec3};
+    use mercs2_core::Transform;
+    use mercs2_formats::schema::FieldValue;
+
+    // Authored world anchors from the block's Transforms (the placement oracle) — the same join
+    // register_population_regions uses. The inline `Position` field is identity on disk, so the real
+    // world position comes from here.
+    let mut centers: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
+    let mut yaws: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+    for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
+        centers.entry(p.key).or_insert(p.pos);
+        yaws.entry(p.key).or_insert_with(|| mercs2_formats::placement::yaw_from_quat(&p.quat));
+    }
+
+    // CF-2 — per-spawner faction from the attached `SkirmishSpawnList` (the spawn-list channel), NOT a
+    // hardcoded `Vz`. The on-disk `PopulationSimpleSpawner` schm has no faction field (the runtime
+    // `+0x58` list index is not authored per-instance), so the faithful source is the joined
+    // `SkirmishSpawnList` COMP: its first slot int is the faction/list channel. Build a
+    // entity_key → SpawnFaction map from any `SkirmishSpawnList` group in the block; spawners with no
+    // joined list fall back to the civilian `Ped` ambient default (below), never a fabricated faction.
+    let faction_by_key = read_spawn_list_factions(block);
+
+    let mut n = 0usize;
+    for g in walk_comp_groups(block) {
+        if g.name.as_deref() != Some("PopulationSimpleSpawner") {
+            continue;
+        }
+        let Some(schema) = g.schema() else { continue };
+        let Some(data) = g.data.as_ref() else { continue };
+        let Some(recs) = schema.deserialize_records(data) else { continue };
+        for r in &recs {
+            // World anchor: the joined Transform (the inline Position blob is identity on disk).
+            let Some(c) = centers.get(&r.entity_key) else { continue };
+            let yaw = yaws.get(&r.entity_key).copied().unwrap_or(0.0);
+            let mut transform = Transform::from_translation(Vec3::from(*c));
+            transform.rotation = Quat::from_rotation_y(yaw);
+
+            // Grounded discriminators (by recovered name-hash).
+            let group = match r.get(PSS_FIELD_SPAWNER_GROUP) {
+                Some(FieldValue::U32(v)) => (v & 0xFF) as u8,
+                _ => 0,
+            };
+            let spawner_type = match r.get(PSS_FIELD_SPAWNER_TYPE) {
+                Some(FieldValue::U32(v)) => (v & 0xFF) as u8,
+                _ => 0,
+            };
+
+            // CF-2 faction: the joined SkirmishSpawnList channel if present, else the civilian Ped
+            // ambient default (the living world is crowds; faction troops arrive via vz_state overlays
+            // / SetSpawnList tweaks). This replaces the old blanket `Vz` default.
+            let faction = faction_by_key
+                .get(&r.entity_key)
+                .copied()
+                .unwrap_or(crate::population::SpawnFaction::Ped);
+
+            let spawner = SimpleSpawner {
+                group: group.min(crate::population::SPAWNER_GROUP_COUNT - 1),
+                // CONFIRM-LIVE: SpawnerType→family fold unproven (§10.2). Kept as the raw type
+                // discriminator; family defaulted to the neutral NoModel ambient updater.
+                type_disc: [spawner_type, 0, 0],
+                family: SpawnerFamily::NoModel,
+                faction,
+                transform,
+                // CONFIRM-LIVE: interval/reload not authored on disk (no f32 fields; runtime/type
+                // defaults). Kept at the SimpleSpawner defaults until the type-default table or a live
+                // capture supplies them.
+                ..SimpleSpawner::default()
+            };
+            if mgr.register(spawner).is_some() {
+                n += 1;
+            } else {
+                break; // 768-cap pool full — stop, matching cdbsizes.ini bound
+            }
+        }
+    }
+    n
+}
+
+/// Read the block's `SkirmishSpawnList` COMP and map each carrying entity key → its [`SpawnFaction`]
+/// channel (CF-2). The list's six ints are documented as "faction/unit/count indices"
+/// (`mercs2_population::components::SkirmishSpawnList`); we take the FIRST field as the faction/list
+/// index and map it via [`mercs2_population::slot_table::faction_from_list_slot`] (clamping unknowns to
+/// the civilian `Ped` ambient default). Returns an empty map when the block carries no such COMP —
+/// then every spawner falls back to `Ped` at the call site.
+///
+/// CONFIRM-LIVE: the exact slot ordering (which of the six ints is the faction channel) is not
+/// instruction-proven; the first-int reading is the honest, documented assumption, and any out-of-range
+/// value degrades to `Ped` rather than a fabricated faction.
+fn read_spawn_list_factions(
+    block: &[u8],
+) -> std::collections::HashMap<u32, crate::population::SpawnFaction> {
+    use mercs2_formats::schema::FieldValue;
+    let mut out = std::collections::HashMap::new();
+    for g in walk_comp_groups(block) {
+        if g.name.as_deref() != Some("SkirmishSpawnList") {
+            continue;
+        }
+        let Some(schema) = g.schema() else { continue };
+        let Some(data) = g.data.as_ref() else { continue };
+        let Some(recs) = schema.deserialize_records(data) else { continue };
+        for r in &recs {
+            // First schema field = the faction/list channel int (slot 0).
+            let slot0 = match r.fields.first() {
+                Some((_, FieldValue::U32(v))) => *v as i32,
+                Some((_, FieldValue::U16(v))) => *v as i32,
+                Some((_, FieldValue::U8(v))) => *v as i32,
+                _ => continue,
+            };
+            out.insert(
+                r.entity_key,
+                crate::population::slot_table::faction_from_list_slot(slot0),
+            );
+        }
+    }
+    out
+}
+
 /// Resolve a vz_state overlay LAYER name to its WAD block, matching the PTHS filename
 /// `<layer>_P###_Q#.block` — i.e. the layer name immediately followed by the `_P` quality suffix.
 /// This avoids the prefix ambiguity a loose substring ([`find_block_by_path`]) has: `vz_state_pmc`
@@ -1287,6 +1464,48 @@ pub(crate) mod schema_wire_tests {
         find_terrain_blocks(&mut w).ok().map(|(_low, ls)| ls)
     }
 
+    /// TASK-B confirm: `PopulationSimpleSpawner` is a plain keyed COMP in the retail `layers_static`
+    /// block and the content loader feeds real spawner instances (at joined-Transform anchors, with the
+    /// recovered SpawnerGroup) into an empty `SimpleSpawnerManager`. SKIPS (passes) when vz.wad absent.
+    #[test]
+    fn live_register_population_spawners_from_layers_static() {
+        let Some(ls) = retail_layers_static() else {
+            return eprintln!("[skip] vz.wad not present — population-spawner loader test skipped");
+        };
+        // The COMP must parse as plain-keyed (stride 4+112) and produce records — the probe result.
+        let mut pss_groups = 0usize;
+        for g in walk_comp_groups(&ls) {
+            if g.name.as_deref() != Some("PopulationSimpleSpawner") {
+                continue;
+            }
+            pss_groups += 1;
+            let schema = g.schema().expect("PopulationSimpleSpawner carries a schm");
+            assert_eq!(schema.payload_stride, 112, "recovered PSS stride is 112 (0x70)");
+            assert!(!schema.is_variable_length(), "PSS is fixed-stride, not variable/bucketed");
+            if let Some(data) = g.data.as_ref() {
+                assert_eq!(data.len() % (4 + 112), 0, "PSS data divides exactly by the 116-B record");
+                assert!(schema.deserialize_records(data).is_some(), "PSS deserializes as plain keyed");
+            }
+        }
+        assert!(pss_groups > 0, "layers_static must carry PopulationSimpleSpawner COMPs");
+
+        // The loader feeds real spawners into a fresh (empty) manager.
+        let mut mgr = crate::population::SimpleSpawnerManager::new();
+        assert_eq!(mgr.spawners().len(), 0, "starts empty (the bug this fixes)");
+        let n = register_population_spawners(&ls, &mut mgr);
+        assert!(n >= 1, "must register at least one spawner from world data");
+        assert_eq!(mgr.spawners().len(), n, "every registered spawner lands in the pool");
+        // Every registered spawner sits at a real (non-origin) world anchor and a valid group.
+        for sp in mgr.spawners() {
+            assert!(sp.group < crate::population::SPAWNER_GROUP_COUNT, "group index in range");
+            assert!(
+                sp.transform.translation != mercs2_core::glam::Vec3::ZERO,
+                "spawner anchored at its joined Transform, not the identity Position blob"
+            );
+        }
+        eprintln!("[task-b] registered {n} PopulationSimpleSpawner instances from layers_static");
+    }
+
     /// The transit landing pads read out of the REAL retail `LandingZone` COMP. SKIPS (passes) when
     /// vz.wad is absent.
     ///
@@ -1648,6 +1867,105 @@ pub(crate) mod schema_wire_tests {
             }
         }
         None
+    }
+}
+
+// ── W7 relocations: boot mechanism moved out of the game's `world.rs` ─────────────────────────────
+//   These were hand-rolled in `mercs2_game::world` (recovered from the deleted engine bin); they are
+//   engine world/terrain utilities, so they live next to the `HeightMap` + placement helpers they use.
+
+/// Build the DEBUG placement-marker mesh (`--markers`): one upright tetra per placement, colour-coded
+/// by class (PMC-subset warm orange / off-map yellow / ordinary cool blue). Vertex-colour only.
+/// Relocated verbatim from `mercs2_game::world::build_placement_markers` — pure geometry over the
+/// placement records, using this module's own `placement_is_pmc_subset` / `is_out_of_bounds`.
+pub fn build_placement_markers(
+    placements: &[mercs2_formats::placement::Placement],
+) -> (Vec<crate::mesh::Vertex>, Vec<u32>, Vec<crate::mesh::DrawGroup>) {
+    const H: f32 = 3.0; // marker height (m)
+    const R: f32 = 0.9; // marker base half-width (m)
+    // Upright tetra: apex above, 3 base corners. (LH +Y up.)
+    let local: [[f32; 3]; 4] =
+        [[0.0, H, 0.0], [-R, 0.0, -R], [R, 0.0, -R], [0.0, 0.0, R]];
+    let faces: [[u32; 3]; 4] = [[0, 2, 1], [0, 3, 2], [0, 1, 3], [1, 2, 3]];
+    let mut verts: Vec<crate::mesh::Vertex> = Vec::with_capacity(placements.len() * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(placements.len() * 12);
+    for p in placements {
+        let color = if placement_is_pmc_subset(p) {
+            [0.95, 0.35, 0.10] // PMC/base subset: warm orange
+        } else if is_out_of_bounds(&p.pos) {
+            [0.95, 0.90, 0.15] // off-map candidate: yellow
+        } else {
+            [0.20, 0.55, 0.90] // ordinary placement: cool blue
+        };
+        let base = verts.len() as u32;
+        for l in &local {
+            verts.push(crate::mesh::Vertex {
+                pos: [p.pos[0] + l[0], p.pos[1] + l[1], p.pos[2] + l[2]],
+                color,
+                uv: [0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [255, 0, 0, 0],
+            });
+        }
+        for f in &faces {
+            indices.push(base + f[0]);
+            indices.push(base + f[1]);
+            indices.push(base + f[2]);
+        }
+    }
+    let draws = vec![crate::mesh::DrawGroup {
+        index_start: 0,
+        index_count: indices.len() as u32,
+        diffuse: None, // vertex-color only (white fallback texture)
+        ..Default::default()
+    }];
+    (verts, indices, draws)
+}
+
+/// World-space collision triangles of a placed renderable mesh: rotate each vertex by `quat` and
+/// translate by `pos`, emitting one `[Vec3; 3]` per index triple. The single builder behind the
+/// game's per-cell / per-interior-shell / per-prop collision loops (they differ only in whether they
+/// pass a rotation). Pass the identity quat `[0,0,0,1]` for translate-only placement.
+pub fn mesh_collision_tris(
+    verts: &[crate::mesh::Vertex],
+    indices: &[u32],
+    pos: [f32; 3],
+    quat: [f32; 4],
+) -> Vec<[mercs2_core::glam::Vec3; 3]> {
+    use mercs2_core::glam::{Quat, Vec3};
+    let tr = Vec3::from(pos);
+    let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
+    indices
+        .chunks_exact(3)
+        .map(|idx| {
+            let w = |i: u32| q * Vec3::from(verts[i as usize].pos) + tr;
+            [w(idx[0]), w(idx[1]), w(idx[2])]
+        })
+        .collect()
+}
+
+impl HeightMap {
+    /// Sample this render `HeightMap` onto a regular grid → a `mercs2_physics::Heightmap` the fleet
+    /// physics can raycast (K2 S3). The terrain extent is the engine's ±4000 m world square; a
+    /// 257×257 grid (~31 m cells) bilinearly interpolates smoothly enough for vehicle ground contact.
+    /// The render `HeightMap` keeps the exact triangles for the player walk; this is the physics-side
+    /// heightfield. Relocated from `mercs2_game::world::heightmap_to_physics`.
+    pub fn to_physics_heightmap(&self) -> crate::physics::Heightmap {
+        const W: usize = 257;
+        const MIN: f32 = -4000.0;
+        const MAX: f32 = 4000.0;
+        let cell = (MAX - MIN) / (W as f32 - 1.0);
+        let mut heights = Vec::with_capacity(W * W);
+        for iz in 0..W {
+            let z = MIN + iz as f32 * cell;
+            for ix in 0..W {
+                let x = MIN + ix as f32 * cell;
+                heights.push(self.height_at(x, z));
+            }
+        }
+        crate::physics::Heightmap::new(MIN, MIN, cell, W, W, heights)
     }
 }
 

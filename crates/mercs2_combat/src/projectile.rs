@@ -120,14 +120,7 @@ pub fn projectile_system_impacts(
         // Explosive round: spawn a blast at the impact/expiry point (its Explosion impact is emitted by
         // the explosion pass). A non-explosive direct hit emits a bullet/blood impact here.
         if let Some(exp) = explosive {
-            world.spawn((RuntimeExplosion {
-                owner: Some(owner),
-                pos: point,
-                stats: exp,
-                damage_key: key,
-                applied: false,
-                life: 0.25, // brief linger; the damage applies on its first tick
-            },));
+            world.spawn((RuntimeExplosion::new(Some(owner), point, exp, key),));
         } else if let Some((normal, dir)) = hit_facing {
             // A person hit sprays blood; a world/prop/vehicle hit leaves a bullet hole.
             let is_character = victim.map(|v| world.get::<&Human>(v).is_ok()).unwrap_or(false);
@@ -165,28 +158,57 @@ pub fn explosion_system_impacts(
     physics: Option<&dyn PhysicsQuery>,
     impacts: &mut Vec<Impact>,
 ) -> u32 {
-    // Gather blasts to detonate this tick (those not yet applied), plus age/despawn bookkeeping.
-    let mut to_detonate: Vec<(Entity, Option<Entity>, Vec3, crate::stats::ExplosiveStats, crate::damage::DamageKey)> =
+    // 1) CreateExplosion pass: any blast not yet gathered gathers its distance-staggered victim list
+    //    (once), emits its FX mark, and flips `applied`. Done as a read-only sweep first because the
+    //    gather borrows the world immutably.
+    let mut to_gather: Vec<(Entity, Option<Entity>, Vec3, crate::stats::ExplosiveStats, crate::damage::DamageKey)> =
         Vec::new();
-    let mut expired: Vec<Entity> = Vec::new();
-    for (ee, ex) in world.query::<&mut RuntimeExplosion>().iter() {
+    for (ee, ex) in world.query::<&RuntimeExplosion>().iter() {
         if !ex.applied {
-            to_detonate.push((ee, ex.owner, ex.pos, ex.stats, ex.damage_key));
-            ex.applied = true;
-        }
-        ex.life -= dt;
-        if ex.life <= 0.0 {
-            expired.push(ee);
+            to_gather.push((ee, ex.owner, ex.pos, ex.stats, ex.damage_key));
         }
     }
-    let mut applied_count = 0u32;
-    for (_ee, owner, pos, stats, key) in to_detonate {
+    for (ee, _owner, pos, stats, key) in to_gather {
         // Emit the explosion-mark/scorch FX at the blast centre (once, on the detonation tick),
         // regardless of whether the blast happened to catch any bodies.
         impacts.push(Impact::explosion(pos));
-        let hits = crate::damage::detonate_explosion(world, bus, physics, owner, pos, &stats, key);
+        let victims = crate::damage::gather_explosion_victims(world, physics, pos, &stats, key);
+        if let Ok(mut ex) = world.get::<&mut RuntimeExplosion>(ee) {
+            ex.victims = victims;
+            ex.applied = true;
+        }
+    }
+
+    // 2) Update pass: age every gathered blast, apply victims whose distance-stagger countdown elapsed,
+    //    and despawn a blast once every victim is applied or its lifetime is spent.
+    let mut blasts: Vec<(Entity, Option<Entity>, Vec3, crate::damage::DamageKey)> = Vec::new();
+    for (ee, ex) in world.query::<&RuntimeExplosion>().iter() {
+        if ex.applied {
+            blasts.push((ee, ex.owner, ex.pos, ex.damage_key));
+        }
+    }
+    let mut applied_count = 0u32;
+    let mut expired: Vec<Entity> = Vec::new();
+    for (ee, owner, pos, key) in blasts {
+        // Take the victim list out to avoid holding a borrow across the mutable apply.
+        let (mut victims, life) = match world.get::<&mut RuntimeExplosion>(ee) {
+            Ok(mut ex) => {
+                ex.life += dt;
+                (std::mem::take(&mut ex.victims), ex.life)
+            }
+            Err(_) => continue,
+        };
+        let hits = crate::damage::update_explosion(world, bus, owner, pos, &mut victims, key, dt);
         if !hits.is_empty() {
             applied_count += 1;
+        }
+        let done = crate::damage::blast_fully_applied(&victims) || life >= crate::damage::wildstar::LIFETIME_SECS;
+        // Put the (partially-drained) list back for next tick unless we're done.
+        if let Ok(mut ex) = world.get::<&mut RuntimeExplosion>(ee) {
+            ex.victims = victims;
+        }
+        if done {
+            expired.push(ee);
         }
     }
     for ee in expired {

@@ -48,6 +48,333 @@ fn xz_in_tri_bbox(t: &[Vec3; 3], pos: Vec3, margin: f32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+//   Broadphase — a uniform XZ spatial grid over the triangle soup
+// ---------------------------------------------------------------------------
+//
+// The retail engine broadphases collision with a `hkpMoppBvTreeShape` BVH, so a query touches
+// `O(log n)` nodes instead of the whole soup. This is the faithful *acceleration* of that intent: a
+// uniform grid over the world's XZ plane (the terrain/tile axis) buckets every triangle into the cells
+// its bounding box overlaps. A ground probe then tests only the cell(s) under the feet, a ray only the
+// cells it traverses (grid DDA), and a swept capsule only the cells it covers — `O(local)` instead of
+// `O(all triangles)`. The exact per-triangle math (bbox cull + Möller–Trumbore / closest-point) is
+// unchanged and still runs on the survivors, so the RESULT is bit-for-bit identical to the linear scan;
+// only the *number of triangles visited* shrinks. See `DEFERRED.md` (Broadphase / MOPP BV-tree).
+
+/// Nominal cell size (metres) — roughly the streamed terrain-tile detail scale, so a ground probe or a
+/// swept-capsule step touches one or a handful of cells.
+const TARGET_CELL: f32 = 12.0;
+/// Hard cap on the cell count so a very large world stays memory-reasonable (the cell size is grown to
+/// fit if needed). `1<<20` cells → the `cell_start` prefix array is ~4 MB worst case.
+const MAX_CELLS: usize = 1 << 20;
+/// A triangle whose XZ bbox spans more cells than this goes in the always-tested `oversized` bucket
+/// (rather than being replicated into every cell) — bounds memory against a huge ground/wall triangle.
+const OVERSIZE_CELLS: usize = 64;
+
+/// A uniform XZ spatial hash over a triangle soup: `items` holds triangle indices grouped by cell
+/// (CSR layout via `cell_start`), plus an `oversized` bucket of triangles too large to bucket. Built
+/// once per distinct soup and reused across every query against it (see [`with_grid`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Grid {
+    min_x: f32,
+    min_z: f32,
+    cell: f32,
+    inv_cell: f32,
+    nx: usize,
+    nz: usize,
+    /// CSR offsets: cell `c`'s triangle indices are `items[cell_start[c]..cell_start[c+1]]`. Length
+    /// `nx*nz + 1` (empty grid: empty).
+    cell_start: Vec<u32>,
+    items: Vec<u32>,
+    /// Triangles spanning more than [`OVERSIZE_CELLS`] cells — always tested (never bucketed).
+    oversized: Vec<u32>,
+}
+
+impl Grid {
+    /// Bucket every triangle into the cells its XZ bounding box overlaps. `O(n)` once; amortised away
+    /// by the per-soup cache. Rebuilt whenever the soup changes (a new slice identity — see [`SoupKey`]).
+    pub(crate) fn build(tris: &[[Vec3; 3]]) -> Grid {
+        if tris.is_empty() {
+            return Grid::default();
+        }
+        let (mut min_x, mut min_z) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_z) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for t in tris {
+            for v in t {
+                min_x = min_x.min(v.x);
+                max_x = max_x.max(v.x);
+                min_z = min_z.min(v.z);
+                max_z = max_z.max(v.z);
+            }
+        }
+        if !(min_x.is_finite() && min_z.is_finite() && max_x.is_finite() && max_z.is_finite()) {
+            // NaN/inf vertices: fall back to "everything is oversized" (correct, just unaccelerated).
+            return Grid { oversized: (0..tris.len() as u32).collect(), ..Grid::default() };
+        }
+        let span_x = (max_x - min_x).max(1e-3);
+        let span_z = (max_z - min_z).max(1e-3);
+        // Grow the cell if the world is so large the grid would blow the cell-count cap.
+        let mut cell = TARGET_CELL;
+        loop {
+            let nx = (span_x / cell) as usize + 1;
+            let nz = (span_z / cell) as usize + 1;
+            if nx.saturating_mul(nz) <= MAX_CELLS || !cell.is_finite() {
+                break;
+            }
+            cell *= 2.0;
+        }
+        let inv_cell = 1.0 / cell;
+        let nx = ((span_x / cell) as usize + 1).max(1);
+        let nz = ((span_z / cell) as usize + 1).max(1);
+        let ncells = nx * nz;
+
+        let cx = |x: f32| (((x - min_x) * inv_cell) as isize).clamp(0, nx as isize - 1) as usize;
+        let cz = |z: f32| (((z - min_z) * inv_cell) as isize).clamp(0, nz as isize - 1) as usize;
+        let tri_range = |t: &[Vec3; 3]| {
+            let (b0, b1) = tri_bbox(t);
+            (cx(b0.x), cx(b1.x), cz(b0.z), cz(b1.z))
+        };
+
+        // Pass 1: count per-cell occupancy (and collect oversized).
+        let mut counts = vec![0u32; ncells];
+        let mut oversized: Vec<u32> = Vec::new();
+        for (i, t) in tris.iter().enumerate() {
+            let (cx0, cx1, cz0, cz1) = tri_range(t);
+            if (cx1 - cx0 + 1) * (cz1 - cz0 + 1) > OVERSIZE_CELLS {
+                oversized.push(i as u32);
+                continue;
+            }
+            for zc in cz0..=cz1 {
+                let base = zc * nx;
+                for xc in cx0..=cx1 {
+                    counts[base + xc] += 1;
+                }
+            }
+        }
+        // Prefix-sum into CSR offsets.
+        let mut cell_start = vec![0u32; ncells + 1];
+        for c in 0..ncells {
+            cell_start[c + 1] = cell_start[c] + counts[c];
+        }
+        // Pass 2: scatter triangle indices into their cells.
+        let mut items = vec![0u32; cell_start[ncells] as usize];
+        let mut cursor: Vec<u32> = cell_start[..ncells].to_vec();
+        for (i, t) in tris.iter().enumerate() {
+            let (cx0, cx1, cz0, cz1) = tri_range(t);
+            if (cx1 - cx0 + 1) * (cz1 - cz0 + 1) > OVERSIZE_CELLS {
+                continue;
+            }
+            for zc in cz0..=cz1 {
+                let base = zc * nx;
+                for xc in cx0..=cx1 {
+                    let c = base + xc;
+                    items[cursor[c] as usize] = i as u32;
+                    cursor[c] += 1;
+                }
+            }
+        }
+        Grid { min_x, min_z, cell, inv_cell, nx, nz, cell_start, items, oversized }
+    }
+
+    #[inline]
+    fn clamp_cx(&self, x: f32) -> usize {
+        (((x - self.min_x) * self.inv_cell) as isize).clamp(0, self.nx as isize - 1) as usize
+    }
+    #[inline]
+    fn clamp_cz(&self, z: f32) -> usize {
+        (((z - self.min_z) * self.inv_cell) as isize).clamp(0, self.nz as isize - 1) as usize
+    }
+
+    /// Collect (sorted, de-duplicated) the indices of every triangle bucketed into any cell overlapping
+    /// the XZ rectangle `[x0,x1]×[z0,z1]`, plus the oversized bucket. A *superset* of every triangle
+    /// whose XZ bbox meets the rectangle, so a caller re-running the exact bbox test gets identical hits.
+    /// De-dup matters: a triangle in two queried cells must be visited once (else a depenetration would
+    /// double-count it).
+    pub(crate) fn gather_rect(&self, out: &mut Vec<u32>, x0: f32, x1: f32, z0: f32, z1: f32) {
+        out.clear();
+        if self.nx > 0 && self.nz > 0 {
+            let gxmax = self.min_x + self.nx as f32 * self.cell;
+            let gzmax = self.min_z + self.nz as f32 * self.cell;
+            if x1 >= self.min_x && x0 <= gxmax && z1 >= self.min_z && z0 <= gzmax {
+                let (cx0, cx1) = (self.clamp_cx(x0), self.clamp_cx(x1));
+                let (cz0, cz1) = (self.clamp_cz(z0), self.clamp_cz(z1));
+                for zc in cz0..=cz1 {
+                    let base = zc * self.nx;
+                    for xc in cx0..=cx1 {
+                        let c = base + xc;
+                        out.extend_from_slice(&self.items[self.cell_start[c] as usize..self.cell_start[c + 1] as usize]);
+                    }
+                }
+            }
+        }
+        out.extend_from_slice(&self.oversized);
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Collect (sorted, de-duplicated) the indices of every triangle in the cells the segment `[o,end]`
+    /// traverses in XZ (via a grid DDA), plus the oversized bucket. A *superset* of every triangle the
+    /// segment can actually intersect: any hit point lies in the triangle's XZ bbox, which sits in a
+    /// cell the segment's XZ projection crosses — so a caller re-running the exact ray/tri test gets the
+    /// identical nearest hit.
+    pub(crate) fn gather_ray(&self, out: &mut Vec<u32>, o: Vec3, end: Vec3) {
+        out.clear();
+        if self.nx > 0 && self.nz > 0 {
+            self.dda_xz(out, o.x, o.z, end.x, end.z);
+        }
+        out.extend_from_slice(&self.oversized);
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Amanatides–Woo grid traversal of the XZ segment, appending each visited cell's triangle indices
+    /// (raw; the caller de-dups). The segment is first clipped to the grid's XZ bounds.
+    fn dda_xz(&self, out: &mut Vec<u32>, ox: f32, oz: f32, ex: f32, ez: f32) {
+        let gxmin = self.min_x;
+        let gxmax = self.min_x + self.nx as f32 * self.cell;
+        let gzmin = self.min_z;
+        let gzmax = self.min_z + self.nz as f32 * self.cell;
+        let (dx, dz) = (ex - ox, ez - oz);
+        let mut t0 = 0.0f32;
+        let mut t1 = 1.0f32;
+        if !clip_slab(ox, dx, gxmin, gxmax, &mut t0, &mut t1) {
+            return;
+        }
+        if !clip_slab(oz, dz, gzmin, gzmax, &mut t0, &mut t1) {
+            return;
+        }
+        let nx = self.nx as isize;
+        let nz = self.nz as isize;
+        let mut cx = self.clamp_cx(ox + dx * t0) as isize;
+        let mut cz = self.clamp_cz(oz + dz * t0) as isize;
+        let ecx = self.clamp_cx(ox + dx * t1) as isize;
+        let ecz = self.clamp_cz(oz + dz * t1) as isize;
+        let step_x: isize = (dx > 0.0) as isize - (dx < 0.0) as isize;
+        let step_z: isize = (dz > 0.0) as isize - (dz < 0.0) as isize;
+        let (mut t_max_x, t_delta_x) = axis_step(ox, dx, cx, step_x, self.min_x, self.cell);
+        let (mut t_max_z, t_delta_z) = axis_step(oz, dz, cz, step_z, self.min_z, self.cell);
+        let mut guard = self.nx + self.nz + 4;
+        loop {
+            let c = (cz * nx + cx) as usize;
+            out.extend_from_slice(&self.items[self.cell_start[c] as usize..self.cell_start[c + 1] as usize]);
+            if (cx == ecx && cz == ecz) || guard == 0 {
+                break;
+            }
+            guard -= 1;
+            if t_max_x <= t_max_z {
+                cx += step_x;
+                t_max_x += t_delta_x;
+                if cx < 0 || cx >= nx {
+                    break;
+                }
+            } else {
+                cz += step_z;
+                t_max_z += t_delta_z;
+                if cz < 0 || cz >= nz {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Liang–Barsky slab clip of the ray `o + t·d` against `[lo,hi]`; narrows `[t0,t1]` to the overlap.
+/// Returns `false` when the segment misses the slab entirely.
+fn clip_slab(o: f32, d: f32, lo: f32, hi: f32, t0: &mut f32, t1: &mut f32) -> bool {
+    if d.abs() < 1e-12 {
+        return o >= lo && o <= hi;
+    }
+    let inv = 1.0 / d;
+    let (mut ta, mut tb) = ((lo - o) * inv, (hi - o) * inv);
+    if ta > tb {
+        std::mem::swap(&mut ta, &mut tb);
+    }
+    *t0 = t0.max(ta);
+    *t1 = t1.min(tb);
+    *t0 <= *t1
+}
+
+/// For an Amanatides–Woo step: the segment parameter `t` at which the ray leaves cell `c` along `step`,
+/// and the per-cell `t` increment. `step == 0` (axis-aligned) → never crosses (`+∞`).
+fn axis_step(o: f32, d: f32, c: isize, step: isize, min: f32, cell: f32) -> (f32, f32) {
+    if step == 0 {
+        return (f32::INFINITY, f32::INFINITY);
+    }
+    let boundary = min + (c + (step > 0) as isize) as f32 * cell;
+    ((boundary - o) / d, (cell / d.abs()).abs())
+}
+
+/// Identity of a soup slice: base pointer + length + a cheap content fingerprint. Two calls with the
+/// same `SoupKey` are treated as the same soup, so the [`Grid`] is built once and reused; a
+/// streaming block load/unload replaces the soup `Vec` (new pointer/length/content → new key → rebuild).
+/// The fingerprint guards the rare case of a reused allocation at the same address and length.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SoupKey {
+    ptr: usize,
+    len: usize,
+    fp: u64,
+}
+
+impl SoupKey {
+    fn of(tris: &[[Vec3; 3]]) -> SoupKey {
+        let len = tris.len();
+        let mut fp = len as u64;
+        if len > 0 {
+            for v in [tris[0][0], tris[0][2], tris[len - 1][1], tris[len / 2][0]] {
+                fp = fp.rotate_left(17)
+                    ^ (v.x.to_bits() as u64)
+                    ^ ((v.y.to_bits() as u64) << 21)
+                    ^ ((v.z.to_bits() as u64) << 42);
+            }
+        }
+        SoupKey { ptr: tris.as_ptr() as usize, len, fp }
+    }
+}
+
+/// Number of distinct soups whose grids are cached per thread. The game queries a single soup, so one
+/// slot suffices; a few slots absorb incidental multi-soup use (e.g. tests) without thrashing.
+const CACHE_SLOTS: usize = 4;
+
+thread_local! {
+    static GRID_CACHE: std::cell::RefCell<GridCache> = std::cell::RefCell::new(GridCache::default());
+}
+
+#[derive(Default)]
+struct GridCache {
+    /// `(key, grid)` slots, most-recently-used last.
+    slots: Vec<(SoupKey, Grid)>,
+    /// Reusable candidate-index scratch (avoids a per-query allocation on the hot path).
+    scratch: Vec<u32>,
+}
+
+/// Run `f` with the broadphase [`Grid`] for `tris` and a scratch buffer. The grid is built on first use
+/// of a given soup and reused for every subsequent query against it (across frames), so the per-frame
+/// queries pay only the `O(local)` traversal, not an `O(n)` rebuild. The grid is discarded and rebuilt
+/// when the soup slice's identity changes ([`SoupKey`]) — i.e. when world streaming swaps the soup.
+fn with_grid<R>(tris: &[[Vec3; 3]], f: impl FnOnce(&Grid, &mut Vec<u32>) -> R) -> R {
+    GRID_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = SoupKey::of(tris);
+        match c.slots.iter().position(|(k, _)| *k == key) {
+            Some(i) => {
+                // Promote to most-recently-used.
+                let entry = c.slots.remove(i);
+                c.slots.push(entry);
+            }
+            None => {
+                let grid = Grid::build(tris);
+                if c.slots.len() >= CACHE_SLOTS {
+                    c.slots.remove(0);
+                }
+                c.slots.push((key, grid));
+            }
+        }
+        let last = c.slots.len() - 1;
+        let GridCache { slots, scratch } = &mut *c;
+        f(&slots[last].1, scratch)
+    })
+}
+
+// ---------------------------------------------------------------------------
 //   Ray / spherecast (camera boom)
 // ---------------------------------------------------------------------------
 
@@ -74,25 +401,31 @@ pub fn ray_tri(o: Vec3, dir: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     (t > 1e-4).then_some(t)
 }
 
-/// Nearest triangle hit along `[o, o + dir*max_t]` (double-sided), with a cheap sphere broad-phase.
+/// Nearest triangle hit along `[o, o + dir*max_t]` (double-sided). The XZ broadphase grid restricts the
+/// per-triangle test to the cells the ray traverses (`O(local)`); the exact segment-AABB cull +
+/// Möller–Trumbore then run on those survivors, so the nearest hit is identical to a full linear scan.
 pub fn raycast(tris: &[[Vec3; 3]], o: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
     // Broad-phase: the ray SEGMENT's AABB vs each triangle AABB (bbox-based, so a large triangle whose
     // first vertex is far from `o` is still tested).
     let end = o + dir * max_t;
     let (smin, smax) = (o.min(end), o.max(end));
-    let mut best: Option<f32> = None;
-    for t in tris {
-        let (b0, b1) = tri_bbox(t);
-        if b1.x < smin.x || b0.x > smax.x || b1.y < smin.y || b0.y > smax.y || b1.z < smin.z || b0.z > smax.z {
-            continue;
-        }
-        if let Some(d) = ray_tri(o, dir, t[0], t[1], t[2]) {
-            if d <= max_t && best.map_or(true, |b| d < b) {
-                best = Some(d);
+    with_grid(tris, |grid, cand| {
+        grid.gather_ray(cand, o, end);
+        let mut best: Option<f32> = None;
+        for &i in cand.iter() {
+            let t = &tris[i as usize];
+            let (b0, b1) = tri_bbox(t);
+            if b1.x < smin.x || b0.x > smax.x || b1.y < smin.y || b0.y > smax.y || b1.z < smin.z || b0.z > smax.z {
+                continue;
+            }
+            if let Some(d) = ray_tri(o, dir, t[0], t[1], t[2]) {
+                if d <= max_t && best.map_or(true, |b| d < b) {
+                    best = Some(d);
+                }
             }
         }
-    }
-    best
+        best
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -219,46 +552,56 @@ fn seg_tri_closest(a: Vec3, b: Vec3, t0: Vec3, t1: Vec3, t2: Vec3) -> (Vec3, Vec
 /// perpendicular to each contact preserves tangential motion → the capsule slides along walls. A few
 /// relaxation passes resolve inside corners. Floors are excluded (the ground probe owns Y).
 fn depenetrate(tris: &[[Vec3; 3]], mut pos: Vec3, radius: f32, height: f32) -> Vec3 {
-    for _ in 0..4 {
-        let mut moved = false;
-        for t in tris {
-            if !is_wall(t) {
-                continue;
-            }
-            // Broad-phase: the capsule's AABB (feet `pos`, up `height`, `radius` around) vs the triangle
-            // AABB. Bbox-based — a large wall triangle's first vertex can be far from the capsule.
-            let (b0, b1) = tri_bbox(t);
-            if b1.x < pos.x - radius
-                || b0.x > pos.x + radius
-                || b1.z < pos.z - radius
-                || b0.z > pos.z + radius
-                || b1.y < pos.y
-                || b0.y > pos.y + height
-            {
-                continue;
-            }
-            let a = pos + Vec3::Y * radius;
-            let b = pos + Vec3::Y * (height - radius);
-            let (sp, tp) = seg_tri_closest(a, b, t[0], t[1], t[2]);
-            let d = sp - tp;
-            let dist = d.length();
-            if dist < radius {
-                if dist > 1e-4 {
-                    pos += d / dist * (radius - dist);
-                } else {
-                    let n = (t[1] - t[0]).cross(t[2] - t[0]);
-                    if n.length() > 1e-6 {
-                        pos += n.normalize() * radius;
-                    }
+    // The capsule's XZ footprint is `[pos.x±radius]×[pos.z±radius]`; the relaxation passes nudge `pos`
+    // by at most a few `radius` in total. Gather candidates over that footprint plus a safe drift margin
+    // (a superset of every triangle the per-pass bbox test can accept), then run the unchanged loop over
+    // them — the wall push-out, and thus the result, is identical to the linear scan. `DRIFT` covers the
+    // small position movement across passes so a wall that comes into range mid-relaxation is included.
+    const DRIFT: f32 = 2.0;
+    with_grid(tris, |grid, cand| {
+        grid.gather_rect(cand, pos.x - radius - DRIFT, pos.x + radius + DRIFT, pos.z - radius - DRIFT, pos.z + radius + DRIFT);
+        for _ in 0..4 {
+            let mut moved = false;
+            for &i in cand.iter() {
+                let t = &tris[i as usize];
+                if !is_wall(t) {
+                    continue;
                 }
-                moved = true;
+                // Broad-phase: the capsule's AABB (feet `pos`, up `height`, `radius` around) vs the
+                // triangle AABB. Bbox-based — a large wall triangle's first vertex can be far from it.
+                let (b0, b1) = tri_bbox(t);
+                if b1.x < pos.x - radius
+                    || b0.x > pos.x + radius
+                    || b1.z < pos.z - radius
+                    || b0.z > pos.z + radius
+                    || b1.y < pos.y
+                    || b0.y > pos.y + height
+                {
+                    continue;
+                }
+                let a = pos + Vec3::Y * radius;
+                let b = pos + Vec3::Y * (height - radius);
+                let (sp, tp) = seg_tri_closest(a, b, t[0], t[1], t[2]);
+                let d = sp - tp;
+                let dist = d.length();
+                if dist < radius {
+                    if dist > 1e-4 {
+                        pos += d / dist * (radius - dist);
+                    } else {
+                        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+                        if n.length() > 1e-6 {
+                            pos += n.normalize() * radius;
+                        }
+                    }
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
             }
         }
-        if !moved {
-            break;
-        }
-    }
-    pos
+        pos
+    })
 }
 
 /// Downward ground probe: the highest WALKABLE surface under `pos` within `[pos.y - step, pos.y + step]`.
@@ -266,25 +609,31 @@ fn depenetrate(tris: &[[Vec3; 3]], mut pos: Vec3, radius: f32, height: f32) -> V
 fn ground_y(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, step: f32) -> Option<f32> {
     let origin = pos + Vec3::Y * step;
     let max_t = step * 2.0;
-    let mut best: Option<f32> = None;
-    for t in tris {
-        // Only walkable (near-horizontal) surfaces are ground; skip walls.
-        if is_wall(t) {
-            continue;
-        }
-        if !xz_in_tri_bbox(t, pos, radius) {
-            continue;
-        }
-        if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
-            if d <= max_t {
-                let y = origin.y - d;
-                if best.map_or(true, |b| y > b) {
-                    best = Some(y);
+    // Feet footprint is `[pos.x±radius]×[pos.z±radius]`; gather those cells and run the unchanged
+    // walkable-surface probe over the survivors — the highest surface found is identical to a full scan.
+    with_grid(tris, |grid, cand| {
+        grid.gather_rect(cand, pos.x - radius, pos.x + radius, pos.z - radius, pos.z + radius);
+        let mut best: Option<f32> = None;
+        for &i in cand.iter() {
+            let t = &tris[i as usize];
+            // Only walkable (near-horizontal) surfaces are ground; skip walls.
+            if is_wall(t) {
+                continue;
+            }
+            if !xz_in_tri_bbox(t, pos, radius) {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+                if d <= max_t {
+                    let y = origin.y - d;
+                    if best.map_or(true, |b| y > b) {
+                        best = Some(y);
+                    }
                 }
             }
         }
-    }
-    best
+        best
+    })
 }
 
 /// Highest walkable surface at or below `pos.y` within `max_drop` metres (a downward probe from
@@ -293,24 +642,30 @@ fn ground_y(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, step: f32) -> Option<f32
 pub fn ground_below(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, max_drop: f32) -> Option<f32> {
     let origin = pos + Vec3::Y * 0.1;
     let max_t = max_drop + 0.1;
-    let mut best: Option<f32> = None;
-    for t in tris {
-        if is_wall(t) {
-            continue;
-        }
-        if !xz_in_tri_bbox(t, pos, radius) {
-            continue;
-        }
-        if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
-            if d <= max_t {
-                let y = origin.y - d;
-                if best.map_or(true, |b| y > b) {
-                    best = Some(y);
+    // Same feet footprint as `ground_y`, deeper vertical reach: gather the cells under the feet and run
+    // the unchanged probe over the survivors — the landing surface found is identical to a full scan.
+    with_grid(tris, |grid, cand| {
+        grid.gather_rect(cand, pos.x - radius, pos.x + radius, pos.z - radius, pos.z + radius);
+        let mut best: Option<f32> = None;
+        for &i in cand.iter() {
+            let t = &tris[i as usize];
+            if is_wall(t) {
+                continue;
+            }
+            if !xz_in_tri_bbox(t, pos, radius) {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+                if d <= max_t {
+                    let y = origin.y - d;
+                    if best.map_or(true, |b| y > b) {
+                        best = Some(y);
+                    }
                 }
             }
         }
-    }
-    best
+        best
+    })
 }
 
 /// Move the player capsule by a horizontal displacement with collide-and-slide against walls, then
@@ -371,5 +726,215 @@ mod tests {
         // Capsule slightly inside the wall from +X, 5 m up, far from any vertex.
         let out = depenetrate(&wall, Vec3::new(0.2, 5.0, 0.0), 0.4, 1.8);
         assert!(out.x >= 0.4 - 1e-3, "capsule pushed clear of the large wall (x={})", out.x);
+    }
+
+    // -----------------------------------------------------------------------
+    //   Broadphase correctness: grid-accelerated == brute-force linear scan
+    // -----------------------------------------------------------------------
+
+    // Reference implementations = the ORIGINAL linear scans (pre-broadphase). The grid path must return
+    // bit-identical results; the perf win follows from only touching local cells.
+
+    fn raycast_brute(tris: &[[Vec3; 3]], o: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
+        let end = o + dir * max_t;
+        let (smin, smax) = (o.min(end), o.max(end));
+        let mut best: Option<f32> = None;
+        for t in tris {
+            let (b0, b1) = tri_bbox(t);
+            if b1.x < smin.x || b0.x > smax.x || b1.y < smin.y || b0.y > smax.y || b1.z < smin.z || b0.z > smax.z {
+                continue;
+            }
+            if let Some(d) = ray_tri(o, dir, t[0], t[1], t[2]) {
+                if d <= max_t && best.map_or(true, |b| d < b) {
+                    best = Some(d);
+                }
+            }
+        }
+        best
+    }
+
+    fn ground_below_brute(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, max_drop: f32) -> Option<f32> {
+        let origin = pos + Vec3::Y * 0.1;
+        let max_t = max_drop + 0.1;
+        let mut best: Option<f32> = None;
+        for t in tris {
+            if is_wall(t) || !xz_in_tri_bbox(t, pos, radius) {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+                if d <= max_t {
+                    let y = origin.y - d;
+                    if best.map_or(true, |b| y > b) {
+                        best = Some(y);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn ground_y_brute(tris: &[[Vec3; 3]], pos: Vec3, radius: f32, step: f32) -> Option<f32> {
+        let origin = pos + Vec3::Y * step;
+        let max_t = step * 2.0;
+        let mut best: Option<f32> = None;
+        for t in tris {
+            if is_wall(t) || !xz_in_tri_bbox(t, pos, radius) {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+                if d <= max_t {
+                    let y = origin.y - d;
+                    if best.map_or(true, |b| y > b) {
+                        best = Some(y);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn depenetrate_brute(tris: &[[Vec3; 3]], mut pos: Vec3, radius: f32, height: f32) -> Vec3 {
+        for _ in 0..4 {
+            let mut moved = false;
+            for t in tris {
+                if !is_wall(t) {
+                    continue;
+                }
+                let (b0, b1) = tri_bbox(t);
+                if b1.x < pos.x - radius
+                    || b0.x > pos.x + radius
+                    || b1.z < pos.z - radius
+                    || b0.z > pos.z + radius
+                    || b1.y < pos.y
+                    || b0.y > pos.y + height
+                {
+                    continue;
+                }
+                let a = pos + Vec3::Y * radius;
+                let b = pos + Vec3::Y * (height - radius);
+                let (sp, tp) = seg_tri_closest(a, b, t[0], t[1], t[2]);
+                let d = sp - tp;
+                let dist = d.length();
+                if dist < radius {
+                    if dist > 1e-4 {
+                        pos += d / dist * (radius - dist);
+                    } else {
+                        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+                        if n.length() > 1e-6 {
+                            pos += n.normalize() * radius;
+                        }
+                    }
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        pos
+    }
+
+    fn move_character_brute(tris: &[[Vec3; 3]], feet: Vec3, horiz: Vec3, radius: f32, height: f32, step: f32, follow: bool) -> Vec3 {
+        let mut pos = feet + Vec3::new(horiz.x, 0.0, horiz.z);
+        pos = depenetrate_brute(tris, pos, radius, height);
+        if follow {
+            if let Some(gy) = ground_y_brute(tris, pos, radius, step) {
+                pos.y = gy;
+            } else {
+                pos.y = feet.y;
+            }
+        }
+        pos
+    }
+
+    // A tiny deterministic PRNG so the fuzz is reproducible without a `rand` dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn f(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (self.next_u32() as f32 / u32::MAX as f32) * (hi - lo)
+        }
+    }
+
+    // A ~51k-triangle soup: a 160×160 heightfield of small (2 m) triangles, a row of vertical walls, and
+    // one map-spanning floor triangle that lands in the grid's OVERSIZED bucket. Exercises every path.
+    fn big_terrain() -> Vec<[Vec3; 3]> {
+        let n = 160usize;
+        let s = 2.0f32;
+        let h = |x: f32, z: f32| (x * 0.05).sin() * 1.5 + (z * 0.07).cos() * 1.2;
+        let mut tris: Vec<[Vec3; 3]> = Vec::with_capacity(n * n * 2 + 64);
+        for xi in 0..n {
+            for zi in 0..n {
+                let x0 = (xi as f32 - 80.0) * s;
+                let x1 = x0 + s;
+                let z0 = (zi as f32 - 80.0) * s;
+                let z1 = z0 + s;
+                let a = Vec3::new(x0, h(x0, z0), z0);
+                let b = Vec3::new(x1, h(x1, z0), z0);
+                let c = Vec3::new(x1, h(x1, z1), z1);
+                let d = Vec3::new(x0, h(x0, z1), z1);
+                tris.push([a, c, b]);
+                tris.push([a, d, c]);
+            }
+        }
+        for k in 0..20 {
+            let xw = (k as f32 - 10.0) * 13.0;
+            let a = Vec3::new(xw, -5.0, -30.0);
+            let b = Vec3::new(xw, -5.0, 30.0);
+            let c = Vec3::new(xw, 5.0, 30.0);
+            let d = Vec3::new(xw, 5.0, -30.0);
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        }
+        // Map-spanning floor far below → its bbox covers far more than OVERSIZE_CELLS cells.
+        tris.push([Vec3::new(-200.0, -50.0, -200.0), Vec3::new(200.0, -50.0, -200.0), Vec3::new(200.0, -50.0, 200.0)]);
+        tris
+    }
+
+    /// The whole point: over a 50k+ triangle soup, the grid-accelerated `ground_below` / `raycast` /
+    /// `move_character` return results BIT-IDENTICAL to the brute-force linear scan (correctness); the
+    /// speedup follows from only visiting local cells, not from any change in what is computed.
+    #[test]
+    fn grid_matches_bruteforce_over_a_large_soup() {
+        let tris = big_terrain();
+        assert!(tris.len() > 50_000, "soup should be large ({} tris)", tris.len());
+        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        for _ in 0..600 {
+            let x = rng.f(-172.0, 172.0);
+            let z = rng.f(-172.0, 172.0);
+
+            // ground_below (feet probe) — the SceneLocomotion ground_height hot path.
+            let pos = Vec3::new(x, 10.0, z);
+            assert_eq!(
+                ground_below(&tris, pos, 0.4, 60.0),
+                ground_below_brute(&tris, pos, 0.4, 60.0),
+                "ground_below mismatch at ({x}, {z})"
+            );
+
+            // raycast (camera boom / weapon ray) — random origin, direction and length.
+            let o = Vec3::new(x, rng.f(-2.0, 12.0), z);
+            let d = Vec3::new(rng.f(-1.0, 1.0), rng.f(-1.0, 1.0), rng.f(-1.0, 1.0));
+            if d.length_squared() > 1e-4 {
+                let dir = d.normalize();
+                let max = rng.f(1.0, 300.0);
+                assert_eq!(
+                    raycast(&tris, o, dir, max),
+                    raycast_brute(&tris, o, dir, max),
+                    "raycast mismatch o={o:?} dir={dir:?} max={max}"
+                );
+            }
+
+            // move_character (swept player move + ground snap).
+            let feet = Vec3::new(x, 8.0, z);
+            let mv = Vec3::new(rng.f(-1.0, 1.0), 0.0, rng.f(-1.0, 1.0));
+            assert_eq!(
+                move_character(&tris, feet, mv, 0.4, 1.8, 0.5, true),
+                move_character_brute(&tris, feet, mv, 0.4, 1.8, 0.5, true),
+                "move_character mismatch feet={feet:?} mv={mv:?}"
+            );
+        }
     }
 }
