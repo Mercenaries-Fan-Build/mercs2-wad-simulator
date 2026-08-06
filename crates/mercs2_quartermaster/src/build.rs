@@ -3092,11 +3092,7 @@ pub fn build(
 
     // The placement record: what goes where, each with its digest. Deploy/undo consumes this — a
     // file drop cannot be backed out without it.
-    let record = placement_json(&placements);
-    std::fs::write(out_dir.join("placement.json"), &record).map_err(|e| BuildError::Io {
-        path: out_dir.join("placement.json"),
-        message: e.to_string(),
-    })?;
+    write_placement_record(&out_dir, &placements)?;
 
     let log_text = log.join("\n") + "\n";
     std::fs::write(out_dir.join("build.log"), &log_text).map_err(|e| BuildError::Io {
@@ -3222,6 +3218,14 @@ pub fn link_installed(
     // so an install of nothing but add_ui / activate_layer Shipments still has script work to do.
     if mutations.is_empty() && ui_regs.is_empty() && layer_regs.is_empty() {
         log.push("no installed Shipment touches a script — nothing to link".into());
+        // Still write the (empty) placement record. Emitting no link WAD is the right call — an
+        // overlay that merely restates the base block is a file deploy has to reason about for
+        // nothing — but emitting no RECORD makes that indistinguishable from "link was never run",
+        // and deploy has to tell those apart. An empty `placements` array says which one it is.
+        write_placement_record(out_dir, &[])?;
+        log.push(format!(
+            "wrote {PLACEMENT_RECORD}: 0 placement(s) — nothing to mount from the link step"
+        ));
         // A Data-only install still has cross-Shipment conflicts worth reporting (two mods minting
         // the same texture name), so carry them even when there is no script overlay to emit.
         return Ok(LinkReport {
@@ -3312,17 +3316,57 @@ pub fn link_installed(
         log.push(format!("self-check: {d}"));
     }
 
+    // The same record `build` writes, for the same reason: this WAD has to be MOUNTED, and where
+    // it must sit in the mount order is not recoverable from the file itself. The name encodes the
+    // intent ("sorts last") but a deploy step reading a directory should not have to infer a
+    // contract from a filename — `destination: overlay` in the record is the contract.
+    let placements = vec![Placement {
+        name: LINK_WAD_NAME.to_string(),
+        bytes: wad_bytes.len(),
+        sha256: digest,
+        destination: Destination::Overlay,
+    }];
+    write_placement_record(out_dir, &placements)?;
+    log.push(format!(
+        "wrote {PLACEMENT_RECORD}: {} placement(s)",
+        placements.len()
+    ));
+
     Ok(LinkReport {
         wad: Some(path),
-        placements: vec![Placement {
-            name: LINK_WAD_NAME.to_string(),
-            bytes: wad_bytes.len(),
-            sha256: digest,
-            destination: Destination::Overlay,
-        }],
+        placements,
         linked,
         conflicts,
         log,
+    })
+}
+
+/// The file name every `qm` output directory carries. There is exactly one.
+pub const PLACEMENT_RECORD: &str = "placement.json";
+
+/// Write `placement.json` into `out_dir`, creating it if needed.
+///
+/// # Why every emitting path calls this
+///
+/// `build` wrote a placement record and `link_installed` did not, so a deploy tool had **two**
+/// contracts for the same question: read the record for one output directory, and special-case
+/// `zz-quartermaster-link.wad` by name for the other. A second output path nobody documented is
+/// how a deploy step ends up guessing, and a guess about which files to mount is not a guess that
+/// fails loudly — it mounts the wrong set and the game boots.
+///
+/// It is also written when `placements` is EMPTY, which is the case that actually needed
+/// deciding. An absent file is ambiguous between "this step produced nothing" and "this step
+/// never ran", and those want opposite responses from a deploy tool. `{"placements": []}` says
+/// the first one outright.
+fn write_placement_record(out_dir: &Path, placements: &[Placement]) -> Result<(), BuildError> {
+    std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
+        path: out_dir.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let path = out_dir.join(PLACEMENT_RECORD);
+    std::fs::write(&path, placement_json(placements)).map_err(|e| BuildError::Io {
+        path,
+        message: e.to_string(),
     })
 }
 
