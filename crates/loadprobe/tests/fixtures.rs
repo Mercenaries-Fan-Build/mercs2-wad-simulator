@@ -44,6 +44,21 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
+/// `LADDER_VERSION` is reachable from a LINKED consumer, not just from inside the crate.
+///
+/// That is the whole point of it: Modkit runs `loadprobe` as a library and has to stamp
+/// `ladder_version` onto a report next to `phase_idx`, so an ordinal is never sent without the
+/// table that gives it meaning. A constant only the binary could see would not do that, and this
+/// test is in the integration suite precisely because it links the crate the way a consumer does.
+#[test]
+fn ladder_version_is_exported_to_consumers() {
+    assert_eq!(loadprobe::LADDER_VERSION, loadprobe::phases::LADDER_VERSION);
+    // And it rides on the report, so the `--json` path carries it too.
+    let lines = loadprobe::parse::parse_log("[00:00:01.000] [blackbox] PMC Blackbox v3\n");
+    let r = loadprobe::report::analyze("x.log", "0".into(), &lines, &[], &[], 30, 1);
+    assert_eq!(r.ladder_version, loadprobe::LADDER_VERSION);
+}
+
 #[test]
 fn vanilla_boots_into_game_postload_crash() {
     let (code, json) = run_json("pmc_blackbox-vanilla-boot-into-game.log");

@@ -102,6 +102,10 @@ rather than leaving it to be scraped out of `crash.block[]`. Three states, all d
 | `null` | `8785` | The address is inside a loaded module the handler could not name (`?+0x…`). The offset is real but is **not comparable to anything** — you do not know which image it indexes. |
 | `null` | `null` | Not in any loaded module, or a first-chance record where resolution was skipped. |
 
+Also in `--json`: `ladder_version`, the version of the phase table `furthest_idx` and `pct`
+are expressed against. Adding a rung shifts every ordinal after it and rescales `pct`, so
+neither field may be compared across differing `ladder_version` values.
+
 **`--hang-secs` is the only option that can change the verdict (and exit code).** A larger
 value makes HANG harder to declare: a wedge shorter than the threshold falls through to
 TRUNCATED instead. It has no effect once the world fully loaded (REACHED-WORLD wins) or when

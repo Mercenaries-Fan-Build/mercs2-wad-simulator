@@ -2,7 +2,7 @@
 //! an optional JSON form.
 
 use crate::parse::LogLine;
-use crate::phases::{self, LADDER, REACHED_WORLD_IDX};
+use crate::phases::{self, LADDER, LADDER_VERSION, REACHED_WORLD_IDX};
 use colored::*;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -182,6 +182,13 @@ pub struct Report {
     pub furthest_idx: usize,
     pub furthest_name: String,
     pub pct: u32,
+    /// Which phase ladder produced `furthest_idx` and `pct` — [`phases::LADDER_VERSION`].
+    ///
+    /// Emitted on the report rather than left as a constant a caller might look up, because a
+    /// `--json` consumer has no way to reach the constant at all: without it, `furthest_idx`
+    /// arrives as an ordinal into an unidentified table, and `pct` rescales silently the next
+    /// time a rung is added. Neither may be aggregated across differing values.
+    pub ladder_version: usize,
     pub verdict: Verdict,
     pub phases: Vec<PhaseHit>,
     pub streaming: Option<StreamSummary>,
@@ -335,7 +342,7 @@ pub fn analyze(file: &str, log_sha256: String, lines: &[LogLine], routine: &[Str
     Report {
         file: file.to_string(), log_sha256, build,
         records: real.len(), first_ts, last_ts, wall_ms,
-        furthest_idx, furthest_name, pct, verdict, phases, streaming,
+        furthest_idx, furthest_name, pct, ladder_version: LADDER_VERSION, verdict, phases, streaming,
         acts, jobs, all_modules, portals, players, pool, crash,
         mtrl_overcounts, stall_dumps, flagged, signals: signals_out, gaps,
         unknown_sources, unparsed_lines, tail, last_progress_ts, last_progress_msg,
@@ -748,6 +755,8 @@ pub fn print_text(r: &Report) {
 
     // phase timeline
     println!("\n{}", "── PHASE TIMELINE ─────────────────────────────".cyan().bold());
+    println!("  {}", format!("ladder v{} ({} rungs) — phase numbers are ordinals into THIS table",
+                             r.ladder_version, LADDER.len()).dimmed());
     let mut prev_ms: Option<u64> = None;
     for ph in LADDER {
         let hit = r.phases.iter().find(|p| p.idx == ph.idx);
@@ -970,6 +979,15 @@ mod crash_tests {
         assert_eq!(off, Some(0x2251));
     }
 
+    /// `ladder_version` rides on every report, so a `--json` consumer can refuse to pool ordinals.
+    #[test]
+    fn the_report_carries_the_ladder_version() {
+        let r = report("[00:00:01.000] [blackbox] PMC Blackbox v3 armed\n");
+        // (the crate-root re-export is covered from tests/fixtures.rs — this module is compiled
+        // into the BINARY too, which has its own private `mod` tree and no crate-root re-export)
+        assert_eq!(r.ladder_version, crate::phases::LADDER_VERSION);
+        assert!(r.ladder_version >= 1);
+    }
 }
 
 #[cfg(test)]
