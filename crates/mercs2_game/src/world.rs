@@ -2155,6 +2155,15 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 merged.extend(sw.collision_tris());
                 self.collision_soup = merged.clone();
                 self.runtime.set_collision(merged);
+                // Authored-PHY2 collision coverage (the same stat the `--stream` printer shows): how many
+                // streamed props/buildings use their authored Havok shape (convex hull / WpMeshShape16
+                // mesh) vs fall back to render-mesh triangles. Prints only on a soup change (prop wake/
+                // hibernate), so it is naturally throttled.
+                let st = sw.stats();
+                println!(
+                    "[world] streamed collision: {} soup tris | authored_phy2={} render_fallback={}",
+                    self.collision_soup.len(), st.coll_authored, st.coll_fallback
+                );
             }
             sw.animate(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt);
         }

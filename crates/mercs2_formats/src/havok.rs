@@ -43,6 +43,15 @@ fn u32_le(b: &[u8], o: usize) -> u32 {
 }
 
 #[inline]
+fn u16_le(b: &[u8], o: usize) -> u16 {
+    if o + 2 <= b.len() {
+        u16::from_le_bytes([b[o], b[o + 1]])
+    } else {
+        0
+    }
+}
+
+#[inline]
 fn f32_le(b: &[u8], o: usize) -> f32 {
     if o + 4 <= b.len() {
         f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
@@ -97,6 +106,52 @@ impl Capsule {
     }
 }
 
+/// A `WpMeshShape16` — Pandemic's 16-bit-indexed static collision mesh (buildings, terrain cells).
+///
+/// Layout **cracked empirically** (40/40 real vz.wad instances decode with score ≥ 0.9). Within the
+/// packfile `pk` (`obj` = `data_pk + mesh_src`):
+/// ```text
+///  obj+32   u32        nsub                 subpart count (sane 1..=256)
+///  obj+48   sp0        first subpart; quantization block:
+///    sp0+0  3×f32      min[3]               dequant offset
+///    sp0+16 3×f32      scale[3]             dequant scale
+///  per subpart s (sp = sp0 + s*48):
+///    sp+36  u32        acnt                 triangle count
+///    lf[sp_src+32]                          → 16-bit INDEX array base (data-relative)
+///      each tri = u16 a,b,c at ap+t*8 (+0,+2,+4); the +6 tail is material/pad
+/// ```
+/// **Vertices** are quantized `u16×3` (6 bytes each): `vert[k] = min[k] + u16 * scale[k]`. The vertex
+/// pool lives in the PHY2 engine WRAPPER *beyond* the Havok packfile — it is NOT reachable via any
+/// local/virtual fixup and NOT at a fixed offset from the packfile end (verified: its offset-from-end
+/// ranges 0..494256 across instances), so its base is recovered by a bounded scan of the trailing region
+/// (`// CONFIRM-LIVE: pool base found by scan`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeshShape {
+    /// Dequantized model-local vertices (`min + u16*scale`), indexed by the triangle triples.
+    pub vertices: Vec<[f32; 3]>,
+    /// Triangle index triples into `vertices`.
+    pub indices: Vec<[u16; 3]>,
+}
+
+impl MeshShape {
+    /// The world-space (model-local) XZ span of the mesh AABB — the terrain-vs-building discriminator the
+    /// collision router uses (a full terrain cell spans ≈400 m in both X and Z; a building ≤ ~40 m).
+    pub fn xz_span(&self) -> [f32; 2] {
+        let (mut mnx, mut mnz, mut mxx, mut mxz) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for v in &self.vertices {
+            mnx = mnx.min(v[0]);
+            mxx = mxx.max(v[0]);
+            mnz = mnz.min(v[2]);
+            mxz = mxz.max(v[2]);
+        }
+        if self.vertices.is_empty() {
+            [0.0, 0.0]
+        } else {
+            [mxx - mnx, mxz - mnz]
+        }
+    }
+}
+
 /// A collision shape recovered from a packfile.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
@@ -111,8 +166,10 @@ pub enum Shape {
     Sphere { radius: f32 },
     /// `hkpMoppBvTreeShape` / `hkpMoppCode` — static non-convex mesh BV-tree.
     Mopp,
-    /// `WpMeshShape16` — Pandemic 16-bit-indexed static collision mesh.
-    Mesh,
+    /// `WpMeshShape16` — Pandemic 16-bit-indexed static collision mesh (dequantized verts + index
+    /// triples). Empty `indices` means the decode did not resolve (treat as an undecoded static mesh).
+    /// See [`MeshShape`].
+    Mesh(MeshShape),
     /// Another `*Shape*` class we recognise by name but don't yet decode.
     Other(String),
 }
@@ -305,6 +362,122 @@ pub fn parse_packfile_raw(pk: &[u8]) -> Result<RawPackfile, String> {
     })
 }
 
+/// Decode ONE `WpMeshShape16` into dequantized model-local vertices + index triples.
+///
+/// `pk` is the parsed packfile slice — but it MUST extend past the packfile into the PHY2 engine
+/// wrapper, because the quantized vertex pool lives THERE (beyond `raw.size`). [`parse_phy2_body`] and
+/// [`find_packfiles`] pass `&buf[off..]`, which does. `obj_src` is the mesh object's virtual-fixup src.
+///
+/// Returns `None` (→ an undecoded static mesh, caller keeps the render fallback) if the object is
+/// malformed or the vertex-pool scan finds no base with a plausible triangle-edge score. Ported from the
+/// validated `meshshape_probe` (40/40 real vz.wad instances decode with score ≥ 0.9). See [`MeshShape`].
+fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<MeshShape> {
+    let obj = raw.data_pk + obj_src;
+    let nsub = u32_le(pk, obj + 32) as usize;
+    if nsub == 0 || nsub > 256 {
+        return None;
+    }
+    let sp0 = obj + 48;
+    let min = [f32_le(pk, sp0), f32_le(pk, sp0 + 4), f32_le(pk, sp0 + 8)];
+    let scale = [f32_le(pk, sp0 + 16), f32_le(pk, sp0 + 20), f32_le(pk, sp0 + 24)];
+    if !min.iter().chain(&scale).all(|v| v.is_finite()) {
+        return None;
+    }
+    // 16-bit index triples, gathered across every subpart via each subpart's local-fixup index pointer.
+    let mut indices: Vec<[u16; 3]> = Vec::new();
+    for s in 0..nsub {
+        let sp = sp0 + s * 48;
+        let sp_src = sp.checked_sub(raw.data_pk)?;
+        let acnt = u32_le(pk, sp + 36) as usize;
+        if acnt > 4_000_000 {
+            return None; // defensive: real subparts are ≤ ~18k tris
+        }
+        let ap = raw.data_pk + *raw.lf.get(&(sp_src + 32))?;
+        for t in 0..acnt {
+            if ap + t * 8 + 6 > pk.len() {
+                return None;
+            }
+            indices.push([
+                u16_le(pk, ap + t * 8),
+                u16_le(pk, ap + t * 8 + 2),
+                u16_le(pk, ap + t * 8 + 4),
+            ]);
+        }
+    }
+    if indices.is_empty() {
+        return None;
+    }
+    let maxidx = indices.iter().map(|t| t[0].max(t[1]).max(t[2])).max().unwrap() as usize;
+    let nverts = maxidx + 1;
+
+    // Dequantize a vertex from a candidate pool base (pool holds u16×3, 6 bytes/vertex).
+    let getb = |pool: usize, v: usize| -> [f32; 3] {
+        let o = pool + v * 6;
+        [
+            min[0] + u16_le(pk, o) as f32 * scale[0],
+            min[1] + u16_le(pk, o + 2) as f32 * scale[1],
+            min[2] + u16_le(pk, o + 4) as f32 * scale[2],
+        ]
+    };
+    let edge = |p: [f32; 3], q: [f32; 3]| {
+        ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+    };
+    // Fraction of triangles whose three edges are all < 40 m — a well-placed pool yields sane tris.
+    let score = |pool: usize| -> f64 {
+        let mut ok = 0usize;
+        for t in &indices {
+            let (va, vb, vc) = (getb(pool, t[0] as usize), getb(pool, t[1] as usize), getb(pool, t[2] as usize));
+            if edge(va, vb) < 40.0 && edge(vb, vc) < 40.0 && edge(va, vc) < 40.0 {
+                ok += 1;
+            }
+        }
+        ok as f64 / indices.len() as f64
+    };
+
+    // CONFIRM-LIVE: pool base found by scan. The quantized vertex pool is engine-wrapper data beyond the
+    // packfile — NOT reachable via a fixup and NOT at a fixed offset from the packfile end (its
+    // offset-from-end ranges 0..494256 across real instances), so the base is recovered by a bounded scan
+    // of the trailing region. Cheap tris[0] pre-check + a 6-triangle medium check gate the full score;
+    // stop early on a near-perfect base. Constrained: start at the packfile end (`raw.size`), keep the
+    // best base only if its score > 0.9 (matches the probe's 40/40 acceptance).
+    let trail = raw.size;
+    let end = pk.len().saturating_sub(nverts * 6);
+    if trail > end {
+        return None; // no room for the pool inside the wrapper this slice carries
+    }
+    let t0 = indices[0];
+    let probe: Vec<[u16; 3]> = indices.iter().take(6).copied().collect();
+    let (mut best_score, mut best_base) = (0.0f64, None::<usize>);
+    let mut base = trail;
+    while base <= end {
+        let (va, vb, vc) = (getb(base, t0[0] as usize), getb(base, t0[1] as usize), getb(base, t0[2] as usize));
+        if edge(va, vb) > 0.0 && edge(va, vb) < 40.0 && edge(vb, vc) < 40.0 && edge(va, vc) < 40.0 {
+            let mut good = true;
+            for t in &probe {
+                let (x, y, z) = (getb(base, t[0] as usize), getb(base, t[1] as usize), getb(base, t[2] as usize));
+                if !(edge(x, y) < 40.0 && edge(y, z) < 40.0 && edge(x, z) < 40.0) {
+                    good = false;
+                    break;
+                }
+            }
+            if good {
+                let sc = score(base);
+                if sc > best_score {
+                    best_score = sc;
+                    best_base = Some(base);
+                    if sc > 0.999 {
+                        break;
+                    }
+                }
+            }
+        }
+        base += 2;
+    }
+    let pool = best_base.filter(|_| best_score > 0.9)?;
+    let vertices: Vec<[f32; 3]> = (0..nverts).map(|v| getb(pool, v)).collect();
+    Some(MeshShape { vertices, indices })
+}
+
 /// Parse a Havok packfile that begins at `pk[0]` (i.e. `pk` starts at, or before,
 /// the `__classnames__` section table). Reads little-endian (PC retail).
 pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
@@ -362,7 +535,13 @@ pub fn parse_packfile(pk: &[u8]) -> Result<Packfile, String> {
             })),
             "hkpSphereShape" => shapes.push(Shape::Sphere { radius: f32_le(pk, obj + 16) }),
             "hkpMoppBvTreeShape" | "hkpMoppCode" => shapes.push(Shape::Mopp),
-            "WpMeshShape16" => shapes.push(Shape::Mesh),
+            "WpMeshShape16" => shapes.push(Shape::Mesh(
+                // Decode against `pk`, which extends past the packfile into the PHY2 wrapper where the
+                // quantized vertex pool lives. A failed decode yields an EMPTY mesh so the caller still
+                // treats it as an undecoded static mesh (keeps the render fallback) rather than silently
+                // dropping the collider.
+                decode_mesh_shape16(pk, &raw, src).unwrap_or(MeshShape { vertices: Vec::new(), indices: Vec::new() }),
+            )),
             other if other.contains("Shape") => shapes.push(Shape::Other(other.to_string())),
             _ => {} // non-shape class (WpArray, hkRootLevelContainer, …) — counted only
         }
@@ -564,6 +743,75 @@ mod tests {
         // The head is the fattest, shortest body; the thighs are the thickest limbs.
         let head = caps.iter().max_by(|a, b| a.radius.partial_cmp(&b.radius).unwrap()).unwrap();
         assert!((head.radius - 0.1700).abs() < 5e-4, "head radius {}", head.radius);
+    }
+
+    /// Live decode of a real BUILDING `WpMeshShape16` from retail `vz.wad`. Block 767 carries a small
+    /// building collider (~396 tris, ~25 m XZ span, verified by the meshshape probe). Confirms the port:
+    /// non-empty index triples, dequantized verts within a sane building-scale bbox, and — the property
+    /// the quantized-pool scan exists to guarantee — the vast majority of triangles have all edges < 40 m.
+    /// SKIPS (stays green) when `vz.wad` is absent.
+    #[test]
+    fn building_wpmesh16_decodes_live_from_vz_wad_if_present() {
+        use crate::ffcs::load_ffcs_archive;
+        use crate::sges::decompress_block;
+        let Some(path) = crate::game_paths::vz_wad_from_env()
+            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
+        else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            return eprintln!("skip: vz.wad not readable");
+        };
+        let size = f.metadata().unwrap().len();
+        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+        let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
+
+        // Every Havok packfile in the block; keep the decoded WpMeshShape16 meshes.
+        let meshes: Vec<MeshShape> = find_packfiles(&dec)
+            .into_iter()
+            .flat_map(|(_off, pf)| pf.shapes.into_iter())
+            .filter_map(|s| match s {
+                Shape::Mesh(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert!(!meshes.is_empty(), "block 767 must carry at least one WpMeshShape16");
+
+        // A BUILDING-scale mesh: non-empty, small XZ span, well-formed triangles.
+        let bldg = meshes
+            .iter()
+            .find(|m| !m.indices.is_empty() && m.xz_span().iter().all(|&s| s < 300.0))
+            .expect("a decoded building-scale mesh in block 767");
+        assert!(bldg.indices.len() > 0, "building mesh has triangles: {}", bldg.indices.len());
+        assert!(!bldg.vertices.is_empty(), "building mesh has vertices");
+
+        // Verts finite and within a plausible model/world bbox; indices in range.
+        let nv = bldg.vertices.len();
+        for v in &bldg.vertices {
+            assert!(v.iter().all(|c| c.is_finite()), "non-finite vertex {v:?}");
+            assert!(v.iter().all(|c| c.abs() < 100_000.0), "implausibly far vertex {v:?}");
+        }
+        for t in &bldg.indices {
+            assert!(t.iter().all(|&i| (i as usize) < nv), "index out of range {t:?} (nv={nv})");
+        }
+        // The dequantization is correct when nearly every triangle has sane (<40 m) edges.
+        let edge = |p: [f32; 3], q: [f32; 3]| {
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        };
+        let sane = bldg
+            .indices
+            .iter()
+            .filter(|t| {
+                let (a, b, c) = (bldg.vertices[t[0] as usize], bldg.vertices[t[1] as usize], bldg.vertices[t[2] as usize]);
+                edge(a, b) < 40.0 && edge(b, c) < 40.0 && edge(a, c) < 40.0
+            })
+            .count();
+        let frac = sane as f64 / bldg.indices.len() as f64;
+        assert!(frac > 0.9, "only {frac:.3} of building-mesh tris well-formed (pool base mis-scanned?)");
+        eprintln!(
+            "block 767 building WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge tris",
+            bldg.indices.len(), nv, bldg.xz_span(), frac * 100.0
+        );
     }
 
     /// Live re-decode from the retail WAD: block 3185 yields exactly 11 ragdoll capsules matching the

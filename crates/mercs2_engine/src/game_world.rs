@@ -129,10 +129,42 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
     Some(LoadedModel { hash: terrainmesh_hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() })
 }
 
+/// The **model→PHY2 linkage**, verified against retail vz.wad: a model's authored Havok collision is a
+/// `PHY2` **sub-chunk INSIDE its resident UCFX model container** (the same container that holds
+/// GEOM/SEGM/HIER/MTRL — see [`crate::model`]'s chunk table), NOT a sibling ASET or a c3-cell field.
+/// This finds that sub-chunk by its `PHY2` descriptor tag, parses the embedded Havok 5.5 packfile, and
+/// triangulates the authored convex/box shapes into **model-local** collision tris (same coordinate
+/// space as the render verts, so the entity Transform places them identically).
+///
+/// Returns `Some(tris)` ONLY when the body is a COMPLETE authored collider (`AuthoredCollision::
+/// is_complete`): it carries no UNDECODED static mesh, and either it produced soup tris (convex/box hulls
+/// and/or a decoded BUILDING-scale `WpMeshShape16`) OR it accounted for its geometry with a TERRAIN-scale
+/// `WpMeshShape16` that is deliberately kept out of the soup (the terrain heightfield covers it — so
+/// `Some(vec![])` here, NOT a render fallback that would flood the soup with ~10k–18k tris/cell). A body
+/// with only an undecodable mesh/MOPP, or a ragdoll-only body, returns `None` → render-mesh fallback.
+/// `WpMeshShape16` is now decoded (`mercs2_formats::havok::MeshShape`), so most buildings flip from the
+/// render fallback to their authored collision mesh here.
+fn authored_collision_from_container(container: &[u8]) -> Option<Vec<[mercs2_core::glam::Vec3; 3]>> {
+    let body = mercs2_formats::ucfx::extract_chunk_body(container, b"PHY2")?;
+    let pf = mercs2_formats::havok::parse_phy2_body(&body).ok()?;
+    let ac = crate::physics::phy2::authored_collision(&pf.shapes);
+    ac.is_complete().then_some(ac.tris)
+}
+
+/// Authored PHY2 collision for a streamed PROP model, by hash: extract its resident UCFX container (the
+/// primary/sub model ASET block) and triangulate its `PHY2` convex/box shapes (see
+/// [`authored_collision_from_container`]). `None` = no complete authored collider → render-mesh fallback.
+fn load_authored_collision(w: &mut wad::Wad, hash: u32) -> Option<Vec<[mercs2_core::glam::Vec3; 3]>> {
+    let container = wad::extract_container(w, hash).ok()?;
+    authored_collision_from_container(&container)
+}
+
 /// Load one c3 streaming cell's `model` container by block index (the streaming executor's LOAD path).
 /// Slices the `model` chunk out of the block, builds it, resolves its textures, and returns the
-/// placed `LoadedModel` + the cell-origin offset (zero when the verts prove already world-space).
-pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f32; 3])> {
+/// placed `LoadedModel`, the cell-origin offset (zero when the verts prove already world-space), and the
+/// authored PHY2 collision tris (`Some` iff the model container carries a complete authored collider;
+/// `None` → render-mesh fallback — see [`authored_collision_from_container`]).
+pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f32; 3], Option<Vec<[mercs2_core::glam::Vec3; 3]>>)> {
     use mercs2_formats::ucfx::parse_block_entry_table;
     let path = wad::block_paths(w).get(block as usize)?.clone();
     let cell_id = c3_cell_id_from_path(&path)?;
@@ -151,6 +183,9 @@ pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f
     }
     let (hash, s0, s1) = model?;
     let (verts, indices, draws, stats) = mesh::build_indexed_from_container(&dec[s0..s1]).ok()?;
+    // Authored PHY2 collision from the SAME sliced container (no second decompress): Some iff it is a
+    // complete authored collider (the c3 model→PHY2 linkage, verified against vz.wad).
+    let phy2 = authored_collision_from_container(&dec[s0..s1]);
     // World-space check (identical to load_c3_cells): bbox centre already inside this cell's bounds
     // => verts are world-space (identity); else cell-local (offset to the cell centre).
     let bcx = (stats.bbox_min[0] + stats.bbox_max[0]) * 0.5;
@@ -171,7 +206,7 @@ pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0;
-    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() }, offset))
+    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() }, offset, phy2))
 }
 
 /// Extract one model container by hash and build its renderable `LoadedModel` (verts/tris + draws +
@@ -1052,6 +1087,10 @@ pub struct StreamStats {
     pub block_ents: usize,
     pub props: usize,
     pub models: usize,
+    /// Cumulative streamed units that used AUTHORED PHY2 (convex/box) collision.
+    pub coll_authored: usize,
+    /// Cumulative streamed units that fell back to render-mesh collision.
+    pub coll_fallback: usize,
 }
 
 /// Map a world XZ to the 20×20 low-res terrain grid cell (`row*20+col`); tiles are 400 m from -3800.
@@ -1281,6 +1320,11 @@ pub struct StreamingWorld {
     /// already resident (loaded by an earlier instance) still contributes collision without re-reading
     /// the WAD. Keyed by model hash.
     local_tris: std::collections::HashMap<u32, Vec<[mercs2_core::glam::Vec3; 3]>>,
+    /// Per-model **authored PHY2** model-local collision tris, cached on first load. `Some(tris)` = the
+    /// model ships a complete authored convex/box collider (used INSTEAD of the render-mesh `local_tris`
+    /// for that unit); `None` = no complete authored collider (render-mesh fallback). Computed once per
+    /// model hash — the model→PHY2 linkage is `PHY2` sub-chunk inside the model's UCFX container.
+    phy2_local: std::collections::HashMap<u32, Option<Vec<[mercs2_core::glam::Vec3; 3]>>>,
     /// Live **world-space** collision soup, keyed per streamed unit (block or prop — see `block_key`/
     /// `prop_key`) so a UNLOAD/HIBERNATE removes exactly that unit's triangles. The consumer rebuilds
     /// its physics soup from [`collision_tris`](Self::collision_tris) whenever [`take_collision_dirty`]
@@ -1294,6 +1338,12 @@ pub struct StreamingWorld {
     /// surface here ONCE on wake and drop it on hibernate; ground queries sample it O(1). This is where
     /// the ~270k terrain triangles that used to bloat the soup now live — as a cheap height grid.
     terrain_field: TerrainHeightField,
+    /// Cumulative collision-source census over the session: streamed prop/building units that used
+    /// AUTHORED PHY2 (convex/box) collision vs those that fell back to the render mesh. Reported in the
+    /// periodic stat line so a real boot shows the authored-vs-fallback split. (Wake events, so a unit
+    /// re-woken after hibernate counts again.)
+    coll_authored: usize,
+    coll_fallback: usize,
 }
 
 impl StreamingWorld {
@@ -1321,9 +1371,12 @@ impl StreamingWorld {
             wake_failed: std::collections::HashSet::new(),
             anim_store: std::collections::HashMap::new(),
             local_tris: std::collections::HashMap::new(),
+            phy2_local: std::collections::HashMap::new(),
             collision: std::collections::HashMap::new(),
             collision_dirty: false,
             terrain_field: TerrainHeightField::default(),
+            coll_authored: 0,
+            coll_fallback: 0,
         }
     }
 
@@ -1362,6 +1415,8 @@ impl StreamingWorld {
             block_ents: self.block_ents.len(),
             props: self.prop_ents.len(),
             models: self.model_refs.len(),
+            coll_authored: self.coll_authored,
+            coll_fallback: self.coll_fallback,
         }
     }
 
@@ -1391,9 +1446,12 @@ impl StreamingWorld {
             wake_failed,
             anim_store,
             local_tris,
+            phy2_local,
             collision,
             collision_dirty,
             terrain_field,
+            coll_authored,
+            coll_fallback,
         } = self;
         let terrain_hash = *terrain_hash;
 
@@ -1441,13 +1499,20 @@ impl StreamingWorld {
             if block_ents.contains_key(b) {
                 continue;
             }
-            if let Some((m, off)) = load_one_c3_cell(wad, *b) {
+            if let Some((m, off, phy2)) = load_one_c3_cell(wad, *b) {
                 if !scene.has_model(m.hash) {
                     scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                 }
-                // Collision (S2): c3 cell geometry placed at `off` (identity rotation).
+                // Collision: prefer AUTHORED PHY2 (convex/box hulls) over render-mesh tris; both are
+                // model-local, placed at `off` (identity rotation). `phy2 == Some` only for a complete
+                // authored collider — a mesh-collider/undecodable body falls back to render tris here.
+                phy2_local.entry(m.hash).or_insert_with(|| phy2);
                 let lt = local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
-                collision.insert(block_key(*b), placed_tris(lt, Vec3::new(off[0], off[1], off[2]), Quat::IDENTITY));
+                let chosen = match phy2_local.get(&m.hash).and_then(|o| o.as_ref()) {
+                    Some(a) => { *coll_authored += 1; a }
+                    None => { *coll_fallback += 1; &*lt }
+                };
+                collision.insert(block_key(*b), placed_tris(chosen, Vec3::new(off[0], off[1], off[2]), Quat::IDENTITY));
                 *collision_dirty = true;
                 let e = world.spawn((
                     Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
@@ -1525,8 +1590,18 @@ impl StreamingWorld {
                     }
                 }
             }
-            // Collision (S2): the prop mesh placed at its authored pos+quat.
-            if let Some(lt) = local_tris.get(&spawn.model_hash) {
+            // Collision: prefer AUTHORED PHY2 (convex/box hulls) over render-mesh tris, placed at the
+            // prop's authored pos+quat. Authored collision is computed once per model hash (the model→
+            // PHY2 linkage: `PHY2` sub-chunk in the model's resident container); `None` = no complete
+            // authored collider → render-mesh fallback (never leaves the unit with NO collision).
+            if !phy2_local.contains_key(&spawn.model_hash) {
+                let a = load_authored_collision(wad, spawn.model_hash);
+                phy2_local.insert(spawn.model_hash, a);
+            }
+            let authored = phy2_local.get(&spawn.model_hash).and_then(|o| o.as_ref());
+            let chosen = authored.or_else(|| local_tris.get(&spawn.model_hash));
+            if let Some(lt) = chosen {
+                if authored.is_some() { *coll_authored += 1; } else { *coll_fallback += 1; }
                 let q = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
                 let p = Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]);
                 collision.insert(prop_key(*k), placed_tris(lt, p, q));
@@ -1823,9 +1898,10 @@ where
                 self.stat_last = std::time::Instant::now();
                 let s = sw.stats();
                 println!(
-                    "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={}",
+                    "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={} | collision: authored_phy2={} render_fallback={}",
                     self.free_pos.x, self.free_pos.y, self.free_pos.z,
-                    s.resident, s.awake, s.cached_regions, s.regions, s.block_ents, s.props, s.models
+                    s.resident, s.awake, s.cached_regions, s.regions, s.block_ents, s.props, s.models,
+                    s.coll_authored, s.coll_fallback
                 );
             }
         }
@@ -2060,6 +2136,66 @@ mod stream_collision_tests {
             std::collections::HashMap::new();
         let soup: Vec<[Vec3; 3]> = prop_collision.values().flatten().copied().collect();
         assert!(soup.is_empty(), "terrain contributes zero triangles to the soup");
+    }
+
+    /// Live: authored PHY2 convex collision loads for a real streamed prop, triangulates to a SANE,
+    /// LOW tri count, and is lower-poly than the render mesh. Also proves the model→PHY2 linkage end to
+    /// end (extract container → `PHY2` sub-chunk → parse → triangulate) and reports the WAD-wide
+    /// authored-vs-fallback split across the ModelName props. SKIPS (passes) when vz.wad is absent.
+    #[test]
+    fn live_prop_phy2_convex_collision_is_sane_and_low_poly() {
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut w) = wad::open(&path) else {
+            return eprintln!("skip: vz.wad not present at {path}");
+        };
+        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
+            return eprintln!("skip: terrain blocks not found");
+        };
+        let mut hashes: Vec<u32> =
+            mercs2_formats::placement::load_model_placements(&ls).iter().map(|p| p.model_hash).collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+
+        // Census + find one prop with a complete authored convex/box collider.
+        let (mut authored, mut fallback) = (0usize, 0usize);
+        let mut example: Option<(u32, usize, usize)> = None; // hash, hull_tris, render_tris
+        for &h in &hashes {
+            match load_authored_collision(&mut w, h) {
+                Some(tris) => {
+                    authored += 1;
+                    // Every authored triangle vertex is finite and in a plausible model-local range.
+                    for t in &tris {
+                        for v in t {
+                            assert!(v.is_finite(), "authored PHY2 tri vertex not finite for 0x{h:08X}: {v:?}");
+                            assert!(v.length() < 2000.0, "authored PHY2 vertex implausibly far for 0x{h:08X}: {v:?}");
+                        }
+                    }
+                    if example.is_none() {
+                        let rt = load_model_by_hash(&mut w, h).map(|(m, _, _)| m.indices.len() / 3).unwrap_or(0);
+                        example = Some((h, tris.len(), rt));
+                    }
+                }
+                None => fallback += 1,
+            }
+        }
+        eprintln!(
+            "ModelName props: {} distinct — authored PHY2 convex/box: {authored}, render-mesh fallback: {fallback}",
+            hashes.len()
+        );
+
+        // The WAD must ship at least one prop with an authored convex collider (this is the whole point).
+        let (h, hull_tris, render_tris) = example.expect("at least one prop ships authored convex PHY2 collision");
+        eprintln!("example prop 0x{h:08X}: authored hull_tris={hull_tris}, render_tris={render_tris}");
+        assert!(hull_tris >= 4, "a convex hull triangulates to >= 4 tris, got {hull_tris}");
+        assert!(hull_tris < 5000, "authored hull collision must be LOW-poly, got {hull_tris} tris");
+        if render_tris > 0 {
+            assert!(
+                hull_tris <= render_tris,
+                "authored hull collision ({hull_tris}) should not exceed the render mesh ({render_tris})"
+            );
+        }
     }
 
     /// Dropping a hibernating tile removes exactly its grid, and a hole (uncovered interior after no

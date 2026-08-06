@@ -64,6 +64,7 @@ use mercs2_core::physics_query::{ClosestPoint, PhysicsQuery, RayHit};
 
 /// Lightweight direct-triangle-soup collision (capsule controller + camera raycast over `&[[Vec3;3]]`),
 /// folded from the game's on-foot collision. Bbox-culled (large-triangle-safe). See [`soup`].
+pub mod phy2;
 pub mod soup;
 
 /// Constrained multi-body ragdoll (XPBD articulated bodies + swing/twist limits), driven by the

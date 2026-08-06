@@ -106,7 +106,12 @@ fn run() -> i32 {
                     .push(json!({"kind": "capsule", "radius": c.radius, "half_len": c.half_len()})),
                 Shape::Sphere { radius } => shapes_json.push(json!({"kind": "sphere", "radius": radius})),
                 Shape::Mopp => shapes_json.push(json!({"kind": "mopp"})),
-                Shape::Mesh => shapes_json.push(json!({"kind": "mesh"})),
+                Shape::Mesh(m) => shapes_json.push(json!({
+                    "kind": "mesh",
+                    "tris": m.indices.len(),
+                    "verts": m.vertices.len(),
+                    "xz_span": m.xz_span(),
+                })),
                 Shape::Other(name) => shapes_json.push(json!({"kind": "other", "class": name})),
             }
         }
