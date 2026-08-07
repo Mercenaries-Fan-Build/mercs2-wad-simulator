@@ -2,7 +2,7 @@
 //!
 //! The fleet crates (physics / vehicle / combat / audio) shipped as tested subsystems, but nothing in
 //! the engine drove them — everything DANGLING at the engine-loop boundary.
-//! This bundle owns their shared per-frame state — a static-soup physics world built from the streamed
+//! This bundle owns their shared per-frame state — a static-collision physics world built from the streamed
 //! collision geometry (the `PhysicsQuery` every sim system uses), the engine event bus, the vehicle
 //! steering LUT, and the shared audio engine — and runs them each fixed step over the ECS `World`.
 //!
@@ -18,13 +18,13 @@ use std::rc::Rc;
 use crate::audio::AudioEngine;
 use mercs2_core::glam::Vec3;
 use mercs2_core::{EventBus, PhysicsQuery, World};
-use crate::physics::StaticSoupPhysics;
+use crate::physics::StaticCollision;
 use crate::vehicle::DonutLut;
 
 /// The fleet gameplay systems + their shared per-frame state, ticked once per fixed step by the loop.
 pub struct GameplaySystems {
     /// Static-world collision (from the streamed geometry) — the `PhysicsQuery` all sim systems use.
-    physics: StaticSoupPhysics,
+    physics: StaticCollision,
     /// The engine event bus (combat posts DamageMsg/DestroyMsg/homing events here).
     bus: EventBus,
     /// The weapon system, held as an instance so its per-frame **impact channel** (bullet/explosion/
@@ -49,7 +49,7 @@ impl GameplaySystems {
     /// Build the bundle sharing `audio` with the script host (so cues + mixing hit one engine).
     pub fn new(audio: Rc<RefCell<AudioEngine>>) -> Self {
         GameplaySystems {
-            physics: StaticSoupPhysics::new(Vec::new()),
+            physics: StaticCollision::new(Vec::new()),
             bus: EventBus::new(),
             weapons: crate::combat::WeaponSystem::default(),
             lut: DonutLut::new(),
@@ -72,7 +72,7 @@ impl GameplaySystems {
         std::mem::take(&mut self.destruction_intents)
     }
 
-    /// Replace the static collision soup (call when the world geometry finishes streaming). The
+    /// Replace the static collision world (call when the world geometry finishes streaming). The
     /// vehicle/weapon systems then raycast against it via the shared `PhysicsQuery`.
     pub fn set_collision(&mut self, tris: Vec<[Vec3; 3]>) {
         self.physics.set_tris(tris);
@@ -86,18 +86,18 @@ impl GameplaySystems {
         self.physics.set_heightmap(heightmap);
     }
 
-    /// The shared static-world `PhysicsQuery` (the fleet collision soup + terrain heightfield). The game
+    /// The shared static-world `PhysicsQuery` (the fleet collision world + terrain heightfield). The game
     /// layer steps the constrained multi-body death ragdoll ([`death_ragdoll`]) against THIS same query,
     /// so a settling corpse collides with the identical world geometry the player and vehicles do.
-    pub fn physics(&self) -> &StaticSoupPhysics {
+    pub fn physics(&self) -> &StaticCollision {
         &self.physics
     }
 
     /// Mutable access to the fleet's persistent collision broadphase, so the game layer can feed it
-    /// INCREMENTAL streaming deltas — [`StaticSoupPhysics::insert_unit`] on a prop/building WAKE,
-    /// [`StaticSoupPhysics::remove_unit`] on a HIBERNATE — instead of re-handing the whole soup through
+    /// INCREMENTAL streaming deltas — [`StaticCollision::insert_unit`] on a prop/building WAKE,
+    /// [`StaticCollision::remove_unit`] on a HIBERNATE — instead of re-handing the whole grid through
     /// [`set_collision`](Self::set_collision) (which rebuilds the grid from scratch) every streaming tick.
-    pub fn physics_mut(&mut self) -> &mut StaticSoupPhysics {
+    pub fn physics_mut(&mut self) -> &mut StaticCollision {
         &mut self.physics
     }
 
@@ -129,7 +129,7 @@ impl GameplaySystems {
         // `detonate_explosion`) flags the victim with `combat::Ragdoll` carrying its blast-seed velocity.
         // The faithful **constrained multi-body** ragdoll is snapped onto the victim's posed skeleton and
         // stepped by the GAME layer (`world.rs`), which owns the model rigs the seed/read-back need — see
-        // [`death_ragdoll`]. It steps against THIS same `physics` soup (via [`GameplaySystems::physics`]),
+        // [`death_ragdoll`]. It steps against THIS same `physics` collider (via [`GameplaySystems::physics`]),
         // so corpses collide with the identical world the player/vehicles do. (The old single-rigid-body
         // stand-in that ran here is superseded.)
         // Destruction runs AFTER the weapon system, so this step's damage is already on `Health`
@@ -166,7 +166,7 @@ impl GameplaySystems {
 ///
 /// Spaces: the anim seam works in the entity's **model space** (`model_pose[b]` = bone `b`'s model-space
 /// matrix, the pose before the inverse-bind skin multiply). The physics ragdoll simulates in **world
-/// space** so it collides with the real world soup. This module bridges the two by the entity's
+/// space** so it collides with the real world collider. This module bridges the two by the entity's
 /// `Transform`: seeds are pushed model→world at spawn, and the stepped bodies are pulled world→model
 /// before the write-back. `SkinPalette.mats` holds the SKIN palette (`InvBind[b] · model[b]`), so
 /// [`model_pose_from_skin`] reconstructs the model pose to seed from, and [`recompose_skin`] rebuilds the
@@ -270,7 +270,7 @@ mod tests {
 
     /// The wired vehicle system **acts**: a throttled car spawned into the World moves forward when
     /// driven purely through `GameplaySystems::tick` (which runs `drive_step_system` over the shared
-    /// `StaticSoupPhysics`). This is the end-to-end proof that the engine→system→entity edge is live —
+    /// `StaticCollision`). This is the end-to-end proof that the engine→system→entity edge is live —
     /// spawn a fleet entity, tick the bundle, the entity moves. (Spawns are Lua/population-driven at
     /// runtime; here we spawn directly to exercise the wire.)
     /// **The frame-loop wire.** A destroyed vehicle loses its governed geometry when driven purely
@@ -407,7 +407,7 @@ mod tests {
     /// then **settle**, with the read-back landing on the entity's model pose.
     #[test]
     fn killed_rigged_entity_ragdoll_diverges_then_settles() {
-        use crate::physics::StaticSoupPhysics;
+        use crate::physics::StaticCollision;
         use mercs2_anim::pose::BoneRig;
         use mercs2_core::glam::Vec3;
         use mercs2_core::Transform;
@@ -456,7 +456,7 @@ mod tests {
             }
             x += 0.5;
         }
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         let tf = Transform::IDENTITY;
 
         let (mut rd, mut work_pose) =

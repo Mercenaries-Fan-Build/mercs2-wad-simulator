@@ -1079,12 +1079,12 @@ const GAME_IDENTITY: [[f32; 4]; 4] =
 const GAME_ANIM_BLEND_SEC: f32 = 0.25;
 
 /// The Mercenaries 2 third-person game as a `Game` over the engine's unified `app::run` loop.
-/// A minimal [`mercs2_core::PhysicsQuery`] over the game's static+streamed collision soup, used to
+/// A minimal [`mercs2_core::PhysicsQuery`] over the game's static+streamed collision world, used to
 /// ground the vehicle drive step's wheel raycasts (`mercs2_vehicle::drive_step_system`). Wraps the
-/// engine's triangle-soup raycast; the soup raycast returns only a hit distance, so the surface
+/// engine's triangle-set raycast; the broadphase raycast returns only a hit distance, so the surface
 /// normal is approximated as world-up — adequate for wheel suspension on mostly-flat ground, a
 /// `// CONFIRM-LIVE:` refinement for steep terrain (the real path returns the triangle normal).
-struct SoupPhysicsQuery<'a> {
+struct TriPhysicsQuery<'a> {
     tris: &'a [[Vec3; 3]],
 }
 
@@ -1093,9 +1093,9 @@ struct SoupPhysicsQuery<'a> {
 /// < `2^32`) so it never aliases a streamed unit's insert/remove.
 const STATIC_COLLISION_KEY: u64 = 1u64 << 60;
 
-impl mercs2_core::PhysicsQuery for SoupPhysicsQuery<'_> {
+impl mercs2_core::PhysicsQuery for TriPhysicsQuery<'_> {
     fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<mercs2_core::RayHit> {
-        mercs2_engine::physics::soup::raycast(self.tris, origin, dir, max).map(|t| mercs2_core::RayHit {
+        mercs2_engine::physics::broadphase::raycast(self.tris, origin, dir, max).map(|t| mercs2_core::RayHit {
             point: origin + dir * t,
             normal: Vec3::Y,
             distance: t,
@@ -1875,7 +1875,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 }
             }
             println!(
-                "[world] collision broadphase seeded: {} resident soup tris (static baseline + pre-warmed units)",
+                "[world] collision broadphase seeded: {} resident collision tris (static baseline + pre-warmed units)",
                 self.runtime.gameplay.physics().tris().len()
             );
         }
@@ -2043,7 +2043,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 }
 
                 if let Some(veh) = self.ridden {
-                    // Drive: input → controls, step the vehicle sim over the collision soup, chase-cam.
+                    // Drive: input → controls, step the vehicle sim over the collision world, chase-cam.
                     let (veh_pos, class) = {
                         let mut w = ctx.world.borrow_mut();
                         if let Ok(mut c) = w.get::<&mut VehicleControls>(veh) {
@@ -2052,7 +2052,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                             c.turn = -mx;
                             c.handbrake = if inp.held(Action::Jump) { 1.0 } else { 0.0 };
                         }
-                        let q = SoupPhysicsQuery { tris: self.runtime.gameplay.physics().tris() };
+                        let q = TriPhysicsQuery { tris: self.runtime.gameplay.physics().tris() };
                         mercs2_engine::vehicle::drive_step_system(&mut w, &q, &self.veh_lut, dt);
                         let pos = w.get::<&Transform>(veh).map(|x| x.translation).unwrap_or(self.player.pos);
                         let class = w.get::<&Vehicle>(veh).map(|v| v.class).unwrap_or(VehicleClass::Car);
@@ -2072,7 +2072,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     let fwd_flat = Vec3::new(self.tp_yaw.sin(), 0.0, self.tp_yaw.cos()).normalize();
                     let right_flat = fwd_flat.cross(Vec3::Y).normalize();
                     let mv = fwd_flat * my + right_flat * mx;
-                    // The controller reads the world through `LocomotionQuery` rather than taking the soup,
+                    // The controller reads the world through `LocomotionQuery` rather than taking the collider,
                     // heightmap and watermap as separate parameters — it lives in `mercs2_player` now, and a
                     // leaf crate cannot name `mercs2_water` or the engine's heightmap. `SceneLocomotion`
                     // borrows all three, so building one per frame is free.
@@ -2106,7 +2106,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         self.fire_cooldown = PLAYER_FIRE_INTERVAL;
                         let aim = Vec3::new(self.tp_pitch.cos() * self.tp_yaw.sin(), self.tp_pitch.sin(), self.tp_pitch.cos() * self.tp_yaw.cos()).normalize();
                         let eye = self.player.pos + Vec3::Y * PLAYER_EYE_HEIGHT;
-                        if let Some(t) = mercs2_engine::physics::soup::raycast(self.runtime.gameplay.physics().tris(), eye, aim, PLAYER_WEAPON_RANGE) {
+                        if let Some(t) = mercs2_engine::physics::broadphase::raycast(self.runtime.gameplay.physics().tris(), eye, aim, PLAYER_WEAPON_RANGE) {
                             let point = eye + aim * t;
                             self.runtime.push_impact(mercs2_engine::combat::Impact::from_hit(point, Vec3::ZERO, aim, false));
                         }
@@ -2147,7 +2147,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
     fn fixed_update(&mut self, ctx: &mut mercs2_engine::app::Ctx) {
         // Streaming tick (K2 unification): decide + execute the LOAD/WAKE/UNLOAD/HIBERNATE diff around
         // the hero, then — only when the streamed collision set actually changed — rebuild the runtime
-        // physics soup as the STATIC interior shells MERGED with the streamer's live world-space soup.
+        // physics collider as the STATIC interior shells MERGED with the streamer's live world-space collider.
         // `animate` poses any woken rigged props (no-op for the clip-less props that dominate).
         let cam = self.player.pos.to_array();
         if let Some(sw) = self.stream.as_mut() {
@@ -2161,7 +2161,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 // on a WAKE, `remove_unit` on a HIBERNATE (retail `hkpWorld::addEntity`/`removeEntity`).
                 // The player controller / vehicle / camera / weapon read this same structure via
                 // `runtime.gameplay.physics()`, and the fleet uses it natively — so hero and fleet collide
-                // with the identical streamed tris, with NO whole-soup clone and NO grid rebuild.
+                // with the identical streamed tris, with NO whole-grid clone and NO grid rebuild.
                 //
                 // Per-delta work is O(the changed units' triangles), not O(all resident tris): a wake
                 // inserts only that unit's tris into the cells they overlap; a hibernate removes only that
@@ -2185,7 +2185,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     }
                 }
                 // Per-delta cost line: work is O(changed units) — `touched` tris across `ins+rem` units —
-                // NOT O(resident). `resident` is the full soup size for context (it is NOT re-touched).
+                // NOT O(resident). `resident` is the full collider size for context (it is NOT re-touched).
                 let st = sw.stats();
                 println!(
                     "[world] streamed collision Δ: +{ins} / -{rem} unit(s), {touched} tri(s) touched (O(changed)) | resident={} authored tris | authored_phy2={} no_authored={}",
@@ -2227,7 +2227,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // lowered `Health` and, on a lethal blast, flagged victims with `combat::Ragdoll` carrying their
         // blast-seed velocity. Here — the GAME layer, which owns the model rigs — snaps
         // `mercs2_physics::ragdoll::Ragdoll::human()` onto each newly-killed rigged character's CURRENT
-        // posed skeleton, stops its clip, then steps every live ragdoll against the SAME collision soup
+        // posed skeleton, stops its clip, then steps every live ragdoll against the SAME collision world
         // the fleet uses (`gameplay.physics()`) and writes it back into the `SkinPalette`, so the corpse
         // visibly goes limp and settles. Pure glue over the recovered `death_ragdoll` seam — no new math.
         {
@@ -2267,7 +2267,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     let rig = to_anim_rig(&ma.rig);
                     let model_pose = death_ragdoll::model_pose_from_skin(&rig, &skin_mats);
                     // Snap the ragdoll onto the posed skeleton lifted into WORLD space by the corpse's
-                    // Transform, so it simulates against the real world soup; the read-back pulls it back
+                    // Transform, so it simulates against the real world collider; the read-back pulls it back
                     // into the model-space SkinPalette. Stop animation so the ragdoll owns the pose.
                     let Some((rd, work_pose)) =
                         death_ragdoll::spawn(&rig, &model_pose, &tf, seed_vel)
@@ -2281,7 +2281,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 }
             }
 
-            // Phase B — step every live ragdoll against the shared world soup and write it back to the
+            // Phase B — step every live ragdoll against the shared world collider and write it back to the
             // skin. Settled ragdolls hold their final pose (already in the palette) and are skipped.
             let pq: &dyn mercs2_core::PhysicsQuery = self.runtime.gameplay.physics();
             let mut done: Vec<Entity> = Vec::new();

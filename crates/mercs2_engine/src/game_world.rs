@@ -137,10 +137,10 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
 /// space as the render verts, so the entity Transform places them identically).
 ///
 /// Returns `Some(tris)` ONLY when the body is a COMPLETE authored collider (`AuthoredCollision::
-/// is_complete`): it carries no UNDECODED static mesh, and either it produced soup tris (convex/box hulls
+/// is_complete`): it carries no UNDECODED static mesh, and either it produced collision tris (convex/box hulls
 /// and/or a decoded BUILDING-scale `WpMeshShape16`) OR it accounted for its geometry with a TERRAIN-scale
-/// `WpMeshShape16` that is deliberately kept out of the soup (the terrain heightfield covers it — so
-/// `Some(vec![])` here, NOT render tris that would flood the soup with ~10k–18k tris/cell). A body
+/// `WpMeshShape16` that is deliberately kept out of the collider (the terrain heightfield covers it — so
+/// `Some(vec![])` here, NOT render tris that would flood the collider with ~10k–18k tris/cell). A body
 /// with only an undecodable mesh/MOPP, or a ragdoll-only body, returns `None` → the unit gets NO
 /// collision (retail authored none, or an undecoded-mesh decode gap), never a render-mesh substitute.
 /// `WpMeshShape16` is now decoded (`mercs2_formats::havok::MeshShape`), so the static world collides
@@ -1118,7 +1118,7 @@ fn prop_key(k: u32) -> u64 {
 /// One incremental collision delta emitted by [`StreamingWorld::step`], drained by the consumer via
 /// [`StreamingWorld::take_collision_ops`] and applied to its persistent broadphase in order. A WAKE/LOAD
 /// yields `Insert` (the unit's world-space tris); a HIBERNATE/UNLOAD yields `Remove` (the unit key). This
-/// replaces the old "flip a dirty bit, re-flatten + rebuild the whole soup" path: the consumer now touches
+/// replaces the old "flip a dirty bit, re-flatten + rebuild the whole grid" path: the consumer now touches
 /// only the changed unit's triangles, matching how retail's `hkpWorld` adds/removes one body's shape.
 #[derive(Clone, Debug)]
 pub enum CollisionOp {
@@ -1158,14 +1158,14 @@ fn placed_tris(
 
 // --- K3: hi-res terrain collision as a baked heightfield (retail hkpHeightFieldShape) ---
 //
-// Retail terrain collision is a baked HEIGHTFIELD, not soup triangles. Feeding every resident hi-res
-// `terrainmesh` tile's triangles into the collision soup meant the streamer rebuilt a ~273k-triangle
+// Retail terrain collision is a baked HEIGHTFIELD, not collision triangles. Feeding every resident hi-res
+// `terrainmesh` tile's triangles into the collision world meant the streamer rebuilt a ~273k-triangle
 // broadphase FROM SCRATCH whenever a tile woke/hibernated — which the terrain streamer does constantly
 // while the player moves, collapsing the frame rate. Instead each tile is baked ONCE on wake into a
 // sparse per-cell max-height grid ([`TileHeightGrid`]) held in a [`TerrainHeightField`], and dropped on
-// hibernate. Ground queries sample it O(1), and the soup keeps only props/buildings (a few thousand
+// hibernate. Ground queries sample it O(1), and the collider keeps only props/buildings (a few thousand
 // triangles) so its regrid stays cheap and rare. The hero still stands on the hi-res surface (≈1 m above
-// the low-res heightmap) — the reason the tris were ever added to the soup — with none of the cost.
+// the low-res heightmap) — the reason the tris were ever added to the collider — with none of the cost.
 
 /// One woken hi-res terrain tile, baked to a regular max-height grid over its XZ AABB. A cell with no
 /// covering vertex is `NEG_INFINITY` (a hole → [`height_at`](Self::height_at) returns `None` so the
@@ -1276,7 +1276,7 @@ impl TileHeightGrid {
 
 /// The baked hi-res terrain collision: a set of per-tile height grids keyed by streamed tile key. A tile
 /// is baked in on WAKE and dropped on HIBERNATE — the faithful stand-in for retail's resident
-/// `hkpHeightFieldShape` terrain collision, holding ZERO soup triangles. Ground queries sample the
+/// `hkpHeightFieldShape` terrain collision, holding ZERO collision triangles. Ground queries sample the
 /// covering tile(s); nothing here ever touches the physics broadphase.
 #[derive(Default)]
 pub struct TerrainHeightField {
@@ -1347,12 +1347,12 @@ pub struct StreamingWorld {
     /// `Insert`, or hibernated/unloaded → `Remove`), keyed per streamed unit (block or prop — see
     /// `block_key`/`prop_key`). The consumer drains it each tick via [`take_collision_ops`](Self::take_collision_ops)
     /// and replays it INCREMENTALLY into its persistent broadphase (`insert_unit`/`remove_unit`) — no
-    /// whole-soup clone or regrid. Terrain tiles do NOT append here — they bake into
+    /// whole-grid clone or regrid. Terrain tiles do NOT append here — they bake into
     /// [`terrain_field`](Self::terrain_field) — so a terrain wake/hibernate never touches the broadphase.
     collision_ops: Vec<CollisionOp>,
     /// The baked hi-res terrain collision (retail `hkpHeightFieldShape`). Terrain tiles bake their
     /// surface here ONCE on wake and drop it on hibernate; ground queries sample it O(1). This is where
-    /// the ~270k terrain triangles that used to bloat the soup now live — as a cheap height grid.
+    /// the ~270k terrain triangles that used to bloat the collider now live — as a cheap height grid.
     terrain_field: TerrainHeightField,
     /// Cumulative collision-source census over the session: streamed prop/building units that used
     /// AUTHORED PHY2 collision vs those left with NO collision (no complete authored collider —
@@ -1396,7 +1396,7 @@ impl StreamingWorld {
     }
 
     /// The baked hi-res terrain heightfield (retail `hkpHeightFieldShape`). The ground query samples this
-    /// O(1) for the exterior near surface; it holds no soup triangles.
+    /// O(1) for the exterior near surface; it holds no collision triangles.
     pub fn terrain_field(&self) -> &TerrainHeightField {
         &self.terrain_field
     }
@@ -1408,7 +1408,7 @@ impl StreamingWorld {
 
     /// Drain this step's ordered per-unit collision deltas (WAKE `Insert` / HIBERNATE `Remove`). The
     /// consumer replays them into its persistent broadphase — `insert_unit`/`remove_unit`, each
-    /// `O(changed unit)` — instead of re-flattening and regridding the whole soup. Empty when nothing
+    /// `O(changed unit)` — instead of re-flattening and regridding the whole grid. Empty when nothing
     /// prop/building-shaped changed (terrain-only ticks never append here).
     pub fn take_collision_ops(&mut self) -> Vec<CollisionOp> {
         std::mem::take(&mut self.collision_ops)
@@ -1482,7 +1482,7 @@ impl StreamingWorld {
         for k in &diff.hibernate {
             // If a hi-res terrain tile hibernates, un-hide its low-res tile again and drop its baked
             // heightfield grid. Dropping a terrain tile touches ONLY the heightfield — never `collision`
-            // — so it does not flip `collision_dirty` and never triggers a full-soup regrid.
+            // — so it does not flip `collision_dirty` and never triggers a full-collider regrid.
             if let Some(&(_, pos)) = terrain_tiles.get(k) {
                 if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
                     scene.set_draw_hidden(terrain_hash, *di, false);
@@ -1557,7 +1557,7 @@ impl StreamingWorld {
                         }
                     }
                 }
-                // Collision (K3): terrain is a baked HEIGHTFIELD, not soup triangles (retail
+                // Collision (K3): terrain is a baked HEIGHTFIELD, not collision triangles (retail
                 // `hkpHeightFieldShape`). Bake the tile's surface into the persistent `terrain_field`
                 // ONCE — do NOT feed its ~thousands of triangles into `collision` and do NOT flip
                 // `collision_dirty`, so a waking terrain tile never rebuilds the broadphase. The
@@ -2122,13 +2122,13 @@ mod stream_collision_tests {
     }
 
     /// K3 routing invariant: a terrain tile bakes into the HEIGHTFIELD and contributes ZERO triangles to
-    /// the collision soup — the whole point of the perf fix. A `TileHeightGrid` reproduces the tile's
-    /// surface height, and the prop `collision` map the streamer feeds the soup stays empty of terrain.
+    /// the collision world — the whole point of the perf fix. A `TileHeightGrid` reproduces the tile's
+    /// surface height, and the prop `collision` map the streamer feeds the collider stays empty of terrain.
     #[test]
-    fn terrain_tile_bakes_into_heightfield_not_soup() {
+    fn terrain_tile_bakes_into_heightfield_not_the_collider() {
         let tile = flat_tile(1.0);
-        // The tile's raw triangles are exactly what USED to bloat the soup.
-        assert_eq!(tile.len(), 200, "the tile carries 200 tris that no longer enter the soup");
+        // The tile's raw triangles are exactly what USED to bloat the collider.
+        assert_eq!(tile.len(), 200, "the tile carries 200 tris that no longer enter the collider");
 
         // Baked into a heightfield instead: the surface is recovered at ~1 m everywhere inside the tile.
         let mut field = TerrainHeightField::default();
@@ -2143,11 +2143,11 @@ mod stream_collision_tests {
         assert_eq!(field.height_at(1000.0, 1000.0), None, "far outside → None");
         assert_eq!(field.tile_count(), 1);
 
-        // The prop/building soup the streamer hands the runtime carries NONE of the terrain triangles.
+        // The prop/building collider the streamer hands the runtime carries NONE of the terrain triangles.
         let prop_collision: std::collections::HashMap<u64, Vec<[Vec3; 3]>> =
             std::collections::HashMap::new();
-        let soup: Vec<[Vec3; 3]> = prop_collision.values().flatten().copied().collect();
-        assert!(soup.is_empty(), "terrain contributes zero triangles to the soup");
+        let collider_tris: Vec<[Vec3; 3]> = prop_collision.values().flatten().copied().collect();
+        assert!(collider_tris.is_empty(), "terrain contributes zero triangles to the collider");
     }
 
     /// Live: authored PHY2 convex collision loads for a real streamed prop, triangulates to a SANE,
@@ -2285,13 +2285,13 @@ mod terrain_texture_tests {
         );
     }
 
-    /// Live proof of the K3 soup savings: a real terrainmesh tile carries thousands of triangles that
-    /// USED to be cloned into the collision soup on every wake/hibernate. Baking it into a
+    /// Live proof of the K3 collision savings: a real terrainmesh tile carries thousands of triangles that
+    /// USED to be cloned into the collision world on every wake/hibernate. Baking it into a
     /// `TileHeightGrid` costs one grid instead, and the grid reproduces the tile's surface height (so the
     /// hero still grounds on the hi-res terrain). Prints the before/after tri count. SKIPS when vz.wad is
     /// absent.
     #[test]
-    fn live_terrain_tile_routes_to_heightfield_not_soup() {
+    fn live_terrain_tile_routes_to_heightfield_not_the_collider() {
         let Some(path) = crate::wad::resolve_vz_wad(None) else {
             return eprintln!("skip: vz.wad not found");
         };
@@ -2310,11 +2310,11 @@ mod terrain_texture_tests {
         };
         let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos).expect("tile loads");
         let world_tris = extract_local_tris(&m); // already world-space
-        let soup_tris_avoided = world_tris.len();
+        let tris_avoided = world_tris.len();
         assert!(
-            soup_tris_avoided > 100,
-            "a real terrain tile should carry many triangles (got {soup_tris_avoided}) — these are the \
-             soup entries the heightfield replaces"
+            tris_avoided > 100,
+            "a real terrain tile should carry many triangles (got {tris_avoided}) — these are the \
+             collider entries the heightfield replaces"
         );
 
         let grid = TileHeightGrid::bake(&world_tris).expect("tile bakes into a heightfield");
@@ -2337,7 +2337,7 @@ mod terrain_texture_tests {
         }
         assert!(checked > 0, "the field covered at least some of the tile's own vertices");
         eprintln!(
-            "terrain tile 0x{:08X}: {soup_tris_avoided} tris NO LONGER enter the soup (baked into a \
+            "terrain tile 0x{:08X}: {tris_avoided} tris NO LONGER enter the collider (baked into a \
              {}-tile heightfield); surface tracked at {checked} verts, max |Δ|={max_err:.2} m",
             tile.terrainmesh_hash,
             field.tile_count()

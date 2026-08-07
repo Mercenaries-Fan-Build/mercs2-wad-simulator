@@ -4,11 +4,11 @@
 //! **Owned Lua namespace(s):** — (none; this system has no Lua surface of its own — it backs the `PhysicsQuery` seam in `mercs2_core` for vehicle/combat/anim).
 //! Implements `mercs2_core::PhysicsQuery` (raycast / getClosestPoints / hkpCharacterProxy move).
 //!
-//! # The static-soup bridge — static triangle soup + heightmap
+//! # The static-collision bridge — static triangle set + heightmap
 //!
-//! [`StaticSoupPhysics`] is the **first concrete [`PhysicsQuery`] impl**: the cheap-but-real
+//! [`StaticCollision`] is the **first concrete [`PhysicsQuery`] impl**: the cheap-but-real
 //! collision bridge that lets the vehicle / combat / anim systems run against *live* geometry queries
-//! before the full Havok world exists. It is backed by a static world-space triangle soup (buildings,
+//! before the full Havok world exists. It is backed by a static world-space triangle set (buildings,
 //! terrain mesh, roads) plus an optional [`Heightmap`] for low-res terrain — a faithful stand-in for
 //! the retail engine's `hkpMoppBvTreeShape` + `hkpSampledHeightFieldShape` world.
 //!
@@ -24,23 +24,23 @@
 //! The full on-foot controller — the recovered OnGround/InAir/Jumping state machine
 //! (`hkpCharacterContext FUN_0094d2e0`) with gravity, jump, slope + step limits — lives in
 //! [`CharacterController`]; minimal prop/debris dynamics live in [`RigidBody`] +
-//! [`StaticSoupPhysics::step_rigid_body`].
+//! [`StaticCollision::step_rigid_body`].
 //!
 //! ## Fidelity note (what the physics system must replace for full Havok)
 //!
-//! * `move_character` is now a **swept linear cast** ([`StaticSoupPhysics::move_swept`] via
-//!   [conservative advancement][`StaticSoupPhysics::linear_cast`]): it never steps further than the
+//! * `move_character` is now a **swept linear cast** ([`StaticCollision::move_swept`] via
+//!   [conservative advancement][`StaticCollision::linear_cast`]): it never steps further than the
 //!   current wall clearance, so the capsule cannot tunnel a thin wall regardless of `|delta|` (the
 //!   tunnel-free upgrade over the earlier depenetration). This matches the retail `hkpCharacterProxy` /
-//!   `HumanLinearCastJob` sweep *behaviour*; row 22 swaps the static soup for the real
+//!   `HumanLinearCastJob` sweep *behaviour*; row 22 swaps the static collision for the real
 //!   MOPP/heightfield world + the full 5-state controller (adding the Climbing/Ladder game states).
 //!   `// CONFIRM-LIVE:` the per-frame integrator (`hkpWorld::step`) is VMX128-undecoded — the
 //!   semi-implicit Euler here is a faithful equivalent, not the exe's exact solver.
-//! * The broadphase is a **uniform XZ spatial grid** (`soup::Grid`, crate-internal) — the faithful acceleration of
+//! * The broadphase is a **uniform XZ spatial grid** (`broadphase::Grid`, crate-internal) — the faithful acceleration of
 //!   retail's `hkpMoppBvTreeShape` BV-tree: a query touches only the cells the probe/ray/capsule covers
-//!   (`O(local)`), not the whole soup. The exact per-triangle math is unchanged and still runs on the
+//!   (`O(local)`), not the whole grid. The exact per-triangle math is unchanged and still runs on the
 //!   survivors, so results are identical to the old linear scan; only the triangle count visited drops.
-//!   Rebuilt whenever the soup changes ([`StaticSoupPhysics::set_tris`]). The full Havok path would swap
+//!   Rebuilt whenever the collider changes ([`StaticCollision::set_tris`]). The full Havok path would swap
 //!   this uniform grid for the real MOPP BV-tree.
 //! * Only static world geometry is modelled, so [`RayHit::entity`] / `ClosestPoint::entity` are always
 //!   `None` (per the trait doc — MOPP/heightfield report no owning entity). Dynamic rigid bodies
@@ -50,11 +50,11 @@
 //!
 //! | item | owns |
 //! |------|------|
-//! | [`StaticSoupPhysics`] (root) | the [`PhysicsQuery`] impl: [`raycast`][PhysicsQuery::raycast] / [`closest_point`][PhysicsQuery::closest_point] / [`move_character`][PhysicsQuery::move_character], plus [`linear_cast`][StaticSoupPhysics::linear_cast], [`move_swept`][StaticSoupPhysics::move_swept], [`ground_hit`][StaticSoupPhysics::ground_hit] and [`step_rigid_body`][StaticSoupPhysics::step_rigid_body] |
+//! | [`StaticCollision`] (root) | the [`PhysicsQuery`] impl: [`raycast`][PhysicsQuery::raycast] / [`closest_point`][PhysicsQuery::closest_point] / [`move_character`][PhysicsQuery::move_character], plus [`linear_cast`][StaticCollision::linear_cast], [`move_swept`][StaticCollision::move_swept], [`ground_hit`][StaticCollision::ground_hit] and [`step_rigid_body`][StaticCollision::step_rigid_body] |
 //! | [`Heightmap`] / [`GroundHit`] (root) | bilinear terrain grid (`hkpSampledHeightFieldShape` stand-in) + the walkable-ground probe result |
 //! | [`CharacterController`] / [`CharacterState`] / [`CharacterInput`] (root) | the OnGround/Jumping/InAir locomotion state machine, gravity, jump, slope + step limits ([`DEFAULT_GRAVITY`], [`DEFAULT_MAX_SLOPE_COS`]) |
-//! | [`RigidBody`] (root) | minimal sphere-body props/debris dynamics, stepped by [`StaticSoupPhysics::step_rigid_body`] |
-//! | [`soup`] | the lighter *direct-soup* API — free functions over a raw `&[[Vec3; 3]]` with no world object ([`soup::raycast`], [`soup::move_character`], [`soup::ground_below`], [`soup::ray_tri`]), used by the engine's on-foot player controller + camera boom. Accelerated by the same uniform-grid broadphase (cached per soup slice, since these functions don't own their triangles), with the exact **bbox-culled** per-triangle tests unchanged — so a large floor/wall triangle a player stands in the middle of is still kept. |
+//! | [`RigidBody`] (root) | minimal sphere-body props/debris dynamics, stepped by [`StaticCollision::step_rigid_body`] |
+//! | [`broadphase`] | the lighter *direct-tri* API — free functions over a raw `&[[Vec3; 3]]` with no world object ([`broadphase::raycast`], [`broadphase::move_character`], [`broadphase::ground_below`], [`broadphase::ray_tri`]), used by the engine's on-foot player controller + camera boom. Accelerated by the same uniform-grid broadphase (cached per triangle slice, since these functions don't own their triangles), with the exact **bbox-culled** per-triangle tests unchanged — so a large floor/wall triangle a player stands in the middle of is still kept. |
 //!
 //! `mercs2_engine` re-exports this crate as `mercs2_engine::physics`. Deferred work (Climbing/Ladder
 //! states, MOPP broadphase, full rigid-body dynamics) is itemised in `DEFERRED.md`.
@@ -62,10 +62,10 @@
 use mercs2_core::glam::Vec3;
 use mercs2_core::physics_query::{ClosestPoint, PhysicsQuery, RayHit};
 
-/// Lightweight direct-triangle-soup collision (capsule controller + camera raycast over `&[[Vec3;3]]`),
-/// folded from the game's on-foot collision. Bbox-culled (large-triangle-safe). See [`soup`].
+/// Lightweight direct-triangle-set collision (capsule controller + camera raycast over `&[[Vec3;3]]`),
+/// folded from the game's on-foot collision. Bbox-culled (large-triangle-safe). See [`broadphase`].
 pub mod phy2;
-pub mod soup;
+pub mod broadphase;
 
 /// Constrained multi-body ragdoll (XPBD articulated bodies + swing/twist limits), driven by the
 /// ragdoll capsule shapes recovered from the WAD. Supersedes the single-body death stand-in. See
@@ -303,55 +303,55 @@ pub struct GroundHit {
 }
 
 // ---------------------------------------------------------------------------
-//   StaticSoupPhysics — the concrete PhysicsQuery impl
+//   StaticCollision — the concrete PhysicsQuery impl
 // ---------------------------------------------------------------------------
 
-/// A [`PhysicsQuery`] backed by a static world-space triangle soup plus an optional terrain
+/// A [`PhysicsQuery`] backed by a static world-space triangle set plus an optional terrain
 /// [`Heightmap`]. This is the collision bridge (see the crate docs): real ray/closest/character
 /// queries against baked geometry, standing in for the retail Havok MOPP + heightfield world until the
 /// full `hkpWorld` is swapped in.
 ///
-/// Construct one with [`StaticSoupPhysics::new`] (soup only), [`StaticSoupPhysics::from_heightmap`]
-/// (terrain only), or [`StaticSoupPhysics::with_heightmap`] (both), then hand a `&dyn PhysicsQuery`
+/// Construct one with [`StaticCollision::new`] (triangles only), [`StaticCollision::from_heightmap`]
+/// (terrain only), or [`StaticCollision::with_heightmap`] (both), then hand a `&dyn PhysicsQuery`
 /// to the vehicle / combat / anim systems.
 #[derive(Clone, Debug, Default)]
-pub struct StaticSoupPhysics {
+pub struct StaticCollision {
     heightmap: Option<Heightmap>,
-    /// The persistent, mutable broadphase — a spatial hash that owns the triangle soup keyed by streamed
-    /// **unit** (block/prop) id (see [`soup::IncrementalGrid`]). The faithful stand-in for retail's
+    /// The persistent, mutable broadphase — a spatial hash that owns the triangle set keyed by streamed
+    /// **unit** (block/prop) id (see [`broadphase::IncrementalGrid`]). The faithful stand-in for retail's
     /// `hkpWorld` persistent broadphase: a streaming WAKE calls [`insert_unit`](Self::insert_unit) and a
     /// HIBERNATE calls [`remove_unit`](Self::remove_unit), each `O(that unit's tris)` — never rebuilding the
     /// whole grid. The batch [`set_tris`](Self::set_tris) / [`new`](Self::new) path still works (it just
     /// loads everything under one reserved unit key), so non-streaming callers are unchanged.
-    grid: soup::IncrementalGrid,
+    grid: broadphase::IncrementalGrid,
 }
 
-/// Reserved unit key for the whole-soup batch load ([`StaticSoupPhysics::new`] / [`set_tris`]). Chosen far
+/// Reserved unit key for the whole-grid batch load ([`StaticCollision::new`] / [`set_tris`]). Chosen far
 /// above any streamed block/prop key so a batch load and per-unit streaming never collide.
 const BATCH_UNIT: u64 = 1u64 << 62;
 
-impl StaticSoupPhysics {
+impl StaticCollision {
     /// Build from a world-space triangle list (buildings/roads/terrain mesh). No terrain heightmap.
     pub fn new(tris: Vec<[Vec3; 3]>) -> Self {
-        let mut grid = soup::IncrementalGrid::new();
+        let mut grid = broadphase::IncrementalGrid::new();
         grid.insert_unit(BATCH_UNIT, &tris);
         Self { heightmap: None, grid }
     }
 
     /// Build from a terrain heightmap only (no triangle geometry).
     pub fn from_heightmap(heightmap: Heightmap) -> Self {
-        Self { heightmap: Some(heightmap), grid: soup::IncrementalGrid::new() }
+        Self { heightmap: Some(heightmap), grid: broadphase::IncrementalGrid::new() }
     }
 
-    /// Build from both a triangle soup and a terrain heightmap.
+    /// Build from both a triangle set and a terrain heightmap.
     pub fn with_heightmap(tris: Vec<[Vec3; 3]>, heightmap: Heightmap) -> Self {
-        let mut grid = soup::IncrementalGrid::new();
+        let mut grid = broadphase::IncrementalGrid::new();
         grid.insert_unit(BATCH_UNIT, &tris);
         Self { heightmap: Some(heightmap), grid }
     }
 
-    /// The triangle soup this impl queries (the persistent broadphase's compact resident buffer). Handed
-    /// to the free-function soup consumers (on-foot controller / camera boom) that still take a raw slice.
+    /// The triangle set this impl queries (the persistent broadphase's compact resident buffer). Handed
+    /// to the free-function tri consumers (on-foot controller / camera boom) that still take a raw slice.
     pub fn tris(&self) -> &[[Vec3; 3]] {
         self.grid.tris()
     }
@@ -361,7 +361,7 @@ impl StaticSoupPhysics {
         self.heightmap.as_ref()
     }
 
-    /// Replace the ENTIRE triangle soup in one shot (non-streaming callers / tests). Drops every resident
+    /// Replace the ENTIRE triangle set in one shot (non-streaming callers / tests). Drops every resident
     /// unit and reloads `tris` under the reserved batch key. Streaming callers should instead feed
     /// per-unit deltas via [`insert_unit`](Self::insert_unit) / [`remove_unit`](Self::remove_unit), which
     /// touch only the changed unit's cells rather than rebuilding.
@@ -372,7 +372,7 @@ impl StaticSoupPhysics {
 
     /// Insert (or replace) one streamed unit's world-space collision triangles, keyed by `key` (a
     /// block/prop id) — the reimpl of `hkpWorld::addEntity` for a waking body. `O(tris.len())`, independent
-    /// of the resident soup size.
+    /// of the resident collision size.
     pub fn insert_unit(&mut self, key: u64, tris: &[[Vec3; 3]]) {
         self.grid.insert_unit(key, tris);
     }
@@ -437,7 +437,7 @@ impl StaticSoupPhysics {
         pos
     }
 
-    /// Highest walkable surface (soup floor OR heightmap) under `pos`, searched in the vertical band
+    /// Highest walkable surface (collider floor OR heightmap) under `pos`, searched in the vertical band
     /// `[pos.y - down, pos.y + up]`. A surface is *walkable* only when its normal is within `min_cos`
     /// of vertical — the slope limit, matching `hkpCharacterStateOnGround`'s `maxSlopeCosine`
     /// (`FUN_0094ce90`, cinfo `+0xa4`). This makes the feet follow stairs/ramps/terrain and climb low
@@ -619,7 +619,7 @@ impl StaticSoupPhysics {
     }
 }
 
-impl PhysicsQuery for StaticSoupPhysics {
+impl PhysicsQuery for StaticCollision {
     /// `hkpWorldRayCaster` / `CastRay`: nearest triangle hit along `[origin, origin + dir*max]`.
     /// `dir` is treated as a unit direction; `max` is the cast length. Normal is oriented to oppose
     /// the ray (front-facing to the caster). `entity` is `None` — static world geometry.
@@ -694,7 +694,7 @@ impl PhysicsQuery for StaticSoupPhysics {
     /// depenetrate the capsule out of walls (collide-and-slide), then snap the feet to the walkable
     /// surface underneath within `step` (step-up / ground follow). Returns the resolved feet position.
     ///
-    /// Now a **swept linear cast** collide-and-slide (tunnel-free — see [`StaticSoupPhysics::move_swept`]),
+    /// Now a **swept linear cast** collide-and-slide (tunnel-free — see [`StaticCollision::move_swept`]),
     /// followed by a ground snap within `step`. The state machine / gravity / jump live in
     /// [`CharacterController`]; this trait method is the stateless "move + step-follow" the seam exposes.
     fn move_character(&self, pos: Vec3, delta: Vec3, radius: f32, height: f32, step: f32) -> Vec3 {
@@ -760,7 +760,7 @@ pub struct CharacterInput {
 ///
 /// It queries the world through the [`PhysicsQuery`] seam only (`raycast` for ground/landing,
 /// `move_character` for the swept collide-and-slide), so it runs against **any** `&dyn PhysicsQuery`
-/// — the [`StaticSoupPhysics`] bridge today, the full `hkpWorld` later. Gravity, jump, slope and step
+/// — the [`StaticCollision`] bridge today, the full `hkpWorld` later. Gravity, jump, slope and step
 /// limits are handled here (the state machine); the swept move + step-follow come from the query impl.
 ///
 /// `// CONFIRM-LIVE:` the per-frame *integrator* (`hkpWorld::step`) is VMX128 and does not decode
@@ -935,11 +935,11 @@ impl CharacterController {
 
 /// A minimal dynamic rigid body (modelled as a sphere) for props / debris — the reimpl stand-in for a
 /// retail `hkpRigidBody` (`FUN_008d4be0`) stepped by `hkpWorld::step`. Enough to let props fall,
-/// bounce, and settle on the static soup; full inertia-tensor / contact-manifold dynamics arrive with
+/// bounce, and settle on the static collision; full inertia-tensor / contact-manifold dynamics arrive with
 /// the Havok world (`DEFERRED.md`).
 ///
 /// `// CONFIRM-LIVE:` the exact integrator + restitution/friction model is VMX128-undecoded
-/// (`physics_code_map.md` §10); [`StaticSoupPhysics::step_rigid_body`] is a faithful semi-implicit
+/// (`physics_code_map.md` §10); [`StaticCollision::step_rigid_body`] is a faithful semi-implicit
 /// Euler + impulse resolve, not the exe's solver. `restitution`/`friction`/`mass` defaults are
 /// `// CONFIRM-LIVE:` gameplay values (read the `hkpRigidBody` material fields live to pin).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -975,10 +975,10 @@ impl RigidBody {
     }
 }
 
-impl StaticSoupPhysics {
-    /// Step one [`RigidBody`] by `dt` against the static soup + heightmap — the minimal
+impl StaticCollision {
+    /// Step one [`RigidBody`] by `dt` against the static collision + heightmap — the minimal
     /// `hkpWorld::step` analog (props/debris). Semi-implicit Euler integrate, then resolve every
-    /// penetration against the soup (push out along the contact normal, kill the into-surface velocity
+    /// penetration against the collider (push out along the contact normal, kill the into-surface velocity
     /// with `restitution`, shave tangential velocity by `friction`), and park the body as `resting`
     /// once it is slow and supported.
     ///
@@ -1099,7 +1099,7 @@ mod tests {
     fn ray_hits_known_tri_at_right_distance_and_normal() {
         // Floor at y = 0; cast straight down from 5 units up.
         let tris: Vec<_> = floor_quad(0.0, -10.0, 10.0, -10.0, 10.0).into();
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         let hit = phys
             .raycast(Vec3::new(1.0, 5.0, 2.0), -Vec3::Y, 100.0)
             .expect("ray should hit the floor");
@@ -1113,7 +1113,7 @@ mod tests {
     #[test]
     fn ray_miss_returns_none() {
         let tris: Vec<_> = floor_quad(0.0, -1.0, 1.0, -1.0, 1.0).into();
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         // Cast upward, away from the floor → miss.
         assert!(phys.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::Y, 100.0).is_none());
         // Cast horizontally past the small quad → miss.
@@ -1123,7 +1123,7 @@ mod tests {
     #[test]
     fn ray_max_range_is_respected() {
         let tris: Vec<_> = floor_quad(0.0, -10.0, 10.0, -10.0, 10.0).into();
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         // Floor is 5 down, but max is only 3 → no hit.
         assert!(phys.raycast(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 3.0).is_none());
     }
@@ -1133,7 +1133,7 @@ mod tests {
         // Wall at x = 1 (normal -X). Feet just touching at x = 0.7 (radius 0.3), then push into it
         // diagonally by a small delta (< radius) with tangential (+Z) motion.
         let wall: Vec<_> = wall_quad(1.0, -5.0, 5.0, 0.0, 3.0).into();
-        let phys = StaticSoupPhysics::new(wall);
+        let phys = StaticCollision::new(wall);
         let radius = 0.3;
         let start = Vec3::new(0.7, 0.0, 0.0);
         let end = phys.move_character(start, Vec3::new(0.2, 0.0, 0.5), radius, 1.8, 0.4);
@@ -1146,12 +1146,12 @@ mod tests {
     #[test]
     fn move_character_steps_up_low_ledge() {
         // Low floor y=0 for x<1, raised floor y=0.4 for x>=1 (a 0.4 ledge, step limit 0.5). Tiles are
-        // kept small (near the path) to match the game's small-triangle soup that the ground-probe cull
+        // kept small (near the path) to match the game's small-triangle set that the ground-probe cull
         // is tuned for.
         let mut tris: Vec<[Vec3; 3]> = Vec::new();
         tris.extend(floor_quad(0.0, -1.0, 1.0, -1.0, 1.0));
         tris.extend(floor_quad(0.4, 1.0, 3.0, -1.0, 1.0));
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         // Start on the low floor, walk +X across the ledge boundary.
         let start = Vec3::new(0.5, 0.0, 0.0);
         let end = phys.move_character(start, Vec3::new(1.0, 0.0, 0.0), 0.3, 1.8, 0.5);
@@ -1166,7 +1166,7 @@ mod tests {
         let mut tris: Vec<[Vec3; 3]> = Vec::new();
         tris.extend(floor_quad(0.0, 1.0, 3.0, -1.0, 1.0));
         tris.extend(floor_quad(0.8, 1.0, 3.0, -1.0, 1.0));
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         let start = Vec3::new(0.5, 0.0, 0.0);
         let end = phys.move_character(start, Vec3::new(1.0, 0.0, 0.0), 0.3, 1.8, 0.5);
         // Ground snap finds the low floor (y=0), not the too-high ledge.
@@ -1176,7 +1176,7 @@ mod tests {
     #[test]
     fn closest_point_sign_flips_inside_vs_outside() {
         // Build a closed axis-aligned box [-1,1]³ with outward-facing normals.
-        let phys = StaticSoupPhysics::new(unit_box());
+        let phys = StaticCollision::new(unit_box());
         // A point well outside → positive separation.
         let outside = phys
             .closest_point(Vec3::new(3.0, 0.0, 0.0), 10.0)
@@ -1192,12 +1192,12 @@ mod tests {
 
     #[test]
     fn closest_point_out_of_range_returns_none() {
-        let phys = StaticSoupPhysics::new(unit_box());
+        let phys = StaticCollision::new(unit_box());
         assert!(phys.closest_point(Vec3::new(100.0, 0.0, 0.0), 1.0).is_none());
     }
 
     // Brute-force reference = the ORIGINAL (pre-broadphase) linear scans, kept here to prove the
-    // grid-accelerated `StaticSoupPhysics` queries are bit-identical over a large soup.
+    // grid-accelerated `StaticCollision` queries are bit-identical over a large collider.
     fn raycast_brute(tris: &[[Vec3; 3]], origin: Vec3, dir: Vec3, max: f32) -> Option<(f32, Vec3, Vec3)> {
         let cull2 = (max + 30.0) * (max + 30.0);
         let mut best: Option<(f32, &[Vec3; 3])> = None;
@@ -1248,11 +1248,11 @@ mod tests {
         })
     }
 
-    /// The grid-accelerated `StaticSoupPhysics::raycast` / `closest_point` return results bit-identical
-    /// to the brute-force linear scan over a 50k+ triangle soup — the vertex cull is preserved, so
+    /// The grid-accelerated `StaticCollision::raycast` / `closest_point` return results bit-identical
+    /// to the brute-force linear scan over a 50k+ triangle set — the vertex cull is preserved, so
     /// restricting to local cells is a pure acceleration, not a behaviour change.
     #[test]
-    fn static_soup_grid_matches_bruteforce() {
+    fn static_collision_grid_matches_bruteforce() {
         // A 160×160 grid of small triangles (≈51k tris) plus a raised block, so rays and proximity
         // queries hit varied geometry.
         let mut tris: Vec<[Vec3; 3]> = Vec::new();
@@ -1274,7 +1274,7 @@ mod tests {
             }
         }
         assert!(tris.len() > 50_000);
-        let phys = StaticSoupPhysics::new(tris.clone());
+        let phys = StaticCollision::new(tris.clone());
 
         // A tiny deterministic PRNG (no `rand` dependency).
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
@@ -1317,7 +1317,7 @@ mod tests {
         ];
         let hm = Heightmap::new(0.0, 0.0, 1.0, 3, 3, heights);
         assert!((hm.sample(1.5, 1.0).unwrap() - 1.5).abs() < 1e-4);
-        let phys = StaticSoupPhysics::from_heightmap(hm);
+        let phys = StaticCollision::from_heightmap(hm);
         // Start near terrain at x=1 (h=1), move to x=1.5 (h=1.5); step tolerance covers the rise.
         let end = phys.move_character(Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.5, 0.0, 0.0), 0.3, 1.8, 1.0);
         assert!((end.y - 1.5).abs() < 1e-3, "did not follow terrain: y = {}", end.y);
@@ -1353,7 +1353,7 @@ mod controller_tests {
     use super::*;
 
     // A flat floor at height `y` over [x0,x1]×[z0,z1], tiled into 1-unit quads (small triangles, like
-    // the game's world soup — the impl's proximity culls are tuned for small triangles). Wound +Y.
+    // the game's world collider — the impl's proximity culls are tuned for small triangles). Wound +Y.
     fn tiled_floor(y: f32, x0: f32, x1: f32, z0: f32, z1: f32) -> Vec<[Vec3; 3]> {
         let mut out = Vec::new();
         let mut x = x0;
@@ -1394,7 +1394,7 @@ mod controller_tests {
     #[test]
     fn swept_move_does_not_tunnel_thin_wall_at_speed() {
         // Thin wall at x = 0. Capsule starts well behind it and is shoved 10 units in ONE step.
-        let phys = StaticSoupPhysics::new(wall(0.0, -5.0, 5.0, 0.0, 3.0));
+        let phys = StaticCollision::new(wall(0.0, -5.0, 5.0, 0.0, 3.0));
         let radius = 0.3;
         let start = Vec3::new(-2.0, 0.0, 0.0);
         let end = phys.move_swept(start, Vec3::new(10.0, 0.0, 0.0), radius, 1.8);
@@ -1407,7 +1407,7 @@ mod controller_tests {
 
     #[test]
     fn linear_cast_reports_toi_and_normal() {
-        let phys = StaticSoupPhysics::new(wall(0.0, -5.0, 5.0, 0.0, 3.0));
+        let phys = StaticCollision::new(wall(0.0, -5.0, 5.0, 0.0, 3.0));
         let radius = 0.3;
         let (toi, n) = phys
             .linear_cast(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), radius, 1.8)
@@ -1422,7 +1422,7 @@ mod controller_tests {
     #[test]
     fn walk_off_edge_transitions_ground_to_air() {
         // Floor only for x < 0 (a ledge at x = 0).
-        let phys = StaticSoupPhysics::new(tiled_floor(0.0, -12.0, 0.0, -12.0, 12.0));
+        let phys = StaticCollision::new(tiled_floor(0.0, -12.0, 0.0, -12.0, 12.0));
         let mut cc = CharacterController::new(Vec3::new(-0.2, 0.0, 0.0), 0.3, 1.8);
         cc.move_speed = 5.0;
         assert_eq!(cc.state, CharacterState::OnGround);
@@ -1440,7 +1440,7 @@ mod controller_tests {
     // state machine: air -> ground on landing
     #[test]
     fn falling_lands_on_ground() {
-        let phys = StaticSoupPhysics::new(big_floor(0.0));
+        let phys = StaticCollision::new(big_floor(0.0));
         let mut cc = CharacterController::new(Vec3::new(0.0, 5.0, 0.0), 0.3, 1.8);
         cc.state = CharacterState::InAir; // spawned in the air
         let mut landed = false;
@@ -1460,7 +1460,7 @@ mod controller_tests {
     // state machine: jump takes off, arcs, and lands
     #[test]
     fn jump_launches_arcs_and_returns_to_ground() {
-        let phys = StaticSoupPhysics::new(big_floor(0.0));
+        let phys = StaticCollision::new(big_floor(0.0));
         let mut cc = CharacterController::new(Vec3::ZERO, 0.3, 1.8);
         cc.jump_speed = 6.0;
         // Jump.
@@ -1495,7 +1495,7 @@ mod controller_tests {
         // 0.3 ledge (below 0.4 step) -> climbs.
         let mut low = big_floor(0.0);
         low.extend(slab(0.3));
-        let phys_low = StaticSoupPhysics::new(low);
+        let phys_low = StaticCollision::new(low);
         let mut cc = CharacterController::new(Vec3::new(0.5, 0.0, 0.0), 0.3, 1.8);
         cc.step_height = 0.4;
         for _ in 0..30 {
@@ -1507,7 +1507,7 @@ mod controller_tests {
         // 0.9 ledge (above 0.4 step) -> cannot climb; stays on the low floor (feet ~0).
         let mut hi = big_floor(0.0);
         hi.extend(slab(0.9));
-        let phys_hi = StaticSoupPhysics::new(hi);
+        let phys_hi = StaticCollision::new(hi);
         let mut cc2 = CharacterController::new(Vec3::new(0.5, 0.0, 0.0), 0.3, 1.8);
         cc2.step_height = 0.4;
         for _ in 0..30 {
@@ -1534,7 +1534,7 @@ mod controller_tests {
             let x = i as f32 * 0.5;
             tris.extend(strip(x, x + 0.5));
         }
-        let phys = StaticSoupPhysics::new(tris);
+        let phys = StaticCollision::new(tris);
         let mut cc = CharacterController::new(Vec3::new(0.25, s * 0.25, 0.0), 0.3, 1.8);
         cc.step_height = 0.5;
         cc.move_speed = 3.0;
@@ -1555,7 +1555,7 @@ mod controller_tests {
     // rigid body: falls and settles on the ground
     #[test]
     fn rigid_body_settles_on_ground() {
-        let phys = StaticSoupPhysics::new(big_floor(0.0));
+        let phys = StaticCollision::new(big_floor(0.0));
         let mut body = RigidBody::new(Vec3::new(0.0, 5.0, 0.0), 0.5);
         let g = Vec3::Y * DEFAULT_GRAVITY;
         for _ in 0..600 {
@@ -1573,7 +1573,7 @@ mod controller_tests {
 
     #[test]
     fn rigid_body_bounces_before_settling() {
-        let phys = StaticSoupPhysics::new(big_floor(0.0));
+        let phys = StaticCollision::new(big_floor(0.0));
         let mut body = RigidBody::new(Vec3::new(0.0, 3.0, 0.0), 0.5);
         body.restitution = 0.6;
         let g = Vec3::Y * DEFAULT_GRAVITY;

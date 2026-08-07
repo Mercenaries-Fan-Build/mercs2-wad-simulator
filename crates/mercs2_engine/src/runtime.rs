@@ -137,7 +137,7 @@ impl GameRuntime {
         self.npc_models.len()
     }
 
-    /// Hand the fleet physics its static collision soup (the streamed structural geometry). See
+    /// Hand the fleet physics its static collision world (the streamed structural geometry). See
     /// [`GameplaySystems::set_collision`].
     pub fn set_collision(&mut self, tris: Vec<[Vec3; 3]>) {
         self.gameplay.set_collision(tris);

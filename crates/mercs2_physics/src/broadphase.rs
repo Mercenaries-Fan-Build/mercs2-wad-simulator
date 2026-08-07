@@ -1,11 +1,11 @@
-//! CPU collision over a raw world-space triangle soup — a capsule character controller + camera-boom
+//! CPU collision over a raw world-space triangle set — a capsule character controller + camera-boom
 //! raycast operating directly on `&[[Vec3; 3]]`, no owning world object required.
 //!
 //! Folded here from `mercs2_game::collision` (the game owns *content*; the engine/physics owns the
 //! *mechanism*). This is the BBOX-culled variant: the broad phase culls by each triangle's bounding box,
 //! not the distance to one vertex — a large floor/wall triangle a player stands in the middle of is kept
-//! (the "fell through the floor after moving" fix). It complements [`crate::StaticSoupPhysics`] (the
-//! `PhysicsQuery` seam for the vehicle/combat/anim systems); this module is the lightweight direct-soup API
+//! (the "fell through the floor after moving" fix). It complements [`crate::StaticCollision`] (the
+//! `PhysicsQuery` seam for the vehicle/combat/anim systems); this module is the lightweight direct-tri API
 //! the on-foot player controller + camera boom use.
 //!
 //! The player is a vertical CAPSULE (a core segment from `feet+radius` to `feet+height-radius`, swept by
@@ -17,7 +17,7 @@
 //! and taller steps within `step` are climbed/descended by the ground probe. This mirrors how the retail
 //! engine used Havok capsule-vs-geometry (`MatchCapsuleToPose`) rather than a heightmap.
 //!
-//! The camera boom uses the same soup via `raycast` (a thick spherecast margin), matching the exe's
+//! The camera boom uses the same slice via `raycast` (a thick spherecast margin), matching the exe's
 //! `CameraCollisionCastRay` (a radius² probe that keeps the camera out of geometry).
 
 use mercs2_core::glam::Vec3;
@@ -48,11 +48,11 @@ fn xz_in_tri_bbox(t: &[Vec3; 3], pos: Vec3, margin: f32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-//   Broadphase — a uniform XZ spatial grid over the triangle soup
+//   Broadphase — a uniform XZ spatial grid over the triangle set
 // ---------------------------------------------------------------------------
 //
 // The retail engine broadphases collision with a `hkpMoppBvTreeShape` BVH, so a query touches
-// `O(log n)` nodes instead of the whole soup. This is the faithful *acceleration* of that intent: a
+// `O(log n)` nodes instead of the whole grid. This is the faithful *acceleration* of that intent: a
 // uniform grid over the world's XZ plane (the terrain/tile axis) buckets every triangle into the cells
 // its bounding box overlaps. A ground probe then tests only the cell(s) under the feet, a ray only the
 // cells it traverses (grid DDA), and a swept capsule only the cells it covers — `O(local)` instead of
@@ -70,9 +70,9 @@ const MAX_CELLS: usize = 1 << 20;
 /// (rather than being replicated into every cell) — bounds memory against a huge ground/wall triangle.
 const OVERSIZE_CELLS: usize = 64;
 
-/// A uniform XZ spatial hash over a triangle soup: `items` holds triangle indices grouped by cell
+/// A uniform XZ spatial hash over a triangle set: `items` holds triangle indices grouped by cell
 /// (CSR layout via `cell_start`), plus an `oversized` bucket of triangles too large to bucket. Built
-/// once per distinct soup and reused across every query against it (see [`with_grid`]).
+/// once per distinct slice and reused across every query against it (see [`with_grid`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Grid {
     min_x: f32,
@@ -91,7 +91,7 @@ pub(crate) struct Grid {
 
 impl Grid {
     /// Bucket every triangle into the cells its XZ bounding box overlaps. `O(n)` once; amortised away
-    /// by the per-soup cache. Rebuilt whenever the soup changes (a new slice identity — see [`SoupKey`]).
+    /// by the per-slice cache. Rebuilt whenever the collider changes (a new slice identity — see [`SliceKey`]).
     pub(crate) fn build(tris: &[[Vec3; 3]]) -> Grid {
         if tris.is_empty() {
             return Grid::default();
@@ -303,19 +303,19 @@ fn axis_step(o: f32, d: f32, c: isize, step: isize, min: f32, cell: f32) -> (f32
     ((boundary - o) / d, (cell / d.abs()).abs())
 }
 
-/// Identity of a soup slice: base pointer + length + a cheap content fingerprint. Two calls with the
-/// same `SoupKey` are treated as the same soup, so the [`Grid`] is built once and reused; a
-/// streaming block load/unload replaces the soup `Vec` (new pointer/length/content → new key → rebuild).
+/// Identity of a triangle slice: base pointer + length + a cheap content fingerprint. Two calls with the
+/// same `SliceKey` are treated as the same slice, so the [`Grid`] is built once and reused; a
+/// streaming block load/unload replaces the collider `Vec` (new pointer/length/content → new key → rebuild).
 /// The fingerprint guards the rare case of a reused allocation at the same address and length.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct SoupKey {
+struct SliceKey {
     ptr: usize,
     len: usize,
     fp: u64,
 }
 
-impl SoupKey {
-    fn of(tris: &[[Vec3; 3]]) -> SoupKey {
+impl SliceKey {
+    fn of(tris: &[[Vec3; 3]]) -> SliceKey {
         let len = tris.len();
         let mut fp = len as u64;
         if len > 0 {
@@ -326,12 +326,12 @@ impl SoupKey {
                     ^ ((v.z.to_bits() as u64) << 42);
             }
         }
-        SoupKey { ptr: tris.as_ptr() as usize, len, fp }
+        SliceKey { ptr: tris.as_ptr() as usize, len, fp }
     }
 }
 
-/// Number of distinct soups whose grids are cached per thread. The game queries a single soup, so one
-/// slot suffices; a few slots absorb incidental multi-soup use (e.g. tests) without thrashing.
+/// Number of distinct slices whose grids are cached per thread. The game queries a single collider, so one
+/// slot suffices; a few slots absorb incidental multi-slice use (e.g. tests) without thrashing.
 const CACHE_SLOTS: usize = 4;
 
 thread_local! {
@@ -341,19 +341,19 @@ thread_local! {
 #[derive(Default)]
 struct GridCache {
     /// `(key, grid)` slots, most-recently-used last.
-    slots: Vec<(SoupKey, Grid)>,
+    slots: Vec<(SliceKey, Grid)>,
     /// Reusable candidate-index scratch (avoids a per-query allocation on the hot path).
     scratch: Vec<u32>,
 }
 
 /// Run `f` with the broadphase [`Grid`] for `tris` and a scratch buffer. The grid is built on first use
-/// of a given soup and reused for every subsequent query against it (across frames), so the per-frame
+/// of a given slice and reused for every subsequent query against it (across frames), so the per-frame
 /// queries pay only the `O(local)` traversal, not an `O(n)` rebuild. The grid is discarded and rebuilt
-/// when the soup slice's identity changes ([`SoupKey`]) — i.e. when world streaming swaps the soup.
+/// when the triangle slice's identity changes ([`SliceKey`]) — i.e. when world streaming swaps the collider.
 fn with_grid<R>(tris: &[[Vec3; 3]], f: impl FnOnce(&Grid, &mut Vec<u32>) -> R) -> R {
     GRID_CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        let key = SoupKey::of(tris);
+        let key = SliceKey::of(tris);
         match c.slots.iter().position(|(k, _)| *k == key) {
             Some(i) => {
                 // Promote to most-recently-used.
@@ -375,12 +375,12 @@ fn with_grid<R>(tris: &[[Vec3; 3]], f: impl FnOnce(&Grid, &mut Vec<u32>) -> R) -
 }
 
 // ---------------------------------------------------------------------------
-//   Incremental broadphase — a MUTABLE spatial hash over a per-unit triangle soup
+//   Incremental broadphase — a MUTABLE spatial hash over a per-unit triangle set
 // ---------------------------------------------------------------------------
 //
-// The [`Grid`] above is immutable/CSR: built once per soup and thrown away when the soup changes. That
+// The [`Grid`] above is immutable/CSR: built once per slice and thrown away when the collider changes. That
 // is the wrong shape for STREAMING, where a prop/building wakes or hibernates every few frames: rebuilding
-// the whole grid (and re-cloning the whole soup) each delta is `O(all tris)` per streaming event.
+// the whole grid (and re-cloning the whole grid) each delta is `O(all tris)` per streaming event.
 //
 // [`IncrementalGrid`] is the persistent, mutable equivalent — the faithful stand-in for how retail's
 // `hkpWorld` adds/removes each body's pre-baked shape from a persistent broadphase
@@ -396,11 +396,11 @@ fn with_grid<R>(tris: &[[Vec3; 3]], f: impl FnOnce(&Grid, &mut Vec<u32>) -> R) -
 // the SAME bbox-culled test the immutable path uses, so query results are identical to a linear scan of
 // the currently-resident tris (proved by `incremental_matches_bruteforce_*`).
 
-/// A persistent, mutable uniform spatial hash over a per-unit world-space triangle soup. Supports
+/// A persistent, mutable uniform spatial hash over a per-unit world-space triangle set. Supports
 /// `O(changed-unit)` [`insert_unit`](Self::insert_unit) / [`remove_unit`](Self::remove_unit) and the same
 /// `gather_rect` / `gather_ray` broadphase the immutable [`Grid`] exposes. Owns its triangles in a compact
 /// [`tris`](Self::tris) buffer (kept dense by swap-remove) so it also serves the raw `&[[Vec3;3]]` the
-/// free-function soup consumers still take.
+/// free-function tri consumers still take.
 #[derive(Clone, Debug)]
 pub struct IncrementalGrid {
     cell: f32,
@@ -439,8 +439,8 @@ impl IncrementalGrid {
         Self::default()
     }
 
-    /// The compact resident triangle buffer (world space). Handed to the free-function soup consumers
-    /// (`soup::raycast` / `move_character` / `ground_below`) that still take a raw slice.
+    /// The compact resident triangle buffer (world space). Handed to the free-function tri consumers
+    /// (`broadphase::raycast` / `move_character` / `ground_below`) that still take a raw slice.
     #[inline]
     pub fn tris(&self) -> &[[Vec3; 3]] {
         &self.tris
@@ -528,7 +528,7 @@ impl IncrementalGrid {
     }
 
     /// Insert (or replace) a streamed unit's world-space triangles, keyed by `key`. Only the cells the new
-    /// triangles overlap are touched — `O(tris.len())`, independent of the resident soup size. Re-inserting
+    /// triangles overlap are touched — `O(tris.len())`, independent of the resident collision size. Re-inserting
     /// an existing key first removes its old triangles (idempotent WAKE).
     pub fn insert_unit(&mut self, key: u64, tris: &[[Vec3; 3]]) {
         if self.units.contains_key(&key) {
@@ -660,7 +660,7 @@ impl IncrementalGrid {
 
     // --- query methods (identical per-triangle math to the free functions, over the gathered survivors) ---
 
-    /// Nearest triangle hit along `[o, o+dir*max_t]` — the [`raycast`] equivalent over the resident soup.
+    /// Nearest triangle hit along `[o, o+dir*max_t]` — the [`raycast`] equivalent over the resident collision.
     pub fn raycast(&self, o: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
         let end = o + dir * max_t;
         let (smin, smax) = (o.min(end), o.max(end));
@@ -706,7 +706,7 @@ impl IncrementalGrid {
         best
     }
 
-    /// Swept player move + optional ground snap — the [`move_character`] equivalent over the resident soup.
+    /// Swept player move + optional ground snap — the [`move_character`] equivalent over the resident collision.
     pub fn move_character(&self, feet: Vec3, horiz_move: Vec3, radius: f32, height: f32, step: f32, follow_ground: bool) -> Vec3 {
         let mut pos = feet + Vec3::new(horiz_move.x, 0.0, horiz_move.z);
         pos = self.depenetrate(pos, radius, height);
@@ -1284,7 +1284,7 @@ mod tests {
         }
     }
 
-    // A ~51k-triangle soup: a 160×160 heightfield of small (2 m) triangles, a row of vertical walls, and
+    // A ~51k-triangle set: a 160×160 heightfield of small (2 m) triangles, a row of vertical walls, and
     // one map-spanning floor triangle that lands in the grid's OVERSIZED bucket. Exercises every path.
     fn big_terrain() -> Vec<[Vec3; 3]> {
         let n = 160usize;
@@ -1319,13 +1319,13 @@ mod tests {
         tris
     }
 
-    /// The whole point: over a 50k+ triangle soup, the grid-accelerated `ground_below` / `raycast` /
+    /// The whole point: over a 50k+ triangle set, the grid-accelerated `ground_below` / `raycast` /
     /// `move_character` return results BIT-IDENTICAL to the brute-force linear scan (correctness); the
     /// speedup follows from only visiting local cells, not from any change in what is computed.
     #[test]
-    fn grid_matches_bruteforce_over_a_large_soup() {
+    fn grid_matches_bruteforce_over_a_large_collider() {
         let tris = big_terrain();
-        assert!(tris.len() > 50_000, "soup should be large ({} tris)", tris.len());
+        assert!(tris.len() > 50_000, "collider should be large ({} tris)", tris.len());
         let mut rng = Lcg(0x1234_5678_9abc_def0);
         for _ in 0..600 {
             let x = rng.f(-172.0, 172.0);
@@ -1400,7 +1400,7 @@ mod tests {
     fn incremental_matches_bruteforce_after_random_ops() {
         let mut rng = Lcg(0xdead_beef_0000_1234);
         let mut grid = IncrementalGrid::new();
-        // Ground truth: which units are resident, so we can flatten a reference soup on demand.
+        // Ground truth: which units are resident, so we can flatten a reference collider on demand.
         let mut resident: std::collections::BTreeMap<u64, Vec<[Vec3; 3]>> = std::collections::BTreeMap::new();
         const POOL: u32 = 24;
 

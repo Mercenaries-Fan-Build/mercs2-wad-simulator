@@ -176,7 +176,7 @@ pub fn view_with_preset(
         let boom_vec = want_eye - focus;
         let boom_len = boom_vec.length();
         let boom_dir = boom_vec / boom_len;
-        match crate::physics::soup::raycast(collision, focus, boom_dir, boom_len) {
+        match crate::physics::broadphase::raycast(collision, focus, boom_dir, boom_len) {
             Some(hit) => focus + boom_dir * (hit - CAM_RADIUS).max(MIN_BOOM),
             None => want_eye,
         }

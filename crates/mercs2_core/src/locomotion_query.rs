@@ -41,7 +41,7 @@ pub struct WaterColumn {
 /// The world-sampling surface on-foot locomotion needs on top of the shared collision queries.
 ///
 /// Implemented engine-side (`mercs2_engine::locomotion::SceneLocomotion`) over the streamed collision
-/// soup + terrain heightmap + watermap; consumed by `mercs2_player`'s controller as `&dyn`.
+/// collision triangles + terrain heightmap + watermap; consumed by `mercs2_player`'s controller as `&dyn`.
 pub trait LocomotionQuery: PhysicsQuery {
     /// Height of the walkable surface under `feet` (a world-space *feet* position, not the entity
     /// origin), searching at most `probe` metres downward with a capsule of `radius`.

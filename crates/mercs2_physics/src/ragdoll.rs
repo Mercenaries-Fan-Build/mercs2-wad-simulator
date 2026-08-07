@@ -594,9 +594,9 @@ fn extract_swing(q: &Quat, axis: Vec3) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Heightmap, StaticSoupPhysics};
+    use crate::{Heightmap, StaticCollision};
 
-    /// A flat floor made of small triangles centred on the origin (matches the small-triangle soup
+    /// A flat floor made of small triangles centred on the origin (matches the small-triangle set
     /// the query culls are tuned for), for the ragdoll to settle on.
     fn floor(y: f32) -> Vec<[Vec3; 3]> {
         let mut out = Vec::new();
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn ragdoll_settles_on_the_ground_without_exploding() {
         let def = RagdollDef::human();
-        let phys = StaticSoupPhysics::new(floor(0.0));
+        let phys = StaticCollision::new(floor(0.0));
         // Drop the whole ragdoll from ~1.5 m so it falls, articulates, and settles.
         let mut rd = Ragdoll::spawn(&def, &upright_seeds(&def, 1.5));
 
@@ -698,7 +698,7 @@ mod tests {
         // After settling, connected bodies' joint anchors should still roughly coincide (the chain
         // didn't tear apart under the constraint solver).
         let def = RagdollDef::human();
-        let phys = StaticSoupPhysics::with_heightmap(floor(0.0), Heightmap::new(-5.0, -5.0, 1.0, 11, 11, vec![0.0; 121]));
+        let phys = StaticCollision::with_heightmap(floor(0.0), Heightmap::new(-5.0, -5.0, 1.0, 11, 11, vec![0.0; 121]));
         let mut rd = Ragdoll::spawn(&def, &upright_seeds(&def, 1.2));
         for _ in 0..900 {
             rd.step(&phys, 1.0 / 60.0);

@@ -21,7 +21,7 @@ use std::path::Path;
 ///
 /// Node transforms ARE applied: a glTF authored with its parts positioned by node transform would
 /// otherwise collapse to the origin. Primitives are concatenated with their indices rebased, so a
-/// multi-part prop arrives as one welded soup — correct for a rigid host group, and the reason the
+/// multi-part prop arrives as one welded triangle set — correct for a rigid host group, and the reason the
 /// per-material split the Workshop does is not reproduced here.
 /// Open a `.glb`/`.gltf` and resolve its buffers **without** gltf's `import` feature.
 ///
