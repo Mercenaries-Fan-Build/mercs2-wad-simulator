@@ -97,7 +97,7 @@ fn csv_split(line: &str) -> Vec<String> {
 /// tests millions of tokens against ~13k targets, so ~10-25 of them hit a target by pure
 /// 32-bit chance. Every one of those collisions observed here was short, underscore-less
 /// gibberish — `cbjoxg`, `kdwjc`, `qxcvzq`, `rfwuf`, `xf4d8` — because that is what most
-/// of a binary's byte-soup looks like. Real Mercs2 asset names are `zone_category_thing`.
+/// of a binary's byte-jumble looks like. Real Mercs2 asset names are `zone_category_thing`.
 /// Demanding an underscore and >=8 chars of a bare token removes the noise wholesale
 /// while keeping `global_sandbagsstraightgr` and `pmcoutpost_statuediscus`.
 ///

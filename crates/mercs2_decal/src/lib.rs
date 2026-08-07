@@ -41,8 +41,8 @@ pub use components::{
 };
 pub use pool::{DecalInstance, DecalPool, DEFAULT_POOL_CAP, FADE_FRACTION};
 pub use table::{
-    DecalDef, DecalTable, DecalType, DECALTABLE_RESIDENT_ALLOC, DECALTABLE_RESIDENT_FLAG,
-    DECALTABLE_TYPE_HASH,
+    DecalDef, DecalRowLayout, DecalTable, DecalType, DECALTABLE_RESIDENT_ALLOC,
+    DECALTABLE_RESIDENT_FLAG, DECALTABLE_TYPE_HASH,
 };
 
 use mercs2_core::glam::Vec3;

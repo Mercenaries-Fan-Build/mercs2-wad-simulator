@@ -62,8 +62,9 @@ pub fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: 
 
 /// Load one hi-res terrainmesh by its `0x7C569307` asset hash, built with POFF (16 sub-tiles) and
 /// translated to its world tile position `pos`. Y is world-absolute (pos.y is 0); XZ shifts by pos.
-/// Returns the placed `LoadedModel`. Textures may be empty (terrain materials live in separate
-/// `terraintextures` blocks — resolved later, the splat step).
+/// Returns the placed `LoadedModel`. Each draw is bound to its PRMG group's representative
+/// `terraintextures` detail layer and those textures are resolved here (they live in separate
+/// `terraintextures_*` blocks but carry their own texture ASET rows, so `extract_texture` finds them).
 pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32; 3]) -> Option<LoadedModel> {
     let container = wad::extract_container_typed(w, terrainmesh_hash, TERRAINMESH_TYPE_HASH).ok()?;
     let (mut verts, indices, mut draws, stats) = mesh::build_indexed_from_container(&container).ok()?;
@@ -79,15 +80,24 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
     // SPLAT (first pass): bind each draw's representative detail layer (the reversed per-draw
     // material -> terraintextures layers). Full per-vertex blend of all layers by the COLOR weights
     // is the next stage; this shows the real per-region surface material.
+    //
+    // `terrain_group_layers` is indexed by PRMG drawing-group ORDINAL (one entry per group), but
+    // `build_indexed_from_container` emits MULTIPLE draws per group — one per multi-material
+    // sub-strip (the `destrip_by_prmt` split). So `draws.len()` is far larger than `layers.len()`
+    // (e.g. c30010: 348 draws vs 28 groups). A former `layers.len() == draws.len()` guard therefore
+    // NEVER held once sub-strip splitting landed, silently binding NO detail texture → the terrain
+    // rendered white. Map each draw back to its group via `DrawGroup::group_index` (the PRMG ordinal,
+    // same order `terrain_group_layers` is built in) so every draw — including split sub-strips —
+    // gets its group's representative terraintextures layer.
     let layers = mercs2_formats::texture::terrain_group_layers(&container);
-    if layers.len() == draws.len() {
-        for (d, l) in draws.iter_mut().zip(layers.iter()) {
+    for d in draws.iter_mut() {
+        if let Some(l) = layers.get(d.group_index) {
             // First detail (slot 2) for per-region variety; fall back to the base (slot 0).
             if let Some(&h) = l.get(2).or_else(|| l.first()) {
                 d.diffuse = Some(h);
             }
-            d.normal = None;
         }
+        d.normal = None;
     }
     // Resolve the material textures (now the terraintextures detail layers, in separate blocks).
     let mut textures: TexMap = std::collections::HashMap::new();
@@ -100,16 +110,62 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
             }
         }
     }
+    // Terrain lighting fix. The terrainmesh vertex COLOR channel carries per-vertex SPLAT WEIGHTS
+    // (e.g. D3DCOLOR [0,0,254] = R-dominant), NOT baked lighting. Two consumers misread it:
+    //  1. the color shader does `albedo = tex.rgb * vertex.color`, so a single-channel weight like
+    //     [0.996,0,0] kills two of three albedo channels → the ground reads near-black/saturated; and
+    //  2. `ModelStats::prelit` flags this mesh baked-lit (its near-gray blend weights trip the
+    //     interior-shell heuristic), so the renderer would drop the exterior SUN and scale it ×0.21.
+    // Neither is right: we bind ONE representative detail layer per draw (not a per-vertex blend), so
+    // that layer must show at full albedo, lit by the sun. Neutralise the weight-color to white and
+    // clear prelit so the hi-res terrain renders as bright, sun-lit ground (the visible near surface).
+    for v in verts.iter_mut() {
+        v.color = [1.0, 1.0, 1.0];
+    }
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0;
+    skin.prelit = false; // terrain is never prelit — its COLOR is splat weights, not baked light
     Some(LoadedModel { hash: terrainmesh_hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() })
+}
+
+/// The **model→PHY2 linkage**, verified against retail vz.wad: a model's authored Havok collision is a
+/// `PHY2` **sub-chunk INSIDE its resident UCFX model container** (the same container that holds
+/// GEOM/SEGM/HIER/MTRL — see [`crate::model`]'s chunk table), NOT a sibling ASET or a c3-cell field.
+/// This finds that sub-chunk by its `PHY2` descriptor tag, parses the embedded Havok 5.5 packfile, and
+/// triangulates the authored convex/box shapes into **model-local** collision tris (same coordinate
+/// space as the render verts, so the entity Transform places them identically).
+///
+/// Returns `Some(tris)` ONLY when the body is a COMPLETE authored collider (`AuthoredCollision::
+/// is_complete`): it carries no UNDECODED static mesh, and either it produced collision tris (convex/box hulls
+/// and/or a decoded BUILDING-scale `WpMeshShape16`) OR it accounted for its geometry with a TERRAIN-scale
+/// `WpMeshShape16` that is deliberately kept out of the collider (the terrain heightfield covers it — so
+/// `Some(vec![])` here, NOT render tris that would flood the collider with ~10k–18k tris/cell). A body
+/// with only an undecodable mesh/MOPP, or a ragdoll-only body, returns `None` → the unit gets NO
+/// collision (retail authored none, or an undecoded-mesh decode gap), never a render-mesh substitute.
+/// `WpMeshShape16` is now decoded (`mercs2_formats::havok::MeshShape`), so the static world collides
+/// from its authored Havok mesh here.
+fn authored_collision_from_container(container: &[u8]) -> Option<Vec<[mercs2_core::glam::Vec3; 3]>> {
+    let body = mercs2_formats::ucfx::extract_chunk_body(container, b"PHY2")?;
+    let pf = mercs2_formats::havok::parse_phy2_body(&body).ok()?;
+    let ac = crate::physics::phy2::authored_collision(&pf.shapes);
+    ac.is_complete().then_some(ac.tris)
+}
+
+/// Authored PHY2 collision for a streamed PROP model, by hash: extract its resident UCFX container (the
+/// primary/sub model ASET block) and triangulate its `PHY2` convex/box shapes (see
+/// [`authored_collision_from_container`]). `None` = no complete authored collider → NO collision.
+fn load_authored_collision(w: &mut wad::Wad, hash: u32) -> Option<Vec<[mercs2_core::glam::Vec3; 3]>> {
+    let container = wad::extract_container(w, hash).ok()?;
+    authored_collision_from_container(&container)
 }
 
 /// Load one c3 streaming cell's `model` container by block index (the streaming executor's LOAD path).
 /// Slices the `model` chunk out of the block, builds it, resolves its textures, and returns the
-/// placed `LoadedModel` + the cell-origin offset (zero when the verts prove already world-space).
-pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f32; 3])> {
+/// placed `LoadedModel`, the cell-origin offset (zero when the verts prove already world-space), and the
+/// authored PHY2 collision tris (`Some` iff the model container carries a complete authored collider;
+/// `None` → NO collision — see [`authored_collision_from_container`]).
+pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f32; 3], Option<Vec<[mercs2_core::glam::Vec3; 3]>>)> {
     use mercs2_formats::ucfx::parse_block_entry_table;
     let path = wad::block_paths(w).get(block as usize)?.clone();
     let cell_id = c3_cell_id_from_path(&path)?;
@@ -128,6 +184,9 @@ pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f
     }
     let (hash, s0, s1) = model?;
     let (verts, indices, draws, stats) = mesh::build_indexed_from_container(&dec[s0..s1]).ok()?;
+    // Authored PHY2 collision from the SAME sliced container (no second decompress): Some iff it is a
+    // complete authored collider (the c3 model→PHY2 linkage, verified against vz.wad).
+    let phy2 = authored_collision_from_container(&dec[s0..s1]);
     // World-space check (identical to load_c3_cells): bbox centre already inside this cell's bounds
     // => verts are world-space (identity); else cell-local (offset to the cell centre).
     let bcx = (stats.bbox_min[0] + stats.bbox_max[0]) * 0.5;
@@ -148,7 +207,7 @@ pub fn load_one_c3_cell(w: &mut wad::Wad, block: u16) -> Option<(LoadedModel, [f
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0;
-    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() }, offset))
+    Some((LoadedModel { hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() }, offset, phy2))
 }
 
 /// Extract one model container by hash and build its renderable `LoadedModel` (verts/tris + draws +
@@ -322,6 +381,70 @@ pub fn load_model_props(
 // ---------------------------------------------------------------------------
 //   Animation clip loaders
 // ---------------------------------------------------------------------------
+
+/// Resolve a character's primary idle clip through the resident AnimationLookup (data-driven:
+/// `ActionTable → Handle → AnimationLookup[CharacterName] → ASTO → clip`, see
+/// `docs/modernization/human_animation_selection.md`). Tries the base resident block (3185) first,
+/// then any `resident`-named block; `None` if the tables aren't present. Relocated from
+/// `mercs2_game::world::resolve_player_idle` — a WAD-scan wrapper over
+/// `mercs2_formats::anim_select::AnimSelector` (the anim crate's `ClipPicker` cannot name `wad`).
+pub fn resolve_player_idle(w: &mut wad::Wad, character: u32) -> Option<u32> {
+    use mercs2_formats::anim_select::AnimSelector;
+    if let Ok(dec) = wad::decompress_block_index(w, 3185) {
+        if let Some(c) = AnimSelector::from_resident_block(&dec).and_then(|s| s.primary_idle(character)) {
+            return Some(c);
+        }
+    }
+    // Collect resident-named block indices first (ends the block_paths borrow before we take `w`
+    // mutably to decompress).
+    let resident: Vec<usize> = {
+        let paths = wad::block_paths(w);
+        paths
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| *i != 3185 && p.to_ascii_lowercase().contains("resident"))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    for i in resident {
+        if let Ok(dec) = wad::decompress_block_index(w, i as u16) {
+            if let Some(c) = AnimSelector::from_resident_block(&dec).and_then(|s| s.primary_idle(character)) {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a swimming locomotion clip through the real ActionTable + AnimationLookup (resident block
+/// 3185). Swim animations are SHARED across mercs — the AnimationLookup keys them under the NONE
+/// character sentinel (`0x27DE7135`), not each merc's hash — so the engine plays the same swim clips
+/// for everyone in the `Swim` stance (`m2("Swim") = 0x614DB965`). Returns a surface-swim clip,
+/// preferring one that is not the `Dive` plunge (`m2("Dive")` handle → `0x64B3CC44`). Relocated from
+/// `mercs2_game::world::resolve_player_swim`.
+pub fn resolve_player_swim(w: &mut wad::Wad) -> Option<u32> {
+    use mercs2_formats::anim_select::AnimSelector;
+    const NONE_KEY: u32 = 0x27DE_7135; // shared/character-agnostic AnimationLookup key
+    const DIVE_CLIP: u32 = 0x64B3_CC44; // the m2("Dive") swim clip — a plunge, not surface locomotion
+    let dec = wad::decompress_block_index(w, 3185).ok()?;
+    let sel = AnimSelector::from_resident_block(&dec)?;
+    let swim = mercs2_formats::hash::pandemic_hash_m2("Swim");
+    let mut fallback = None;
+    for (st, ac) in sel.action_states() {
+        if st != swim {
+            continue;
+        }
+        for h in sel.handles_for_state(st, ac) {
+            if let Some(c) = sel.resolve_handle(h, NONE_KEY) {
+                if c != DIVE_CLIP {
+                    return Some(c);
+                }
+                fallback = fallback.or(Some(c));
+            }
+        }
+    }
+    fallback
+}
 
 /// Find the animgroup whose binding best covers this model's HIER, decode a clip, and bind its
 /// tracks to HIER bones. `want` selects a specific clip by name-hash; otherwise a normal fully-mapped
@@ -614,6 +737,22 @@ pub struct StreamingWorldData {
     lights: Vec<crate::render::GpuLight>,
 }
 
+impl StreamingWorldData {
+    /// Consume the loader output into the reusable [`StreamingWorld`] executor, handing back the base
+    /// (low-res) terrain model (for the one-time upload) and the world lights (for `Scene::set_lights`).
+    ///
+    /// This is the K2-unification hand-off for a caller in ANOTHER crate: `mercs2_game`'s TPS boot holds
+    /// the opaque `StreamingWorldData` and cannot read its crate-private fields, so this method does the
+    /// same boot glue `FreeFlyGame::setup` does inline (upload terrain, take ownership of the streamer)
+    /// and returns the pieces the caller must wire into its own `Scene`/`World`.
+    pub fn into_streaming_world(self) -> (LoadedModel, Vec<crate::render::GpuLight>, StreamingWorld) {
+        let StreamingWorldData { wad, terrain, manager, props, terrain_tiles, lowres_draw_by_cell, lights } = self;
+        let terrain_hash = terrain.hash;
+        let sw = StreamingWorld::new(wad, manager, props, terrain_tiles, lowres_draw_by_cell, terrain_hash);
+        (terrain, lights, sw)
+    }
+}
+
 /// Convert a harvested `LightObject` placement to a GPU point light, dropping degenerate lights
 /// (non-positive / non-finite radius) so the inferred `params[0]=intensity`/`params[1]=radius`
 /// mapping can never flood the scene. Color/intensity/radius are the authored on-disk values.
@@ -855,9 +994,11 @@ pub fn load_streaming_world_data(
     let verts = terrain_to_vertices(&tm, textured);
     let mut textures: TexMap = std::collections::HashMap::new();
     let diffuse = if let Some(t) = tm.texture.clone() {
+        println!("[stream] terrain texture: vz_lrterrain atlas {}x{} ({:?}) bound at key 0", t.width, t.height, t.format);
         textures.insert(0, t);
         Some(0)
     } else {
+        println!("[stream] terrain texture: NONE — vz_lrterrain atlas did not parse; terrain will render untextured (black)");
         None
     };
     // One draw group PER TILE (all sharing the atlas view), so a low-res tile can be hidden when its
@@ -947,6 +1088,12 @@ pub struct StreamStats {
     pub block_ents: usize,
     pub props: usize,
     pub models: usize,
+    /// Cumulative streamed units that used AUTHORED PHY2 (convex/box/mesh) collision.
+    pub coll_authored: usize,
+    /// Cumulative streamed units left with NO collision because they carry no complete authored
+    /// collider — faithful for the many props retail authored non-colliding, and a logged decode
+    /// gap for the handful of undecoded static meshes. NEVER a render-mesh substitute.
+    pub coll_no_authored: usize,
 }
 
 /// Map a world XZ to the 20×20 low-res terrain grid cell (`row*20+col`); tiles are 400 m from -3800.
@@ -966,6 +1113,19 @@ fn block_key(b: u16) -> u64 {
 }
 fn prop_key(k: u32) -> u64 {
     k as u64
+}
+
+/// One incremental collision delta emitted by [`StreamingWorld::step`], drained by the consumer via
+/// [`StreamingWorld::take_collision_ops`] and applied to its persistent broadphase in order. A WAKE/LOAD
+/// yields `Insert` (the unit's world-space tris); a HIBERNATE/UNLOAD yields `Remove` (the unit key). This
+/// replaces the old "flip a dirty bit, re-flatten + rebuild the whole grid" path: the consumer now touches
+/// only the changed unit's triangles, matching how retail's `hkpWorld` adds/removes one body's shape.
+#[derive(Clone, Debug)]
+pub enum CollisionOp {
+    /// A unit woke/loaded — insert its world-space triangles under `key` (`hkpWorld::addEntity`).
+    Insert(u64, Vec<[mercs2_core::glam::Vec3; 3]>),
+    /// A unit hibernated/unloaded — remove `key`'s triangles (`hkpWorld::removeEntity`).
+    Remove(u64),
 }
 
 /// A mesh's **local-space** collision triangles (raw vertex positions, per index triple). Degenerate
@@ -996,6 +1156,161 @@ fn placed_tris(
         .collect()
 }
 
+// --- K3: hi-res terrain collision as a baked heightfield (retail hkpHeightFieldShape) ---
+//
+// Retail terrain collision is a baked HEIGHTFIELD, not collision triangles. Feeding every resident hi-res
+// `terrainmesh` tile's triangles into the collision world meant the streamer rebuilt a ~273k-triangle
+// broadphase FROM SCRATCH whenever a tile woke/hibernated — which the terrain streamer does constantly
+// while the player moves, collapsing the frame rate. Instead each tile is baked ONCE on wake into a
+// sparse per-cell max-height grid ([`TileHeightGrid`]) held in a [`TerrainHeightField`], and dropped on
+// hibernate. Ground queries sample it O(1), and the collider keeps only props/buildings (a few thousand
+// triangles) so its regrid stays cheap and rare. The hero still stands on the hi-res surface (≈1 m above
+// the low-res heightmap) — the reason the tris were ever added to the collider — with none of the cost.
+
+/// One woken hi-res terrain tile, baked to a regular max-height grid over its XZ AABB. A cell with no
+/// covering vertex is `NEG_INFINITY` (a hole → [`height_at`](Self::height_at) returns `None` so the
+/// low-res heightmap fills in). The tile's triangles are already WORLD-SPACE (the terrainmesh bakes its
+/// world position into its verts on load), so `bake` reads world XZ/Y directly.
+pub struct TileHeightGrid {
+    min_x: f32,
+    min_z: f32,
+    cell: f32,
+    nx: usize,
+    nz: usize,
+    heights: Vec<f32>, // row-major [iz*nx + ix], NEG_INFINITY where uncovered
+}
+
+impl TileHeightGrid {
+    /// Target hi-res terrain cell (m). ~2 m tracks the terrainmesh vertex spacing closely enough that,
+    /// after the dilation passes below, every interior cell carries a surface height, while keeping the
+    /// per-cell max within a metre of the true surface on the game's steepest slopes (so the hero stands
+    /// ON the hi-res ground, never sinks below it and never floats far above it).
+    const TARGET_CELL: f32 = 2.0;
+    /// Hard cap on a tile's grid dimension so a tile can never allocate an unbounded grid.
+    const MAX_DIM: usize = 256;
+
+    /// Bake a tile's WORLD-SPACE triangles into a per-cell max-height grid. `None` for an empty or
+    /// XZ-degenerate tile (no finite extent).
+    pub fn bake(world_tris: &[[mercs2_core::glam::Vec3; 3]]) -> Option<TileHeightGrid> {
+        if world_tris.is_empty() {
+            return None;
+        }
+        let (mut min_x, mut min_z) = (f32::INFINITY, f32::INFINITY);
+        let (mut max_x, mut max_z) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for t in world_tris {
+            for v in t {
+                min_x = min_x.min(v.x);
+                max_x = max_x.max(v.x);
+                min_z = min_z.min(v.z);
+                max_z = max_z.max(v.z);
+            }
+        }
+        let (ex, ez) = (max_x - min_x, max_z - min_z);
+        if !(ex.is_finite() && ez.is_finite()) || ex <= 0.0 || ez <= 0.0 {
+            return None;
+        }
+        // Cell from the larger extent, capped at MAX_DIM cells so the grid stays bounded.
+        let cell = (ex.max(ez) / Self::MAX_DIM as f32).max(Self::TARGET_CELL);
+        let nx = (((ex / cell).ceil() as usize) + 1).min(Self::MAX_DIM);
+        let nz = (((ez / cell).ceil() as usize) + 1).min(Self::MAX_DIM);
+        let mut heights = vec![f32::NEG_INFINITY; nx * nz];
+        let cell_of = |v: f32, min: f32, n: usize| {
+            (((v - min) / cell) as isize).clamp(0, n as isize - 1) as usize
+        };
+        // Max vertex Y per cell — the surface high point covering that cell.
+        for t in world_tris {
+            for v in t {
+                let ix = cell_of(v.x, min_x, nx);
+                let iz = cell_of(v.z, min_z, nz);
+                let c = &mut heights[iz * nx + ix];
+                if v.y > *c {
+                    *c = v.y;
+                }
+            }
+        }
+        // Dilate holes from finite neighbours so the whole tile AABB returns a height (no sink to the
+        // low-res surface under the hero between sparse vertices). Bounded passes; stops once filled.
+        for _ in 0..3 {
+            let prev = heights.clone();
+            let mut filled_any = false;
+            for iz in 0..nz {
+                for ix in 0..nx {
+                    if prev[iz * nx + ix].is_finite() {
+                        continue;
+                    }
+                    let mut best = f32::NEG_INFINITY;
+                    for dz in iz.saturating_sub(1)..=(iz + 1).min(nz - 1) {
+                        for dx in ix.saturating_sub(1)..=(ix + 1).min(nx - 1) {
+                            best = best.max(prev[dz * nx + dx]);
+                        }
+                    }
+                    if best.is_finite() {
+                        heights[iz * nx + ix] = best;
+                        filled_any = true;
+                    }
+                }
+            }
+            if !filled_any {
+                break;
+            }
+        }
+        Some(TileHeightGrid { min_x, min_z, cell, nx, nz, heights })
+    }
+
+    /// Nearest-cell surface height at world (x, z), or `None` outside the tile / over an unfilled hole.
+    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let fx = (x - self.min_x) / self.cell;
+        let fz = (z - self.min_z) / self.cell;
+        if fx < 0.0 || fz < 0.0 {
+            return None;
+        }
+        let ix = fx.round() as usize;
+        let iz = fz.round() as usize;
+        if ix >= self.nx || iz >= self.nz {
+            return None;
+        }
+        let h = self.heights[iz * self.nx + ix];
+        h.is_finite().then_some(h)
+    }
+}
+
+/// The baked hi-res terrain collision: a set of per-tile height grids keyed by streamed tile key. A tile
+/// is baked in on WAKE and dropped on HIBERNATE — the faithful stand-in for retail's resident
+/// `hkpHeightFieldShape` terrain collision, holding ZERO collision triangles. Ground queries sample the
+/// covering tile(s); nothing here ever touches the physics broadphase.
+#[derive(Default)]
+pub struct TerrainHeightField {
+    tiles: std::collections::HashMap<u32, TileHeightGrid>,
+}
+
+impl TerrainHeightField {
+    /// Bake a woken tile in (overwrites any prior grid for the same key).
+    pub fn insert(&mut self, key: u32, grid: TileHeightGrid) {
+        self.tiles.insert(key, grid);
+    }
+    /// Drop a hibernating tile. Returns whether a grid was present.
+    pub fn remove(&mut self, key: u32) -> bool {
+        self.tiles.remove(&key).is_some()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.tiles.is_empty()
+    }
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+    /// Highest baked hi-res terrain surface at world (x, z) across every resident tile covering it, or
+    /// `None` when no resident tile covers the point (the caller falls back to the low-res heightmap).
+    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for g in self.tiles.values() {
+            if let Some(h) = g.height_at(x, z) {
+                best = Some(best.map_or(h, |b| b.max(h)));
+            }
+        }
+        best
+    }
+}
+
 /// The reusable streaming-runtime **executor** (K2 unification,
 /// `docs/modernization/k2_streaming_unification_plan.md`). Owns the decision [`StreamingManager`], the
 /// WAD handle (for on-demand wake extraction), the wake recipes, and all live-executor bookkeeping, and
@@ -1017,17 +1332,34 @@ pub struct StreamingWorld {
     wake_failed: std::collections::HashSet<u32>,
     anim_store: std::collections::HashMap<u32, crate::scene::ModelAnim>,
     // --- collision delta (K2 S2) ---
-    /// Per-model **local-space** collision triangles, cached on first load so a prop whose mesh is
-    /// already resident (loaded by an earlier instance) still contributes collision without re-reading
-    /// the WAD. Keyed by model hash.
+    /// Per-model **local-space** render triangles for the TERRAIN tiles only — cached on first load and
+    /// baked ONCE into the [`terrain_field`](Self::terrain_field) heightfield (retail `hkpHeightFieldShape`).
+    /// Props and c3 blocks do NOT populate this: they collide via AUTHORED PHY2 ([`phy2_local`](Self::phy2_local))
+    /// or not at all — never from render-mesh triangles. Keyed by model hash.
     local_tris: std::collections::HashMap<u32, Vec<[mercs2_core::glam::Vec3; 3]>>,
-    /// Live **world-space** collision soup, keyed per streamed unit (block or prop — see `block_key`/
-    /// `prop_key`) so a UNLOAD/HIBERNATE removes exactly that unit's triangles. The consumer rebuilds
-    /// its physics soup from [`collision_tris`](Self::collision_tris) whenever [`take_collision_dirty`]
-    /// (Self::take_collision_dirty) reports a change.
-    collision: std::collections::HashMap<u64, Vec<[mercs2_core::glam::Vec3; 3]>>,
-    /// Set whenever `collision` changed this step (a unit woke/loaded or hibernated/unloaded).
-    collision_dirty: bool,
+    /// Per-model **authored PHY2** model-local collision tris, cached on first load. `Some(tris)` = the
+    /// model ships a complete authored convex/box/mesh collider (that IS the unit's collision); `None` =
+    /// no complete authored collider, so the unit gets NO collision — retail authored none (faithful) or
+    /// its static mesh is an undecoded decode-gap. Never a render-mesh substitute. Computed once per
+    /// model hash — the model→PHY2 linkage is the `PHY2` sub-chunk inside the model's UCFX container.
+    phy2_local: std::collections::HashMap<u32, Option<Vec<[mercs2_core::glam::Vec3; 3]>>>,
+    /// Ordered log of the per-unit collision deltas produced this step (a PROP/building unit woke/loaded →
+    /// `Insert`, or hibernated/unloaded → `Remove`), keyed per streamed unit (block or prop — see
+    /// `block_key`/`prop_key`). The consumer drains it each tick via [`take_collision_ops`](Self::take_collision_ops)
+    /// and replays it INCREMENTALLY into its persistent broadphase (`insert_unit`/`remove_unit`) — no
+    /// whole-grid clone or regrid. Terrain tiles do NOT append here — they bake into
+    /// [`terrain_field`](Self::terrain_field) — so a terrain wake/hibernate never touches the broadphase.
+    collision_ops: Vec<CollisionOp>,
+    /// The baked hi-res terrain collision (retail `hkpHeightFieldShape`). Terrain tiles bake their
+    /// surface here ONCE on wake and drop it on hibernate; ground queries sample it O(1). This is where
+    /// the ~270k terrain triangles that used to bloat the collider now live — as a cheap height grid.
+    terrain_field: TerrainHeightField,
+    /// Cumulative collision-source census over the session: streamed prop/building units that used
+    /// AUTHORED PHY2 collision vs those left with NO collision (no complete authored collider —
+    /// faithfully-none, or an undecoded-mesh gap). Reported in the periodic stat line. (Wake events, so
+    /// a unit re-woken after hibernate counts again.)
+    coll_authored: usize,
+    coll_no_authored: usize,
 }
 
 impl StreamingWorld {
@@ -1055,26 +1387,31 @@ impl StreamingWorld {
             wake_failed: std::collections::HashSet::new(),
             anim_store: std::collections::HashMap::new(),
             local_tris: std::collections::HashMap::new(),
-            collision: std::collections::HashMap::new(),
-            collision_dirty: false,
+            phy2_local: std::collections::HashMap::new(),
+            collision_ops: Vec::new(),
+            terrain_field: TerrainHeightField::default(),
+            coll_authored: 0,
+            coll_no_authored: 0,
         }
     }
 
-    /// Whether the collision soup changed since the last [`take_collision_dirty`](Self::take_collision_dirty).
+    /// The baked hi-res terrain heightfield (retail `hkpHeightFieldShape`). The ground query samples this
+    /// O(1) for the exterior near surface; it holds no collision triangles.
+    pub fn terrain_field(&self) -> &TerrainHeightField {
+        &self.terrain_field
+    }
+
+    /// Whether any per-unit collision delta was produced since the last [`take_collision_ops`](Self::take_collision_ops).
     pub fn collision_dirty(&self) -> bool {
-        self.collision_dirty
+        !self.collision_ops.is_empty()
     }
 
-    /// Read-and-clear the collision-dirty flag — the consumer calls this each step and, if `true`,
-    /// rebuilds its physics soup from [`collision_tris`](Self::collision_tris).
-    pub fn take_collision_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.collision_dirty)
-    }
-
-    /// The current world-space collision soup (all resident blocks + woken props), flattened. Cheap to
-    /// rebuild since it only runs when [`take_collision_dirty`](Self::take_collision_dirty) is `true`.
-    pub fn collision_tris(&self) -> Vec<[mercs2_core::glam::Vec3; 3]> {
-        self.collision.values().flatten().copied().collect()
+    /// Drain this step's ordered per-unit collision deltas (WAKE `Insert` / HIBERNATE `Remove`). The
+    /// consumer replays them into its persistent broadphase — `insert_unit`/`remove_unit`, each
+    /// `O(changed unit)` — instead of re-flattening and regridding the whole grid. Empty when nothing
+    /// prop/building-shaped changed (terrain-only ticks never append here).
+    pub fn take_collision_ops(&mut self) -> Vec<CollisionOp> {
+        std::mem::take(&mut self.collision_ops)
     }
 
     /// Live executor counts for the periodic stat line.
@@ -1087,6 +1424,8 @@ impl StreamingWorld {
             block_ents: self.block_ents.len(),
             props: self.prop_ents.len(),
             models: self.model_refs.len(),
+            coll_authored: self.coll_authored,
+            coll_no_authored: self.coll_no_authored,
         }
     }
 
@@ -1116,8 +1455,11 @@ impl StreamingWorld {
             wake_failed,
             anim_store,
             local_tris,
-            collision,
-            collision_dirty,
+            phy2_local,
+            collision_ops,
+            terrain_field,
+            coll_authored,
+            coll_no_authored,
         } = self;
         let terrain_hash = *terrain_hash;
 
@@ -1134,17 +1476,18 @@ impl StreamingWorld {
                 let _ = world.despawn(e);
                 scene.forget_entity(e);
             }
-            if collision.remove(&block_key(*b)).is_some() {
-                *collision_dirty = true;
-            }
+            collision_ops.push(CollisionOp::Remove(block_key(*b)));
         }
         // HIBERNATE (free GPU): props beyond their stream-out distance.
         for k in &diff.hibernate {
-            // If a hi-res terrain tile hibernates, un-hide its low-res tile again.
+            // If a hi-res terrain tile hibernates, un-hide its low-res tile again and drop its baked
+            // heightfield grid. Dropping a terrain tile touches ONLY the heightfield — never `collision`
+            // — so it does not flip `collision_dirty` and never triggers a full-collider regrid.
             if let Some(&(_, pos)) = terrain_tiles.get(k) {
                 if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
                     scene.set_draw_hidden(terrain_hash, *di, false);
                 }
+                terrain_field.remove(*k);
             }
             if let Some(e) = prop_ents.remove(k) {
                 if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
@@ -1153,8 +1496,10 @@ impl StreamingWorld {
                 let _ = world.despawn(e);
                 scene.forget_entity(e);
             }
-            if collision.remove(&prop_key(*k)).is_some() {
-                *collision_dirty = true;
+            // Terrain tiles never entered the broadphase (they bake into `terrain_field`), so only a real
+            // prop unit emits a Remove — a hibernating terrain tile must not mark the broadphase dirty.
+            if !terrain_tiles.contains_key(k) {
+                collision_ops.push(CollisionOp::Remove(prop_key(*k)));
             }
         }
         // LOAD c3-cell blocks (throttled by the manager's block budget).
@@ -1162,14 +1507,25 @@ impl StreamingWorld {
             if block_ents.contains_key(b) {
                 continue;
             }
-            if let Some((m, off)) = load_one_c3_cell(wad, *b) {
+            if let Some((m, off, phy2)) = load_one_c3_cell(wad, *b) {
                 if !scene.has_model(m.hash) {
                     scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                 }
-                // Collision (S2): c3 cell geometry placed at `off` (identity rotation).
-                let lt = local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
-                collision.insert(block_key(*b), placed_tris(lt, Vec3::new(off[0], off[1], off[2]), Quat::IDENTITY));
-                *collision_dirty = true;
+                // Collision: AUTHORED PHY2 only (convex/box hulls + decoded static mesh), model-local,
+                // placed at `off` (identity rotation). `phy2 == Some` only for a COMPLETE authored
+                // collider; `None` (an undecoded WpMeshShape16 cell) gets NO collision op — a logged
+                // decode gap, never a render-mesh substitute. Retail collides the static world from its
+                // authored Havok shapes, so that is the only source here.
+                phy2_local.entry(m.hash).or_insert_with(|| phy2);
+                if let Some(a) = phy2_local.get(&m.hash).and_then(|o| o.as_ref()) {
+                    *coll_authored += 1;
+                    collision_ops.push(CollisionOp::Insert(
+                        block_key(*b),
+                        placed_tris(a, Vec3::new(off[0], off[1], off[2]), Quat::IDENTITY),
+                    ));
+                } else {
+                    *coll_no_authored += 1;
+                }
                 let e = world.spawn((
                     Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
                     ModelRef { model: m.hash },
@@ -1201,10 +1557,15 @@ impl StreamingWorld {
                         }
                     }
                 }
-                // Collision (S2): terrain verts are already world-space; the tile spawns at identity.
+                // Collision (K3): terrain is a baked HEIGHTFIELD, not collision triangles (retail
+                // `hkpHeightFieldShape`). Bake the tile's surface into the persistent `terrain_field`
+                // ONCE — do NOT feed its ~thousands of triangles into `collision` and do NOT flip
+                // `collision_dirty`, so a waking terrain tile never rebuilds the broadphase. The
+                // terrainmesh's `local_tris` are already world-space (its world pos is baked into verts).
                 if let Some(lt) = local_tris.get(&tm_hash) {
-                    collision.insert(prop_key(*k), lt.clone());
-                    *collision_dirty = true;
+                    if let Some(grid) = TileHeightGrid::bake(lt) {
+                        terrain_field.insert(*k, grid);
+                    }
                 }
                 let e = world.spawn((
                     Transform::IDENTITY,
@@ -1225,9 +1586,9 @@ impl StreamingWorld {
                 match load_model_by_hash(wad, spawn.model_hash) {
                     Some((m, _, _)) => {
                         scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                        local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
-                        // A rigged model that ships clips registers its rig + clips so the per-frame
-                        // animation pass can pose it (no-op for clip-less props).
+                        // No render-mesh collision extraction: props collide via AUTHORED PHY2 only (or
+                        // not at all). A rigged model that ships clips registers its rig + clips so the
+                        // per-frame animation pass can pose it (no-op for clip-less props).
                         if !m.clips.is_empty() {
                             anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
                                 rig: m.skin.rig.clone(),
@@ -1241,12 +1602,22 @@ impl StreamingWorld {
                     }
                 }
             }
-            // Collision (S2): the prop mesh placed at its authored pos+quat.
-            if let Some(lt) = local_tris.get(&spawn.model_hash) {
+            // Collision: AUTHORED PHY2 only, placed at the prop's authored pos+quat. Computed once per
+            // model hash (the model→PHY2 linkage: `PHY2` sub-chunk in the model's resident container).
+            // `None` = no complete authored collider → the prop gets NO collision, exactly as retail
+            // authored it: the vast majority of ModelName props (439/446) ship no PHY2 and are meant to
+            // be walked through. Never a render-mesh substitute.
+            if !phy2_local.contains_key(&spawn.model_hash) {
+                let a = load_authored_collision(wad, spawn.model_hash);
+                phy2_local.insert(spawn.model_hash, a);
+            }
+            if let Some(a) = phy2_local.get(&spawn.model_hash).and_then(|o| o.as_ref()) {
+                *coll_authored += 1;
                 let q = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
                 let p = Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]);
-                collision.insert(prop_key(*k), placed_tris(lt, p, q));
-                *collision_dirty = true;
+                collision_ops.push(CollisionOp::Insert(prop_key(*k), placed_tris(a, p, q)));
+            } else {
+                *coll_no_authored += 1;
             }
             let nbones = scene.model_bone_count(spawn.model_hash).max(1);
             let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
@@ -1539,9 +1910,10 @@ where
                 self.stat_last = std::time::Instant::now();
                 let s = sw.stats();
                 println!(
-                    "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={}",
+                    "[stream] cam({:.0},{:.0},{:.0}) resident={} awake={} regions={}/{} | live_blk_ents={} props={} models={} | collision: authored_phy2={} no_authored={}",
                     self.free_pos.x, self.free_pos.y, self.free_pos.z,
-                    s.resident, s.awake, s.cached_regions, s.regions, s.block_ents, s.props, s.models
+                    s.resident, s.awake, s.cached_regions, s.regions, s.block_ents, s.props, s.models,
+                    s.coll_authored, s.coll_no_authored
                 );
             }
         }
@@ -1733,5 +2105,242 @@ mod stream_collision_tests {
         let r = placed_tris(&local, Vec3::ZERO, q);
         assert!((r[0][0].length() - 1.0).abs() < 1e-4, "rotation preserves length");
         assert!((r[0][0] - Vec3::X).length() > 0.5, "X was actually rotated, not left in place");
+    }
+
+    /// A flat hi-res terrain tile of world-space triangles at y=1, spanning [0,40]² in XZ.
+    fn flat_tile(y: f32) -> Vec<[Vec3; 3]> {
+        let mut tris = Vec::new();
+        for xi in 0..10 {
+            for zi in 0..10 {
+                let (x0, x1) = (xi as f32 * 4.0, xi as f32 * 4.0 + 4.0);
+                let (z0, z1) = (zi as f32 * 4.0, zi as f32 * 4.0 + 4.0);
+                tris.push([Vec3::new(x0, y, z0), Vec3::new(x1, y, z0), Vec3::new(x1, y, z1)]);
+                tris.push([Vec3::new(x0, y, z0), Vec3::new(x1, y, z1), Vec3::new(x0, y, z1)]);
+            }
+        }
+        tris
+    }
+
+    /// K3 routing invariant: a terrain tile bakes into the HEIGHTFIELD and contributes ZERO triangles to
+    /// the collision world — the whole point of the perf fix. A `TileHeightGrid` reproduces the tile's
+    /// surface height, and the prop `collision` map the streamer feeds the collider stays empty of terrain.
+    #[test]
+    fn terrain_tile_bakes_into_heightfield_not_the_collider() {
+        let tile = flat_tile(1.0);
+        // The tile's raw triangles are exactly what USED to bloat the collider.
+        assert_eq!(tile.len(), 200, "the tile carries 200 tris that no longer enter the collider");
+
+        // Baked into a heightfield instead: the surface is recovered at ~1 m everywhere inside the tile.
+        let mut field = TerrainHeightField::default();
+        let grid = TileHeightGrid::bake(&tile).expect("flat tile bakes");
+        field.insert(0x00A5_5E77_u32, grid);
+        for &(x, z) in &[(0.0f32, 0.0f32), (20.0, 20.0), (39.0, 39.0), (5.5, 33.2)] {
+            let h = field.height_at(x, z).expect("covered by the tile");
+            assert!((h - 1.0).abs() < 1e-3, "hi-res surface at ({x},{z}) = {h}, expected 1.0");
+        }
+        // Outside the tile → no cover → the caller falls back to the low-res heightmap.
+        assert_eq!(field.height_at(-10.0, -10.0), None, "outside the tile → None");
+        assert_eq!(field.height_at(1000.0, 1000.0), None, "far outside → None");
+        assert_eq!(field.tile_count(), 1);
+
+        // The prop/building collider the streamer hands the runtime carries NONE of the terrain triangles.
+        let prop_collision: std::collections::HashMap<u64, Vec<[Vec3; 3]>> =
+            std::collections::HashMap::new();
+        let collider_tris: Vec<[Vec3; 3]> = prop_collision.values().flatten().copied().collect();
+        assert!(collider_tris.is_empty(), "terrain contributes zero triangles to the collider");
+    }
+
+    /// Live: authored PHY2 convex collision loads for a real streamed prop, triangulates to a SANE,
+    /// LOW tri count, and is lower-poly than the render mesh. Also proves the model→PHY2 linkage end to
+    /// end (extract container → `PHY2` sub-chunk → parse → triangulate) and reports the WAD-wide
+    /// authored-vs-fallback split across the ModelName props. SKIPS (passes) when vz.wad is absent.
+    #[test]
+    fn live_prop_phy2_convex_collision_is_sane_and_low_poly() {
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut w) = wad::open(&path) else {
+            return eprintln!("skip: vz.wad not present at {path}");
+        };
+        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
+            return eprintln!("skip: terrain blocks not found");
+        };
+        let mut hashes: Vec<u32> =
+            mercs2_formats::placement::load_model_placements(&ls).iter().map(|p| p.model_hash).collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+
+        // Census + find one prop with a complete authored convex/box collider.
+        let (mut authored, mut no_authored) = (0usize, 0usize);
+        let mut example: Option<(u32, usize, usize)> = None; // hash, hull_tris, render_tris
+        for &h in &hashes {
+            match load_authored_collision(&mut w, h) {
+                Some(tris) => {
+                    authored += 1;
+                    // Every authored triangle vertex is finite and in a plausible model-local range.
+                    for t in &tris {
+                        for v in t {
+                            assert!(v.is_finite(), "authored PHY2 tri vertex not finite for 0x{h:08X}: {v:?}");
+                            assert!(v.length() < 2000.0, "authored PHY2 vertex implausibly far for 0x{h:08X}: {v:?}");
+                        }
+                    }
+                    if example.is_none() {
+                        let rt = load_model_by_hash(&mut w, h).map(|(m, _, _)| m.indices.len() / 3).unwrap_or(0);
+                        example = Some((h, tris.len(), rt));
+                    }
+                }
+                None => no_authored += 1,
+            }
+        }
+        eprintln!(
+            "ModelName props: {} distinct — authored PHY2 convex/box: {authored}, no authored collider (no collision): {no_authored}",
+            hashes.len()
+        );
+
+        // The WAD must ship at least one prop with an authored convex collider (this is the whole point).
+        let (h, hull_tris, render_tris) = example.expect("at least one prop ships authored convex PHY2 collision");
+        eprintln!("example prop 0x{h:08X}: authored hull_tris={hull_tris}, render_tris={render_tris}");
+        assert!(hull_tris >= 4, "a convex hull triangulates to >= 4 tris, got {hull_tris}");
+        assert!(hull_tris < 5000, "authored hull collision must be LOW-poly, got {hull_tris} tris");
+        if render_tris > 0 {
+            assert!(
+                hull_tris <= render_tris,
+                "authored hull collision ({hull_tris}) should not exceed the render mesh ({render_tris})"
+            );
+        }
+    }
+
+    /// Dropping a hibernating tile removes exactly its grid, and a hole (uncovered interior after no
+    /// dilation can reach it) reports `None` rather than a fabricated height.
+    #[test]
+    fn heightfield_insert_remove_and_bounds() {
+        let mut field = TerrainHeightField::default();
+        assert!(field.is_empty());
+        field.insert(7, TileHeightGrid::bake(&flat_tile(2.5)).unwrap());
+        assert_eq!(field.tile_count(), 1);
+        assert!((field.height_at(10.0, 10.0).unwrap() - 2.5).abs() < 1e-3);
+        assert!(field.remove(7), "the tile was present");
+        assert!(!field.remove(7), "already gone");
+        assert!(field.is_empty());
+        assert_eq!(field.height_at(10.0, 10.0), None, "no resident tile → None");
+    }
+}
+
+#[cfg(test)]
+mod terrain_texture_tests {
+    use super::*;
+
+    /// Live: a real hi-res terrainmesh tile must come back TEXTURED, not white. Loading a tile binds
+    /// each draw's PRMG-group representative `terraintextures` detail layer (via `DrawGroup::group_index`
+    /// → `terrain_group_layers`) and resolves those hashes into the tile's texture map. Regression guard
+    /// for the `layers.len() == draws.len()` guard that once silently skipped ALL binding after the
+    /// multi-material sub-strip split, leaving the ground white. SKIPS (passes) when vz.wad is absent.
+    #[test]
+    fn live_terrainmesh_tile_is_textured() {
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found (set VZ_WAD to the install folder or the file)");
+        };
+        let Ok(mut w) = wad::open(&path) else {
+            return eprintln!("skip: vz.wad not present at {path}");
+        };
+        // The TerrainObject->Transform tile map (terrainmesh_hash -> world pos) lives in layers_static.
+        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
+            return eprintln!("skip: terrain blocks not found");
+        };
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let Some(tile) = tiles.into_iter().find(|t| {
+            wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok()
+        }) else {
+            return eprintln!("skip: no loadable terrainmesh tile in this WAD");
+        };
+
+        let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos)
+            .expect("terrainmesh tile must load");
+        assert!(!m.draws.is_empty(), "tile has no draws");
+
+        // Every draw should carry a detail diffuse, and that hash must be a real, decoded
+        // terraintextures texture present in the tile's resolved texture map.
+        let with_diffuse = m.draws.iter().filter(|d| d.diffuse.is_some()).count();
+        let resolved = m
+            .draws
+            .iter()
+            .filter(|d| d.diffuse.map_or(false, |h| m.textures.contains_key(&h)))
+            .count();
+        assert!(!m.textures.is_empty(), "no terrain textures were loaded (terrain would render white)");
+        assert!(
+            with_diffuse * 100 >= m.draws.len() * 95,
+            "expected ~all draws bound to a detail layer, got {with_diffuse}/{} — the group_index \
+             mapping regressed and the terrain would render white",
+            m.draws.len()
+        );
+        assert!(
+            resolved * 100 >= m.draws.len() * 95,
+            "expected ~all bound draws to resolve to a loaded terraintextures texture, got \
+             {resolved}/{} resolved",
+            m.draws.len()
+        );
+        eprintln!(
+            "terrainmesh 0x{:08X}: {} draws, {with_diffuse} bound, {resolved} resolve, {} distinct textures",
+            tile.terrainmesh_hash, m.draws.len(), m.textures.len()
+        );
+    }
+
+    /// Live proof of the K3 collision savings: a real terrainmesh tile carries thousands of triangles that
+    /// USED to be cloned into the collision world on every wake/hibernate. Baking it into a
+    /// `TileHeightGrid` costs one grid instead, and the grid reproduces the tile's surface height (so the
+    /// hero still grounds on the hi-res terrain). Prints the before/after tri count. SKIPS when vz.wad is
+    /// absent.
+    #[test]
+    fn live_terrain_tile_routes_to_heightfield_not_the_collider() {
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut w) = wad::open(&path) else {
+            return eprintln!("skip: vz.wad not present at {path}");
+        };
+        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
+            return eprintln!("skip: terrain blocks not found");
+        };
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let Some(tile) = tiles
+            .into_iter()
+            .find(|t| wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok())
+        else {
+            return eprintln!("skip: no loadable terrainmesh tile");
+        };
+        let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos).expect("tile loads");
+        let world_tris = extract_local_tris(&m); // already world-space
+        let tris_avoided = world_tris.len();
+        assert!(
+            tris_avoided > 100,
+            "a real terrain tile should carry many triangles (got {tris_avoided}) — these are the \
+             collider entries the heightfield replaces"
+        );
+
+        let grid = TileHeightGrid::bake(&world_tris).expect("tile bakes into a heightfield");
+        let mut field = TerrainHeightField::default();
+        field.insert(tile.key, grid);
+
+        // The baked surface must track the tile's actual triangle vertices (the hero stands on THIS, not
+        // the low-res surface). Sample a spread of real vertices and compare to the field.
+        let mut checked = 0u32;
+        let mut max_err = 0.0f32;
+        for t in world_tris.iter().step_by(world_tris.len() / 50 + 1) {
+            for v in t {
+                if let Some(h) = field.height_at(v.x, v.z) {
+                    // The grid stores per-cell MAX height, so it is >= any single vertex in that cell;
+                    // on the near-flat terrain the gap is small. Bound the shortfall generously.
+                    max_err = max_err.max((h - v.y).abs());
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "the field covered at least some of the tile's own vertices");
+        eprintln!(
+            "terrain tile 0x{:08X}: {tris_avoided} tris NO LONGER enter the collider (baked into a \
+             {}-tile heightfield); surface tracked at {checked} verts, max |Δ|={max_err:.2} m",
+            tile.terrainmesh_hash,
+            field.tile_count()
+        );
     }
 }

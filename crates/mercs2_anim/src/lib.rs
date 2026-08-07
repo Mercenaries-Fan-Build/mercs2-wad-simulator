@@ -31,9 +31,12 @@
 //! ground through `mercs2_core::PhysicsQuery`, so the only dependencies are `mercs2_core` +
 //! `mercs2_formats` — no renderer, no loader, no leaf→leaf edge to the physics system.
 //!
-//! **Ragdoll and FaceFX are DEFERRED** — ragdoll needs physics rigid bodies from the physics system; FaceFX
-//! (evaluator `FUN_00686ce0`) needs its curve format decoded. Neither exists in this crate despite
-//! the package description listing them. Other known faithfulness gaps: the per-transition crossfade
+//! **Ragdoll: the sim lands in `mercs2_physics`; the skeleton seam is [`ragdoll`] here.** The
+//! constrained multi-body ragdoll (recovered WAD capsule bodies + XPBD joints) is
+//! `mercs2_physics::ragdoll`; this crate contributes the physics-free glue ([`body_seeds`] /
+//! [`write_back_model_pose`]) that snaps bodies onto the posed skeleton and reads the sim back into
+//! the skin — no leaf→leaf edge. **FaceFX is DEFERRED** (evaluator `FUN_00686ce0` needs its curve
+//! format decoded). Other known faithfulness gaps: the per-transition crossfade
 //! table (`AnimationTransition 0xAB8FE34B` — the controller uses a fixed [`ANIM_BLEND_SEC`] instead),
 //! the walk↔run locomotion blend space, and foot-IK surface-normal orientation + pelvis drop. All are
 //! tracked in `DEFERRED.md`.
@@ -41,6 +44,7 @@
 pub mod controller;
 pub mod ik;
 pub mod pose;
+pub mod ragdoll;
 pub mod select;
 
 pub use controller::{
@@ -49,6 +53,7 @@ pub use controller::{
 };
 pub use ik::{solve_two_bone, FootPlacementIk, IkResult, LegChain};
 pub use pose::BoneRig;
+pub use ragdoll::{body_seeds, write_back_model_pose};
 pub use select::{ClipPicker, ResolvedClip, StateKey};
 
 // Re-export the clip decode + selection primitives this crate is built on, so downstream (the

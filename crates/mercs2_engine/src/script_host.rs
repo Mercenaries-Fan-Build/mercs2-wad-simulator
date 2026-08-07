@@ -50,12 +50,18 @@ pub struct SpawnRequest {
 /// * `nil` (**new game**) → `sMissionId = "VzaCon001"` →
 ///   `WifMissionFlow.GetMissionStartLocations("VzaCon001")` → `{"VzaCon001_Start1"}` (the opening
 ///   contract's own `tStartLocations`, `vz/wifmissiondata.lua:763`).
-/// * a table (**resuming a save**) → `{"Pmc_Entry1", "Pmc_Entry2"}` with `_bPmcRequired = true` — the
-///   PMC HQ entrance. This is the LOAD spawn, and it is the reason a save resumes at the HQ.
+/// * a table **with `tRetryLocations`** (**resuming mid-contract**) → the contract's checkpoint
+///   marker(s), `_bLoadIntoWorld` — the hero resumes in the world at the checkpoint. `_bPmcRequired`
+///   stays false, so this does NOT enter the PMC (correct for a pre-PMC / in-progress save).
+/// * a table **without `tRetryLocations`** (**resuming at the hub**) → `{"Pmc_Entry1", "Pmc_Entry2"}`
+///   with `_bPmcRequired = true` — the PMC HQ entrance, then teleported inside. This is the reason a
+///   between-contracts save resumes at the HQ.
 ///
-/// Getting those two branches backwards is what made every "New Game" open inside the PMC interior the
-/// player does not own yet. Nothing here is a coordinate: the flow yields marker NAMES, which
-/// `CreatePlayerCharacter` resolves through `Pg.GetGuidByName` against live world entities.
+/// Getting these branches wrong is what made a resume misfire: collapsing them made "New Game" open
+/// inside the PMC, and dropping [`retry_locations`](Self::retry_locations) made every mid-contract
+/// resume fall through to `Pmc_Entry1` (the sea-level HQ marker) and land in the water. Nothing here is
+/// a coordinate: the flow yields marker NAMES, which `CreatePlayerCharacter` resolves through
+/// `Pg.GetGuidByName` against live world entities.
 ///
 /// Field names mirror the retail Lua keys (`MrxMissionFlow.SaveSingleton`, `mrxmissionflow.lua:597`),
 /// so the mapping from [`mercs2_formats::save::SaveState`] is one-to-one.
@@ -71,6 +77,18 @@ pub struct BootSaveState {
     /// `tFlowData.tActiveMissions` — in-progress mission ids. `LoadSingleton` calls
     /// `UnlockMission(id, tMissionSaveData, false)` for each.
     pub active_missions: Vec<String>,
+    /// `tSaveData.tRetryLocations` — the active contract's retry-checkpoint marker(s). Present ONLY for a
+    /// save taken mid-contract; a between-contracts (PMC hub) save omits it. **This is the field the
+    /// master script's `LoadSingleton` (`vz/xQ!L.lua:645-652`) branches on to decide a resume's spawn:**
+    ///
+    /// * **non-empty** (mid-mission) → `_bLoadIntoWorld`, hero spawns at the checkpoint marker in the
+    ///   world — it does NOT take the PMC path, and `_bPmcRequired` stays false.
+    /// * **empty** (at the hub) → `{"Pmc_Entry1","Pmc_Entry2"}` + `_bPmcRequired = true` — the PMC HQ
+    ///   entrance, then teleported inside via `WifPmcInterior.Enter`/`MrxHq._TeleportHero`.
+    ///
+    /// Leaving this empty for a genuinely mid-mission (pre-PMC) save is what made a VzaCon001 resume land
+    /// at the sea-level `Pmc_Entry1` marker (Y=0, in the water) instead of at its checkpoint.
+    pub retry_locations: Vec<String>,
     /// `tLayerData` — the active `vz_state_*` world-overlay layer names.
     pub layers: Vec<String>,
     /// `tTransitData.bEnabled` — the transit (fast-travel) system's master switch.
@@ -418,6 +436,20 @@ pub const LOCAL_PLAYER_GUID: u64 = 0x0000_0002;
 /// return this; `Object.SetPosition`/`SetYaw` on it drive the real player). Distinct from the
 /// script-spawn GUID space (`0x1000_0000+`).
 pub const HERO_GUID: u64 = 0x0000_0001;
+
+/// Map the boot hero name to the EXACT object label `MrxUtil.GetCharacterIdentity(uChar)` tests —
+/// the lowercase ids `"mattias"` / `"jennifer"` / `"chris"` it loops over (`mrxutil.lua:649`,
+/// decompiled retail). The reimpl's hero name for Jennifer is the short `jen`
+/// (`mrxplayer.lua` `_tCharacterMap.base`), so it folds to the `jennifer` label the engine expects.
+/// Returns `None` for an unknown/empty hero (no label stamped, matching the pre-boot state).
+fn hero_identity_label(hero: &str) -> Option<&'static str> {
+    match hero.to_ascii_lowercase().as_str() {
+        "mattias" => Some("mattias"),
+        "chris" => Some("chris"),
+        "jen" | "jennifer" => Some("jennifer"),
+        _ => None,
+    }
+}
 
 impl GameScriptHost {
     pub fn new(level: impl Into<String>) -> Self {
@@ -767,11 +799,12 @@ impl GameScriptHost {
         self.hero_character = hero_character.into();
         // The engine tags the player character object with its identity label (mattias/jennifer/chris) at
         // creation; the game reads it via `MrxUtil.GetCharacterIdentity → Object.HasLabel(uChar, <id>)`
-        // (mrxutil.lua:649) throughout the mission/faction/HUD code. Wire that label onto the hero object
-        // so identity resolves to the chosen merc instead of erroring "not one of M/J/C".
-        let id = self.hero_character.to_ascii_lowercase();
-        if !id.is_empty() {
-            self.object_add_label(HERO_GUID, &id);
+        // (mrxutil.lua:649) throughout the mission/faction/HUD code. Stamp that exact label on the
+        // pre-boot hero object (`HERO_GUID`, the construction-time possession) so identity resolves during
+        // the window BEFORE `CreatePlayerCharacter` re-possesses onto the spawned hero. The spawned hero
+        // itself is tagged in `pg_spawn` (that guid is what `GetCharacterIdentity` actually reads).
+        if let Some(label) = hero_identity_label(&self.hero_character) {
+            self.object_add_label(HERO_GUID, label);
         }
     }
 
@@ -894,6 +927,13 @@ impl EngineHost for GameScriptHost {
         // the spawn position the loop reads to place the player — the REAL flow's result.
         if !self.hero_character.is_empty() && template.eq_ignore_ascii_case(&self.hero_character) {
             self.hero_spawn = Some(pos);
+            // Retail character templates carry the identity label, which the spawned character inherits.
+            // `CreatePlayerCharacter` immediately `Player.AttachToCharacter`s this guid, so it is what
+            // `Player.GetPrimaryCharacter()` (hence `MrxUtil.GetCharacterIdentity`) returns — stamp the
+            // label here so `Object.HasLabel(uChar, "mattias"|"jennifer"|"chris")` succeeds.
+            if let Some(label) = hero_identity_label(&self.hero_character) {
+                self.object_add_label(guid, label);
+            }
         }
         let idx = self.spawns.len();
         self.spawns.push(SpawnRequest {
@@ -1884,11 +1924,14 @@ const VZ_MASTER_SCRIPT: &str = "xQ!L";
 /// TABLE here: the subsystem sees "a save with nothing recorded for me", which every one of them
 /// handles (they all test individual fields), instead of "no save at all", which none of them do.
 ///
-/// Two keys are deliberately left `nil`, because they are read as **branch conditions** rather than
-/// passed to a loader, and an empty table is truthy in Lua:
+/// Two keys are handled as **branch conditions** rather than passed to a loader, and an empty table is
+/// truthy in Lua, so an empty one must be published as `nil`, not `{}`:
 ///
-/// * `tRetryLocations` (`:656`) — non-nil would divert the spawn to a mission-retry point and, being
-///   empty, would yield no start marker at all.
+/// * `tRetryLocations` (`:645`) — the resume-spawn gate. Published as a real 1-based marker array WHEN
+///   [`BootSaveState::retry_locations`] is non-empty (a mid-contract save), so `LoadSingleton` takes its
+///   in-world checkpoint branch; left `nil` otherwise, so a hub save falls through to `Pmc_Entry1` +
+///   `_bPmcRequired`. An EMPTY table here would be truthy and divert the spawn to a branch with no
+///   marker — which is exactly the bug this gate fixes.
 /// * `vEquippedSupport` (`:815`) — non-nil would replay an empty loadout over the default one.
 ///
 /// Only content grounded in the decompile is filled in; a guessed shape would be worse than an empty
@@ -1984,6 +2027,21 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
         transit.set(z.zone, t)?;
     }
     root.set("tTransitData", transit)?;
+
+    // `tRetryLocations` (`xQ!L.lua:645`) — the master script's resume-spawn GATE, read as a branch
+    // condition (not handed to a loader). A save taken mid-contract carries its checkpoint marker(s)
+    // here; publishing them makes `LoadSingleton` take the in-world checkpoint branch (`_bLoadIntoWorld`)
+    // instead of `{"Pmc_Entry1","Pmc_Entry2"}` + `_bPmcRequired`, matching retail for a pre-PMC resume.
+    // A save WITHOUT retry locations (a between-contracts / PMC hub save) leaves this NIL — an empty
+    // table would be truthy and wrongly divert the spawn — so a hub resume still reaches the HQ entrance.
+    if !save.retry_locations.is_empty() {
+        let retry = lua.create_table()?;
+        for (i, m) in save.retry_locations.iter().enumerate() {
+            retry.set(i + 1, m.as_str())?;
+        }
+        root.set("tRetryLocations", retry)?;
+    }
+
     lua.globals().set("__boot_save_state", root)?;
     Ok(true)
 }
@@ -2010,7 +2068,8 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
 /// | branch | start locations | meaning |
 /// |---|---|---|
 /// | `tSaveData == nil` (**new game**) | `GetMissionStartLocations("VzaCon001")` → `{"VzaCon001_Start1"}` | the opening contract, before the player owns the PMC |
-/// | `tSaveData ~= nil` (**resume**) | `{"Pmc_Entry1", "Pmc_Entry2"}`, `_bPmcRequired = true` | the PMC HQ entrance |
+/// | `tSaveData.tRetryLocations` set (**resume mid-contract**) | the save's checkpoint marker(s), `_bLoadIntoWorld` | resume in the world at the checkpoint; NOT the PMC (a pre-PMC / in-progress save) |
+/// | `tSaveData ~= nil`, no `tRetryLocations` (**resume at hub**) | `{"Pmc_Entry1", "Pmc_Entry2"}`, `_bPmcRequired = true` | the PMC HQ entrance |
 ///
 /// This function's job is only to answer `Pg.LoadGame` truthfully from [`GameScriptHost::boot_save_state`]
 /// and let the branch run. It deliberately does **not** call `MrxPlayer.SetSpawnLocations` itself: doing
@@ -2030,7 +2089,16 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, charac
     };
     println!(
         "[world] boot branch: {}",
-        if resuming { "RESUME a save -> Pmc_Entry1 (HQ entrance)" } else { "NEW GAME -> VzaCon001_Start1 (opening contract)" }
+        if resuming {
+            let mid_contract = host.borrow().boot_save_state().map(|s| !s.retry_locations.is_empty()).unwrap_or(false);
+            if mid_contract {
+                "RESUME mid-contract -> checkpoint marker (in world, pre-PMC)"
+            } else {
+                "RESUME at hub -> Pmc_Entry1 (HQ entrance)"
+            }
+        } else {
+            "NEW GAME -> VzaCon001_Start1 (opening contract)"
+        }
     );
     // Drive the flow the way the engine does: MrxBootstrap.Start() registers the callbacks, the master
     // script's Init decides the spawn markers, and the player-joined path spawns the hero
@@ -2320,6 +2388,37 @@ pub fn run_interior_boot_inline() -> Vec<SpawnRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GAP-2 regression: the hero's identity label round-trips so `MrxUtil.GetCharacterIdentity`
+    /// (`mrxutil.lua:649`, which loops `Object.HasLabel(uChar, "mattias"|"jennifer"|"chris")`) resolves
+    /// instead of erroring "not one of M/J/C". Two stamp sites must both hold: the pre-boot `HERO_GUID`
+    /// possession, and the `Pg.Spawn`'d hero guid that `CreatePlayerCharacter → AttachToCharacter`
+    /// possesses (what `Player.GetPrimaryCharacter` actually returns). Also pins the `jen → jennifer`
+    /// fold — the reimpl's short base name vs the label the retail Lua tests.
+    #[test]
+    fn hero_identity_label_round_trips_for_getcharacteridentity() {
+        for (hero, label) in [("mattias", "mattias"), ("chris", "chris"), ("jen", "jennifer")] {
+            let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+            host.borrow_mut().set_boot_context(hero);
+            // Pre-spawn window: the construction-time possession points at HERO_GUID.
+            assert!(
+                host.borrow().object_has_label(HERO_GUID, label),
+                "{hero}: HERO_GUID must carry the identity label {label} before the spawn"
+            );
+            // The boot's Pg.Spawn(hero, …) mints a fresh guid (the one AttachToCharacter possesses).
+            let spawned = host.borrow_mut().pg_spawn(hero, [1.0, 0.0, 2.0], 0.0, false);
+            assert_ne!(spawned, HERO_GUID, "the spawned hero gets a distinct script-space guid");
+            assert!(
+                host.borrow().object_has_label(spawned, label),
+                "{hero}: GetCharacterIdentity reads the SPAWNED guid — it must carry {label}"
+            );
+        }
+        // A non-hero spawn is not tagged (no fabricated identity on ambient actors).
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        host.borrow_mut().set_boot_context("mattias");
+        let civ = host.borrow_mut().pg_spawn("civ_hum_male_business", [0.0; 3], 0.0, false);
+        assert!(!host.borrow().object_has_label(civ, "mattias"));
+    }
 
     /// Mint a handle from a literal, for tests that need a **known** guid on both sides — e.g.
     /// asserting `host.faction.accumulator(777)` after driving Lua that names 777.
@@ -3307,6 +3406,7 @@ mod tests {
             flow_keys: s.completed_flow.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             culled_bindings: s.flow_chain.clone(),
             active_missions: s.active_missions.iter().map(|m| m.id.clone()).collect(),
+            retry_locations: s.retry_locations.clone(),
             layers: s.layers.clone(),
             transit_enabled: s.transit_enabled,
             transit_zones: s.transit_zones.clone(),
@@ -3317,10 +3417,14 @@ mod tests {
     ///
     /// That test drives the NEW-GAME branch (`Pg.LoadGame` false → `VzaCon001_Start1`). Every retail
     /// capture we have is a save RESUME, so this is the like-for-like: same populated world, but with
-    /// a save installed so `xQ!L.LoadSingleton` takes its `_bPmcRequired` branch and starts the hero
-    /// at the PMC HQ entrance instead of the opening contract.
+    /// a save installed so `xQ!L.LoadSingleton` takes a resume branch.
     ///
-    /// The save is measured from the chris 0% capture ([`retail_resume_save`]) rather than invented.
+    /// The save is measured from the chris 0% capture ([`retail_resume_save`]) rather than invented. That
+    /// capture is a **mid-contract VzaCon001** save (`tRetryLocations = {"PmcCon001_Start1"}`), so it is a
+    /// PRE-PMC resume: the master script must spawn the hero at the contract CHECKPOINT marker, NOT at
+    /// `Pmc_Entry1` (the sea-level HQ entrance — landing there drops a pre-PMC hero in the water). The
+    /// post-PMC / hub resume that DOES reach `Pmc_Entry1` is covered by
+    /// [`new_game_and_resume_take_different_boot_branches`].
     ///
     /// This is also what gives the two worldless boot tests their landing zones: `MrxTransit.Reset`
     /// bails when `Pg.GetAllLandingZones` is empty, leaving `_tLandingZones = false` for
@@ -3364,9 +3468,9 @@ mod tests {
         host.borrow_mut().set_boot_context("chris");
         run_boot_flow(&sh, &host, "chris");
 
-        // The resume branch was taken. `xQ!L.LoadSingleton` (`:626-686`) picks
-        // `{"Pmc_Entry1", "Pmc_Entry2"}` when it got a save, versus `VzaCon001_Start1` when it did not
-        // — the single observable that separates the two branches.
+        // The mid-contract resume branch was taken. `xQ!L.LoadSingleton` (`:645-652`) picks the save's
+        // `tRetryLocations` checkpoint marker when the save carries them, rather than
+        // `{"Pmc_Entry1", "Pmc_Entry2"}` (a hub save) or `VzaCon001_Start1` (a new game).
         let marker: Option<String> = sh
             .exec(
                 "__resume_marker = MrxPlayer and MrxPlayer._tSpawnLocations and MrxPlayer._tSpawnLocations[1]",
@@ -3376,8 +3480,14 @@ mod tests {
             .and_then(|()| sh.lua().globals().get::<Option<String>>("__resume_marker").ok().flatten());
         assert_eq!(
             marker.as_deref(),
+            Some("PmcCon001_Start1"),
+            "a mid-contract (pre-PMC) resume must spawn at the save's tRetryLocations checkpoint marker"
+        );
+        assert_ne!(
+            marker.as_deref(),
             Some("Pmc_Entry1"),
-            "a save must send the hero to the PMC HQ entrance, not the opening contract"
+            "a pre-PMC resume must NOT take the PMC HQ-entrance path — that is the Y=0 sea-level marker \
+             that drops the hero in the water"
         );
 
         // `MrxTransit.Reset` completed, so the shipped `SaveSingleton` bug cannot fire. Asserted
@@ -3608,11 +3718,14 @@ mod tests {
         assert!(!install_boot_save_state(&sh, &host).unwrap(), "no save = new game");
         sh.exec("assert(__boot_save_state == nil, 'a new game must publish no save table')", "@t").unwrap();
 
-        // Resuming: the flow tables land in the shape `MrxMissionFlow.LoadSingleton` destructures.
+        // Resuming AT THE HUB (no retry locations): the flow tables land in the shape
+        // `MrxMissionFlow.LoadSingleton` destructures, and `tRetryLocations` is NIL so `LoadSingleton`
+        // takes its `{Pmc_Entry1,Pmc_Entry2}` + `_bPmcRequired` path.
         host.borrow_mut().set_boot_save_state(Some(BootSaveState {
             flow_keys: vec![("VzaCon001".into(), 1.0), ("PmcCon001".into(), 1.0)],
             culled_bindings: vec!["Start".into(), "VzaCon001".into()],
             active_missions: vec!["OilCon020".into()],
+            retry_locations: Vec::new(),
             layers: vec!["vz_state_pmcinterior".into()],
             transit_enabled: false,
             transit_zones: Vec::new(),
@@ -3625,7 +3738,26 @@ mod tests {
              assert(s.tFlowData.tCulledBindings[1] == 'Start', 'culled bindings are a 1-based array')\n\
              assert(s.tFlowData.tCulledBindings[2] == 'VzaCon001', 'order preserved')\n\
              assert(type(s.tFlowData.tActiveMissions.OilCon020) == 'table', 'active missions keyed by id')\n\
-             assert(s.tLayerData[1] == 'vz_state_pmcinterior', 'layer overlays carried')",
+             assert(s.tLayerData[1] == 'vz_state_pmcinterior', 'layer overlays carried')\n\
+             assert(s.tRetryLocations == nil, 'a hub save must publish NO tRetryLocations (Pmc_Entry1 path)')",
+            "@t",
+        )
+        .unwrap();
+
+        // Resuming MID-CONTRACT (retry locations present): `tRetryLocations` is published as a 1-based
+        // marker array so `LoadSingleton` takes its in-world checkpoint branch instead of `Pmc_Entry1`.
+        host.borrow_mut().set_boot_save_state(Some(BootSaveState {
+            flow_keys: vec![("VzaCon001".into(), 1.0)],
+            culled_bindings: vec!["Start".into()],
+            retry_locations: vec!["Checkpoint_PMC001_VillaReached".into()],
+            ..Default::default()
+        }));
+        assert!(install_boot_save_state(&sh, &host).unwrap(), "a mid-contract save = resume");
+        sh.exec(
+            "local s = __boot_save_state\n\
+             assert(s, 'save table must be published')\n\
+             assert(type(s.tRetryLocations) == 'table', 'a mid-contract save must publish tRetryLocations')\n\
+             assert(s.tRetryLocations[1] == 'Checkpoint_PMC001_VillaReached', 'checkpoint marker carried, 1-based')",
             "@t",
         )
         .unwrap();
@@ -3690,24 +3822,45 @@ mod tests {
         let Some(new_game) = spawn_marker_for(None) else {
             return eprintln!("[skip] decompiled Lua corpus not present — boot-branch test skipped");
         };
-        let resumed = spawn_marker_for(Some(BootSaveState {
+        // POST-PMC / hub resume: a save with NO retry locations falls through to the PMC HQ entrance.
+        let resumed_hub = spawn_marker_for(Some(BootSaveState {
+            flow_keys: vec![("VzaCon001".into(), 1.0), ("PmcCon001".into(), 1.0)],
+            culled_bindings: vec!["Start".into(), "VzaCon001".into()],
+            ..Default::default()
+        }))
+        .expect("the corpus was present a moment ago");
+        // PRE-PMC / mid-contract resume: a save WITH retry locations spawns at its checkpoint marker,
+        // NOT at Pmc_Entry1. This is the case the water-spawn bug lived in.
+        let resumed_midcontract = spawn_marker_for(Some(BootSaveState {
             flow_keys: vec![("VzaCon001".into(), 1.0)],
             culled_bindings: vec!["Start".into()],
+            retry_locations: vec!["Checkpoint_PMC001_VillaReached".into()],
             ..Default::default()
         }))
         .expect("the corpus was present a moment ago");
 
-        println!("[boot-branch] new game -> {new_game}   resume -> {resumed}");
+        println!(
+            "[boot-branch] new game -> {new_game}   resume(hub) -> {resumed_hub}   \
+             resume(mid-contract) -> {resumed_midcontract}"
+        );
         assert_eq!(
             new_game, "VzaCon001_Start1",
             "a NEW GAME must start at the opening contract (vz/xQ!L.lua:665-670 + \
              wifmissiondata.lua:766), not inside the PMC the player does not own yet"
         );
         assert_eq!(
-            resumed, "Pmc_Entry1",
-            "RESUMING a save must start at the PMC HQ entrance (vz/xQ!L.lua:661-663)"
+            resumed_hub, "Pmc_Entry1",
+            "RESUMING a hub save (no tRetryLocations) must start at the PMC HQ entrance (vz/xQ!L.lua:650-652)"
         );
-        assert_ne!(new_game, resumed, "the two branches must not collapse into one");
+        assert_eq!(
+            resumed_midcontract, "Checkpoint_PMC001_VillaReached",
+            "RESUMING a mid-contract save must start at its tRetryLocations checkpoint (vz/xQ!L.lua:645-648)"
+        );
+        assert_ne!(
+            resumed_midcontract, "Pmc_Entry1",
+            "a pre-PMC resume must NOT be diverted to the PMC HQ entrance"
+        );
+        assert_ne!(new_game, resumed_hub, "the new-game and hub-resume branches must not collapse into one");
     }
 
     /// The core proof that this is real, not a shadow: `Object.GetPosition` reads the entity's LIVE

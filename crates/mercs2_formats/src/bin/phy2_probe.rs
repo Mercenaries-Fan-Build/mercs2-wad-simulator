@@ -59,8 +59,20 @@ fn main() {
                         Shape::Box { half_extents } => {
                             println!("  box half-extents {half_extents:?}")
                         }
+                        Shape::Capsule(c) => {
+                            println!("  capsule r={:.4} half_len={:.4}", c.radius, c.half_len())
+                        }
+                        Shape::Sphere { radius } => println!("  sphere r={radius:.4}"),
                         Shape::Mopp => println!("  MOPP BV-tree (static non-convex mesh)"),
-                        Shape::Mesh => println!("  WpMeshShape16 (16-bit indexed collision mesh)"),
+                        Shape::Mesh(m) => {
+                            let [sx, sz] = m.xz_span();
+                            println!(
+                                "  WpMeshShape16: {} tris {} verts  XZ span [{sx:.1},{sz:.1}] m{}",
+                                m.indices.len(),
+                                m.vertices.len(),
+                                if m.indices.is_empty() { "  (undecoded)" } else { "" }
+                            );
+                        }
                         Shape::Other(n) => println!("  undecoded shape: {n}"),
                         Shape::Convex(_) => {}
                     }

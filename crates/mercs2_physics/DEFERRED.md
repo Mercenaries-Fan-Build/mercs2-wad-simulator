@@ -1,14 +1,14 @@
 # mercs2_physics — deferred work
 
 Improvements deliberately left for the physics system or later passes. None of these is a
-faithfulness blocker for the `PhysicsQuery` bridge (`StaticSoupPhysics`); each is tagged.
+faithfulness blocker for the `PhysicsQuery` bridge (`StaticCollision`); each is tagged.
 
 - **DONE (controller pass).** `move_character` is now a **swept linear cast** (conservative
-  advancement, `StaticSoupPhysics::linear_cast` / `move_swept`) — tunnel-free at any speed — and a
+  advancement, `StaticCollision::linear_cast` / `move_swept`) — tunnel-free at any speed — and a
   faithful **3-locomotion-state machine** (`CharacterController`: OnGround/InAir/Jumping per the
   recovered `hkpCharacterContext FUN_0094d2e0`) with gravity, jump, slope limit (`max_slope_cos`
   ≈ cinfo `maxSlopeCosine +0xa4`) and step-up (`step_height`) now live in this crate. A minimal
-  `RigidBody` + `StaticSoupPhysics::step_rigid_body` (semi-implicit Euler + impulse resolve) covers
+  `RigidBody` + `StaticCollision::step_rigid_body` (semi-implicit Euler + impulse resolve) covers
   props/debris. Remaining gaps below.
 
 - **Climbing / Ladder-Flying states (5-state → full).** The retail machine registers two extra game
@@ -24,12 +24,25 @@ faithfulness blocker for the `PhysicsQuery` bridge (`StaticSoupPhysics`); each i
   pin by reading `hkpWorldCinfo` / proxy-cinfo / `hkpRigidBody` material fields live (`physics_code_map.md`
   §9). `[faithful-blocker: no]`
 
-- **Full rigid-body dynamics.** `RigidBody` is a sphere with no rotation/inertia tensor, no body↔body
-  contacts (only body↔static soup), and a single deepest-contact resolve. The retail `hkpRigidBody`
-  (`FUN_008d4be0`) has full motions + contact manifolds. Grow with the real broadphase/narrowphase.
+- **DONE (ragdoll pass).** Constrained multi-body ragdoll (`ragdoll.rs`): one oriented rigid body per
+  bone with a capsule collider, ball-and-socket joints + swing-cone/twist limits (the
+  `hkpRagdollConstraintData` parameterization), stepped by a substepped **XPBD** solver and collided
+  against the world through the `PhysicsQuery` seam. Driven by the **recovered** WAD ragdoll capsules:
+  a full-WAD census found retail serializes **no** `hkpRigidBody`/constraint/`hkaRagdollInstance` (built
+  procedurally, Havok-side) but block 3185 ships the **11 `hkpCapsuleShape`** human-ragdoll bodies —
+  decoded byte-exact by `mercs2_formats::havok` and baked into `RagdollDef::human()`. Per-body **mass**
+  (anthropometric) and **joint limits** (anatomical) are the only `// CONFIRM-LIVE:` items (not in the
+  shipped data; read live off `RagdollController`). Bone→body map is `Bone_*` name-hash identity
+  (m2, confirmed present in every human HIER). The single-body `RigidBody` path is retained for
+  props/debris. `[faithful-blocker: no]`
+
+- **Full rigid-body dynamics (props/debris).** `RigidBody` is a sphere with no rotation/inertia tensor,
+  no body↔body contacts (only body↔static collision), and a single deepest-contact resolve. The retail
+  `hkpRigidBody` (`FUN_008d4be0`) has full motions + contact manifolds. The ragdoll bodies already have
+  full orientation + capsule inertia; unify the prop path onto that solver when body↔body contacts land.
   `[faithful-blocker: no]`
 
-- **Broadphase (MOPP BV-tree).** Queries are a linear scan over the triangle soup with a cheap sphere
+- **Broadphase (MOPP BV-tree).** Queries are a linear scan over the triangle set with a cheap sphere
   cull. Retail uses `hkpMoppBvTreeShape`. Swap in a BV-tree/BVH when triangle counts grow.
   `[faithful-blocker: no]`
 
@@ -37,9 +50,9 @@ faithfulness blocker for the `PhysicsQuery` bridge (`StaticSoupPhysics`); each i
   / `ClosestPoint::entity` are always `None`. Dynamic `hkpRigidBody` props/debris and per-shape entity
   ownership arrive with the physics system. `[faithful-blocker: no]`
 
-- **Closest-point sign for arbitrary soup.** `closest_point`'s inside/outside sign is taken from the
+- **Closest-point sign for arbitrary triangle set.** `closest_point`'s inside/outside sign is taken from the
   nearest triangle's wound normal, which is only meaningful for consistently-wound (outward-facing)
-  closed shells. An open soup has no well-defined inside; the real `getClosestPoints` uses the shape's
+  closed shells. An open triangle set has no well-defined inside; the real `getClosestPoints` uses the shape's
   own inside test. `[faithful-blocker: no]`
 
 - **Heightfield fidelity.** The `Heightmap` is a bilinear regular grid standing in for

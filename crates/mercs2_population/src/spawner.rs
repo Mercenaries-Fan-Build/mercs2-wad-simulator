@@ -14,6 +14,7 @@
 //! group, `+0x8c` done. Terminal state byte = **5** (`SimpleSpawnerStateEnum` = 5 members); groups
 //! **< 8**; Window radius² = **25600 = 160²**.
 
+use mercs2_core::glam::Vec3;
 use mercs2_core::Transform;
 
 use crate::components::{SkirmishSpawnList, SpawnFaction};
@@ -152,12 +153,55 @@ impl SimpleSpawner {
         self.state == SPAWNER_STATE_TERMINAL
     }
 
+    /// This spawner's activation radius **squared**, in the horizontal (XZ) plane. The recovered
+    /// `UpdateSimpleSpawners` gate tests the player/viewport against `+0x78 radius` (× runtime scale
+    /// `DAT_00b97eec`, treated as 1 here — the scale is not statically recovered). When the authored
+    /// `+0x78` radius is present (`> 0`) it wins; otherwise the recovered Window-family default
+    /// [`WINDOW_RADIUS_SQ`] (160²) applies (code map §6).
+    ///
+    /// **CONFIRM-LIVE:** `register_population_spawners` does not yet load the per-instance `+0x78`
+    /// value, so in practice `radius == 0` and every spawner falls back to the 160² default. The
+    /// `radius > 0` branch is the faithful path for when that field is threaded in.
+    fn activation_radius_sq(&self) -> f32 {
+        if self.radius > 0.0 {
+            self.radius * self.radius // CONFIRM-LIVE: per-instance +0x78 authored radius (× DAT_00b97eec scale = 1)
+        } else {
+            WINDOW_RADIUS_SQ // recovered 160² Window-family default
+        }
+    }
+
+    /// Whether SOME `viewport` (a player/camera anchor) lies within this spawner's activation radius,
+    /// measured as an **XZ** (ground-plane) distance from `transform.translation` — population is a
+    /// horizontal system, so vertical (`Y`) separation is deliberately ignored. With no viewports the
+    /// spawner has no anchor and is treated as out of range (cached-out).
+    pub fn within_activation_radius(&self, viewports: &[Vec3]) -> bool {
+        let r2 = self.activation_radius_sq();
+        let p = self.transform.translation;
+        viewports.iter().any(|v| {
+            let dx = p.x - v.x;
+            let dz = p.z - v.z;
+            dx * dx + dz * dz <= r2
+        })
+    }
+
     /// Advance this spawner by `dt`, returning `Some(request)` on the frame its countdown elapses (then
     /// reloading), else `None`. Terminal / done spawners never fire. The emitted request places the
     /// unit at the spawner's transform (the family updater applies family-specific offsets/queries; the
     /// radius carried on the request lets the resolver jitter within it).
-    pub fn update(&mut self, dt: f32) -> Option<SpawnRequest> {
+    ///
+    /// **Activation-radius FIRING gate** (`UpdateSimpleSpawners`, Xbox `FUN_82338768` ↔ PC
+    /// `FUN_004e4100`; the eligibility position/radius test `FUN_004e38d0`, code map §6): a spawner
+    /// only advances/fires when SOME `viewport` is within its activation radius
+    /// ([`within_activation_radius`](Self::within_activation_radius)). Out of range it is **cached-out**
+    /// — it does NOT fire and its countdown does NOT decrement, so when a viewport comes back within
+    /// range the timer resumes where it left off (§5 CacheIn/CacheOut behavior). This is what clusters
+    /// ambient spawns around the player instead of firing every spawner across the whole map.
+    pub fn update(&mut self, dt: f32, viewports: &[Vec3]) -> Option<SpawnRequest> {
         if self.is_terminal() || self.done {
+            return None;
+        }
+        if !self.within_activation_radius(viewports) {
+            // Cached-out: no anchor in range → do not fire and do not decrement the countdown.
             return None;
         }
         self.countdown -= dt;
@@ -168,7 +212,12 @@ impl SimpleSpawner {
         // "one-shot then done" spawner is expressed by state==5 / done, not a zero reload.
         self.countdown = self.reload;
         Some(SpawnRequest {
-            template: 0,
+            // Slot→template resolution (CF-1): resolve this spawner's faction/list channel to a real,
+            // corpus-verified faction human template so the fired unit realizes a faction-correct
+            // Character, not the invisible `template 0` prop. (The exact per-slot crowd pick is the
+            // CONFIRM-LIVE runtime spawn-list `int[]` — see [`crate::slot_table`].) The vehicle
+            // channel has no human template → 0, which stays the veh-naming/prop path on the resolver.
+            template: crate::slot_table::faction_template_hash(self.faction),
             transform: self.transform,
             faction: self.faction,
             group: self.group,
@@ -275,13 +324,15 @@ impl SimpleSpawnerManager {
     }
 
     /// `UpdateSimpleSpawners` — fan out over the four families in fixed order (§6). Each non-terminal
-    /// spawner advances its timer; a fired spawner enqueues one request onto its family's cap-128
-    /// queue. Returns the number of requests enqueued this tick.
-    pub fn update(&mut self, dt: f32) -> u32 {
+    /// spawner **within activation radius of some `viewport`** advances its timer; a fired spawner
+    /// enqueues one request onto its family's cap-128 queue. Out-of-range spawners are cached-out (they
+    /// neither fire nor drain their countdown), so only spawners near a player anchor emit. Returns the
+    /// number of requests enqueued this tick.
+    pub fn update(&mut self, dt: f32, viewports: &[Vec3]) -> u32 {
         let mut fired = 0;
         for family in SpawnerFamily::ALL {
             for sp in self.spawners.iter_mut().filter(|s| s.family == family) {
-                if let Some(req) = sp.update(dt) {
+                if let Some(req) = sp.update(dt, viewports) {
                     if self.queues[family as usize].push(req) {
                         fired += 1;
                     }
@@ -371,17 +422,100 @@ mod tests {
         assert_eq!(SpawnerFamily::ALL.len(), 4);
     }
 
+    /// In-range viewport for the origin-anchored test spawners (well within the 160 m Window default).
+    const HERE: [Vec3; 1] = [Vec3::ZERO];
+
     /// A spawner fires exactly when its countdown elapses, then reloads — not before, not every frame.
     #[test]
     fn spawner_fires_on_interval_and_reloads() {
         let mut sp = spawner(1.0, SpawnerFamily::Window, 0);
-        assert!(sp.update(0.4).is_none(), "0.4s < 1.0s interval");
-        assert!(sp.update(0.4).is_none(), "0.8s total, still under");
-        let req = sp.update(0.4).expect("2 ticks past 1.0s should fire");
+        assert!(sp.update(0.4, &HERE).is_none(), "0.4s < 1.0s interval");
+        assert!(sp.update(0.4, &HERE).is_none(), "0.8s total, still under");
+        let req = sp.update(0.4, &HERE).expect("2 ticks past 1.0s should fire");
         assert_eq!(req.faction, SpawnFaction::Vz);
         assert_eq!(req.family, SpawnerFamily::Window);
         assert!((sp.countdown - 1.0).abs() < 1e-6, "reloaded to interval");
-        assert!(sp.update(0.5).is_none(), "just reloaded — no immediate refire");
+        assert!(sp.update(0.5, &HERE).is_none(), "just reloaded — no immediate refire");
+    }
+
+    /// Activation-radius FIRING gate (`UpdateSimpleSpawners`, PC `FUN_004e4100` eligibility
+    /// position/radius test): a spawner fires only when SOME viewport is within its activation radius.
+    /// Out of range it is cached-out — it neither fires NOR decrements its countdown, so the timer
+    /// resumes on return. This is the fix that clusters ambient spawns around the hero.
+    #[test]
+    fn spawner_gated_by_activation_radius() {
+        let mut sp = SimpleSpawner {
+            transform: Transform::from_translation(Vec3::new(1000.0, 0.0, 0.0)),
+            ..spawner(1.0, SpawnerFamily::Window, 0)
+        };
+        // Viewport 1000 m away (>> the 160 m Window default): dormant. Many ticks must NOT fire and
+        // must NOT drain the countdown.
+        let far = [Vec3::ZERO];
+        for _ in 0..10 {
+            assert!(sp.update(1.0, &far).is_none(), "out of range: never fires");
+        }
+        assert!((sp.countdown - 1.0).abs() < 1e-6, "dormant spawner keeps its full countdown");
+
+        // Viewport within the 160 m default radius (10 m away): the timer resumes and fires.
+        let near = [Vec3::new(990.0, 0.0, 0.0)];
+        assert!(sp.update(0.5, &near).is_none(), "0.5s < 1.0s interval");
+        let req = sp.update(0.6, &near).expect("crosses interval while in range → fires");
+        assert_eq!(req.family, SpawnerFamily::Window);
+
+        // No viewport at all ⇒ no anchor ⇒ out of range (cached-out).
+        assert!(sp.update(1.0, &[]).is_none(), "no viewport → dormant");
+    }
+
+    /// The gate measures XZ (ground-plane) distance — vertical (Y) separation is ignored, so a
+    /// viewport directly above/below still activates the spawner (the population is a horizontal
+    /// system; this is why the live bug had actors floating at Y=160 across the map).
+    #[test]
+    fn activation_radius_ignores_vertical_separation() {
+        let sp = SimpleSpawner {
+            transform: Transform::from_translation(Vec3::new(50.0, 0.0, 50.0)),
+            ..spawner(1.0, SpawnerFamily::Window, 0)
+        };
+        // Same XZ as the spawner but 500 m up: XZ distance 0 → in range despite the huge Y gap.
+        assert!(sp.within_activation_radius(&[Vec3::new(50.0, 500.0, 50.0)]));
+        // 300 m away in XZ (> 160 m) → out of range regardless of matching Y.
+        assert!(!sp.within_activation_radius(&[Vec3::new(350.0, 0.0, 50.0)]));
+    }
+
+    /// The per-instance `+0x78` radius overrides the 160² default when authored (`> 0`).
+    #[test]
+    fn spawner_uses_per_instance_radius_when_authored() {
+        // radius 50 m (radius² 2500): a viewport 100 m away is OUT of range, even though 100 m is
+        // inside the 160 m Window default — the authored radius wins.
+        let mut sp = SimpleSpawner {
+            radius: 50.0,
+            transform: Transform::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+            ..spawner(1.0, SpawnerFamily::Window, 0)
+        };
+        assert!(sp.update(1.0, &HERE).is_none(), "100 m > 50 m authored radius → dormant");
+        // Viewport 40 m away → inside the authored 50 m → fires.
+        assert!(sp.update(1.0, &[Vec3::new(60.0, 0.0, 0.0)]).is_some(), "40 m < 50 m → fires");
+    }
+
+    /// CF-1: a fired spawner resolves its faction channel to a REAL, non-zero template (not the old
+    /// literal `0`), and the template matches `slot_table`'s per-channel resolution — so the request
+    /// realizes a faction-correct Character downstream, not the invisible template-0 prop.
+    #[test]
+    fn fired_spawner_resolves_a_nonzero_faction_template() {
+        for f in [
+            SpawnFaction::Vz,
+            SpawnFaction::Gur,
+            SpawnFaction::Pir,
+            SpawnFaction::Ped,
+        ] {
+            let mut sp = SimpleSpawner {
+                faction: f,
+                ..spawner(1.0, SpawnerFamily::NoModel, 0)
+            };
+            let req = sp.update(1.0, &HERE).expect("crosses the 1.0s interval");
+            assert_ne!(req.template, 0, "{f:?} spawner must emit a real template, not 0");
+            assert_eq!(req.template, crate::slot_table::faction_template_hash(f));
+            assert_eq!(req.faction, f);
+        }
     }
 
     /// A terminal (state 5) spawner never fires.
@@ -390,7 +524,7 @@ mod tests {
         let mut sp = spawner(0.1, SpawnerFamily::Path, 0);
         sp.state = SPAWNER_STATE_TERMINAL;
         assert!(sp.is_terminal());
-        assert!(sp.update(10.0).is_none());
+        assert!(sp.update(10.0, &HERE).is_none());
     }
 
     /// The queue caps at 128 and drops the overflow.
@@ -418,8 +552,8 @@ mod tests {
         let mut mgr = SimpleSpawnerManager::new();
         mgr.register(spawner(1.0, SpawnerFamily::Window, 0)).unwrap();
         mgr.register(spawner(1.0, SpawnerFamily::Path, 1)).unwrap();
-        assert_eq!(mgr.update(0.5), 0, "under interval, nothing fires");
-        assert_eq!(mgr.update(0.6), 2, "both cross 1.0s this tick");
+        assert_eq!(mgr.update(0.5, &HERE), 0, "under interval, nothing fires");
+        assert_eq!(mgr.update(0.6, &HERE), 2, "both cross 1.0s this tick");
         let reqs = mgr.drain_requests();
         assert_eq!(reqs.len(), 2);
         assert!(mgr.drain_requests().is_empty(), "drain empties the queues");
@@ -467,6 +601,6 @@ mod tests {
             force_respawn: true,
             ..SpawnerAdjust::default()
         });
-        assert_eq!(mgr.update(0.0), 1, "countdown zeroed → fires on the very next tick");
+        assert_eq!(mgr.update(0.0, &HERE), 1, "countdown zeroed → fires on the very next tick");
     }
 }

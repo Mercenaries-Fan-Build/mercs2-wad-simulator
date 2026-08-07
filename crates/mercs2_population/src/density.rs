@@ -148,6 +148,22 @@ impl DensityController {
         let headroom = (cap - current).max(0) as u32;
         headroom.min(per_tick_budget)
     }
+
+    /// The recovered per-tick **emission RATE cap** for a class — how many of that class the ambient
+    /// update lets through in a single frame regardless of headroom: **10 people/tick**, **2
+    /// vehicles/tick** (`render_distance_and_density_levers.md` §"Spawn PLACEMENT + density":
+    /// *"batch caps 10/tick … + trickle 2/tick"*; Xbox `FUN_82367d28` = `10/10/2/2`). Far/near share
+    /// the same per-tick batch cap, so this is band-independent — it is the deficit **fill rate**, not
+    /// the ceiling (the ceiling is the zone's desired count, consumed as headroom by [`allowance`]).
+    ///
+    /// [`allowance`]: DensityController::allowance
+    pub fn per_tick_emit_budget(&self, is_vehicle: bool) -> u32 {
+        if is_vehicle {
+            self.budget.vehicles_near
+        } else {
+            self.budget.people_near
+        }
+    }
 }
 
 #[cfg(test)]

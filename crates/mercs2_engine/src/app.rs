@@ -50,7 +50,7 @@ pub enum MenuOutcome {
 }
 
 /// Static configuration the engine reads ONCE, before it opens the window. Replaces the positional
-/// argument soup of `run_scene_world_loading` and the inline fog/sun/plate setup: the game declares
+/// argument sprawl of `run_scene_world_loading` and the inline fog/sun/plate setup: the game declares
 /// *what* world it wants; the engine performs the *how* of standing it up.
 pub struct GameConfig {
     /// Window title bar text.

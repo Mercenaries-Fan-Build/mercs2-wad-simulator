@@ -90,7 +90,7 @@ Dev tools (headless unless noted — all parse args in `main.rs`; the *engine* n
 | `--hall-hunt` | scan vz.wad models for the room-sized mesh whose local bbox encloses the player-enter hardpoint (IDs the interior hall shell) |
 | `--tex-audit <0xMODEL>` | per-texture ASET rows for a model, per-block dims/body size, and whether a block carries the FULL mip0 or only the resident tail |
 | `--tex-locate <0xHASH>` | scan every block's entry table for a texture chunk (finds streaming copies that aren't ASET-indexed) |
-| `--coll-probe` | build the hall collision soup and walk the player in each cardinal direction, reporting distance travelled before sticking |
+| `--coll-probe` | build the hall collision set and walk the player in each cardinal direction, reporting distance travelled before sticking |
 | `--c3-flat` | scan c3 models for flat, floor-sized meshes |
 
 Ignored probe tests (need the real install):

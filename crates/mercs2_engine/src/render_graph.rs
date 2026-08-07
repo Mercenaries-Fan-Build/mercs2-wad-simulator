@@ -190,8 +190,12 @@ pub type RenderItem = (mercs2_core::Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)
 ///   `surface_format`) — the engine exposes ONE directional shadow map, not the exe's 4-cascade
 ///   1024×4096 atlas (shadow_code_map.md §4).
 /// - **FX / decals:** HAS the camera + `depth` + `color` (project decal quads, depth-test
-///   against the scene) and `items` (find the affected surfaces). STILL NEEDS a decal atlas / decal
-///   material binding of its own (decal_code_map.md) — no shared decal texture handle is exposed here.
+///   against the scene) and `items` (find the affected surfaces). The projected-decal pass is
+///   REALIZED as `scene::DecalNode`, registered at [`PassId::Blob`] via `Scene::enable_decals` and
+///   fed each frame from the `mercs2_decal` pool through `Scene::set_decals` — the first real
+///   [`RenderNode`] the engine registers, validating this seam. It carries its own pipeline + camera
+///   uniform; the real `decalNormal`/`decalParam` decal textures (decal_code_map.md §2) are
+///   confirm-live, so the per-category look is procedural until those handles are captured.
 /// - **Sky / water:** HAS the camera — `view` = the raw (un-flipped) camera view the
 ///   reflection pass mirrors against the water plane (`FUN_004677d0`, water_code_map.md §2), `view_proj`
 ///   = the handedness-flipped world clip matrix all opaque draws use, `cam_pos` = camera world

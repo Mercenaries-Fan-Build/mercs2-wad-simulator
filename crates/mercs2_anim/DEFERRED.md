@@ -6,16 +6,21 @@ beyond what the exe demonstrably does or a cross-system dependency).
 
 ---
 
-## Ragdoll — physics rigid-body driven
-`[faithful-blocker: yes]` (but gated on another system)
+## Ragdoll — LANDED (sim in `mercs2_physics`; skeleton seam here)
+`[faithful-blocker: no]` (was yes)
 
-Ragdoll consumes physics rigid bodies + constraints from **`mercs2_physics`** (
-`docs/reverse_engineer/physics_code_map.md`). The Havok anchor is `hkaRagdollInstance` / the
-`hkpRigidBody` chain the death/impact path activates. This crate must NOT build it (no leaf→leaf
-edge, and there are no rigid bodies to drive yet). When `mercs2_physics` lands `PhysicsQuery`-adjacent
-rigid-body access, add a `Ragdoll` component + a system that: (1) on trigger, seeds body transforms
-from the current `SkinPalette`; (2) each tick reads body transforms back into the bone locals
-(blend `animated → ragdoll` over a short window); (3) exposes a get-up blend back to animation.
+The constrained multi-body ragdoll now lives in **`mercs2_physics::ragdoll`** (recovered WAD capsule
+bodies + XPBD joints/limits). This crate contributes the physics-free skeleton seam ([`ragdoll`]):
+- `body_seeds(rig, model_pose, bone_hashes)` — the `SetBodyToRagdoll` snap: reads each ragdoll bone's
+  current animated MODEL-space transform so a body spawns exactly on the posed skeleton.
+- `write_back_model_pose(rig, model_pose, driven)` — reads the simulated transforms back into the
+  driven bones' model matrices each frame.
+No leaf→leaf edge: the seam speaks only bone name-hashes + `(pos, rot)`; the combat/death integrator
+glues it to `mercs2_physics::Ragdoll::{spawn_with, step, bone_transforms}`.
+
+**Residual (deferred):** the `animated → ragdoll` blend-in window and the get-up blend back to
+animation (retail `hkbGetUpModifier`/catch-fall; the field defaults don't decode statically). The seam
+above is what a blend layers on top of.
 
 ## Transition graph (`0xAB8FE34B`) — per-handle crossfade rules
 `[faithful-blocker: yes]`

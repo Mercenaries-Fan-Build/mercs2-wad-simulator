@@ -16,7 +16,7 @@
 //!
 //! It was inside `mercs2_engine`'s world loop, then extracted into `mercs2_engine::player`. It belongs
 //! with the player concern, and moving it here is what lets the engine
-//! re-export the whole concern as one crate. Its three world reads — collision soup, terrain
+//! re-export the whole concern as one crate. Its three world reads — collision world, terrain
 //! heightfield, watermap — go through [`LocomotionQuery`] rather than direct crate edges, because a leaf
 //! crate may not depend on another leaf (the carve rule).
 

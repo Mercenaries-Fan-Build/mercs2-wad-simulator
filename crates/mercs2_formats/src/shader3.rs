@@ -209,7 +209,10 @@ struct Instr {
 /// `header_end` is the token index of the first *executable* instruction
 /// (past version + comments + dcl/def) — the insertion point for new `dcl`s.
 fn walk(tokens: &[u32]) -> Result<(usize, Vec<Instr>), Error> {
-    if tokens.is_empty() || tokens[0] != VS_3_0 {
+    // Accept either shader version token (`vs_3_0`/`ps_3_0`): the token stream grammar (comments,
+    // dcl/def, instruction param counts) is identical. VS-only callers (the splice) independently
+    // require `objectData`, so a PS blob can never reach them.
+    if tokens.is_empty() || (tokens[0] != VS_3_0 && tokens[0] != PS_3_0) {
         return Err(Error::NotVertexShader);
     }
     let mut i = 1usize;
@@ -270,6 +273,8 @@ pub struct SpliceReport {
     pub world_regs: u32,
     pub input_base: u32,
     pub texcoord_base: u32,
+    /// `mov temp,input` copies inserted so no instruction reads two input registers.
+    pub input_copies: u32,
     /// (token index, old const reg, new input reg) for every redirected operand.
     pub redirects: Vec<(usize, u32, u32)>,
 }
@@ -327,36 +332,92 @@ pub fn splice_instanced_world(
             .ok_or(Error::NoFreeInputs)?,
     };
 
-    // 3. redirect every source operand reading c[O..O+3] → v[vbase..vbase+3].
-    //    Source operands are every param token after the first (destination) one,
-    //    for executable instructions. dcl/def tokens are skipped (no const reads).
+    // 3a. vs_3_0 allows AT MOST ONE input register (v#) read per instruction (proven live: a splice
+    //     that made an instruction read two inputs was rejected D3DERR_INVALIDCALL, 43/60). Since the
+    //     objectData redirect turns a const read into an input read, any instruction that already
+    //     reads an input register (position/normal/tangent) alongside objectData would then read two.
+    //     Find those pre-existing inputs; we copy each to a fresh temp at the top and read the temp
+    //     there instead. Also track the highest temp in use, to allocate above it.
+    let mut conflict_inputs: Vec<u32> = Vec::new();
+    let mut max_temp: i64 = -1;
+    for ins in &instrs {
+        // Skip dcl/def first: their trailing tokens are semantics / float immediates, NOT register
+        // operands — decoding them as registers would pollute max_temp (a def's float bits can look
+        // like a temp with a huge index).
+        if matches!(ins.opcode, OP_DCL | OP_DEF | OP_DEFI | OP_DEFB) {
+            continue;
+        }
+        for p in 0..ins.nparams {
+            let t = tokens[ins.at + 1 + p];
+            if regtype(t) == REG_TEMP {
+                max_temp = max_temp.max(regnum(t) as i64);
+            }
+        }
+        let mut od_here = 0u32;
+        let mut inputs_here: Vec<u32> = Vec::new();
+        for p in 1..ins.nparams {
+            let t = tokens[ins.at + 1 + p];
+            match regtype(t) {
+                REG_CONST if (o..o + nregs).contains(&regnum(t)) => {
+                    // objectData is a fixed block, never relatively addressed; refuse if it is.
+                    if t & (1 << 13) != 0 {
+                        return Err(Error::Structure(
+                            "relative addressing on objectData register — unsupported",
+                        ));
+                    }
+                    od_here += 1;
+                }
+                REG_INPUT => inputs_here.push(regnum(t)),
+                _ => {}
+            }
+        }
+        if od_here >= 1 {
+            // Two objectData rows in one instruction → both become inputs, unsplittable this way.
+            if od_here >= 2 {
+                return Err(Error::Structure(
+                    "instruction reads two objectData registers — unsupported",
+                ));
+            }
+            for v in inputs_here {
+                if !conflict_inputs.contains(&v) {
+                    conflict_inputs.push(v);
+                }
+            }
+        }
+    }
+    conflict_inputs.sort_unstable();
+    let temp_base = (max_temp + 1) as u32;
+    if temp_base as usize + conflict_inputs.len() > 32 {
+        return Err(Error::Structure("out of temp registers for input copies"));
+    }
+    // input register -> its private temp copy
+    let temp_map: Vec<(u32, u32)> = conflict_inputs
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, temp_base + i as u32))
+        .collect();
+
+    // 3b. rewrite operands: objectData const -> new instance input; a conflicting input -> its temp.
     let mut redirects = Vec::new();
     for ins in &instrs {
         if matches!(ins.opcode, OP_DCL | OP_DEF | OP_DEFI | OP_DEFB) {
             continue;
         }
-        // params: [dst, src0, src1, ...]; only sources (index >= 1) read registers.
         for p in 1..ins.nparams {
             let idx = ins.at + 1 + p;
             let tok = tokens[idx];
-            if regtype(tok) == REG_CONST {
-                let rn = regnum(tok);
-                if (o..o + nregs).contains(&rn) {
-                    // objectData is a fixed 3/4-reg block; it is never relatively
-                    // addressed. If it somehow is, the index is ambiguous — refuse
-                    // rather than mis-splice. (Relative addressing ELSEWHERE in the
-                    // shader — spline/palette arrays — is fine and left untouched;
-                    // its extra address token decodes as regtype ADDR/LOOP, never
-                    // CONST, so this per-token scan skips it safely.)
-                    if tok & (1 << 13) != 0 {
-                        return Err(Error::Structure(
-                            "relative addressing on objectData register — unsupported",
-                        ));
-                    }
-                    let newnum = vbase + (rn - o);
+            match regtype(tok) {
+                REG_CONST if (o..o + nregs).contains(&regnum(tok)) => {
+                    let newnum = vbase + (regnum(tok) - o);
+                    redirects.push((idx, regnum(tok), newnum));
                     tokens[idx] = set_reg(tok, REG_INPUT, newnum);
-                    redirects.push((idx, rn, newnum));
                 }
+                REG_INPUT => {
+                    if let Some(&(_, t)) = temp_map.iter().find(|(v, _)| *v == regnum(tok)) {
+                        tokens[idx] = set_reg(tok, REG_TEMP, t);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -364,18 +425,22 @@ pub fn splice_instanced_world(
         return Err(Error::Structure("objectData declared but never read"));
     }
 
-    // 4. insert the input dcls at the header boundary (dcl_texcoord{tbase..} v{vbase..}).
-    let mut dcls = Vec::with_capacity(nregs as usize * 3);
+    // 4. header insertions at the first executable instruction: the instance-input dcls, then a
+    //    `mov temp, input` copy for each conflicting input (these run before any transform).
+    let mut header_ins: Vec<u32> = Vec::with_capacity(nregs as usize * 3 + temp_map.len() * 3);
     for k in 0..nregs {
-        // dcl opcode token: opcode 0x1f, length 2.
-        dcls.push(0x1f | (2 << 24));
-        // usage token: TEXCOORD(5) | usageindex<<16.
-        dcls.push(5 | ((tbase + k) << 16));
-        // dst input register, full write mask, param-token bit set.
-        let dst = PARAM_TOKEN_BIT | (0xf << 16);
-        dcls.push(set_reg(dst, REG_INPUT, vbase + k));
+        header_ins.push(0x1f | (2 << 24)); // dcl, length 2
+        // semantic token: TEXCOORD(5) | usageindex<<16, WITH the param-token bit (0x80000000).
+        // Omitting that bit makes the D3D9 runtime reject the shader D3DERR_INVALIDCALL.
+        header_ins.push(PARAM_TOKEN_BIT | 5 | ((tbase + k) << 16));
+        header_ins.push(set_reg(PARAM_TOKEN_BIT | (0xf << 16), REG_INPUT, vbase + k));
     }
-    tokens.splice(header_end..header_end, dcls);
+    for &(vx, t) in &temp_map {
+        header_ins.push(0x01 | (2 << 24)); // mov, length 2
+        header_ins.push(set_reg(PARAM_TOKEN_BIT | (0xf << 16), REG_TEMP, t)); // dst temp, full mask
+        header_ins.push(set_reg(PARAM_TOKEN_BIT | (0xe4 << 16), REG_INPUT, vx)); // src input .xyzw
+    }
+    tokens.splice(header_end..header_end, header_ins);
 
     // 5. serialize.
     let mut out = Vec::with_capacity(tokens.len() * 4);
@@ -389,6 +454,7 @@ pub fn splice_instanced_world(
             world_regs: nregs,
             input_base: vbase,
             texcoord_base: tbase,
+            input_copies: temp_map.len() as u32,
             redirects,
         },
     ))
@@ -427,7 +493,265 @@ pub fn verify_splice(spliced: &[u8], report: &SpliceReport) -> Result<(), Error>
             return Err(Error::Structure("spliced input register not declared"));
         }
     }
+    // The rule the live D3D9 runtime enforces (proven at R0): at most ONE input register read per
+    // instruction. Verify no executable instruction sources two distinct v# — this is what the
+    // temp-copy pass exists to guarantee, and the offline gate that now catches its absence.
+    for ins in &instrs {
+        if matches!(ins.opcode, OP_DCL | OP_DEF | OP_DEFI | OP_DEFB) {
+            continue;
+        }
+        let mut seen: Vec<u32> = Vec::new();
+        for p in 1..ins.nparams {
+            let t = tokens[ins.at + 1 + p];
+            if regtype(t) == REG_INPUT && !seen.contains(&regnum(t)) {
+                seen.push(regnum(t));
+            }
+        }
+        if seen.len() > 1 {
+            return Err(Error::Structure("instruction reads more than one input register"));
+        }
+    }
     Ok(())
+}
+
+// ── SM3.0 disassembly + CTAB-signature role classification (shader recovery) ─────────────────────
+//
+// `shader3.bin` is the PC retail store of **already-compiled D3D9 SM3.0 bytecode** (`vs_3_0`/`ps_3_0`),
+// NOT Xenon microcode (that is the Xbox `.updb`/`ucode` path). Recovery toward WGSL therefore means:
+// disassemble the SM3 token stream, and identify WHICH logical `Pg*` shader a record is.
+//
+// **The identification wall (honest):** the record `id` is NOT `FNV(name)` — proven by hash inversion
+// against 344 known names (`density_upgrade_state.md`), and the store carries no name column. The
+// `.rdata` registry `FUN_0084f130` names the shaders (`PgSkyFP`, `PgDecalVP`, …) but binds them to
+// `.sho` blobs by FNV handle, and the `id → blob` map is a stripped `%0x1200` table. So mapping
+// "record N == PgSkyFP" is **confirm-live** (find the `%0x1200` reader, or bp the loader). What IS
+// static is every blob's intact CTAB → constant **names + register layout**, which lets us classify a
+// record by its constant *signature* (the only static handle on identity) and disassemble its body.
+
+/// SM3.0 register file (the merged 5-bit `D3DSHADER_PARAM_REGISTER_TYPE`). Only the members the
+/// disassembler labels are named; the rest fall through to a numbered form.
+fn regtype_name(ty: u32) -> &'static str {
+    match ty {
+        0 => "r",      // temp
+        1 => "v",      // input
+        2 => "c",      // float const
+        3 => "t",      // texture coord (ps) / addr (vs a0)
+        4 => "oPos",   // rasterizer out (vs)
+        5 => "oD",     // attribute out (vs color)
+        6 => "o",      // output (vs texcoord out / ps color pre-SM3 quirk)
+        7 => "i",      // int const
+        8 => "oC",     // colour out (ps)
+        9 => "oDepth", // depth out (ps)
+        10 => "s",     // sampler
+        15 => "aL",    // loop counter / label
+        16 => "p",     // predicate
+        17 => "b",     // bool const
+        _ => "x",
+    }
+}
+
+const SWIZ: [char; 4] = ['x', 'y', 'z', 'w'];
+
+/// Format a destination operand token (`reg + write mask`).
+fn fmt_dst(tok: u32) -> String {
+    let base = format!("{}{}", regtype_name(regtype(tok)), regnum(tok));
+    let mask = (tok >> 16) & 0xf;
+    if mask == 0xf || mask == 0 {
+        return base; // full write (or a form with no mask, e.g. dcl dst)
+    }
+    let mut s = String::from(".");
+    for (i, c) in SWIZ.iter().enumerate() {
+        if mask & (1 << i) != 0 {
+            s.push(*c);
+        }
+    }
+    base + &s
+}
+
+/// Format a source operand token (`reg + swizzle + modifier`), noting relative addressing.
+fn fmt_src(tok: u32) -> String {
+    let mut base = format!("{}{}", regtype_name(regtype(tok)), regnum(tok));
+    if tok & (1 << 13) != 0 {
+        base.push_str("[aL]"); // relative-addressed (const/palette array)
+    }
+    // swizzle: 2 bits per component in bits 16..23.
+    let sw = (tok >> 16) & 0xff;
+    let swz: Vec<char> = (0..4).map(|i| SWIZ[((sw >> (i * 2)) & 3) as usize]).collect();
+    let swizzle = if swz == ['x', 'y', 'z', 'w'] {
+        String::new()
+    } else if swz[0] == swz[1] && swz[1] == swz[2] && swz[2] == swz[3] {
+        format!(".{}", swz[0]) // replicate (e.g. .x)
+    } else {
+        format!(".{}{}{}{}", swz[0], swz[1], swz[2], swz[3])
+    };
+    // source modifier in bits 24..27 (0 none, 1 negate, common subset).
+    let modn = (tok >> 24) & 0xf;
+    let (pre, post) = match modn {
+        1 => ("-", ""),   // negate
+        2 => ("", "_bias"),
+        3 => ("", "_x2"),
+        11 => ("", "_abs"),
+        _ => ("", ""),
+    };
+    format!("{pre}{base}{swizzle}{post}")
+}
+
+/// Human-readable mnemonic for an SM3 opcode (the subset the retail Pg* shaders use; others print
+/// as `op_0xNN`). Enough to read a sky/decal/mesh body and hand-translate it to WGSL.
+fn opcode_name(op: u16) -> &'static str {
+    match op {
+        0x00 => "nop", 0x01 => "mov", 0x02 => "add", 0x03 => "sub", 0x04 => "mad",
+        0x05 => "mul", 0x06 => "rcp", 0x07 => "rsq", 0x08 => "dp3", 0x09 => "dp4",
+        0x0a => "min", 0x0b => "max", 0x0c => "slt", 0x0d => "sge", 0x0e => "exp",
+        0x0f => "log", 0x10 => "lit", 0x11 => "dst", 0x12 => "lrp", 0x13 => "frc",
+        0x14 => "m4x4", 0x15 => "m4x3", 0x16 => "m3x4", 0x17 => "m3x3", 0x18 => "m3x2",
+        0x19 => "call", 0x1a => "callnz", 0x1b => "loop", 0x1c => "ret", 0x1d => "endloop",
+        0x1e => "label", 0x1f => "dcl", 0x20 => "pow", 0x21 => "crs", 0x22 => "sgn",
+        0x23 => "abs", 0x24 => "nrm", 0x25 => "sincos", 0x26 => "rep", 0x27 => "endrep",
+        0x28 => "if", 0x29 => "ifc", 0x2a => "else", 0x2b => "endif", 0x2c => "break",
+        0x2d => "breakc", 0x2e => "mova", 0x2f => "defb", 0x30 => "defi",
+        0x40 => "texcoord", 0x41 => "texkill", 0x42 => "texld", 0x43 => "texbem",
+        0x48 => "texm3x3pad", 0x4a => "texm3x3tex", 0x51 => "def", 0x58 => "cmp",
+        0x5a => "bem", 0x5b => "dp2add", 0x5c => "dsx", 0x5d => "dsy", 0x5e => "texldd",
+        0x5f => "setp", 0x60 => "texldl", 0x61 => "breakp",
+        _ => "op",
+    }
+}
+
+/// Disassemble one `vs_3_0`/`ps_3_0` blob to readable SM3 assembly (one instruction per line). This
+/// is the recovery surface the WGSL translation reads off; it reuses the WIP token walker
+/// ([`walk`]) so it stays in lock-step with the splice's structural model. `dcl`/`def` operands are
+/// printed raw (semantic / immediate), executable operands are decoded (reg + mask/swizzle/mod).
+pub fn disassemble(blob: &[u8]) -> Result<Vec<String>, Error> {
+    if blob.len() < 4 || blob.len() % 4 != 0 {
+        return Err(Error::Structure("blob length not a whole number of tokens"));
+    }
+    let tokens: Vec<u32> = blob
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let version = tokens[0];
+    let kind = match version {
+        VS_3_0 => "vs_3_0",
+        PS_3_0 => "ps_3_0",
+        _ => return Err(Error::NotVertexShader),
+    };
+    let (_he, instrs) = walk(&tokens)?;
+    let mut out = vec![format!("{kind}")];
+    for ins in &instrs {
+        let name = opcode_name(ins.opcode);
+        let mnem = if name == "op" { format!("op_0x{:02x}", ins.opcode) } else { name.to_string() };
+        if matches!(ins.opcode, OP_DEF | OP_DEFI | OP_DEFB) {
+            // def cN, f,f,f,f — dst reg then 4 raw immediate tokens.
+            let dst = fmt_dst(tokens[ins.at + 1]);
+            let mut vals = Vec::new();
+            for p in 1..ins.nparams {
+                let raw = tokens[ins.at + 1 + p];
+                vals.push(if ins.opcode == OP_DEF {
+                    format!("{:.4}", f32::from_bits(raw))
+                } else {
+                    format!("0x{raw:08x}")
+                });
+            }
+            out.push(format!("{mnem} {dst}, {}", vals.join(", ")));
+        } else if ins.opcode == OP_DCL {
+            // dcl usage_reg — first token is the usage/semantic, second the register.
+            let usage = tokens[ins.at + 1];
+            let reg = fmt_dst(tokens[ins.at + 2]);
+            let u = usage & 0xf;
+            let uidx = (usage >> 16) & 0xf;
+            let uname = match u {
+                0 => "position", 1 => "blendweight", 2 => "blendindices", 3 => "normal",
+                4 => "psize", 5 => "texcoord", 6 => "tangent", 7 => "binormal",
+                10 => "color", _ => "usage",
+            };
+            out.push(format!("dcl_{uname}{uidx} {reg}"));
+        } else {
+            let mut ops: Vec<String> = Vec::new();
+            for p in 0..ins.nparams {
+                let tok = tokens[ins.at + 1 + p];
+                ops.push(if p == 0 { fmt_dst(tok) } else { fmt_src(tok) });
+            }
+            out.push(format!("{mnem} {}", ops.join(", ")));
+        }
+    }
+    Ok(out)
+}
+
+/// A recovered role bucket for a shader record, assigned from its CTAB constant **signature** — the
+/// only static identity handle (record `id != FNV(name)`; see the module note). These are *candidate*
+/// classes, not proven `Pg*` names: e.g. a VS whose only constants are the view/projection block and
+/// carries no `objectData`/`BoneMatrixArray` is a **fullscreen/far-plane** shader — the class the sky,
+/// sun, moon, cloud and post-process shaders all fall into — so it narrows the search but does not by
+/// itself say "this is `PgSkyFP`". Mapping a bucket member to its exact name is confirm-live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderRole {
+    /// VS reading `BoneMatrixArray` — a skinned character/vehicle mesh vertex shader.
+    SkinnedMeshVs,
+    /// VS reading `objectData` (World) but no bones — a static-mesh vertex shader (the splice targets).
+    StaticMeshVs,
+    /// VS with neither `objectData` nor bones — a fullscreen / far-plane VS (sky/sun/moon/cloud/post
+    /// candidates all live here; the sky draws a far-plane quad, post a fullscreen tri).
+    FullscreenVs,
+    /// Any other VS (special geometry paths).
+    OtherVs,
+    /// PS binding a `decalNormal` or `decalParam` sampler/const — a **decal** pixel-shader candidate.
+    DecalPs,
+    /// PS whose constant signature carries scattering/atmosphere params — a **sky/atmosphere** PS
+    /// candidate (`beta`/`scatter`/`inscatter`/`sun`/`atmos`/`sky` named constants).
+    SkyPs,
+    /// PS binding one or more samplers with no lighting/scatter signature — a generic textured PS
+    /// (mesh material / post-process; distinguishing those two is confirm-live).
+    TexturedPs,
+    /// PS with no sampler and no recognised signature (solid-colour / math-only).
+    PlainPs,
+}
+
+impl ShaderRole {
+    /// Whether this role is one of the sky/decal candidate buckets W5 cares about.
+    pub fn is_w5_candidate(self) -> bool {
+        matches!(self, ShaderRole::FullscreenVs | ShaderRole::DecalPs | ShaderRole::SkyPs)
+    }
+}
+
+/// Classify a record into a [`ShaderRole`] from its kind + CTAB constant signature. This is the
+/// static recovery step that narrows "which record could be `PgSky*`/`PgDecal*`" without a name map.
+pub fn classify_role(kind: &ShaderKind, consts: &[Constant]) -> ShaderRole {
+    let has = |n: &str| consts.iter().any(|c| c.name == n);
+    let name_has = |needle: &str| {
+        consts.iter().any(|c| c.name.to_ascii_lowercase().contains(needle))
+    };
+    match kind {
+        ShaderKind::Vertex => {
+            if has("BoneMatrixArray") {
+                ShaderRole::SkinnedMeshVs
+            } else if has("objectData") {
+                ShaderRole::StaticMeshVs
+            } else if consts.is_empty()
+                || consts.iter().all(|c| c.register_set == 2 /* c */ && c.register_count <= 4)
+            {
+                // Only float-const scalars/vectors (view block etc.), no per-object/bone matrix → the
+                // fullscreen/far-plane family (sky/sun/moon/cloud/post).
+                ShaderRole::FullscreenVs
+            } else {
+                ShaderRole::OtherVs
+            }
+        }
+        ShaderKind::Pixel => {
+            let samplers = consts.iter().filter(|c| c.register_set == 3 /* s */).count();
+            if name_has("decal") {
+                ShaderRole::DecalPs
+            } else if name_has("beta") || name_has("scatter") || name_has("inscatter")
+                || name_has("atmos") || name_has("sky") || name_has("henyey")
+            {
+                ShaderRole::SkyPs
+            } else if samplers > 0 {
+                ShaderRole::TexturedPs
+            } else {
+                ShaderRole::PlainPs
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -451,8 +775,9 @@ mod tests {
             t.push(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
         }
         // ---- dcls ----
+        // real dcl semantic tokens carry the param bit (0x80000000); mirror that here.
         let dcl = |usage: u32, ty: u32, num: u32| -> [u32; 3] {
-            [0x1f | (2 << 24), usage, set_reg(PARAM_TOKEN_BIT | (0xf << 16), ty, num)]
+            [0x1f | (2 << 24), PARAM_TOKEN_BIT | usage, set_reg(PARAM_TOKEN_BIT | (0xf << 16), ty, num)]
         };
         for w in dcl(0, REG_INPUT, 0) { t.push(w); }   // dcl_position v0
         for w in dcl(0, 6, 0) { t.push(w); }           // dcl_position o0 (output type 6)
@@ -550,6 +875,42 @@ mod tests {
     }
 
     #[test]
+    fn spliced_dcl_semantic_tokens_carry_param_bit() {
+        // Regression: the dcl semantic token MUST have bit 31 set, or the D3D9 runtime rejects the
+        // shader with D3DERR_INVALIDCALL (caught live at R0, not by structural re-parse).
+        let blob = build_min_vs();
+        let (spliced, _rep) = splice_instanced_world(&blob, None, None).unwrap();
+        let tokens: Vec<u32> = spliced
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let mut i = 1;
+        let mut checked = 0;
+        while i < tokens.len() {
+            let tok = tokens[i];
+            if tok == END_TOKEN {
+                break;
+            }
+            let op = (tok & 0xffff) as u16;
+            if op == COMMENT_OPCODE {
+                i += 1 + ((tok >> 16) & 0x7fff) as usize;
+                continue;
+            }
+            let n = ((tok >> 24) & 0xf) as usize;
+            if op == OP_DCL {
+                let semantic = tokens[i + 1];
+                assert!(
+                    semantic & PARAM_TOKEN_BIT != 0,
+                    "dcl semantic token 0x{semantic:08x} missing param bit"
+                );
+                checked += 1;
+            }
+            i += 1 + n;
+        }
+        assert!(checked >= 4, "expected the 4 inserted input dcls");
+    }
+
+    #[test]
     fn parse_real_store_if_present() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -564,11 +925,62 @@ mod tests {
         let ps = store.records.len() - vs;
         assert_eq!(store.records.len(), 556);
         assert_eq!((vs, ps), (151, 405));
-        // every VS blob must carry a CTAB and parse.
-        for r in store.records.iter().filter(|r| matches!(r.kind, ShaderKind::Vertex)) {
+        // every VS blob must carry a CTAB and parse; and every record (VS+PS) must disassemble +
+        // classify (the recovery surface must not choke on any real retail blob).
+        for r in &store.records {
             let blob = store.blob(r);
-            assert_eq!(u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]), VS_3_0);
-            parse_ctab(blob).unwrap();
+            let (_c, consts) = parse_ctab(blob).unwrap();
+            let asm = disassemble(blob).unwrap();
+            assert!(asm.len() >= 2, "a real shader disassembles to >=1 instruction");
+            let _role = classify_role(&r.kind, &consts);
+            if matches!(r.kind, ShaderKind::Vertex) {
+                assert_eq!(u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]), VS_3_0);
+            }
         }
+    }
+
+    #[test]
+    fn disassembles_the_min_vs_body() {
+        let blob = build_min_vs();
+        let asm = disassemble(&blob).unwrap();
+        assert_eq!(asm[0], "vs_3_0");
+        // The synthetic body is 2 dcls + 8 dp4; the CTAB comment must be skipped, not disassembled.
+        assert!(asm.iter().any(|l| l.starts_with("dcl_position")), "dcl decoded: {asm:?}");
+        assert!(asm.iter().filter(|l| l.starts_with("dp4 ")).count() == 8, "8 dp4: {asm:?}");
+        // operand decode: the World reads are c4..c7, the ViewProj reads c0..c3.
+        assert!(asm.iter().any(|l| l.contains("c4")), "objectData read present: {asm:?}");
+    }
+
+    #[test]
+    fn classifies_static_mesh_vs_by_signature() {
+        let blob = build_min_vs();
+        let (_c, consts) = parse_ctab(&blob).unwrap();
+        // objectData present, no BoneMatrixArray → static-mesh VS (a splice target).
+        assert_eq!(classify_role(&ShaderKind::Vertex, &consts), ShaderRole::StaticMeshVs);
+    }
+
+    #[test]
+    fn classifies_decal_and_sky_ps_by_constant_names() {
+        let mk = |name: &str, set: u16| Constant {
+            name: name.to_string(),
+            register_set: set,
+            register_index: 0,
+            register_count: 1,
+        };
+        // a PS binding decalNormal → decal candidate.
+        assert_eq!(
+            classify_role(&ShaderKind::Pixel, &[mk("decalNormal", 3)]),
+            ShaderRole::DecalPs
+        );
+        // a PS with a scattering const → sky candidate.
+        assert_eq!(
+            classify_role(&ShaderKind::Pixel, &[mk("betaRay", 2)]),
+            ShaderRole::SkyPs
+        );
+        // a plain textured PS (one sampler, no signature).
+        assert_eq!(
+            classify_role(&ShaderKind::Pixel, &[mk("diffuseMap", 3)]),
+            ShaderRole::TexturedPs
+        );
     }
 }
