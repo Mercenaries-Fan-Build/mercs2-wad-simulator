@@ -369,8 +369,12 @@ pub fn parse_packfile_raw(pk: &[u8]) -> Result<RawPackfile, String> {
 /// [`find_packfiles`] pass `&buf[off..]`, which does. `obj_src` is the mesh object's virtual-fixup src.
 ///
 /// Returns `None` (→ an undecoded static mesh, caller keeps the render fallback) if the object is
-/// malformed or the vertex-pool scan finds no base with a plausible triangle-edge score. Ported from the
-/// validated `meshshape_probe` (40/40 real vz.wad instances decode with score ≥ 0.9). See [`MeshShape`].
+/// malformed or no vertex-pool base survives the acceptance guards. Two-stage recovery: the fast wrapper
+/// scan (the validated 40/40 path), then a guarded whole-slice fallback for the pools it misses (retail c3
+/// census: 77 undecoded → 28, zero regression). The vertex pool has NO packfile fixup — the only fixups on
+/// the mesh object are the inline subpart pointer (`+28`, self-relative to `obj+48`) and the two u16 index
+/// arrays (`+80`/`+88`); the quantized pool lives in the engine MOPP wrapper past the packfile with no fixed
+/// offset — hence a content scan. See the FALLBACK block below and [`MeshShape`].
 fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<MeshShape> {
     let obj = raw.data_pk + obj_src;
     let nsub = u32_le(pk, obj + 32) as usize;
@@ -384,7 +388,12 @@ fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<M
         return None;
     }
     // 16-bit index triples, gathered across every subpart via each subpart's local-fixup index pointer.
+    // `idx_ranges` records each subpart's index-array byte span so the fallback pool scan can REJECT any
+    // candidate base that overlaps the index arrays (the classic false positive: index values are small
+    // 0..N, so dequantising the index bytes as vertices clusters every vertex near `min` → all triangles
+    // collapse to ~0 size → a spurious perfect edge-score. A real vertex pool never overlaps the indices).
     let mut indices: Vec<[u16; 3]> = Vec::new();
+    let mut idx_ranges: Vec<(usize, usize)> = Vec::new();
     for s in 0..nsub {
         let sp = sp0 + s * 48;
         let sp_src = sp.checked_sub(raw.data_pk)?;
@@ -393,6 +402,7 @@ fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<M
             return None; // defensive: real subparts are ≤ ~18k tris
         }
         let ap = raw.data_pk + *raw.lf.get(&(sp_src + 32))?;
+        idx_ranges.push((ap, ap + acnt * 8));
         for t in 0..acnt {
             if ap + t * 8 + 6 > pk.len() {
                 return None;
@@ -473,7 +483,86 @@ fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<M
         }
         base += 2;
     }
-    let pool = best_base.filter(|_| best_score > 0.9)?;
+    // FALLBACK — recover the ~1.3% of pools the wrapper scan misses (verified over the retail c3 census:
+    // 77 undecoded WpMeshShape16 → 28, zero regression to the wrapper-scan successes). The misses fall in
+    // two classes the wrapper scan cannot see: (1) TERRAIN-scale cell meshes whose pool sits at the very end
+    // of the PHY2 chunk but whose FIRST triangle is a large (>40 m) cell edge, so the `tris[0]`/6-probe gate
+    // above skips the correct base; (2) meshes whose pool lies BEFORE the packfile end. The fallback widens
+    // the search to the whole slice with three guards that keep it honest (no fabricated geometry):
+    //   • a SAMPLED cheap gate (12 evenly-spaced triangles, majority < 40 m, at least one non-degenerate
+    //     edge) — admits terrain pools the strict `tris[0]` gate rejected, still cheap;
+    //   • a SPREAD gate (used-vertex bbox diagonal in [3 m, 900 m]) — rejects the degenerate index-cluster
+    //     false positive and any all-coincident window;
+    //   • an INDEX-OVERLAP reject — the candidate pool must not overlap this mesh's own index arrays.
+    // Wrapper region first (never changes a wrapper-scan success), then the whole slice. A mesh whose pool
+    // cannot be located under these guards stays undecoded (empty) and is reported by the caller — the
+    // remaining 28 are small building sub-meshes bound through the engine MOPP wrapper with no scan-locatable
+    // pool, which we do NOT guess at.
+    let pool = best_base.filter(|_| best_score > 0.9).or_else(|| {
+        // Used-vertex bbox diagonal at a candidate base.
+        let spread = |base: usize| -> f32 {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for t in &indices {
+                for &i in t.iter() {
+                    let v = getb(base, i as usize);
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(v[k]);
+                        hi[k] = hi[k].max(v[k]);
+                    }
+                }
+            }
+            ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt()
+        };
+        let overlaps_indices = |base: usize| -> bool {
+            let e = base + nverts * 6;
+            idx_ranges.iter().any(|&(a, b)| base < b && a < e)
+        };
+        // Sampled cheap pre-gate (≤12 triangles): ≥50% sane edges and not an all-coincident cluster.
+        let step_s = (indices.len() / 12).max(1);
+        let sample: Vec<[u16; 3]> = indices.iter().step_by(step_s).take(12).copied().collect();
+        let cheap = |base: usize| -> bool {
+            let (mut ok, mut any_extent) = (0usize, false);
+            for t in &sample {
+                let (a, b, c) = (getb(base, t[0] as usize), getb(base, t[1] as usize), getb(base, t[2] as usize));
+                let (e0, e1, e2) = (edge(a, b), edge(b, c), edge(a, c));
+                if e0 < 40.0 && e1 < 40.0 && e2 < 40.0 {
+                    ok += 1;
+                }
+                if e0 > 0.05 || e1 > 0.05 || e2 > 0.05 {
+                    any_extent = true;
+                }
+            }
+            any_extent && ok * 2 >= sample.len()
+        };
+        let accept = |base: usize| -> Option<f64> {
+            if overlaps_indices(base) || !cheap(base) {
+                return None;
+            }
+            let sc = score(base);
+            let sp = spread(base);
+            (sc >= 0.9 && (3.0..=900.0).contains(&sp)).then_some(sc)
+        };
+        for lo in [trail, 0usize] {
+            let (mut bsc, mut bb) = (0.0f64, None);
+            let mut base = lo.min(end);
+            while base <= end {
+                if let Some(sc) = accept(base) {
+                    if sc > bsc {
+                        bsc = sc;
+                        bb = Some(base);
+                        if sc > 0.999 {
+                            return Some(base);
+                        }
+                    }
+                }
+                base += 2;
+            }
+            if bb.is_some() {
+                return bb;
+            }
+        }
+        None
+    })?;
     let vertices: Vec<[f32; 3]> = (0..nverts).map(|v| getb(pool, v)).collect();
     Some(MeshShape { vertices, indices })
 }
@@ -811,6 +900,117 @@ mod tests {
         eprintln!(
             "block 767 building WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge tris",
             bldg.indices.len(), nv, bldg.xz_span(), frac * 100.0
+        );
+    }
+
+    /// Live decode of a PREVIOUSLY-FAILING `WpMeshShape16` from retail `vz.wad`, exercising the guarded
+    /// whole-slice FALLBACK. Block 826 container `0xF589CA67` carries a terrain-scale cell mesh (~4.5k verts)
+    /// whose vertex pool sits at the very end of the PHY2 chunk with a large first triangle — the wrapper
+    /// scan's `tris[0]`/6-probe gate skipped its correct base, so the old decoder returned an EMPTY mesh and
+    /// the whole cell lost its authored collision. It must now decode: non-empty, finite, every vertex within
+    /// the quantization range `[min, min + scale*65535]`, and the vast majority of triangles well-formed
+    /// (< 40 m edges). SKIPS (stays green) when `vz.wad` is absent.
+    #[test]
+    fn recovered_terrain_wpmesh16_decodes_live_from_vz_wad_if_present() {
+        use crate::ffcs::load_ffcs_archive;
+        use crate::sges::decompress_block;
+        use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
+        let Some(path) = crate::game_paths::vz_wad_from_env()
+            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
+        else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            return eprintln!("skip: vz.wad not readable");
+        };
+        let size = f.metadata().unwrap().len();
+        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+        let dec = decompress_block(&mut f, &arch.indx, 826).expect("decompress block 826");
+
+        // Walk to container 0xF589CA67 exactly as the streaming loader does.
+        let (count, entries) = parse_block_entry_table(&dec);
+        let mut pos = 4 + count as usize * 16;
+        let mut body: Option<Vec<u8>> = None;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if end > dec.len() {
+                break;
+            }
+            if e.name_hash == 0xF589_CA67 {
+                body = extract_chunk_body(&dec[pos..end], b"PHY2");
+                break;
+            }
+            pos = end;
+        }
+        let body = body.expect("block 826 container 0xF589CA67 carries a PHY2 chunk");
+
+        // Recover this mesh object's own quantization block (min/scale @ obj+48/+64) for the range check.
+        let off = find_sub(&body, &HAVOK_MAGIC).expect("embedded Havok packfile");
+        let pk = &body[off..];
+        let raw = parse_packfile_raw(pk).expect("parse packfile");
+        let (mut min, mut scale) = ([0.0f32; 3], [0.0f32; 3]);
+        for (src, cname) in &raw.vfixups {
+            if cname == "WpMeshShape16" {
+                let sp0 = raw.data_pk + src + 48;
+                min = [f32_le(pk, sp0), f32_le(pk, sp0 + 4), f32_le(pk, sp0 + 8)];
+                scale = [f32_le(pk, sp0 + 16), f32_le(pk, sp0 + 20), f32_le(pk, sp0 + 24)];
+                break;
+            }
+        }
+
+        // Decode and grab the terrain-scale mesh (the big one this test is about).
+        let pf = parse_phy2_body(&body).expect("parse PHY2");
+        let mesh = pf
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Mesh(m) if m.vertices.len() > 3000 => Some(m),
+                _ => None,
+            })
+            .max_by_key(|m| m.vertices.len())
+            .expect("block 826 must now decode its terrain-scale WpMeshShape16 (was empty → collision lost)");
+        assert!(!mesh.indices.is_empty(), "recovered mesh has triangles");
+        assert!(!mesh.vertices.is_empty(), "recovered mesh has vertices");
+
+        // Every vertex lies within the quantization range [min, min + scale*65535], per-axis.
+        let hi = [
+            min[0] + scale[0] * 65535.0,
+            min[1] + scale[1] * 65535.0,
+            min[2] + scale[2] * 65535.0,
+        ];
+        for v in &mesh.vertices {
+            for k in 0..3 {
+                assert!(v[k].is_finite(), "non-finite vertex {v:?}");
+                assert!(
+                    v[k] >= min[k] - 1e-3 && v[k] <= hi[k] + 1e-3,
+                    "vertex axis {k} = {} out of quant range [{}, {}]",
+                    v[k],
+                    min[k],
+                    hi[k]
+                );
+            }
+        }
+        // Dequantization correct → nearly every triangle well-formed (< 40 m edges).
+        let nv = mesh.vertices.len();
+        for t in &mesh.indices {
+            assert!(t.iter().all(|&i| (i as usize) < nv), "index out of range {t:?}");
+        }
+        let edge = |p: [f32; 3], q: [f32; 3]| {
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        };
+        let sane = mesh
+            .indices
+            .iter()
+            .filter(|t| {
+                let (a, b, c) = (mesh.vertices[t[0] as usize], mesh.vertices[t[1] as usize], mesh.vertices[t[2] as usize]);
+                edge(a, b) < 40.0 && edge(b, c) < 40.0 && edge(a, c) < 40.0
+            })
+            .count();
+        let frac = sane as f64 / mesh.indices.len() as f64;
+        assert!(frac > 0.9, "only {frac:.3} of recovered terrain-mesh tris well-formed");
+        eprintln!(
+            "block 826 recovered WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge",
+            mesh.indices.len(), nv, mesh.xz_span(), frac * 100.0
         );
     }
 
