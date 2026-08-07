@@ -77,32 +77,52 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
         v.pos[2] += pos[2];
         v.uv = [v.pos[0] * UV_SCALE, v.pos[2] * UV_SCALE];
     }
-    // SPLAT (first pass): bind each draw's representative detail layer (the reversed per-draw
-    // material -> terraintextures layers). Full per-vertex blend of all layers by the COLOR weights
-    // is the next stage; this shows the real per-region surface material.
+    // SPLAT (multi-layer per-vertex blend). Each draw's PRMG group binds a terrain MATERIAL whose
+    // texture slots are (byte-verified over vz.wad): [0]=base0 (per-tile dominant diffuse), [1]=3B030C8A
+    // (a GLOBAL constant across EVERY tile — a shared detail/normal overlay, NOT a per-region diffuse),
+    // then N×{detail_diffuse, A3CD72A7-marker} marker-delimited terraintextures details. `terrain_group_
+    // layers` returns the marker-filtered slots: [base0, 3B030C8A, detail0, detail1, ...].
     //
-    // `terrain_group_layers` is indexed by PRMG drawing-group ORDINAL (one entry per group), but
-    // `build_indexed_from_container` emits MULTIPLE draws per group — one per multi-material
-    // sub-strip (the `destrip_by_prmt` split). So `draws.len()` is far larger than `layers.len()`
-    // (e.g. c30010: 348 draws vs 28 groups). A former `layers.len() == draws.len()` guard therefore
-    // NEVER held once sub-strip splitting landed, silently binding NO detail texture → the terrain
-    // rendered white. Map each draw back to its group via `DrawGroup::group_index` (the PRMG ordinal,
-    // same order `terrain_group_layers` is built in) so every draw — including split sub-strips —
-    // gets its group's representative terraintextures layer.
+    // The per-vertex COLOR is D3DCOLOR SPLAT WEIGHTS (R,G,B; the 4th/alpha channel is empirically
+    // always 0 across 77k+ sampled verts, weights sum to ~255). We carry up to 3 DIFFUSE blend layers
+    // per draw into the material's diffuse/normal/specular texture slots (terrain has no tangent normal
+    // map or spec map here, so those slots are free) and the shader blends them by the normalized
+    // weights: layer0 weighted by R, layer1 by G, layer2 by B (see `shader.wgsl` `overlay.y`).
+    //
+    // Layer ORDER: the representative layer (index 2 = detail0 when present, else base0) goes FIRST so
+    // the DOMINANT weight channel (R, ~96% of the weight mass) drives the SAME texture the pre-blend
+    // single-layer bind showed — i.e. no visual regression in the dominant case, with the other real
+    // layers blending in where G/B fire. Absent layers ALIAS layer0 so a missing detail blends the base
+    // again (never white/flat). `terrain_group_layers` is indexed by PRMG group ORDINAL, but the builder
+    // emits multiple draws per group (sub-strip split), so map each draw via `DrawGroup::group_index`.
     let layers = mercs2_formats::texture::terrain_group_layers(&container);
     for d in draws.iter_mut() {
-        if let Some(l) = layers.get(d.group_index) {
-            // First detail (slot 2) for per-region variety; fall back to the base (slot 0).
-            if let Some(&h) = l.get(2).or_else(|| l.first()) {
-                d.diffuse = Some(h);
+        if let Some(l) = layers.get(d.group_index).filter(|l| !l.is_empty()) {
+            let rep_i = if l.len() > 2 { 2 } else { 0 }; // representative: detail0 else base0
+            let mut blend: Vec<u32> = Vec::with_capacity(3);
+            blend.push(l[rep_i]);
+            for (i, &h) in l.iter().enumerate() {
+                if i == 1 || i == rep_i {
+                    continue; // skip 3B030C8A (global const) and the already-added representative
+                }
+                if blend.len() >= 3 {
+                    break;
+                }
+                blend.push(h);
             }
+            let l0 = blend[0];
+            d.diffuse = Some(l0);
+            d.normal = Some(blend.get(1).copied().unwrap_or(l0)); // slot repurposed = detail layer 1
+            d.specular = Some(blend.get(2).copied().unwrap_or(l0)); // slot repurposed = detail layer 2
+        } else {
+            d.normal = None;
+            d.specular = None;
         }
-        d.normal = None;
     }
-    // Resolve the material textures (now the terraintextures detail layers, in separate blocks).
+    // Resolve the terraintextures detail layers (all three blend slots), in their separate blocks.
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
-        for h in [d.diffuse, d.normal].into_iter().flatten() {
+        for h in [d.diffuse, d.normal, d.specular].into_iter().flatten() {
             if !textures.contains_key(&h) {
                 if let Ok(t) = wad::extract_texture(w, h) {
                     textures.insert(h, t);
@@ -110,18 +130,10 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
             }
         }
     }
-    // Terrain lighting fix. The terrainmesh vertex COLOR channel carries per-vertex SPLAT WEIGHTS
-    // (e.g. D3DCOLOR [0,0,254] = R-dominant), NOT baked lighting. Two consumers misread it:
-    //  1. the color shader does `albedo = tex.rgb * vertex.color`, so a single-channel weight like
-    //     [0.996,0,0] kills two of three albedo channels → the ground reads near-black/saturated; and
-    //  2. `ModelStats::prelit` flags this mesh baked-lit (its near-gray blend weights trip the
-    //     interior-shell heuristic), so the renderer would drop the exterior SUN and scale it ×0.21.
-    // Neither is right: we bind ONE representative detail layer per draw (not a per-vertex blend), so
-    // that layer must show at full albedo, lit by the sun. Neutralise the weight-color to white and
-    // clear prelit so the hi-res terrain renders as bright, sun-lit ground (the visible near surface).
-    for v in verts.iter_mut() {
-        v.color = [1.0, 1.0, 1.0];
-    }
+    // The vertex COLOR stays the raw per-vertex SPLAT WEIGHTS (R,G,B in [0,1]) — the terrain shader
+    // path reads it as blend weights, NOT as an albedo multiply, so it must NOT be whited out. `prelit`
+    // is force-cleared: terrain is sun-lit, and its near-gray weights would otherwise trip the
+    // interior-shell baked-lighting heuristic.
     let mut skin = stats.skin_data();
     skin.center = [0.0, 0.0, 0.0];
     skin.scale = 1.0;
@@ -1548,7 +1560,7 @@ impl StreamingWorld {
                 if !scene.has_model(tm_hash) {
                     match load_terrainmesh_tile(wad, tm_hash, pos) {
                         Some(m) => {
-                            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                            scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                             local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
                         }
                         None => {
@@ -2282,6 +2294,113 @@ mod terrain_texture_tests {
         eprintln!(
             "terrainmesh 0x{:08X}: {} draws, {with_diffuse} bound, {resolved} resolve, {} distinct textures",
             tile.terrainmesh_hash, m.draws.len(), m.textures.len()
+        );
+    }
+
+    /// Live: the multi-layer SPLAT BLEND is faithful and non-degenerate. Over real vz.wad tiles this
+    /// asserts (a) a terrainmesh group material carries >=2 blendable DETAIL diffuses beyond the base
+    /// (so the blend has real layers to mix); (b) the per-vertex D3DCOLOR weights decode to a sane,
+    /// non-degenerate distribution (dominant R, weights normalize to ~1, NOT all-equal); (c) after
+    /// binding, every blend draw carries a representative diffuse AND its aliased detail slots, all
+    /// resolving to loaded textures — the anti-white-terrain guarantee. SKIPS when vz.wad is absent.
+    #[test]
+    fn live_terrainmesh_splat_blend_is_faithful() {
+        let Some(path) = crate::wad::resolve_vz_wad(None) else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut w) = wad::open(&path) else {
+            return eprintln!("skip: vz.wad not present at {path}");
+        };
+        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
+            return eprintln!("skip: terrain blocks not found");
+        };
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+
+        // (a) Find a tile whose material set carries >=2 blendable detail diffuses beyond base0 +
+        // the global 3B030C8A constant — i.e. a group layerset of len >= 4 — while AGGREGATING the
+        // per-vertex weight distribution across every scanned tile (a single sparse edge tile can be
+        // near-uniform; the corpus-wide distribution is what proves the weights are real splat data).
+        let mut multi_layer_tile = None;
+        let mut max_len_seen = 0usize;
+        let (mut nverts, mut sum_r, mut sum_g, mut sum_b) = (0u64, 0u64, 0u64, 0u64);
+        let mut sum_ok = 0u64; // verts whose R+G+B normalizes to ~1
+        let mut distinct: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
+        let mut scanned = 0usize;
+        for t in &tiles {
+            let Ok(container) =
+                wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
+            else { continue };
+            let layers = mercs2_formats::texture::terrain_group_layers(&container);
+            let ml = layers.iter().map(|l| l.len()).max().unwrap_or(0);
+            max_len_seen = max_len_seen.max(ml);
+            if ml >= 4 && multi_layer_tile.is_none() {
+                let best = layers.iter().max_by_key(|l| l.len()).unwrap().clone();
+                multi_layer_tile = Some((t.terrainmesh_hash, t.pos, best));
+            }
+            if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(&container) {
+                for m in &meshes {
+                    for c in &m.colors {
+                        // D3DCOLOR stored B,G,R,A: c[2]=R, c[1]=G, c[0]=B.
+                        let (r, g, b) = (c[2] as u64, c[1] as u64, c[0] as u64);
+                        sum_r += r; sum_g += g; sum_b += b;
+                        let s = (r + g + b) as f32 / 255.0;
+                        if (s - 1.0).abs() < 0.15 { sum_ok += 1; }
+                        distinct.insert(*c);
+                        nverts += 1;
+                    }
+                }
+            }
+            scanned += 1;
+            if scanned >= 24 && multi_layer_tile.is_some() {
+                break;
+            }
+        }
+        let Some((tile_hash, tile_pos, best)) = multi_layer_tile else {
+            return eprintln!("skip: no multi-layer terrain tile in this WAD (max layerset len {max_len_seen})");
+        };
+        // base0 + 3B030C8A + >=2 details => at least 2 blendable diffuses after dropping the base
+        // and the global constant (index 1).
+        let blendable_details = best.len().saturating_sub(2);
+        assert!(
+            blendable_details >= 2,
+            "expected a group to carry >=2 blendable detail diffuses, got layerset {best:08X?}"
+        );
+
+        // (b) Per-vertex weight distribution (aggregated): dominant R, sum normalizes to ~1, varied.
+        assert!(nverts > 0, "terrain tiles carried no per-vertex splat weights");
+        assert!(
+            distinct.len() > 16,
+            "weights are degenerate (all-equal): only {} distinct values over {nverts} verts",
+            distinct.len()
+        );
+        assert!(
+            sum_ok * 100 >= nverts * 90,
+            "expected >=90% of vertices' R+G+B to normalize to ~1, got {sum_ok}/{nverts}"
+        );
+        assert!(
+            sum_r > sum_g && sum_r > sum_b,
+            "expected the R channel to dominate the splat weights (means R {} G {} B {})",
+            sum_r / nverts, sum_g / nverts, sum_b / nverts
+        );
+
+        // (c) Binding: every blend draw carries a representative diffuse + aliased detail slots, all
+        // resolving to a loaded terraintextures texture (anti-white-terrain).
+        let m = load_terrainmesh_tile(&mut w, tile_hash, tile_pos).expect("tile loads");
+        let blend_draws: Vec<_> = m.draws.iter().filter(|d| d.diffuse.is_some()).collect();
+        assert!(!blend_draws.is_empty(), "no draw bound a detail layer");
+        for d in &blend_draws {
+            for slot in [d.diffuse, d.normal, d.specular] {
+                let h = slot.expect("a blend draw must bind all three diffuse slots (aliased if absent)");
+                assert!(
+                    m.textures.contains_key(&h),
+                    "blend layer 0x{h:08X} did not resolve to a loaded texture (white-terrain risk)"
+                );
+            }
+        }
+        eprintln!(
+            "splat 0x{:08X}: layerset {:08X?} ({blendable_details} blendable details); {} distinct \
+             weights over {nverts} verts, {sum_ok} normalize; {} blend draws all resolve",
+            tile_hash, best, distinct.len(), blend_draws.len()
         );
     }
 

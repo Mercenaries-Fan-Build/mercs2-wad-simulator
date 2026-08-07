@@ -162,29 +162,57 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    // Vertex color modulates the sampled albedo. Textured geometry (terrain/player/props) authors
-    // color = (1,1,1) so this is a no-op there; the untextured placement markers use it (white
-    // fallback texture) to category-tint via vertex color.
-    let tex = textureSample(t_diffuse, s_linear, in.uv);
-    // Alpha-tested cutout. Opaque diffuse (DXT1 / authored a=1, and the white fallback a=1) reads
-    // alpha ≈ 1 and never discards; DXT5 / 1-bit-alpha diffuse carries the cutout mask, so foliage,
-    // railings, fences and window/arch openings in the building shells render see-through instead of
-    // as solid quads. (True alpha-BLEND — glass — is a later, sort-order pass.)
-    if (tex.a < 0.5) { discard; }
-    let albedo = tex.rgb * in.color;
-
-    // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
-    let nsamp = textureSample(t_normal, s_linear, in.uv);
-    let nx = nsamp.a * 2.0 - 1.0;
-    let ny = nsamp.g * 2.0 - 1.0;
-    let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
-    let n_tan = vec3<f32>(nx, ny, nz);
-    let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
-    let N = normalize(tbn * n_tan);
-
-    // Specular mask from the `_sm` map (slot 1). Black fallback -> no highlight (matte).
-    let spec_mask = textureSample(t_specular, s_linear, in.uv).rgb;
+    var albedo: vec3<f32>;
+    var N: vec3<f32>;
+    var spec_mask: vec3<f32>;
     let spec_power = 48.0; // fixed Blinn-Phong gloss exponent (per-material gloss is a later refinement)
+
+    // TERRAIN SPLAT BLEND (`overlay.y` = 1). The hi-res terrainmesh carries per-vertex D3DCOLOR SPLAT
+    // WEIGHTS in `in.color` (R,G,B; the authored 4th/alpha channel is empirically always 0), and its
+    // draw binds up to THREE terraintextures DIFFUSE detail layers into the material's diffuse/normal/
+    // specular texture slots (the loader repurposes the two extra slots — terrain has no tangent normal
+    // map or spec here). Blend the layers by the normalized weights: layer0 (representative) weighted by
+    // R, layer1 by G, layer2 by B. Absent layers are ALIASED to layer0 by the loader, so a missing
+    // detail blends the base again — never white/flat. Degenerate (all-zero) weights fall back to the
+    // representative layer at full albedo. Terrain uses its geometric normal, is matte, and is opaque
+    // (no alpha cutout), so it stays bright and sun-lit exactly like the pre-blend representative bind.
+    if (cam.overlay.y > 0.5) {
+        let l0 = textureSample(t_diffuse,  s_linear, in.uv).rgb;
+        let l1 = textureSample(t_normal,   s_linear, in.uv).rgb;
+        let l2 = textureSample(t_specular, s_linear, in.uv).rgb;
+        let w = in.color; // R,G,B splat weights in [0,1]
+        let wsum = w.x + w.y + w.z;
+        if (wsum < 0.001) {
+            albedo = l0; // degenerate weights -> representative layer (graceful fallback, never black)
+        } else {
+            albedo = (l0 * w.x + l1 * w.y + l2 * w.z) / wsum;
+        }
+        N = normalize(in.n);        // geometric terrain relief normal (no tangent-space normal map)
+        spec_mask = vec3<f32>(0.0); // matte ground
+    } else {
+        // Vertex color modulates the sampled albedo. Textured geometry (player/props) authors
+        // color = (1,1,1) so this is a no-op there; the untextured placement markers use it (white
+        // fallback texture) to category-tint via vertex color.
+        let tex = textureSample(t_diffuse, s_linear, in.uv);
+        // Alpha-tested cutout. Opaque diffuse (DXT1 / authored a=1, and the white fallback a=1) reads
+        // alpha ≈ 1 and never discards; DXT5 / 1-bit-alpha diffuse carries the cutout mask, so foliage,
+        // railings, fences and window/arch openings in the building shells render see-through instead of
+        // as solid quads. (True alpha-BLEND — glass — is a later, sort-order pass.)
+        if (tex.a < 0.5) { discard; }
+        albedo = tex.rgb * in.color;
+
+        // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
+        let nsamp = textureSample(t_normal, s_linear, in.uv);
+        let nx = nsamp.a * 2.0 - 1.0;
+        let ny = nsamp.g * 2.0 - 1.0;
+        let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
+        let n_tan = vec3<f32>(nx, ny, nz);
+        let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
+        N = normalize(tbn * n_tan);
+
+        // Specular mask from the `_sm` map (slot 1). Black fallback -> no highlight (matte).
+        spec_mask = textureSample(t_specular, s_linear, in.uv).rgb;
+    }
 
     // View vector (world space) for Blinn-Phong.
     let V = normalize(cam.cam_pos.xyz - in.wpos);

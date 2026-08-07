@@ -262,6 +262,11 @@ struct ModelGpu {
     /// Baked-lighting flag: this model bakes its lighting into vertex color, so the shader must NOT
     /// stamp the fixed exterior sun over it (fed to the per-entity uniform `fog_misc.z`).
     prelit: bool,
+    /// Terrain SPLAT-BLEND flag: this model is a hi-res terrainmesh tile whose per-vertex COLOR is
+    /// SPLAT WEIGHTS (not albedo modulation) and whose draws bind up to 3 diffuse detail layers into
+    /// the diffuse/normal/specular slots. Fed to the per-entity uniform `overlay.y` so the fragment
+    /// shader blends the layers by the weights instead of the normal-map/specular material path.
+    terrain_blend: bool,
 }
 
 /// Per-entity GPU resources: its own MVP uniform (group 0) and skinning palette (group 2).
@@ -1435,6 +1440,35 @@ impl Scene {
         textures: &TexMap,
         skin: &mesh::SkinData,
     ) {
+        self.load_model_inner(hash, verts, indices, draws, textures, skin, false);
+    }
+
+    /// Upload a hi-res terrainmesh TILE — same as [`Self::load_model`] but flags the model for the
+    /// terrain SPLAT-BLEND path: its draws carry up to 3 diffuse detail layers (in the diffuse/normal/
+    /// specular slots, all decoded sRGB — terrain has no linear normal/spec map) and the per-vertex
+    /// COLOR is SPLAT WEIGHTS the fragment shader blends by (see `shader.wgsl` `overlay.y`).
+    pub fn load_terrain_model(
+        &mut self,
+        hash: u32,
+        verts: &[Vertex],
+        indices: &[u32],
+        draws: &[mesh::DrawGroup],
+        textures: &TexMap,
+        skin: &mesh::SkinData,
+    ) {
+        self.load_model_inner(hash, verts, indices, draws, textures, skin, true);
+    }
+
+    fn load_model_inner(
+        &mut self,
+        hash: u32,
+        verts: &[Vertex],
+        indices: &[u32],
+        draws: &[mesh::DrawGroup],
+        textures: &TexMap,
+        skin: &mesh::SkinData,
+        terrain_blend: bool,
+    ) {
         if self.models.contains_key(&hash) {
             return;
         }
@@ -1443,8 +1477,12 @@ impl Scene {
         // (~0.17 authored luma) that must NOT go through sRGB→linear, or its albedo collapses to ~0.014
         // and the ground renders near-black — so force its diffuse LINEAR. See BASE_TERRAIN_MODEL_HASH.
         let terrain_atlas = hash == BASE_TERRAIN_MODEL_HASH;
-        let normal_hashes: HashSet<u32> = draws.iter().filter_map(|d| d.normal).collect();
-        let spec_hashes: HashSet<u32> = draws.iter().filter_map(|d| d.specular).collect();
+        // Terrain-blend tiles repurpose the normal/specular slots as extra DIFFUSE detail layers, so
+        // they must decode sRGB like any albedo — never through the linear normal/spec path.
+        let normal_hashes: HashSet<u32> =
+            if terrain_blend { HashSet::new() } else { draws.iter().filter_map(|d| d.normal).collect() };
+        let spec_hashes: HashSet<u32> =
+            if terrain_blend { HashSet::new() } else { draws.iter().filter_map(|d| d.specular).collect() };
         let mut views: HashMap<u32, wgpu::TextureView> = HashMap::new();
         for (h, td) in textures {
             let srgb = !terrain_atlas && !normal_hashes.contains(h) && !spec_hashes.contains(h);
@@ -1522,6 +1560,7 @@ impl Scene {
                 bone_count,
                 fit,
                 prelit: skin.prelit,
+                terrain_blend,
             },
         );
     }
@@ -2017,7 +2056,7 @@ impl Scene {
         // Phase 1: ensure per-entity resources and upload their MVP + palette.
         for (e, entity_model, model_hash, palette) in &items {
             let Some(mg) = self.models.get(model_hash) else { continue };
-            let (bone_count, fit, prelit) = (mg.bone_count, mg.fit, mg.prelit);
+            let (bone_count, fit, prelit, terrain_blend) = (mg.bone_count, mg.fit, mg.prelit, mg.terrain_blend);
             self.ensure_entity(*e, bone_count);
             let model = *entity_model * fit; // model -> world (fit=identity in the streaming/world path)
             let mvp = view_proj * model; // entity transform placed in fitted world space, + handedness flip
@@ -2037,6 +2076,7 @@ impl Scene {
             uni[42] = if prelit { 1.0 } else { 0.0 }; // fog_misc.z = prelit (skip exterior sun)
             uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
             uni[44] = self.model_alpha; // overlay.x = model opacity (1 = opaque)
+            uni[45] = if terrain_blend { 1.0 } else { 0.0 }; // overlay.y = terrain splat-blend path
             self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
                 // Clamp to the entity's allocated bone count so a mismatched palette can't overflow.
