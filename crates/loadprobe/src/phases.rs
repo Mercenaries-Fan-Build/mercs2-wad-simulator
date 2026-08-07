@@ -35,13 +35,22 @@ pub struct Phase {
 /// So `mercs2-sdk`'s `gen_ladder.py` can read it with the `CONST_RE` it already has
 /// (`pub const NAME: usize = N;`) if it grows an `M2_LADDER_VERSION` emit — no regex
 /// change, no second parse shape. It is an opaque monotonic integer, not a count.
-pub const LADDER_VERSION: usize = 1;
+pub const LADDER_VERSION: usize = 2;
 
 /// The ordered load → world → gameplay ladder. Order matches the observed chronology
 /// of a deep load (`storage/pmc_blackbox-vanilla-boot-into-game.log`): the GlobalEnter
 /// entity-construction burst (player/WAITFORGAME/act-staging) fires before mission-flow
 /// + the WAITFORSTREAMING layer cycles, which precede the portal enables and GlobalExit.
 pub static LADDER: &[Phase] = &[
+    // Version-independent on purpose. The banner is `PMC Blackbox v<version> (ASI Loader)`, and
+    // since pmc_blackbox stamps the real git tag (b4ec854, 2026-07-01) that version is whatever
+    // shipped — 0.4.x and 3.x both appear in the committed captures, and 4.x will arrive. Pinning
+    // `v3` made this rung a version-family filter: it matched one of the three families that have
+    // actually produced logs, and would have gone quiet at 4.0 with no failure to notice.
+    //
+    // It is also the only rung reachable without `PMC_VERBOSE_LOG=1` — every other marker comes
+    // through the verbose-gated Lua hook, while the banner is always logged. So the string was
+    // blinding progression reporting for precisely the default configuration.
     Phase { idx: 0,  name: "Process init",            matches: &["PMC Blackbox v"] },
     Phase { idx: 1,  name: "Pool/hooks armed",        matches: &["render-instance pool initialized"] },
     Phase { idx: 2,  name: "Shell sound init",        matches: &["SoundShellBootstrap.Init"] },
@@ -218,7 +227,7 @@ mod tests {
     fn ladder_version_pins_the_table() {
         assert_eq!(
             (LADDER_VERSION, LADDER.len(), ladder_fingerprint()),
-            (1, 21, 0xd39e_dbea_39fc_dbdc),
+            (2, 21, 0xfe67_e58f_80ba_e2b5),
             "LADDER changed — bump LADDER_VERSION and update this pin together. \
              The version is what lets a consumer refuse to pool phase_idx/pct across ladders."
         );
