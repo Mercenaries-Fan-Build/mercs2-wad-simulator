@@ -93,6 +93,14 @@ impl GameplaySystems {
         &self.physics
     }
 
+    /// Mutable access to the fleet's persistent collision broadphase, so the game layer can feed it
+    /// INCREMENTAL streaming deltas — [`StaticSoupPhysics::insert_unit`] on a prop/building WAKE,
+    /// [`StaticSoupPhysics::remove_unit`] on a HIBERNATE — instead of re-handing the whole soup through
+    /// [`set_collision`](Self::set_collision) (which rebuilds the grid from scratch) every streaming tick.
+    pub fn physics_mut(&mut self) -> &mut StaticSoupPhysics {
+        &mut self.physics
+    }
+
     /// Run one fixed simulation step of the fleet systems over `world`, in the recovered layer-4 order
     /// (player roster → vehicle → weapons → destruction — `FUN_004c9740`), drain the event bus, then
     /// advance audio. No-op over a World carrying none of the fleet components yet.

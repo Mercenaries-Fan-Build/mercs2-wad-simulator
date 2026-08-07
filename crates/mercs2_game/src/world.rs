@@ -1088,6 +1088,11 @@ struct SoupPhysicsQuery<'a> {
     tris: &'a [[Vec3; 3]],
 }
 
+/// The persistent-broadphase unit key for the STATIC collision baseline (interior shells + furniture),
+/// inserted once in `setup`. Kept clear of the streamed block/prop keys (`block_key` ≈ `2^32+`, `prop_key`
+/// < `2^32`) so it never aliases a streamed unit's insert/remove.
+const STATIC_COLLISION_KEY: u64 = 1u64 << 60;
+
 impl mercs2_core::PhysicsQuery for SoupPhysicsQuery<'_> {
     fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<mercs2_core::RayHit> {
         mercs2_engine::physics::soup::raycast(self.tris, origin, dir, max).map(|t| mercs2_core::RayHit {
@@ -1182,16 +1187,10 @@ pub struct Mercs2Game {
     /// The donut/turn sine LUT the vehicle drive step samples (built once, reused each ride frame).
     veh_lut: mercs2_engine::vehicle::DonutLut,
     /// The STATIC collision baseline — interior shells + interior furniture (the exterior props + c3
-    /// cells that used to live here are streamed now). `fixed_update` rebuilds the live soup
-    /// (`collision_soup`) as THIS merged with the streamer's live `collision_tris()` whenever the
-    /// stream reports dirty.
+    /// cells that used to live here are streamed now). Inserted ONCE into the persistent broadphase as
+    /// one unit ([`STATIC_COLLISION_KEY`]) in `setup`; the streamer then feeds per-unit WAKE/HIBERNATE
+    /// deltas alongside it.
     collision_tris: Vec<[Vec3; 3]>,
-    /// The LIVE merged collision soup = `collision_tris` (static baseline) + the streamer's current
-    /// world-space building/prop triangles. This is the single soup EVERY consumer reads — the player
-    /// controller's locomotion/raycast, the vehicle drive step, the camera boom, weapon fire — AND what
-    /// is fed to the fleet runtime, so the hero and the fleet collide with the same streamed geometry.
-    /// Rebuilt in `fixed_update` on a stream-dirty tick; seeded to the static baseline in `setup`.
-    collision_soup: Vec<[Vec3; 3]>,
     /// The save's vz_state overlay layer names (set in `apply_boot`) — passed to the streaming loader as
     /// the interior/staging/faction layers folded into the streaming catalog.
     overlays: Vec<String>,
@@ -1285,7 +1284,6 @@ impl Mercs2Game {
             use_prev: false,
             veh_lut: mercs2_engine::vehicle::DonutLut::new(),
             collision_tris: Vec::new(),
-            collision_soup: Vec::new(),
             overlays: Vec::new(),
             stream: None,
             hmap: None,
@@ -1854,17 +1852,33 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     last = r;
                 }
             }
-            let _ = sw.take_collision_dirty(); // folded into the seed below; fixed_update rebuilds on later change
             println!("[world] streaming pre-warm: {} block(s) resident around spawn", sw.stats().resident);
         }
-        // Seed the LIVE soup with the static baseline PLUS the pre-warmed streamed geometry (later
-        // streamed changes merge in via `fixed_update`). Both the fleet runtime AND the
-        // player/vehicle/camera read this one soup — so the hero stands on streamed ground from frame 0.
-        self.collision_soup = self.collision_tris.clone();
-        if let Some(sw) = self.stream.as_ref() {
-            self.collision_soup.extend(sw.collision_tris());
+        // Seed the PERSISTENT broadphase (retail `hkpWorld`): the STATIC baseline (interior shells +
+        // furniture) as ONE unit, then the pre-warmed streamed prop/building units applied incrementally
+        // (drain the ops the pre-warm steps accumulated). This is the SINGLE structure every consumer reads
+        // — the fleet runtime's own fields AND the player/vehicle/camera/weapon via
+        // `runtime.gameplay.physics()` — so the hero stands on streamed ground from frame 0 and later
+        // WAKE/HIBERNATE deltas mutate it in place (no clone/regrid). See `fixed_update`.
+        {
+            let phys = self.runtime.gameplay.physics_mut();
+            phys.clear();
+            phys.insert_unit(STATIC_COLLISION_KEY, &self.collision_tris);
         }
-        self.runtime.set_collision(self.collision_soup.clone());
+        if let Some(sw) = self.stream.as_mut() {
+            let ops = sw.take_collision_ops();
+            let phys = self.runtime.gameplay.physics_mut();
+            for op in ops {
+                match op {
+                    mercs2_engine::game_world::CollisionOp::Insert(key, tris) => phys.insert_unit(key, &tris),
+                    mercs2_engine::game_world::CollisionOp::Remove(key) => phys.remove_unit(key),
+                }
+            }
+            println!(
+                "[world] collision broadphase seeded: {} resident soup tris (static baseline + pre-warmed units)",
+                self.runtime.gameplay.physics().tris().len()
+            );
+        }
         // Projected-decal render node (W5): register the `DecalNode` at the `PassId::Blob` seam so the
         // live decal pool (bullet holes / scorch / blood, spawned by combat impacts) actually draws.
         // `render_prep` feeds it each frame from `self.runtime.decal` via `scene.set_decals`.
@@ -2038,7 +2052,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                             c.turn = -mx;
                             c.handbrake = if inp.held(Action::Jump) { 1.0 } else { 0.0 };
                         }
-                        let q = SoupPhysicsQuery { tris: &self.collision_soup };
+                        let q = SoupPhysicsQuery { tris: self.runtime.gameplay.physics().tris() };
                         mercs2_engine::vehicle::drive_step_system(&mut w, &q, &self.veh_lut, dt);
                         let pos = w.get::<&Transform>(veh).map(|x| x.translation).unwrap_or(self.player.pos);
                         let class = w.get::<&Vehicle>(veh).map(|v| v.class).unwrap_or(VehicleClass::Car);
@@ -2052,7 +2066,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         _ => "CameraCarPreset",
                     };
                     let preset = mercs2_engine::camera::CameraMode::for_ridden(Some(class_name)).preset();
-                    mercs2_engine::camera::view_with_preset(&preset, veh_pos, self.tp_yaw, self.tp_pitch, &self.collision_soup)
+                    mercs2_engine::camera::view_with_preset(&preset, veh_pos, self.tp_yaw, self.tp_pitch, self.runtime.gameplay.physics().tris())
                 } else {
                     // ── On foot ──
                     let fwd_flat = Vec3::new(self.tp_yaw.sin(), 0.0, self.tp_yaw.cos()).normalize();
@@ -2063,12 +2077,12 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     // leaf crate cannot name `mercs2_water` or the engine's heightmap. `SceneLocomotion`
                     // borrows all three, so building one per frame is free.
                     let q = mercs2_engine::locomotion::SceneLocomotion {
-                        tris: &self.collision_soup,
+                        tris: self.runtime.gameplay.physics().tris(),
                         hmap: self.hmap.as_ref(),
                         // Baked hi-res terrain heightfield (retail hkpHeightFieldShape): the resident
                         // `terrainmesh` tiles' near surface, sampled O(1). `None` on the interior boot
-                        // (no streamer). This is what the hero stands on outdoors — the terrain tris no
-                        // longer live in `collision_soup`.
+                        // (no streamer). This is what the hero stands on outdoors — the terrain tris are
+                        // not in the collision broadphase (`runtime.gameplay.physics()`).
                         terrain: self.stream.as_ref().map(|sw| sw.terrain_field()),
                         water: self.watermap.as_ref(),
                         interior: self.spawn_interior,
@@ -2092,14 +2106,14 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         self.fire_cooldown = PLAYER_FIRE_INTERVAL;
                         let aim = Vec3::new(self.tp_pitch.cos() * self.tp_yaw.sin(), self.tp_pitch.sin(), self.tp_pitch.cos() * self.tp_yaw.cos()).normalize();
                         let eye = self.player.pos + Vec3::Y * PLAYER_EYE_HEIGHT;
-                        if let Some(t) = mercs2_engine::physics::soup::raycast(&self.collision_soup, eye, aim, PLAYER_WEAPON_RANGE) {
+                        if let Some(t) = mercs2_engine::physics::soup::raycast(self.runtime.gameplay.physics().tris(), eye, aim, PLAYER_WEAPON_RANGE) {
                             let point = eye + aim * t;
                             self.runtime.push_impact(mercs2_engine::combat::Impact::from_hit(point, Vec3::ZERO, aim, false));
                         }
                     }
                     // Mode-based camera: on foot → the RE-pinned `HumanCameraModifier` preset.
                     let preset = mercs2_engine::camera::CameraMode::for_ridden(None).preset();
-                    mercs2_engine::camera::view_with_preset(&preset, self.player.pos, self.tp_yaw, self.tp_pitch, &self.collision_soup)
+                    mercs2_engine::camera::view_with_preset(&preset, self.player.pos, self.tp_yaw, self.tp_pitch, self.runtime.gameplay.physics().tris())
                 }
             }
         };
@@ -2141,28 +2155,41 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 let mut w = ctx.world.borrow_mut();
                 sw.step(&mut *ctx.scene, &mut w, cam);
             }
-            if sw.take_collision_dirty() {
-                // Rebuild the ONE live PROP/building soup: static baseline + the streamer's current
-                // prop/building geometry. Store it as `collision_soup` (read by the player controller /
-                // vehicle / camera in `update`) AND hand it to the fleet runtime, so hero and fleet
-                // collide with the same streamed tris.
+            let ops = sw.take_collision_ops();
+            if !ops.is_empty() {
+                // Apply the per-unit deltas INCREMENTALLY to the ONE persistent broadphase — `insert_unit`
+                // on a WAKE, `remove_unit` on a HIBERNATE (retail `hkpWorld::addEntity`/`removeEntity`).
+                // The player controller / vehicle / camera / weapon read this same structure via
+                // `runtime.gameplay.physics()`, and the fleet uses it natively — so hero and fleet collide
+                // with the identical streamed tris, with NO whole-soup clone and NO grid rebuild.
                 //
-                // K3: this now fires ONLY when a prop/building woke or hibernated — a rare, small event
-                // (a few thousand tris). Streamed hi-res TERRAIN tiles no longer enter this soup at all;
-                // they bake into the streamer's `terrain_field` heightfield (sampled O(1) by the hero's
-                // ground query), so moving across terrain never rebuilds the broadphase.
-                let mut merged = self.collision_tris.clone();
-                merged.extend(sw.collision_tris());
-                self.collision_soup = merged.clone();
-                self.runtime.set_collision(merged);
-                // Authored-PHY2 collision coverage (the same stat the `--stream` printer shows): how many
-                // streamed props/buildings use their authored Havok shape (convex hull / WpMeshShape16
-                // mesh) vs fall back to render-mesh triangles. Prints only on a soup change (prop wake/
-                // hibernate), so it is naturally throttled.
+                // Per-delta work is O(the changed units' triangles), not O(all resident tris): a wake
+                // inserts only that unit's tris into the cells they overlap; a hibernate removes only that
+                // unit's tris from the cells they occupied. Streamed hi-res TERRAIN never enters here (it
+                // bakes into the streamer's `terrain_field` heightfield), so moving across terrain is free.
+                let (mut ins, mut rem, mut touched) = (0usize, 0usize, 0usize);
+                {
+                    let phys = self.runtime.gameplay.physics_mut();
+                    for op in &ops {
+                        match op {
+                            mercs2_engine::game_world::CollisionOp::Insert(key, tris) => {
+                                ins += 1;
+                                touched += tris.len();
+                                phys.insert_unit(*key, tris);
+                            }
+                            mercs2_engine::game_world::CollisionOp::Remove(key) => {
+                                rem += 1;
+                                phys.remove_unit(*key);
+                            }
+                        }
+                    }
+                }
+                // Per-delta cost line: work is O(changed units) — `touched` tris across `ins+rem` units —
+                // NOT O(resident). `resident` is the full soup size for context (it is NOT re-touched).
                 let st = sw.stats();
                 println!(
-                    "[world] streamed collision: {} soup tris | authored_phy2={} render_fallback={}",
-                    self.collision_soup.len(), st.coll_authored, st.coll_fallback
+                    "[world] streamed collision Δ: +{ins} / -{rem} unit(s), {touched} tri(s) touched (O(changed)) | resident={} authored tris | authored_phy2={} no_authored={}",
+                    self.runtime.gameplay.physics().tris().len(), st.coll_authored, st.coll_no_authored
                 );
             }
             sw.animate(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt);

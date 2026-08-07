@@ -375,6 +375,431 @@ fn with_grid<R>(tris: &[[Vec3; 3]], f: impl FnOnce(&Grid, &mut Vec<u32>) -> R) -
 }
 
 // ---------------------------------------------------------------------------
+//   Incremental broadphase — a MUTABLE spatial hash over a per-unit triangle soup
+// ---------------------------------------------------------------------------
+//
+// The [`Grid`] above is immutable/CSR: built once per soup and thrown away when the soup changes. That
+// is the wrong shape for STREAMING, where a prop/building wakes or hibernates every few frames: rebuilding
+// the whole grid (and re-cloning the whole soup) each delta is `O(all tris)` per streaming event.
+//
+// [`IncrementalGrid`] is the persistent, mutable equivalent — the faithful stand-in for how retail's
+// `hkpWorld` adds/removes each body's pre-baked shape from a persistent broadphase
+// (`hkpWorld::addEntity` / `removeEntity`), never rebuilding. Triangles are owned in a compact `tris`
+// buffer and tagged by a streamed-**unit** key (a block or prop id). [`insert_unit`](IncrementalGrid::insert_unit)
+// appends a unit's tris and buckets ONLY those into the cells they overlap; [`remove_unit`](IncrementalGrid::remove_unit)
+// deletes exactly that unit's tris (compacting via swap-remove) and touches ONLY the cells they occupied.
+// So a wake/hibernate costs `O(that unit's tris)`, not `O(all tris)`.
+//
+// The broadphase is an **unbounded spatial hash** (integer cell coords → bucket) rather than the CSR
+// grid's fixed extent, because the resident set grows/shrinks and moves as the player streams across the
+// world — there is no single up-front bbox. The exact per-triangle math run on the gathered survivors is
+// the SAME bbox-culled test the immutable path uses, so query results are identical to a linear scan of
+// the currently-resident tris (proved by `incremental_matches_bruteforce_*`).
+
+/// A persistent, mutable uniform spatial hash over a per-unit world-space triangle soup. Supports
+/// `O(changed-unit)` [`insert_unit`](Self::insert_unit) / [`remove_unit`](Self::remove_unit) and the same
+/// `gather_rect` / `gather_ray` broadphase the immutable [`Grid`] exposes. Owns its triangles in a compact
+/// [`tris`](Self::tris) buffer (kept dense by swap-remove) so it also serves the raw `&[[Vec3;3]]` the
+/// free-function soup consumers still take.
+#[derive(Clone, Debug)]
+pub struct IncrementalGrid {
+    cell: f32,
+    inv_cell: f32,
+    /// Occupied cells only: integer cell coord `(cx,cz)` → the indices (into `tris`) bucketed there.
+    buckets: std::collections::HashMap<(i32, i32), Vec<u32>>,
+    /// Triangles whose XZ bbox spans more than [`OVERSIZE_CELLS`] cells — always tested (never bucketed).
+    oversized: Vec<u32>,
+    /// Compact triangle storage (append on insert, swap-remove on remove). `tris()` hands this slice to the
+    /// free-function consumers unchanged.
+    tris: Vec<[Vec3; 3]>,
+    /// Parallel to `tris`: the unit key that owns each triangle (needed to fix up the moved tri on a
+    /// swap-remove).
+    unit_of: Vec<u64>,
+    /// Per-unit list of the indices (into `tris`) a unit currently owns — the removal set for `remove_unit`.
+    units: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl Default for IncrementalGrid {
+    fn default() -> Self {
+        IncrementalGrid {
+            cell: TARGET_CELL,
+            inv_cell: 1.0 / TARGET_CELL,
+            buckets: std::collections::HashMap::new(),
+            oversized: Vec::new(),
+            tris: Vec::new(),
+            unit_of: Vec::new(),
+            units: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl IncrementalGrid {
+    /// An empty grid with the default [`TARGET_CELL`] cell size.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The compact resident triangle buffer (world space). Handed to the free-function soup consumers
+    /// (`soup::raycast` / `move_character` / `ground_below`) that still take a raw slice.
+    #[inline]
+    pub fn tris(&self) -> &[[Vec3; 3]] {
+        &self.tris
+    }
+
+    /// Number of resident triangles.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.tris.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.tris.is_empty()
+    }
+
+    /// Number of resident units (streamed blocks/props + any batch unit).
+    #[inline]
+    pub fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
+    /// Drop every unit and triangle (used by the batch `set_tris` reset path).
+    pub fn clear(&mut self) {
+        self.buckets.clear();
+        self.oversized.clear();
+        self.tris.clear();
+        self.unit_of.clear();
+        self.units.clear();
+    }
+
+    #[inline]
+    fn cx(&self, x: f32) -> i32 {
+        (x * self.inv_cell).floor() as i32
+    }
+    #[inline]
+    fn cz(&self, z: f32) -> i32 {
+        (z * self.inv_cell).floor() as i32
+    }
+
+    /// The inclusive cell range `(cx0,cx1,cz0,cz1)` a triangle's XZ bbox overlaps.
+    #[inline]
+    fn tri_cells(&self, t: &[Vec3; 3]) -> (i32, i32, i32, i32) {
+        let (b0, b1) = tri_bbox(t);
+        (self.cx(b0.x), self.cx(b1.x), self.cz(b0.z), self.cz(b1.z))
+    }
+
+    /// Add index `i` (whose geometry is `tris[i]`) to every cell its bbox overlaps, or to `oversized`.
+    fn bucket_index(&mut self, i: u32) {
+        let (cx0, cx1, cz0, cz1) = self.tri_cells(&self.tris[i as usize]);
+        let span = (cx1 - cx0 + 1) as i64 * (cz1 - cz0 + 1) as i64;
+        if span > OVERSIZE_CELLS as i64 {
+            self.oversized.push(i);
+            return;
+        }
+        for zc in cz0..=cz1 {
+            for xc in cx0..=cx1 {
+                self.buckets.entry((xc, zc)).or_default().push(i);
+            }
+        }
+    }
+
+    /// Remove index `i` (whose geometry is still `tris[i]`) from every cell it was bucketed into.
+    fn unbucket_index(&mut self, i: u32) {
+        let (cx0, cx1, cz0, cz1) = self.tri_cells(&self.tris[i as usize]);
+        let span = (cx1 - cx0 + 1) as i64 * (cz1 - cz0 + 1) as i64;
+        if span > OVERSIZE_CELLS as i64 {
+            if let Some(p) = self.oversized.iter().position(|&x| x == i) {
+                self.oversized.swap_remove(p);
+            }
+            return;
+        }
+        for zc in cz0..=cz1 {
+            for xc in cx0..=cx1 {
+                if let Some(v) = self.buckets.get_mut(&(xc, zc)) {
+                    if let Some(p) = v.iter().position(|&x| x == i) {
+                        v.swap_remove(p);
+                    }
+                    if v.is_empty() {
+                        self.buckets.remove(&(xc, zc));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Insert (or replace) a streamed unit's world-space triangles, keyed by `key`. Only the cells the new
+    /// triangles overlap are touched — `O(tris.len())`, independent of the resident soup size. Re-inserting
+    /// an existing key first removes its old triangles (idempotent WAKE).
+    pub fn insert_unit(&mut self, key: u64, tris: &[[Vec3; 3]]) {
+        if self.units.contains_key(&key) {
+            self.remove_unit(key);
+        }
+        if tris.is_empty() {
+            self.units.insert(key, Vec::new());
+            return;
+        }
+        let mut idxs = Vec::with_capacity(tris.len());
+        for t in tris {
+            let i = self.tris.len() as u32;
+            self.tris.push(*t);
+            self.unit_of.push(key);
+            self.bucket_index(i);
+            idxs.push(i);
+        }
+        self.units.insert(key, idxs);
+    }
+
+    /// Remove a streamed unit's triangles by key (HIBERNATE / UNLOAD). Touches only the cells that unit's
+    /// triangles occupied plus the one swap-moved survivor per removed triangle — `O(that unit's tris)`.
+    /// A no-op for an absent key.
+    pub fn remove_unit(&mut self, key: u64) {
+        let Some(mut idxs) = self.units.remove(&key) else {
+            return;
+        };
+        // Descending: swap-removing the highest index first guarantees the element swapped in from the
+        // tail is always a survivor (never another index still queued for removal), so its bookkeeping fix
+        // is a single rewrite.
+        idxs.sort_unstable_by(|a, b| b.cmp(a));
+        for i in idxs {
+            self.remove_index(i);
+        }
+    }
+
+    /// Swap-remove one triangle index, keeping `tris` dense and the grid/units bookkeeping consistent.
+    fn remove_index(&mut self, i: u32) {
+        let iu = i as usize;
+        let last = self.tris.len() - 1;
+        // Drop the removed triangle's own cell references.
+        self.unbucket_index(i);
+        if iu != last {
+            // The tail survivor moves into slot `i`: pull its refs at `last`, move it, re-bucket at `i`.
+            self.unbucket_index(last as u32);
+            self.tris.swap(iu, last);
+            self.unit_of.swap(iu, last);
+            let owner = self.unit_of[iu];
+            if let Some(v) = self.units.get_mut(&owner) {
+                for e in v.iter_mut() {
+                    if *e == last as u32 {
+                        *e = i;
+                    }
+                }
+            }
+            self.bucket_index(i);
+        }
+        self.tris.pop();
+        self.unit_of.pop();
+    }
+
+    /// Broadphase: gather (sorted, de-duplicated) every resident triangle index whose cell overlaps the XZ
+    /// rectangle `[x0,x1]×[z0,z1]`, plus the oversized bucket. A superset of the immutable [`Grid::gather_rect`]
+    /// result (identical exact-test survivors), so callers get identical hits. Falls back to a full scan when
+    /// the rectangle spans more cells than there are triangles (cheaper, still a correct superset).
+    pub(crate) fn gather_rect(&self, out: &mut Vec<u32>, x0: f32, x1: f32, z0: f32, z1: f32) {
+        out.clear();
+        let (cx0, cx1) = (self.cx(x0), self.cx(x1));
+        let (cz0, cz1) = (self.cz(z0), self.cz(z1));
+        let cells = (cx1 - cx0 + 1).max(0) as i64 * (cz1 - cz0 + 1).max(0) as i64;
+        if cells > (self.tris.len() as i64).max(64) {
+            out.extend(0..self.tris.len() as u32);
+            return; // already sorted + unique + covers oversized
+        }
+        for zc in cz0..=cz1 {
+            for xc in cx0..=cx1 {
+                if let Some(v) = self.buckets.get(&(xc, zc)) {
+                    out.extend_from_slice(v);
+                }
+            }
+        }
+        out.extend_from_slice(&self.oversized);
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Broadphase: gather (sorted, de-duplicated) every resident triangle index in the cells the segment
+    /// `[o,end]` traverses in XZ (grid DDA), plus the oversized bucket — the mutable equivalent of
+    /// [`Grid::gather_ray`].
+    pub(crate) fn gather_ray(&self, out: &mut Vec<u32>, o: Vec3, end: Vec3) {
+        out.clear();
+        self.dda_xz(out, o.x, o.z, end.x, end.z);
+        out.extend_from_slice(&self.oversized);
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// Amanatides–Woo traversal of the XZ segment over the (originless) hash cells, appending each visited
+    /// cell's triangle indices. The Manhattan distance to the end cell strictly decreases each step, so the
+    /// guard is exact.
+    fn dda_xz(&self, out: &mut Vec<u32>, ox: f32, oz: f32, ex: f32, ez: f32) {
+        let (dx, dz) = (ex - ox, ez - oz);
+        let mut cx = self.cx(ox);
+        let mut cz = self.cz(oz);
+        let ecx = self.cx(ex);
+        let ecz = self.cz(ez);
+        let step_x: i32 = (dx > 0.0) as i32 - (dx < 0.0) as i32;
+        let step_z: i32 = (dz > 0.0) as i32 - (dz < 0.0) as i32;
+        let (mut t_max_x, t_delta_x) = hash_axis_step(ox, dx, cx, step_x, self.cell);
+        let (mut t_max_z, t_delta_z) = hash_axis_step(oz, dz, cz, step_z, self.cell);
+        let mut guard = (ecx - cx).abs() + (ecz - cz).abs() + 4;
+        loop {
+            if let Some(v) = self.buckets.get(&(cx, cz)) {
+                out.extend_from_slice(v);
+            }
+            if (cx == ecx && cz == ecz) || guard == 0 {
+                break;
+            }
+            guard -= 1;
+            if t_max_x <= t_max_z {
+                cx += step_x;
+                t_max_x += t_delta_x;
+            } else {
+                cz += step_z;
+                t_max_z += t_delta_z;
+            }
+        }
+    }
+
+    // --- query methods (identical per-triangle math to the free functions, over the gathered survivors) ---
+
+    /// Nearest triangle hit along `[o, o+dir*max_t]` — the [`raycast`] equivalent over the resident soup.
+    pub fn raycast(&self, o: Vec3, dir: Vec3, max_t: f32) -> Option<f32> {
+        let end = o + dir * max_t;
+        let (smin, smax) = (o.min(end), o.max(end));
+        let mut cand = Vec::new();
+        self.gather_ray(&mut cand, o, end);
+        let mut best: Option<f32> = None;
+        for &i in cand.iter() {
+            let t = &self.tris[i as usize];
+            let (b0, b1) = tri_bbox(t);
+            if b1.x < smin.x || b0.x > smax.x || b1.y < smin.y || b0.y > smax.y || b1.z < smin.z || b0.z > smax.z {
+                continue;
+            }
+            if let Some(d) = ray_tri(o, dir, t[0], t[1], t[2]) {
+                if d <= max_t && best.map_or(true, |b| d < b) {
+                    best = Some(d);
+                }
+            }
+        }
+        best
+    }
+
+    /// Highest walkable surface at or below `pos.y` within `max_drop` — the [`ground_below`] equivalent.
+    pub fn ground_below(&self, pos: Vec3, radius: f32, max_drop: f32) -> Option<f32> {
+        let origin = pos + Vec3::Y * 0.1;
+        let max_t = max_drop + 0.1;
+        let mut cand = Vec::new();
+        self.gather_rect(&mut cand, pos.x - radius, pos.x + radius, pos.z - radius, pos.z + radius);
+        let mut best: Option<f32> = None;
+        for &i in cand.iter() {
+            let t = &self.tris[i as usize];
+            if is_wall(t) || !xz_in_tri_bbox(t, pos, radius) {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+                if d <= max_t {
+                    let y = origin.y - d;
+                    if best.map_or(true, |b| y > b) {
+                        best = Some(y);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Swept player move + optional ground snap — the [`move_character`] equivalent over the resident soup.
+    pub fn move_character(&self, feet: Vec3, horiz_move: Vec3, radius: f32, height: f32, step: f32, follow_ground: bool) -> Vec3 {
+        let mut pos = feet + Vec3::new(horiz_move.x, 0.0, horiz_move.z);
+        pos = self.depenetrate(pos, radius, height);
+        if follow_ground {
+            if let Some(gy) = self.ground_y(pos, radius, step) {
+                pos.y = gy;
+            } else {
+                pos.y = feet.y;
+            }
+        }
+        pos
+    }
+
+    fn ground_y(&self, pos: Vec3, radius: f32, step: f32) -> Option<f32> {
+        let origin = pos + Vec3::Y * step;
+        let max_t = step * 2.0;
+        let mut cand = Vec::new();
+        self.gather_rect(&mut cand, pos.x - radius, pos.x + radius, pos.z - radius, pos.z + radius);
+        let mut best: Option<f32> = None;
+        for &i in cand.iter() {
+            let t = &self.tris[i as usize];
+            if is_wall(t) || !xz_in_tri_bbox(t, pos, radius) {
+                continue;
+            }
+            if let Some(d) = ray_tri(origin, -Vec3::Y, t[0], t[1], t[2]) {
+                if d <= max_t {
+                    let y = origin.y - d;
+                    if best.map_or(true, |b| y > b) {
+                        best = Some(y);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn depenetrate(&self, mut pos: Vec3, radius: f32, height: f32) -> Vec3 {
+        const DRIFT: f32 = 2.0;
+        let mut cand = Vec::new();
+        self.gather_rect(&mut cand, pos.x - radius - DRIFT, pos.x + radius + DRIFT, pos.z - radius - DRIFT, pos.z + radius + DRIFT);
+        for _ in 0..4 {
+            let mut moved = false;
+            for &i in cand.iter() {
+                let t = &self.tris[i as usize];
+                if !is_wall(t) {
+                    continue;
+                }
+                let (b0, b1) = tri_bbox(t);
+                if b1.x < pos.x - radius
+                    || b0.x > pos.x + radius
+                    || b1.z < pos.z - radius
+                    || b0.z > pos.z + radius
+                    || b1.y < pos.y
+                    || b0.y > pos.y + height
+                {
+                    continue;
+                }
+                let a = pos + Vec3::Y * radius;
+                let b = pos + Vec3::Y * (height - radius);
+                let (sp, tp) = seg_tri_closest(a, b, t[0], t[1], t[2]);
+                let d = sp - tp;
+                let dist = d.length();
+                if dist < radius {
+                    if dist > 1e-4 {
+                        pos += d / dist * (radius - dist);
+                    } else {
+                        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+                        if n.length() > 1e-6 {
+                            pos += n.normalize() * radius;
+                        }
+                    }
+                    moved = true;
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        pos
+    }
+}
+
+/// For an Amanatides–Woo step over the originless hash grid: the segment parameter `t` at which the ray
+/// leaves cell `c` along `step`, plus the per-cell `t` increment. `step == 0` → never crosses (`+∞`).
+fn hash_axis_step(o: f32, d: f32, c: i32, step: i32, cell: f32) -> (f32, f32) {
+    if step == 0 {
+        return (f32::INFINITY, f32::INFINITY);
+    }
+    let boundary = (c + (step > 0) as i32) as f32 * cell;
+    ((boundary - o) / d, (cell / d.abs()).abs())
+}
+
+// ---------------------------------------------------------------------------
 //   Ray / spherecast (camera boom)
 // ---------------------------------------------------------------------------
 
@@ -936,5 +1361,124 @@ mod tests {
                 "move_character mismatch feet={feet:?} mv={mv:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    //   Incremental broadphase correctness: after ANY sequence of insert/remove
+    //   ops, IncrementalGrid queries == a brute-force scan of the resident tris.
+    // -----------------------------------------------------------------------
+
+    /// Build unit `u`'s triangles: a small cluster (a floor quad + a short wall) at a per-unit world
+    /// offset, so different units land in different (and some SHARED) grid cells and the swap-remove
+    /// bookkeeping is exercised across cell boundaries.
+    fn unit_tris(u: u32) -> Vec<[Vec3; 3]> {
+        let ox = ((u % 7) as f32 - 3.0) * 9.0;
+        let oz = ((u / 7) as f32 - 3.0) * 9.0;
+        let y = (u % 3) as f32 * 0.5;
+        let s = 6.0;
+        let mut v = vec![
+            // floor quad (walkable)
+            [Vec3::new(ox, y, oz), Vec3::new(ox + s, y, oz), Vec3::new(ox + s, y, oz + s)],
+            [Vec3::new(ox, y, oz), Vec3::new(ox + s, y, oz + s), Vec3::new(ox, y, oz + s)],
+            // a wall along +X
+            [Vec3::new(ox, y, oz), Vec3::new(ox, y + 4.0, oz), Vec3::new(ox + s, y + 4.0, oz)],
+        ];
+        // Every 5th unit also carries a MAP-SPANNING floor → lands in the oversized bucket, so insert/
+        // remove of oversized triangles is covered too.
+        if u % 5 == 0 {
+            v.push([Vec3::new(-300.0, -20.0 - y, -300.0), Vec3::new(300.0, -20.0 - y, -300.0), Vec3::new(300.0, -20.0 - y, 300.0)]);
+        }
+        v
+    }
+
+    /// The whole point of the incremental path: after a RANDOM sequence of `insert_unit`/`remove_unit`
+    /// ops, the grid's `raycast` / `ground_below` / `move_character` are BIT-IDENTICAL to a brute-force
+    /// linear scan of the currently-resident triangles (`grid.tris()`), and its `tris()` buffer holds
+    /// exactly the resident units' triangles. Proves add/remove keep the broadphase consistent — the
+    /// per-delta work is `O(changed unit)`, but the RESULT matches a full rebuild.
+    #[test]
+    fn incremental_matches_bruteforce_after_random_ops() {
+        let mut rng = Lcg(0xdead_beef_0000_1234);
+        let mut grid = IncrementalGrid::new();
+        // Ground truth: which units are resident, so we can flatten a reference soup on demand.
+        let mut resident: std::collections::BTreeMap<u64, Vec<[Vec3; 3]>> = std::collections::BTreeMap::new();
+        const POOL: u32 = 24;
+
+        for op in 0..400 {
+            let u = rng.next_u32() % POOL;
+            let key = u as u64;
+            // Bias toward insert early (fill up), then a mix.
+            let insert = resident.is_empty() || (rng.next_u32() % 100) < 55;
+            if insert {
+                let t = unit_tris(u);
+                grid.insert_unit(key, &t);
+                resident.insert(key, t);
+            } else {
+                grid.remove_unit(key);
+                resident.remove(&key);
+            }
+
+            // Reference = the resident tris in the SAME order the grid stores them, so the order-sensitive
+            // move_character/depenetrate accumulation matches bit-for-bit (raycast/ground pick a min/max
+            // and are order-independent regardless).
+            let flat: Vec<[Vec3; 3]> = grid.tris().to_vec();
+            // The grid's compact buffer must hold exactly the resident triangle count.
+            let want: usize = resident.values().map(|v| v.len()).sum();
+            assert_eq!(flat.len(), want, "op {op}: grid tris count {} != resident {}", flat.len(), want);
+
+            // A handful of queries per op keeps the test fast but broadly covering.
+            for _ in 0..6 {
+                let x = rng.f(-40.0, 40.0);
+                let z = rng.f(-40.0, 40.0);
+
+                let pos = Vec3::new(x, 8.0, z);
+                assert_eq!(
+                    grid.ground_below(pos, 0.4, 40.0),
+                    ground_below_brute(&flat, pos, 0.4, 40.0),
+                    "op {op}: ground_below mismatch at ({x},{z})"
+                );
+
+                let o = Vec3::new(x, rng.f(-2.0, 10.0), z);
+                let d = Vec3::new(rng.f(-1.0, 1.0), rng.f(-1.0, 1.0), rng.f(-1.0, 1.0));
+                if d.length_squared() > 1e-4 {
+                    let dir = d.normalize();
+                    let max = rng.f(1.0, 120.0);
+                    assert_eq!(
+                        grid.raycast(o, dir, max),
+                        raycast_brute(&flat, o, dir, max),
+                        "op {op}: raycast mismatch o={o:?} dir={dir:?} max={max}"
+                    );
+                }
+
+                let feet = Vec3::new(x, 6.0, z);
+                let mv = Vec3::new(rng.f(-1.0, 1.0), 0.0, rng.f(-1.0, 1.0));
+                assert_eq!(
+                    grid.move_character(feet, mv, 0.4, 1.8, 0.5, true),
+                    move_character_brute(&flat, feet, mv, 0.4, 1.8, 0.5, true),
+                    "op {op}: move_character mismatch feet={feet:?} mv={mv:?}"
+                );
+            }
+        }
+        assert!(grid.unit_count() <= POOL as usize);
+    }
+
+    /// Re-inserting an existing key REPLACES that unit (idempotent WAKE) rather than duplicating it, and a
+    /// full drain leaves an empty, consistent grid.
+    #[test]
+    fn incremental_reinsert_replaces_and_full_drain_empties() {
+        let mut grid = IncrementalGrid::new();
+        let a = unit_tris(1);
+        grid.insert_unit(1, &a);
+        grid.insert_unit(1, &a); // re-wake same key
+        assert_eq!(grid.tris().len(), a.len(), "re-insert must not duplicate");
+        assert_eq!(grid.unit_count(), 1);
+        grid.insert_unit(2, &unit_tris(2));
+        grid.remove_unit(1);
+        grid.remove_unit(2);
+        grid.remove_unit(999); // absent key → no-op
+        assert!(grid.is_empty());
+        assert_eq!(grid.unit_count(), 0);
+        assert!(grid.buckets.is_empty(), "no dangling buckets after full drain");
+        assert!(grid.oversized.is_empty(), "no dangling oversized refs after full drain");
     }
 }

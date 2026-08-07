@@ -168,8 +168,27 @@ pub fn hull_tris(hull: &ConvexHull) -> Vec<[Vec3; 3]> {
         }
         let n = n / nl;
         let w = p[3] / nl;
-        // Vertices on this face.
-        let mut face: Vec<Vec3> = verts.iter().copied().filter(|v| (n.dot(*v) + w).abs() <= eps).collect();
+        // Face vertices = those on this plane. Havok `hkpConvexVerticesShape` carries a **convex
+        // radius** (default 0.05 m): the stored plane equations are the collision SHELL, pushed OUT
+        // from the actual vertices by that radius, so a face vertex satisfies `n·v + w == -radius`, NOT
+        // `== 0` (verified over retail c3 hulls: every failing hull's per-plane max signed distance is
+        // exactly -0.0500). Selecting the vertices at the per-plane MAXIMUM of `n·v + w` (within eps)
+        // recovers the face regardless of the radius, and reduces to the exact on-plane test when the
+        // radius is 0 (the authored break-piece crate hulls). Using `.abs() <= eps` against 0 instead
+        // dropped ~108 retail building hulls to the render-mesh fallback.
+        let d: Vec<f32> = verts.iter().map(|v| n.dot(*v) + w).collect();
+        let dmax = d.iter().copied().fold(f32::MIN, f32::max);
+        // Only trust the max as a real face plane when the supporting vertices are behind it (dmax ≤ eps,
+        // i.e. a genuine support plane, allowing the radius shell to sit at or inside 0).
+        if dmax > eps {
+            continue;
+        }
+        let mut face: Vec<Vec3> = verts
+            .iter()
+            .zip(&d)
+            .filter(|(_, &di)| di >= dmax - eps)
+            .map(|(v, _)| *v)
+            .collect();
         if face.len() < 3 {
             continue;
         }
@@ -287,6 +306,43 @@ mod tests {
         }
     }
 
+    /// A cube whose plane equations are the Havok **convex-radius shell** (pushed OUT from the vertices
+    /// by 0.05 m, so a face vertex sits at `n·v + w == -0.05`, not `== 0`). The on-plane-against-zero
+    /// test found ZERO face vertices here and emitted no triangles — the exact failure that dropped ~108
+    /// retail building hulls to the render-mesh fallback. The per-plane-maximum face selection recovers
+    /// all 12 tris regardless of the radius.
+    #[test]
+    fn hull_tris_handles_convex_radius_shell() {
+        let v = |x: f32, y: f32, z: f32| [x, y, z];
+        let r = 0.05_f32; // Havok default convex radius
+        let hull = ConvexHull {
+            vertices: vec![
+                v(-1., -1., -1.), v(1., -1., -1.), v(1., 1., -1.), v(-1., 1., -1.),
+                v(-1., -1., 1.), v(1., -1., 1.), v(1., 1., 1.), v(-1., 1., 1.),
+            ],
+            // support = max(n·v) + radius = 1 + 0.05 → w = -1.05: the plane is the collision shell.
+            planes: vec![
+                [1., 0., 0., -(1. + r)], [-1., 0., 0., -(1. + r)],
+                [0., 1., 0., -(1. + r)], [0., -1., 0., -(1. + r)],
+                [0., 0., 1., -(1. + r)], [0., 0., -1., -(1. + r)],
+            ],
+        };
+        let tris = hull_tris(&hull);
+        assert_eq!(tris.len(), 12, "convex-radius cube → 12 tris, got {}", tris.len());
+        // Every triangle vertex is a real cube corner (the vertices, not the shell).
+        for t in &tris {
+            for p in t {
+                assert!(p.x.abs() == 1.0 && p.y.abs() == 1.0 && p.z.abs() == 1.0, "off-cube vertex {p:?}");
+            }
+        }
+        // Outward orientation preserved.
+        for t in &tris {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            let centroid = (t[0] + t[1] + t[2]) / 3.0;
+            assert!(n.dot(centroid) > 0.0, "face wound inward");
+        }
+    }
+
     #[test]
     fn box_tris_is_twelve_and_outward() {
         let tris = box_tris([2.0, 1.0, 0.5]);
@@ -366,5 +422,83 @@ mod tests {
         assert!(ragdoll.tris.is_empty(), "sphere/capsule colliders are not emitted as world tris");
         assert_eq!(ragdoll.n_sphere, 1);
         assert!(!ragdoll.is_complete());
+    }
+
+    /// Live: a REAL retail building whose `hkpConvexVerticesShape` planes carry the 0.05 m convex-radius
+    /// shell. Block 789's c3 model container holds a single 83-vertex / 52-plane hull that the old
+    /// on-plane-against-zero test triangulated to ZERO tris (→ render-mesh fallback). Decoding its PHY2
+    /// end-to-end (block → `model` chunk → `PHY2` sub-chunk → parse → `authored_collision`) must now yield
+    /// a non-empty, sane, COMPLETE authored collider. SKIPS (stays green) when `vz.wad` is absent.
+    #[test]
+    fn convex_radius_building_hull_triangulates_live_from_vz_wad_if_present() {
+        use mercs2_formats::ffcs::load_ffcs_archive;
+        use mercs2_formats::havok::parse_phy2_body;
+        use mercs2_formats::sges::decompress_block;
+        use mercs2_formats::ucfx::{extract_chunk_body, parse_block_entry_table};
+
+        const MODEL_TYPE_HASH: u32 = 0x5B72_4250; // pandemic_hash_m2("model")
+
+        let Some(path) = mercs2_formats::game_paths::vz_wad_from_env()
+            .or_else(|| mercs2_formats::game_paths::wad_from_local_config(std::path::Path::new(".")))
+        else {
+            return eprintln!("skip: vz.wad not found");
+        };
+        let Ok(mut f) = std::fs::File::open(&path) else {
+            return eprintln!("skip: vz.wad not readable");
+        };
+        let size = f.metadata().unwrap().len();
+        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+        let dec = decompress_block(&mut f, &arch.indx, 789).expect("decompress block 789");
+
+        // Slice the `model` container out of the block, then pull its `PHY2` sub-chunk.
+        let (count, entries) = parse_block_entry_table(&dec);
+        let mut pos = 4 + count as usize * 16;
+        let mut model: Option<(usize, usize)> = None;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == MODEL_TYPE_HASH && end <= dec.len() {
+                model = Some((pos, end));
+                break;
+            }
+            pos = end;
+        }
+        let (s0, s1) = model.expect("block 789 has a model container");
+        let body = extract_chunk_body(&dec[s0..s1], b"PHY2").expect("model 789 carries a PHY2 chunk");
+        let pf = parse_phy2_body(&body).expect("parse PHY2");
+
+        // The body is a single convex hull carrying the convex-radius shell.
+        let n_hulls = pf.shapes.iter().filter(|s| matches!(s, Shape::Convex(_))).count();
+        assert!(n_hulls >= 1, "block 789 PHY2 must carry a convex hull, got shapes {:?}", pf.shapes.len());
+
+        let ac = authored_collision(&pf.shapes);
+        assert!(!ac.tris.is_empty(), "convex-radius hull must now triangulate (was 0 tris → fallback)");
+        assert!(ac.is_complete(), "a pure-convex building body is a COMPLETE authored collider");
+
+        // Every tri vertex is finite and within the hull's own (building-scale) bbox — sane geometry.
+        let mut lo = Vec3::splat(f32::MAX);
+        let mut hi = Vec3::splat(f32::MIN);
+        for s in &pf.shapes {
+            if let Shape::Convex(h) = s {
+                for v in &h.vertices {
+                    lo = lo.min(Vec3::from(*v));
+                    hi = hi.max(Vec3::from(*v));
+                }
+            }
+        }
+        for t in &ac.tris {
+            for p in t {
+                assert!(p.is_finite(), "non-finite authored tri vertex {p:?}");
+                assert!(
+                    p.x >= lo.x - 1e-3 && p.x <= hi.x + 1e-3
+                        && p.y >= lo.y - 1e-3 && p.y <= hi.y + 1e-3
+                        && p.z >= lo.z - 1e-3 && p.z <= hi.z + 1e-3,
+                    "tri vertex {p:?} outside hull bbox {lo:?}..{hi:?}"
+                );
+            }
+        }
+        eprintln!(
+            "block 789 convex-radius building hull: {} hull(s) → {} authored tris (bbox {lo:?}..{hi:?})",
+            n_hulls, ac.tris.len()
+        );
     }
 }

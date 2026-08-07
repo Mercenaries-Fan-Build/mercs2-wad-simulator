@@ -316,36 +316,44 @@ pub struct GroundHit {
 /// to the vehicle / combat / anim systems.
 #[derive(Clone, Debug, Default)]
 pub struct StaticSoupPhysics {
-    tris: Vec<[Vec3; 3]>,
     heightmap: Option<Heightmap>,
-    /// Broadphase over `tris` — a uniform XZ spatial grid (the faithful acceleration of retail's
-    /// `hkpMoppBvTreeShape` BV-tree; see [`soup::Grid`]). Rebuilt whenever `tris` changes so every query
-    /// touches only the local cells, not the whole soup. Owned here (unlike the free-function soup API,
-    /// which caches per-slice) because this type owns its triangles.
-    grid: soup::Grid,
+    /// The persistent, mutable broadphase — a spatial hash that owns the triangle soup keyed by streamed
+    /// **unit** (block/prop) id (see [`soup::IncrementalGrid`]). The faithful stand-in for retail's
+    /// `hkpWorld` persistent broadphase: a streaming WAKE calls [`insert_unit`](Self::insert_unit) and a
+    /// HIBERNATE calls [`remove_unit`](Self::remove_unit), each `O(that unit's tris)` — never rebuilding the
+    /// whole grid. The batch [`set_tris`](Self::set_tris) / [`new`](Self::new) path still works (it just
+    /// loads everything under one reserved unit key), so non-streaming callers are unchanged.
+    grid: soup::IncrementalGrid,
 }
+
+/// Reserved unit key for the whole-soup batch load ([`StaticSoupPhysics::new`] / [`set_tris`]). Chosen far
+/// above any streamed block/prop key so a batch load and per-unit streaming never collide.
+const BATCH_UNIT: u64 = 1u64 << 62;
 
 impl StaticSoupPhysics {
     /// Build from a world-space triangle list (buildings/roads/terrain mesh). No terrain heightmap.
     pub fn new(tris: Vec<[Vec3; 3]>) -> Self {
-        let grid = soup::Grid::build(&tris);
-        Self { tris, heightmap: None, grid }
+        let mut grid = soup::IncrementalGrid::new();
+        grid.insert_unit(BATCH_UNIT, &tris);
+        Self { heightmap: None, grid }
     }
 
     /// Build from a terrain heightmap only (no triangle geometry).
     pub fn from_heightmap(heightmap: Heightmap) -> Self {
-        Self { tris: Vec::new(), heightmap: Some(heightmap), grid: soup::Grid::default() }
+        Self { heightmap: Some(heightmap), grid: soup::IncrementalGrid::new() }
     }
 
     /// Build from both a triangle soup and a terrain heightmap.
     pub fn with_heightmap(tris: Vec<[Vec3; 3]>, heightmap: Heightmap) -> Self {
-        let grid = soup::Grid::build(&tris);
-        Self { tris, heightmap: Some(heightmap), grid }
+        let mut grid = soup::IncrementalGrid::new();
+        grid.insert_unit(BATCH_UNIT, &tris);
+        Self { heightmap: Some(heightmap), grid }
     }
 
-    /// The triangle soup this impl queries.
+    /// The triangle soup this impl queries (the persistent broadphase's compact resident buffer). Handed
+    /// to the free-function soup consumers (on-foot controller / camera boom) that still take a raw slice.
     pub fn tris(&self) -> &[[Vec3; 3]] {
-        &self.tris
+        self.grid.tris()
     }
 
     /// The terrain heightmap, if any.
@@ -353,11 +361,31 @@ impl StaticSoupPhysics {
         self.heightmap.as_ref()
     }
 
-    /// Replace the triangle soup (e.g. after a world-streaming block loads/unloads). Rebuilds the
-    /// broadphase grid for the new triangle set.
+    /// Replace the ENTIRE triangle soup in one shot (non-streaming callers / tests). Drops every resident
+    /// unit and reloads `tris` under the reserved batch key. Streaming callers should instead feed
+    /// per-unit deltas via [`insert_unit`](Self::insert_unit) / [`remove_unit`](Self::remove_unit), which
+    /// touch only the changed unit's cells rather than rebuilding.
     pub fn set_tris(&mut self, tris: Vec<[Vec3; 3]>) {
-        self.grid = soup::Grid::build(&tris);
-        self.tris = tris;
+        self.grid.clear();
+        self.grid.insert_unit(BATCH_UNIT, &tris);
+    }
+
+    /// Insert (or replace) one streamed unit's world-space collision triangles, keyed by `key` (a
+    /// block/prop id) — the reimpl of `hkpWorld::addEntity` for a waking body. `O(tris.len())`, independent
+    /// of the resident soup size.
+    pub fn insert_unit(&mut self, key: u64, tris: &[[Vec3; 3]]) {
+        self.grid.insert_unit(key, tris);
+    }
+
+    /// Remove one streamed unit's collision triangles by key (a hibernating/unloading body) — the reimpl of
+    /// `hkpWorld::removeEntity`. `O(that unit's tris)`; a no-op for an absent key.
+    pub fn remove_unit(&mut self, key: u64) {
+        self.grid.remove_unit(key);
+    }
+
+    /// Drop every resident unit (empty the broadphase) without discarding the heightmap.
+    pub fn clear(&mut self) {
+        self.grid.clear();
     }
 
     /// Attach or replace the terrain heightmap.
@@ -381,7 +409,7 @@ impl StaticSoupPhysics {
         for _ in 0..4 {
             let mut moved = false;
             for &ci in &cand {
-                let t = &self.tris[ci as usize];
+                let t = &self.grid.tris()[ci as usize];
                 if (t[0] - pos).length_squared() > cull2 || !is_wall(t) {
                     continue;
                 }
@@ -425,7 +453,7 @@ impl StaticSoupPhysics {
         self.grid.gather_rect(&mut cand, pos.x - reach, pos.x + reach, pos.z - reach, pos.z + reach);
         let mut best: Option<GroundHit> = None;
         for &ci in &cand {
-            let t = &self.tris[ci as usize];
+            let t = &self.grid.tris()[ci as usize];
             let n = tri_normal(t);
             let nl = n.length();
             if nl <= 1e-6 {
@@ -475,7 +503,7 @@ impl StaticSoupPhysics {
         let b = pos + Vec3::Y * (height - radius);
         let mut best: Option<(f32, Vec3)> = None; // (surface-to-surface distance, normal)
         for &ci in cand {
-            let t = &self.tris[ci as usize];
+            let t = &self.grid.tris()[ci as usize];
             if !is_wall(t) {
                 continue;
             }
@@ -603,7 +631,7 @@ impl PhysicsQuery for StaticSoupPhysics {
         self.grid.gather_ray(&mut cand, origin, origin + dir * max);
         let mut best: Option<(f32, &[Vec3; 3])> = None;
         for &ci in &cand {
-            let t = &self.tris[ci as usize];
+            let t = &self.grid.tris()[ci as usize];
             if (t[0] - origin).length_squared() > cull2 {
                 continue;
             }
@@ -638,7 +666,7 @@ impl PhysicsQuery for StaticSoupPhysics {
         self.grid.gather_rect(&mut cand, point.x - max, point.x + max, point.z - max, point.z + max);
         let mut best: Option<(f32, Vec3, &[Vec3; 3])> = None; // (unsigned dist², cp, tri)
         for &ci in &cand {
-            let t = &self.tris[ci as usize];
+            let t = &self.grid.tris()[ci as usize];
             if (t[0] - point).length_squared() > cull2 {
                 continue;
             }
@@ -983,7 +1011,7 @@ impl StaticSoupPhysics {
             let mut best: Option<(f32, Vec3)> = None; // (penetration depth, contact normal)
             let cull2 = (body.radius + 4.0) * (body.radius + 4.0);
             for &ci in &cand {
-                let t = &self.tris[ci as usize];
+                let t = &self.grid.tris()[ci as usize];
                 if (t[0] - body.position).length_squared() > cull2 {
                     continue;
                 }
