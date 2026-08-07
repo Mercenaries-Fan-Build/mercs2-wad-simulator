@@ -9,6 +9,34 @@ pub struct Phase {
     pub matches: &'static [&'static str],
 }
 
+/// Version of the `LADDER` **table**, bumped ONLY when `LADDER` changes.
+///
+/// # Why this is not the crate version
+///
+/// `phase_idx` is an ordinal into `LADDER`, so it is meaningless without knowing which
+/// ladder produced it: inserting a phase mid-table shifts every ordinal after it, and
+/// `pct` (`furthest_idx / (LADDER.len() - 1)`) silently rescales every previously
+/// reported percentage. A consumer aggregating across ladders needs to know which one it
+/// is looking at.
+///
+/// The crate version cannot answer that. A patch release that never touches this table
+/// still bumps it, so it cannot distinguish "same ladder, new release" from "table edited
+/// inside a patch release" — and the second is exactly the case that must not be pooled.
+///
+/// # The bump rule
+///
+/// Bump this by 1 when, and only when, `LADDER` changes: a phase added, removed,
+/// reordered, renamed, or its `matches` substrings edited. Do **not** bump it for
+/// anything else in this crate. `ladder_version_pins_the_table` below fails until the
+/// bump is made, so the rule is enforced rather than remembered.
+///
+/// # Why `usize`
+///
+/// So `mercs2-sdk`'s `gen_ladder.py` can read it with the `CONST_RE` it already has
+/// (`pub const NAME: usize = N;`) if it grows an `M2_LADDER_VERSION` emit — no regex
+/// change, no second parse shape. It is an opaque monotonic integer, not a count.
+pub const LADDER_VERSION: usize = 1;
+
 /// The ordered load → world → gameplay ladder. Order matches the observed chronology
 /// of a deep load (`storage/pmc_blackbox-vanilla-boot-into-game.log`): the GlobalEnter
 /// entity-construction burst (player/WAITFORGAME/act-staging) fires before mission-flow
@@ -153,4 +181,56 @@ pub fn is_job_module(module: &str) -> bool {
         }
     }
     module.starts_with("MrxTaskObjective")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ENTERED_WORLD_IDX, LADDER, LADDER_VERSION, REACHED_WORLD_IDX};
+
+    /// FNV-1a over the whole table: every idx, name and match substring.
+    fn ladder_fingerprint() -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+        };
+        for p in LADDER {
+            // `as u64`, not `usize`: a usize-width hash would differ on a 32-bit target and
+            // fail this test for a reason that has nothing to do with the ladder.
+            eat(&(p.idx as u64).to_le_bytes());
+            eat(p.name.as_bytes());
+            for m in p.matches {
+                eat(m.as_bytes());
+            }
+        }
+        h
+    }
+
+    /// ★ The bump rule, enforced.
+    ///
+    /// `LADDER_VERSION` exists to tell a consumer which table produced a `phase_idx`, and a
+    /// convention nobody can see is one the next edit forgets. This pins the table's shape to
+    /// the version that describes it: any edit to `LADDER` changes the fingerprint and fails
+    /// here until `LADDER_VERSION` and the expected values below are updated together.
+    #[test]
+    fn ladder_version_pins_the_table() {
+        assert_eq!(
+            (LADDER_VERSION, LADDER.len(), ladder_fingerprint()),
+            (1, 21, 0xd39e_dbea_39fc_dbdc),
+            "LADDER changed — bump LADDER_VERSION and update this pin together. \
+             The version is what lets a consumer refuse to pool phase_idx/pct across ladders."
+        );
+    }
+
+    /// The two exported ordinals must name real rungs, or a consumer resolving them gets nothing.
+    #[test]
+    fn the_named_ordinals_are_in_the_table() {
+        assert!(LADDER.iter().any(|p| p.idx == REACHED_WORLD_IDX));
+        assert!(LADDER.iter().any(|p| p.idx == ENTERED_WORLD_IDX));
+        for (i, p) in LADDER.iter().enumerate() {
+            assert_eq!(p.idx, i, "ladder indices must be contiguous from 0");
+        }
+    }
 }

@@ -22,3 +22,9 @@ pub mod phases;
 pub mod report;
 pub mod sha256;
 pub mod symbolize;
+
+/// The version of the phase ladder this build carries — re-exported at the crate root
+/// because a consumer reporting a `phase_idx` needs it on every path, and having to know
+/// it lives in `phases` is how it gets left out. See [`phases::LADDER_VERSION`] for the
+/// bump rule and why the crate version cannot stand in for it.
+pub use phases::LADDER_VERSION;

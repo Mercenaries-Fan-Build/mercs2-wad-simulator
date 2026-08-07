@@ -2,7 +2,7 @@
 //! an optional JSON form.
 
 use crate::parse::LogLine;
-use crate::phases::{self, LADDER, REACHED_WORLD_IDX};
+use crate::phases::{self, LADDER, LADDER_VERSION, REACHED_WORLD_IDX};
 use colored::*;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -84,6 +84,25 @@ pub struct CrashInfo {
     pub eip: u32,
     pub eip_label: Option<String>,
     pub av: Option<String>,        // "READ target=F011157A"
+    /// The faulting module's **basename**, e.g. `dxwrapper.dll` — `None` when the handler
+    /// could not name one. See [`parse_module_offset`] for what "could not" covers.
+    ///
+    /// # Why this is a typed field and not left inside `block`
+    ///
+    /// The module text is in `block[]` too, but `block[]` also carries `scan_ascii`'s dump of
+    /// whatever process memory the faulting registers pointed at — arbitrary bytes, including
+    /// file paths and anything a mod happened to have in RAM. A consumer regexing that vector
+    /// for `module+0x…` is one malformed line away from forwarding scraped memory, so the
+    /// extraction lives here, once, against a line whose shape the handler controls.
+    pub module: Option<String>,
+    /// Offset **within** `module`, never an absolute address (that is `eip`).
+    ///
+    /// `Some` while `module` is `None` is a real state, not an inconsistency: the handler
+    /// prints `?+0x…` when it found the containing module but could not name it, and the
+    /// offset is genuine. It is also **not comparable to anything** in that state — an offset
+    /// is only meaningful once you know which image it is into — so a consumer aggregating
+    /// offsets must drop the pair when `module` is `None` rather than pooling them.
+    pub offset: Option<u32>,
     pub block: Vec<String>,        // the full [crash] block lines (message bodies)
     pub terminal: bool,            // no progress after it
     pub since_world_load_ms: Option<i64>,
@@ -163,6 +182,13 @@ pub struct Report {
     pub furthest_idx: usize,
     pub furthest_name: String,
     pub pct: u32,
+    /// Which phase ladder produced `furthest_idx` and `pct` — [`phases::LADDER_VERSION`].
+    ///
+    /// Emitted on the report rather than left as a constant a caller might look up, because a
+    /// `--json` consumer has no way to reach the constant at all: without it, `furthest_idx`
+    /// arrives as an ordinal into an unidentified table, and `pct` rescales silently the next
+    /// time a rung is added. Neither may be aggregated across differing values.
+    pub ladder_version: usize,
     pub verdict: Verdict,
     pub phases: Vec<PhaseHit>,
     pub streaming: Option<StreamSummary>,
@@ -316,7 +342,7 @@ pub fn analyze(file: &str, log_sha256: String, lines: &[LogLine], routine: &[Str
     Report {
         file: file.to_string(), log_sha256, build,
         records: real.len(), first_ts, last_ts, wall_ms,
-        furthest_idx, furthest_name, pct, verdict, phases, streaming,
+        furthest_idx, furthest_name, pct, ladder_version: LADDER_VERSION, verdict, phases, streaming,
         acts, jobs, all_modules, portals, players, pool, crash,
         mtrl_overcounts, stall_dumps, flagged, signals: signals_out, gaps,
         unknown_sources, unparsed_lines, tail, last_progress_ts, last_progress_msg,
@@ -426,17 +452,85 @@ fn analyze_pool(lines: &[LogLine]) -> PoolHealth {
         garbage_distinct: garbage_keys.len(), garbage_samples, free_min, free_final, bursts, refills }
 }
 
+/// Is this the banner line that opens a `[crash]` block?
+///
+/// pmc_blackbox's `log_exception` emits `==== <via> EXCEPTION <code> <name> @ EIP=… (<module>)
+/// (flags=…) ====` and is called from **two** places with two different `via` strings:
+///
+/// | record | module resolution | what it means |
+/// |---|---|---|
+/// | `==== VEH EXCEPTION …` | none — logs `unknown module` | first-chance; the fault may have been handled and the load continued |
+/// | `==== UNHANDLED EXCEPTION …` | full `resolve_addr` | the last-chance filter; the process is going down |
+///
+/// This anchored on `"VEH EXCEPTION"` alone, which had two consequences. The fatal record —
+/// the *only* one carrying module attribution, because `g_richResolve` is set from the
+/// `force` flag that only the last-chance filter passes — was never parsed. And a crash that
+/// produced only an `UNHANDLED` record yielded no `CrashInfo` at all, so it fell past the
+/// blocking-crash branch in `analyze` and was classified `Verdict::Truncated`: real fatal
+/// crashes counted as inconclusive, in the bucket that is supposed to mean "no signature".
+///
+/// So the match is on the banner's SHAPE rather than on either `via` string. A third caller
+/// with a third `via` would otherwise reintroduce exactly this bug, silently, and the code and
+/// EIP parse identically for any of them.
+fn is_crash_header(l: &LogLine) -> bool {
+    l.source == "crash" && l.msg.trim_start().starts_with("====") && l.msg.contains(" EXCEPTION ")
+}
+
+/// Pull `module.dll` + `0xOFFSET` out of a crash banner's parenthesised resolve field.
+///
+/// The banner spells the faulting address as `@ EIP=00874E7D (Mercenaries2.exe+0x474E7D)`,
+/// where the parenthesised token is `resolve_addr`'s output. It has three forms, and each
+/// means something different:
+///
+/// * `name+0xN` — resolved. `name` is already a basename; the handler strips the path at
+///   `crash_handler.c:64-65`, which is what keeps a `C:\Users\<name>\…` path out of the log.
+/// * `?+0xN` — the address IS inside a loaded module (so the offset is real) but
+///   `GetModuleFileNameA` failed, so there is no name. Reported as `(None, Some(off))`:
+///   discarding the offset would be a lie about what was known, and inventing a name like
+///   `"?"` would put a sentinel into a field consumers treat as a filename.
+/// * `unknown module` — not in any loaded module at all (a wild pointer, or a first-chance
+///   record where resolution was skipped outright). Nothing is known; `(None, None)`.
+///
+/// A name is rejected if it carries a path separator or whitespace. Nothing the handler emits
+/// looks like that, which is the point: this field is the one place module text becomes typed
+/// and forwardable, so it fails closed on anything that does not look like a basename rather
+/// than passing an unexpected string through to a consumer.
+fn parse_module_offset(msg: &str) -> (Option<String>, Option<u32>) {
+    let after_eip = match after(msg, "EIP=") { Some(t) => t, None => return (None, None) };
+    let open = match after_eip.find('(') { Some(i) => i + 1, None => return (None, None) };
+    let close = match after_eip[open..].find(')') { Some(i) => open + i, None => return (None, None) };
+    let tok = after_eip[open..close].trim();
+    // Split at the LAST "+0x": a module basename can contain '+' but the offset never can.
+    let (name, hex) = match tok.rfind("+0x") { Some(i) => (&tok[..i], &tok[i + 3..]), None => return (None, None) };
+    let off = u32::from_str_radix(hex.trim(), 16).ok();
+    let named = !name.is_empty()
+        && name != "?"
+        && !name.contains(['\\', '/'])
+        && !name.contains(char::is_whitespace);
+    (named.then(|| name.to_string()), off)
+}
+
 fn analyze_crash(lines: &[LogLine], phases: &[PhaseHit]) -> Option<CrashInfo> {
-    let idx = lines.iter().rposition(|l| l.source == "crash" && l.msg.contains("VEH EXCEPTION"))?;
+    // The LAST banner in the file. `pmc_log` opens the log with `"w"`, so a file holds exactly
+    // one run — and within a run the fatal `UNHANDLED` record follows the first-chance `VEH` one
+    // for the same fault, so "last" is also "most informative": it is the record with module
+    // resolution, and the one that actually killed the process.
+    let idx = lines.iter().rposition(is_crash_header)?;
     let head = &lines[idx];
     let code = token_after(&head.msg, "EXCEPTION ").unwrap_or("?").to_string();
     let eip = hex_after(&head.msg, "EIP=").unwrap_or(0);
+    let (module, offset) = parse_module_offset(&head.msg);
     // gather the contiguous [crash] block from idx forward
     let mut block = Vec::new();
     let mut av = None;
     for l in lines[idx..].iter() {
         if l.source != "crash" { break; }
-        if l.msg.starts_with("AV ") { av = Some(l.msg.trim_start_matches("AV ").to_string()); }
+        // `trim_start` because the handler indents its detail lines — `pmc_log("crash", "  AV %s
+        // target=…")` — and the parser strips only the single space after `[crash]`, leaving the
+        // indent on `msg`. Matching `"AV "` against the raw message never fired, so `av` was
+        // always None and every consumer of it read "no access violation recorded".
+        let body = l.msg.trim_start();
+        if let Some(rest) = body.strip_prefix("AV ") { av = Some(rest.to_string()); }
         block.push(l.msg.clone());
         if block.len() >= 40 { break; }
     }
@@ -447,7 +541,7 @@ fn analyze_crash(lines: &[LogLine], phases: &[PhaseHit]) -> Option<CrashInfo> {
     let since = world_ms.map(|w| (crash_ms - w) as i64);
     Some(CrashInfo {
         raw_ts: head.raw_ts.clone(), ts_ms: head.ts_ms, code, eip, eip_label: phases::eip_label(eip).map(String::from),
-        av, block, terminal, since_world_load_ms: since,
+        av, module, offset, block, terminal, since_world_load_ms: since,
     })
 }
 
@@ -646,12 +740,23 @@ pub fn print_text(r: &Report) {
             None => println!("  subsystem: {}", "UNRECOGNIZED — new crash site; add EIP to phases::KNOWN_EIPS".yellow().bold()),
         }
         if let Some(av) = &c.av { println!("  AV {}", av); }
+        // Where the fault landed, as the handler resolved it. Only the fatal (UNHANDLED) record
+        // carries this; a first-chance-only capture prints the "not resolved" note instead, which
+        // is a fact about the record kind rather than about the crash.
+        match (&c.module, c.offset) {
+            (Some(m), Some(off)) => println!("  module: {}+0x{:X}", m.bold(), off),
+            (None, Some(off)) => println!("  module: {} (offset +0x{:X} is into an unnamed image — not comparable)",
+                                          "UNNAMED".yellow(), off),
+            _ => println!("  module: {}", "not resolved (first-chance record; only the fatal UNHANDLED record resolves modules)".dimmed()),
+        }
         if let Some(s) = c.since_world_load_ms { println!("  {} after world-load start", fmt_dur(s)); }
         for line in c.block.iter().take(24) { println!("    {}", line.dimmed()); }
     }
 
     // phase timeline
     println!("\n{}", "── PHASE TIMELINE ─────────────────────────────".cyan().bold());
+    println!("  {}", format!("ladder v{} ({} rungs) — phase numbers are ordinals into THIS table",
+                             r.ladder_version, LADDER.len()).dimmed());
     let mut prev_ms: Option<u64> = None;
     for ph in LADDER {
         let hit = r.phases.iter().find(|p| p.idx == ph.idx);
@@ -763,6 +868,126 @@ pub fn print_text(r: &Report) {
     for l in &r.tail { println!("  {}", l.dimmed()); }
 
     println!("{}", bar.dimmed());
+}
+
+/// The crash-record half: the anchor, and the typed `module`/`offset` extraction.
+///
+/// These drive `analyze` through the real parser rather than hand-building `LogLine`s, so the
+/// log TEXT is what is pinned — the shape `pmc_blackbox` actually writes, indentation and all.
+/// A hand-built `LogLine` would have hidden the `AV ` indent bug indefinitely.
+#[cfg(test)]
+mod crash_tests {
+    use super::{analyze, parse_module_offset, Verdict};
+    use crate::parse::parse_log;
+
+    /// A log that loads as far as the world-load rung, then faults.
+    fn log_with(crash_block: &str) -> String {
+        format!(
+            "[00:00:01.000] [blackbox] PMC Blackbox v3 armed\n\
+             [00:00:02.000] [lua] Top of ShellBootstrap::Init()\n\
+             [00:00:03.000] [world] Loading vz level with vz masterscript\n\
+             [00:00:04.000] [lua] CreatePlayerCharacter mattias\n\
+             {crash_block}"
+        )
+    }
+
+    fn report(text: &str) -> super::Report {
+        let lines = parse_log(text);
+        analyze("test.log", "0".into(), &lines, &["lua".into(), "pool".into()], &[], 30, 3)
+    }
+
+    /// ★ The defect this reconciliation exists to remove.
+    ///
+    /// A fatal crash that produced only an `UNHANDLED` record used to yield no `CrashInfo`, so
+    /// `analyze` fell past the blocking-crash branch and classified it `Truncated` — a bucket
+    /// that is supposed to mean "inconclusive" and was instead full of real fatal crashes.
+    #[test]
+    fn a_fatal_only_log_is_a_crash_not_truncated() {
+        let r = report(&log_with(
+            "[00:00:05.000] [crash] ==== UNHANDLED EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0047AA5C (Mercenaries2.exe+0x7AA5C) (flags=0) ====\n\
+             [00:00:05.001] [crash]   AV READ target=00000000  Mercenaries2.exe+0x7AA5C\n",
+        ));
+        assert!(matches!(r.verdict, Verdict::Crash { .. }), "fatal record must classify as CRASH");
+        let c = r.crash.expect("the UNHANDLED record is parsed");
+        assert_eq!(c.eip, 0x0047AA5C);
+        assert_eq!(c.code, "C0000005");
+        assert!(c.terminal);
+        // The fatal record is the one with module resolution — that is the whole reason to parse it.
+        assert_eq!(c.module.as_deref(), Some("Mercenaries2.exe"));
+        assert_eq!(c.offset, Some(0x7AA5C));
+        // and the AV line, whose two-space indent the old `starts_with("AV ")` never matched
+        assert_eq!(c.av.as_deref(), Some("READ target=00000000  Mercenaries2.exe+0x7AA5C"));
+        assert_eq!(c.since_world_load_ms, Some(2000));
+    }
+
+    /// The first-chance record still parses exactly as before — the anchor widened, it did not move.
+    #[test]
+    fn a_first_chance_record_still_parses_with_no_module() {
+        let r = report(&log_with(
+            "[00:00:05.000] [crash] ==== VEH EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0047AA5C (unknown module) (flags=0) ====\n\
+             [00:00:06.000] [lua] load continued after the handled fault\n",
+        ));
+        let c = r.crash.expect("VEH record still anchors");
+        assert_eq!(c.eip, 0x0047AA5C);
+        assert_eq!(c.module, None, "first-chance resolution is skipped — no module to report");
+        assert_eq!(c.offset, None);
+        assert!(!c.terminal, "lua progress after it means the load carried on");
+        assert!(!matches!(r.verdict, Verdict::Crash { .. }), "a recovered fault is not a CRASH verdict");
+    }
+
+    /// Both records for one fault: the fatal one wins, because it is the one that knows where it landed.
+    #[test]
+    fn the_fatal_record_wins_over_the_first_chance_one() {
+        let r = report(&log_with(
+            "[00:00:05.000] [crash] ==== VEH EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0047AA5C (unknown module) (flags=0) ====\n\
+             [00:00:05.100] [crash] ==== UNHANDLED EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0047AA5C (dxwrapper.dll+0x1C40) (flags=0) ====\n",
+        ));
+        let c = r.crash.expect("a crash");
+        assert_eq!(c.raw_ts, "00:00:05.100");
+        assert_eq!(c.module.as_deref(), Some("dxwrapper.dll"));
+        assert_eq!(c.offset, Some(0x1C40));
+    }
+
+    /// `?+0x…`: the module is real but unnamed. The offset survives; the name does not become `"?"`.
+    #[test]
+    fn an_unnamed_module_keeps_its_offset_and_reports_no_name() {
+        let (m, off) = parse_module_offset(
+            "==== UNHANDLED EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=6D982251 (?+0x2251) (flags=0) ====",
+        );
+        assert_eq!(m, None, "`?` is the handler saying it has no name — not a name");
+        assert_eq!(off, Some(0x2251), "the offset is genuine; discarding it would lose what was known");
+    }
+
+    #[test]
+    fn module_forms_that_must_not_be_reported_as_a_name() {
+        // Not in any loaded module.
+        assert_eq!(parse_module_offset("… @ EIP=00000004 (unknown module) (flags=0) ===="), (None, None));
+        // No resolve field at all (an older handler, or a truncated line).
+        assert_eq!(parse_module_offset("==== VEH EXCEPTION C0000005 AV @ EIP=0047AA5C"), (None, None));
+        // Fails closed on anything that is not a bare basename — a path would be rule-3 data.
+        assert_eq!(
+            parse_module_offset("… @ EIP=0047AA5C (C:\\Users\\austin\\game\\thing.dll+0x10)"),
+            (None, Some(0x10))
+        );
+    }
+
+    /// A `.asi` basename with punctuation resolves whole — the split is on the LAST `+0x`.
+    #[test]
+    fn a_plugin_basename_survives_intact() {
+        let (m, off) = parse_module_offset("… @ EIP=6D982251 (lua_trace-v2+x.asi+0x2251) (flags=0) ====");
+        assert_eq!(m.as_deref(), Some("lua_trace-v2+x.asi"));
+        assert_eq!(off, Some(0x2251));
+    }
+
+    /// `ladder_version` rides on every report, so a `--json` consumer can refuse to pool ordinals.
+    #[test]
+    fn the_report_carries_the_ladder_version() {
+        let r = report("[00:00:01.000] [blackbox] PMC Blackbox v3 armed\n");
+        // (the crate-root re-export is covered from tests/fixtures.rs — this module is compiled
+        // into the BINARY too, which has its own private `mod` tree and no crate-root re-export)
+        assert_eq!(r.ladder_version, crate::phases::LADDER_VERSION);
+        assert!(r.ladder_version >= 1);
+    }
 }
 
 #[cfg(test)]

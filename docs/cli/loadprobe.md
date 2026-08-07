@@ -64,7 +64,7 @@ classification.
 consulted when `--symbolize` is set; on their own they do nothing. Symbolization runs
 *after* analysis and *only* rewrites the lines inside the detected `[crash]` block, so:
 
-* If the run has no `[crash VEH EXCEPTION]` line, `--symbolize` (and its path options) change
+* If the run has no `[crash]` exception banner, `--symbolize` (and its path options) change
   nothing.
 * Because it mutates the crash block in the `Report` before output, `--symbolize` affects
   **both** the text dump and `--json` — the resolved `= function+0xN` suffixes appear in the
@@ -76,6 +76,35 @@ consulted when `--symbolize` is set; on their own they do nothing. Symbolization
   log's parent dir, that dir's `scripts/` subdir, and every `--module-dir` — in that order.
 * If neither source exists (missing exe map and no `.asi`/`.dll` next to the log),
   `--symbolize` prints a warning to stderr and leaves the crash block untouched.
+
+## Crash records: both kinds are read
+
+`pmc_blackbox` logs a fault twice over, from two different handlers, and they are not
+interchangeable:
+
+| Banner | Handler | Module resolution |
+| --- | --- | --- |
+| `==== VEH EXCEPTION …` | first-chance VEH | none — logs `unknown module`. The handler skips the loader-lock APIs here on purpose; taking them mid-spawn perturbed the game. |
+| `==== UNHANDLED EXCEPTION …` | last-chance filter | full — the banner names `module.dll+0xOFFSET`. The process is going down, so there is nothing left to perturb. |
+
+loadprobe anchors on **either** banner and takes the last one in the file, which for a
+fatal fault is the `UNHANDLED` record — the one that knows where the fault landed. Before
+this it anchored on `VEH EXCEPTION` alone, so a crash that produced only a fatal record was
+reported as TRUNCATED (exit `12`) rather than CRASH (exit `10`), and the module was never
+read at all.
+
+`--json` exposes the resolved location as typed `crash.module` / `crash.offset` fields
+rather than leaving it to be scraped out of `crash.block[]`. Three states, all distinct:
+
+| `module` | `offset` | Meaning |
+| --- | --- | --- |
+| `"dxwrapper.dll"` | `7232` | Resolved. The name is a basename; the handler strips the path. |
+| `null` | `8785` | The address is inside a loaded module the handler could not name (`?+0x…`). The offset is real but is **not comparable to anything** — you do not know which image it indexes. |
+| `null` | `null` | Not in any loaded module, or a first-chance record where resolution was skipped. |
+
+Also in `--json`: `ladder_version`, the version of the phase table `furthest_idx` and `pct`
+are expressed against. Adding a rung shifts every ordinal after it and rescales `pct`, so
+neither field may be compared across differing `ladder_version` values.
 
 **`--hang-secs` is the only option that can change the verdict (and exit code).** A larger
 value makes HANG harder to declare: a wedge shorter than the threshold falls through to

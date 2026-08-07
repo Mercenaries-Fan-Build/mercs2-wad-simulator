@@ -867,9 +867,29 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
         );
     }
 
-    let report = build::link_installed(&[&a, &b], &mut game, &corpus, &root.join("deploy"))
+    let deploy = root.join("deploy");
+    let report = build::link_installed(&[&a, &b], &mut game, &corpus, &deploy)
         .expect("deploy link");
     eprintln!("{}", report.log.join("\n"));
+
+    // ONE contract for locating outputs. `build` has always written a placement record; the link
+    // step wrote a bare `zz-quartermaster-link.wad` and nothing else, so a deploy tool had to
+    // special-case a filename for this directory and read the record for every other one. A second
+    // undocumented output path is how a deploy step ends up guessing which files to mount — and a
+    // wrong guess there does not fail loudly, it mounts the wrong set and the game boots.
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(deploy.join("placement.json")).unwrap())
+            .expect("the link step writes a placement record too");
+    assert_eq!(record["format"], 1);
+    let placed = record["placements"].as_array().expect("placements array");
+    assert_eq!(placed.len(), 1);
+    assert_eq!(placed[0]["name"], build::LINK_WAD_NAME);
+    assert_eq!(
+        placed[0]["destination"]["kind"], "overlay",
+        "the mount instruction has to be IN the record — 'zz-' sorting last is a convention a \
+         reader would have to know, not a contract it can read"
+    );
+    assert_eq!(placed[0]["sha256"], report.placements[0].sha256);
 
     assert_eq!(
         report.linked.len(),
@@ -1040,7 +1060,7 @@ fn the_deploy_link_is_order_independent() {
 }
 
 /// Nothing to link means no overlay — an overlay that merely restates the base block is noise a
-/// user would have to reason about.
+/// user would have to reason about. It does NOT mean no placement record.
 #[test]
 fn a_set_with_no_script_mods_emits_no_link_wad() {
     let Some(mut game) = discovered_game() else {
@@ -1056,9 +1076,23 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
         &root.join("tex"),
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
-    let report = build::link_installed(&[&s], &mut game, &corpus, &root.join("out")).expect("link");
+    let out = root.join("out");
+    let report = build::link_installed(&[&s], &mut game, &corpus, &out).expect("link");
     assert!(report.wad.is_none());
     assert!(report.linked.is_empty());
+
+    // …but the RECORD is still written. "No overlay to mount" and "link never ran" are opposite
+    // facts a deploy step must act on differently, and an absent file cannot tell them apart. The
+    // empty array says which one it is.
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap())
+            .expect("a placement record exists even with nothing to place");
+    assert_eq!(record["format"], 1);
+    assert_eq!(
+        record["placements"].as_array().map(|a| a.len()),
+        Some(0),
+        "nothing to place, stated rather than implied"
+    );
 }
 
 // ---------------------------------------------------------------------------
