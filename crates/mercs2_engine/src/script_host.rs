@@ -1983,7 +1983,8 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
         "tPlayerData",         // :767  MrxPlayer.LoadSingleton
         "tBoundaryData",       // :793  WifVzBoundary.LoadSingleton
         "tPmcData",            // :795  MrxPmc.LoadSingleton
-        "tSupportData",        // :796  MrxSupportData.LoadSingleton
+        // tSupportData (:796 MrxSupportData.LoadSingleton) is special-cased below — unlike its siblings
+        // it indexes a sub-key unguarded, so a bare empty table is not enough.
         "tRewardData",         // :797  MrxRewardData.LoadSingleton
         "tFactionData",        // :798  MrxFactionManager.LoadSingleton
         "tPmcInteriorData",    // :799  WifPmcInterior.LoadSingleton  <- the one that first threw
@@ -2000,6 +2001,19 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
     ] {
         root.set(key, lua.create_table()?)?;
     }
+    // `tSupportData` — `MrxSupportData.LoadSingleton` (`mrxsupportdata.lua:2445`) does an UNGUARDED
+    // `tRequirementsObtained = tSaveData._tRequirementsObtained` (`:2449`), so an absent key nils the
+    // module global; the recruit setters (`SetMechanicRecruited` `:79`, via `SynchNetRecruits` `:105`,
+    // fired on the `WaitForStreaming` state exit) then INDEX it and throw. Unlike its siblings it does
+    // not test individual fields, so a present-but-empty outer table is not enough — the inner
+    // `_tRequirementsObtained` must itself be a table. Seed it empty ("nothing recorded for me"): the
+    // global loads as a valid empty table, the setters assign into it, and `IsSupportEquippable` (`:57`)
+    // simply reports not-yet-obtained until real support save-state is reconstructed. (Per this
+    // function's rule we do NOT guess the recruit booleans — `Init` `:115` seeds them all before the
+    // load, and an empty save-table is the honest "this save recorded no support progress".)
+    let support = lua.create_table()?;
+    support.set("_tRequirementsObtained", lua.create_table()?)?;
+    root.set("tSupportData", support)?;
     // `WifPmcInterior.SetAvailableCostumes` (`:1522`) does `nAvailableCostumes - GetAvailableCostumes()`
     // with no nil guard, and `GetAvailableCostumes` reports `_nAvailableCostumes or 1`. Passing 1 is the
     // neutral value: zero newly-unlocked costumes, so the unlock fanfare stays silent.
