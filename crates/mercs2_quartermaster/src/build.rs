@@ -171,6 +171,9 @@ pub enum Destination {
     /// A file placed in the game folder, at this path relative to it — an `.asi` in the loader's
     /// search path, or a companion beside it.
     GameFolder { relative: String },
+    /// A NEW base WAD in `data/`, at this path relative to the game folder (`data/<name>.wad`). Only
+    /// `add_language` produces one; it is ADDITIVE and collision-checked, never over a shipped WAD.
+    DataWad { relative: String },
 }
 
 /// One emitted artifact and its digest.
@@ -208,6 +211,48 @@ pub const ASI_SUBDIR: &str = "scripts";
 /// hash correctly, and never load — with the loader logging nothing at all, because it never
 /// considered the file.
 pub const RESERVED_ASI: &str = "pmc_bb.asi";
+
+/// The base-WAD basenames the game already ships, which `add_language` must never overwrite.
+///
+/// The engine opens `.\Data\<name>.wad` by name; a novel language is ADDITIVE, so it may only
+/// introduce a name the game does not ship. These are the level/shell/loading WADs plus the six
+/// shipped language WADs — placing over any of them would shadow base-game data.
+pub const RESERVED_WAD_BASENAMES: &[&str] = &[
+    "vz", "shell", "loading", "english", "french", "german", "italian", "spanish", "japanese",
+    "russian",
+];
+
+/// Refuse an `add_language` name that could not be a novel language WAD.
+///
+/// Two failure modes, both about `name` becoming BOTH `.\Data\<name>.wad` AND the stringdb key: it
+/// must be a lowercase `[a-z0-9_]` token (a single, filesystem-safe path component — the engine's own
+/// language names are `english`, `english_uk`), and it must not be a WAD the game already ships, which
+/// this kind would otherwise overwrite. This is the `data/` safety pivot in code: [`PlaceIn`] bans
+/// `data/` outright, and `add_language` earns it back only for a builder-derived, collision-checked
+/// name. Called by the linter (M0200, so template CI says so) AND the lowering (so the refusal
+/// survives a suppressed rule).
+pub fn language_name_refusal(name: &str) -> Option<String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Some("it is empty".into());
+    }
+    if !n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        return Some(format!(
+            "{n:?} is not a language token — expected lowercase a-z, digits and underscore only. It \
+             becomes the filename `.\\Data\\{n}.wad` and hashes to the stringdb key, so a separator, \
+             an uppercase letter or punctuation cannot appear in it"
+        ));
+    }
+    if RESERVED_WAD_BASENAMES.contains(&n) {
+        return Some(format!(
+            "{n:?} is a WAD the game already ships (`.\\Data\\{n}.wad`). add_language only ADDS a \
+             language it never shipped and must never overwrite a base WAD — pick a name that is not \
+             one of: {}",
+            RESERVED_WAD_BASENAMES.join(", ")
+        ));
+    }
+    None
+}
 
 /// Join a game-folder directory and a filename into the relative path a deploy tool writes.
 ///
@@ -341,6 +386,12 @@ enum Lowering {
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
     Blocks(Vec<PatchBlock>),
+    /// A NEW base WAD placed in `data/`. `add_language` is the only producer: a novel language WAD the
+    /// engine opens by name, kept OUT of the Shipment overlay because it is not an overlay over vz.
+    LanguageWad {
+        language: String,
+        blocks: Vec<PatchBlock>,
+    },
     /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
     /// next to the digest it records for them.
     File {
@@ -2696,6 +2747,98 @@ fn lower(
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::Block(block))
         }
+
+        // A NEW language WAD. Forks the base string table out of the stack (like edit_stringdb reads a
+        // table), applies the translation, and RE-KEYS the container under the new language's own hash
+        // so the engine resolves it as `<name>`'s table when the selector mounts `.\Data\<name>.wad`.
+        // Emitted as its OWN base WAD (kept out of the Shipment overlay) because the game opens it by
+        // name, not as an overlay over vz.
+        Contribution::AddLanguage {
+            name,
+            display: _,
+            strings,
+            base,
+        } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            // Belt to M0200's braces: never mint a WAD name that shadows a shipped one, even if the
+            // rule was suppressed. The `data/` write is only safe because this holds.
+            if let Some(why) = language_name_refusal(name) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("add_language name {name:?} is not usable: {why}"),
+                });
+            }
+
+            let base_name = base.as_deref().unwrap_or("english");
+            let base_hash = crate::manifest::asset_hash(base_name);
+            let container = game
+                .container_for_asset(base_hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "base table {base_name:?} (0x{base_hash:08X}) is not a string table in the \
+                         configured game stack — a new language forks a shipped table, so `base` must \
+                         name one that exists (default `english`)"
+                    ),
+                })?;
+
+            let text = std::fs::read_to_string(root.join(strings)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(strings).display()),
+            })?;
+            let edits = parse_string_edits(&text)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            if edits.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} declares no strings — a language identical to {base_name} is not a new \
+                         language",
+                        root.join(strings).display()
+                    ),
+                });
+            }
+            let edited = mercs2_formats::stringdb::edit_container(&container, &edits)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+
+            // Re-key the forked container under the NEW language's hash so the engine resolves it as
+            // `<name>`'s table, not `base`'s. Same single-entry stringdb block shape edit_stringdb
+            // emits — INFO/KEYS/STRS spliced straight in, PRIMARY, sentinel LOD (a string table has no
+            // LOD chain, so anything but the sentinel would dangle, M0001).
+            let hash = crate::manifest::asset_hash(name);
+            log.push(format!(
+                "contributions[{index}] add_language {name} 0x{hash:08X} ← fork {base_name} \
+                 0x{base_hash:08X}: {} key(s) translated, container {} -> {} bytes → .\\Data\\{name}.wad",
+                edits.len(),
+                container.len(),
+                edited.len()
+            ));
+            let mut block_data = Vec::new();
+            block_data.extend_from_slice(&1u32.to_le_bytes());
+            block_data.extend_from_slice(&hash.to_le_bytes());
+            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
+            block_data.extend_from_slice(&0u32.to_le_bytes());
+            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
+            block_data.extend_from_slice(&edited);
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
+            let block = PatchBlock::from_decompressed(
+                &block_data,
+                format!("blocks\\{name}\\{name}_stringdb.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            Ok(Lowering::LanguageWad {
+                language: name.clone(),
+                blocks: vec![block],
+            })
+        }
     }
 }
 
@@ -2878,11 +3021,13 @@ pub fn build(
 
     let mut blocks = Vec::new();
     let mut files = Vec::new();
+    let mut lang_wads: Vec<(String, Vec<PatchBlock>)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match lower(index, c, &shipment.root, game.as_deref_mut(), names, &mut log)? {
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
             Lowering::Blocks(bs) => blocks.extend(bs),
+            Lowering::LanguageWad { language, blocks: bs } => lang_wads.push((language, bs)),
             Lowering::File {
                 name,
                 relative,
@@ -3048,6 +3193,50 @@ pub fn build(
             destination: Destination::Overlay,
         });
         wad_path = Some(path);
+    }
+
+    // Language WADs. A NEW base WAD per `add_language`, placed in `data/` — NOT the Shipment overlay,
+    // because the engine opens it by name. Assembled with the same machinery, self-checked before it
+    // reaches disk, and recorded as a `Destination::DataWad` so deploy places it in `data/` — the one
+    // place a Shipment writes a WAD, earned only by the collision-checked name (`language_name_refusal`).
+    for (language, lang_blocks) in lang_wads {
+        let wad =
+            build_patch_wad_multi(&lang_blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+                BuildError::Lower {
+                    index: 0,
+                    kind: "add_language",
+                    message: m,
+                }
+            })?;
+        let found = verify_emitted(&wad)?;
+        for d in &found {
+            log.push(format!("self-check ({language}.wad): {d}"));
+        }
+        diagnostics.extend(found);
+
+        let relative = format!("data/{language}.wad");
+        let path = out_dir.join(&relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| BuildError::Io {
+                path: parent.to_path_buf(),
+                message: e.to_string(),
+            })?;
+        }
+        std::fs::write(&path, &wad).map_err(|e| BuildError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        })?;
+        let digest = sha256_hex(&wad);
+        log.push(format!(
+            "wrote {relative}: {} bytes, sha256 {digest} → new base language WAD",
+            wad.len()
+        ));
+        placements.push(Placement {
+            name: format!("{language}.wad"),
+            bytes: wad.len(),
+            sha256: digest,
+            destination: Destination::DataWad { relative },
+        });
     }
 
     // Code-layer artifacts. The build directory MIRRORS the tree these will be copied into, so
@@ -3378,6 +3567,9 @@ fn placement_json(placements: &[Placement]) -> String {
                 Destination::Overlay => serde_json::json!({ "kind": "overlay" }),
                 Destination::GameFolder { relative } => {
                     serde_json::json!({ "kind": "game_folder", "relative": relative })
+                }
+                Destination::DataWad { relative } => {
+                    serde_json::json!({ "kind": "data_wad", "relative": relative })
                 }
             };
             serde_json::json!({

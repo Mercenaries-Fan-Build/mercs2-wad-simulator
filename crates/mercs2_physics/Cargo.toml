@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_physics"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — Havok character controller, rigid bodies, collision queries, MOPP/heightfield."
 readme = "README.md"

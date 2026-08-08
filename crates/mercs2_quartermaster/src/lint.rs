@@ -195,6 +195,25 @@ pub const M0194_LAYER_UNKNOWN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#activate_layer",
 };
 
+/// An `add_language` name that cannot be a novel language WAD — not a lowercase `[a-z0-9_]` token, or
+/// one the game already ships (`.\Data\<name>.wad`), which the kind would otherwise overwrite. The
+/// message comes from [`crate::build::language_name_refusal`], the same check the lowering enforces —
+/// so the refusal exists at BOTH ends and cannot be reached past by suppressing the rule.
+pub const M0200_LANGUAGE_NAME_UNUSABLE: Rule = Rule {
+    code: "M0200",
+    title: "an add_language name is not a usable language name, or collides with a shipped WAD",
+    doc: "docs/modding/manifest_format.md#add_language",
+};
+
+/// An `add_language` with no `native_hook` in the same Shipment. PC has no in-game language selector,
+/// so without the language-selector plugin the new language ships but nothing switches the game into
+/// it. Advisory: the plugin MAY be installed separately, which a single manifest cannot see.
+pub const M0201_LANGUAGE_NO_SELECTOR: Rule = Rule {
+    code: "M0201",
+    title: "an add_language ships no selector plugin, so nothing switches the game into it",
+    doc: "docs/modding/manifest_format.md#add_language",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -228,6 +247,8 @@ pub const RULES: &[Rule] = &[
     M0171_INSECURE_URL,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
+    M0200_LANGUAGE_NAME_UNUSABLE,
+    M0201_LANGUAGE_NO_SELECTOR,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -997,6 +1018,42 @@ pub fn lint(
             }
             Contribution::PlaceFile { file, dest } => {
                 out.extend(placed_file_checks(index, file, *dest, &plugin_stems));
+            }
+            Contribution::AddLanguage { name, .. } => {
+                // The `data/` safety pivot: refuse a name that is not a usable language token or that
+                // collides with a WAD the game already ships. Error, and the SAME refusal the lowering
+                // enforces — surfaced here so template CI says so before a build is attempted.
+                if let Some(why) = crate::build::language_name_refusal(name) {
+                    out.push(Diagnostic {
+                        rule: M0200_LANGUAGE_NAME_UNUSABLE,
+                        severity: Severity::Error,
+                        message: format!("add_language name {name:?}: {why}"),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
+                // Selection is a separate concern — PC chooses its language at boot from OS-locale and
+                // has no in-game selector — so a language with no companion `native_hook` in this
+                // Shipment ships content nothing switches into. Advisory: the selector may be installed
+                // separately, which this manifest cannot see.
+                let has_selector = manifest
+                    .contributions
+                    .iter()
+                    .any(|o| matches!(o, Contribution::NativeHook { .. }));
+                if !has_selector {
+                    out.push(Diagnostic {
+                        rule: M0201_LANGUAGE_NO_SELECTOR,
+                        severity: Severity::Warning,
+                        message: format!(
+                            "add_language {name:?} ships no `native_hook` selector in this Shipment. \
+                             PC has no in-game language selector, so without the language-selector \
+                             plugin the new language ships but nothing switches the game into it — \
+                             ship the selector here, or install it separately."
+                        ),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
             }
             _ => {}
         }

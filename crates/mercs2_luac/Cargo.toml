@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_luac"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Mercenaries 2 Lua 5.1.5 — the workspace's single Lua. Vendors the game's VM flavour (float lua_Number, 32-bit size_t), emits LuaQ chunks the game accepts from any host, and exposes the whole VM as raw FFI (`sys`) so the engine's script host and the bytecode compiler share one library instead of colliding over unprefixed `lua_*` symbols."
 license.workspace = true

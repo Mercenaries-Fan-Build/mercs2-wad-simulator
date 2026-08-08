@@ -646,3 +646,97 @@ fn a_payload_that_is_not_a_movie_is_left_to_the_lowering() {
 fn m0190_is_registered() {
     assert!(lint::RULES.iter().any(|r| r.code == "M0190"));
 }
+
+// ---------------------------------------------------------------------------
+// add_language (M0200 / M0201)
+// ---------------------------------------------------------------------------
+
+/// A novel language paired with its selector plugin is clean — the ordinary, correct shape.
+#[test]
+fn a_novel_language_with_a_selector_is_quiet() {
+    let m = shipment_with(
+        "  - kind: add_language
+    name: polski
+    display: Polski
+    strings: src/text/polski.txt
+  - kind: native_hook
+    target: retail
+    plugin: src/mercs2_language.asi
+    touches: [\"0x004BFE20\"]
+",
+    );
+    assert!(lint::lint(&m, None, None).is_empty());
+}
+
+/// A name the game already ships (`.\Data\english.wad`) is an ERROR: add_language may only ADD, and
+/// placing over a shipped WAD would shadow base-game data — the `data/` safety pivot.
+#[test]
+fn a_language_name_that_collides_with_a_shipped_wad_is_an_error() {
+    for name in ["english", "vz", "shell", "russian"] {
+        let m = shipment_with(&format!(
+            "  - kind: add_language
+    name: {name}
+    display: X
+    strings: src/text/x.txt
+  - kind: native_hook
+    target: retail
+    plugin: src/x.asi
+    touches: [\"0x004BFE20\"]
+"
+        ));
+        let diags = lint::lint(&m, None, None);
+        assert!(
+            codes(&diags).contains(&"M0200"),
+            "{name} must be refused: {diags:?}"
+        );
+        assert!(lint::blocks_build(&diags), "{name} must block the build");
+    }
+}
+
+/// A name that is not a lowercase `[a-z0-9_]` token cannot be a filename / stringdb key — M0200.
+#[test]
+fn a_language_name_that_is_not_a_token_is_an_error() {
+    for name in ["Polski", "pl-PL", "pl.pl", "es/es"] {
+        let m = shipment_with(&format!(
+            "  - kind: add_language
+    name: \"{name}\"
+    display: X
+    strings: src/text/x.txt
+  - kind: native_hook
+    target: retail
+    plugin: src/x.asi
+    touches: [\"0x1\"]
+"
+        ));
+        assert!(
+            codes(&lint::lint(&m, None, None)).contains(&"M0200"),
+            "{name} is not a language token"
+        );
+    }
+}
+
+/// An add_language with no selector plugin in the same Shipment is a WARNING, not a block: PC has no
+/// in-game selector, so nothing switches the game into the language — but the plugin may be installed
+/// separately, so it does not fail the build.
+#[test]
+fn a_language_without_a_selector_warns_but_does_not_block() {
+    let m = shipment_with(
+        "  - kind: add_language
+    name: polski
+    display: Polski
+    strings: src/text/polski.txt
+",
+    );
+    let diags = lint::lint(&m, None, None);
+    assert!(codes(&diags).contains(&"M0201"), "{diags:?}");
+    assert!(!lint::blocks_build(&diags), "M0201 is advisory, not blocking");
+    assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+}
+
+/// Both new rules are registered, so `qm rules` can list them.
+#[test]
+fn the_language_rules_are_registered() {
+    for code in ["M0200", "M0201"] {
+        assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
+    }
+}

@@ -321,6 +321,9 @@ impl Contribution {
             // not files to pack.
             Contribution::ActivateLayer { .. } => {}
             Contribution::EditStringDb { strings, .. } => out.push(("strings", strings.as_path())),
+            // The translation file, checked by the same source rules as every other `src/` path. `base`
+            // is a table NAME, not a file, so there is nothing else to pack.
+            Contribution::AddLanguage { strings, .. } => out.push(("strings", strings.as_path())),
             Contribution::NativeHook { plugin, .. } => {
                 if let Some(p) = plugin {
                     out.push(("plugin", p.as_path()));

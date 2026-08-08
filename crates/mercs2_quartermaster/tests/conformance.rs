@@ -84,6 +84,11 @@ contributions:
     target: english
     strings: src/text/english.txt
 
+  - kind: add_language
+    name: polski
+    display: Polski
+    strings: src/text/polski.txt
+
   - kind: add_movie
     name: my_hud_widgets
     movie: src/ui/widgets.gfx
@@ -193,6 +198,12 @@ const JSON: &str = r#"
       "kind": "edit_stringdb",
       "target": "english",
       "strings": "src/text/english.txt"
+    },
+    {
+      "kind": "add_language",
+      "name": "polski",
+      "display": "Polski",
+      "strings": "src/text/polski.txt"
     },
     {
       "kind": "add_movie",
@@ -313,6 +324,12 @@ target = "english"
 strings = "src/text/english.txt"
 
 [[contributions]]
+kind = "add_language"
+name = "polski"
+display = "Polski"
+strings = "src/text/polski.txt"
+
+[[contributions]]
 kind = "add_movie"
 name = "my_hud_widgets"
 movie = "src/ui/widgets.gfx"
@@ -373,6 +390,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "edit_world",
             "activate_layer",
             "edit_stringdb",
+            "add_language",
             "add_movie",
             "add_ui",
             "patch_lua",

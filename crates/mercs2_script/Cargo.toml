@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_script"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 description = "The engine's Lua script host: VM + module system (import/inherit) + the Sys.*/engine binding mechanism. Asset-agnostic; the game's Mercenaries Lua runs ON it. Runs the game's OWN Lua 5.1.5 VM (float lua_Number), so the shipped corpus executes as authored."
 readme = "README.md"

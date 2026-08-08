@@ -1935,6 +1935,7 @@ fn a_plugin_and_its_companion_build_together() {
         .iter()
         .map(|p| match &p.destination {
             Destination::GameFolder { relative } => relative.clone(),
+            Destination::DataWad { relative } => relative.clone(),
             Destination::Overlay => "overlay".into(),
         })
         .collect();

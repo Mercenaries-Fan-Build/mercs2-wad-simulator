@@ -543,6 +543,39 @@ pub enum Contribution {
         /// A `src/`-relative file mapping bracket keys (`[Menu.Play]`) to their new text.
         strings: PathBuf,
     },
+    /// Data, NEW base WAD. Adds a **novel language** the install never shipped — a `.\Data\<name>.wad`
+    /// the engine opens by name, carrying that language's `stringdb`.
+    ///
+    /// This is the one kind that places a NEW BASE WAD in `data/` rather than an overlay. It has to:
+    /// the engine builds BOTH the mounted filename (`.\Data\<name>.wad`) AND the stringdb key
+    /// (`pandemic_hash_m2(name) × 0x39E5E978`) from the same language-name string, and a missing base
+    /// `<name>.wad` is a hard `exit(1)` (`FUN_004bfe20`). So a new selectable language is a new base
+    /// WAD, which no overlay kind can express. The `data/` write is safe by CONSTRUCTION — the
+    /// filename is builder-derived from `name` and refused if it collides with a WAD the game already
+    /// ships (`build::language_name_refusal`), so it can only ever ADD, never shadow `vz.wad` or a
+    /// shipped language.
+    ///
+    /// Selection is a SEPARATE concern: PC has no in-game language selector (the language is chosen at
+    /// boot from OS-locale), so a companion `native_hook` — the language-selector `.asi` — forces the
+    /// index. `add_language` ships the CONTENT; pairing it with that plugin is what makes the language
+    /// reachable (M0201 warns when it is missing). The RE and the plugin contract are in
+    /// `docs/reverse_engineer/language_asi_hook_contract.md`.
+    AddLanguage {
+        /// The language name → the mounted `.\Data\<name>.wad` filename AND `pandemic_hash_m2(name)`
+        /// for the stringdb key. A lowercase `[a-z0-9_]` token (it becomes a filename), and never a
+        /// name the game already ships — both enforced by `build::language_name_refusal` / M0200.
+        name: String,
+        /// The label a selector UI (Modkit) shows for this language. Metadata — it is not lowered into
+        /// the WAD, because the engine has no selector to read it.
+        display: String,
+        /// A `src/`-relative translation file, one edit per line (`[Menu.Play] = text`), exactly the
+        /// format [`Contribution::EditStringDb`] takes. The build forks `base` and applies these; keys
+        /// left untranslated keep the base text.
+        strings: PathBuf,
+        /// The shipped string table to fork as the starting point. Omit for `english`.
+        #[serde(default)]
+        base: Option<String>,
+    },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
     /// else's ASI use `load.requires` with a pinned digest instead — never vendor a third-party
     /// binary. `dest` is deliberately absent: the author cannot name a path, so the exe and
@@ -610,6 +643,7 @@ impl Contribution {
         "edit_world",
         "activate_layer",
         "edit_stringdb",
+        "add_language",
         "native_hook",
         "place_file",
         "raw",
@@ -630,6 +664,7 @@ impl Contribution {
             Contribution::EditWorld { .. } => "edit_world",
             Contribution::ActivateLayer { .. } => "activate_layer",
             Contribution::EditStringDb { .. } => "edit_stringdb",
+            Contribution::AddLanguage { .. } => "add_language",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
             Contribution::Raw { .. } => "raw",

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_anim"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Mercenaries 2 reimpl — animation runtime (controllers, IK, ragdoll, FaceFX)."
 readme = "README.md"

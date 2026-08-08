@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_bridge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Live link to a running Mercenaries 2 via Wally's lua-bridge ASI: a rate-limited raw-TCP client for its <<<RUN>>>/<<<END>>> REPL protocol, consumed by the Workshop and Modkit."
 license.workspace = true

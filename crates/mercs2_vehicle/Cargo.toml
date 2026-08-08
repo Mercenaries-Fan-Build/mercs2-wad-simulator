@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_vehicle"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
 description = "Mercenaries 2 reimpl — vehicle actors + custom raycast drive model + command-ring transport + camera modes. Exe is the oracle (docs/reverse_engineer/vehicle_code_map.md)."
 readme = "README.md"

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_formats"
-version = "3.4.0"
+version = "3.5.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — asset format layer: WAD/sges/UCFX/mesh/texture/terrain container parsing and decompression."
 readme = "README.md"

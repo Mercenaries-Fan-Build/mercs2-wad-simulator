@@ -327,6 +327,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::EditStringDb { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
+            // A NEW language: mints a new stringdb hash (`hash(name)`) carried in a new base WAD.
+            // Additive, so two Shipments adding the same language collide (KeyedSet) rather than one
+            // silently winning — the same shape as add_texture / add_movie.
+            Contribution::AddLanguage { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
             Contribution::NativeHook {
                 plugin,
                 symbol,

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_combat"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "Mercenaries 2 reimpl — weapons/combat (wpn_* stats, projectile lifecycle, homing FSM, damage/explosion applier)."
 readme = "README.md"
