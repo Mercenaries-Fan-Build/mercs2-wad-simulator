@@ -150,6 +150,11 @@ pub const M0171_INSECURE_URL: Rule = Rule {
     title: "an external requirement is fetched over an untrusted transport",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
+pub const M0172_BAD_VERSION_REQ: Rule = Rule {
+    code: "M0172",
+    title: "a managed requirement's version is not a valid semver range",
+    doc: "docs/modding/manifest_format.md#the-code-layer",
+};
 pub const M0190_MOVIE_CARRIES_AS3: Rule = Rule {
     code: "M0190",
     title: "an added movie carries AS3 bytecode, which the GFx 2.0.48 runtime cannot execute",
@@ -245,6 +250,7 @@ pub const RULES: &[Rule] = &[
     M0163_COMPANION_NOT_BESIDE_PLUGIN,
     M0170_BAD_DIGEST,
     M0171_INSECURE_URL,
+    M0172_BAD_VERSION_REQ,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
     M0200_LANGUAGE_NAME_UNUSABLE,
@@ -1060,6 +1066,23 @@ pub fn lint(
     }
 
     for req in &manifest.load.requires {
+        // A managed requirement carries a semver RANGE that resolution compares releases against.
+        // An unparseable range is a hard error: nothing downstream can pick a version from it.
+        if let Requirement::Compatible { name, version } = req {
+            if semver::VersionReq::parse(version).is_err() {
+                out.push(Diagnostic {
+                    rule: M0172_BAD_VERSION_REQ,
+                    severity: Severity::Error,
+                    message: format!(
+                        "requirement {name:?} pins version {version:?}, which is not a valid semver \
+                         range. Use a range resolution can compare against — e.g. \"^0.1\" or \
+                         \">=0.0.3, <1.0.0\"."
+                    ),
+                    at: None,
+                    fix: None,
+                });
+            }
+        }
         if let Requirement::External { url, sha256 } = req {
             let looks_like_digest =
                 sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit());
