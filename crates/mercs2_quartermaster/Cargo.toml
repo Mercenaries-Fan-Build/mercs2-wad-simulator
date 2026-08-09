@@ -43,6 +43,10 @@ png = "0.17"  # decode source images for texture lowering (same version the work
 # not reintroduce the mlua/`mercs2_luac` symbol collision warned about above.
 wad_simulator = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+# Managed dependencies (`load.requires` → `Requirement::Compatible`) carry a semver RANGE, resolved
+# like a package manager. The same crate Cargo itself parses version requirements with, so the range
+# semantics a modder expects (`^0.1`, `>=0.0.3, <1.0.0`) are exactly what they get.
+semver = "1"
 
 [dev-dependencies]
 # Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
