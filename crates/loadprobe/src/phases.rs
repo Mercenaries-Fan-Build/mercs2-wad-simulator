@@ -42,7 +42,7 @@ pub const LADDER_VERSION: usize = 1;
 /// entity-construction burst (player/WAITFORGAME/act-staging) fires before mission-flow
 /// + the WAITFORSTREAMING layer cycles, which precede the portal enables and GlobalExit.
 pub static LADDER: &[Phase] = &[
-    Phase { idx: 0,  name: "Process init",            matches: &["PMC Blackbox v3"] },
+    Phase { idx: 0,  name: "Process init",            matches: &["PMC Blackbox v"] },
     Phase { idx: 1,  name: "Pool/hooks armed",        matches: &["render-instance pool initialized"] },
     Phase { idx: 2,  name: "Shell sound init",        matches: &["SoundShellBootstrap.Init"] },
     Phase { idx: 3,  name: "Shell init",              matches: &["Top of ShellBootstrap::Init()"] },
