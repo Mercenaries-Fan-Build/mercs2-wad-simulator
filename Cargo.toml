@@ -37,7 +37,7 @@ mercs2_engine = { path = "crates/mercs2_engine", version = "1.4.0" }
 # The Shipment format, linter and builder. Registered here because neither the Workshop nor Modkit
 # owns the format — this crate does, and both are clients. Without an entry they cannot write
 # `mercs2_quartermaster = { workspace = true }` at all.
-mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "2.1.0" }
+mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "2.2.0" }
 mercs2_bridge = { path = "crates/mercs2_bridge", version = "0.1.1" }
 # The consumption simulator, as a LIBRARY. Registered because its engine-accurate predicates are the
 # proven implementations of several linter rules — `texture::texture_buffer_too_small` in particular,
