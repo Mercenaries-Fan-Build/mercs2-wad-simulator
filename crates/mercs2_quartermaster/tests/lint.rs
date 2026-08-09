@@ -345,6 +345,52 @@ fn an_http_requirement_warns_but_does_not_block() {
 }
 
 // ---------------------------------------------------------------------------
+// M0172 — managed requirements resolved by semver range
+// ---------------------------------------------------------------------------
+
+fn with_compatible(name: &str, version: &str) -> Manifest {
+    parse(&format!(
+        "format: 1
+shipment: {{ name: s, version: 1.0.0, target: retail }}
+load:
+  requires:
+    - name: {name}
+      version: \"{version}\"
+contributions: []
+"
+    ))
+}
+
+/// A managed requirement with a valid range is resolved downstream; nothing to flag at lint time.
+#[test]
+fn a_valid_version_range_is_quiet() {
+    assert!(lint::lint(&with_compatible("m2-sdk", "^0.1"), None, None).is_empty());
+}
+
+/// An unparseable range is fatal — resolution has nothing to compare releases against.
+#[test]
+fn a_bad_version_range_is_an_error() {
+    let diags = lint::lint(&with_compatible("m2-sdk", "not-a-range"), None, None);
+    assert!(codes(&diags).contains(&"M0172"));
+    assert!(lint::blocks_build(&diags));
+}
+
+/// The untagged forms are disjoint: `{name,version}` is a managed dep, `{url,sha256}` is external.
+/// If these ever collided, a pinned third-party ASI could be misread as a managed component.
+#[test]
+fn managed_and_external_requirements_do_not_collide() {
+    use mercs2_quartermaster::Requirement;
+    assert!(matches!(
+        with_compatible("m2-sdk", ">=0.0.3, <1.0.0").load.requires.as_slice(),
+        [Requirement::Compatible { .. }]
+    ));
+    assert!(matches!(
+        with_requirement("https://example.com/x.asi", GOOD_SHA).load.requires.as_slice(),
+        [Requirement::External { .. }]
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // Wiring of the earlier increments
 // ---------------------------------------------------------------------------
 
