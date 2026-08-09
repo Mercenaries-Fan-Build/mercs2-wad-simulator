@@ -87,16 +87,26 @@ pub struct Load {
     pub conflicts: Vec<String>,
 }
 
-/// A hard dependency: either another Shipment by name, or an EXTERNAL artifact pinned by digest.
+/// A hard dependency, in one of three forms:
 ///
-/// The external form exists so a Shipment can depend on a third-party ASI (published on a GitHub
-/// release, which carries the hash) **without vendoring someone else's binary**. Pinning the digest
-/// is what makes the reference tamper-evident — see the trust discussion in the spec: this is
-/// integrity, not authenticity.
+/// * `Shipment(name)` — another Shipment, by name.
+/// * `Compatible { name, version }` — a Modkit-MANAGED component (e.g. `m2-sdk`) at a semver
+///   RANGE (`"^0.1"`). Resolved like a package manager: Modkit installs the highest released
+///   version that satisfies the range, ONE copy shared across every Shipment that needs it. This
+///   is the form for a first-party managed runtime — it updates on its own cadence and two mods
+///   can share a single install, neither of which a byte-exact pin allows.
+/// * `External { url, sha256 }` — a third-party artifact pinned by digest. For an ASI with no
+///   managed component and no semver contract: the digest makes the reference tamper-evident (see
+///   the spec's trust discussion — integrity, not authenticity). Do NOT reach for it to lock a
+///   managed component to one build; that defeats resolution and freezes the dependency.
+///
+/// Untagged and unambiguous: a bare string is a `Shipment`; `{name,version}` is `Compatible`;
+/// `{url,sha256}` is `External` — disjoint required keys, so serde cannot confuse them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Requirement {
     Shipment(String),
+    Compatible { name: String, version: String },
     External { url: String, sha256: String },
 }
 
