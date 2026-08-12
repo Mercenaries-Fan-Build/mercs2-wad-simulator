@@ -386,11 +386,15 @@ enum Lowering {
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
     Blocks(Vec<PatchBlock>),
-    /// A NEW base WAD placed in `data/`. `add_language` is the only producer: a novel language WAD the
-    /// engine opens by name, kept OUT of the Shipment overlay because it is not an overlay over vz.
+    /// A NEW base WAD placed in `data/`, plus the stringdb block that belongs in the Shipment overlay.
+    /// `add_language` is the only producer. The base WAD is opened by name (the mount-check target);
+    /// the `overlay` blocks ride the always-mounted Shipment overlay, because the engine resolves a
+    /// language's stringdb from the MOUNTED registry — every retail language stringdb lives in
+    /// shell.wad/vz.wad, never in the on-demand `.\Data\<lang>.wad`.
     LanguageWad {
         language: String,
         blocks: Vec<PatchBlock>,
+        overlay: Vec<PatchBlock>,
     },
     /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
     /// next to the digest it records for them.
@@ -2748,11 +2752,17 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
-        // A NEW language WAD. Forks the base string table out of the stack (like edit_stringdb reads a
+        // A NEW language. Forks the base string table out of the stack (like edit_stringdb reads a
         // table), applies the translation, and RE-KEYS the container under the new language's own hash
-        // so the engine resolves it as `<name>`'s table when the selector mounts `.\Data\<name>.wad`.
-        // Emitted as its OWN base WAD (kept out of the Shipment overlay) because the game opens it by
-        // name, not as an overlay over vz.
+        // so the engine resolves it as `<name>`'s table.
+        //
+        // ⚠ The stringdb is emitted into the ALWAYS-MOUNTED Shipment overlay, NOT the base
+        // `.\Data\<name>.wad`. The engine requests `(pandemic_hash_m2("<name>"), stringdb)` from the
+        // MOUNTED registry — every retail language stringdb lives in shell.wad/vz.wad, and
+        // `English.wad` (the `.\Data\English.wad`) carries none. A stringdb in an on-demand base WAD
+        // opened by name never registers there, so the menu falls back to raw `[0x…]` keys. The base
+        // WAD is still emitted (a missing `.\Data\<name>.wad` is a hard exit(1)) — it just carries no
+        // stringdb the engine reads.
         Contribution::AddLanguage {
             name,
             display: _,
@@ -2826,17 +2836,29 @@ fn lower(
             block_data.extend_from_slice(&0u32.to_le_bytes());
             block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
             block_data.extend_from_slice(&edited);
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
-            let block = PatchBlock::from_decompressed(
+            // Base `.\Data\<name>.wad`: exists only to satisfy the mount check. It carries the same
+            // stringdb bytes (harmless, and keeps the base a valid non-empty WAD), but the engine
+            // never reads a stringdb from here — see the note above.
+            let base_block = PatchBlock::from_decompressed(
                 &block_data,
                 format!("blocks\\{name}\\{name}_stringdb.block"),
-                vec![aset],
+                vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB)],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            // The stringdb the engine actually resolves — in the always-mounted Shipment overlay, in
+            // the same single-entry `blocks\VZ\mod_<hash>.block` shape edit_stringdb uses.
+            let overlay_block = PatchBlock::from_decompressed(
+                &block_data,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB)],
                 None,
             )
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::LanguageWad {
                 language: name.clone(),
-                blocks: vec![block],
+                blocks: vec![base_block],
+                overlay: vec![overlay_block],
             })
         }
     }
@@ -3027,7 +3049,16 @@ pub fn build(
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
             Lowering::Blocks(bs) => blocks.extend(bs),
-            Lowering::LanguageWad { language, blocks: bs } => lang_wads.push((language, bs)),
+            Lowering::LanguageWad {
+                language,
+                blocks: bs,
+                overlay,
+            } => {
+                // The stringdb goes into the always-mounted Shipment overlay (vz-patch); the base WAD
+                // is emitted separately below, opened by name only to satisfy the mount check.
+                blocks.extend(overlay);
+                lang_wads.push((language, bs));
+            }
             Lowering::File {
                 name,
                 relative,
