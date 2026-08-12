@@ -72,7 +72,7 @@ fn main() {
     let cs = mercs2_formats::char_skin::build_character(
         &glb.build_input(&target, None, std::collections::HashMap::new(), false)).expect("build");
     let full_targets: BTreeSet<u32> = cs.full.values().copied().collect();
-    let palette: BTreeSet<u16> = cs.ranges.iter().flat_map(|&(b, c)| (b..b + c)).collect();
+    let palette: BTreeSet<u16> = cs.ranges.iter().flat_map(|&(b, c)| b..b + c).collect();
     println!("
 -- downstream of the automap --");
     println!("  automap distinct targets      : {}", distinct.len());
