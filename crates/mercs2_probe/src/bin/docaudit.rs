@@ -492,7 +492,7 @@ pub fn part2(wadpath: &str, which: &str) {
         }
 
         // flgs/flgt/enum rows in the first sub-block
-        dump_nonComp_rows(&dec);
+        dump_non_comp_rows(&dec);
 
         // doc §3.3 heuristic: first 0x3f800000 minus 4, relative to the Transform blob start
         if let Some(c) = comps.iter().find(|c| c.info_name.as_deref() == Some("Transform")) {
@@ -510,7 +510,7 @@ pub fn part2(wadpath: &str, which: &str) {
     }
 }
 
-fn dump_nonComp_rows(dec: &[u8]) {
+fn dump_non_comp_rows(dec: &[u8]) {
     // walk the first UCFX's CHDR table manually and print non-COMP rows
     let Some(u) = dec.windows(4).position(|w| w == b"UCFX") else { return };
     let Some(cp) = dec[u..(u + 4096).min(dec.len())].windows(4).position(|w| w == b"CHDR") else { return };
