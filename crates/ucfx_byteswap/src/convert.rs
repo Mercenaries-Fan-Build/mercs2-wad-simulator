@@ -1644,14 +1644,11 @@ fn swap_u16_array(data: &mut [u8]) {
 //   validate-first discipline of `convert_keyed_group_records_inplace`).
 // ---------------------------------------------------------------------------
 
-/// Field width/semantics within a record. F32 reverses identically to U32 (both
-/// a 4-byte reversal) but is kept distinct for self-documentation. U8 = no-op.
+/// Field width/semantics within a record.
 #[derive(Clone, Copy, PartialEq)]
 enum FieldKind {
     U32,
     U16,
-    U8,
-    F32,
 }
 
 /// One field of a record layout (offsets are implicit from order).
@@ -1741,9 +1738,8 @@ fn walk_records(data: &mut [u8], w: &RecordWalker) -> bool {
         let mut off = start + ri * w.stride;
         for f in w.fields {
             match f.kind {
-                FieldKind::U32 | FieldKind::F32 => data[off..off + 4].reverse(),
+                FieldKind::U32 => data[off..off + 4].reverse(),
                 FieldKind::U16 => data[off..off + 2].reverse(),
-                FieldKind::U8 => {}
             }
             off += f.width as usize;
         }
@@ -2870,6 +2866,7 @@ fn rebuild_terrain_vertices(
 ///
 /// `src` is the generic-swapped (u16-swap-corrected) Xbox index body. Returns the
 /// PC triangle-list index bytes (LE u16).
+#[cfg(test)]
 fn destrip_indices(src: &[u8]) -> Vec<u8> {
     destrip_indices_with_map(src).0
 }
