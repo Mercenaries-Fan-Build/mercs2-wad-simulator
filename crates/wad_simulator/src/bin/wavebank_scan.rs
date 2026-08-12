@@ -11,7 +11,6 @@
 //! `type_hash` is `wavebank` (0xF753F6D0) -- with how many of its clips are STREAMING (fmt 0x04),
 //! since a bank that indexes the .pws is exactly a bank full of streaming clips.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
 
@@ -26,8 +25,6 @@ use mercs2_formats::ucfx::{extract_data_chunk, walk_decompressed_block};
 // for a crate that had no [lib] and so compiled this module once per binary.
 use wad_simulator::names;
 use names::RainbowTable;
-
-const TH_WAVEBANK: u32 = 0xF753_F6D0;
 
 #[derive(Parser)]
 struct Cli {
