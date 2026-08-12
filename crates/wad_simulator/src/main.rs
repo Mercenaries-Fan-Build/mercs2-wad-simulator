@@ -71,10 +71,7 @@
 // The simulation modules live in the crate's `[lib]` (`src/lib.rs`) so a linter or another tool can
 // call these checks instead of shelling out to this binary. Consumed from there rather than
 // re-declared here, so there is one copy compiled once.
-use wad_simulator::{
-    action_table, animation, aset_validate, audio, blocks, chunk_invariants, consume, material,
-    model, names, overlay, placement, progress, pws, resident, script, simulate, texture,
-};
+use wad_simulator::{aset_validate, names, simulate};
 
 use clap::Parser;
 use colored::*;
