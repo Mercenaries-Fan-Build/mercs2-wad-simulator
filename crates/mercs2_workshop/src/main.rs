@@ -2157,7 +2157,7 @@ fn pack_data(
     // IN this repo. When it is present the pack is fully self-contained — no 32 MB parent-repo rainbow
     // table and no game WAD needed, so any machine can rebuild the bundle. Falls back to the slow raw
     // corpora + WAD-trim path only when the production file is absent (i.e. when regenerating it).
-    let (mut names, full) = match load_production_names() {
+    let (names, full) = match load_production_names() {
         Some(p) => {
             eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
             let n = p.len();
