@@ -23,7 +23,7 @@
 //!   cargo run --release -p wad_simulator --bin asset_gap_probe -- \
 //!       --export docs/data/aset_export.csv --filter helicopter,vtol,plane
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -136,8 +136,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut name_of: HashMap<u32, String> = HashMap::new();
     // base name -> (texture names seen, blocks seen)
     let mut tex_bases: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
-    /// Deeper name candidates (see `candidate_bases`) — the character body-part convention needs
-    /// more than one suffix peeled to reach the model.
+    // Deeper name candidates (see `candidate_bases`) — the character body-part convention needs
+    // more than one suffix peeled to reach the model.
     let mut derived_bases: BTreeSet<String> = BTreeSet::new();
 
     for line in text.lines().skip(1) {
