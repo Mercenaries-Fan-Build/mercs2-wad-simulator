@@ -788,7 +788,13 @@ fn get_parsed_for_entry<'a>(
 }
 
 fn resolve_type_hash(parsed: &ParsedBlock, entry: &ResolvedAset) -> u32 {
-    for e in &parsed.entries {
+    // The engine's resident asset map is keyed by name hash, and loading an entry whose hash is
+    // already present OVERWRITES the earlier one. So when a block carries two assets under one
+    // name hash — resident_P000_Q3 holds a BINN asset (idx 816) and the real fxdict (idx 5889)
+    // both at 0x86BF6C5B — the one the game actually resolves is the LAST loaded, not the first.
+    // Walk in reverse to be faithful to that overwrite; picking the first consumed the wrong asset
+    // and flagged the stock fxdict as "missing INFO/DICT".
+    for e in parsed.entries.iter().rev() {
         if e.name_hash == entry.asset_hash {
             return e.type_hash;
         }
