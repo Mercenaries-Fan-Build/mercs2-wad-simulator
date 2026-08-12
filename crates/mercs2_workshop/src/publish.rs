@@ -27,9 +27,8 @@ use mercs2_formats::model_inject::{
 };
 use mercs2_formats::texture::{group_material_indices, parse_mtrl};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
-use mercs2_formats::sges::{compress_sges, decompress_block};
+use mercs2_formats::sges::compress_sges;
 use mercs2_formats::skeleton::Skeleton;
-use mercs2_formats::ucfx::parse_block_entry_table;
 
 /// The two shared body switch nodes every vehicle carries (see vehicle_model_spec §5).
 const NODE_INTACT_BODY: u32 = 0x255E_AB53; // PristineState SHOWs this — static host, hidden on death
