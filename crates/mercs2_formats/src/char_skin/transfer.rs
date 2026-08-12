@@ -290,7 +290,7 @@ pub fn smooth_weights(
 /// Vertex adjacency from a triangle list, both directions, deduplicated.
 pub fn adjacency(vertex_count: usize, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
     let mut adj: Vec<Vec<u32>> = vec![Vec::new(); vertex_count];
-    let mut add = |a: u32, b: u32, adj: &mut Vec<Vec<u32>>| {
+    let add = |a: u32, b: u32, adj: &mut Vec<Vec<u32>>| {
         if (a as usize) < adj.len() && (b as usize) < adj.len() && a != b {
             adj[a as usize].push(b);
         }
