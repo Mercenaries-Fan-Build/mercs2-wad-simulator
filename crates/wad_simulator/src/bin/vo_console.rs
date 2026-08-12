@@ -639,7 +639,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&dir)?;
         let (mut n, mut oob, mut unsynced) = (0usize, 0usize, 0usize);
         let mut bytes = 0u64;
-        let mut sync_at: HashMap<usize, usize> = HashMap::new();
+        let sync_at: HashMap<usize, usize> = HashMap::new();
 
         // ★ Codec 0x0C IS MP3 (MPEG-1 Layer III). Proven: each blob's first non-zero byte is
         // `FF FA 40 C0` -- the very frame header the .pws streams carry. Clips are zero-padded and
