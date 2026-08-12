@@ -3463,7 +3463,7 @@ mod tests {
         let mut mtrl = vec![0u8; 128];
         mtrl[108..112].copy_from_slice(&0xAAAA_AAAAu32.to_le_bytes());
 
-        let mut make_group = |verts: u32, idx: u32| -> Vec<R> {
+        let make_group = |verts: u32, idx: u32| -> Vec<R> {
             let mut si = Vec::new();
             si.extend_from_slice(&7u32.to_le_bytes());
             si.extend_from_slice(&32u32.to_le_bytes());
@@ -4609,7 +4609,6 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
     // end of GEOM's subtree). Bodies: leaves copied from the donor (offsets reflow on emit). ----
     struct Out {
         tag: [u8; 4],
-        marker: bool,
         size: u32,
         u2: u32,
         u3: u32,
@@ -4639,7 +4638,6 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
         }
         out.push(Out {
             tag: r.tag,
-            marker,
             size: r.size,
             u2: r.u2,
             u3,
@@ -4653,7 +4651,6 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
             let marker = is_marker(r);
             out.push(Out {
                 tag: r.tag,
-                marker,
                 size: r.size,
                 u2: r.u2,
                 u3: r.u3,
@@ -4667,7 +4664,6 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
         let marker = is_marker(r);
         out.push(Out {
             tag: r.tag,
-            marker,
             size: r.size,
             u2: r.u2,
             u3: r.u3,
@@ -4679,7 +4675,7 @@ pub fn append_draw_groups(ucfx: &[u8], n: usize) -> Result<(Vec<u8>, Vec<usize>)
     let new_ndesc = out.len();
     let new_data_off = (20 + new_ndesc * 20) as u32;
     let mut data: Vec<u8> = Vec::new();
-    let mut descs: Vec<(([u8; 4]), u32, u32, u32, u32)> = Vec::with_capacity(new_ndesc);
+    let mut descs: Vec<([u8; 4], u32, u32, u32, u32)> = Vec::with_capacity(new_ndesc);
     for o in &out {
         if let Some(b) = &o.body {
             let off = data.len() as u32;
