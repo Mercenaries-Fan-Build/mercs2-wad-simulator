@@ -18,7 +18,7 @@
 //! can only ever produce the derivable half — useful for scripting, not a substitute.
 
 use crate::retarget::Retarget;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// How much the recorded bone map is worth, for the caller to report.
 pub struct BoneMapStats {
