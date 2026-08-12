@@ -698,7 +698,7 @@ mod tests {
         c.extend_from_slice(&0u32.to_le_bytes());
         c.extend_from_slice(&0u32.to_le_bytes());
         c.extend_from_slice(&n_desc.to_le_bytes());
-        let mut push_row = |c: &mut Vec<u8>, tag: &[u8; 4], u0: u32, sz: u32| {
+        let push_row = |c: &mut Vec<u8>, tag: &[u8; 4], u0: u32, sz: u32| {
             c.extend_from_slice(tag);
             c.extend_from_slice(&u0.to_le_bytes());
             c.extend_from_slice(&sz.to_le_bytes());
