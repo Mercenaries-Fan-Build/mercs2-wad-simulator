@@ -108,7 +108,7 @@ fn main() {
         }
     }
 
-    let c = ag.clips.iter().find(|c| c.name_hash == clip_hash).unwrap().clone();
+    let c = ag.clips.iter().find(|c| c.name_hash == clip_hash).unwrap();
 
     let bones = &c.binding.track_to_bone_hash;
     let names = mercs2_engine::worldutil::rainbow_names(&bones.iter().copied().collect());
