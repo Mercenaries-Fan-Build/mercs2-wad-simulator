@@ -1042,7 +1042,7 @@ mod tests {
         c.extend_from_slice(&0u32.to_le_bytes());
         c.extend_from_slice(&0u32.to_le_bytes());
         c.extend_from_slice(&4u32.to_le_bytes());
-        let mut row = |c: &mut Vec<u8>, tag: &[u8; 4], u0: u32, size: u32| {
+        let row = |c: &mut Vec<u8>, tag: &[u8; 4], u0: u32, size: u32| {
             c.extend_from_slice(tag);
             c.extend_from_slice(&u0.to_le_bytes());
             c.extend_from_slice(&size.to_le_bytes());
