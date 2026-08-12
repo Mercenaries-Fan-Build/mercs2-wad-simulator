@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("{} block-path stems seeded from PTHS", stems.len());
 
     let mut hits: BTreeMap<u32, (String, String)> = BTreeMap::new(); // hash -> (name, why)
-    let mut try_name = |name: String, why: &str, hits: &mut BTreeMap<u32, (String, String)>| {
+    let try_name = |name: String, why: &str, hits: &mut BTreeMap<u32, (String, String)>| {
         let h = pandemic_hash_m2(&name);
         if targets.contains_key(&h) && !hits.contains_key(&h) {
             hits.insert(h, (name, why.to_string()));
