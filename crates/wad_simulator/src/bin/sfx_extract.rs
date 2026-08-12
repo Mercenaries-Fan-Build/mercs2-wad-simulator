@@ -34,8 +34,9 @@ use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::ucfx::{extract_data_chunk, walk_decompressed_block};
 
-#[path = "../names.rs"]
-mod names;
+// From the crate lib now; this used to be `#[path = "../names.rs"] mod names;`, the workaround
+// for a crate that had no [lib] and so compiled this module once per binary.
+use wad_simulator::names;
 use names::RainbowTable;
 
 const TH_WAVEBANK: u32 = 0xF753_F6D0;
