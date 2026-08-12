@@ -141,7 +141,7 @@ impl AssetSource {
 
         // Each entry: (slot, resolved path, required). Order here IS the mount order.
         let mut plan: Vec<(MountSlot, String)> = Vec::new();
-        let mut push = |plan: &mut Vec<_>, slot, name: &str| {
+        let push = |plan: &mut Vec<_>, slot, name: &str| {
             if let Some(p) = sibling_ci(base, name) {
                 plan.push((slot, p));
             }
@@ -381,6 +381,7 @@ pub fn load_resident_audio(w: &mut Wad) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 
 /// The standard patch-WAD path for a base: `vz-patch.wad` alongside `vz.wad`. Kept separate so the
 /// discovery contract is unit-testable without a real archive on disk.
+#[cfg(test)]
 fn patch_sibling(base: &str) -> std::path::PathBuf {
     std::path::Path::new(base).with_file_name(patch_name_for(base))
 }
