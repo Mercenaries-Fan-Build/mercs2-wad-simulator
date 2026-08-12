@@ -252,7 +252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .par_iter()
         .flat_map_iter(|wa| {
             let mut out: Vec<(u32, String)> = Vec::new();
-            let mut test = |cand: &str, out: &mut Vec<(u32, String)>| {
+            let test = |cand: &str, out: &mut Vec<(u32, String)>| {
                 let h = pandemic_hash_m2(cand);
                 if targets.contains(&h) {
                     out.push((h, cand.to_string()));
@@ -274,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .collect()
                     };
                     let seps: &[&str] = &["", "_"];
-                    let mut emit = |ws: &[String], out: &mut Vec<(u32, String)>| {
+                    let emit = |ws: &[String], out: &mut Vec<(u32, String)>| {
                         for p in &prefixes {
                             match ws.len() {
                                 1 => {
