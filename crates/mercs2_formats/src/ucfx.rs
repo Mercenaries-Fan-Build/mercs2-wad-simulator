@@ -287,7 +287,11 @@ pub fn get_container_by_type_hash(
     type_hash: u32,
     name_hash: Option<u32>,
 ) -> Option<Vec<u8>> {
-    for (i, entry) in parsed.entries.iter().enumerate() {
+    // Reverse walk: the engine's asset map overwrites a re-encountered name hash, so when a block
+    // carries the same name hash more than once the LAST entry is the one that resolves in game.
+    // (See `resolve_type_hash` — resident_P000_Q3 has both a BINN asset and the real fxdict at
+    // 0x86BF6C5B, and only the later fxdict survives.)
+    for (i, entry) in parsed.entries.iter().enumerate().rev() {
         if entry.type_hash != type_hash {
             continue;
         }
@@ -368,4 +372,45 @@ pub fn build_wrapped_block(name_hash: u32, type_hash: u32, payload: &[u8]) -> Ve
     block.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
     block.extend_from_slice(&ucfx);
     block
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name_hash: u32, type_hash: u32) -> BlockTableEntry {
+        BlockTableEntry { name_hash, type_hash, field_c: 0, chunk_size: 0 }
+    }
+
+    /// The engine overwrites a re-encountered name hash, so a lookup must resolve the LAST entry
+    /// carrying that hash. resident_P000_Q3 holds a BINN asset and the real fxdict both at
+    /// 0x86BF6C5B; the fxdict is loaded second and is the one the game keeps. Resolving the first
+    /// handed `consume_fxdict` the BINN asset and falsely flagged the stock fxdict.
+    #[test]
+    fn get_container_resolves_the_last_entry_for_a_colliding_name_hash() {
+        let parsed = ParsedBlock {
+            entry_count: 2,
+            entries: vec![entry(0x86BF6C5B, 0x424E_4E00), entry(0x86BF6C5B, 0xFA46_D8A8)],
+            containers: vec![b"binn".to_vec(), b"fxdict".to_vec()],
+        };
+        assert_eq!(
+            get_container_by_type_hash(&parsed, 0xFA46_D8A8, Some(0x86BF6C5B)).as_deref(),
+            Some(&b"fxdict"[..]),
+        );
+    }
+
+    /// Two entries sharing BOTH name and type: last-wins is what the reverse walk guarantees
+    /// (a forward walk would return the earlier one).
+    #[test]
+    fn get_container_last_wins_when_name_and_type_both_repeat() {
+        let parsed = ParsedBlock {
+            entry_count: 2,
+            entries: vec![entry(0xAAAA_AAAA, 0x1111_1111), entry(0xAAAA_AAAA, 0x1111_1111)],
+            containers: vec![b"first".to_vec(), b"last".to_vec()],
+        };
+        assert_eq!(
+            get_container_by_type_hash(&parsed, 0x1111_1111, Some(0xAAAA_AAAA)).as_deref(),
+            Some(&b"last"[..]),
+        );
+    }
 }
