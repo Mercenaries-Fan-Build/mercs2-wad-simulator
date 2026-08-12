@@ -729,6 +729,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddTexture { name, .. }
         | Contribution::AddSound { name, .. }
         | Contribution::AddMovie { name, .. }
+        | Contribution::AddLanguage { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
@@ -1795,6 +1796,26 @@ fn contribution_form(
                 "one `[Bracket.Key] = New text` per line. Same-hash, last-wins.",
             );
         }
+        Contribution::AddLanguage { name, display, strings, base } => {
+            commit |= theme::text_field(ui, "Language", name, "polski", theme::FieldState::Neutral)
+                .lost_focus();
+            commit |=
+                theme::text_field(ui, "Display", display, "Polski", theme::FieldState::Neutral)
+                    .lost_focus();
+            commit |= source_row(ui, "Strings", strings, root, &["strings", "txt"]);
+            let mut b = base.clone().unwrap_or_default();
+            if theme::text_field(ui, "Base", &mut b, "english (default)", theme::FieldState::Neutral)
+                .lost_focus()
+            {
+                *base = (!b.is_empty()).then_some(b);
+                commit = true;
+            }
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
+            );
+        }
         Contribution::NativeHook { target, plugin, symbol, touches } => {
             // `both` is reserved and rejected in v1, so it is not offered.
             commit |= theme::combo_field(
@@ -2179,6 +2200,13 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::EditStringDb { target, .. } => vec![
             ("Writes".to_string(), format!("stringdb {target}")),
             ("Merge".to_string(), "last-wins \u{2014} load order is the answer".to_string()),
+        ],
+        Contribution::AddLanguage { name, .. } => vec![
+            ("Adds".to_string(), format!("language {name}")),
+            (
+                "Merge".to_string(),
+                "new base .\\Data\\<name>.wad + overlay stringdb \u{2014} additive".to_string(),
+            ),
         ],
         // Discovery is filesystem order, so two plugins on one address have no load order that
         // resolves them — it has to be exclusive.
