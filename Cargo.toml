@@ -14,10 +14,10 @@ repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-gam
 # NOTE: mercs2_formats crossed to 3.0.0, so every dependent's `workspace = true` requirement moved
 # with it — a `^2.1` consumer (e.g. mercs2-modkit) will NOT pick 3.0.0 up until it is edited too.
 [workspace.dependencies]
-mercs2_formats = { path = "crates/mercs2_formats", version = "3.5.0" }
+mercs2_formats = { path = "crates/mercs2_formats", version = "3.5.1" }
 mercs2_luac = { path = "crates/mercs2_luac", version = "1.1.1" }
 mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.0.1" }
-ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.1.1" }
+ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.1.2" }
 mercs2_core = { path = "crates/mercs2_core", version = "1.0.3" }
 mercs2_audio = { path = "crates/mercs2_audio", version = "1.2.2" }
 mercs2_script = { path = "crates/mercs2_script", version = "2.0.1" }
@@ -33,11 +33,11 @@ mercs2_combat = { path = "crates/mercs2_combat", version = "1.2.1" }
 mercs2_faction = { path = "crates/mercs2_faction", version = "1.0.2" }
 mercs2_ui = { path = "crates/mercs2_ui", version = "1.1.1" }
 mercs2_player = { path = "crates/mercs2_player", version = "1.1.1" }
-mercs2_engine = { path = "crates/mercs2_engine", version = "1.4.0" }
+mercs2_engine = { path = "crates/mercs2_engine", version = "1.4.1" }
 # The Shipment format, linter and builder. Registered here because neither the Workshop nor Modkit
 # owns the format — this crate does, and both are clients. Without an entry they cannot write
 # `mercs2_quartermaster = { workspace = true }` at all.
-mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "2.2.0" }
+mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "2.3.0" }
 mercs2_bridge = { path = "crates/mercs2_bridge", version = "0.1.1" }
 # The consumption simulator, as a LIBRARY. Registered because its engine-accurate predicates are the
 # proven implementations of several linter rules — `texture::texture_buffer_too_small` in particular,
@@ -45,7 +45,7 @@ mercs2_bridge = { path = "crates/mercs2_bridge", version = "0.1.1" }
 # bodies). Reimplementing that predicate in the linter is how the two copies drift; depending on it
 # is how they cannot. Safe to link anywhere: this crate pulls no Lua runtime, so it does not collide
 # with `mercs2_luac` (see the warning on `mercs2_quartermaster`'s dependency list).
-wad_simulator = { path = "crates/wad_simulator", version = "2.2.4" }
+wad_simulator = { path = "crates/wad_simulator", version = "2.2.5" }
 
 # The load path is CPU-bound `sges`/zlib block decompression + mesh assembly. In a plain `dev` build
 # those run UNOPTIMIZED, making the PMC-interior boot ~134s (vs ~15s optimized) — a ~9x tax purely from

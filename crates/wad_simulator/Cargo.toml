@@ -1,6 +1,6 @@
 [package]
 name = "wad_simulator"
-version = "2.2.4"
+version = "2.2.5"
 edition = "2021"
 description = "Engine-accurate WAD consumption simulator for Mercenaries 2"
 readme = "README.md"

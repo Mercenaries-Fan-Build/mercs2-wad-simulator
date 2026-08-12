@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_workshop"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native asset workshop (browse / inspect / remix) on the mercs2_engine renderer."
 readme = "README.md"

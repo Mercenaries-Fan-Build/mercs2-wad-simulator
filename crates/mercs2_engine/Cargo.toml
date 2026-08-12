@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_engine"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu): asset-agnostic WAD/mesh/render/stream machinery with a typed API."
 readme = "README.md"
