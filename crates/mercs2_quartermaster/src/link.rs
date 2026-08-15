@@ -317,6 +317,111 @@ pub fn outfit_row_append(wearer: &str, slug: &str, model: &str, display: &str) -
     )
 }
 
+/// The `tUnlockStatus` table literal for a shop item: `{ <Fac> = 1, … }` when unlocked in every
+/// listed vendor, or `{}` when it should ship locked. Locked matters only in Eva's obscured shop
+/// (where a locked item is unbuyable); in the five faction shops a locked item is still purchasable.
+pub fn shop_unlock_table(shops: &[crate::manifest::ShopVendor], unlocked: bool) -> String {
+    if !unlocked {
+        return "{}".to_string();
+    }
+    let mut s = String::from("{ ");
+    for (i, v) in shops.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&format!("{} = 1", v.faction_key()));
+    }
+    s.push_str(" }");
+    s
+}
+
+/// A SUPPORT-catalog row appended to `mrxsupportdata` for one shop item.
+///
+/// Wrapped in `do … end` so the `local oSupport` is scoped per item and N appended rows never
+/// collide. `tSupportData` is a module-global, so a top-level append lands before `Init()`'s
+/// auto-name loop runs — the loop then picks the row up. The item key uses bracket form so an
+/// arbitrary author id is safe.
+#[allow(clippy::too_many_arguments)]
+pub fn shop_support_row_append(
+    id: &str,
+    name: &str,
+    description: &str,
+    icon: &str,
+    item_type: &str,
+    cash_cost: u64,
+    fuel_cost: u64,
+    max_stock: u32,
+    unlock_table: &str,
+    module: &str,
+    cargo: Option<&str>,
+    delivery_vehicle: Option<&str>,
+) -> String {
+    let mut b = String::new();
+    b.push_str("do\n");
+    b.push_str(&format!("  local oSupport = {module}:Create()\n"));
+    if let Some(c) = cargo {
+        b.push_str(&format!("  oSupport:SetCargo({})\n", lua_string(c)));
+    }
+    if let Some(dv) = delivery_vehicle {
+        b.push_str(&format!("  oSupport:SetDeliveryVehicle({})\n", lua_string(dv)));
+    }
+    b.push_str(&format!(
+        "  tSupportData[{}] = {{ sName = {}, sDescription = {}, sIcon = {}, nMaxStock = {}, \
+         nCashCost = {}, nFuelCost = {}, oSupport = oSupport, sType = {}, tUnlockStatus = {} }}\n",
+        lua_string(id),
+        lua_string(name),
+        lua_string(description),
+        lua_string(icon),
+        max_stock,
+        cash_cost,
+        fuel_cost,
+        lua_string(item_type),
+        unlock_table,
+    ));
+    b.push_str("end\n");
+    b
+}
+
+/// An EQUIPMENT-catalog row appended to `wifequipmentdata`. `_tEquipment` is a module-global; only
+/// fuel-tank / grapple `nType`s are ever shopped (the `mrxshop` insert gate), which is what
+/// `ntype_const` is restricted to.
+pub fn shop_equipment_row_append(
+    id: &str,
+    name: &str,
+    description: &str,
+    texture: &str,
+    ntype_const: &str,
+    cost: u64,
+) -> String {
+    format!(
+        "_tEquipment[{}] = {{ sName = {}, sDescription = {}, sTexture = {}, nType = {}, nCost = {} }}\n",
+        lua_string(id),
+        lua_string(name),
+        lua_string(description),
+        lua_string(texture),
+        ntype_const,
+        cost,
+    )
+}
+
+/// The `mrxrewarddata` reward rows that SURFACE a shop item — one per vendor faction, because
+/// `GetAllPotentialShopItems(f)` matches a row's `sFactionId` against exactly one faction. `field`
+/// is `tSupport` (support catalog) or `tEquipment` (equipment catalog).
+pub fn shop_reward_append(id: &str, field: &str, shops: &[crate::manifest::ShopVendor]) -> String {
+    let mut out = String::new();
+    for v in shops {
+        let fac = v.faction_key();
+        out.push_str(&format!(
+            "_tRewards[{}] = {{ sFactionId = {}, {field} = {{ {{ {}, {} }} }} }}\n",
+            lua_string(&format!("{id}Reward_{fac}")),
+            lua_string(fac),
+            lua_string(id),
+            lua_string(fac),
+        ));
+    }
+    out
+}
+
 /// The name of the Quartermaster mod-loader script — a NEW `scripts_vz` script the linker mints and
 /// `add_script`s into the block, distinct from any retail script. Its ASET row (type 35, primary)
 /// is emitted automatically by `script_patch_blocks`' new-entry branch, which is the other half of
@@ -349,6 +454,36 @@ pub struct LayerRegistration {
     pub remove: Vec<String>,
 }
 
+/// One novel-behaviour shop item — a `MrxSupport` subclass shipped as source, plus the catalog row
+/// that must be DEFERRED into the loader (its `module:Create()` cannot run at resident-load time).
+///
+/// The linker mints `source` as a new `scripts_vz` script named `module` (like `qm_modloader`
+/// itself), then bakes an `_inits` closure that `import`s it and constructs the catalog + reward
+/// rows post-world-load. Ordered by `(shipment, id)` for a byte-identical bake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportRegistration {
+    pub shipment: String,
+    /// Runtime module name — both the minted script name and what the loader `import`s.
+    pub module: String,
+    /// The novel subclass Lua source, compiled + minted as a new `scripts_vz` script.
+    pub source: String,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    /// `sType` string (already validated to the closed set by the manifest layer).
+    pub item_type: String,
+    pub cash_cost: u64,
+    pub fuel_cost: u64,
+    pub max_stock: u32,
+    /// The `tUnlockStatus` table literal (from `shop_unlock_table`).
+    pub unlock_table: String,
+    pub cargo: Option<String>,
+    pub delivery_vehicle: Option<String>,
+    /// Vendor faction keys (Capitalized) for the deferred reward rows.
+    pub shops: Vec<String>,
+}
+
 /// The whole `qm_modloader` script, baked from every UI registration.
 ///
 /// This is the "expandable load space" the user asked for: the game's resident scripts stay
@@ -362,7 +497,11 @@ pub struct LayerRegistration {
 ///
 /// Registrations are ordered by `(shipment, movie)` / `(shipment, add)` so the same set bakes
 /// byte-identically whatever order they arrive in — the same determinism rule [`linked_source`] holds.
-pub fn qm_modloader_source(regs: &[UiRegistration], layers: &[LayerRegistration]) -> String {
+pub fn qm_modloader_source(
+    regs: &[UiRegistration],
+    layers: &[LayerRegistration],
+    support: &[SupportRegistration],
+) -> String {
     let mut ordered: Vec<&UiRegistration> = regs.iter().collect();
     ordered.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.movie.cmp(&b.movie)));
 
@@ -411,6 +550,65 @@ pub fn qm_modloader_source(regs: &[UiRegistration], layers: &[LayerRegistration]
              end)\n",
             shipment = r.shipment,
             layer = r.add,
+        ));
+    }
+
+    // Novel-behaviour shop items bake into the SAME once-guarded, `pcall`-wrapped `_inits` list. Each
+    // imports its minted subclass, constructs `oSupport`, DEFERS the catalog + reward rows (the eager
+    // append can't — the module is nil at resident-load), re-applies the `SetSupportName` the
+    // `mrxsupportdata.Init` tail loop already ran without, and nulls the never-invalidated
+    // `gtAllSupport` cache so the next shop Open rebuilds with the new id. Ordered by `(shipment, id)`.
+    let mut ordered_support: Vec<&SupportRegistration> = support.iter().collect();
+    ordered_support.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.id.cmp(&b.id)));
+    for r in &ordered_support {
+        let mut body = String::new();
+        body.push_str(&format!("    import({})\n", lua_string(&r.module)));
+        body.push_str(&format!("    local oSupport = {}:Create()\n", r.module));
+        if let Some(c) = &r.cargo {
+            body.push_str(&format!("    oSupport:SetCargo({})\n", lua_string(c)));
+        }
+        if let Some(dv) = &r.delivery_vehicle {
+            body.push_str(&format!(
+                "    oSupport:SetDeliveryVehicle({})\n",
+                lua_string(dv)
+            ));
+        }
+        body.push_str(&format!(
+            "    if oSupport.SetSupportName then oSupport:SetSupportName({}) end\n",
+            lua_string(&r.id)
+        ));
+        body.push_str(&format!(
+            "    MrxSupportData.tSupportData[{}] = {{ sName = {}, sDescription = {}, sIcon = {}, \
+             nMaxStock = {}, nCashCost = {}, nFuelCost = {}, oSupport = oSupport, sType = {}, \
+             tUnlockStatus = {} }}\n",
+            lua_string(&r.id),
+            lua_string(&r.name),
+            lua_string(&r.description),
+            lua_string(&r.icon),
+            r.max_stock.min(99),
+            r.cash_cost,
+            r.fuel_cost,
+            lua_string(&r.item_type),
+            r.unlock_table,
+        ));
+        for fac in &r.shops {
+            body.push_str(&format!(
+                "    MrxRewardData._tRewards[{}] = {{ sFactionId = {}, tSupport = {{ {{ {}, {} }} }} }}\n",
+                lua_string(&format!("{}Reward_{}", r.id, fac)),
+                lua_string(fac),
+                lua_string(&r.id),
+                lua_string(fac),
+            ));
+        }
+        body.push_str("    MrxRewardData.gtAllSupport = nil\n");
+        inits.push_str(&format!(
+            "  -- {shipment}: shop ability {id} ({module})\n  \
+             table.insert(_QM._inits, function()\n    \
+             if MrxSupportData and MrxRewardData then\n{body}    end\n  \
+             end)\n",
+            shipment = r.shipment,
+            id = r.id,
+            module = r.module,
         ));
     }
 
@@ -525,7 +723,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[])
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[])
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -543,11 +741,13 @@ pub fn link_into_blocks(
     mutations: &[ScriptMutation],
     ui_regs: &[UiRegistration],
     layer_regs: &[LayerRegistration],
+    support_regs: &[SupportRegistration],
     order: &[String],
 ) -> Result<Vec<LinkedScript>, LinkError> {
-    // Anything that lives in the load space — a UI widget or a layer activation — needs the loader
-    // minted and the resident trampoline installed.
-    let needs_loader = !ui_regs.is_empty() || !layer_regs.is_empty();
+    // Anything that lives in the load space — a UI widget, a layer activation, or a novel support
+    // behaviour — needs the loader minted and the resident trampoline installed.
+    let needs_loader =
+        !ui_regs.is_empty() || !layer_regs.is_empty() || !support_regs.is_empty();
     // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any load-space
     // mod registered — ONE line regardless of how many, so the resident never grows with mod count.
     // The expandable part is `qm_modloader`, minted after the base scripts link (below).
@@ -623,19 +823,50 @@ pub fn link_into_blocks(
     // DLC's own recipe ships. It goes in the block carrying `wifpmcinterior`, because `import` is
     // scripts_vz-only and that is where the trampoline calls it from.
     if needs_loader {
-        let source = qm_modloader_source(ui_regs, layer_regs);
-        // BARE chunk name, like every other script here — see the module note.
-        let bytecode =
-            mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
-                target: QM_MODLOADER_NAME.to_string(),
-                message: e,
-            })?;
         let bi = blocks
             .iter()
             .position(|tb| tb.block.find_script_by_name("wifpmcinterior").is_some())
             .ok_or_else(|| LinkError::UnknownScript {
                 target: "wifpmcinterior".to_string(),
                 shipment: "quartermaster-modloader".to_string(),
+            })?;
+
+        // Mint each NOVEL support subclass as its own new `scripts_vz` script, so the loader can
+        // `import` it by name at `_OnEnter`. Same `add_script` mechanism as `qm_modloader` below.
+        // Deduped by module name — two items sharing one subclass mint it once.
+        let mut minted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for r in support_regs {
+            if !minted.insert(r.module.as_str()) {
+                continue;
+            }
+            let bytecode =
+                mercs2_luac::compile(&r.source, &r.module).map_err(|e| LinkError::Compile {
+                    target: r.module.clone(),
+                    message: e,
+                })?;
+            blocks[bi]
+                .block
+                .add_script(&r.module, &bytecode)
+                .map_err(|m| LinkError::Splice {
+                    target: r.module.clone(),
+                    message: m,
+                })?;
+            linked.push(LinkedScript {
+                target: r.module.clone(),
+                contributors: vec![r.shipment.clone()],
+                base_source_bytes: 0,
+                linked_source_bytes: r.source.len(),
+                bytecode_bytes: bytecode.len(),
+                block: bi,
+            });
+        }
+
+        let source = qm_modloader_source(ui_regs, layer_regs, support_regs);
+        // BARE chunk name, like every other script here — see the module note.
+        let bytecode =
+            mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
+                target: QM_MODLOADER_NAME.to_string(),
+                message: e,
             })?;
         blocks[bi]
             .block
@@ -648,6 +879,7 @@ pub fn link_into_blocks(
             .iter()
             .map(|r| r.shipment.clone())
             .chain(layer_regs.iter().map(|r| r.shipment.clone()))
+            .chain(support_regs.iter().map(|r| r.shipment.clone()))
             .collect();
         contributors.sort();
         contributors.dedup();
@@ -827,7 +1059,7 @@ mod tests {
     /// movie's FlashWidget under the proven creation sequence.
     #[test]
     fn the_mod_loader_defines_qm_and_registers_each_movie() {
-        let src = qm_modloader_source(&[reg("mod-a", "my_hud"), reg("mod-b", "my_map")], &[]);
+        let src = qm_modloader_source(&[reg("mod-a", "my_hud"), reg("mod-b", "my_map")], &[], &[]);
         assert!(src.contains("_QM = _QM or"), "must define the _QM global: {src}");
         assert!(src.contains("function _QM.run()"), "must expose run(): {src}");
         // Each movie enrols via the loadingscreen_standalone sequence.
@@ -844,8 +1076,8 @@ mod tests {
     /// linker rests on, applied to the bake.
     #[test]
     fn the_bake_is_order_independent() {
-        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[]);
-        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[]);
+        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[], &[]);
+        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[], &[]);
         assert_eq!(a, b, "install order must not change the baked loader");
         // ordered by (shipment, movie): aaa/one appears before zzz/two.
         assert!(a.find("one").unwrap() < a.find("two").unwrap(), "{a}");
@@ -854,7 +1086,7 @@ mod tests {
     /// A movie name cannot break out of its Lua string and inject code into the block we compile.
     #[test]
     fn a_movie_name_is_escaped_in_the_bake() {
-        let src = qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[]);
+        let src = qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[], &[]);
         // The escaped form keeps the payload INSIDE the string literal ...
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         // ... and the unescaped breakout (a bare `evil") ` that would end the string early) is absent.
@@ -876,6 +1108,7 @@ mod tests {
         let src = qm_modloader_source(
             &[],
             &[layer("act-mod", "vz_state_pmccon004_destroyed", &["vz_state_pmccon004_pristine"])],
+            &[],
         );
         assert!(src.contains("_QM = _QM or"), "must still define the _QM global: {src}");
         assert!(
@@ -903,10 +1136,12 @@ mod tests {
         let a = qm_modloader_source(
             &[reg("ui-mod", "my_hud")],
             &[layer("aaa", "layer_a", &[]), layer("zzz", "layer_z", &[])],
+            &[],
         );
         let b = qm_modloader_source(
             &[reg("ui-mod", "my_hud")],
             &[layer("zzz", "layer_z", &[]), layer("aaa", "layer_a", &[])],
+            &[],
         );
         assert_eq!(a, b, "install order must not change the baked loader");
         assert!(a.contains("w:SetSwfFile(\"my_hud\")"), "the widget is still baked: {a}");
@@ -916,9 +1151,58 @@ mod tests {
     /// A layer name cannot break out of its Lua string and inject code into the block we compile.
     #[test]
     fn a_layer_name_is_escaped_in_the_bake() {
-        let src = qm_modloader_source(&[], &[layer("m", "evil\") os.exit() --", &[])]);
+        let src = qm_modloader_source(&[], &[layer("m", "evil\") os.exit() --", &[])], &[]);
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         assert!(!src.contains("Addition(\"evil\") os"), "the injection must not close the string: {src}");
+    }
+
+    fn support(shipment: &str, id: &str, module: &str) -> SupportRegistration {
+        SupportRegistration {
+            shipment: shipment.into(),
+            module: module.into(),
+            source: "-- a novel MrxSupport subclass\n".into(),
+            id: id.into(),
+            name: format!("[{id}.name]"),
+            description: format!("[{id}.desc]"),
+            icon: "support_cluster_bomb".into(),
+            item_type: "Airstrike".into(),
+            cash_cost: 100000,
+            fuel_cost: 50,
+            max_stock: 8,
+            unlock_table: "{ Pmc = 1 }".into(),
+            cargo: None,
+            delivery_vehicle: None,
+            shops: vec!["Pmc".into()],
+        }
+    }
+
+    /// A novel support behaviour DEFERS its whole catalog row into the loader: import the minted
+    /// subclass, construct `oSupport`, write `tSupportData` live, re-apply the name the `Init` tail
+    /// loop no longer runs for it, add the reward row, and null the never-invalidated shop cache —
+    /// none of which can run at resident-load, which is the entire reason this path exists.
+    #[test]
+    fn the_mod_loader_defers_a_novel_support_behaviour() {
+        let src =
+            qm_modloader_source(&[], &[], &[support("bomb-mod", "ggbomb", "DLC_MrxGreenGoblinBomb")]);
+        assert!(src.contains("import(\"DLC_MrxGreenGoblinBomb\")"), "imports the subclass: {src}");
+        assert!(src.contains("DLC_MrxGreenGoblinBomb:Create()"), "constructs oSupport: {src}");
+        assert!(
+            src.contains("oSupport:SetSupportName(\"ggbomb\")"),
+            "re-applies the name Init would have: {src}"
+        );
+        assert!(
+            src.contains("MrxSupportData.tSupportData[\"ggbomb\"]"),
+            "defers the catalog row: {src}"
+        );
+        assert!(
+            src.contains("MrxRewardData._tRewards[\"ggbombReward_Pmc\"]"),
+            "defers the reward row: {src}"
+        );
+        assert!(
+            src.contains("MrxRewardData.gtAllSupport = nil"),
+            "nulls the never-invalidated cache: {src}"
+        );
+        assert!(src.contains("pcall(f)"), "runs under the shared fail-soft guard: {src}");
     }
 
     /// The trampoline is exactly what the resident carries: it wraps `_OnEnter`, imports the loader
