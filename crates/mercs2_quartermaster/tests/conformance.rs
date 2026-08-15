@@ -110,6 +110,18 @@ contributions:
     file: src/native/mybridge.ini
     dest: scripts
 
+  - kind: add_shop_item
+    id: dlcm1a1
+    name: "[vehicle.m1a1]"
+    icon: vehicles_tank_m1a2
+    type: heavy
+    shops: [pmc, gur]
+    cash_cost: 250000
+    fuel_cost: 75
+    max_stock: 4
+    unlocked: true
+    behaviour: { module: mrxcratedelivery, cargo: "LAVIII (Minigun)", delivery_vehicle: "Mi26 (PMC) (Driver)" }
+
   - kind: raw
     description: hand-tuned destruction states for the destroyer
     payload: src/destroyer_states.block
@@ -230,6 +242,19 @@ const JSON: &str = r#"
       "kind": "place_file",
       "file": "src/native/mybridge.ini",
       "dest": "scripts"
+    },
+    {
+      "kind": "add_shop_item",
+      "id": "dlcm1a1",
+      "name": "[vehicle.m1a1]",
+      "icon": "vehicles_tank_m1a2",
+      "type": "heavy",
+      "shops": ["pmc", "gur"],
+      "cash_cost": 250000,
+      "fuel_cost": 75,
+      "max_stock": 4,
+      "unlocked": true,
+      "behaviour": { "module": "mrxcratedelivery", "cargo": "LAVIII (Minigun)", "delivery_vehicle": "Mi26 (PMC) (Driver)" }
     },
     {
       "kind": "raw",
@@ -356,6 +381,19 @@ file = "src/native/mybridge.ini"
 dest = "scripts"
 
 [[contributions]]
+kind = "add_shop_item"
+id = "dlcm1a1"
+name = "[vehicle.m1a1]"
+icon = "vehicles_tank_m1a2"
+type = "heavy"
+shops = ["pmc", "gur"]
+cash_cost = 250000
+fuel_cost = 75
+max_stock = 4
+unlocked = true
+behaviour = { module = "mrxcratedelivery", cargo = "LAVIII (Minigun)", delivery_vehicle = "Mi26 (PMC) (Driver)" }
+
+[[contributions]]
 kind = "raw"
 description = "hand-tuned destruction states for the destroyer"
 payload = "src/destroyer_states.block"
@@ -396,6 +434,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "patch_lua",
             "native_hook",
             "place_file",
+            "add_shop_item",
             "raw"
         ]
     );
