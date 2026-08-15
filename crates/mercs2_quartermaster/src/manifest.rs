@@ -347,6 +347,127 @@ impl SoundKind {
     }
 }
 
+/// Which faction vendor a shop item is offered at (`add_shop_item`). Six shops key off
+/// `MrxStarter.GetFaction()`; the runtime key is Capitalized and matched by exact string, so a
+/// lowercase key reaches no shop. `Pmc` is Eva's custom-vehicle shop (obscures locked items, price
+/// scale forced to 1.0); the other five are outpost vendors (reputation-scaled price, and a locked
+/// item there is still purchasable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShopVendor {
+    All,
+    Chi,
+    Gur,
+    Oil,
+    Pir,
+    Pmc,
+}
+
+impl ShopVendor {
+    /// The exact runtime faction key (`sFactionId` / `GetFaction()`), Capitalized.
+    pub fn faction_key(self) -> &'static str {
+        match self {
+            ShopVendor::All => "All",
+            ShopVendor::Chi => "Chi",
+            ShopVendor::Gur => "Gur",
+            ShopVendor::Oil => "Oil",
+            ShopVendor::Pir => "Pir",
+            ShopVendor::Pmc => "Pmc",
+        }
+    }
+}
+
+/// Which of the shop's TWO disjoint catalogs an item lives in. `MrxShop.Open` reads both the support
+/// catalog (`MrxSupportData.tSupportData`, behaviour-carrying `oSupport` items) and the equipment
+/// catalog (`WifEquipmentData._tEquipment`, fuel tanks / grapple) — different schemas, and different
+/// reward-row fields (`tSupport` vs `tEquipment`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShopCatalog {
+    #[default]
+    Support,
+    Equipment,
+}
+
+/// `sType` — the closed enum the store icon map (`tTypeToIcon`) and reward-string markup key on. A
+/// novel value renders a nil icon and no markup, so it is not a free string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShopItemType {
+    Airstrike,
+    Supply,
+    Light,
+    Heavy,
+    Civilian,
+    Boat,
+    Heli,
+}
+
+impl ShopItemType {
+    pub fn lua(self) -> &'static str {
+        match self {
+            ShopItemType::Airstrike => "Airstrike",
+            ShopItemType::Supply => "Supply",
+            ShopItemType::Light => "Light",
+            ShopItemType::Heavy => "Heavy",
+            ShopItemType::Civilian => "Civilian",
+            ShopItemType::Boat => "Boat",
+            ShopItemType::Heli => "Heli",
+        }
+    }
+}
+
+/// The equipment `nType`. Only fuel tanks and grappling hooks are ever inserted into a shop
+/// (`mrxshop` hardcodes `bIsFuelTank or bIsGrapplingHook`); the costume type exists in the enum but
+/// is never shopped, so it is intentionally not offered here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShopEquipmentType {
+    FuelTank,
+    GrapplingHook,
+}
+
+impl ShopEquipmentType {
+    /// The `knType*` constant name the equipment table references.
+    pub fn lua_const(self) -> &'static str {
+        match self {
+            ShopEquipmentType::FuelTank => "knTypeFuelTank",
+            ShopEquipmentType::GrapplingHook => "knTypeGrapplingHook",
+        }
+    }
+}
+
+/// The `oSupport` behaviour a SUPPORT-catalog item constructs. Any support is `<module>:Create()`
+/// plus optional setters — the exact shape the DLC's own catalog uses
+/// (`mrxcratedelivery:Create()` → `SetCargo` / `SetDeliveryVehicle`). `module` must be an ALREADY
+/// resident, imported `MrxSupport` subclass; shipping a NOVEL subclass is a separate path (a new
+/// resident chunk hits the phase-8 world-load deadlock and needs the `qm_modloader` trampoline).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShopBehaviour {
+    pub module: String,
+    #[serde(default)]
+    pub cargo: Option<String>,
+    #[serde(default)]
+    pub delivery_vehicle: Option<String>,
+    /// A `src/`-relative Lua source for a NOVEL `MrxSupport` subclass (e.g. a new airstrike). When
+    /// present, `module` is NOT assumed resident: the source is minted as a new `scripts_vz` script
+    /// and `import`-ed post-world-load through the `qm_modloader` trampoline, and the catalog row is
+    /// DEFERRED into that loader — because the ordinary eager append would run `module:Create()` at
+    /// resident-load time, when the novel global is still `nil`, aborting a resident script (the
+    /// phase-8 deadlock's cousin). Omit to reference a module the game already ships.
+    ///
+    /// Author-facing caveat (the linter warns): a novel-behaviour item surfaces reliably only at
+    /// Eva's PMC shop — the trampoline fires on PMC-interior entry, so an outpost vendor that opens
+    /// first caches its list without the item. Co-op requires both peers to install the Shipment.
+    #[serde(default)]
+    pub script: Option<PathBuf>,
+}
+
+fn default_shop_max_stock() -> u32 {
+    99
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -618,6 +739,58 @@ pub enum Contribution {
     /// [`Contribution::NativeHook`], which reads the PE headers the loader will `LoadLibrary` and
     /// records the hooked addresses. Letting a companion be a plugin would be a way around both.
     PlaceFile { file: PathBuf, dest: PlaceIn },
+    /// Script (composed). A purchasable item added to one or more faction shops.
+    ///
+    /// Delivered as LINKED APPENDS onto the resident catalog scripts, never a block replace: a
+    /// full-block replace of the resident script block is `Exclusive`/last-wins and silently
+    /// annihilates a second shop mod — the exact failure `patch_lua` and the linker exist to
+    /// prevent. `catalog: support` appends a `tSupportData` row to `mrxsupportdata`;
+    /// `catalog: equipment` appends a `_tEquipment` row to `wifequipmentdata`. Either way a reward
+    /// row per listed vendor faction is appended to `mrxrewarddata`, which is the only source
+    /// `MrxShop.Open` reads (`GetAllPotentialShopItems(<faction>)`).
+    ///
+    /// Dependencies the author owns: `name`/`description` that are `[stringdb tokens]` need a
+    /// companion `edit_stringdb` (an unresolved token renders raw); `icon` is an atlas key (a novel
+    /// icon renders blank); a support `behaviour.cargo` names a spawnable template that must already
+    /// exist. Runtime faction keys are Capitalized on emit.
+    AddShopItem {
+        /// Catalog id → `tSupportData`/`_tEquipment` key and the reward id.
+        id: String,
+        /// `sName` — a stringdb token (`[vehicle.m1a1]`) or a literal.
+        name: String,
+        /// `sDescription` — token or literal.
+        #[serde(default)]
+        description: String,
+        /// `sIcon` (support) / `sTexture` (equipment) — an atlas key.
+        icon: String,
+        /// The vendor shop(s) this item is offered at — one reward row is emitted per vendor.
+        shops: Vec<ShopVendor>,
+        /// Which catalog. Default `support`.
+        #[serde(default)]
+        catalog: ShopCatalog,
+        /// `sType` (support catalog). Needed for a support item to get an icon + reward markup.
+        #[serde(rename = "type", default)]
+        item_type: Option<ShopItemType>,
+        /// `nCashCost` (support) / `nCost` (equipment).
+        #[serde(default)]
+        cash_cost: u64,
+        /// `nFuelCost` (support only).
+        #[serde(default)]
+        fuel_cost: u64,
+        /// `nMaxStock` (support). Capped at 99 by `Init`.
+        #[serde(default = "default_shop_max_stock")]
+        max_stock: u32,
+        /// `tUnlockStatus` — unlocked in every listed vendor. Required in Eva's obscured shop, where
+        /// a locked item is unbuyable.
+        #[serde(default)]
+        unlocked: bool,
+        /// The `oSupport` behaviour (support catalog). Omit for equipment.
+        #[serde(default)]
+        behaviour: Option<ShopBehaviour>,
+        /// The equipment `nType` (equipment catalog). Omit for support.
+        #[serde(default)]
+        equipment_type: Option<ShopEquipmentType>,
+    },
     /// The OPEN LOWER BOUND — opaque payload plus a DECLARED blast radius, so the linter and the
     /// conflict system can reason without understanding the bytes.
     Raw {
@@ -656,6 +829,7 @@ impl Contribution {
         "add_language",
         "native_hook",
         "place_file",
+        "add_shop_item",
         "raw",
     ];
 
@@ -677,6 +851,7 @@ impl Contribution {
             Contribution::AddLanguage { .. } => "add_language",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
+            Contribution::AddShopItem { .. } => "add_shop_item",
             Contribution::Raw { .. } => "raw",
         }
     }
