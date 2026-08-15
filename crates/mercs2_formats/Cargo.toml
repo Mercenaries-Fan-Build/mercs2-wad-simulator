@@ -9,6 +9,14 @@ repository.workspace = true
 
 [dependencies]
 flate2 = "1"
+# PS3 DLC decrypt chain (ps3_* modules): the retail PKG data region, the NPDRM
+# EDAT payload, and the SCE SELF appldr/NPDRM layers are all AES-128/256, and the
+# title klicensee is recovered by AES-CMAC. Only `aes` (block cipher) + `cmac` are
+# pulled in — CTR/CBC/ECB modes are implemented locally in `ps3_crypto` so the mode
+# crates aren't needed. Same RustCrypto generation as the `sha2 0.10` already in
+# the tree (digest 0.10), so no version-generation split.
+aes = "0.8"
+cmac = "0.7"
 # Parser + accessor readers ONLY. `default-features` pulls `import`, which drags in `image` and
 # `base64` for decoding embedded textures — this crate never needs those: a Shipment supplies its
 # maps as separate files, and the rigid-prop path reads geometry alone.
