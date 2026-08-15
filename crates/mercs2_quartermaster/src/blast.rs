@@ -141,7 +141,15 @@ pub enum Intent {
 /// This is the curated half of the composition catalog. It is deliberately a SHORT allow-list:
 /// everything absent from it falls to `Exclusive`, so being wrong here costs a false conflict
 /// (annoying, visible) rather than a silent mutual annihilation (catastrophic, invisible).
-const MERGEABLE_SCRIPTS: &[&str] = &["wifpmcinterior"];
+const MERGEABLE_SCRIPTS: &[&str] = &[
+    "wifpmcinterior",
+    // The resident shop catalogs `add_shop_item` appends to. Their target tables (`tSupportData`,
+    // `_tEquipment`, `_tRewards`) are module-globals populated at load, so N top-level append rows
+    // union by concatenation exactly as `_tOutfits` does — reversed and safe to merge.
+    "mrxsupportdata",
+    "wifequipmentdata",
+    "mrxrewarddata",
+];
 
 /// The merge class for a claim. Curated domain knowledge; **default is Exclusive**.
 pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass {
@@ -296,6 +304,29 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: target.clone(),
+                    }),
+                    Intent::Additive,
+                );
+            }
+            // A shop item claims the catalog script it appends a row to (support vs equipment) plus
+            // `mrxrewarddata` for the reward row. All are in `MERGEABLE_SCRIPTS`, so these are
+            // `OrderedList` (Additive) — N shop mods union rather than clobber.
+            Contribution::AddShopItem { catalog, .. } => {
+                let catalog_script = match catalog {
+                    crate::manifest::ShopCatalog::Support => "mrxsupportdata",
+                    crate::manifest::ShopCatalog::Equipment => "wifequipmentdata",
+                };
+                push(
+                    Access::Write,
+                    bare(Claim::Script {
+                        name: catalog_script.into(),
+                    }),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    bare(Claim::Script {
+                        name: "mrxrewarddata".into(),
                     }),
                     Intent::Additive,
                 );
