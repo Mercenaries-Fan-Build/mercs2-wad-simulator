@@ -2,7 +2,8 @@
 //! tools for the game's WAD/sges/UCFX container stack and everything inside it.
 //!
 //! No rendering, no simulation, no I/O policy — just format code, reverse-engineered from the
-//! retail PC build and its console siblings. The one dependency is `flate2`.
+//! retail PC build and its console siblings. The core dependency is `flate2`; the `ps3_*` DLC
+//! decrypt chain additionally links `aes` + `cmac`.
 //!
 //! # Getting bytes out of a WAD
 //!
@@ -59,6 +60,10 @@
 //! - [`mannequin`], [`retarget`] — procedural humanoid mesh; foreign-rig retargeting.
 //! - [`placement_build`], [`patch_wad`] — append a new world placement; serialize a `vz-patch.wad`.
 //! - [`dlc_input`], [`dlc_stfs`] — big-endian Xbox 360 DLC readers; STFS container + RAR extraction.
+//! - [`ps3_pkg`], [`ps3_edat`], [`ps3_self`], [`ps3_klic`], [`ps3_crypto`], [`ps3_keys`] — the PS3
+//!   "Blow It Up Again" DLC decrypt chain: PSN PKG → NPDRM EDAT → inner BE `SCFF` WAD, plus SCE
+//!   SELF→ELF and sliding-window AES-CMAC klicensee recovery. Output feeds the same BE `dlc_input`
+//!   + `ucfx` pipeline as the Xbox path.
 //!
 //! # Gotchas
 //!
@@ -94,14 +99,23 @@ pub mod game_paths;
 pub mod gfx;
 pub mod hash;
 pub mod havok;
+pub mod havok_write;
 pub mod mesh_import;
 pub mod model_build;
 pub mod model_cubeize;
 pub mod model_inject;
+pub mod mopp;
 pub mod orchestrator;
 pub mod patch_wad;
+pub mod phy2_moppswap;
 pub mod placement;
 pub mod placement_build;
+pub mod ps3_crypto;
+pub mod ps3_edat;
+pub mod ps3_keys;
+pub mod ps3_klic;
+pub mod ps3_pkg;
+pub mod ps3_self;
 pub mod safe_slice;
 pub mod save;
 pub mod save_write;
