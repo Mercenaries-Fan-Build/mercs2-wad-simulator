@@ -623,6 +623,91 @@ pub fn script_mutations(
                     append: source,
                 });
             }
+            Contribution::AddShopItem {
+                id,
+                name,
+                description,
+                icon,
+                shops,
+                catalog,
+                item_type,
+                cash_cost,
+                fuel_cost,
+                max_stock,
+                unlocked,
+                behaviour,
+                equipment_type,
+            } => {
+                use crate::manifest::ShopCatalog;
+                // A NOVEL support behaviour (behaviour.script set) is NOT a load-time append: it
+                // defers into `qm_modloader` via `support_registrations`, because its `module:Create()`
+                // would run against a nil global at resident-load. Skip it here.
+                if behaviour.as_ref().is_some_and(|b| b.script.is_some()) {
+                    continue;
+                }
+                match catalog {
+                    ShopCatalog::Support => {
+                        let b = behaviour.as_ref().ok_or_else(|| BuildError::Lower {
+                            index,
+                            kind: "add_shop_item",
+                            message: format!(
+                                "support shop item {id:?} needs a `behaviour` (the oSupport module)"
+                            ),
+                        })?;
+                        let itype = item_type.as_ref().map_or("Supply", |t| t.lua());
+                        let unlock = link::shop_unlock_table(shops, *unlocked);
+                        out.push(ScriptMutation {
+                            shipment: shipment.clone(),
+                            target: "mrxsupportdata".into(),
+                            append: link::shop_support_row_append(
+                                id,
+                                name,
+                                description,
+                                icon,
+                                itype,
+                                *cash_cost,
+                                *fuel_cost,
+                                *max_stock,
+                                &unlock,
+                                &b.module,
+                                b.cargo.as_deref(),
+                                b.delivery_vehicle.as_deref(),
+                            ),
+                        });
+                    }
+                    ShopCatalog::Equipment => {
+                        let et = equipment_type.as_ref().ok_or_else(|| BuildError::Lower {
+                            index,
+                            kind: "add_shop_item",
+                            message: format!(
+                                "equipment shop item {id:?} needs an `equipment_type` \
+                                 (fuel_tank | grappling_hook)"
+                            ),
+                        })?;
+                        out.push(ScriptMutation {
+                            shipment: shipment.clone(),
+                            target: "wifequipmentdata".into(),
+                            append: link::shop_equipment_row_append(
+                                id,
+                                name,
+                                description,
+                                icon,
+                                et.lua_const(),
+                                *cash_cost,
+                            ),
+                        });
+                    }
+                }
+                let field = match catalog {
+                    ShopCatalog::Support => "tSupport",
+                    ShopCatalog::Equipment => "tEquipment",
+                };
+                out.push(ScriptMutation {
+                    shipment: shipment.clone(),
+                    target: "mrxrewarddata".into(),
+                    append: link::shop_reward_append(id, field, shops),
+                });
+            }
             _ => {}
         }
     }
@@ -672,6 +757,72 @@ pub fn layer_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::La
             _ => None,
         })
         .collect()
+}
+
+/// Every NOVEL-behaviour shop item's registration, for the linker to mint the `MrxSupport` subclass
+/// and bake its DEFERRED catalog row into `qm_modloader`. A shop item is novel only when its
+/// `behaviour.script` is set; a resident-module item stays on the load-time append path in
+/// [`script_mutations`]. Support catalog only — equipment carries no behaviour.
+pub fn support_registrations(
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+) -> Result<Vec<link::SupportRegistration>, BuildError> {
+    use crate::manifest::ShopCatalog;
+    let shipment = manifest.shipment.name.clone();
+    let mut out = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let Contribution::AddShopItem {
+            id,
+            name,
+            description,
+            icon,
+            shops,
+            catalog,
+            item_type,
+            cash_cost,
+            fuel_cost,
+            max_stock,
+            unlocked,
+            behaviour,
+            ..
+        } = c
+        else {
+            continue;
+        };
+        let Some(b) = behaviour else { continue };
+        let Some(script) = &b.script else { continue };
+        if !matches!(catalog, ShopCatalog::Support) {
+            return Err(BuildError::Lower {
+                index,
+                kind: "add_shop_item",
+                message: format!("shop item {id:?}: behaviour.script is support-catalog only"),
+            });
+        }
+        let path = root.join(script);
+        let source = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
+            index,
+            kind: "add_shop_item",
+            message: format!("reading behaviour.script {}: {e}", path.display()),
+        })?;
+        out.push(link::SupportRegistration {
+            shipment: shipment.clone(),
+            module: b.module.clone(),
+            source,
+            id: id.clone(),
+            name: name.clone(),
+            description: description.clone(),
+            icon: icon.clone(),
+            item_type: item_type.as_ref().map_or("Supply", |t| t.lua()).to_string(),
+            cash_cost: *cash_cost,
+            fuel_cost: *fuel_cost,
+            max_stock: *max_stock,
+            unlock_table: link::shop_unlock_table(shops, *unlocked),
+            cargo: b.cargo.clone(),
+            delivery_vehicle: b.delivery_vehicle.clone(),
+            shops: shops.iter().map(|v| v.faction_key().to_string()).collect(),
+        });
+    }
+    Ok(out)
 }
 
 /// Mint a Scaleform movie as a `cfx_pack` patch block under `name`, from the file at `root/movie`.
@@ -1991,6 +2142,10 @@ fn lower(
         // `script_mutations` and realised at link time.
         Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
 
+        // No Data half: a shop item is pure Script-layer catalog + reward appends (see
+        // `script_mutations`), composed by the linker. Nothing to pack into a block.
+        Contribution::AddShopItem { .. } => Ok(Lowering::Nothing),
+
         // Contributes no block either: its effect is a layer registration baked into `qm_modloader`,
         // collected by `layer_registrations` and realised at link time — exactly like `add_ui`'s
         // Script half, but with no Data movie of its own.
@@ -3069,6 +3224,7 @@ pub fn build(
     let mutations = script_mutations(manifest, &shipment.root)?;
     let ui_regs = ui_registrations(manifest);
     let layer_regs = layer_registrations(manifest);
+    let support_regs = support_registrations(manifest, &shipment.root)?;
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -3084,7 +3240,11 @@ pub fn build(
     // `ui_regs` / `layer_regs` count too: an add_ui or activate_layer with no other script edit
     // still mints `qm_modloader` and the trampoline, so the link must run for it even when
     // `mutations` is empty.
-    if !mutations.is_empty() || !ui_regs.is_empty() || !layer_regs.is_empty() {
+    if !mutations.is_empty()
+        || !ui_regs.is_empty()
+        || !layer_regs.is_empty()
+        || !support_regs.is_empty()
+    {
         let Some(game) = game.as_deref_mut() else {
             return Err(BuildError::GameRequired {
                 index: 0,
@@ -3118,6 +3278,7 @@ pub fn build(
             &mutations,
             &ui_regs,
             &layer_regs,
+            &support_regs,
             &[],
         )
         .map_err(|e| BuildError::Lower {
@@ -3429,14 +3590,17 @@ pub fn link_installed(
 
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
     let mut layer_regs: Vec<link::LayerRegistration> = Vec::new();
+    let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
+        support_regs.extend(support_registrations(&s.manifest, &s.root)?);
     }
     // A UI or layer mod touches the Script layer too — it mints `qm_modloader` and the trampoline —
     // so an install of nothing but add_ui / activate_layer Shipments still has script work to do.
-    if mutations.is_empty() && ui_regs.is_empty() && layer_regs.is_empty() {
+    if mutations.is_empty() && ui_regs.is_empty() && layer_regs.is_empty() && support_regs.is_empty()
+    {
         log.push("no installed Shipment touches a script — nothing to link".into());
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
         // overlay that merely restates the base block is a file deploy has to reason about for
@@ -3478,6 +3642,7 @@ pub fn link_installed(
         &mutations,
         &ui_regs,
         &layer_regs,
+        &support_regs,
         &order,
     )
     .map_err(|e| BuildError::Lower {
