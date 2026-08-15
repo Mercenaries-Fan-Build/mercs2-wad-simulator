@@ -567,6 +567,367 @@ fn wv_inverse(coeffs: &[f32], block_size: usize) -> Vec<f32> {
     coeffs[..block_size.min(coeffs.len())].to_vec()
 }
 
+// ============================ FORWARD (ENCODER) ============================
+//
+// The write side: invert each decode stage so a clip can be rebuilt from source into a native
+// wavelet packfile WITHOUT the Havok DLL. Gated against the verified decoder (encode → decode ≈
+// source) and, at the packfile level, diffed against AssetCc2's proven-in-retail output.
+
+/// Invert an 8×8 matrix by Gauss–Jordan elimination. Used once to derive the forward wavelet
+/// transform from [`INV_WAVELET_8`]; panics if the matrix is singular (it is not).
+fn invert8(m: &[[f32; 8]; 8]) -> [[f32; 8]; 8] {
+    // Work in f64 for conditioning, then narrow — the basis has exact dyadic entries so this is
+    // effectively exact.
+    let mut a = [[0f64; 16]; 8];
+    for i in 0..8 {
+        for j in 0..8 {
+            a[i][j] = m[i][j] as f64;
+        }
+        a[i][8 + i] = 1.0;
+    }
+    for col in 0..8 {
+        // partial pivot
+        let mut piv = col;
+        for r in (col + 1)..8 {
+            if a[r][col].abs() > a[piv][col].abs() {
+                piv = r;
+            }
+        }
+        a.swap(col, piv);
+        let d = a[col][col];
+        assert!(d.abs() > 1e-12, "INV_WAVELET_8 singular");
+        for j in 0..16 {
+            a[col][j] /= d;
+        }
+        for r in 0..8 {
+            if r != col {
+                let f = a[r][col];
+                if f != 0.0 {
+                    for j in 0..16 {
+                        a[r][j] -= f * a[col][j];
+                    }
+                }
+            }
+        }
+    }
+    let mut out = [[0f32; 8]; 8];
+    for i in 0..8 {
+        for j in 0..8 {
+            out[i][j] = a[i][8 + j] as f32;
+        }
+    }
+    out
+}
+
+/// The forward 8-point wavelet transform: `coeffs = INV_WAVELET_8⁻¹ · samples`. Exact inverse of
+/// [`wv_inverse`] for `block_size == 8` (every retail clip). Cached — the inversion runs once.
+pub fn forward_wavelet_8(samples: &[f32; 8]) -> [f32; 8] {
+    use std::sync::OnceLock;
+    static FWD: OnceLock<[[f32; 8]; 8]> = OnceLock::new();
+    let fwd = FWD.get_or_init(|| invert8(&INV_WAVELET_8));
+    let mut out = [0f32; 8];
+    for (i, oi) in out.iter_mut().enumerate() {
+        let mut s = 0.0f32;
+        for j in 0..8 {
+            s += fwd[i][j] * samples[j];
+        }
+        *oi = s;
+    }
+    out
+}
+
+/// Forward affine quantize of one DOF's `block_size` wavelet coefficients — the exact inverse of
+/// [`wv_dequant`] (`value = code · 2^-bw · mult + off`). Chooses `off = min` and `mult` so the
+/// coefficient range spans the full `2^bw` codes, then `code = round((coeff − off) / scale)`
+/// clamped to `[0, 2^bw − 1]`. `preserved` leading coefficients are kept as raw f32 (retail
+/// `preserved = 0`). Returns `(codes, mult, off)`; `mult == 0` for a constant block (all codes 0).
+pub fn forward_quantize(coeffs: &[f32], bw: u32, preserved: usize) -> (Vec<u32>, f32, f32) {
+    let n = coeffs.len();
+    let dyn_coeffs = &coeffs[preserved.min(n)..];
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for &c in dyn_coeffs {
+        lo = lo.min(c);
+        hi = hi.max(c);
+    }
+    if !lo.is_finite() {
+        lo = 0.0;
+        hi = 0.0;
+    }
+    let off = lo;
+    let levels = ((1u64 << bw) - 1) as f32; // 2^bw − 1 usable codes
+    let range = hi - lo;
+    // scale = 2^-bw · mult ; choose mult so range maps onto `levels`.
+    let (scale, mult) = if range > 0.0 {
+        let scale = range / levels;
+        (scale, scale * 2f32.powi(bw as i32))
+    } else {
+        (1.0, 0.0)
+    };
+    let maxcode = ((1u64 << bw) - 1) as i64;
+    let mut codes = Vec::with_capacity(dyn_coeffs.len());
+    for &c in dyn_coeffs {
+        let q = (((c - off) / scale).round() as i64).clamp(0, maxcode);
+        codes.push(q as u32);
+    }
+    (codes, mult, off)
+}
+
+/// Pack one block's quantized codes into the raw on-disk entropy blob, ALL-PRESENT — the inverse of
+/// [`wv_entropy_unpack`] with an all-zero bitmap (no run-fill). Layout:
+/// `[preserved leading f32s][bitmap: (n+7)/8 zero bytes][codes bit-packed LSB-first at bw bits,
+/// emitted as u16 LE words]`. All-present is a valid, slightly larger encoding (the run-fill
+/// sparsification the decoder supports is a size optimization only) — it is the simplest correct
+/// packer and what the encoder emits.
+pub fn pack_block_all_present(codes: &[u32], bw: u32, preserved_f32: &[f32]) -> Vec<u8> {
+    let n = codes.len();
+    let mut out = Vec::new();
+    for &f in preserved_f32 {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    // all-present bitmap: (n+7)/8 zero bytes (every code read from the word stream).
+    let bm_bytes = (n + 7) >> 3;
+    out.resize(out.len() + bm_bytes, 0);
+    // Bit-pack codes LSB-first into a BYTE-rounded stream. The decoder reads it via 16-bit words
+    // (`rd16`) and may over-read the final partial word into the next DOF's bytes, but only consumes
+    // the exact bit count — so the on-disk blob is byte-rounded, matching `wv_entropy_advance`
+    // (`bitmap n bits + present·bw bits`, byte-rounded). Word-padding here would desync every DOF
+    // after the first.
+    let mask: u64 = (1u64 << bw) - 1;
+    let mut acc: u64 = 0;
+    let mut nbits: u32 = 0;
+    for &c in codes {
+        acc |= (c as u64 & mask) << nbits;
+        nbits += bw;
+        while nbits >= 8 {
+            out.push((acc & 0xff) as u8);
+            acc >>= 8;
+            nbits -= 8;
+        }
+    }
+    if nbits > 0 {
+        out.push((acc & 0xff) as u8);
+    }
+    out
+}
+
+/// Encode one dynamic DOF's per-frame values into per-block all-present entropy blobs plus the
+/// SINGLE per-DOF quant descriptor `(mult, off)` the decoder applies to every block. This is the
+/// inverse of the per-DOF loop in `decode_wavelet`: forward-transform each `block_size` window,
+/// quantize ALL coefficients together (the decoder uses one `mult`/`off` per DOF, not per block),
+/// then pack each block. The final block is padded to `block_size` with the last sample. Returns
+/// `(per_block_blobs, mult, off)`.
+pub fn encode_dof(frames: &[f32], block_size: usize, bw: u32) -> (Vec<Vec<u8>>, f32, f32) {
+    assert!(block_size <= 8, "only block_size ≤ 8 is supported (retail is 8)");
+    let n_blocks = frames.len().div_ceil(block_size).max(1);
+    let last = frames.last().copied().unwrap_or(0.0);
+    // Forward-transform each block → the full coefficient stream for this DOF.
+    let mut all_coeffs: Vec<f32> = Vec::with_capacity(n_blocks * block_size);
+    for b in 0..n_blocks {
+        let mut samp = [0f32; 8];
+        for (i, s) in samp.iter_mut().enumerate().take(block_size) {
+            let fi = b * block_size + i;
+            *s = if fi < frames.len() { frames[fi] } else { last };
+        }
+        let c = forward_wavelet_8(&samp);
+        all_coeffs.extend_from_slice(&c[..block_size]);
+    }
+    // One affine quantizer for the whole DOF (matches the decoder's per-DOF descriptor).
+    let (codes, mult, off) = forward_quantize(&all_coeffs, bw, 0);
+    let blocks: Vec<Vec<u8>> = (0..n_blocks)
+        .map(|b| pack_block_all_present(&codes[b * block_size..(b + 1) * block_size], bw, &[]))
+        .collect();
+    (blocks, mult, off)
+}
+
+/// Encode a whole clip into a native `hkaWaveletSkeletalAnimation` struct + its dataBuffer (the
+/// bytes `decode_wavelet` reads) — the top-level wavelet encoder. Uses the simplest valid encoding:
+/// every transform track's 10 components (tx,ty,tz, qx,qy,qz,qw, sx,sy,sz) are DYNAMIC and
+/// all-present (no static/identity groups, no run-fill), so the StaticMask is uniform and the
+/// dof_map is `[0..10]` per track. Constant components fall out for free (a zero-range quantizer
+/// emits all-zero codes that dequantize to the constant `off`). Wrap the result in a Havok packfile
+/// with [`crate::havok_write::write_packfile`]. Frames are `[frame][track]`.
+pub fn encode_wavelet_struct(frames: &[Vec<QsTransform>], duration: f32) -> Vec<u8> {
+    let n_poses = frames.len();
+    assert!(n_poses > 0, "clip has no frames");
+    let n_tt = frames[0].len();
+    let block_size = 8usize;
+    let bw = 11u32;
+    let n_blocks = n_poses.div_ceil(block_size);
+
+    let comp = |t: &QsTransform, ci: usize| -> f32 {
+        match ci {
+            0..=2 => t.translation[ci],
+            3..=6 => t.rotation[ci - 3],
+            7..=9 => t.scale[ci - 7],
+            _ => 0.0,
+        }
+    };
+
+    // Per-DOF encode, all 10 components of every track (dof_map order 0..10 per track).
+    let mut dof_blocks: Vec<Vec<Vec<u8>>> = Vec::with_capacity(n_tt * 10);
+    let mut mult: Vec<f32> = Vec::new();
+    let mut addend: Vec<f32> = Vec::new();
+    for ti in 0..n_tt {
+        for ci in 0..10 {
+            let series: Vec<f32> = (0..n_poses).map(|f| comp(&frames[f][ti], ci)).collect();
+            let (blocks, m, o) = encode_dof(&series, block_size, bw);
+            dof_blocks.push(blocks);
+            mult.push(m);
+            addend.push(o);
+        }
+    }
+    let num_d = mult.len();
+
+    // quantData is block-major: block b = concat of every DOF's block-b blob, in DOF order.
+    let mut quant_data: Vec<u8> = Vec::new();
+    let mut block_off: Vec<u32> = Vec::with_capacity(n_blocks);
+    for blk in 0..n_blocks {
+        block_off.push(quant_data.len() as u32);
+        for blocks in &dof_blocks {
+            quant_data.extend_from_slice(&blocks[blk]);
+        }
+    }
+
+    let mask = encode_static_mask(MaskGroup::Mixed, MaskGroup::Mixed, MaskGroup::Mixed, &[true; 10]);
+
+    // dataBuffer layout (all offsets relative to the struct end): masks, then the per-DOF
+    // offset/scale/bitWidth arrays, the block index, and finally the quantData.
+    let mut db: Vec<u8> = Vec::new();
+    let sm_idx = db.len() as u32;
+    for _ in 0..n_tt {
+        db.extend_from_slice(&mask.to_le_bytes());
+    }
+    while db.len() % 4 != 0 {
+        db.push(0);
+    }
+    let offset_idx = db.len() as u32;
+    for &o in &addend {
+        db.extend_from_slice(&o.to_le_bytes());
+    }
+    let scale_idx = db.len() as u32;
+    for &m in &mult {
+        db.extend_from_slice(&m.to_le_bytes());
+    }
+    let bw_idx = db.len() as u32;
+    for _ in 0..num_d {
+        db.push(bw as u8);
+    }
+    while db.len() % 4 != 0 {
+        db.push(0);
+    }
+    let bi_idx = db.len() as u32;
+    for &bo in &block_off {
+        db.extend_from_slice(&bo.to_le_bytes());
+    }
+    let qd_idx = db.len() as u32;
+    db.extend_from_slice(&quant_data);
+    let sd_idx = 0u32; // no static DOFs → never read
+
+    // The 96-byte hkaWaveletSkeletalAnimation fixed part.
+    let mut s = vec![0u8; WAVELET_STRUCT_SIZE];
+    let put32 = |s: &mut [u8], off: usize, v: u32| s[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    put32(&mut s, W_OFF_ANIM_TYPE, 3);
+    s[W_OFF_DURATION..W_OFF_DURATION + 4].copy_from_slice(&duration.to_le_bytes());
+    put32(&mut s, W_OFF_NUM_TT, n_tt as u32);
+    // numFloatTracks @20 stays 0.
+    put32(&mut s, W_OFF_NUM_POSES, n_poses as u32);
+    put32(&mut s, W_OFF_BLOCK_SIZE, block_size as u32);
+    let qf = W_OFF_QFMT;
+    s[qf] = bw as u8; // maxBitWidth
+    s[qf + QFMT_PRESERVED] = 0;
+    put32(&mut s, qf + QFMT_NUM_D, num_d as u32);
+    put32(&mut s, qf + QFMT_OFFSET_IDX, offset_idx);
+    put32(&mut s, qf + QFMT_SCALE_IDX, scale_idx);
+    put32(&mut s, qf + QFMT_BW_IDX, bw_idx);
+    put32(&mut s, W_OFF_STATIC_MASK_IDX, sm_idx);
+    put32(&mut s, W_OFF_STATIC_DOFS_IDX, sd_idx);
+    put32(&mut s, W_OFF_BLOCK_INDEX_IDX, bi_idx);
+    put32(&mut s, W_OFF_BLOCK_INDEX_SIZE, n_blocks as u32);
+    put32(&mut s, W_OFF_QUANT_DATA_IDX, qd_idx);
+    put32(&mut s, 84, quant_data.len() as u32); // quantDataSize
+    put32(&mut s, 92, db.len() as u32); // numDataBuffer
+
+    let mut out = s;
+    out.extend_from_slice(&db);
+    out
+}
+
+/// Group type in a StaticMask: `Identity` (0,0,0 / identity quat / 1,1,1), `AllStatic` (constant,
+/// from the static-DOF array), or `Mixed` (type 0 — each component dynamic-or-static per selector
+/// bit). Encoded as the 2-bit field per group: 2=identity, 1=all-static, 0=mixed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MaskGroup {
+    Mixed = 0,
+    AllStatic = 1,
+    Identity = 2,
+}
+
+/// Which of the 10 transform components (tx,ty,tz,qx,qy,qz,qw,sx,sy,sz) a track's StaticMask marks
+/// DYNAMIC (read from the coefficient buffer). A component is dynamic only when its group is `Mixed`
+/// (type 0) AND its selector bit is set. Inverse of [`encode_static_mask`].
+pub fn static_mask_dynamic(mask: u16) -> [bool; 10] {
+    let mut dyn_ = [false; 10];
+    let u = (mask >> 6) as u32;
+    if mask & 0x3 == 0 {
+        for &(bit, ci) in &POS_SUBS {
+            if u & bit != 0 {
+                dyn_[ci] = true;
+            }
+        }
+    }
+    if (mask >> 2) & 0x3 == 0 {
+        for &(bit, ci) in &ROT_SUBS {
+            if u & bit != 0 {
+                dyn_[ci] = true;
+            }
+        }
+    }
+    if (mask >> 4) & 0x3 == 0 {
+        for &(bit, ci) in &SCALE_SUBS {
+            if u & bit != 0 {
+                dyn_[ci] = true;
+            }
+        }
+    }
+    dyn_
+}
+
+/// Build a track's StaticMask u16 from the three group types and the per-component dynamic flags
+/// (only consulted for `Mixed` groups). Inverse of [`static_mask_dynamic`].
+pub fn encode_static_mask(
+    pos: MaskGroup,
+    rot: MaskGroup,
+    scale: MaskGroup,
+    dynamic: &[bool; 10],
+) -> u16 {
+    let mut m = (pos as u16) | ((rot as u16) << 2) | ((scale as u16) << 4);
+    let mut u = 0u32;
+    if pos == MaskGroup::Mixed {
+        for &(bit, ci) in &POS_SUBS {
+            if dynamic[ci] {
+                u |= bit;
+            }
+        }
+    }
+    if rot == MaskGroup::Mixed {
+        for &(bit, ci) in &ROT_SUBS {
+            if dynamic[ci] {
+                u |= bit;
+            }
+        }
+    }
+    if scale == MaskGroup::Mixed {
+        for &(bit, ci) in &SCALE_SUBS {
+            if dynamic[ci] {
+                u |= bit;
+            }
+        }
+    }
+    m |= (u as u16) << 6;
+    m
+}
+
 /// StRecomposeW (FUN_009fb870, decomp line ~918497) reconstructs the quaternion
 /// W from the `±2` sentinel: when the stored W has magnitude `_DAT_00b6b6b8`
 /// (= 2.0, read live from the exe), the real W is `±sqrt(1 - x² - y² - z²)` with
@@ -1005,6 +1366,339 @@ pub fn parse_anim(packfile: &[u8]) -> Result<AnimClip, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The forward transform must EXACTLY invert the decoder's `wv_inverse` for block-8 (every
+    /// retail clip). This is the mathematical foundation of the encoder — if it doesn't round-trip
+    /// to machine precision, nothing built on it can. Tested across several deterministic blocks.
+    #[test]
+    fn forward_wavelet_inverts_the_decoder() {
+        let blocks: [[f32; 8]; 4] = [
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            [1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.125, -0.125],
+            [3.14, 2.71, -1.41, 0.0, 9.8, -6.0, 0.577, 42.0],
+            [-0.001, 0.002, -0.003, 100.0, -100.0, 0.0, 0.5, 0.5],
+        ];
+        for (bi, samples) in blocks.iter().enumerate() {
+            let coeffs = forward_wavelet_8(samples);
+            let recovered = wv_inverse(&coeffs, 8);
+            for i in 0..8 {
+                let d = (recovered[i] - samples[i]).abs();
+                assert!(
+                    d < 1e-4,
+                    "block {bi} dof {i}: forward→inverse drift {d:.3e} (got {}, want {})",
+                    recovered[i],
+                    samples[i]
+                );
+            }
+        }
+    }
+
+    /// The full per-DOF codec round-trips within quantization error: samples → forward transform →
+    /// forward quantize → (dequant → inverse) ≈ samples, at the retail bit width (11). This is the
+    /// encoder's core promise — an authored curve survives the wavelet compression.
+    #[test]
+    fn wavelet_codec_round_trips_within_quant_error() {
+        let bw = 11u32;
+        let cases: [[f32; 8]; 3] = [
+            [0.10, 0.15, 0.20, 0.18, 0.12, 0.05, -0.10, -0.20],
+            [1.0, 1.02, 1.05, 1.03, 0.98, 0.95, 0.9, 0.88],
+            [-2.0, -1.5, 0.0, 1.5, 2.0, 1.0, 0.0, -1.0],
+        ];
+        for (ci, samples) in cases.iter().enumerate() {
+            let coeffs = forward_wavelet_8(samples);
+            let (codes, mult, off) = forward_quantize(&coeffs, bw, 0);
+            // Mirror wv_dequant, then the inverse transform (the decode side).
+            let scale = mult * 2f32.powi(-(bw as i32));
+            let recon: Vec<f32> = codes.iter().map(|&c| c as f32 * scale + off).collect();
+            let out = wv_inverse(&recon, 8);
+            for i in 0..8 {
+                let d = (out[i] - samples[i]).abs();
+                assert!(d < 2e-3, "case {ci} dof {i}: codec drift {d:.3e}");
+            }
+        }
+    }
+
+    /// The all-present bitstream packer must invert the decoder's entropy stage: pack codes → the
+    /// raw blob → `wv_entropy_unpack` → `wv_dequant` recovers exactly those codes. This is the
+    /// trickiest encoder piece; gated against the real decode path at the retail bit width 11.
+    #[test]
+    fn entropy_packer_round_trips_through_the_decoder() {
+        let bw = 11u32;
+        let block_size = 8usize;
+        let cases: [[u32; 8]; 3] = [
+            [0, 5, 100, 2047, 1024, 512, 3, 88],
+            [2047, 2047, 0, 0, 1, 2046, 1023, 1024],
+            [1, 2, 4, 8, 16, 32, 64, 128],
+        ];
+        for (ci, codes) in cases.iter().enumerate() {
+            let mut blob = pack_block_all_present(codes, bw, &[]);
+            // The decoder reads via 16-bit words and over-reads the final partial word; in the real
+            // block-contiguous layout the next DOF's bytes follow, so pad a standalone blob.
+            blob.extend_from_slice(&[0u8; 4]);
+            let budget = wv_bit_budget(block_size, bw, 0);
+            let (stream, _is_fill) = wv_entropy_unpack(&blob, 0, bw, 0, 0, budget);
+            // Decode with mult=1, off=0 so the recovered float IS code · 2^-bw.
+            let out = wv_dequant(&stream, bw, 0, 1.0, 0.0, block_size);
+            let scale = 2f32.powi(-(bw as i32));
+            for i in 0..block_size {
+                let want = codes[i] as f32 * scale;
+                let d = (out[i] - want).abs();
+                assert!(
+                    d < 1e-6,
+                    "case {ci} code {i}: recovered {} want {} (Δ{d:.2e}) — packer/decoder mismatch",
+                    out[i],
+                    want
+                );
+            }
+        }
+    }
+
+    /// THE WAVELET CODEC CAPSTONE: encode a block through all three Rust stages (transform →
+    /// quantize → all-present pack), then decode it through the REAL decoder (entropy → dequant →
+    /// inverse), and recover the source within quantization error. This proves the complete wavelet
+    /// codec works in native Rust with no Havok DLL in the loop.
+    #[test]
+    fn full_block_codec_round_trips_end_to_end() {
+        let bw = 11u32;
+        let cases: [[f32; 8]; 3] = [
+            [0.10, 0.15, 0.20, 0.18, 0.12, 0.05, -0.10, -0.20],
+            [1.0, 1.02, 1.05, 1.03, 0.98, 0.95, 0.9, 0.88],
+            [-2.0, -1.5, 0.0, 1.5, 2.0, 1.0, 0.0, -1.0],
+        ];
+        for (ci, samples) in cases.iter().enumerate() {
+            // ENCODE (Rust)
+            let coeffs = forward_wavelet_8(samples);
+            let (codes, mult, off) = forward_quantize(&coeffs, bw, 0);
+            let mut blob = pack_block_all_present(&codes, bw, &[]);
+            blob.extend_from_slice(&[0u8; 4]); // standalone-block padding for the decoder's word over-read
+            // DECODE (the verified decoder path)
+            let budget = wv_bit_budget(8, bw, 0);
+            let (stream, _) = wv_entropy_unpack(&blob, 0, bw, 0, 0, budget);
+            let recon = wv_dequant(&stream, bw, 0, mult, off, 8);
+            let out = wv_inverse(&recon, 8);
+            for i in 0..8 {
+                let d = (out[i] - samples[i]).abs();
+                assert!(d < 2e-3, "case {ci} dof {i}: end-to-end codec drift {d:.3e}");
+            }
+        }
+    }
+
+    /// The StaticMask encode/decode pair must invert: build a mask from group types + dynamic
+    /// flags, and the decoder's dynamic-DOF reader must recover exactly those flags. Covers all-
+    /// dynamic (the simplest encoder target), mixed, and static/identity groups.
+    #[test]
+    fn static_mask_round_trips() {
+        use MaskGroup::*;
+        // (pos, rot, scale, dynamic[10]) cases → encode → decode dynamic → must match the Mixed
+        // groups' flags exactly (static/identity groups contribute no dynamic DOFs).
+        let cases: &[(MaskGroup, MaskGroup, MaskGroup, [bool; 10])] = &[
+            // all components dynamic (every group Mixed, all bits set) — the simplest encoding.
+            (Mixed, Mixed, Mixed, [true; 10]),
+            // rotation-only animated; translation constant, scale identity.
+            (
+                AllStatic,
+                Mixed,
+                Identity,
+                [false, false, false, true, true, true, true, false, false, false],
+            ),
+            // mixed within a group: tx,tz dynamic, ty static.
+            (
+                Mixed,
+                AllStatic,
+                AllStatic,
+                [true, false, true, false, false, false, false, false, false, false],
+            ),
+        ];
+        for (pi, &(p, r, s, dynflags)) in cases.iter().enumerate() {
+            let mask = encode_static_mask(p, r, s, &dynflags);
+            let decoded = static_mask_dynamic(mask);
+            // A component can only be reported dynamic if its group is Mixed; compare on that basis.
+            let mut want = [false; 10];
+            if p == Mixed {
+                for c in 0..3 {
+                    want[c] = dynflags[c];
+                }
+            }
+            if r == Mixed {
+                for c in 3..7 {
+                    want[c] = dynflags[c];
+                }
+            }
+            if s == Mixed {
+                for c in 7..10 {
+                    want[c] = dynflags[c];
+                }
+            }
+            assert_eq!(decoded, want, "case {pi}: mask 0x{mask:04X} dynamic-DOF mismatch");
+        }
+    }
+
+    /// A full multi-block DOF must round-trip: `encode_dof` (all blocks, one quantizer) → decode
+    /// each block through the real decoder (entropy → dequant with the per-DOF mult/off → inverse)
+    /// → recover the per-frame values within quantization error. This is the heart of the full-clip
+    /// encode — a whole animated curve rebuilt in native Rust.
+    #[test]
+    fn full_dof_encode_round_trips() {
+        let bw = 11u32;
+        let bs = 8usize;
+        // 20 frames = 3 blocks (last partial), a smooth-ish animated curve.
+        let frames: Vec<f32> = (0..20).map(|i| (i as f32 * 0.3).sin() * 0.5 + 0.1).collect();
+        let (blocks, mult, off) = encode_dof(&frames, bs, bw);
+        assert_eq!(blocks.len(), 3);
+        let budget = wv_bit_budget(bs, bw, 0);
+        let mut recovered: Vec<f32> = Vec::new();
+        for blob in &blocks {
+            let mut b = blob.clone();
+            b.extend_from_slice(&[0u8; 4]); // standalone-block padding for the decoder's word over-read
+            let (stream, _) = wv_entropy_unpack(&b, 0, bw, 0, 0, budget);
+            let coeffs = wv_dequant(&stream, bw, 0, mult, off, bs);
+            recovered.extend_from_slice(&wv_inverse(&coeffs, bs));
+        }
+        for i in 0..frames.len() {
+            let d = (recovered[i] - frames[i]).abs();
+            assert!(d < 3e-3, "frame {i}: DOF round-trip drift {d:.3e}");
+        }
+    }
+
+    /// THE FULL-CLIP CAPSTONE: encode a whole synthetic clip (multi-track, multi-block, animated +
+    /// constant components) into a native wavelet struct+dataBuffer, then decode it straight back
+    /// through the REAL `decode_wavelet` and recover every per-frame transform within quant error.
+    /// This proves the complete wavelet encoder — a clip built from source in native Rust that the
+    /// decoder reads correctly. (The packfile wrapping is separately proven byte-exact.)
+    #[test]
+    fn full_clip_encode_round_trips_through_decoder() {
+        let n_tt = 3usize;
+        let n_poses = 20usize;
+        let mut frames: Vec<Vec<QsTransform>> = Vec::with_capacity(n_poses);
+        for f in 0..n_poses {
+            let mut track = Vec::with_capacity(n_tt);
+            for t in 0..n_tt {
+                let p = f as f32 * 0.12 + t as f32 * 0.7;
+                track.push(QsTransform {
+                    translation: [p.sin() * 0.5, (p * 1.3).cos() * 0.3, 0.2], // z constant
+                    rotation: [(p * 0.2).sin() * 0.1, (p * 0.15).cos() * 0.08, 0.0, 0.99],
+                    scale: [1.0, 1.0, 1.0], // constant
+                });
+            }
+            frames.push(track);
+        }
+        let encoded = encode_wavelet_struct(&frames, 0.66);
+        let decoded = decode_wavelet(&encoded).expect("decode the Rust-encoded clip");
+        assert_eq!(decoded.n_tt, n_tt);
+        assert_eq!(decoded.frames.len(), n_poses);
+        for f in 0..n_poses {
+            for t in 0..n_tt {
+                let a = &frames[f][t];
+                let b = &decoded.frames[f][t];
+                for k in 0..3 {
+                    assert!(
+                        (a.translation[k] - b.translation[k]).abs() < 5e-3,
+                        "f{f} t{t} trans[{k}]: {} vs {}",
+                        a.translation[k],
+                        b.translation[k]
+                    );
+                    assert!((a.scale[k] - b.scale[k]).abs() < 5e-3, "f{f} t{t} scale[{k}]");
+                }
+                // Quaternion x,y,z (w is decoder-recomputed via the sentinel path).
+                for k in 0..3 {
+                    assert!(
+                        (a.rotation[k] - b.rotation[k]).abs() < 5e-3,
+                        "f{f} t{t} rot[{k}]: {} vs {}",
+                        a.rotation[k],
+                        b.rotation[k]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Parse `__classnames__` records (signature, name) — the fixed 30-class set an anim packfile
+    /// carries, read from the oracle fixture for the integration test.
+    fn parse_cn(body: &[u8]) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        let mut p = 0;
+        while p + 4 <= body.len() {
+            let sig = u32::from_le_bytes([body[p], body[p + 1], body[p + 2], body[p + 3]]);
+            if sig == 0xFFFF_FFFF {
+                break;
+            }
+            p += 5; // sig + 0x09 separator
+            let start = p;
+            while p < body.len() && body[p] != 0 {
+                p += 1;
+            }
+            out.push((sig, String::from_utf8_lossy(&body[start..p]).into_owned()));
+            p += 1;
+        }
+        out
+    }
+
+    /// THE FULL INTEGRATION GATE: compose the encoder + serializer — encode a clip, wrap the wavelet
+    /// object in a 48-byte `hkaAnimationContainer` and a full Havok packfile via `write_packfile`
+    /// (with the exact oracle fixups) — then decode the WHOLE thing through the public `parse_anim`.
+    /// If this passes, `frames → native Rust packfile → parse_anim` works with ZERO DLL in the loop.
+    #[test]
+    fn full_encode_to_packfile_decodes_via_parse_anim() {
+        use crate::havok_write::{write_packfile, DataSection};
+        let n_tt = 4usize;
+        let n_poses = 24usize;
+        let mut frames: Vec<Vec<QsTransform>> = Vec::with_capacity(n_poses);
+        for f in 0..n_poses {
+            let mut track = Vec::with_capacity(n_tt);
+            for t in 0..n_tt {
+                let p = f as f32 * 0.1 + t as f32 * 0.5;
+                track.push(QsTransform {
+                    translation: [p.sin() * 0.4, (p * 1.1).cos() * 0.25, 0.15],
+                    rotation: [(p * 0.2).sin() * 0.12, (p * 0.13).cos() * 0.05, 0.0, 0.98],
+                    scale: [1.0, 1.0, 1.0],
+                });
+            }
+            frames.push(track);
+        }
+        let dur = 0.8f32;
+        let wavelet = encode_wavelet_struct(&frames, dur);
+
+        // data object body: 48-byte container + 16-byte array storage (all zero except
+        // m_animations.m_size@0xC = 1), then the wavelet object @0x40; padded to 16.
+        let mut body = vec![0u8; 0x40];
+        body[0x0C] = 1;
+        body.extend_from_slice(&wavelet);
+        while body.len() % 16 != 0 {
+            body.push(0);
+        }
+
+        let oracle: &[u8] = include_bytes!("../tests/fixtures/havok_anim_orig8720.bin");
+        let classes = parse_cn(&oracle[0xD0..0x390]);
+        let refs: Vec<(u32, &str)> = classes.iter().map(|(s, n)| (*s, n.as_str())).collect();
+        let data = DataSection {
+            body,
+            local: vec![(0x08, 0x30), (0x98, 0xA0)],
+            global: vec![(0x30, 2, 0x40)],
+            virt: vec![(0x00, 0, 0x272), (0x40, 0, 0x1B8)],
+        };
+        let packfile = write_packfile(&refs, 0x272, &data);
+
+        let clip = parse_anim(&packfile).expect("parse_anim must read the Rust-built packfile");
+        assert_eq!(clip.num_tracks, n_tt, "track count");
+        assert_eq!(clip.num_frames, n_poses, "frame count");
+        for f in 0..n_poses {
+            let t = dur * f as f32 / (n_poses - 1) as f32;
+            let sampled = clip.sample_local(t);
+            for tr in 0..n_tt {
+                let a = &frames[f][tr];
+                let b = &sampled[tr];
+                for k in 0..3 {
+                    assert!(
+                        (a.translation[k] - b.translation[k]).abs() < 1e-2,
+                        "f{f} tr{tr} trans[{k}]: {} vs {}",
+                        a.translation[k],
+                        b.translation[k]
+                    );
+                    assert!((a.scale[k] - b.scale[k]).abs() < 1e-2, "f{f} tr{tr} scale[{k}]");
+                }
+            }
+        }
+    }
 
     #[inline]
     fn qlen(q: [f32; 4]) -> f32 {
