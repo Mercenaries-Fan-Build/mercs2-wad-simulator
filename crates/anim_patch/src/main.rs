@@ -101,6 +101,21 @@ struct Cli {
     /// Write the selected block's DECOMPRESSED bytes to this path and exit.
     #[arg(long)]
     dump: Option<PathBuf>,
+    /// Replace the packfile of the clip with this hash (hex) with the external Havok packfile
+    /// given by --replace-file. The replacement must fit the clip's on-disk region (zero-padded
+    /// to fit — a Havok packfile is self-describing, so trailing zeros are ignored). Composable
+    /// with --freeze: freeze everything, then restore this one clip from the external packfile.
+    #[arg(long, value_parser = parse_hex_u32)]
+    replace_clip: Option<u32>,
+    /// The external Havok packfile spliced in for --replace-clip (e.g. an AssetCc2 round-trip).
+    #[arg(long)]
+    replace_file: Option<PathBuf>,
+    /// Round-trip EVERY clip in the block through this AssetCc2.exe (extract → `--xml` →
+    /// `--strip --rules4101` native LE) and splice each back, preserving each clip's trnm binding.
+    /// The whole-block from-source rebuild via the real Havok 5.5 toolchain — its output is the
+    /// oracle the native Rust encoder will be diffed against.
+    #[arg(long)]
+    assetcc: Option<PathBuf>,
 }
 
 /// The `--clip` default, as an integer (kept in sync with the clap default_value).
@@ -357,6 +372,12 @@ fn run() -> Result<(), String> {
     if [cli.roundtrip, cli.freeze].iter().filter(|b| **b).count() > 1 {
         return Err("choose only one of --roundtrip / --freeze".into());
     }
+    if cli.roundtrip && cli.replace_clip.is_some() {
+        return Err("--roundtrip is an identity pass — it cannot combine with --replace-clip".into());
+    }
+    if cli.replace_clip.is_some() != cli.replace_file.is_some() {
+        return Err("--replace-clip and --replace-file must be given together".into());
+    }
 
     let wad_path = cli
         .wad
@@ -401,13 +422,70 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
-    if !cli.roundtrip && !cli.freeze {
-        return Err("specify a mode: --roundtrip, --freeze (or --list)".into());
+    if !cli.roundtrip && !cli.freeze && cli.replace_clip.is_none() && cli.assetcc.is_none() {
+        return Err("specify a mode: --roundtrip, --freeze, --replace-clip, --assetcc (or --list)".into());
     }
 
     // Work on a copy of the decompressed block; apply the perturbation, if any.
     let original = loc.decompressed.clone();
     let mut work = original.clone();
+
+    // Whole-block AssetCc2 rebuild: round-trip every clip's Havok packfile through the real 5.5
+    // toolchain and splice it back (trnm preserved). If the retail engine then animates the block
+    // normally, every AssetCc2-serialized clip is engine-accepted end to end.
+    if let Some(cc) = &cli.assetcc {
+        let tmp = std::env::temp_dir().join("anim_assetcc_batch");
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("tmp dir: {e}"))?;
+        let (mut ok, mut skipped) = (0usize, 0usize);
+        for (i, &(_name_hash, havok_off)) in loc.clips.iter().enumerate() {
+            let clip_end = loc
+                .clips
+                .iter()
+                .skip(i + 1)
+                .map(|&(_, o)| o)
+                .find(|&o| o > havok_off)
+                .unwrap_or(work.len());
+            let raw = &work[havok_off..clip_end.min(work.len())];
+            let in_bin = tmp.join(format!("c{i}.bin"));
+            let xml = tmp.join(format!("c{i}.xml"));
+            let out_bin = tmp.join(format!("c{i}_rt.bin"));
+            let _ = std::fs::remove_file(&xml);
+            let _ = std::fs::remove_file(&out_bin);
+            std::fs::write(&in_bin, raw).map_err(|e| format!("write {in_bin:?}: {e}"))?;
+            let _ = std::process::Command::new(cc)
+                .arg("--xml")
+                .arg(&in_bin)
+                .arg(&xml)
+                .output()
+                .map_err(|e| format!("run AssetCc2 (xml): {e}"))?;
+            if !xml.exists() {
+                skipped += 1;
+                continue;
+            }
+            let _ = std::process::Command::new(cc)
+                .args(["--strip", "--rules4101"])
+                .arg(&xml)
+                .arg(&out_bin)
+                .output()
+                .map_err(|e| format!("run AssetCc2 (native): {e}"))?;
+            if !out_bin.exists() {
+                skipped += 1;
+                continue;
+            }
+            let new_pk = std::fs::read(&out_bin).map_err(|e| format!("read {out_bin:?}: {e}"))?;
+            match perturb::replace_clip(&mut work, havok_off, clip_end, &new_pk) {
+                Ok(_) => ok += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+        println!(
+            "--assetcc: {ok}/{} clips round-tripped through AssetCc2 and spliced ({skipped} skipped)",
+            loc.clips.len()
+        );
+        if ok == 0 {
+            return Err("--assetcc: no clip round-tripped (nothing to pack)".into());
+        }
+    }
 
     if cli.freeze {
         let mut total = 0usize;
@@ -444,6 +522,33 @@ fn run() -> Result<(), String> {
         if zeroed == 0 {
             return Err("--freeze: no clip could be frozen (nothing to pack)".into());
         }
+    }
+
+    // Splice an external packfile into one clip (e.g. an AssetCc2 round-trip). Applied AFTER any
+    // freeze, so `--freeze --replace-clip X` freezes everything then restores clip X — leaving X
+    // the one clip that still animates, an unmistakable "this externally-built clip loaded" signal.
+    if let Some(target) = cli.replace_clip {
+        let path = cli.replace_file.as_ref().expect("checked above");
+        let new_pk =
+            std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let idx = loc
+            .clips
+            .iter()
+            .position(|&(h, _)| h == target)
+            .ok_or_else(|| format!("clip 0x{target:08X} is not in this block"))?;
+        let havok_off = loc.clips[idx].1;
+        let clip_end = loc
+            .clips
+            .iter()
+            .skip(idx + 1)
+            .map(|&(_, o)| o)
+            .find(|&o| o > havok_off)
+            .unwrap_or(work.len());
+        let n = perturb::replace_clip(&mut work, havok_off, clip_end, &new_pk)?;
+        println!(
+            "--replace-clip 0x{target:08X}: spliced {n} B packfile into [0x{havok_off:X}..0x{clip_end:X}) (region {} B)",
+            clip_end - havok_off
+        );
     }
 
     // Build the override block from the (possibly perturbed) bytes.
