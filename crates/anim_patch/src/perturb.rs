@@ -151,3 +151,34 @@ pub fn freeze_clip(
         len: qd_size,
     })
 }
+
+/// Overwrite one clip's Havok packfile IN PLACE, **preserving** everything after it.
+///
+/// A clip's on-disk region `havok_offset..clip_end` is NOT just the Havok packfile — the packfile
+/// is followed by a separate Pandemic **`trnm`** binding chunk (the track→bone map). AssetCc2 only
+/// round-trips the Havok half, so the trnm must survive untouched: this writes `new_pk` at
+/// `havok_offset` and leaves the tail alone. `new_pk.len()` must therefore equal the ORIGINAL
+/// packfile length (so it ends exactly where the trnm begins) — never larger, or it would clobber
+/// the binding. Returns the number of bytes written.
+pub fn replace_clip(
+    block: &mut [u8],
+    havok_offset: usize,
+    clip_end: usize,
+    new_pk: &[u8],
+) -> Result<usize, String> {
+    let end = clip_end.min(block.len());
+    if havok_offset >= end {
+        return Err("clip region is empty".into());
+    }
+    let region = end - havok_offset;
+    if new_pk.len() > region {
+        return Err(format!(
+            "replacement packfile is {} B but the clip region is only {} B",
+            new_pk.len(),
+            region
+        ));
+    }
+    // Overwrite ONLY the packfile bytes; the trnm binding after it is preserved verbatim.
+    block[havok_offset..havok_offset + new_pk.len()].copy_from_slice(new_pk);
+    Ok(new_pk.len())
+}
