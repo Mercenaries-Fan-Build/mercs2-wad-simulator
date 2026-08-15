@@ -20,3 +20,5 @@ mercs2_formats = { workspace = true }
 mercs2_core = { workspace = true }
 # `model_namer` emits a rainbow-table name fragment (same JSON shape the workshop merges).
 serde_json = "1"
+# `mopp_swap` verifies its patched PHY2 artifacts BY sha256 (mandate: verify-artifacts-by-hash).
+sha2 = "0.10"
