@@ -534,3 +534,106 @@ contributions:
         "writing the hash must not evade detection: {found:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Shop items: two shop mods must compose, and the emit hits the right scripts.
+// ---------------------------------------------------------------------------
+
+/// A support-catalog shop mod adding one crate-delivery item to two vendors.
+fn shop_item(shipment: &str, id: &str, cargo: &str) -> Manifest {
+    parse(&format!(
+        "format: 1
+shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: add_shop_item
+    id: {id}
+    name: \"{id} display\"
+    icon: vehicles_tank_m1a2
+    type: heavy
+    shops: [pmc, gur]
+    cash_cost: 250000
+    fuel_cost: 75
+    max_stock: 4
+    unlocked: true
+    behaviour: {{ module: mrxcratedelivery, cargo: \"{cargo}\", delivery_vehicle: \"Mi26 (PMC) (Driver)\" }}
+"
+    ))
+}
+
+/// THE reason a shop item is delivered as linked appends, not a full-block replace of the resident
+/// catalog block: two independent shop mods adding different items to the same vendor must coexist.
+#[test]
+fn two_shop_item_mods_coexist() {
+    let a = shop_item("tank-pack", "dlcm1a1", "LAVIII (Minigun)");
+    let b = shop_item("racer-pack", "nukeracer", "Nuke Racer");
+    let found = blast::conflicts(&[("tank-pack", &a), ("racer-pack", &b)]);
+    assert!(found.is_empty(), "shop mods must compose, got: {found:?}");
+}
+
+/// Every claim a shop item makes is `OrderedList` (mergeable), never `Exclusive` — the property
+/// that makes the coexistence above hold rather than being luck.
+#[test]
+fn shop_item_claims_are_ordered_list() {
+    let m = shop_item("tank-pack", "dlcm1a1", "LAVIII (Minigun)");
+    let claims = blast::claims(&m);
+    assert!(!claims.is_empty());
+    for c in &claims {
+        assert_eq!(
+            c.class,
+            MergeClass::OrderedList,
+            "claim {:?} must be mergeable, not {:?}",
+            c.claim,
+            c.class
+        );
+    }
+}
+
+/// The item lowers to appends on the two resident catalog scripts, and the emitted Lua carries the
+/// catalog row plus one reward row per listed vendor (faction keys Capitalized).
+#[test]
+fn shop_item_lowers_to_catalog_and_reward_appends() {
+    let m = shop_item("tank-pack", "dlcm1a1", "LAVIII (Minigun)");
+    let muts =
+        mercs2_quartermaster::build::script_mutations(&m, std::path::Path::new(".")).unwrap();
+    let targets: Vec<&str> = muts.iter().map(|x| x.target.as_str()).collect();
+    assert!(targets.contains(&"mrxsupportdata"), "targets: {targets:?}");
+    assert!(targets.contains(&"mrxrewarddata"), "targets: {targets:?}");
+
+    let support = muts.iter().find(|x| x.target == "mrxsupportdata").unwrap();
+    assert!(support.append.contains("tSupportData[\"dlcm1a1\"]"));
+    assert!(support.append.contains("mrxcratedelivery:Create()"));
+    assert!(support.append.contains("SetCargo(\"LAVIII (Minigun)\")"));
+    assert!(support.append.contains("sType = \"Heavy\""));
+    assert!(support.append.contains("tUnlockStatus = { Pmc = 1, Gur = 1 }"));
+
+    let reward = muts.iter().find(|x| x.target == "mrxrewarddata").unwrap();
+    assert!(reward.append.contains("sFactionId = \"Pmc\""), "{}", reward.append);
+    assert!(reward.append.contains("sFactionId = \"Gur\""), "{}", reward.append);
+}
+
+/// A NOVEL-behaviour shop item (`behaviour.script` set) emits NO load-time catalog append — its row
+/// defers into `qm_modloader`, so `script_mutations` must skip it. An eager `module:Create()` on a
+/// nil global would abort a resident script (the whole reason the deferred path exists).
+#[test]
+fn novel_behaviour_shop_item_skips_the_eager_append() {
+    let m = parse(
+        "format: 1
+shipment: { name: bomb-mod, version: 1.0.0, target: retail }
+contributions:
+  - kind: add_shop_item
+    id: ggbomb
+    name: \"[support.airstrike.greengoblinbomb.name]\"
+    icon: support_cluster_bomb
+    type: airstrike
+    shops: [pmc]
+    cash_cost: 100000
+    behaviour: { module: DLC_MrxGreenGoblinBomb, script: src/ggbomb.lua }
+",
+    );
+    let muts =
+        mercs2_quartermaster::build::script_mutations(&m, std::path::Path::new(".")).unwrap();
+    assert!(
+        muts.is_empty(),
+        "a novel behaviour must not emit a load-time append (it defers to the loader): {muts:?}"
+    );
+}
