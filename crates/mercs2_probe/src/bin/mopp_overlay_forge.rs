@@ -32,6 +32,10 @@
 use mercs2_formats::crc32::crc32_mercs2;
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::game_paths;
+use mercs2_formats::havok::{parse_phy2_body, Shape};
+use mercs2_formats::model_cubeize::parse_segm;
+use mercs2_formats::mopp;
+use mercs2_formats::phy2_build::{build_phy2_kind, build_phy2_multi_kind, MoppKind};
 use mercs2_formats::patch_wad::{
     build_patch_wad_multi, merge_patch_wads, AsetEntry, PatchBlock, FFCS_CERT_BLOB,
 };
@@ -169,6 +173,239 @@ fn replace_phy2_in_container(
     Ok(out)
 }
 
+/// Re-author a WHOLE PHY2 body from the target container's OWN decoded collision geometry, and gate it
+/// offline. Single-shape → `build_phy2`; multi-shape → `build_phy2_multi`. The original 48-byte PHY2
+/// prefix (name-hash + framing fields) is preserved verbatim except byte-32 (the packfile size, which the
+/// authored packfile changes) so the engine still resolves this body to the same asset. Returns the
+/// authored body (prefix + authored packfile + authored engine-faithful AA/CC/EE descriptor-chain wrapper;
+/// multi-shape emits the retail SHARED-pool layout: one common frame + one shared pool, global indices, all
+/// N EEs → that pool — see `build_multi_mesh_wrapper` / `build_shared_mesh_set`).
+fn author_whole_phy2(
+    container: &[u8],
+    base_body: &[u8],
+    ename: u32,
+    mopp_kind: MoppKind,
+) -> Result<Vec<u8>, String> {
+    // 1. Decode the source meshes (in packfile order) → model-local tris/verts.
+    let src = parse_phy2_body(base_body).map_err(|e| format!("decode source PHY2: {e}"))?;
+    let meshes: Vec<(Vec<[u32; 3]>, Vec<[f32; 3]>)> = src
+        .shapes
+        .iter()
+        .filter_map(|s| match s {
+            Shape::Mesh(m) if !m.indices.is_empty() => Some((
+                m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect::<Vec<_>>(),
+                m.vertices.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if meshes.is_empty() {
+        return Err("source PHY2 has no decodable WpMeshShape16".into());
+    }
+    let n_shapes = meshes.len();
+    let segm = parse_segm(container);
+    println!(
+        "  AUTHORED: {} decodable mesh(es); container SEGM records = {}",
+        n_shapes,
+        segm.len()
+    );
+    for (i, (t, v)) in meshes.iter().enumerate() {
+        println!("    mesh[{i}]: {} tris, {} verts", t.len(), v.len());
+    }
+    if !segm.is_empty() && segm.len() != n_shapes {
+        return Err(format!(
+            "shape count {n_shapes} != SEGM record count {} — authored shapes MUST match SEGM count",
+            segm.len()
+        ));
+    }
+    if n_shapes > 1 {
+        println!(
+            "  MULTI-SHAPE authoring (retail SHARED pool): one common quantization frame + ONE shared vertex \
+             pool that every sub-mesh indexes with GLOBAL indices, all N leaf EEs → that one pool (EE+76 → \
+             wrapper+1232), MERGED 2N−1 BV-tree ((N−1) internal AA nodes w/ CC union-AABB + two children, N \
+             leaf AA nodes → EE). Reproduces the retail floor's frame + record/CC/EE/pool topology; tree is \
+             our own proven-edge caterpillar."
+        );
+    }
+    if mopp_kind == MoppKind::ReturnAll {
+        println!(
+            "  MOPP = RETURN-ALL (diagnostic): each shape's spatial MOPP replaced by encode_return_all(ntris) \
+             — SAME m_info + mesh + wrapper, ONLY the m_data bytecode changes. STAND ⇒ spatial frame is the \
+             culprit; FALL ⇒ upstream m_info/AABB/mesh/binding."
+        );
+    }
+
+    // 2. Author the whole PHY2.
+    let name = format!("authored_collider_0x{ename:08X}");
+    let authored = if n_shapes == 1 {
+        build_phy2_kind(&name, &meshes[0].0, &meshes[0].1, mopp_kind)?
+    } else {
+        build_phy2_multi_kind(&name, &meshes, mopp_kind)?
+    };
+
+    // 3. Preserve the original 48-byte prefix (name-hash + framing) except byte-32 = packfile size.
+    if base_body.len() < 48 || authored.len() < 48 {
+        return Err("PHY2 body shorter than the 48-byte prefix".into());
+    }
+    let mut out = Vec::with_capacity(authored.len());
+    out.extend_from_slice(&base_body[0..48]); // original prefix verbatim
+    out[32..36].copy_from_slice(&authored[32..36]); // …but the authored packfile size
+    out.extend_from_slice(&authored[48..]); // authored packfile + wrapper
+
+    // 4. Offline gate: re-parse the authored body.
+    let pf = parse_phy2_body(&out).map_err(|e| format!("re-parse authored PHY2: {e}"))?;
+    for class in ["WpMeshShape16", "hkpMoppBvTreeShape", "hkpMoppCode", "WpArray"] {
+        let want = if class == "WpArray" { 1 } else { n_shapes as u32 };
+        let got = pf.class_counts.get(class).copied().unwrap_or(0);
+        if got != want {
+            return Err(format!("authored gate: class {class} count {got} != {want}"));
+        }
+    }
+    // Each mesh decodes back to its OWN triangle indices (deterministic — from the packfile).
+    let re_meshes: Vec<&mercs2_formats::havok::MeshShape> = pf
+        .shapes
+        .iter()
+        .filter_map(|s| match s {
+            Shape::Mesh(m) if !m.indices.is_empty() => Some(m),
+            _ => None,
+        })
+        .collect();
+    if re_meshes.len() != n_shapes {
+        return Err(format!("authored gate: {} meshes decoded, want {n_shapes}", re_meshes.len()));
+    }
+    // For a multi-shape (shared-pool) body the packfile index arrays are GLOBAL indices, so validate GEOMETRY
+    // (triangle vertex POSITIONS, order-preserving) rather than raw index equality. Single-shape stays local,
+    // so raw index equality still holds there.
+    if n_shapes == 1 {
+        let want: Vec<[u16; 3]> =
+            meshes[0].0.iter().map(|t| [t[0] as u16, t[1] as u16, t[2] as u16]).collect();
+        if re_meshes[0].indices != want {
+            return Err("authored gate: single-shape mesh indices did not round-trip".into());
+        }
+    } else {
+        for (i, (tris, verts)) in meshes.iter().enumerate() {
+            if re_meshes[i].indices.len() != tris.len() {
+                return Err(format!("authored gate: mesh[{i}] triangle count changed"));
+            }
+            for (t, gt) in tris.iter().enumerate() {
+                for k in 0..3 {
+                    let got = re_meshes[i].vertices[re_meshes[i].indices[t][k] as usize];
+                    let want = verts[gt[k] as usize];
+                    let d = ((got[0] - want[0]).powi(2) + (got[1] - want[1]).powi(2) + (got[2] - want[2]).powi(2)).sqrt();
+                    if d > 0.1 {
+                        return Err(format!("authored gate: mesh[{i}] tri {t} corner {k} position err {d} > 0.1"));
+                    }
+                }
+            }
+        }
+    }
+    // For single-shape, verticies must round-trip within quant error (the reader locks the one pool).
+    if n_shapes == 1 {
+        let re = re_meshes[0];
+        let (tris, verts) = &meshes[0];
+        let maxidx = *tris.iter().flat_map(|t| t.iter()).max().unwrap() as usize;
+        let mut worst = 0.0f32;
+        for i in 0..=maxidx {
+            let (a, b) = (re.vertices[i], verts[i]);
+            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+            worst = worst.max(d);
+        }
+        if worst > 0.1 {
+            return Err(format!("authored gate: single-shape vertex round-trip error {worst} > 0.1"));
+        }
+        println!("    single-shape vertex round-trip: worst dequant error {worst:.5} m (< 0.1)");
+
+        // ★ ENGINE-FAITHFUL WRAPPER GATE: walk the trailing AA/CC/EE descriptor chain exactly as the
+        // retail loader relocates it (`&body[0]+offset`) and prove every pool/descriptor pointer resolves.
+        // This is the property the old pool-first wrapper lacked → in-game AV @0x0248C15A.
+        let mesh = mercs2_formats::phy2_build::write_wpmesh16(&meshes[0].0, &meshes[0].1)?;
+        let packfile_size = u32::from_le_bytes(out[32..36].try_into().unwrap()) as usize;
+        let pkend = 48 + packfile_size;
+        mercs2_formats::phy2_build::validate_wrapper_chain(&out, pkend, &mesh)
+            .map_err(|e| format!("authored gate: faithful wrapper chain FAILED: {e}"))?;
+        println!("    faithful wrapper chain: AA→CC→AA→EE→pool all relocate in-bounds (engine-walkable)");
+    } else {
+        // ★ MERGED BV-TREE ENGINE-FAITHFUL WRAPPER GATE: walk the WHOLE 2N−1 tree from the root (every
+        // internal two-child + every leaf EE/pool/tail) exactly as the loader relocates it, and prove each
+        // leaf's EE+76 pool pointer addresses ITS OWN pool whose dequantized verts reproduce that mesh's
+        // input (deterministic, not the tolerant content scan). This is the property the old N-linked-chains
+        // wrapper lacked — the full-tree walk is the gate that was missing.
+        // Build the SHARED-POOL layout from the same meshes (the exact structure the builder emits) and walk
+        // the merged tree, asserting every leaf's EE+76 points to the ONE shared pool.
+        let sms = mercs2_formats::phy2_build::build_shared_mesh_set(&meshes)
+            .map_err(|e| format!("authored gate: shared-mesh-set: {e}"))?;
+        let per_mesh_ntris: Vec<u32> = sms.subs.iter().map(|s| s.tris_global.len() as u32).collect();
+        let packfile_size = u32::from_le_bytes(out[32..36].try_into().unwrap()) as usize;
+        let pkend = 48 + packfile_size;
+        mercs2_formats::phy2_build::validate_multi_wrapper_chain(&out, pkend, &sms.pool, &per_mesh_ntris)
+            .map_err(|e| format!("authored gate: merged BV-tree walk FAILED: {e}"))?;
+        // Per-mesh vertex correctness via the ONE shared pool (leaf l's EE at ee_region + l*108). Dequantize
+        // each sub-mesh's GLOBAL triangle indices under the common frame and compare to the input positions.
+        let ic = if n_shapes <= 1 { 1 } else { n_shapes - 1 };
+        let ee_region = (ic + n_shapes) * 68 + ic * 108;
+        let shared_pool =
+            u32::from_le_bytes(out[pkend + ee_region + 76..pkend + ee_region + 80].try_into().unwrap()) as usize;
+        let mut worst = 0.0f32;
+        for (i, (tris, verts)) in meshes.iter().enumerate() {
+            let ee = pkend + ee_region + i * 108;
+            let poolptr = u32::from_le_bytes(out[ee + 76..ee + 76 + 4].try_into().unwrap()) as usize;
+            if poolptr != shared_pool {
+                return Err(format!("authored gate: mesh[{i}] EE+76 pool {poolptr} != shared pool {shared_pool}"));
+            }
+            let deqg = |g: usize| -> [f32; 3] {
+                let o = shared_pool + g * 6;
+                [
+                    sms.min[0] + u16::from_le_bytes([out[o], out[o + 1]]) as f32 * sms.scale[0],
+                    sms.min[1] + u16::from_le_bytes([out[o + 2], out[o + 3]]) as f32 * sms.scale[1],
+                    sms.min[2] + u16::from_le_bytes([out[o + 4], out[o + 5]]) as f32 * sms.scale[2],
+                ]
+            };
+            for (t, gt) in sms.subs[i].tris_global.iter().enumerate() {
+                for k in 0..3 {
+                    let got = deqg(gt[k] as usize);
+                    let want = verts[tris[t][k] as usize];
+                    let d = ((got[0] - want[0]).powi(2) + (got[1] - want[1]).powi(2) + (got[2] - want[2]).powi(2)).sqrt();
+                    worst = worst.max(d);
+                }
+            }
+        }
+        if worst > 0.1 {
+            return Err(format!("authored gate: multi-shape per-mesh vertex round-trip error {worst} > 0.1"));
+        }
+        println!(
+            "    merged BV-tree walk (SHARED pool): {n_shapes} leaves reached from root, all EE+76 → the one \
+             shared pool @body[{shared_pool}]; per-mesh global-index dequant worst {worst:.5} m (< 0.1)"
+        );
+        // ★ DISTINCT-SHAPE BINDING GATE: the packfile global-fixup graph must bind N DISTINCT shapes
+        // (WpArray → N distinct bvtrees → N distinct moppcodes + N distinct meshes), never collapsed onto
+        // shape[0]. This is the invariant the live A/B x32dbg proof flagged and that the mesh/MOPP census
+        // (virtual-fixup enumeration) is structurally blind to.
+        mercs2_formats::phy2_build::validate_multi_shape_binding(&out, n_shapes)
+            .map_err(|e| format!("authored gate: distinct-shape binding FAILED: {e}"))?;
+        println!("    distinct-shape binding: WpArray → {n_shapes} distinct bvtrees → {n_shapes} distinct moppcodes + meshes (record[i]→shape[i])");
+    }
+    // Each MOPP decodes clean to [0..tris_i).
+    let re_mopps = mopp::extract_mopp_with_info(&out);
+    if re_mopps.len() != n_shapes {
+        return Err(format!("authored gate: {} MOPPs, want {n_shapes}", re_mopps.len()));
+    }
+    for (i, (code, _)) in re_mopps.iter().enumerate() {
+        let d = mopp::decode(code);
+        if d.error.is_some() || d.consumed != code.len() {
+            return Err(format!("authored gate: MOPP[{i}] decode {:?}, coverage {}/{}", d.error, d.consumed, code.len()));
+        }
+        let (ks, range, missing) = d.key_summary();
+        let want_n = meshes[i].0.len();
+        if ks.len() != want_n || range != Some((0, want_n as u32 - 1)) || !missing.is_empty() {
+            return Err(format!("authored gate: MOPP[{i}] keys {} range {range:?} (want [0..{want_n}))", ks.len()));
+        }
+    }
+    println!(
+        "  AUTHORED offline gate PASS: {n_shapes} shape(s), class census OK, indices + MOPP keys round-trip"
+    );
+    Ok(out)
+}
+
 /// One MOPP's key summary for the report / gate lines.
 fn mopp_line(body: &[u8], idx: usize) -> String {
     match decode_phy2_mopp_keys(body, idx) {
@@ -235,19 +472,45 @@ fn run() -> Result<(), String> {
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
     let report = has(&args, "--report");
     let all_mopps = has(&args, "--all-mopps");
-    let mode = match arg(&args, "--mode").as_deref() {
-        None | Some("identity") => SwapMode::Identity,
-        Some("return-all") | Some("returnall") => SwapMode::ReturnAll,
-        Some("empty") => SwapMode::Empty,
-        Some(other) => return Err(format!("unknown --mode {other} (identity|return-all|empty)")),
+    // `authored` is a whole-PHY2 re-authoring mode (not a MOPP swap): decode the target container's
+    // mesh(es), re-author a fully-authored PHY2 (WpMeshShape16 + engine-faithful descriptor-chain wrapper
+    // + native MOPP) from that SAME geometry, and splice it in. Single-shape uses build_phy2 (proven); a
+    // multi-shape container uses build_phy2_multi (see the wrapper caveat printed at run time).
+    let authored = matches!(arg(&args, "--mode").as_deref(), Some("authored"));
+    // On the authored path, `--mopp` selects which MOPP bytecode each shape carries: `spatial` (default,
+    // the real collision) or `return-all` (the frame-ignoring diagnostic — SAME mesh/wrapper/m_info, only
+    // the bytecode changes; see phy2_build::MoppKind).
+    let mopp_kind = match arg(&args, "--mopp").as_deref() {
+        None | Some("spatial") => MoppKind::Spatial,
+        Some("return-all") | Some("returnall") => MoppKind::ReturnAll,
+        Some(other) => return Err(format!("unknown --mopp {other} (spatial|return-all)")),
+    };
+    let mode = if authored {
+        SwapMode::Identity // placeholder; unused on the authored path
+    } else {
+        match arg(&args, "--mode").as_deref() {
+            None | Some("identity") => SwapMode::Identity,
+            Some("return-all") | Some("returnall") => SwapMode::ReturnAll,
+            Some("empty") => SwapMode::Empty,
+            Some(other) => {
+                return Err(format!("unknown --mode {other} (identity|return-all|empty|authored)"))
+            }
+        }
     };
     let default_out = format!(
         "C:/Users/Shadow/AppData/Local/Temp/hunt/mopp/overlay/vz-patch-mopp-{}.wad",
-        match mode {
-            SwapMode::Identity => "identity",
-            SwapMode::ReturnAll => "returnall",
-            SwapMode::Empty => "empty",
-            SwapMode::Spatial => "spatial",
+        if authored {
+            match mopp_kind {
+                MoppKind::ReturnAll => "authored-returnall",
+                MoppKind::Spatial => "authored",
+            }
+        } else {
+            match mode {
+                SwapMode::Identity => "identity",
+                SwapMode::ReturnAll => "returnall",
+                SwapMode::Empty => "empty",
+                SwapMode::Spatial => "spatial",
+            }
         }
     );
     let out = arg(&args, "--out").unwrap_or(default_out);
@@ -280,7 +543,11 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    println!("=== mopp_overlay_forge (mode={}) ===", mode_name(mode));
+    let authored_label = match mopp_kind {
+        MoppKind::ReturnAll => "authored/return-all",
+        MoppKind::Spatial => "authored",
+    };
+    println!("=== mopp_overlay_forge (mode={}) ===", if authored { authored_label } else { mode_name(mode) });
     println!("base wad : {}", vz.display());
     println!("target   : block {block}  '{path}'");
     println!("decompressed block: {} B  sha256 {dec_sha}", dec.len());
@@ -310,52 +577,56 @@ fn run() -> Result<(), String> {
         );
     println!("  src PHY2 body sha256 {}", sha256_hex(&base_body));
 
-    // Which MOPP indices does this mode target?
-    let default_idx = arg(&args, "--mopp").and_then(|s| s.parse::<usize>().ok());
-    let targets: Vec<usize> = match mode {
-        SwapMode::Empty if all_mopps => (0..n_mopps).collect(),
-        _ => vec![default_idx.unwrap_or_else(|| first_contiguous_mopp(&base_body))],
-    };
-    println!("  targeting MOPP index(es): {targets:?}");
+    let new_body = if authored {
+        author_whole_phy2(&parsed.containers[ci], &base_body, ename, mopp_kind)?
+    } else {
+        // Which MOPP indices does this mode target?
+        let default_idx = arg(&args, "--mopp").and_then(|s| s.parse::<usize>().ok());
+        let targets: Vec<usize> = match mode {
+            SwapMode::Empty if all_mopps => (0..n_mopps).collect(),
+            _ => vec![default_idx.unwrap_or_else(|| first_contiguous_mopp(&base_body))],
+        };
+        println!("  targeting MOPP index(es): {targets:?}");
 
-    // 3. apply the swap(s) sequentially. Identity & empty are size-preserving (in-place), so successive
-    //    MOPP indices stay valid across calls; return-all is applied to a single index.
-    let mut body = base_body.clone();
-    for &idx in &targets {
-        if idx >= count_phy2_mopps(&body) {
-            return Err(format!("mopp index {idx} out of range ({n_mopps} MOPPs)"));
+        // Apply the swap(s) sequentially. Identity & empty are size-preserving (in-place), so successive
+        // MOPP indices stay valid across calls; return-all is applied to a single index.
+        let mut body = base_body.clone();
+        for &idx in &targets {
+            if idx >= count_phy2_mopps(&body) {
+                return Err(format!("mopp index {idx} out of range ({n_mopps} MOPPs)"));
+            }
+            let src_keys = decode_phy2_mopp_keys(&body, idx)?.keys;
+            let (nb, rep) = swap_phy2_mopp(&body, idx, mode)?;
+            let expected: Option<&[u32]> = if mode == SwapMode::Identity { Some(&src_keys) } else { None };
+            let g = validate_swapped_body(&nb, idx, mode, expected);
+            let gate_ok = g.reparse_ok
+                && g.mopp_present
+                && g.decode_clean
+                && g.decode_coverage_full
+                && g.keys_as_expected
+                && g.mesh_still_decodes;
+            println!(
+                "  mopp[{idx}]: {} src keys -> {} decoded key(s), buf {}->{} B, packfile {}->{} B ({}), offline-gate {}",
+                rep.source_key_count,
+                g.decoded_key_count,
+                rep.old_buf_len,
+                rep.new_buf_len,
+                rep.old_packfile_size,
+                rep.new_packfile_size,
+                if rep.grew { "GREW/appended" } else { "in-place" },
+                if gate_ok { "PASS" } else { "FAIL" }
+            );
+            if !gate_ok {
+                return Err(format!("mopp[{idx}] offline gate FAILED: {g:?}"));
+            }
+            if mode == SwapMode::Identity && nb != body {
+                return Err("identity swap was not byte-identical".into());
+            }
+            body = nb;
         }
-        let src_keys = decode_phy2_mopp_keys(&body, idx)?.keys;
-        let (nb, rep) = swap_phy2_mopp(&body, idx, mode)?;
-        let expected: Option<&[u32]> = if mode == SwapMode::Identity { Some(&src_keys) } else { None };
-        let g = validate_swapped_body(&nb, idx, mode, expected);
-        let gate_ok = g.reparse_ok
-            && g.mopp_present
-            && g.decode_clean
-            && g.decode_coverage_full
-            && g.keys_as_expected
-            && g.mesh_still_decodes;
-        println!(
-            "  mopp[{idx}]: {} src keys -> {} decoded key(s), buf {}->{} B, packfile {}->{} B ({}), offline-gate {}",
-            rep.source_key_count,
-            g.decoded_key_count,
-            rep.old_buf_len,
-            rep.new_buf_len,
-            rep.old_packfile_size,
-            rep.new_packfile_size,
-            if rep.grew { "GREW/appended" } else { "in-place" },
-            if gate_ok { "PASS" } else { "FAIL" }
-        );
-        if !gate_ok {
-            return Err(format!("mopp[{idx}] offline gate FAILED: {g:?}"));
-        }
-        if mode == SwapMode::Identity && nb != body {
-            return Err("identity swap was not byte-identical".into());
-        }
-        body = nb;
-    }
-    let new_body = body;
-    println!("  swapped PHY2 body: {} B  sha256 {}", new_body.len(), sha256_hex(&new_body));
+        body
+    };
+    println!("  new PHY2 body: {} B  sha256 {}", new_body.len(), sha256_hex(&new_body));
 
     // 4. splice the swapped body back into the container (RESIZE-AWARE) + rebuild the block.
     let new_container = replace_phy2_in_container(&parsed.containers[ci], pstart, psize, &new_body)?;
@@ -385,7 +656,7 @@ fn run() -> Result<(), String> {
     }
     println!("  RE-WALK GATE: rebuilt block walks clean (CSUM + descriptors OK)");
     // GATE B (identity only): byte-identical to base.
-    if mode == SwapMode::Identity {
+    if mode == SwapMode::Identity && !authored {
         println!(
             "  IDENTITY GATE — rebuilt == base decompressed: {}",
             if rebuilt == dec { "YES (byte-identical)" } else { "NO !!" }
