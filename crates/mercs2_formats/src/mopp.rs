@@ -383,11 +383,13 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
     }
     let extent = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let max_ext = extent.iter().cloned().fold(0.0f32, f32::max);
-    // Divide by `0xFF00`, not `0xFFFF`: at the root shift (8) a byte split operand `b<<8` tops out at
-    // `0xFF00`, so the whole mesh must fit in `int ∈ [0, 0xFF00]` for its far face to be representable
-    // as an *upper* bound (`code[+1]`). `/0xFF00` puts the AABB-max vertex at exactly `int = 0xFF00`
-    // (`ceil(0xFF00/256) = 255`) — conservatively enclosable. Floor avoids a zero/degenerate scale.
-    let scale = (max_ext / 65280.0).max(1e-6);
+    // The engine walks the tree at a FIXED root operand shift of 16 (PROVEN — see [`ROOT_SHIFT`]), so a
+    // root byte split operand `b` means `plane_int = b << 16` and `world = plane_int*scale + offset`.
+    // Divide the widest extent by `ROOT_INT_MAX` (`0xFF << 16`) so the AABB-max face maps to exactly
+    // `int = 0xFF0000` (byte operand `0xFF`) — representable as an *upper* bound (`code[+1]`), the whole
+    // mesh enclosed in `int ∈ [0, ROOT_INT_MAX]`. This is Havok's own frame choice, reproduced: retail's
+    // 4 floor MOPPs each hold `scale ≈ ext_max/0xFF0000`. Floor avoids a zero/degenerate scale.
+    let scale = (max_ext / ROOT_INT_MAX).max(1e-9);
     let info = MoppInfo { offset: lo, scale };
 
     if tris.is_empty() {
@@ -428,12 +430,15 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
 
     // Quantize a world coordinate on `axis` to a root byte operand, rounding OUTWARD so the recovered
     // plane conservatively brackets `world`: `q_up` (an upper bound) rounds UP, `q_down` (a lower
-    // bound) rounds DOWN. `plane_int = byte << 8`; `plane_world = plane_int*scale + offset`.
+    // bound) rounds DOWN. `plane_int = byte << ROOT_SHIFT`; `plane_world = plane_int*scale + offset`, so
+    // `byte = (world-offset)/scale / 2^ROOT_SHIFT`. The `2^16` divisor MUST equal the shift the engine
+    // walks at (16) — an 8-shift frame lands every RIGHT-child plane ~256× beyond the mesh, unreachable.
+    let step = (1u32 << ROOT_SHIFT) as f32; // 2^16
     let q_up = move |world: f32, axis: usize| -> u8 {
-        (((world - info.offset[axis]) / info.scale / 256.0).ceil()).clamp(0.0, 255.0) as u8
+        (((world - info.offset[axis]) / info.scale / step).ceil()).clamp(0.0, 255.0) as u8
     };
     let q_down = move |world: f32, axis: usize| -> u8 {
-        (((world - info.offset[axis]) / info.scale / 256.0).floor()).clamp(0.0, 255.0) as u8
+        (((world - info.offset[axis]) / info.scale / step).floor()).clamp(0.0, 255.0) as u8
     };
 
     // Recursively split `idx` (indices into `tri`); returns (subtree bytes, subtree world AABB). The
@@ -773,11 +778,27 @@ pub(crate) fn leaf_boxes(
     out
 }
 
-/// Root integer-frame shift: at the tree root a byte split operand occupies bits `[8..16)` of the
-/// 16-bit frame, so `plane_int = operand << 8`. REANCHOR ops (`0x01–0x04`) refine sub-cells by adding
+/// Root integer-frame shift: at the tree root a byte split operand occupies bits `[16..24)` of a
+/// **24-bit** frame, so `plane_int = operand << 16`. **PROVEN = 16 by the retail oracle**
+/// (`diag_retail_floor_root_shift_oracle`): every one of the PMC-HQ floor `0x39AF17DC`'s 4 baked
+/// MOPPs — each with a *different* `m_info.scale` (5.0e-7 … 2.1e-6) — is no-miss over its own real
+/// triangles at shift 16 and ONLY 16, with clean far-box pruning; every other shift misses ~all
+/// triangles. So the engine walks with a **fixed** root operand shift of 16 (`0x10 - p3root`,
+/// p3root = 0) and Havok's compiler chose each mesh's `scale = ext_max / 0xFF0000` so the far face
+/// maps to byte operand `0xFF` (`0xFF << 16`). REANCHOR ops (`0x01–0x04`) refine sub-cells by adding
 /// to the origin and *decreasing* the shift; [`encode`] does not emit them (it stays at root
 /// precision), but [`query_aabb`] tracks the shift so it walks real refined MOPPs correctly.
-pub(crate) const ROOT_SHIFT: u32 = 8;
+///
+/// ⚠ Historically pinned to 8, which made `query_aabb`/`encode` internally self-consistent (the
+/// FindAll + leaf-box gates passed because both sides used the same wrong shift) but off by 256× vs
+/// the engine — the root cause of the spatial-MOPP fall-through and of the long-"blocked" absolute
+/// cross-check (`docs/reverse_engineer/mopp_bytecode_format.md` "Still open").
+pub(crate) const ROOT_SHIFT: u32 = 16;
+
+/// The largest integer a root byte operand addresses: `0xFF << ROOT_SHIFT`. [`encode`] picks the
+/// frame `scale = ext_max / ROOT_INT_MAX` so the AABB-max face lands exactly on byte operand `0xFF`,
+/// representable as an *upper* bound (`code[+1]`) — the whole mesh fits in `int ∈ [0, ROOT_INT_MAX]`.
+pub(crate) const ROOT_INT_MAX: f32 = (0xFFu32 << 16) as f32; // 16_711_680
 
 /// Geometric MOPP walk mirroring the HCT OBB/KDop virtual machine with narrowphase stripped — the real
 /// broadphase minus the per-triangle test. Returns the candidate shape-keys whose leaves a query AABB
@@ -1145,8 +1166,9 @@ mod tests {
     /// all-space) must return every one of the n keys (the tree prunes nothing).
     #[test]
     fn return_all_decodes_to_full_range_and_query_returns_everything() {
-        // Frame with scale 1.0 at ROOT_SHIFT=8 spans int [0, 0xFF00] → world [0, 65280] per axis; any
-        // query box inside that (or all-space) must return every key.
+        // Return-all pins split planes to the frame extremes (Lmax=0xFF, Rmin=0x00), which are
+        // shift-INVARIANT, so it returns every key under ANY frame/box — including the 24-bit
+        // ROOT_SHIFT=16 frame (int [0, 0xFF0000] → world [0, 16711680] per axis at scale 1.0).
         let info = MoppInfo { offset: [0.0; 3], scale: 1.0 };
         let inf = f32::INFINITY;
         for &n in &[1u32, 2, 3, 5, 76, 255, 256, 1000, 5000] {
@@ -1204,11 +1226,12 @@ mod tests {
         let tris = vec![[0u32, 1, 2]];
         let (_code, info) = encode(&tris, &verts);
         assert_eq!(info.offset, [-5.0, -1.0, 0.0], "offset = AABB min");
-        // Every vertex must dequantize back inside [offset, offset + scale*0xFFFF] per axis.
+        // Every vertex must dequantize back inside the 24-bit root frame [offset, offset + scale*0xFF0000]
+        // per axis (root byte operand `0xFF` at ROOT_SHIFT=16 → int 0xFF0000).
         let hi = [
-            info.offset[0] + info.scale * 65535.0,
-            info.offset[1] + info.scale * 65535.0,
-            info.offset[2] + info.scale * 65535.0,
+            info.offset[0] + info.scale * ROOT_INT_MAX,
+            info.offset[1] + info.scale * ROOT_INT_MAX,
+            info.offset[2] + info.scale * ROOT_INT_MAX,
         ];
         for v in &verts {
             for k in 0..3 {
@@ -1653,5 +1676,85 @@ mod tests {
             "query_aabb_leafbox: {leaves_tested} real leaf boxes across {mopps} MOPPs — every leaf \
              reachable inside its own reconstructed box (pruning is nesting-correct)"
         );
+    }
+
+    /// DIAGNOSTIC (retail oracle): for the retail PMC-HQ floor 0x39AF17DC, for each of its 4 MOPPs,
+    /// sweep the root operand shift and report — over the sub-mesh's REAL triangles in common-frame
+    /// world-local space — the no-miss count and a far-box prune count at each shift. The shift where
+    /// every triangle is a hit AND a far box prunes = the shift the engine actually walks the tree at.
+    /// Not an assertion; prints the measured relationship (scale, extent, aligning shift).
+    #[test]
+    fn diag_retail_floor_root_shift_oracle() {
+        let p = "C:/Users/Shadow/AppData/Local/Temp/hunt/mopp/overlay/blk2612_0x39AF17DC_identity.phy2";
+        let Ok(body) = std::fs::read(p) else {
+            return eprintln!("SKIPPING diag_retail_floor_root_shift_oracle: {p} not present");
+        };
+        let pf = crate::havok::parse_phy2_body(&body).expect("parse retail floor");
+        let meshes: Vec<&crate::havok::MeshShape> = pf
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                crate::havok::Shape::Mesh(m) if !m.indices.is_empty() => Some(m),
+                _ => None,
+            })
+            .collect();
+        let mopps = extract_mopp_with_info(&body);
+        eprintln!("retail floor: {} decodable meshes, {} MOPPs", meshes.len(), mopps.len());
+
+        for (code, info) in &mopps {
+            let d = decode(code);
+            let nkeys = d.key_summary().0.len();
+            // Match this MOPP to the mesh whose triangle count equals its key count.
+            let Some(mesh) = meshes.iter().find(|m| m.indices.len() == nkeys) else {
+                eprintln!("  MOPP {nkeys} keys: no mesh with matching tri count; skip");
+                continue;
+            };
+            // Per-triangle world AABB (common-frame dequant is already baked into mesh.vertices).
+            let tri_boxes: Vec<([f32; 3], [f32; 3])> = mesh
+                .indices
+                .iter()
+                .map(|t| {
+                    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for &vi in t {
+                        let v = mesh.vertices[vi as usize];
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(v[k]);
+                            hi[k] = hi[k].max(v[k]);
+                        }
+                    }
+                    (lo, hi)
+                })
+                .collect();
+            // Whole-mesh world AABB + extent.
+            let (mut wlo, mut whi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for (lo, hi) in &tri_boxes {
+                for k in 0..3 {
+                    wlo[k] = wlo[k].min(lo[k]);
+                    whi[k] = whi[k].max(hi[k]);
+                }
+            }
+            let ext = [whi[0] - wlo[0], whi[1] - wlo[1], whi[2] - wlo[2]];
+            let ext_max = ext.iter().cloned().fold(0.0f32, f32::max);
+            eprintln!(
+                "  MOPP {nkeys} tris: info.offset={:?} scale={:.3e} (lane3={:.1}) mesh AABB min={:?} ext={:?}",
+                info.offset, info.scale, 1.0 / info.scale, wlo, ext
+            );
+            // Far query box, well outside the mesh, on +X — a correct frame prunes it to empty.
+            let far_lo = [whi[0] + ext_max + 50.0, wlo[1], wlo[2]];
+            let far_hi = [whi[0] + ext_max + 60.0, whi[1], whi[2]];
+            for shift in 0u32..=24 {
+                let mut miss = 0usize;
+                for (t, (lo, hi)) in tri_boxes.iter().enumerate() {
+                    let got = query_aabb_shift(code, info, *lo, *hi, shift);
+                    if !got.contains(&(t as u32)) {
+                        miss += 1;
+                    }
+                }
+                let far = query_aabb_shift(code, info, far_lo, far_hi, shift).len();
+                if miss == 0 || shift <= 20 {
+                    eprintln!("    shift={shift:2}: misses={miss:5}/{nkeys}  far_box_cands={far}");
+                }
+            }
+        }
     }
 }
