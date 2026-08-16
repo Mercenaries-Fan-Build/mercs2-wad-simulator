@@ -247,6 +247,14 @@ pub struct RawPackfile {
     /// Virtual fixups in packfile order: `(object src offset relative to
     /// `data_pk`, class name)`.
     pub vfixups: Vec<(usize, String)>,
+    /// Global fixups: object pointer field-offset (relative to `data_pk`) →
+    /// `(section index, data offset relative to that section body)`. For
+    /// intra-`__data__` object references (`sec == 2`) the target is
+    /// `data_pk + dst`. This is where the `WpArray → shape` / `bvtree → mesh`
+    /// object graph pointers live (the reader resolves shapes by *virtual*
+    /// fixup and never consults these, so a collapsed global-fixup table is
+    /// invisible to the mesh census — see [`crate::phy2_build::validate_multi_shape_binding`]).
+    pub gf: HashMap<usize, (usize, usize)>,
 }
 
 impl RawPackfile {
@@ -327,6 +335,19 @@ pub fn parse_packfile_raw(pk: &[u8]) -> Result<RawPackfile, String> {
         k += 8;
     }
 
+    // global fixups: object pointer field → (section, data offset). 12-byte {src, sec, dst}.
+    let mut gf: HashMap<usize, (usize, usize)> = HashMap::new();
+    let gf_end = (data_pk + d_vf).min(pk.len());
+    let mut k = data_pk + d_gf;
+    while k + 12 <= gf_end {
+        let src = u32_le(pk, k);
+        if src == 0xFFFF_FFFF {
+            break;
+        }
+        gf.insert(src as usize, (u32_le(pk, k + 4) as usize, u32_le(pk, k + 8) as usize));
+        k += 12;
+    }
+
     // virtual fixups: object → class name.
     let mut vfixups = Vec::new();
     let vf_end = (data_pk + d_end).min(pk.len());
@@ -359,6 +380,7 @@ pub fn parse_packfile_raw(pk: &[u8]) -> Result<RawPackfile, String> {
         names,
         lf,
         vfixups,
+        gf,
     })
 }
 
@@ -454,6 +476,53 @@ fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<M
     let end = pk.len().saturating_sub(nverts * 6);
     if trail > end {
         return None; // no room for the pool inside the wrapper this slice carries
+    }
+    // FAST PATH — the faithful single-mesh engine wrapper (retail 0xE8EB75D7/0x86D7CF92 AND our authored
+    // build_phy2) is a FIXED-layout descriptor chain: an 0xAAAAAAAA node at the packfile end, an
+    // 0xEEEEEEEE subpart block at wrapper+244, and the quantized vertex pool at wrapper+352 (pointed to
+    // by the EE+76 body-absolute field). When those markers are present, follow the layout directly —
+    // deterministic and immune to the content-scan's zero-region false positives on small meshes. Gated
+    // by the score so it never regresses a container whose wrapper is not this exact form.
+    let mk = |o: usize| -> u32 {
+        if o + 4 <= pk.len() {
+            u32::from_le_bytes([pk[o], pk[o + 1], pk[o + 2], pk[o + 3]])
+        } else {
+            0
+        }
+    };
+    // DETERMINISTIC WRAPPER-POOL path (single AND multi-mesh). The authored + retail engine wrapper stores
+    // each subpart's vertex pool as a BODY-ABSOLUTE pointer at `EE+76` (inside an 0xEEEEEEEE block). For a
+    // MULTI-mesh SHARED-POOL container (retail floor 0x39AF17DC) every EE points to the ONE shared pool, so
+    // any EE resolves it and this mesh's GLOBAL indices dequantize correctly; for a single mesh the lone EE
+    // points to its own pool. Following the stored pointer is deterministic and immune to the content scan's
+    // degenerate false-locks (index bytes read as vertices collapse to `min` → a spurious perfect score). A
+    // PHY2 body places the packfile after a FIXED 48-byte prefix, so a body-absolute offset `B` maps to
+    // `pk[B-48]`; the score gate keeps this from ever regressing a container whose wrapper is a different form.
+    const PHY2_PREFIX: usize = 48;
+    {
+        let mut o = trail;
+        while o + 108 <= pk.len() {
+            if mk(o) == 0xEEEE_EEEE {
+                if let Some(pool) = (mk(o + 76) as usize).checked_sub(PHY2_PREFIX) {
+                    if pool + nverts * 6 <= pk.len() && score(pool) > 0.9 {
+                        let vertices: Vec<[f32; 3]> = (0..nverts).map(|v| getb(pool, v)).collect();
+                        return Some(MeshShape { vertices, indices });
+                    }
+                }
+                break; // all EEs share the pool in the multi form; the first is authoritative
+            }
+            o += 4;
+        }
+    }
+    if trail + 352 + nverts * 6 <= pk.len()
+        && mk(trail) == 0xAAAA_AAAA
+        && mk(trail + 244) == 0xEEEE_EEEE
+    {
+        let cand = trail + 352;
+        if score(cand) > 0.9 {
+            let vertices: Vec<[f32; 3]> = (0..nverts).map(|v| getb(cand, v)).collect();
+            return Some(MeshShape { vertices, indices });
+        }
     }
     let t0 = indices[0];
     let probe: Vec<[u16; 3]> = indices.iter().take(6).copied().collect();
