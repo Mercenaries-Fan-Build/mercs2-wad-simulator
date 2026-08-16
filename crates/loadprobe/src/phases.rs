@@ -153,6 +153,15 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // Fires only when the model is actually DRAWN (load succeeds; the camera turning to it crashes).
     // Draw-time cousin of the parse-time 0x00858DB8. NOT teardown.
     KnownEip { eip: 0x00855691, label: "render draw-loop (FUN_00855420) shader-registry lookup: NULL shader slot -> model has MORE MTRL records than the donor (appended material gets no registry slot); convert a record in place instead of appending", teardown: false },
+    // 0x0248C0E9 / 0x0248C15A: the dynamic Havok PHY2 trailing-wrapper RELOCATOR (`real_ptr = &body[0] +
+    // stored_offset`). An authored wrapper whose pointer field holds a non-offset (pool bytes read as an
+    // offset, a 0xFFFFFFFF sentinel relocated as base-1, or an internal node's second-child field the
+    // walker mis-reads) makes the relocator compute base + garbage → AV here (e.g. ECX=4E15BFB0 from the
+    // N-linked-chains wrapper, target A48E1608 from the pool-first wrapper). NOT teardown — it is an
+    // authored-collision format fault; the fix is the merged 2N−1 BV-tree wrapper (phy2_build.rs) whose
+    // full-tree walk gate (validate_multi_wrapper_chain) proves every relocated pointer lands in-bounds.
+    KnownEip { eip: 0x0248C0E9, label: "Havok PHY2 wrapper relocator — authored-wrapper pointer fault (base + garbage offset); merged BV-tree wrapper is the fix", teardown: false },
+    KnownEip { eip: 0x0248C15A, label: "Havok PHY2 wrapper relocator — authored-wrapper pointer fault (base + garbage offset); merged BV-tree wrapper is the fix", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
