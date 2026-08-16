@@ -107,6 +107,7 @@ pub mod model_inject;
 pub mod mopp;
 pub mod orchestrator;
 pub mod patch_wad;
+pub mod phy2_build;
 pub mod phy2_moppswap;
 pub mod placement;
 pub mod placement_build;
