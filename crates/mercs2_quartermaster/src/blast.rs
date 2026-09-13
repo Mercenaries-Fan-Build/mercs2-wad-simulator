@@ -318,6 +318,20 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddScript { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
+            // replace_lua swaps a shipped script's bytecode in place. Same-hash write, `Replace`
+            // intent -- last-mounted wins if two Shipments claim one target, same shape as
+            // `replace_texture`. Note the claim is on the SCRIPT (not the asset hash) so it also
+            // conflicts cleanly with a `patch_lua` on the same target, which we DO want -- an
+            // append + a wholesale replace of the same script cannot both be true.
+            Contribution::ReplaceLua { target, .. } => {
+                push(
+                    Access::Write,
+                    bare(Claim::Script {
+                        name: target.clone(),
+                    }),
+                    Intent::Replace,
+                );
+            }
             // A shop item claims the catalog script it appends a row to (support vs equipment) plus
             // `mrxrewarddata` for the reward row. All are in `MERGEABLE_SCRIPTS`, so these are
             // `OrderedList` (Additive) — N shop mods union rather than clobber.
@@ -366,6 +380,17 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // replace_texture). Two Shipments editing the same table is a load-order question, not
             // a conflict — whichever mounts last serves the lookup.
             Contribution::EditStringDb { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
+            // Adds NEW keys, `Additive` on the target string-table asset. Same first-writer-wins
+            // shape as add_texture / add_movie: two Shipments adding to the same table is fine
+            // if their key sets are disjoint (the build rejects duplicate keys at file load);
+            // two Shipments adding the SAME new key is a hard conflict.
+            Contribution::AddStringDbKeys { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Additive);
+            }
+            // Rewrites strings by content match. Same-hash edit, same shape as edit_stringdb.
+            Contribution::ReplaceStringDbText { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
             // A NEW language: mints a new stringdb hash (`hash(name)`) carried in a new base WAD.

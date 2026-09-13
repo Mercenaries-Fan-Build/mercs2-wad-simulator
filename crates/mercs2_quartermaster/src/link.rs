@@ -88,6 +88,17 @@ pub struct ScriptAddition {
     pub source: String,
 }
 
+/// One Shipment's declaration of a wholesale REPLACE on an existing script's bytecode.
+/// Same asset hash, new body; the last-mounted replace wins if two Shipments claim one target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptReplacement {
+    pub shipment: String,
+    /// The shipped script to replace, e.g. `wifpmcinterior`.
+    pub target: String,
+    /// Full Lua source text that becomes the new bytecode.
+    pub source: String,
+}
+
 #[derive(Debug)]
 pub enum LinkError {
     /// The base script is not in the block being linked.
@@ -735,7 +746,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[])
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[], &[])
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -755,6 +766,7 @@ pub fn link_into_blocks(
     layer_regs: &[LayerRegistration],
     support_regs: &[SupportRegistration],
     additions: &[ScriptAddition],
+    replacements: &[ScriptReplacement],
     order: &[String],
 ) -> Result<Vec<LinkedScript>, LinkError> {
     // Anything that lives in the load space — a UI widget, a layer activation, or a novel support
@@ -826,6 +838,39 @@ pub fn link_into_blocks(
             contributors,
             base_source_bytes: base.len(),
             linked_source_bytes: source.len(),
+            bytecode_bytes: bytecode.len(),
+            block: bi,
+        });
+    }
+
+    // Apply each `replace_lua` wholesale swap. Same asset hash, new bytecode -- every existing
+    // `import(<target>)` call site now returns the new module without rebinding.
+    for r in replacements {
+        let (bi, idx) = blocks
+            .iter()
+            .enumerate()
+            .find_map(|(bi, tb)| tb.block.find_script_by_name(&r.target).map(|idx| (bi, idx)))
+            .ok_or_else(|| LinkError::UnknownScript {
+                target: r.target.clone(),
+                shipment: r.shipment.clone(),
+            })?;
+        let bytecode = mercs2_luac::compile(&r.source, &r.target)
+            .map_err(|e| LinkError::Compile {
+                target: r.target.clone(),
+                message: e,
+            })?;
+        blocks[bi]
+            .block
+            .replace_lua(idx, &bytecode)
+            .map_err(|m| LinkError::Splice {
+                target: r.target.clone(),
+                message: m,
+            })?;
+        linked.push(LinkedScript {
+            target: r.target.clone(),
+            contributors: vec![r.shipment.clone()],
+            base_source_bytes: 0,
+            linked_source_bytes: r.source.len(),
             bytecode_bytes: bytecode.len(),
             block: bi,
         });

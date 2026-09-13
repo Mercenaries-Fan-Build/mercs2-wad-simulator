@@ -687,6 +687,28 @@ pub enum Contribution {
         /// The `.lua` source file to compile, `src/`-relative.
         source: PathBuf,
     },
+    /// Script. Wholesale REPLACE the bytecode of an existing shipped script, keeping its name and
+    /// asset hash. The append counterpart to [`PatchLua`] and the additive counterpart to
+    /// [`AddScript`]: this one takes a `.lua` file, compiles it to LuaQ, and swaps the target
+    /// script's bytecode in place (`scripts_block::replace_lua`). Same asset hash means every
+    /// existing `import(<target>)` call site now returns YOUR module, no rebinding required.
+    ///
+    /// Use when the desired change is a full rewrite rather than an append — a stock script whose
+    /// structure you cannot cleanly wrap, or a Lua-side reimplementation of an engine subsystem.
+    /// This is a `LastWins` claim (like `replace_texture`), so two Shipments replacing the same
+    /// script is a load-order question rather than a hard conflict; the later-mounted wins and the
+    /// earlier's bytecode is silently absent.
+    ///
+    /// ⚠ **Prefer `patch_lua` when the change is additive.** Two `patch_lua` mods on the same
+    /// script COMPOSE (the linker concatenates their appends and compiles once); two `replace_lua`
+    /// mods CLOBBER (the later one erases the earlier). Only reach for `replace_lua` when the
+    /// change genuinely cannot be expressed as an append.
+    ReplaceLua {
+        /// The shipped script to replace, e.g. `wifpmcinterior`.
+        target: String,
+        /// The `.lua` source that becomes the new bytecode. `src/`-relative.
+        source: PathBuf,
+    },
     /// Data. SWIT/STAT/CHDR/CEXE rewrite (`FUN_004cf340`, decoded).
     EditStateMachine { target: String, states: PathBuf },
     /// Data. Edit a placement LAYER (`vz_state` overlay or `layers_static`): move / rotate / re-model
@@ -713,6 +735,41 @@ pub enum Contribution {
         /// only add.
         #[serde(default)]
         replaces: Vec<String>,
+    },
+    /// Data, SAME-HASH. Add BRAND-NEW keys to a shipped string table.
+    ///
+    /// The additive companion to [`EditStringDb`]: the engine's localizer resolves `[Foo.Bar]` at
+    /// render time by hashing "Foo.Bar" and looking up in the string table, so an added key is
+    /// reachable the moment a widget renders text containing it. Mostly needed by mods that
+    /// introduce their own names — a new mission id (`[FioDef001.Title]`), a new ability slug,
+    /// a new HUD prompt.
+    ///
+    /// ⚠ Two Shipments adding the same key are a hard conflict (Additive intent). To OVERRIDE an
+    /// existing key's text, use [`EditStringDb`]; a mixed intent must be split into two rows.
+    /// The same shell/vz duplication caveat applies as for [`EditStringDb`] (M0191 warns).
+    AddStringDbKeys {
+        /// The string-table asset — `english`, `french`, `english_dlc01`, …
+        target: String,
+        /// A `src/`-relative file mapping bracket keys (`[Menu.Play]`) to their text, exactly the
+        /// format [`EditStringDb`] takes. The build rejects any key that ALREADY exists in the
+        /// target table (use `edit_stringdb` for those instead — mixing intents is a design bug).
+        strings: PathBuf,
+    },
+    /// Data, SAME-HASH. Rewrite every string whose current text is EXACTLY `old` (fix-pack surface).
+    ///
+    /// A community bug report almost always names a string by the text the player sees, not by its
+    /// bracket key. This kind takes a `.pairs` file of `old\tnew` (or a YAML map, same encoding as
+    /// `edit_stringdb`) and rewrites every entry whose current text matches exactly. Requiring the
+    /// FULL string match keeps this from mangling unrelated lines that merely contain the phrase.
+    ///
+    /// Runs on top of `edit_stringdb` (both apply, in author order), so a Shipment can co-fix by
+    /// key AND by text. Two Shipments rewriting overlapping text is a load-order question, same
+    /// shape as `replace_texture` — `Replace` intent, `LastWins`.
+    ReplaceStringDbText {
+        /// The string-table asset.
+        target: String,
+        /// A `src/`-relative file mapping old text → new text, one pair per row.
+        pairs: PathBuf,
     },
     /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
     ///
@@ -883,10 +940,13 @@ impl Contribution {
         "replace_texture",
         "patch_lua",
         "add_script",
+        "replace_lua",
         "edit_state_machine",
         "edit_world",
         "activate_layer",
         "edit_stringdb",
+        "add_stringdb_keys",
+        "replace_stringdb_text",
         "add_language",
         "native_hook",
         "place_file",
@@ -906,10 +966,13 @@ impl Contribution {
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::AddScript { .. } => "add_script",
+            Contribution::ReplaceLua { .. } => "replace_lua",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
             Contribution::ActivateLayer { .. } => "activate_layer",
             Contribution::EditStringDb { .. } => "edit_stringdb",
+            Contribution::AddStringDbKeys { .. } => "add_stringdb_keys",
+            Contribution::ReplaceStringDbText { .. } => "replace_stringdb_text",
             Contribution::AddLanguage { .. } => "add_language",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",

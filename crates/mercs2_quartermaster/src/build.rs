@@ -714,6 +714,31 @@ pub fn script_mutations(
     Ok(out)
 }
 
+/// Every `replace_lua`, ready for the linker to compile + swap in place.
+pub fn script_replacements(
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+) -> Result<Vec<link::ScriptReplacement>, BuildError> {
+    let shipment = manifest.shipment.name.clone();
+    let mut out = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        if let Contribution::ReplaceLua { target, source } = c {
+            let path = root.join(source);
+            let src = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind: "replace_lua",
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+            out.push(link::ScriptReplacement {
+                shipment: shipment.clone(),
+                target: target.clone(),
+                source: src,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Every `add_script`, ready for the linker to compile + mint as a fresh scripts_vz entry.
 ///
 /// Reads each source file up front, so a missing `.lua` is a build-time (deploy-time) error with
@@ -2491,6 +2516,8 @@ fn lower(
         Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
         // Realised at link time by `script_additions` + `link_into_blocks`. Nothing to pack here.
         Contribution::AddScript { .. } => Ok(Lowering::Nothing),
+        // Realised at link time by `script_replacements` + `link_into_blocks`. Nothing to pack here.
+        Contribution::ReplaceLua { .. } => Ok(Lowering::Nothing),
 
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
         // `script_mutations`), composed by the linker. Nothing to pack into a block.
@@ -3257,6 +3284,142 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
+        // Adds NEW keys to a shipped string table. Same container-emit shape as edit_stringdb --
+        // reads the base container, rebuilds with our added keys (heap grows, descriptors re-emit),
+        // ships as a same-hash overlay. Distinct kind from edit_stringdb so the claim graph sees
+        // "additive" vs "replace" as different intents.
+        Contribution::AddStringDbKeys { target, strings } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            let hash = crate::manifest::asset_hash(target);
+            let container = game
+                .container_for_asset(hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{target:?} (0x{hash:08X}) is not a string table in the configured game \
+                         stack — check the spelling"
+                    ),
+                })?;
+            let text = std::fs::read_to_string(root.join(strings)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(strings).display()),
+            })?;
+            let adds = parse_string_edits(&text).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            if adds.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} declares no keys to add",
+                        root.join(strings).display()
+                    ),
+                });
+            }
+            let edited = mercs2_formats::stringdb::add_keys_to_container(&container, &adds)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            log.push(format!(
+                "contributions[{index}] add_stringdb_keys {target} 0x{hash:08X}: {} key(s) added, \
+                 container {} -> {} bytes",
+                adds.len(),
+                container.len(),
+                edited.len()
+            ));
+            let mut block_data = Vec::new();
+            block_data.extend_from_slice(&1u32.to_le_bytes());
+            block_data.extend_from_slice(&hash.to_le_bytes());
+            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
+            block_data.extend_from_slice(&0u32.to_le_bytes());
+            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
+            block_data.extend_from_slice(&edited);
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
+            let block = PatchBlock::from_decompressed(
+                &block_data,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            Ok(Lowering::Block(block))
+        }
+
+        // Rewrite strings by exact-text match. Reads the container, applies each
+        // (old, new) pair via replace_exact_text, ships as a same-hash overlay.
+        Contribution::ReplaceStringDbText { target, pairs } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            let hash = crate::manifest::asset_hash(target);
+            let container = game
+                .container_for_asset(hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{target:?} (0x{hash:08X}) is not a string table in the configured game stack"
+                    ),
+                })?;
+            let text = std::fs::read_to_string(root.join(pairs)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(pairs).display()),
+            })?;
+            let map = parse_string_edits(&text).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            let list: Vec<(String, String)> = map.into_iter().collect();
+            if list.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{} declares no pairs", root.join(pairs).display()),
+                });
+            }
+            let (edited, counts) =
+                mercs2_formats::stringdb::replace_text_in_container(&container, &list)
+                    .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let hit_total: usize = counts.iter().map(|(_, n)| n).sum();
+            log.push(format!(
+                "contributions[{index}] replace_stringdb_text {target} 0x{hash:08X}: {hit_total} \
+                 row(s) rewritten across {} pair(s)",
+                counts.len()
+            ));
+            let misses: Vec<&String> =
+                counts.iter().filter(|(_, n)| *n == 0).map(|(k, _)| k).collect();
+            if !misses.is_empty() {
+                log.push(format!(
+                    "  note: {} pair(s) matched nothing (likely a typo): {:?}",
+                    misses.len(),
+                    misses
+                ));
+            }
+            let mut block_data = Vec::new();
+            block_data.extend_from_slice(&1u32.to_le_bytes());
+            block_data.extend_from_slice(&hash.to_le_bytes());
+            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
+            block_data.extend_from_slice(&0u32.to_le_bytes());
+            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
+            block_data.extend_from_slice(&edited);
+            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
+            let block = PatchBlock::from_decompressed(
+                &block_data,
+                format!("blocks\\VZ\\mod_{hash:08x}.block"),
+                vec![aset],
+                None,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            Ok(Lowering::Block(block))
+        }
+
         // A NEW language. Forks the base string table out of the stack (like edit_stringdb reads a
         // table), applies the translation, and RE-KEYS the container under the new language's own hash
         // so the engine resolves it as `<name>`'s table.
@@ -3576,6 +3739,7 @@ pub fn build(
     let layer_regs = layer_registrations(manifest);
     let support_regs = support_registrations(manifest, &shipment.root)?;
     let additions = script_additions(manifest, &shipment.root)?;
+    let replacements = script_replacements(manifest, &shipment.root)?;
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -3597,6 +3761,7 @@ pub fn build(
         || !layer_regs.is_empty()
         || !support_regs.is_empty()
         || !additions.is_empty()
+        || !replacements.is_empty()
     {
         let Some(game) = game.as_deref_mut() else {
             return Err(BuildError::GameRequired {
@@ -3633,6 +3798,7 @@ pub fn build(
             &layer_regs,
             &support_regs,
             &additions,
+            &replacements,
             &[],
         )
         .map_err(|e| BuildError::Lower {
@@ -3946,21 +4112,24 @@ pub fn link_installed(
     let mut layer_regs: Vec<link::LayerRegistration> = Vec::new();
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
     let mut additions: Vec<link::ScriptAddition> = Vec::new();
+    let mut replacements: Vec<link::ScriptReplacement> = Vec::new();
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
         support_regs.extend(support_registrations(&s.manifest, &s.root)?);
         additions.extend(script_additions(&s.manifest, &s.root)?);
+        replacements.extend(script_replacements(&s.manifest, &s.root)?);
     }
-    // A UI, layer, or add_script mod touches the Script layer too — the first two mint
-    // `qm_modloader` and the trampoline; the third mints its own fresh scripts_vz entry — so an
-    // install of nothing but those Shipments still has script work to do.
+    // A UI, layer, add_script, or replace_lua mod touches the Script layer too — the first two mint
+    // `qm_modloader` and the trampoline; add_script mints its own fresh scripts_vz entry;
+    // replace_lua swaps a shipped script's bytecode. Any of them needs the link to run.
     if mutations.is_empty()
         && ui_regs.is_empty()
         && layer_regs.is_empty()
         && support_regs.is_empty()
         && additions.is_empty()
+        && replacements.is_empty()
     {
         log.push("no installed Shipment touches a script — nothing to link".into());
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
@@ -4005,6 +4174,7 @@ pub fn link_installed(
         &layer_regs,
         &support_regs,
         &additions,
+        &replacements,
         &order,
     )
     .map_err(|e| BuildError::Lower {

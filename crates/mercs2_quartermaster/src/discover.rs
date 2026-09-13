@@ -316,12 +316,15 @@ impl Contribution {
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
             Contribution::AddScript { source, .. } => out.push(("source", source.as_path())),
+            Contribution::ReplaceLua { source, .. } => out.push(("source", source.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
             // No `src/` artifact: `layer` / `replaces` are layer NAMES the loader marks at runtime,
             // not files to pack.
             Contribution::ActivateLayer { .. } => {}
             Contribution::EditStringDb { strings, .. } => out.push(("strings", strings.as_path())),
+            Contribution::AddStringDbKeys { strings, .. } => out.push(("strings", strings.as_path())),
+            Contribution::ReplaceStringDbText { pairs, .. } => out.push(("pairs", pairs.as_path())),
             // The translation file, checked by the same source rules as every other `src/` path. `base`
             // is a table NAME, not a file, so there is nothing else to pack.
             Contribution::AddLanguage { strings, .. } => out.push(("strings", strings.as_path())),

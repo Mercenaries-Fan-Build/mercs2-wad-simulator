@@ -250,6 +250,35 @@ impl StringDb {
         }
         n
     }
+
+    /// Insert a NEW key with its text. Returns false if the key already exists (no overwrite —
+    /// use [`set_by_hash`]/[`set_by_name`] for that). The heap-rebuild in `build` produces valid
+    /// `KEYS`/`STRS` regardless of order, and the SYEK descriptors are re-emitted from
+    /// `self.entries`, so appending is safe on any size delta.
+    ///
+    /// The engine locates strings by hashing the bracket key at render time and comparing against
+    /// the SYEK table — an added key becomes reachable the moment the localizer next looks up
+    /// `[<name>]`. Adding a key that already appears in a shared table (english lives in both
+    /// shell.wad and vz.wad) only affects the copy this call is on; a companion `edit_stringdb`
+    /// on the other target is up to the manifest.
+    pub fn add_by_hash(&mut self, key_hash: u32, text: &str) -> bool {
+        if self.entries.iter().any(|e| e.key_hash == key_hash) {
+            return false;
+        }
+        self.entries.push(StringEntry {
+            key_hash,
+            // `build` recomputes every offset from the rebuilt heap; the initial value is a
+            // placeholder that never reaches disk.
+            offset: 0,
+            text: text.to_string(),
+        });
+        true
+    }
+
+    /// Add by key name (e.g. `"[FioDef001.Title]"`), hashing it the way the engine does.
+    pub fn add_by_name(&mut self, key_name: &str, text: &str) -> bool {
+        self.add_by_hash(pandemic_hash_m2(key_name), text)
+    }
 }
 
 /// Extract a named chunk's body range `(start, len)` from a `UCFX` container. Little-endian
@@ -293,6 +322,71 @@ fn chunk_range(container: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
 /// Arbitrary-length edits are supported: the heap is rebuilt and the `KEYS`/`STRS` descriptors are
 /// re-pointed, then the trailing `CSUM` is re-stamped. Retail's shared-string dedupe is preserved by
 /// `build`, which only shares a heap slot when the offset AND the text still match.
+/// Read a stringdb container, hand it to `f` for arbitrary mutation, rebuild. The container I/O
+/// (KEYS/STRS extraction, heap rebuild, descriptor re-pointing, trailing CSUM re-stamp) is
+/// invariant across every kind of edit; only the mutation differs. Callers stack their own
+/// primitives on top ([`edit_container`], the add/replace_text container helpers below).
+pub fn apply_container<F>(container: &[u8], f: F) -> Result<Vec<u8>, String>
+where
+    F: FnOnce(&mut StringDb) -> Result<(), String>,
+{
+    let (ks, kl) = chunk_range(container, b"KEYS").ok_or("container has no KEYS chunk")?;
+    let (ss, sl) = chunk_range(container, b"STRS").ok_or("container has no STRS chunk")?;
+    let mut db = parse(&container[ks..ks + kl], &container[ss..ss + sl])?;
+    f(&mut db)?;
+    let (new_keys, new_strs) = build(&db);
+    rebuild_container(container, &[(*b"KEYS", &new_keys), (*b"STRS", &new_strs)])
+}
+
+/// Add NEW keys to a stringdb container. The companion to [`edit_container`] (which errors on
+/// unknown keys) — this one errors on keys that ALREADY exist. Mixing intents is a design bug:
+/// an author who wants to overwrite existing text should call `edit_container`, and one who
+/// wants to add fresh keys should call this, and the two apply cleanly in either order.
+pub fn add_keys_to_container(
+    container: &[u8],
+    additions: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<u8>, String> {
+    apply_container(container, |db| {
+        for (key, text) in additions {
+            let ok = match key
+                .trim()
+                .strip_prefix("0x")
+                .or_else(|| key.trim().strip_prefix("0X"))
+                .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+            {
+                Some(h) => db.add_by_hash(h, text),
+                None => db.add_by_name(key, text),
+            };
+            if !ok {
+                return Err(format!(
+                    "{key} already exists in this string table — use edit_stringdb to overwrite, \
+                     not add_stringdb_keys (mixing intents in one contribution is refused)"
+                ));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Rewrite every string whose current text is EXACTLY `old`, for every `(old, new)` pair given.
+/// Wraps [`StringDb::replace_exact_text`]. Returns the rebuilt container plus a count log of
+/// how many rows each pair hit.
+pub fn replace_text_in_container(
+    container: &[u8],
+    pairs: &[(String, String)],
+) -> Result<(Vec<u8>, Vec<(String, usize)>), String> {
+    let mut counts = Vec::with_capacity(pairs.len());
+    let bytes = apply_container(container, |db| {
+        for (old, new) in pairs {
+            let n = db.replace_exact_text(old, new);
+            counts.push((old.clone(), n));
+        }
+        Ok(())
+    })?;
+    Ok((bytes, counts))
+}
+
 pub fn edit_container(
     container: &[u8],
     edits: &std::collections::BTreeMap<String, String>,
