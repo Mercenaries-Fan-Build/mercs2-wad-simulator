@@ -468,6 +468,31 @@ fn default_shop_max_stock() -> u32 {
     99
 }
 
+/// Where an [`Contribution::AddModel`] prop's static collision comes from.
+///
+/// The rigid `add_model` path injects a novel mesh into a donor container but keeps the donor's
+/// `PHY2` collision **verbatim** — so a new prop physically collides with the *donor's* shape, not
+/// its own. This selects between that legacy behaviour and regenerating collision from the model's
+/// own geometry.
+///
+/// Regeneration is safe on ANY donor because collision is NOT `SEGM`-bound: the engine walks the
+/// self-contained `WpArray` of shapes in the `PHY2` packfile (each model-local, placed by the
+/// object/cell transform), while `SEGM` is a pure RENDER draw table. So `follow_geometry` replaces
+/// only the `PHY2` body and leaves `SEGM`/`INDX`/`HIER` and every render chunk byte-unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollisionSource {
+    /// Reuse the donor's `PHY2` collision verbatim — today's behaviour, backward compatible. The new
+    /// prop collides with the donor's shape (correct when the donor's footprint matches the mesh).
+    #[default]
+    Donor,
+    /// Regenerate the static collision from THIS model's own injected mesh
+    /// ([`mercs2_formats::phy2_build::build_phy2_multi`]) and splice it in, replacing the donor `PHY2`.
+    /// Collision then follows the novel geometry. Rigid/static path only (the skinned `retarget` path
+    /// uses ragdoll/capsule collision, out of scope).
+    FollowGeometry,
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -542,6 +567,11 @@ pub enum Contribution {
         textures: Textures,
         #[serde(default)]
         retarget: Option<Retarget>,
+        /// Where the prop's static collision comes from. Default [`CollisionSource::Donor`] keeps the
+        /// donor's `PHY2` verbatim (today's behaviour); [`CollisionSource::FollowGeometry`] regenerates
+        /// it from this model's own mesh so collision follows the novel geometry. Rigid path only.
+        #[serde(default)]
+        collision: CollisionSource,
     },
     /// Data, new-hash additive. A standalone texture under a name the author chooses.
     ///
@@ -627,6 +657,36 @@ pub enum Contribution {
     /// Script. A DECLARED MUTATION, not a finished block: the Quartermaster links `scripts_vz`
     /// across the installed set at deploy, so two Shipments patching Lua do not annihilate.
     PatchLua { target: String, append: PathBuf },
+    /// Script. Mint a WHOLE NEW Lua module the engine can `import` / `dynamic_import` by NAME.
+    ///
+    /// Distinct from [`PatchLua`], which appends to an existing script; this one ships a fresh
+    /// script asset with its own ASET row, so `_MODULES[<name>]` starts populated the moment the
+    /// engine resolves the name. Same underlying primitive the linker already uses for
+    /// `qm_modloader` and a novel `add_shop_item` behaviour (`link.rs::add_script`), promoted to
+    /// a first-class contribution kind so a Shipment can inject its own module — a custom mission
+    /// class, a bespoke helper library, an ASI-callable table — without a runtime `dynamic_import`
+    /// hook.
+    ///
+    /// The `name` is what the engine hashes to locate the asset — the exact string a `Lua` caller
+    /// passes to `import("<name>")` / `dynamic_import("<name>")` / mrxtask's `sModuleName`. It is
+    /// not a filename and carries no extension; retail's are bare (`mrxtaskcontract`,
+    /// `mrxmissionflow`, `pmccon001`).
+    ///
+    /// The `source` is a `.lua` file, `src/`-relative, compiled to LuaQ 5.1 bytecode at build
+    /// time and packed into the `scripts_vz` block. It is NOT executed at load time — Lua modules
+    /// run on first import — so `inherit()` / `import()` calls at the top of the file resolve
+    /// against modules that ARE loaded by then (mrxmissionflow, wifmissiondata, MrxTaskContract).
+    ///
+    /// ⚠ **`name` cannot collide with a shipped script.** The registry is first-writer-wins on
+    /// asset hash, so a name that already exists silently drops one of the two. The linter (M0197)
+    /// refuses a name it recognises in the base corpus.
+    AddScript {
+        /// The module name the engine `import`s. Bare, lowercase-ish, no extension, no path — see
+        /// the doc comment on this variant.
+        name: String,
+        /// The `.lua` source file to compile, `src/`-relative.
+        source: PathBuf,
+    },
     /// Data. SWIT/STAT/CHDR/CEXE rewrite (`FUN_004cf340`, decoded).
     EditStateMachine { target: String, states: PathBuf },
     /// Data. Edit a placement LAYER (`vz_state` overlay or `layers_static`): move / rotate / re-model
@@ -822,6 +882,7 @@ impl Contribution {
         "add_ui",
         "replace_texture",
         "patch_lua",
+        "add_script",
         "edit_state_machine",
         "edit_world",
         "activate_layer",
@@ -844,6 +905,7 @@ impl Contribution {
             Contribution::AddUi { .. } => "add_ui",
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
+            Contribution::AddScript { .. } => "add_script",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
             Contribution::ActivateLayer { .. } => "activate_layer",

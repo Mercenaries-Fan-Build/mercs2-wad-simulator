@@ -315,6 +315,7 @@ impl Contribution {
             Contribution::AddUi { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
+            Contribution::AddScript { source, .. } => out.push(("source", source.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
             // No `src/` artifact: `layer` / `replaces` are layer NAMES the loader marks at runtime,

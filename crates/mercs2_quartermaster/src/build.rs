@@ -714,6 +714,34 @@ pub fn script_mutations(
     Ok(out)
 }
 
+/// Every `add_script`, ready for the linker to compile + mint as a fresh scripts_vz entry.
+///
+/// Reads each source file up front, so a missing `.lua` is a build-time (deploy-time) error with
+/// the shipment name and the offending path, not a mysterious silent skip at link time.
+pub fn script_additions(
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+) -> Result<Vec<link::ScriptAddition>, BuildError> {
+    let shipment = manifest.shipment.name.clone();
+    let mut out = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        if let Contribution::AddScript { name, source } = c {
+            let path = root.join(source);
+            let src = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind: "add_script",
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+            out.push(link::ScriptAddition {
+                shipment: shipment.clone(),
+                name: name.clone(),
+                source: src,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Every `add_ui`'s FlashWidget registration, for the linker to bake into `qm_modloader`.
 ///
 /// Kept separate from [`script_mutations`] because a UI mod does NOT append to a base script — its
@@ -1134,6 +1162,285 @@ fn bake_diffuse_atlas(mats: &[(usize, Rgba)]) -> (Rgba, std::collections::HashMa
         px[i * 4 + 3] = 255.0;
     }
     (Rgba { width: 4, height: 4, pixels: px }, std::collections::HashMap::new())
+}
+
+/// Regenerate a rigid prop's static collision from its OWN injected mesh and splice it into the
+/// model block, replacing the donor's `PHY2`. Backs `add_model collision: follow_geometry`.
+///
+/// `new_block` is the block returned by [`inject_static_into_donor_block`]
+/// (`[20-byte block header][UCFX container incl. CSUM]`); `mesh` is the imported glTF geometry in
+/// MODEL-LOCAL space (the rigid path injects it with `fit_to_template=false`, so its verts are the
+/// same frame the render mesh occupies and the frame the engine queries collision in).
+///
+/// Only the `PHY2` chunk changes: [`build_phy2_multi`] emits one whole-mesh `WpMeshShape16`+MOPP
+/// shape (N=1 is byte-identical to the proven single-mesh path), and the donor's 48-byte PHY2 prefix
+/// (asset-hash + framing) is preserved except byte-32 (the authored packfile size). `SEGM`, `INDX`,
+/// `HIER` and every render chunk stay byte-for-byte identical — collision is not `SEGM`-bound.
+/// Partition a mesh into `MeshSoup` chunks of at most `max_tris` triangles each, so every chunk's
+/// authored MOPP fits the encoder's 16-bit child-jump budget. Triangles are sorted along the longest
+/// bbox axis first, so each chunk is spatially compact (tight AABB → real broadphase pruning). Every
+/// chunk re-indexes only the vertices it uses. One chunk (small mesh) returns the whole mesh, so the
+/// N=1 path is unchanged.
+fn split_mesh_for_mopp(
+    tris: &[[u32; 3]],
+    positions: &[[f32; 3]],
+    max_tris: usize,
+) -> Vec<mercs2_formats::phy2_build::MeshSoup> {
+    use std::collections::HashMap;
+    let n = tris.len();
+    if n == 0 {
+        return vec![(Vec::new(), Vec::new())];
+    }
+    let n_chunks = n.div_ceil(max_tris.max(1)).max(1);
+    // Longest bbox axis, from triangle centroids.
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    let cen: Vec<[f32; 3]> = tris
+        .iter()
+        .map(|t| {
+            let (a, b, c) = (
+                positions[t[0] as usize],
+                positions[t[1] as usize],
+                positions[t[2] as usize],
+            );
+            let ct = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            for k in 0..3 {
+                lo[k] = lo[k].min(ct[k]);
+                hi[k] = hi[k].max(ct[k]);
+            }
+            ct
+        })
+        .collect();
+    let axis = (0..3)
+        .max_by(|&a, &b| (hi[a] - lo[a]).partial_cmp(&(hi[b] - lo[b])).unwrap())
+        .unwrap();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| cen[a][axis].partial_cmp(&cen[b][axis]).unwrap());
+
+    let chunk_len = n.div_ceil(n_chunks);
+    let mut soups = Vec::with_capacity(n_chunks);
+    for chunk in order.chunks(chunk_len) {
+        let mut vmap: HashMap<u32, u32> = HashMap::new();
+        let mut verts: Vec<[f32; 3]> = Vec::new();
+        let mut ctris: Vec<[u32; 3]> = Vec::with_capacity(chunk.len());
+        for &ti in chunk {
+            let t = tris[ti];
+            let mut nt = [0u32; 3];
+            for k in 0..3 {
+                nt[k] = *vmap.entry(t[k]).or_insert_with(|| {
+                    verts.push(positions[t[k] as usize]);
+                    (verts.len() - 1) as u32
+                });
+            }
+            ctris.push(nt);
+        }
+        soups.push((ctris, verts));
+    }
+    soups
+}
+
+fn regenerate_prop_collision(
+    new_block: &[u8],
+    mesh: &mercs2_formats::model_inject::ExternalMesh,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    use mercs2_formats::phy2_container::{phy2_span_in_container, replace_phy2_in_container};
+
+    if mesh.tris.is_empty() || mesh.positions.is_empty() {
+        return Err("injected mesh has no triangles to build collision from".into());
+    }
+    if new_block.len() < 20 {
+        return Err("model block too small".into());
+    }
+    let ucfx_len = u32::from_le_bytes(new_block[16..20].try_into().unwrap()) as usize;
+    let container = new_block
+        .get(20..20 + ucfx_len)
+        .ok_or("model block truncated before end of UCFX container")?;
+
+    let (pstart, psize) = phy2_span_in_container(container)
+        .ok_or("donor container has no PHY2 collision chunk to replace (follow_geometry needs one)")?;
+    let base_body = &container[pstart..pstart + psize];
+    if base_body.len() < 48 {
+        return Err("donor PHY2 body shorter than the 48-byte prefix".into());
+    }
+
+    // Build a fresh whole-model PHY2 from the injected geometry as N `WpMeshShape16` shapes sharing
+    // one common frame + vertex pool (the proven shared-pool multi-shape path). A single-shape MOPP's
+    // child-jump offsets are only 16-bit (`mopp::encode`'s `0x23` split), so a tree over more than
+    // ~11 k triangles overflows and only part of it decodes. Splitting into ≤ `MAX_MOPP_TRIS`-triangle
+    // shapes keeps every shape's MOPP inside the 16-bit budget while collision still follows the FULL
+    // mesh. Shapes bind via the packfile `WpArray`, not `SEGM`, so any shape count is legal on any
+    // donor (census-proven). N=1 (a small mesh) stays byte-identical to the proven single-mesh path.
+    const MAX_MOPP_TRIS: usize = 8000;
+    let soups = split_mesh_for_mopp(&mesh.tris, &mesh.positions, MAX_MOPP_TRIS);
+    let authored = mercs2_formats::phy2_build::build_phy2_multi(name, &soups)?;
+    if authored.len() < 48 {
+        return Err("authored PHY2 body shorter than the 48-byte prefix".into());
+    }
+
+    // Preserve the donor's 48-byte PHY2 prefix verbatim except byte-32 (the authored packfile size).
+    let mut new_body = Vec::with_capacity(authored.len());
+    new_body.extend_from_slice(&base_body[0..48]);
+    new_body[32..36].copy_from_slice(&authored[32..36]);
+    new_body.extend_from_slice(&authored[48..]);
+
+    let new_container = replace_phy2_in_container(container, pstart, psize, &new_body)?;
+
+    // Rewrap the block header, updating the UCFX length field (offset 16).
+    let mut out = new_block[0..20].to_vec();
+    out[16..20].copy_from_slice(&(new_container.len() as u32).to_le_bytes());
+    out.extend_from_slice(&new_container);
+    Ok(out)
+}
+
+/// A rigid render group indexes vertices with u16 and draws ONE triangle strip, so a dense mesh
+/// whose strip would exceed 65 534 indices cannot be injected as its render geometry. This
+/// cluster-decimates a RENDER copy just enough to fit. Collision (`follow_geometry`) is regenerated
+/// from the FULL mesh separately, so the visible LOD drops while the collider stays geometry-tight.
+///
+/// Returns the mesh unchanged when its strip already fits (the common case), else the finest
+/// decimation that fits — plus the (verts, tris) it landed on, for the build log.
+fn fit_render_mesh_to_u16_strip(
+    mesh: &mercs2_formats::model_inject::ExternalMesh,
+) -> (mercs2_formats::model_inject::ExternalMesh, Option<(usize, usize)>) {
+    use mercs2_formats::model_inject::to_strip_connected;
+    const U16_STRIP_MAX: usize = 65534;
+    if to_strip_connected(&mesh.tris).len() <= U16_STRIP_MAX {
+        return (mesh.clone(), None);
+    }
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for p in &mesh.positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+    let mut cell_lo = diag / 8192.0; // fine   -> many verts
+    let mut cell_hi = diag / 2.0; // coarse -> few verts
+    let mut best = cluster_decimate_ext(mesh, cell_hi);
+    // Smallest cell (most detail) whose connected strip still fits.
+    for _ in 0..48 {
+        let mid = (cell_lo * cell_hi).sqrt();
+        let d = cluster_decimate_ext(mesh, mid);
+        if to_strip_connected(&d.tris).len() <= U16_STRIP_MAX {
+            best = d;
+            cell_hi = mid;
+        } else {
+            cell_lo = mid;
+        }
+        if cell_hi / cell_lo < 1.02 {
+            break;
+        }
+    }
+    let n = (best.positions.len(), best.tris.len());
+    (best, Some(n))
+}
+
+/// Vertex-cluster decimation on an [`mercs2_formats::model_inject::ExternalMesh`]: quantise positions
+/// to a `cell` grid, collapse each occupied cell to its centroid, drop degenerate / zero-area tris,
+/// recompute area-weighted normals. UVs are zeroed (this render path serves an untextured prop) and
+/// skin arrays dropped (rigid). Mirrors `mesh_prep::cluster_decimate`.
+fn cluster_decimate_ext(
+    m: &mercs2_formats::model_inject::ExternalMesh,
+    cell: f32,
+) -> mercs2_formats::model_inject::ExternalMesh {
+    use std::collections::HashMap;
+    let inv = 1.0 / cell;
+    let key = |p: &[f32; 3]| {
+        (
+            (p[0] * inv).floor() as i64,
+            (p[1] * inv).floor() as i64,
+            (p[2] * inv).floor() as i64,
+        )
+    };
+    let mut cells: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    let mut sum: Vec<[f64; 3]> = Vec::new();
+    let mut cnt: Vec<u32> = Vec::new();
+    let mut remap: Vec<u32> = Vec::with_capacity(m.positions.len());
+    for p in &m.positions {
+        let k = key(p);
+        let idx = *cells.entry(k).or_insert_with(|| {
+            sum.push([0.0; 3]);
+            cnt.push(0);
+            (sum.len() - 1) as u32
+        });
+        let i = idx as usize;
+        sum[i] = [
+            sum[i][0] + p[0] as f64,
+            sum[i][1] + p[1] as f64,
+            sum[i][2] + p[2] as f64,
+        ];
+        cnt[i] += 1;
+        remap.push(idx);
+    }
+    let positions: Vec<[f32; 3]> = sum
+        .iter()
+        .zip(&cnt)
+        .map(|(s, &c)| {
+            let c = c.max(1) as f64;
+            [(s[0] / c) as f32, (s[1] / c) as f32, (s[2] / c) as f32]
+        })
+        .collect();
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(m.tris.len());
+    for t in &m.tris {
+        let (a, b, c) = (
+            remap[t[0] as usize],
+            remap[t[1] as usize],
+            remap[t[2] as usize],
+        );
+        if a == b || b == c || a == c {
+            continue;
+        }
+        let n = cross(
+            sub(positions[b as usize], positions[a as usize]),
+            sub(positions[c as usize], positions[a as usize]),
+        );
+        if n[0] * n[0] + n[1] * n[1] + n[2] * n[2] <= 1e-20 {
+            continue;
+        }
+        tris.push([a, b, c]);
+    }
+    let mut normals = vec![[0.0f32; 3]; positions.len()];
+    for t in &tris {
+        let (ia, ib, ic) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        let n = cross(sub(positions[ib], positions[ia]), sub(positions[ic], positions[ia]));
+        for &i in &[ia, ib, ic] {
+            for k in 0..3 {
+                normals[i][k] += n[k];
+            }
+        }
+    }
+    for nrm in normals.iter_mut() {
+        let l = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt();
+        if l > 1e-12 {
+            nrm[0] /= l;
+            nrm[1] /= l;
+            nrm[2] /= l;
+        } else {
+            *nrm = [0.0, 1.0, 0.0];
+        }
+    }
+    let uvs = vec![[0.0f32; 2]; positions.len()];
+    mercs2_formats::model_inject::ExternalMesh {
+        positions,
+        normals,
+        uvs,
+        tris,
+        joints: Vec::new(),
+        weights: Vec::new(),
+    }
 }
 
 /// Lower a rigged `.glb` onto a donor — the SKINNED path, shared by `add_model` and `add_outfit`.
@@ -1764,6 +2071,7 @@ fn lower(
             group,
             textures,
             retarget,
+            collision,
         } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
@@ -1839,11 +2147,16 @@ fn lower(
             // a host group be picked and had nowhere to record it, so a placement could be
             // previewed and then not expressed.
             let host_group = group.map(|g| g as usize).unwrap_or(DEFAULT_TARGET_GROUP);
+            // The rigid render group is u16-indexed and draws one strip, so a dense mesh's strip can
+            // exceed 65 534. Fit a RENDER copy to that budget; `follow_geometry` regenerates collision
+            // from the FULL `mesh` below, so the collider stays geometry-tight while the visible LOD
+            // drops. A mesh that already fits is returned unchanged (`render_decim` = None).
+            let (render_mesh, render_decim) = fit_render_mesh_to_u16_strip(&mesh);
             // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
             // transform), target the raw rendered group, neutralise the rest.
             let (new_block, stats) = inject_static_into_donor_block(
                 &donor_blk,
-                &mesh,
+                &render_mesh,
                 host_group,
                 &[],
                 hash,
@@ -1866,6 +2179,41 @@ fn lower(
                  group {host_group}: {} verts, {} tris",
                 stats.vertex_count, stats.triangle_count
             ));
+            if let Some((rv, rt)) = render_decim {
+                log.push(format!(
+                    "contributions[{index}] add_model {name} 0x{hash:08X}: render LOD decimated to \
+                     {rt} tris / {rv} verts to fit the rigid group's u16 strip ({} tris source \
+                     preserved for collision)",
+                    mesh.tris.len()
+                ));
+            }
+
+            // OPT-IN: regenerate static collision from the model's OWN injected geometry, replacing
+            // the donor's PHY2. Safe on ANY donor — collision is not SEGM-bound (the loader walks the
+            // self-contained WpArray of model-local shapes); SEGM/INDX/HIER stay byte-unchanged. The
+            // default (`CollisionSource::Donor`) keeps the donor PHY2 verbatim (backward compatible).
+            let new_block = match collision {
+                crate::manifest::CollisionSource::Donor => new_block,
+                crate::manifest::CollisionSource::FollowGeometry => {
+                    let regen =
+                        regenerate_prop_collision(&new_block, &mesh, name).map_err(|m| {
+                            BuildError::Lower {
+                                index,
+                                kind,
+                                message: format!(
+                                    "follow_geometry collision for {name} (donor {donor_name}): {m}"
+                                ),
+                            }
+                        })?;
+                    log.push(format!(
+                        "contributions[{index}] add_model {name} 0x{hash:08X}: collision \
+                         follow_geometry — regenerated PHY2 from {} tris, {} verts (SEGM untouched)",
+                        mesh.tris.len(),
+                        mesh.positions.len()
+                    ));
+                    regen
+                }
+            };
 
             let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
             let block = PatchBlock::from_decompressed(
@@ -2141,6 +2489,8 @@ fn lower(
         // Contributes no block: its whole effect is a declared mutation, collected by
         // `script_mutations` and realised at link time.
         Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
+        // Realised at link time by `script_additions` + `link_into_blocks`. Nothing to pack here.
+        Contribution::AddScript { .. } => Ok(Lowering::Nothing),
 
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
         // `script_mutations`), composed by the linker. Nothing to pack into a block.
@@ -3225,6 +3575,7 @@ pub fn build(
     let ui_regs = ui_registrations(manifest);
     let layer_regs = layer_registrations(manifest);
     let support_regs = support_registrations(manifest, &shipment.root)?;
+    let additions = script_additions(manifest, &shipment.root)?;
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -3237,13 +3588,15 @@ pub fn build(
     // prevent. That cross-Shipment relink belongs to deploy (Modkit), and this is deliberately only
     // its single-Shipment case.
     //
-    // `ui_regs` / `layer_regs` count too: an add_ui or activate_layer with no other script edit
-    // still mints `qm_modloader` and the trampoline, so the link must run for it even when
-    // `mutations` is empty.
+    // `ui_regs` / `layer_regs` / `additions` count too: an add_ui / activate_layer / add_script with
+    // no other script edit still needs the linker to run (respectively: mints the loader trampoline,
+    // mints the loader trampoline, mints a fresh scripts_vz entry). So a non-empty of any of them
+    // must trigger the link even when `mutations` is empty.
     if !mutations.is_empty()
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
         || !support_regs.is_empty()
+        || !additions.is_empty()
     {
         let Some(game) = game.as_deref_mut() else {
             return Err(BuildError::GameRequired {
@@ -3279,6 +3632,7 @@ pub fn build(
             &ui_regs,
             &layer_regs,
             &support_regs,
+            &additions,
             &[],
         )
         .map_err(|e| BuildError::Lower {
@@ -3591,15 +3945,22 @@ pub fn link_installed(
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
     let mut layer_regs: Vec<link::LayerRegistration> = Vec::new();
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
+    let mut additions: Vec<link::ScriptAddition> = Vec::new();
     for s in shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
         support_regs.extend(support_registrations(&s.manifest, &s.root)?);
+        additions.extend(script_additions(&s.manifest, &s.root)?);
     }
-    // A UI or layer mod touches the Script layer too — it mints `qm_modloader` and the trampoline —
-    // so an install of nothing but add_ui / activate_layer Shipments still has script work to do.
-    if mutations.is_empty() && ui_regs.is_empty() && layer_regs.is_empty() && support_regs.is_empty()
+    // A UI, layer, or add_script mod touches the Script layer too — the first two mint
+    // `qm_modloader` and the trampoline; the third mints its own fresh scripts_vz entry — so an
+    // install of nothing but those Shipments still has script work to do.
+    if mutations.is_empty()
+        && ui_regs.is_empty()
+        && layer_regs.is_empty()
+        && support_regs.is_empty()
+        && additions.is_empty()
     {
         log.push("no installed Shipment touches a script — nothing to link".into());
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
@@ -3643,6 +4004,7 @@ pub fn link_installed(
         &ui_regs,
         &layer_regs,
         &support_regs,
+        &additions,
         &order,
     )
     .map_err(|e| BuildError::Lower {

@@ -76,6 +76,18 @@ pub struct ScriptMutation {
     pub append: String,
 }
 
+/// One Shipment's declaration of a NOVEL script module — a whole new `import`-able Lua module
+/// that mints its own `scripts_vz` entry and ASET row. Compiled to LuaQ at link time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptAddition {
+    pub shipment: String,
+    /// The module name (`import("<name>")` / `dynamic_import("<name>")` / `sModuleName`). Bare,
+    /// no extension. Hashed with `pandemic_hash_m2` to become the ASET row's key.
+    pub name: String,
+    /// Full Lua source text to compile.
+    pub source: String,
+}
+
 #[derive(Debug)]
 pub enum LinkError {
     /// The base script is not in the block being linked.
@@ -723,7 +735,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[])
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[])
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -742,6 +754,7 @@ pub fn link_into_blocks(
     ui_regs: &[UiRegistration],
     layer_regs: &[LayerRegistration],
     support_regs: &[SupportRegistration],
+    additions: &[ScriptAddition],
     order: &[String],
 ) -> Result<Vec<LinkedScript>, LinkError> {
     // Anything that lives in the load space — a UI widget, a layer activation, or a novel support
@@ -816,6 +829,44 @@ pub fn link_into_blocks(
             bytecode_bytes: bytecode.len(),
             block: bi,
         });
+    }
+
+    // Mint each first-class `add_script` addition. Each one becomes a fresh entry in the
+    // `scripts_vz` block with its own primary type-35 ASET row (via `script_patch_blocks`' new-entry
+    // branch), so the engine's `import` / `dynamic_import` locates it the same way any shipped
+    // script is located. Lives in the `wifpmcinterior`-carrying block for the same reason
+    // `qm_modloader` does — `import` is scripts_vz-only, and this keeps every minted script in one
+    // discoverable place.
+    if !additions.is_empty() {
+        let bi = blocks
+            .iter()
+            .position(|tb| tb.block.find_script_by_name("wifpmcinterior").is_some())
+            .ok_or_else(|| LinkError::UnknownScript {
+                target: "wifpmcinterior".to_string(),
+                shipment: additions[0].shipment.clone(),
+            })?;
+        for a in additions {
+            let bytecode = mercs2_luac::compile(&a.source, &a.name)
+                .map_err(|e| LinkError::Compile {
+                    target: a.name.clone(),
+                    message: e,
+                })?;
+            blocks[bi]
+                .block
+                .add_script(&a.name, &bytecode)
+                .map_err(|m| LinkError::Splice {
+                    target: a.name.clone(),
+                    message: m,
+                })?;
+            linked.push(LinkedScript {
+                target: a.name.clone(),
+                contributors: vec![a.shipment.clone()],
+                base_source_bytes: 0,
+                linked_source_bytes: a.source.len(),
+                bytecode_bytes: bytecode.len(),
+                block: bi,
+            });
+        }
     }
 
     // Mint the mod loader. It is a NEW `scripts_vz` script — `add_script` appends its container and

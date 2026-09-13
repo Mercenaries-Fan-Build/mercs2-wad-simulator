@@ -290,6 +290,10 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 );
             }
             Contribution::AddModel { name, donor, .. } => {
+                // The model's own hash. With `collision: follow_geometry` the regenerated PHY2 ships
+                // INSIDE this same model block (it replaces the donor's PHY2 chunk in the injected
+                // container, and touches no SEGM/other asset), so the model-hash Write claim already
+                // covers the collision — no separate claim is needed.
                 push(Access::Write, Claim::asset(name), Intent::Additive);
                 if let Some(d) = donor {
                     push(Access::Read, Claim::asset(d), Intent::Replace);
@@ -307,6 +311,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     }),
                     Intent::Additive,
                 );
+            }
+            // add_script mints a whole new script asset. Same claim shape as add_movie / add_texture:
+            // one new hash, `Additive`, so two Shipments minting the same `name` are a hard conflict
+            // (first-writer-wins registry — the loser is silently absent, not visibly overridden).
+            Contribution::AddScript { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
             }
             // A shop item claims the catalog script it appends a row to (support vs equipment) plus
             // `mrxrewarddata` for the reward row. All are in `MERGEABLE_SCRIPTS`, so these are
