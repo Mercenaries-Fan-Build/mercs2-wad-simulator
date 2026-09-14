@@ -410,6 +410,171 @@ pub fn parse_text(body: &[u8]) -> Vec<u32> {
     (0..n).map(|i| read_u32_le(body, 4 + i * 4)).collect()
 }
 
+// ------------------------------------------------------------------------------------------------
+// Encoders.
+// ------------------------------------------------------------------------------------------------
+
+pub fn write_fxparam(p: &FxParam) -> [u8; DICT_RECORD_BYTES] {
+    let mut out = [0u8; DICT_RECORD_BYTES];
+    out[0..4].copy_from_slice(&p.name_hash.to_le_bytes());
+    out[4..8].copy_from_slice(&p.default.to_le_bytes());
+    out[8..12].copy_from_slice(&p.value_b.to_le_bytes());
+    out[12..16].copy_from_slice(&p.value_c.to_le_bytes());
+    out[16..20].copy_from_slice(&p.flags.to_le_bytes());
+    out
+}
+
+pub fn write_fxdict_dict(params: &[FxParam]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(params.len() * DICT_RECORD_BYTES);
+    for p in params {
+        out.extend_from_slice(&write_fxparam(p));
+    }
+    out
+}
+
+pub fn write_fxdict_info(count: u32) -> [u8; 4] {
+    count.to_le_bytes()
+}
+
+pub fn write_efct(h: &EffectHeader) -> Vec<u8> {
+    let mut body = vec![0u8; 16];
+    body[2..4].copy_from_slice(&h.magic.to_le_bytes());
+    body[14..16].copy_from_slice(&h.sub_count.to_le_bytes());
+    body
+}
+
+pub fn write_emtr(t: &EmitterTable) -> Vec<u8> {
+    let mut body = Vec::with_capacity(2 + t.refs.len() * 4);
+    body.extend_from_slice(&(t.refs.len() as u16).to_le_bytes());
+    for r in &t.refs {
+        body.extend_from_slice(&r.to_le_bytes());
+    }
+    body
+}
+
+pub fn write_emit(t: &EmitTiming) -> Vec<u8> {
+    let mut body = Vec::with_capacity(t.floats.len() * 4);
+    for f in &t.floats {
+        body.extend_from_slice(&f.to_le_bytes());
+    }
+    body
+}
+
+pub fn write_poff(v: [f32; 3]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(12);
+    for x in v {
+        body.extend_from_slice(&x.to_le_bytes());
+    }
+    body
+}
+
+pub fn write_trfm(m: &[[f32; 4]; 4]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(64);
+    for row in m {
+        for x in row {
+            body.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    body
+}
+
+pub fn write_ptyp(p: ParticleType) -> Vec<u8> {
+    vec![p.flags]
+}
+
+pub fn write_colr(g: &ColorGradient) -> Vec<u8> {
+    let mut body = Vec::with_capacity(COLR_BYTES);
+    for s in &g.stops {
+        body.extend_from_slice(s);
+    }
+    body
+}
+
+pub fn write_frce(f: &Force) -> Vec<u8> {
+    let n = f.param_count.min(4);
+    let mut body = Vec::with_capacity(4 + n * 4);
+    body.extend_from_slice(&f.inner_hash.to_le_bytes());
+    for x in &f.params[..n] {
+        body.extend_from_slice(&x.to_le_bytes());
+    }
+    body
+}
+
+pub fn write_text(hashes: &[u32]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + hashes.len() * 4);
+    body.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
+    for h in hashes {
+        body.extend_from_slice(&h.to_le_bytes());
+    }
+    body
+}
+
+impl EffectTemplate {
+    pub fn to_chunks(&self) -> Vec<([u8; 4], Vec<u8>)> {
+        let mut out: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+        if let Some(h) = self.header { out.push((*b"EFCT", write_efct(&h))); }
+        if !self.emitters.refs.is_empty() { out.push((*b"EMTR", write_emtr(&self.emitters))); }
+        if !self.emit.floats.is_empty() { out.push((*b"EMIT", write_emit(&self.emit))); }
+        if let Some(v) = self.offset { out.push((*b"POFF", write_poff(v))); }
+        if let Some(m) = &self.transform { out.push((*b"TRFM", write_trfm(m))); }
+        if let Some(p) = self.ptype { out.push((*b"PTYP", write_ptyp(p))); }
+        if let Some(g) = &self.gradient { out.push((*b"COLR", write_colr(g))); }
+        for f in &self.forces { out.push((*b"FRCE", write_frce(f))); }
+        if !self.text_refs.is_empty() { out.push((*b"TEXT", write_text(&self.text_refs))); }
+        out
+    }
+}
+
+pub fn write_ucfx_container(chunks: &[([u8; 4], u32, u32, Vec<u8>)]) -> Vec<u8> {
+    let n = chunks.len();
+    let hdr_bytes = 20;
+    let desc_bytes = n * 20;
+    let data_off = (hdr_bytes + desc_bytes) as u32;
+
+    let mut data = Vec::new();
+    let mut placed: Vec<(u32, u32)> = Vec::with_capacity(n);
+    for (_, _, _, body) in chunks {
+        while data.len() % 4 != 0 { data.push(0); }
+        placed.push((data.len() as u32, body.len() as u32));
+        data.extend_from_slice(body);
+    }
+
+    let mut c = Vec::with_capacity(20 + desc_bytes + data.len() + 8);
+    c.extend_from_slice(b"UCFX");
+    for v in [data_off, 0, 0, n as u32] {
+        c.extend_from_slice(&v.to_le_bytes());
+    }
+    for (i, (tag, u2, u3, _)) in chunks.iter().enumerate() {
+        let (rel_off, size) = placed[i];
+        c.extend_from_slice(tag);
+        c.extend_from_slice(&rel_off.to_le_bytes());
+        c.extend_from_slice(&size.to_le_bytes());
+        c.extend_from_slice(&u2.to_le_bytes());
+        c.extend_from_slice(&u3.to_le_bytes());
+    }
+    c.extend_from_slice(&data);
+    let sum = crate::crc32::crc32_mercs2(&c);
+    c.extend_from_slice(b"CSUM");
+    c.extend_from_slice(&sum.to_le_bytes());
+    c
+}
+
+pub fn write_effect_container(t: &EffectTemplate) -> Vec<u8> {
+    let owned = t.to_chunks();
+    let chunks: Vec<([u8; 4], u32, u32, Vec<u8>)> =
+        owned.into_iter().map(|(tag, body)| (tag, 0u32, 0u32, body)).collect();
+    write_ucfx_container(&chunks)
+}
+
+pub fn write_fxdict_container(params: &[FxParam]) -> Vec<u8> {
+    let info = write_fxdict_info(params.len() as u32).to_vec();
+    let dict = write_fxdict_dict(params);
+    write_ucfx_container(&[
+        (*b"INFO", 0, 0, info),
+        (*b"DICT", 0, 0, dict),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,5 +778,319 @@ mod tests {
         assert_eq!(t.ptype.unwrap().flags, 0x01);
         assert_eq!(t.forces.len(), 1);
         assert_eq!(t.forces[0].kind, ForceKind::Drag);
+    }
+
+    #[test]
+    fn fxparam_write_roundtrip() {
+        let p = FxParam {
+            name_hash: 0xDEADBEEF,
+            default: 1.25,
+            value_b: 3.5,
+            value_c: 0.03125,
+            flags: 0x12345678,
+        };
+        let bytes = write_fxparam(&p);
+        assert_eq!(bytes.len(), DICT_RECORD_BYTES);
+        let info = 1u32.to_le_bytes();
+        let dict = bytes.to_vec();
+        let back = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0], p);
+    }
+
+    #[test]
+    fn fxdict_bodies_roundtrip_many() {
+        let params: Vec<FxParam> = (0..17)
+            .map(|i| FxParam {
+                name_hash: pandemic_hash_m2(&format!("param{i}")),
+                default: i as f32 * 0.5,
+                value_b: 1.0 + i as f32,
+                value_c: (i as f32).sqrt(),
+                flags: 0xC0DE_0000 | i,
+            })
+            .collect();
+        let info = write_fxdict_info(params.len() as u32);
+        let dict = write_fxdict_dict(&params);
+        assert_eq!(info.len(), 4);
+        assert_eq!(dict.len(), params.len() * DICT_RECORD_BYTES);
+        let back = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(back, params);
+    }
+
+    #[test]
+    fn efct_write_roundtrip() {
+        let h = EffectHeader { magic: 0x0226, sub_count: 7 };
+        let body = write_efct(&h);
+        assert_eq!(body.len(), 16);
+        assert_eq!(parse_efct(&body), Some(h));
+        assert_eq!(body[0..2], [0, 0]);
+        assert_eq!(body[4..14], [0u8; 10]);
+    }
+
+    #[test]
+    fn emtr_write_roundtrip() {
+        let t = EmitterTable { refs: vec![0xAAAA, 0xBBBB, 0xCCCC] };
+        let body = write_emtr(&t);
+        assert_eq!(&body[0..2], &(3u16).to_le_bytes());
+        assert_eq!(body.len(), 2 + 3 * 4);
+        assert_eq!(parse_emtr(&body), t);
+
+        let empty = EmitterTable::default();
+        let body = write_emtr(&empty);
+        assert_eq!(body.len(), 2);
+        assert_eq!(parse_emtr(&body), empty);
+    }
+
+    #[test]
+    fn emit_write_roundtrip() {
+        let t = EmitTiming { floats: vec![0.0, 1.5, -3.25, 100.0] };
+        let body = write_emit(&t);
+        assert_eq!(body.len(), 16);
+        assert_eq!(parse_emit(&body), t);
+    }
+
+    #[test]
+    fn poff_write_roundtrip() {
+        let v = [1.5f32, -2.0, 0.25];
+        let body = write_poff(v);
+        assert_eq!(body.len(), 12);
+        assert_eq!(parse_poff(&body), Some(v));
+    }
+
+    #[test]
+    fn trfm_write_roundtrip() {
+        let m = [
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0, 16.0],
+        ];
+        let body = write_trfm(&m);
+        assert_eq!(body.len(), 64);
+        assert_eq!(parse_trfm(&body), Some(m));
+    }
+
+    #[test]
+    fn ptyp_write_roundtrip() {
+        for flags in [0x00u8, 0x01, 0x02, 0x03, 0xFF] {
+            let body = write_ptyp(ParticleType { flags });
+            assert_eq!(body, vec![flags]);
+            assert_eq!(parse_ptyp(&body).unwrap().flags, flags);
+        }
+    }
+
+    #[test]
+    fn colr_write_roundtrip() {
+        let mut g = ColorGradient::default();
+        for (i, s) in g.stops.iter_mut().enumerate() {
+            *s = [i as u8, (i * 2) as u8, (i * 3) as u8, (i * 5) as u8];
+        }
+        let body = write_colr(&g);
+        assert_eq!(body.len(), COLR_BYTES);
+        assert_eq!(parse_colr(&body), Some(g));
+    }
+
+    #[test]
+    fn frce_write_roundtrip() {
+        let f = Force {
+            inner_hash: u32::from_le_bytes(*b"DRAG"),
+            kind: ForceKind::Drag,
+            params: [0.25, 0.5, 0.75, 0.0],
+            param_count: 3,
+        };
+        let body = write_frce(&f);
+        assert_eq!(body.len(), 4 + 3 * 4);
+        let back = parse_frce(&body).unwrap();
+        assert_eq!(back.inner_hash, f.inner_hash);
+        assert_eq!(back.kind, ForceKind::Drag);
+        assert_eq!(back.param_count, 3);
+        assert_eq!(&back.params[..3], &[0.25, 0.5, 0.75]);
+
+        let f = Force {
+            inner_hash: 0xDEADBEEF,
+            kind: ForceKind::Unknown,
+            params: [0.0; 4],
+            param_count: 0,
+        };
+        let body = write_frce(&f);
+        assert_eq!(body.len(), 4);
+        assert_eq!(parse_frce(&body).unwrap().param_count, 0);
+
+        let f = Force {
+            inner_hash: u32::from_le_bytes(*b"GRAV"),
+            kind: ForceKind::Gravity,
+            params: [1.0, 2.0, 3.0, 4.0],
+            param_count: 4,
+        };
+        let body = write_frce(&f);
+        assert_eq!(body.len(), 4 + 4 * 4);
+        let back = parse_frce(&body).unwrap();
+        assert_eq!(back.param_count, 4);
+        assert_eq!(back.params, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn text_write_roundtrip() {
+        let hashes = vec![0x1111_2222u32, 0x3333_4444, 0x5555_6666];
+        let body = write_text(&hashes);
+        assert_eq!(body.len(), 4 + hashes.len() * 4);
+        assert_eq!(parse_text(&body), hashes);
+
+        let body = write_text(&[]);
+        assert_eq!(body.len(), 4);
+        assert_eq!(parse_text(&body), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn effect_template_to_from_chunks_roundtrip() {
+        let mut gradient = ColorGradient::default();
+        for (i, s) in gradient.stops.iter_mut().enumerate() {
+            *s = [255, i as u8, (255 - i) as u8, 128];
+        }
+        let template = EffectTemplate {
+            header: Some(EffectHeader { magic: 0x0226, sub_count: 2 }),
+            emitters: EmitterTable { refs: vec![0xAAAA, 0xBBBB] },
+            emit: EmitTiming { floats: vec![0.1, 0.2, 0.3] },
+            gradient: Some(gradient),
+            forces: vec![
+                Force {
+                    inner_hash: u32::from_le_bytes(*b"GRAV"),
+                    kind: ForceKind::Gravity,
+                    params: [0.0, -9.8, 0.0, 0.0],
+                    param_count: 3,
+                },
+                Force {
+                    inner_hash: u32::from_le_bytes(*b"DRAG"),
+                    kind: ForceKind::Drag,
+                    params: [0.15, 0.0, 0.0, 0.0],
+                    param_count: 1,
+                },
+            ],
+            ptype: Some(ParticleType { flags: 0x03 }),
+            offset: Some([0.5, 1.0, 1.5]),
+            transform: Some([
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [10.0, 20.0, 30.0, 1.0],
+            ]),
+            text_refs: vec![0xF00D_BEEF, 0xCAFE_D00D],
+        };
+
+        let emitted = template.to_chunks();
+        // Round-trip through the from_chunks side.
+        let borrowed: Vec<(&[u8; 4], &[u8])> =
+            emitted.iter().map(|(tag, body)| (tag, body.as_slice())).collect();
+        let back = EffectTemplate::from_chunks(borrowed);
+
+        assert_eq!(back.header, template.header);
+        assert_eq!(back.emitters, template.emitters);
+        assert_eq!(back.emit, template.emit);
+        assert_eq!(back.gradient, template.gradient);
+        assert_eq!(back.ptype, template.ptype);
+        assert_eq!(back.offset, template.offset);
+        assert_eq!(back.transform, template.transform);
+        assert_eq!(back.text_refs, template.text_refs);
+        assert_eq!(back.forces.len(), template.forces.len());
+        for (a, b) in back.forces.iter().zip(template.forces.iter()) {
+            assert_eq!(a.inner_hash, b.inner_hash);
+            assert_eq!(a.param_count, b.param_count);
+            assert_eq!(a.params[..a.param_count], b.params[..b.param_count]);
+        }
+    }
+
+    #[test]
+    fn write_ucfx_container_shape_and_csum() {
+        let a = vec![0x11u8, 0x22, 0x33];
+        let b = vec![0x44u8, 0x55, 0x66, 0x77, 0x88, 0x99];
+        let chunks = vec![
+            (*b"AAAA", 0u32, 0u32, a.clone()),
+            (*b"BBBB", 0u32, 0u32, b.clone()),
+        ];
+        let container = write_ucfx_container(&chunks);
+
+        assert_eq!(&container[0..4], b"UCFX");
+        let data_off = u32::from_le_bytes(container[4..8].try_into().unwrap());
+        let n_desc = u32::from_le_bytes(container[16..20].try_into().unwrap());
+        assert_eq!(n_desc, 2);
+        assert_eq!(data_off as usize, 20 + 2 * 20);
+
+        let tail = &container[container.len() - 8..];
+        assert_eq!(&tail[0..4], b"CSUM");
+        let stored = u32::from_le_bytes(tail[4..8].try_into().unwrap());
+        let recomputed = crate::crc32::crc32_mercs2(&container[..container.len() - 8]);
+        assert_eq!(stored, recomputed);
+
+        let issues = crate::ucfx::verify_ucfx_container(&container, "test", 0);
+        assert!(issues.is_none(), "unexpected issues: {issues:?}");
+
+        assert_eq!(crate::ucfx::extract_chunk_body(&container, b"AAAA"), Some(a));
+        assert_eq!(crate::ucfx::extract_chunk_body(&container, b"BBBB"), Some(b));
+    }
+
+    #[test]
+    fn write_effect_container_roundtrip_via_walker() {
+        let template = EffectTemplate {
+            header: Some(EffectHeader { magic: 0x0226, sub_count: 1 }),
+            emitters: EmitterTable { refs: vec![0x9999_AAAA] },
+            emit: EmitTiming { floats: vec![0.5, 1.0] },
+            gradient: None,
+            forces: vec![Force {
+                inner_hash: u32::from_le_bytes(*b"GRAV"),
+                kind: ForceKind::Gravity,
+                params: [0.0, -9.8, 0.0, 0.0],
+                param_count: 2,
+            }],
+            ptype: Some(ParticleType { flags: 0x01 }),
+            offset: Some([0.0, 1.0, 2.0]),
+            transform: None,
+            text_refs: vec![0x1234_5678],
+        };
+        let container = write_effect_container(&template);
+        assert!(crate::ucfx::verify_ucfx_container(&container, "eff", 0).is_none());
+        let tags: &[&[u8; 4]] = &[b"EFCT", b"EMTR", b"EMIT", b"POFF", b"PTYP", b"FRCE", b"TEXT"];
+        let mut pairs: Vec<(&[u8; 4], Vec<u8>)> = Vec::new();
+        for tag in tags {
+            if let Some(body) = crate::ucfx::extract_chunk_body(&container, tag) {
+                pairs.push((*tag, body));
+            }
+        }
+        let borrowed: Vec<(&[u8; 4], &[u8])> =
+            pairs.iter().map(|(tag, body)| (*tag, body.as_slice())).collect();
+        let back = EffectTemplate::from_chunks(borrowed);
+        assert_eq!(back.header, template.header);
+        assert_eq!(back.emitters, template.emitters);
+        assert_eq!(back.emit, template.emit);
+        assert_eq!(back.ptype, template.ptype);
+        assert_eq!(back.offset, template.offset);
+        assert_eq!(back.text_refs, template.text_refs);
+        assert_eq!(back.forces.len(), 1);
+        assert_eq!(back.forces[0].inner_hash, template.forces[0].inner_hash);
+        assert_eq!(back.forces[0].param_count, template.forces[0].param_count);
+        assert_eq!(
+            back.forces[0].params[..2],
+            template.forces[0].params[..2]
+        );
+    }
+
+    #[test]
+    fn write_fxdict_container_roundtrip_via_walker() {
+        let params: Vec<FxParam> = (0..8)
+            .map(|i| FxParam {
+                name_hash: 0x1000 + i,
+                default: i as f32,
+                value_b: 2.0 * i as f32,
+                value_c: 0.5 * i as f32,
+                flags: 0xF000_0000 | i,
+            })
+            .collect();
+        let container = write_fxdict_container(&params);
+        assert!(crate::ucfx::verify_ucfx_container(&container, "fxd", 0).is_none());
+        let info = crate::ucfx::extract_chunk_body(&container, b"INFO").expect("INFO present");
+        let dict = crate::ucfx::extract_chunk_body(&container, b"DICT").expect("DICT present");
+        assert_eq!(info.len(), 4);
+        assert_eq!(dict.len(), params.len() * DICT_RECORD_BYTES);
+        let back = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(back, params);
     }
 }
