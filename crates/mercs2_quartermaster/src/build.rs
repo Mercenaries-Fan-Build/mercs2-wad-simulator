@@ -778,10 +778,22 @@ fn lower_layer_append(
     let new_block = mercs2_formats::placement_build::append_placements(
         &inputs.block, template_sub, ents, layer_hash,
     ).map_err(|m| BuildError::Lower { index, kind, message: m })?;
+
+    // Every sub-block in the modified carrier needs its own ASET row: on WAD merge the base's
+    // rows still point at BASE block indices, and our overlay's block gets re-indexed. Without
+    // rows for the pre-existing sub-blocks, they resolve to a stale base index and M0004 fires.
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&new_block);
+    let mut asets = Vec::with_capacity(count as usize);
+    for e in &entries {
+        let tid = mercs2_formats::aset_type_ids::type_id_for_type_hash(e.type_hash)
+            .unwrap_or(TYPE_ID_LAYER);
+        asets.push(AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, tid));
+    }
+
     Ok(Lowering::Block(PatchBlock::from_decompressed(
         &new_block,
         inputs.path.clone(),
-        vec![AsetEntry::new(layer_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_LAYER)],
+        asets,
         None,
     ).map_err(|m| BuildError::Lower { index, kind, message: m })?))
 }
@@ -793,7 +805,11 @@ fn find_template_sub(block: &[u8]) -> Option<usize> {
         let row = 4 + i * 16;
         if row + 8 > block.len() { break; }
         let type_hash = u32::from_le_bytes(block[row + 4..row + 8].try_into().ok()?);
-        if type_hash == TYPE_HASH_LAYER { return Some(i); }
+        if type_hash == TYPE_HASH_LAYER
+            && mercs2_formats::placement_build::container_has_scaffolding(block, i)
+        {
+            return Some(i);
+        }
     }
     None
 }

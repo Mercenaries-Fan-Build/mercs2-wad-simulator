@@ -120,6 +120,46 @@ struct Desc {
 }
 
 /// Byte span (offset, len) of the block-entry container at table index `idx`.
+pub fn nth_container_span(block: &[u8], idx: usize) -> Option<(usize, usize)> {
+    nth_container(block, idx)
+}
+
+/// True if the UCFX container at `idx` carries a `Name` + `ModelName` + `Transform` COMP triple —
+/// i.e. can serve as an `append_placements` template.
+pub fn container_has_scaffolding(block: &[u8], idx: usize) -> bool {
+    let Some((off, len)) = nth_container(block, idx) else { return false; };
+    let Some(c) = block.get(off..off + len) else { return false; };
+    if c.len() < HDR || &c[0..4] != b"UCFX" { return false; }
+    let daf = rd_u32(c, 4) as usize;
+    let ndesc = rd_u32(c, 16) as usize;
+    if daf != HDR + ndesc * 20 || daf > c.len() { return false; }
+    let mut current_comp: Option<String> = None;
+    let mut have = (false, false, false);
+    for k in 0..ndesc {
+        let ro = HDR + k * 20;
+        let u0 = rd_u32(c, ro + 4);
+        let size = rd_u32(c, ro + 8) as usize;
+        if u0 == 0xFFFF_FFFF { current_comp = None; continue; }
+        let tag = &c[ro..ro + 4];
+        let body_start = daf + u0 as usize;
+        let body_end = body_start + size;
+        if body_end > c.len() { return false; }
+        let body = &c[body_start..body_end];
+        if tag == b"info" {
+            let n = body.iter().position(|&x| x == 0).unwrap_or(body.len());
+            current_comp = Some(String::from_utf8_lossy(&body[..n]).into_owned());
+        } else if tag == b"data" {
+            match current_comp.as_deref() {
+                Some("Name") => have.0 = true,
+                Some("ModelName") => have.1 = true,
+                Some("Transform") => have.2 = true,
+                _ => {}
+            }
+        }
+    }
+    have == (true, true, true)
+}
+
 fn nth_container(block: &[u8], idx: usize) -> Option<(usize, usize)> {
     let (count, entries) = parse_block_entry_table(block);
     if idx >= count as usize {
