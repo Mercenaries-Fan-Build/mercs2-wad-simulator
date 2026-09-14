@@ -2780,7 +2780,14 @@ pub fn inject_static_into_donor_block(
     } else {
         &mesh.tris
     };
-    let strip = to_strip(tris);
+    // `to_strip` restarts per-triangle (~6 indices/tri), which overflows the u16 index space on a
+    // dense mesh (a 27k-tri hull is ~160k indices). Fall back to the adjacency-greedy
+    // `to_strip_connected` (~1 index/tri inside a run, degenerate-bridged, self-verifying) only when
+    // the naive strip would not fit — so nothing that already passed changes.
+    let mut strip = to_strip(tris);
+    if strip.len() > 65534 {
+        strip = to_strip_connected(tris);
+    }
     if strip.len() > 65534 {
         return Err(format!("strip length {} exceeds u16", strip.len()));
     }
