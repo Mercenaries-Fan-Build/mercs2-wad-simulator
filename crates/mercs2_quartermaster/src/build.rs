@@ -715,6 +715,89 @@ pub fn script_mutations(
     Ok(out)
 }
 
+#[derive(serde::Deserialize)]
+struct EntityYaml {
+    key: u32,
+    model: String,
+    pos: [f32; 3],
+    #[serde(default)]
+    quat: Option<[f32; 4]>,
+    #[serde(default)]
+    yaw: Option<f32>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum EntitiesDoc {
+    List(Vec<EntityYaml>),
+    Single(EntityYaml),
+}
+
+fn parse_entities_file(path: &Path) -> Result<Vec<mercs2_formats::placement_build::NewEntity>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading: {e}"))?;
+    let doc: EntitiesDoc = serde_norway::from_str(&text).map_err(|e| format!("parse yaml: {e}"))?;
+    let list = match doc {
+        EntitiesDoc::List(v) => v,
+        EntitiesDoc::Single(e) => vec![e],
+    };
+    if list.is_empty() { return Err("no entities".into()); }
+    list.into_iter().map(|e| {
+        let quat = if let Some(q) = e.quat { q }
+        else if let Some(yaw) = e.yaw {
+            let h = (yaw.to_radians() * 0.5); [0.0, h.sin(), 0.0, h.cos()]
+        } else { [0.0, 0.0, 0.0, 1.0] };
+        Ok(mercs2_formats::placement_build::NewEntity {
+            key: e.key,
+            model_hash: crate::manifest::asset_hash(&e.model),
+            pos: e.pos,
+            quat,
+            name: e.name.unwrap_or_else(|| format!("modent_{:08x}", e.key)),
+        })
+    }).collect()
+}
+
+fn lower_layer_append(
+    game: &mut crate::game::GameStack,
+    template_layer: &str,
+    new_layer_name: &str,
+    ents: &[mercs2_formats::placement_build::NewEntity],
+    index: usize,
+    kind: &'static str,
+) -> Result<Lowering, BuildError> {
+    let inputs = game.layer_block_for_edit(template_layer).ok_or_else(|| BuildError::Lower {
+        index, kind,
+        message: format!("no layer matching {template_layer:?} in the game stack"),
+    })?;
+    let template_sub = find_template_sub(&inputs.block).ok_or_else(|| BuildError::Lower {
+        index, kind,
+        message: format!("no layer sub-block found in the carrier block for {template_layer:?}"),
+    })?;
+    let layer_hash = crate::manifest::asset_hash(new_layer_name);
+    let new_block = mercs2_formats::placement_build::append_placements(
+        &inputs.block, template_sub, ents, layer_hash,
+    ).map_err(|m| BuildError::Lower { index, kind, message: m })?;
+    Ok(Lowering::Block(PatchBlock::from_decompressed(
+        &new_block,
+        inputs.path.clone(),
+        vec![AsetEntry::new(layer_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_LAYER)],
+        None,
+    ).map_err(|m| BuildError::Lower { index, kind, message: m })?))
+}
+
+fn find_template_sub(block: &[u8]) -> Option<usize> {
+    if block.len() < 4 { return None; }
+    let count = u32::from_le_bytes(block[0..4].try_into().ok()?) as usize;
+    for i in 0..count {
+        let row = 4 + i * 16;
+        if row + 8 > block.len() { break; }
+        let type_hash = u32::from_le_bytes(block[row + 4..row + 8].try_into().ok()?);
+        if type_hash == TYPE_HASH_LAYER { return Some(i); }
+    }
+    None
+}
+
 /// Shared helper for the passthrough kinds: read an author-supplied binary file and wrap it as a
 /// single-entry mod block carrying one primary ASET row at `pandemic_hash_m2(<name_or_target>)`.
 ///
@@ -2623,8 +2706,20 @@ fn lower(
         // wrap them as a single-entry mod block with the right (type_hash, type_id) ASET row.
         // For each, the format side that would produce those bytes from a source description is
         // future work; the manifest side is real today for anyone who has the encoder.
-        Contribution::AddPlacement { layer, entity } => opaque_new_asset(root, entity, layer, TYPE_HASH_LAYER, TYPE_ID_LAYER, index, kind),
-        Contribution::AddLayer { name, entities } => opaque_new_asset(root, entities, name, TYPE_HASH_LAYER, TYPE_ID_LAYER, index, kind),
+        Contribution::AddPlacement { layer, entity } => {
+            let Some(game) = game else { return Err(BuildError::GameRequired { index, kind }); };
+            let ents = parse_entities_file(&root.join(entity)).map_err(|m| BuildError::Lower {
+                index, kind, message: format!("{}: {m}", root.join(entity).display()),
+            })?;
+            lower_layer_append(game, layer, layer, &ents, index, kind)
+        }
+        Contribution::AddLayer { name, template, entities } => {
+            let Some(game) = game else { return Err(BuildError::GameRequired { index, kind }); };
+            let ents = parse_entities_file(&root.join(entities)).map_err(|m| BuildError::Lower {
+                index, kind, message: format!("{}: {m}", root.join(entities).display()),
+            })?;
+            lower_layer_append(game, template, name, &ents, index, kind)
+        }
         Contribution::AddAnimation { name, clip, trnm: _ } => opaque_new_asset(root, clip, name, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION, index, kind),
         Contribution::ReplaceAnimation { target, clip, trnm: _ } => opaque_new_asset(root, clip, target, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION, index, kind),
         Contribution::AddShader { name, blob } => opaque_new_asset(root, blob, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),

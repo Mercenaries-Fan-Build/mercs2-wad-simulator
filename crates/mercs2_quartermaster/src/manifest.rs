@@ -746,7 +746,10 @@ pub enum Contribution {
     /// key that already exists in the target layer (M0198), because reusing a key silently
     /// overwrites the existing entity and that is not what "add" means.
     AddPlacement {
-        /// The layer name (`layers_static`, `vz_state_pmccon004_pristine`, …).
+        /// The layer name (`layers_static`, `vz_state_pmccon004_pristine`, …). Used both as the
+        /// carrier block (where the appended sub-block lands) AND as the COMP-scaffolding template
+        /// the new sub-block clones from — the existing layer's Transform / ModelName / Name / flgs
+        /// COMP layouts are cloned verbatim, then extended with the author's new entity.
         layer: String,
         /// The new entity's config, `src/`-relative — YAML with `key`, `model`, `position`,
         /// `orientation` (either `quat: [x,y,z,w]` or `yaw: <degrees>`).
@@ -762,6 +765,11 @@ pub enum Contribution {
     AddLayer {
         /// The new layer name (hashed to become the ASET key).
         name: String,
+        /// The existing layer whose COMP scaffolding (Transform / ModelName / Name / flgs layouts,
+        /// FLGS 32-byte per-entity payload template, etc.) to clone. Every real layer has to have
+        /// this scaffolding; `append_placements` clones it from a template rather than authoring
+        /// COMP defaults per author. `layers_static` is the usual choice.
+        template: String,
         /// `src/`-relative YAML — a list of entity records (same shape as `add_placement.entity`,
         /// one row per entity).
         entities: PathBuf,
