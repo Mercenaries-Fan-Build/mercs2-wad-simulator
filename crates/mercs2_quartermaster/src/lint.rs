@@ -219,6 +219,15 @@ pub const M0201_LANGUAGE_NO_SELECTOR: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_language",
 };
 
+/// `collision: follow_geometry` set alongside `retarget:` on the same `add_model`. `retarget` takes
+/// the SKINNED lowering (character rig → ragdoll/capsule collision), where the rigid static-collision
+/// regeneration never runs — so `follow_geometry` is silently ignored. It is a rigid-path-only option.
+pub const M0202_COLLISION_ON_SKINNED: Rule = Rule {
+    code: "M0202",
+    title: "collision: follow_geometry is ignored on a skinned (retarget) add_model",
+    doc: "docs/modding/manifest_format.md#add_model",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -1055,6 +1064,34 @@ pub fn lint(
                              PC has no in-game language selector, so without the language-selector \
                              plugin the new language ships but nothing switches the game into it — \
                              ship the selector here, or install it separately."
+                        ),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
+            }
+            Contribution::AddModel {
+                name,
+                retarget,
+                collision,
+                ..
+            } => {
+                // `follow_geometry` regenerates STATIC (WpMeshShape16) collision on the rigid path.
+                // `retarget` diverts to the skinned lowering, whose collision is ragdoll/capsule and
+                // whose PHY2 is never re-authored — so the option silently does nothing there.
+                if *collision == crate::manifest::CollisionSource::FollowGeometry
+                    && retarget.is_some()
+                {
+                    out.push(Diagnostic {
+                        rule: M0202_COLLISION_ON_SKINNED,
+                        severity: Severity::Error,
+                        message: format!(
+                            "add_model {name:?} sets `collision: follow_geometry` together with \
+                             `retarget:`. `retarget` is the SKINNED path (character rig → \
+                             ragdoll/capsule collision); the rigid static-collision regeneration \
+                             never runs there, so `follow_geometry` would be silently ignored. Drop \
+                             one: `follow_geometry` is for rigid props, `retarget` for skinned \
+                             characters."
                         ),
                         at: Some(index),
                         fix: None,
