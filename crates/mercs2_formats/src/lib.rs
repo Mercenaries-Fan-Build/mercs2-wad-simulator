@@ -133,6 +133,7 @@ pub mod terrain;
 pub mod texsize;
 pub mod texture;
 pub mod texture_encode;
+pub mod be_to_le;
 pub mod model_edit;
 pub mod types;
 pub mod ucfx;

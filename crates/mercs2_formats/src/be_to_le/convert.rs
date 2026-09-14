@@ -27,16 +27,16 @@
 //! # }
 //! ```
 
-use mercs2_formats::crc32::crc32_mercs2;
-use mercs2_formats::ffcs::read_u32_be;
-use mercs2_formats::schema::{ComponentSchema, SchemaFieldType};
-use mercs2_formats::tags::ChunkTag;
-use mercs2_formats::texsize::{dxt_format, dxt_mip_count, linear_mip_chain_size, tex_mip_levels};
-use mercs2_formats::types;
+use crate::crc32::crc32_mercs2;
+use crate::ffcs::read_u32_be;
+use crate::schema::{ComponentSchema, SchemaFieldType};
+use crate::tags::ChunkTag;
+use crate::texsize::{dxt_format, dxt_mip_count, linear_mip_chain_size, tex_mip_levels};
+use crate::types;
 
-use crate::havok;
-use crate::lua;
-use crate::report::SchemaCoverageReport;
+use super::havok;
+use super::lua;
+use super::report::SchemaCoverageReport;
 
 /// When `true`, the per-block / per-entry diagnostics below are suppressed.
 /// The in-process `dlc_port` driver sets this (it converts thousands of blocks);
@@ -46,7 +46,7 @@ pub static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 
 macro_rules! vlog {
     ($($arg:tt)*) => {
-        if !$crate::convert::QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+        if !$crate::be_to_le::convert::QUIET.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!($($arg)*);
         }
     };
@@ -229,7 +229,7 @@ fn convert_container(
     }
 
     let is_be = magic == b"XFCU";
-    let read_u32: fn(&[u8], usize) -> u32 = if is_be { read_u32_be } else { mercs2_formats::ffcs::read_u32_le };
+    let read_u32: fn(&[u8], usize) -> u32 = if is_be { read_u32_be } else { crate::ffcs::read_u32_le };
 
     // Read UCFX header fields (bytes 0..20)
     let data_area_off = read_u32(container, 4) as usize;
@@ -464,7 +464,7 @@ fn apply_wavebank_transcode(
         return Ok(());
     }
     let body_be = out[body_abs..old_end].to_vec();
-    let new_body = crate::audio::convert_wavebank_data(&body_be)
+    let new_body = super::audio::convert_wavebank_data(&body_be)
         .map_err(|e| format!("wavebank transcode: {e}"))?;
 
     // Update this chunk's body_size field (descriptor row layout: tag@0, row_u0@+4,
@@ -878,7 +878,7 @@ fn extract_comp_name(
         if is_be {
             read_u32_be(body, 0)
         } else {
-            mercs2_formats::ffcs::read_u32_le(body, 0)
+            crate::ffcs::read_u32_le(body, 0)
         }
     } else {
         0
@@ -1575,7 +1575,7 @@ fn convert_generic_bodies(
                             // validated as WAD chunks (or that belong to non-UCFX
                             // subsystems) get a loud "requires deeper investigation"
                             // entry instead of the quiet generic-fallback note.
-                            match mercs2_formats::tag_registry::needs_investigation(other_tag.as_bytes()) {
+                            match crate::tag_registry::needs_investigation(other_tag.as_bytes()) {
                                 Some(info) => rpt.record_needs_investigation(
                                     entry_idx,
                                     &format!("{}", other_tag),
@@ -3863,7 +3863,7 @@ fn walk_container_tags(container: &[u8], entry_idx: usize) -> Result<(), String>
     }
 
     let is_be = magic == b"XFCU";
-    let read_u32: fn(&[u8], usize) -> u32 = if is_be { read_u32_be } else { mercs2_formats::ffcs::read_u32_le };
+    let read_u32: fn(&[u8], usize) -> u32 = if is_be { read_u32_be } else { crate::ffcs::read_u32_le };
 
     let data_area_off = read_u32(container, 4) as usize;
     let n_desc = read_u32(container, 16) as usize;

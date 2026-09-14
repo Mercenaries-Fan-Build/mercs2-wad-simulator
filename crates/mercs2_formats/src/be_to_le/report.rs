@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use mercs2_formats::schema::SchemaFieldType;
+use crate::schema::SchemaFieldType;
 
 /// Tracks schema field coverage during BE→LE conversion.
 #[derive(Debug, Default)]
@@ -17,7 +17,7 @@ pub struct SchemaCoverageReport {
     /// Non-ECS descriptor bodies that hit the catch-all swap_u32_array path.
     pub generic_fallback_tags: Vec<GenericFallbackEntry>,
     /// Tags present in WAD data that are registered but NOT yet validated as WAD
-    /// chunks (see mercs2_formats::tag_registry). These need deeper investigation
+    /// chunks (see crate::tag_registry). These need deeper investigation
     /// before we can trust the conversion; surfaced loudly, not silently swapped.
     pub needs_investigation_tags: Vec<NeedsInvestigationEntry>,
 }
@@ -279,7 +279,7 @@ fn type_code_display_name(code: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aset::AsetEntry;
+    use super::aset::AsetEntry;
 
     #[test]
     fn test_empty_report() {

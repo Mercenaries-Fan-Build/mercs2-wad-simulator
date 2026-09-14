@@ -3,13 +3,13 @@
 //! Checks entry table integrity, CSUM, descriptor bounds, float sanity
 //! (NaN/Inf in STRM/BNDS), world envelope on BNDS, and IBUF index bounds.
 
-use mercs2_formats::chunk_validate::{
+use crate::chunk_validate::{
     self, validate_deps_body, validate_fxdict_chunks, validate_watr_payload,
 };
-use mercs2_formats::crc32::crc32_mercs2;
-use mercs2_formats::ffcs::{read_f32_le, read_u16_le, read_u32_le};
-use mercs2_formats::tags::ChunkTag;
-use mercs2_formats::types;
+use crate::crc32::crc32_mercs2;
+use crate::ffcs::{read_f32_le, read_u16_le, read_u32_le};
+use crate::tags::ChunkTag;
+use crate::types;
 
 #[derive(Debug)]
 pub enum ValidationError {

@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use mercs2_formats::ffcs::read_u32_be;
+use crate::ffcs::read_u32_be;
 
 /// Swap unit for u32 fields (4 bytes).
 pub const U32: u8 = 4;
