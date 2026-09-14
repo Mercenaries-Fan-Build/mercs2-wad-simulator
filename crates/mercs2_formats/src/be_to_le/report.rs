@@ -279,7 +279,7 @@ fn type_code_display_name(code: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::aset::AsetEntry;
+    use crate::be_to_le::aset::AsetEntry;
 
     #[test]
     fn test_empty_report() {

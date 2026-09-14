@@ -701,8 +701,8 @@ mod tests {
     /// (header / classnames-preserved / __data__ u32 sweep / layoutRules).
     #[test]
     fn phy2_resident2_matches_python() {
-        let be = include_bytes!("../tests/fixtures/phy2_resident2_be.bin");
-        let expected = include_bytes!("../tests/fixtures/phy2_resident2_le.bin");
+        let be = include_bytes!("../../tests/fixtures/phy2_resident2_be.bin");
+        let expected = include_bytes!("../../tests/fixtures/phy2_resident2_le.bin");
         let got = convert_phy2_be_to_le(be).expect("PHY2 convert");
         assert_eq!(got.len(), expected.len(), "PHY2 output size must match");
         assert_eq!(&got, expected, "PHY2 Rust output must equal Python output");
@@ -719,8 +719,8 @@ mod tests {
     /// and array no-swap regions.
     #[test]
     fn anim_ks750_matches_python() {
-        let be = include_bytes!("../tests/fixtures/anim_ks750_be.bin");
-        let expected = include_bytes!("../tests/fixtures/anim_ks750_le.bin");
+        let be = include_bytes!("../../tests/fixtures/anim_ks750_be.bin");
+        let expected = include_bytes!("../../tests/fixtures/anim_ks750_le.bin");
         let got = convert_havok_be_to_le(be).expect("anim convert");
         assert_eq!(got.len(), expected.len(), "anim output size must match");
         assert_eq!(&got, expected, "anim Rust output must equal Python output");
@@ -732,8 +732,8 @@ mod tests {
     /// of relocating to an unmapped address (AV at 0x0248C13E).
     #[test]
     fn phy2_trailing_after_packfile_is_u32_swapped() {
-        let pf_be = include_bytes!("../tests/fixtures/anim_ks750_be.bin");
-        let pf_le = include_bytes!("../tests/fixtures/anim_ks750_le.bin");
+        let pf_be = include_bytes!("../../tests/fixtures/anim_ks750_be.bin");
+        let pf_le = include_bytes!("../../tests/fixtures/anim_ks750_le.bin");
         assert_eq!(havok_packfile_size(pf_be), Some(pf_be.len()), "packfile bound");
 
         let mut be = vec![0x00, 0x00, 0x00, 0x39, 0x12, 0x34, 0x56, 0x78]; // u32 header

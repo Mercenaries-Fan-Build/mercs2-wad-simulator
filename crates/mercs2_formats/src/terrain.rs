@@ -910,4 +910,391 @@ mod tests {
         assert_eq!(read_f16_le(&b, 4), -2.0);
         assert_eq!(read_f16_le(&b, 6), 0.0);
     }
+
+    #[test]
+    fn planar_uv_projection_matches_python() {
+        // Python: v = 1 - (z + 4000) / 8000 (D3D9 V-flip). At world (x=-4000, z=-4000):
+        // u = 0.0, v = 1.0 (image top = south). At (x=+4000, z=+4000): u=1.0, v=0.0.
+        let (u, v) = planar_world_xz_to_uv(-4000.0, -4000.0);
+        assert!((u - 0.0).abs() < 1e-4 && (v - 1.0).abs() < 1e-4);
+        let (u, v) = planar_world_xz_to_uv(4000.0, 4000.0);
+        assert!((u - 1.0).abs() < 1e-4 && (v - 0.0).abs() < 1e-4);
+        let (u, v) = planar_world_xz_to_uv(0.0, 0.0);
+        assert!((u - 0.5).abs() < 1e-4 && (v - 0.5).abs() < 1e-4);
+        // Out-of-range clamps.
+        let (u, v) = planar_world_xz_to_uv(-5000.0, 5000.0);
+        assert_eq!((u, v), (0.0, 0.0));
+    }
+}
+
+// ===========================================================================
+//   High-level tile-merge port of `tools/terrain_extractor.py`
+//   (appended — do NOT modify pre-existing pub items above.)
+// ===========================================================================
+//
+// Ports the merge half of `terrain_extractor.py::extract_merged_terrain` into
+// an in-memory struct. OBJ/GLB export code, the aux-texture manifest walk, and
+// the seam-matching jigsaw solver are NOT ported (see module-level docs +
+// task brief). Callers wanting placement metadata drive the existing
+// `load_terrain(low, layers_static)` entry; this entry is the single-blob
+// fallback (cell := iteration index, row-major).
+
+/// World-XZ full-continent span used by the planar UV projection into the
+/// shared `vz_lrterrain` atlas. Verified from `layers_static` placements: tile
+/// centers −3800..+3800 in 400 m steps, tile-local extent ±200 m → world spans
+/// [−4000, 4000] on both X and Z (8000 m square).
+pub const TERRAIN_WORLD_MIN_M: f32 = -4000.0;
+pub const TERRAIN_WORLD_SPAN_M: f32 = 8000.0;
+/// The master `vz_lrterrain` atlas is authored with image row 0 = game south,
+/// image row 2047 = game north; glTF UV convention is v=0 at image bottom, so
+/// v must be flipped for the planar projection. See `terrain_extractor.py`
+/// `_TEXTURE_V_FLIP` (verified by placement-density correlation).
+pub const TERRAIN_UV_V_FLIP: bool = true;
+/// Tile-local half-span (m). Ocean placeholders are single-quad tiles ≤±200 m.
+const TILE_LOCAL_HALF_SPAN_M: f32 = 200.0;
+
+/// Axis-aligned bounds in native game space (LH, +Y up).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorldBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl WorldBounds {
+    pub fn empty() -> Self {
+        Self {
+            min: [f32::INFINITY; 3],
+            max: [f32::NEG_INFINITY; 3],
+        }
+    }
+    pub fn extend(&mut self, p: [f32; 3]) {
+        for i in 0..3 {
+            if p[i] < self.min[i] {
+                self.min[i] = p[i];
+            }
+            if p[i] > self.max[i] {
+                self.max[i] = p[i];
+            }
+        }
+    }
+}
+
+/// UV extents over the master `vz_lrterrain` atlas.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UvBounds {
+    pub min_u: f32,
+    pub max_u: f32,
+    pub min_v: f32,
+    pub max_v: f32,
+}
+
+/// Source of the (row,col) -> tile-iter-index mapping in a merged terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridSource {
+    /// Recovered from `LowResTerrainObject.mesh_hash` -> TOC hash1 -> iter idx.
+    MetadataLookup,
+    /// No `layers_static` supplied — cell := tile-iter-index (row-major).
+    /// Placement is only correct if the block's iteration order happens to
+    /// match `lrterrain_rXX_cYY` naming (retail: 397/400 differ; useful only
+    /// for diagnostics or heightfield-shape work).
+    IterationFallback,
+}
+
+/// One cell of the 20x20 placement grid in a [`MergedTerrain`].
+#[derive(Debug, Clone)]
+pub struct TerrainCell {
+    /// `row * 20 + col`.
+    pub cell: usize,
+    pub row: usize,
+    pub col: usize,
+    /// Iteration index of the tile that fills this cell (see
+    /// `iter_ucfx_containers` order).
+    pub tile_iter_index: usize,
+    /// Half-open range within [`MergedTerrain::indices`] for this cell's tris.
+    pub index_start: u32,
+    pub index_count: u32,
+    /// Half-open range within [`MergedTerrain::positions`] for this cell's verts.
+    pub vertex_start: u32,
+    pub vertex_count: u32,
+    /// MTRL texture-asset hashes for this tile (usually 1: `vz_lrterrain`).
+    /// Empty if MTRL parsing yielded nothing.
+    pub material_hashes: Vec<u32>,
+    /// World-space tile center (X, Z; Y is baked into the vertices).
+    pub center_x: f32,
+    pub center_z: f32,
+    /// Per-tile height extents (game Y).
+    pub min_y: f32,
+    pub max_y: f32,
+    /// True for the flat single-quad ocean placeholders (≤8 verts, Δy < 1 m).
+    pub is_ocean: bool,
+}
+
+/// The 400-tile merge, stitched into a single indexed textured world mesh.
+///
+/// Vertices and normals are in native game space (LH, +Y up); nothing is
+/// flipped. UVs project world XZ into the shared `vz_lrterrain` atlas per
+/// [`planar_world_xz_to_uv`]. `cells[cell]` is `None` where no tile was
+/// placed (mismatched metadata or too few tiles decoded).
+#[derive(Debug, Clone)]
+pub struct MergedTerrain {
+    /// Merged world-space vertex positions.
+    pub positions: Vec<[f32; 3]>,
+    /// Per-vertex unit normals (decoded from the tile VB; passthrough on
+    /// assembly since tiles are only translated).
+    pub normals: Vec<[f32; 3]>,
+    /// Planar UVs synthesized from world XZ (source stream has no UVs).
+    pub uvs: Vec<[f32; 2]>,
+    /// Triangle-list indices into `positions`.
+    pub indices: Vec<u32>,
+    /// Per-cell placement records, indexed by `row * 20 + col`.
+    pub cells: Vec<Option<TerrainCell>>,
+    /// AABB over `positions`.
+    pub world_bounds: WorldBounds,
+    /// AABB over `uvs`.
+    pub uv_bounds: UvBounds,
+    /// Iteration indices of tiles classified as ocean placeholders.
+    pub ocean_tile_iter_indices: Vec<usize>,
+    /// Shared `vz_lrterrain` DXT1 atlas when the texture container parses.
+    pub texture: Option<TextureData>,
+    /// Placed cell count (expect 400 on a good pairing).
+    pub tiles_placed: usize,
+    /// Decoded tile count (expect 400 for the retail low_res block).
+    pub tiles_decoded: usize,
+    /// UCFX containers seen in the block (mesh tiles + dummies, before filter).
+    pub containers_seen: usize,
+    /// TOC `n_entries` read from `block[0]` (expect 401 for retail).
+    pub toc_entry_count: u32,
+    /// How the (row, col) -> tile mapping was resolved.
+    pub grid_source: GridSource,
+}
+
+/// Planar world-XZ -> `vz_lrterrain` UV projection with the D3D9 V-flip.
+/// Clamped to `[0, 1]`. Port of `terrain_extractor.py::_world_xz_to_uv`.
+pub fn planar_world_xz_to_uv(x: f32, z: f32) -> (f32, f32) {
+    let mut u = (x - TERRAIN_WORLD_MIN_M) / TERRAIN_WORLD_SPAN_M;
+    let mut v = (z - TERRAIN_WORLD_MIN_M) / TERRAIN_WORLD_SPAN_M;
+    if TERRAIN_UV_V_FLIP {
+        v = 1.0 - v;
+    }
+    if u < 0.0 {
+        u = 0.0;
+    } else if u > 1.0 {
+        u = 1.0;
+    }
+    if v < 0.0 {
+        v = 0.0;
+    } else if v > 1.0 {
+        v = 1.0;
+    }
+    (u, v)
+}
+
+/// Classify a decoded tile as a flat "ocean" placeholder — mirrors
+/// `terrain_extractor.py::extract_merged_terrain` (≤8 verts, |Δy| < 1 m).
+fn is_ocean_tile(verts: &[[f32; 3]]) -> bool {
+    if verts.len() > 8 || verts.is_empty() {
+        return verts.is_empty();
+    }
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for v in verts {
+        if v[1] < lo {
+            lo = v[1];
+        }
+        if v[1] > hi {
+            hi = v[1];
+        }
+    }
+    (hi - lo) < 1.0
+}
+
+/// Top-level in-memory merge of the `low_res_terrain_P000_Q3` block.
+///
+/// Reuses [`iter_ucfx_containers`] / [`geom_child_row_slices`] /
+/// [`parse_prmg_body`] / [`decode_tile`] / [`extract_terrain_texture`] plus
+/// [`crate::texture::parse_mtrl`], then stitches every decoded tile into one
+/// indexed mesh with synthesized planar UVs, per-cell material hashes, world
+/// bounds, and ocean-tile classification.
+///
+/// This entry does **not** consume `layers_static` and does **not** run the
+/// seam-matching jigsaw solver (parked, see task brief). Cell placement is
+/// `cell := tile_iter_index` (row-major). For metadata-driven placement, use
+/// the existing [`load_terrain`] entry with a `layers_static` block.
+///
+/// Fails when zero tiles decode. A partial decode (< 400) is still returned
+/// with `tiles_placed < 400` and `cells[cell] == None` for unpopulated cells.
+pub fn merge_tiles(block: &[u8]) -> Result<MergedTerrain, String> {
+    let containers = iter_ucfx_containers(block);
+    let containers_seen = containers.len();
+
+    struct DecodedTile {
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        tris: Vec<[u32; 3]>,
+        materials: Vec<u32>,
+        is_ocean: bool,
+        min_y: f32,
+        max_y: f32,
+    }
+
+    let mut tiles: Vec<DecodedTile> = Vec::new();
+    for c in &containers {
+        for rows in geom_child_row_slices(&c.chunks) {
+            let Some(sub) = parse_prmg_body(&rows) else { continue };
+            let Some((positions, normals, tris)) = decode_tile(block, c.data_base, &sub) else {
+                break;
+            };
+            // MTRL is resolved relative to the UCFX magic (parse_mtrl uses UcfxView),
+            // so pass this container's slice — matches probe_terrain.
+            let materials: Vec<u32> = crate::texture::parse_mtrl(&block[c.ucfx_off..])
+                .into_iter()
+                .flat_map(|m| m.textures)
+                .collect();
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for p in &positions {
+                if p[1] < lo {
+                    lo = p[1];
+                }
+                if p[1] > hi {
+                    hi = p[1];
+                }
+            }
+            let is_ocean = is_ocean_tile(&positions);
+            tiles.push(DecodedTile {
+                positions,
+                normals,
+                tris,
+                materials,
+                is_ocean,
+                min_y: lo,
+                max_y: hi,
+            });
+            break;
+        }
+    }
+    let tiles_decoded = tiles.len();
+    if tiles_decoded == 0 {
+        return Err(format!(
+            "merge_tiles: no drawable UCFX tile decoded from block \
+             (containers_seen={containers_seen}, block_len={})",
+            block.len()
+        ));
+    }
+
+    let (_hash_to_idx, toc_entry_count) = read_low_res_terrain_toc(block);
+    let texture = extract_terrain_texture(block);
+
+    let ocean_tile_iter_indices: Vec<usize> = tiles
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| if t.is_ocean { Some(i) } else { None })
+        .collect();
+
+    // Cell placement (fallback: cell := iter idx, row-major). Only the first
+    // GRID*GRID tiles participate; any trailing tiles are ignored.
+    let cell_count = GRID * GRID;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut cells: Vec<Option<TerrainCell>> = vec![None; cell_count];
+    let mut world_bounds = WorldBounds::empty();
+    let mut uv_min_u = f32::INFINITY;
+    let mut uv_max_u = f32::NEG_INFINITY;
+    let mut uv_min_v = f32::INFINITY;
+    let mut uv_max_v = f32::NEG_INFINITY;
+    let mut tiles_placed = 0usize;
+
+    let placeable = tiles.len().min(cell_count);
+    for tile_iter_index in 0..placeable {
+        let tile = &tiles[tile_iter_index];
+        let row = tile_iter_index / GRID;
+        let col = tile_iter_index % GRID;
+        let cell = row * GRID + col;
+        let (cx, cz) = tile_world_center(row, col);
+
+        let base = positions.len() as u32;
+        let idx_start = indices.len() as u32;
+        for (p, n) in tile.positions.iter().zip(tile.normals.iter()) {
+            let world = [p[0] + cx, p[1], p[2] + cz];
+            let (u, v) = planar_world_xz_to_uv(world[0], world[2]);
+            positions.push(world);
+            normals.push(*n);
+            uvs.push([u, v]);
+            world_bounds.extend(world);
+            if u < uv_min_u {
+                uv_min_u = u;
+            }
+            if u > uv_max_u {
+                uv_max_u = u;
+            }
+            if v < uv_min_v {
+                uv_min_v = v;
+            }
+            if v > uv_max_v {
+                uv_max_v = v;
+            }
+        }
+        for t in &tile.tris {
+            indices.push(base + t[0]);
+            indices.push(base + t[1]);
+            indices.push(base + t[2]);
+        }
+        let vertex_count = tile.positions.len() as u32;
+        let index_count = (indices.len() as u32) - idx_start;
+        cells[cell] = Some(TerrainCell {
+            cell,
+            row,
+            col,
+            tile_iter_index,
+            index_start: idx_start,
+            index_count,
+            vertex_start: base,
+            vertex_count,
+            material_hashes: tile.materials.clone(),
+            center_x: cx,
+            center_z: cz,
+            min_y: tile.min_y,
+            max_y: tile.max_y,
+            is_ocean: tile.is_ocean,
+        });
+        tiles_placed += 1;
+    }
+
+    if positions.is_empty() {
+        world_bounds = WorldBounds {
+            min: [0.0; 3],
+            max: [0.0; 3],
+        };
+        uv_min_u = 0.0;
+        uv_max_u = 0.0;
+        uv_min_v = 0.0;
+        uv_max_v = 0.0;
+    }
+
+    // Silence dead-code lint for the exported constant — the ocean cutoff is
+    // documented in `TILE_LOCAL_HALF_SPAN_M` and used by callers reasoning
+    // about placement radius; keep the reference resolved.
+    let _ = TILE_LOCAL_HALF_SPAN_M;
+
+    Ok(MergedTerrain {
+        positions,
+        normals,
+        uvs,
+        indices,
+        cells,
+        world_bounds,
+        uv_bounds: UvBounds {
+            min_u: uv_min_u,
+            max_u: uv_max_u,
+            min_v: uv_min_v,
+            max_v: uv_max_v,
+        },
+        ocean_tile_iter_indices,
+        texture,
+        tiles_placed,
+        tiles_decoded,
+        containers_seen,
+        toc_entry_count,
+        grid_source: GridSource::IterationFallback,
+    })
 }
