@@ -42,9 +42,13 @@ blocks → UCFX containers). The validation rules on top of it were derived from
   renderable consumer at `0x004a4c40`, which reads each array chunk as `count * record` bytes with
   `count` taken from the 0x10-byte renderable INFO. Tag registry: `docs/ucfx_tag_registry.md`.
 * **Action tables** (`src/action_table.rs`): the engine processes type `0x207359C7` (type_id 11) in
-  `FUN_0067cfb0`, building a fixed 1024-slot per-row hash table (open addressing, mask `0x3FF`). A
-  table with more than 1024 rows fills it and the next linear probe at `0x0067D130` spins forever —
-  the deterministic world-load livelock this consumer exists to catch.
+  `FUN_0067cfb0`, building a fixed 1024-slot hash table (open addressing, mask `0x3FF`). **⚠ This check
+  is a ROW-COUNT HEURISTIC and was LIVE-DISPROVEN as the DLC wedge (2026-09-02): `FUN_0067cfb0` dedups
+  per KEY COLUMN, not per row — the livelock at `0x0067D130` needs a single key column with >1024
+  *distinct* values.** A live per-call trace during the dlc01 boot showed the DLC ActionTable (1035
+  rows) has only ~303 distinct per key column and does NOT overflow; the real dlc01 hang is the
+  WAITFORSTREAMING wedge on missing content, not this. Treat a `count > 1024` finding as a rough flag,
+  not a proven livelock — see the module header in `src/action_table.rs`.
 * **`.pws` streaming audio** (`src/pws.rs`): a PC `.pws` is headerless blob storage with no
   self-describing layout — verified on retail `music.pws`, `ambience.pws` and
   `vo_stream.english.pws`, none of which carry `RIFF`/`OggS`/IMA markers. Format lives in the
@@ -125,7 +129,7 @@ Exit code is 0 when no fatal finding was recorded, 1 otherwise — so the comman
 | `animation` | Animation / Havok packfile structural validation |
 | `script` | Script consumption (LuaQ / BINN) |
 | `placement` | Layer/ECS_NODE Transform validation + `flgs` vz_state placement records |
-| `action_table` | ActionTable 1024-slot overflow check (the world-load livelock) |
+| `action_table` | ActionTable 1024-slot row-count heuristic (⚠ NOT the DLC wedge — live-disproven 2026-09-02; real overflow is per-key-column distinct) |
 | `resident` | Resident singletons (watermap, fxdict) |
 | `audio` | Wavebank + soundbank consumption, IMA ADPCM decode |
 | `pws` | External `.pws` streaming audio audit |

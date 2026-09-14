@@ -1,9 +1,22 @@
 //! ActionTable / named-registry overflow check (type 0x207359C7, type_id 11).
 //!
+//! ★★ LIVE-DISPROVEN AS THE DLC WEDGE (2026-09-02) — DO NOT re-chase this. ★★
+//! This check's "row count > 1024 → livelock" model is a FALSE POSITIVE and the "Blow It Up Again"
+//! DLC world-load hang is NOT the ActionTable. FUN_0067cfb0 dedups **per KEY COLUMN** (the bits set in
+//! obj+0x18), not per row: for each key column it inserts that column's DISTINCT values into the
+//! 1024-slot table. The livelock at 0x0067D130 requires a single key column with >1024 DISTINCT values.
+//! A live per-call trace of FUN_0067cfb0 during the dlc01 boot (mods/anim_table_expand instrumentation)
+//! showed all 9 dim-tables delegate cleanly — the ActionTable (1035 rows, totalDims=14) has keyMask=0x3
+//! (2 key columns) with only ~303 distinct each; MAX across every table was 533. Nothing overflows.
+//! The real dlc01 hang is the WAITFORSTREAMING wedge on MISSING CONTENT (dlc01.wad mounted alone
+//! replaces vz.wad, so ~26k base assets are absent): main thread spins in the load/worldbuild→streaming
+//! pump with lastStatus=STATUS_OBJECT_NAME_NOT_FOUND. See memory `dlc-level-boot-and-replacement-architecture`.
+//! ⇒ Treat any "count > 1024 → livelock" verdict below as UNVERIFIED HEURISTIC, not a proven blocker.
+//!
 //! The engine processes these tables in FUN_0067cfb0 by building a FIXED 1024-slot
-//! per-row hash table (open-addressing, mask 0x3FF). A table with more than 1024
-//! rows fills the table and the next linear probe at 0x0067D130 spins forever —
-//! the deterministic world-load livelock.
+//! per-key-column dedup table (open-addressing, mask 0x3FF). Only a KEY COLUMN with more than 1024
+//! DISTINCT values fills it and makes the linear probe at 0x0067D130 spin forever (see the live
+//! correction above — a large ROW count alone does NOT trigger it).
 //!
 //! A table is laid out `UCFX → INFO → TYPE → VALU{ header, N dimension-name
 //! strings, then value rows of N u32 each }`. This consumer computes a static
@@ -113,12 +126,17 @@ pub fn consume_action_table(
 
     if let Some(h) = registry_header(container) {
         if h.count > ACTION_TABLE_CAPACITY {
+            // HEURISTIC ONLY — row count, NOT the real overflow condition. FUN_0067cfb0 dedups per
+            // KEY COLUMN; the livelock needs a single key column with >1024 DISTINCT values. Live
+            // (2026-09-02) the DLC ActionTable has ~303 distinct/column and does NOT overflow — this
+            // verdict was a FALSE POSITIVE for the dlc01 hang. Kept as a rough row-count flag; do not
+            // treat it as a proven world-load livelock (see the module-header live correction).
             r.issues.push(format!(
-                "{label}: registry count={} > {ACTION_TABLE_CAPACITY}-slot engine table \
-                 (keyDims={}, totalDims={}) — overflows FUN_0067cfb0's fixed 1024-slot table \
-                 -> world-load livelock (linear-probe 0x0067D130). Needs runtime table \
-                 expansion to next_pow2({}).",
-                h.count, h.key_dims, h.total_dims, h.count
+                "{label}: registry row count={} > {ACTION_TABLE_CAPACITY} (keyDims={}, totalDims={}) \
+                 — ROW-COUNT HEURISTIC only; FUN_0067cfb0 dedups per key column, so this is NOT a \
+                 proven livelock (live-disproven for the DLC ActionTable 2026-09-02). Confirm distinct \
+                 values per key column before treating as a blocker.",
+                h.count, h.key_dims, h.total_dims
             ));
             r.structural_violations += 1;
         }
