@@ -332,6 +332,55 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Intent::Replace,
                 );
             }
+            // replace_phy2 swaps a shipped model's collision. Same-hash asset write, `Replace`.
+            Contribution::ReplacePhy2 { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
+            // add_placement writes into an existing layer's placement block. Additive by design --
+            // two Shipments adding disjoint entity keys to the same layer merge, same-key is the
+            // hard conflict (handled by the layer's own key check at build time).
+            Contribution::AddPlacement { layer, .. } => {
+                push(Access::Write, Claim::asset(layer), Intent::Additive);
+            }
+            // add_layer mints a NEW layer asset. Same shape as add_texture / add_movie: two
+            // Shipments minting the same layer name is a hard conflict.
+            Contribution::AddLayer { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // Novel Havok animation clip. New hash, Additive.
+            Contribution::AddAnimation { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // Same-hash animation swap. LastWins.
+            Contribution::ReplaceAnimation { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
+            // Novel shader. New hash, Additive.
+            Contribution::AddShader { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            Contribution::ReplaceShader { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
+            // Novel particle effect. New hash, Additive.
+            Contribution::AddFx { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            Contribution::ReplaceFx { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
+            // ECS component schema. New hash, Additive.
+            Contribution::AddSchema { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // AI squad-composition template. New hash, Additive.
+            Contribution::AddAiSquadTemplate { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // Terrain cell wholesale replace. Same-hash, LastWins.
+            Contribution::ReplaceTerrainCell { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Replace);
+            }
             // A shop item claims the catalog script it appends a row to (support vs equipment) plus
             // `mrxrewarddata` for the reward row. All are in `MERGEABLE_SCRIPTS`, so these are
             // `OrderedList` (Additive) — N shop mods union rather than clobber.

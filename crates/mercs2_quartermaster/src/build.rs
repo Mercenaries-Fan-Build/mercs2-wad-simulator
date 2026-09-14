@@ -59,8 +59,9 @@ use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
 use mercs2_formats::types::{
-    TYPE_HASH_MODEL, TYPE_HASH_STRINGDB, TYPE_ID_CFX_PACK, TYPE_ID_MODEL, TYPE_ID_SCRIPT,
-    TYPE_ID_STRINGDB, TYPE_ID_TEXTURE,
+    TYPE_HASH_ANIMATION, TYPE_HASH_EFFECT, TYPE_HASH_LAYER, TYPE_HASH_MODEL, TYPE_HASH_STRINGDB,
+    TYPE_HASH_TERRAIN_MESH, TYPE_ID_ANIMATION, TYPE_ID_CFX_PACK, TYPE_ID_EFFECT, TYPE_ID_LAYER,
+    TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_STRINGDB, TYPE_ID_TERRAIN_MESH, TYPE_ID_TEXTURE,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -712,6 +713,61 @@ pub fn script_mutations(
         }
     }
     Ok(out)
+}
+
+/// Shared helper for the passthrough kinds: read an author-supplied binary file and wrap it as a
+/// single-entry mod block carrying one primary ASET row at `pandemic_hash_m2(<name_or_target>)`.
+///
+/// The manifest side (contribution parse, path sandbox, block emit, ASET wire) is real today;
+/// the format side (an encoder that produces the bytes from an author-friendly source description)
+/// is orthogonal future work per asset type. A modder with an external encoder can ship any of
+/// these kinds NOW.
+fn opaque_new_asset(
+    root: &Path,
+    payload: &Path,
+    name_or_target: &str,
+    type_hash: u32,
+    type_id: u32,
+    index: usize,
+    kind: &'static str,
+) -> Result<Lowering, BuildError> {
+    let hash = crate::manifest::asset_hash(name_or_target);
+    let bytes = std::fs::read(root.join(payload)).map_err(|e| BuildError::Lower {
+        index,
+        kind,
+        message: format!("reading {}: {e}", root.join(payload).display()),
+    })?;
+    Ok(Lowering::Block(opaque_container_block(
+        hash, type_hash, type_id, &bytes, index, kind,
+    )?))
+}
+
+/// Wrap an already-produced container as a single-entry mod block. Split from
+/// [`opaque_new_asset`] so the `replace_phy2` codepath (which produces `edited` in-Rust rather
+/// than reading a file) can share the block-emit half.
+fn opaque_container_block(
+    hash: u32,
+    type_hash: u32,
+    type_id: u32,
+    bytes: &[u8],
+    index: usize,
+    kind: &'static str,
+) -> Result<PatchBlock, BuildError> {
+    let mut block_data = Vec::new();
+    block_data.extend_from_slice(&1u32.to_le_bytes());
+    block_data.extend_from_slice(&hash.to_le_bytes());
+    block_data.extend_from_slice(&type_hash.to_le_bytes());
+    block_data.extend_from_slice(&0u32.to_le_bytes());
+    block_data.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    block_data.extend_from_slice(bytes);
+    let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, type_id);
+    PatchBlock::from_decompressed(
+        &block_data,
+        format!("blocks\\VZ\\mod_{hash:08x}.block"),
+        vec![aset],
+        None,
+    )
+    .map_err(|m| BuildError::Lower { index, kind, message: m })
 }
 
 /// Every `replace_lua`, ready for the linker to compile + swap in place.
@@ -2519,6 +2575,66 @@ fn lower(
         // Realised at link time by `script_replacements` + `link_into_blocks`. Nothing to pack here.
         Contribution::ReplaceLua { .. } => Ok(Lowering::Nothing),
 
+        // Swap a shipped model's PHY2 collision in place. Uses the proven container primitive
+        // `phy2_container::replace_phy2_in_container`; the model asset hash is preserved.
+        Contribution::ReplacePhy2 { target, phy2 } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            let hash = crate::manifest::asset_hash(target);
+            let container = game
+                .container_for_asset(hash, TYPE_HASH_MODEL, TYPE_ID_MODEL)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{target:?} (0x{hash:08X}) is not a model in the game stack"),
+                })?;
+            let new_phy2 = std::fs::read(root.join(phy2)).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", root.join(phy2).display()),
+            })?;
+            let (pstart, psize) = mercs2_formats::phy2_container::phy2_span_in_container(&container)
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("model container for {target:?} has no PHY2 chunk to replace"),
+                })?;
+            let edited = mercs2_formats::phy2_container::replace_phy2_in_container(
+                &container, pstart, psize, &new_phy2,
+            )
+            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            log.push(format!(
+                "contributions[{index}] replace_phy2 {target} 0x{hash:08X}: {} -> {} bytes",
+                container.len(),
+                edited.len()
+            ));
+            Ok(Lowering::Block(opaque_container_block(
+                hash,
+                TYPE_HASH_MODEL,
+                TYPE_ID_MODEL,
+                &edited,
+                index,
+                kind,
+            )?))
+        }
+
+        // The passthrough kinds below all follow the same shape: read author-supplied bytes,
+        // wrap them as a single-entry mod block with the right (type_hash, type_id) ASET row.
+        // For each, the format side that would produce those bytes from a source description is
+        // future work; the manifest side is real today for anyone who has the encoder.
+        Contribution::AddPlacement { layer, entity } => opaque_new_asset(root, entity, layer, TYPE_HASH_LAYER, TYPE_ID_LAYER, index, kind),
+        Contribution::AddLayer { name, entities } => opaque_new_asset(root, entities, name, TYPE_HASH_LAYER, TYPE_ID_LAYER, index, kind),
+        Contribution::AddAnimation { name, clip, trnm: _ } => opaque_new_asset(root, clip, name, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION, index, kind),
+        Contribution::ReplaceAnimation { target, clip, trnm: _ } => opaque_new_asset(root, clip, target, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION, index, kind),
+        Contribution::AddShader { name, blob } => opaque_new_asset(root, blob, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
+        Contribution::ReplaceShader { target, blob } => opaque_new_asset(root, blob, target, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
+        Contribution::AddFx { name, payload } => opaque_new_asset(root, payload, name, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
+        Contribution::ReplaceFx { target, payload } => opaque_new_asset(root, payload, target, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
+        Contribution::AddSchema { name, schm } => opaque_new_asset(root, schm, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
+        Contribution::AddAiSquadTemplate { name, config, type_id, type_hash } => opaque_new_asset(root, config, name, *type_hash, *type_id, index, kind),
+        Contribution::ReplaceTerrainCell { target, cell } => opaque_new_asset(root, cell, target, TYPE_HASH_TERRAIN_MESH, TYPE_ID_TERRAIN_MESH, index, kind),
+
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
         // `script_mutations`), composed by the linker. Nothing to pack into a block.
         Contribution::AddShopItem { .. } => Ok(Lowering::Nothing),
@@ -2782,6 +2898,9 @@ fn lower(
             plugin,
             symbol,
             touches,
+            // A record-only field: qm carries the sig map through so lint/report can compare it
+            // against a live plugin's expected prologue bytes; it does not affect the packed WAD.
+            signature_guard: _,
         } => {
             let Some(plugin) = plugin else {
                 // M0161 already blocks the both-absent case, so reaching here means a `symbol` with

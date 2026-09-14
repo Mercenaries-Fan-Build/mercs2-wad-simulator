@@ -317,6 +317,24 @@ impl Contribution {
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
             Contribution::AddScript { source, .. } => out.push(("source", source.as_path())),
             Contribution::ReplaceLua { source, .. } => out.push(("source", source.as_path())),
+            Contribution::ReplacePhy2 { phy2, .. } => out.push(("phy2", phy2.as_path())),
+            Contribution::AddPlacement { entity, .. } => out.push(("entity", entity.as_path())),
+            Contribution::AddLayer { entities, .. } => out.push(("entities", entities.as_path())),
+            Contribution::AddAnimation { clip, trnm, .. } => {
+                out.push(("clip", clip.as_path()));
+                out.push(("trnm", trnm.as_path()));
+            }
+            Contribution::ReplaceAnimation { clip, trnm, .. } => {
+                out.push(("clip", clip.as_path()));
+                out.push(("trnm", trnm.as_path()));
+            }
+            Contribution::AddShader { blob, .. } => out.push(("blob", blob.as_path())),
+            Contribution::ReplaceShader { blob, .. } => out.push(("blob", blob.as_path())),
+            Contribution::AddFx { payload, .. } => out.push(("payload", payload.as_path())),
+            Contribution::ReplaceFx { payload, .. } => out.push(("payload", payload.as_path())),
+            Contribution::AddSchema { schm, .. } => out.push(("schm", schm.as_path())),
+            Contribution::AddAiSquadTemplate { config, .. } => out.push(("config", config.as_path())),
+            Contribution::ReplaceTerrainCell { cell, .. } => out.push(("cell", cell.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
             // No `src/` artifact: `layer` / `replaces` are layer NAMES the loader marks at runtime,

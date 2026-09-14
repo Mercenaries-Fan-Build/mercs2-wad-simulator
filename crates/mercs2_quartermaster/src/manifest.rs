@@ -85,6 +85,13 @@ pub struct Load {
     pub requires: Vec<Requirement>,
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// Capability tokens this Shipment declares it provides — the other side of
+    /// [`Requirement::Capability`]. Multiple Shipments can `provides` the same token so a consumer
+    /// can `requires` it interchangeably (e.g., three different widescreen-fix mods all
+    /// `provides: [widescreen]`, a UI mod `requires: [Capability("widescreen")]`, and any one of
+    /// them satisfies the dep). Free-form strings; conventionally lowercase-kebab.
+    #[serde(default)]
+    pub provides: Vec<String>,
 }
 
 /// A hard dependency, in one of three forms:
@@ -108,6 +115,12 @@ pub enum Requirement {
     Shipment(String),
     Compatible { name: String, version: String },
     External { url: String, sha256: String },
+    /// A capability token any Shipment with a matching `provides:` satisfies. Lets consumers
+    /// depend on WHAT is provided rather than WHO provides it, so three interchangeable "widescreen
+    /// fix" mods can each `provides: [widescreen]` and a UI mod `requires: [{capability: widescreen}]`
+    /// picks up whichever the user installed. Disjoint from the other three variants by the
+    /// unique `capability` field, so `#[serde(untagged)]` disambiguates cleanly.
+    Capability { capability: String },
 }
 
 /// Parse a bare `0xHHHHHHHH` asset reference into the hash it names.
@@ -709,6 +722,144 @@ pub enum Contribution {
         /// The `.lua` source that becomes the new bytecode. `src/`-relative.
         source: PathBuf,
     },
+    /// Data, SAME-HASH. Swap the collision (PHY2) chunk of a shipped model without touching its
+    /// meshes / materials / skeleton / anything else. Uses
+    /// [`mercs2_formats::phy2_container::replace_phy2_in_container`]; the model asset hash is
+    /// preserved, so every entity referencing the model transparently picks up the new collision.
+    ///
+    /// The `phy2` file must be a fully-formed PHY2 body (Havok packfile + trailing wrapper if the
+    /// donor had one), matching the shape [`build_phy2_multi`] emits. Same-hash, `Replace` intent
+    /// — two mods swapping the same model's PHY2 is a load-order question, not a hard conflict.
+    ReplacePhy2 {
+        /// The model to swap collision on, by name or bare `0xHHHHHHHH` hash.
+        target: String,
+        /// A `src/`-relative PHY2 binary. Verbatim bytes.
+        phy2: PathBuf,
+    },
+    /// Data. Add a single NEW entity to an existing placement layer (surgical add — the layer's
+    /// other placements are read from the base, our entity is appended, and the whole layer's
+    /// placement block is re-emitted as an overlay). The additive counterpart to `edit_world`
+    /// (which patches existing entities in-place).
+    ///
+    /// A concrete placement carries a model hash, a transform (position + orientation quaternion),
+    /// and an entity key (`u32`) — the same three fields `edit_world` edits. The build refuses a
+    /// key that already exists in the target layer (M0198), because reusing a key silently
+    /// overwrites the existing entity and that is not what "add" means.
+    AddPlacement {
+        /// The layer name (`layers_static`, `vz_state_pmccon004_pristine`, …).
+        layer: String,
+        /// The new entity's config, `src/`-relative — YAML with `key`, `model`, `position`,
+        /// `orientation` (either `quat: [x,y,z,w]` or `yaw: <degrees>`).
+        entity: PathBuf,
+    },
+    /// Data. Mint a WHOLE NEW placement layer, mountable as its own overlay + toggle-able via
+    /// `activate_layer`. Distinct from `add_placement` (which appends to an existing layer):
+    /// this one creates a layer container from scratch, hash-keyed by `pandemic_hash_m2(name)`,
+    /// carrying the author's entity list.
+    ///
+    /// Common combo: `add_layer` mints `vz_state_myMission` from a YAML entity list, then
+    /// `activate_layer` toggles it ON so the world load pages it in.
+    AddLayer {
+        /// The new layer name (hashed to become the ASET key).
+        name: String,
+        /// `src/`-relative YAML — a list of entity records (same shape as `add_placement.entity`,
+        /// one row per entity).
+        entities: PathBuf,
+    },
+    /// Data. Add a NEW animation clip to the world's animation-asset table, callable by the
+    /// engine's animation system when the containing model's HIER queries it by name.
+    ///
+    /// The `clip` is a pre-encoded Havok 5.5 packfile (the exact bytes the Havok content pipeline
+    /// -- `AssetCc2.exe --strip --rules4101` per memory `havok-anim-toolchain-roundtrip-proven` --
+    /// produces). Ship it verbatim; the engine's Havok reader consumes it identically to any
+    /// stock animation asset.
+    ///
+    /// The `trnm` binding (bone-name → clip-track index) MUST be paired: without it the engine
+    /// cannot select tracks by bone. Ship it alongside as the second file.
+    AddAnimation {
+        /// The clip name (hashed to become the ASET key; what the engine's animation lookups use).
+        name: String,
+        /// The pre-encoded Havok packfile carrying the clip.
+        clip: PathBuf,
+        /// The `trnm` bone-name → track-index binding.
+        trnm: PathBuf,
+    },
+    /// Data, SAME-HASH. Wholesale REPLACE a shipped animation's data (both the Havok packfile and
+    /// its `trnm` binding), keeping the clip name. Every model that queries the clip by name
+    /// picks up the new data on next lookup.
+    ReplaceAnimation {
+        /// The shipped animation to replace.
+        target: String,
+        clip: PathBuf,
+        trnm: PathBuf,
+    },
+    /// Data. Add a NEW compiled shader (SM3 blob) to `shader3.bin`. Author is responsible for
+    /// producing the binary via an external SM3 compiler (fxc `/T vs_3_0` or `ps_3_0`).
+    /// The engine indexes shaders by their name hash, so a bind-by-name in a material picks up
+    /// the added shader transparently.
+    AddShader {
+        /// The shader name (hashed to become the ASET key).
+        name: String,
+        /// The compiled SM3 shader bytes.
+        blob: PathBuf,
+    },
+    /// Data, SAME-HASH. Wholesale REPLACE the compiled bytes of a shipped shader, keeping the
+    /// name. Same-hash swap; every material bind picks up the new shader.
+    ReplaceShader {
+        target: String,
+        blob: PathBuf,
+    },
+    /// Data. Add a NEW particle-effect entry to the fxdict, callable by its name from Lua and
+    /// engine spawn sites. Pre-encoded `fxdict` payload (the sequence of tagged sub-chunks:
+    /// `efct` / `emtr` / `emit` / `poff` / `trfm` / `ptyp` / `colr` / `frce` / `text` — see
+    /// `mercs2_formats::fxdict`).
+    AddFx {
+        /// The effect name.
+        name: String,
+        /// The pre-encoded fxdict entry blob.
+        payload: PathBuf,
+    },
+    /// Data, SAME-HASH. Wholesale REPLACE a shipped fx entry with a new fxdict payload.
+    ReplaceFx {
+        target: String,
+        payload: PathBuf,
+    },
+    /// Data. Add a NEW ECS component-type schema (`.schm` binary the ECS registry indexes for
+    /// field layout). Modders who wire a new ECS component through the reimpl can pack its schema
+    /// this way. Author supplies the pre-encoded `.schm` bytes.
+    AddSchema {
+        /// The component-type name (hashed to become the ASET key).
+        name: String,
+        /// Pre-encoded `.schm` bytes.
+        schm: PathBuf,
+    },
+    /// Data. Add a NEW AI squad-composition template the game's AI-squad system can spawn by name.
+    /// Payload is the pre-encoded squad-config binary (format author-side; the engine consumes
+    /// whatever the ASET row's type-id says).
+    AddAiSquadTemplate {
+        /// The squad name.
+        name: String,
+        /// Pre-encoded squad-config bytes.
+        config: PathBuf,
+        /// The type-id the engine registers this squad under. Author must know the value; qm
+        /// cannot infer it because the AI-squad system's type-id has not been reverse-engineered
+        /// into `aset_type_ids` yet. Common conventions: reuse an existing squad's row from a
+        /// dump.
+        type_id: u32,
+        /// The type-hash that pairs with `type_id`.
+        type_hash: u32,
+    },
+    /// Data, SAME-HASH. REPLACE a single shipped terrain cell (heightmap / texturing / MOPP
+    /// collision) with pre-encoded bytes. The heightmap format + MOPP-baked collision codec are
+    /// only partially wrapped in `mercs2_formats::terrain`; this variant takes the fully-encoded
+    /// cell as opaque bytes for authors who produced them externally (e.g., extracted, edited,
+    /// re-baked via the Havok tools referenced in `memory/mopp-bake-oracle-hct-recipe.md`).
+    ReplaceTerrainCell {
+        /// The terrain-cell asset name (or bare hash).
+        target: String,
+        /// Pre-encoded cell bytes (heightmap + collision).
+        cell: PathBuf,
+    },
     /// Data. SWIT/STAT/CHDR/CEXE rewrite (`FUN_004cf340`, decoded).
     EditStateMachine { target: String, states: PathBuf },
     /// Data. Edit a placement LAYER (`vz_state` overlay or `layers_static`): move / rotate / re-model
@@ -836,6 +987,17 @@ pub enum Contribution {
         symbol: Option<String>,
         #[serde(default)]
         touches: Vec<Touch>,
+        /// Byte-signature guard for each `touches` address. When set, the plugin is expected to
+        /// verify each address's leading N bytes against the given hex signature at load-time and
+        /// bail (leaving the exe untouched) on mismatch — the pattern the working ASIs already
+        /// follow by hand (`anim_table_expand.asi`, `dontcry_native.asi`). Recording it in the
+        /// manifest lets the linter emit a M0199 when a plugin's declared `touches` list drifts
+        /// from a sig verified against a known engine build.
+        ///
+        /// Map keys are `touches` addresses in `0xHHHHHHHH` hex; values are hex-encoded prologue
+        /// bytes (`"55 8B EC 51 53 56 57"` etc.). Missing address = no guard for that touch.
+        #[serde(default)]
+        signature_guard: std::collections::BTreeMap<String, String>,
     },
     /// Code. A companion FILE placed in the game folder beside the plugins that read it.
     ///
@@ -941,6 +1103,18 @@ impl Contribution {
         "patch_lua",
         "add_script",
         "replace_lua",
+        "replace_phy2",
+        "add_placement",
+        "add_layer",
+        "add_animation",
+        "replace_animation",
+        "add_shader",
+        "replace_shader",
+        "add_fx",
+        "replace_fx",
+        "add_schema",
+        "add_ai_squad_template",
+        "replace_terrain_cell",
         "edit_state_machine",
         "edit_world",
         "activate_layer",
@@ -967,6 +1141,18 @@ impl Contribution {
             Contribution::PatchLua { .. } => "patch_lua",
             Contribution::AddScript { .. } => "add_script",
             Contribution::ReplaceLua { .. } => "replace_lua",
+            Contribution::ReplacePhy2 { .. } => "replace_phy2",
+            Contribution::AddPlacement { .. } => "add_placement",
+            Contribution::AddLayer { .. } => "add_layer",
+            Contribution::AddAnimation { .. } => "add_animation",
+            Contribution::ReplaceAnimation { .. } => "replace_animation",
+            Contribution::AddShader { .. } => "add_shader",
+            Contribution::ReplaceShader { .. } => "replace_shader",
+            Contribution::AddFx { .. } => "add_fx",
+            Contribution::ReplaceFx { .. } => "replace_fx",
+            Contribution::AddSchema { .. } => "add_schema",
+            Contribution::AddAiSquadTemplate { .. } => "add_ai_squad_template",
+            Contribution::ReplaceTerrainCell { .. } => "replace_terrain_cell",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
             Contribution::ActivateLayer { .. } => "activate_layer",
