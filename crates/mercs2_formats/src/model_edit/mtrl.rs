@@ -12,7 +12,7 @@
 //! material array and halfword-transpose every record whose `count` half is invalid,
 //! then recompute the container CSUM. material[0] (already PC-form) is left as-is.
 
-use mercs2_formats::crc32::crc32_mercs2;
+use crate::crc32::crc32_mercs2;
 
 const MTRL_PRE: usize = 104; // 26-dword param block before the [flags][count] pair
 

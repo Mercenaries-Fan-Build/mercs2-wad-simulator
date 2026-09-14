@@ -35,10 +35,9 @@
 //! * [`model_unwrap`] — static-`MESH` slot surgery (strip `AREA` / drop the slot).
 //! * [`model_reskin`] — convert a static `MESH` group into a skinned `SKIN` group.
 
-mod model_mtrl;
-mod model_reskin;
-mod model_unwrap;
-mod model_vertex;
+// model_{mtrl,reskin,unwrap,vertex} moved to mercs2_formats::model_edit::{mtrl,reskin,unwrap,vertex}.
+use mercs2_formats::model_edit::{mtrl as model_mtrl, reskin as model_reskin,
+                                 unwrap as model_unwrap, vertex as model_vertex};
 // `scripts_block` now lives in `mercs2_formats` so library consumers (the modkit GUI)
 // can edit Lua without depending on this bin-only crate.
 use mercs2_formats::scripts_block;

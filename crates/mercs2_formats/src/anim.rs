@@ -1936,3 +1936,87 @@ mod tests {
         }
     }
 }
+
+// Wavelet-clip perturbation passes (freeze / replace) -- decompressed-block
+// in-place edits. Consolidated here from the old anim_patch::perturb module so
+// W_OFF_* live in one place. `pub` surface: freeze_clip / replace_clip /
+// ZeroedRange (via `mercs2_formats::anim::perturb::*`).
+pub mod perturb {
+    use super::{u32_le, f32_le, W_OFF_ANIM_TYPE, W_OFF_DURATION, W_OFF_NUM_TT,
+                W_OFF_BLOCK_SIZE, W_OFF_QUANT_DATA_IDX, WAVELET_STRUCT_SIZE};
+
+    const W_OFF_QUANT_DATA_SIZE: usize = 84;
+    const HAVOK_MAGIC: [u8; 8] = [0x57, 0xe0, 0xe0, 0x57, 0x10, 0xc0, 0xc0, 0x10];
+
+    fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() || hay.len() < needle.len() { return None; }
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    fn find_wavelet_struct_wide(pk: &[u8]) -> Option<usize> {
+        if pk.len() < WAVELET_STRUCT_SIZE { return None; }
+        let limit = pk.len() - WAVELET_STRUCT_SIZE;
+        let mut off = 0usize;
+        while off < limit {
+            if u32_le(pk, off + W_OFF_ANIM_TYPE) != 3 { off += 4; continue; }
+            let d = f32_le(pk, off + W_OFF_DURATION);
+            if !(d.is_finite() && (0.001..=600.0).contains(&d)) { off += 4; continue; }
+            let ntt = u32_le(pk, off + W_OFF_NUM_TT);
+            if !(1..=500).contains(&ntt) { off += 4; continue; }
+            let bs = u32_le(pk, off + W_OFF_BLOCK_SIZE);
+            if !matches!(bs, 2 | 4 | 8 | 16 | 32 | 64) { off += 4; continue; }
+            return Some(off);
+        }
+        None
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct ZeroedRange {
+        pub name_hash: u32,
+        pub start: usize,
+        pub len: usize,
+    }
+
+    pub fn freeze_clip(
+        block: &mut [u8],
+        name_hash: u32,
+        havok_offset: usize,
+        clip_end: usize,
+    ) -> Option<ZeroedRange> {
+        if havok_offset >= block.len() { return None; }
+        let end = clip_end.min(block.len());
+        if end <= havok_offset { return None; }
+        let scan_base = find_sub(&block[havok_offset..end], &HAVOK_MAGIC)
+            .map(|rel| havok_offset + rel).unwrap_or(havok_offset);
+        let pk = &block[scan_base..end];
+        let so = find_wavelet_struct_wide(pk)?;
+        let qd_idx = u32_le(pk, so + W_OFF_QUANT_DATA_IDX) as usize;
+        let qd_size = u32_le(pk, so + W_OFF_QUANT_DATA_SIZE) as usize;
+        if qd_size == 0 { return None; }
+        let db = so + WAVELET_STRUCT_SIZE;
+        let start_abs = scan_base + db + qd_idx;
+        let end_abs = start_abs.checked_add(qd_size)?;
+        if end_abs > block.len() { return None; }
+        for byte in &mut block[start_abs..end_abs] { *byte = 0; }
+        Some(ZeroedRange { name_hash, start: start_abs, len: qd_size })
+    }
+
+    pub fn replace_clip(
+        block: &mut [u8],
+        havok_offset: usize,
+        clip_end: usize,
+        new_pk: &[u8],
+    ) -> Result<usize, String> {
+        let end = clip_end.min(block.len());
+        if havok_offset >= end { return Err("clip region is empty".into()); }
+        let region = end - havok_offset;
+        if new_pk.len() > region {
+            return Err(format!(
+                "replacement packfile is {} B but the clip region is only {} B",
+                new_pk.len(), region
+            ));
+        }
+        block[havok_offset..havok_offset + new_pk.len()].copy_from_slice(new_pk);
+        Ok(new_pk.len())
+    }
+}

@@ -731,6 +731,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddMovie { name, .. }
         | Contribution::AddLanguage { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
+        Contribution::AddShopItem { id, .. } => id.clone(),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
         | Contribution::EditStateMachine { target, .. }
@@ -745,6 +746,11 @@ fn contribution_name(c: &Contribution) -> String {
             .unwrap_or_else(|| "native hook".into()),
         Contribution::PlaceFile { file, .. } => leaf(file),
         Contribution::Raw { payload, .. } => leaf(payload),
+        // New Contribution kinds (add_script/replace_lua/replace_phy2/add_placement/add_layer/
+        // add_animation/replace_animation/add_shader/replace_shader/add_fx/replace_fx/add_schema/
+        // add_ai_squad_template/replace_terrain_cell/add_stringdb_keys/replace_stringdb_text)
+        // don't have first-class workshop UI yet; fall back to the machine tag.
+        other => other.kind().to_string(),
     }
 }
 
@@ -969,6 +975,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             group: None,
             textures: Textures::default(),
             retarget: None,
+            collision: mercs2_quartermaster::manifest::CollisionSource::default(),
         },
         "add_texture" => Contribution::AddTexture {
             name,
@@ -1017,6 +1024,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             plugin: Some(PathBuf::from("src/plugin.asi")),
             symbol: None,
             touches: Vec::new(),
+            signature_guard: Default::default(),
         },
         "place_file" => Contribution::PlaceFile {
             file: PathBuf::from("src/plugin.ini"),
@@ -1623,7 +1631,7 @@ fn contribution_form(
             }
             commit |= retarget_summary(ui, retarget);
         }
-        Contribution::AddModel { name, model, donor, group, textures, retarget } => {
+        Contribution::AddModel { name, model, donor, group, textures, retarget, collision: _ } => {
             commit |= text_row(ui, "Asset name", name, "my_custom_helipad", true);
             if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
                 commit = true;
@@ -1662,6 +1670,13 @@ fn contribution_form(
                 commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
             }
             commit |= retarget_summary(ui, retarget);
+        }
+        Contribution::AddShopItem { .. } => {
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "shop items are edited in the manifest, not the workshop bench",
+            );
         }
         Contribution::AddTexture { name, image, normal_map } => {
             commit |= text_row(ui, "Asset name", name, "my_custom_decal", true);
@@ -1816,7 +1831,7 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
-        Contribution::NativeHook { target, plugin, symbol, touches } => {
+        Contribution::NativeHook { target, plugin, symbol, touches, signature_guard: _ } => {
             // `both` is reserved and rejected in v1, so it is not offered.
             commit |= theme::combo_field(
                 ui,
@@ -1916,6 +1931,18 @@ fn contribution_form(
             ui.add_space(4.0);
             theme::eyebrow(ui, "Declared blast radius — must match the payload exactly");
             commit |= touches_editor(ui, touches, true);
+        }
+        // Newer Contribution kinds without bespoke workshop editors yet. Manifest is still fully
+        // editable as YAML; this panel just doesn't offer field-level UI for them today.
+        other => {
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!(
+                    "No field editor yet for `{}` — edit the manifest.yaml directly.",
+                    other.kind()
+                ),
+            );
         }
     }
     commit
@@ -2152,6 +2179,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::AddModel { name, .. } => {
             vec![("Writes".to_string(), format!("model {name}  (new hash)"))]
         }
+        Contribution::AddShopItem { id, shops, .. } => vec![(
+            "Script".to_string(),
+            format!("shop item {id}  (catalog + {} reward row(s))", shops.len()),
+        )],
         Contribution::AddMovie { name, .. } => {
             vec![("Writes".to_string(), format!("cfx_pack {name}  (new hash)"))]
         }
@@ -2224,6 +2255,9 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
             .iter()
             .map(|t| ("Declares".to_string(), t.0.clone()))
             .collect(),
+        // Fallback for kinds without a bespoke blast row yet; show the kind so the panel is
+        // non-empty rather than hiding the contribution.
+        other => vec![("Kind".to_string(), other.kind().to_string())],
     }
 }
 

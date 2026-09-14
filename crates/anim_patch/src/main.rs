@@ -35,9 +35,9 @@
 //! Module map:
 //!   `main`     — CLI, FFCS load, block selection, patch-WAD build/verify/write.
 //!   [`perturb`] — in-place perturbation passes on the DECOMPRESSED block bytes
-//!                 (currently [`perturb::freeze_clip`]).
+//!                 (currently [`mercs2_formats::anim::perturb::freeze_clip`]).
 
-mod perturb;
+// perturb passes moved to mercs2_formats::anim::perturb (dedup W_OFF_* constants).
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -473,7 +473,7 @@ fn run() -> Result<(), String> {
                 continue;
             }
             let new_pk = std::fs::read(&out_bin).map_err(|e| format!("read {out_bin:?}: {e}"))?;
-            match perturb::replace_clip(&mut work, havok_off, clip_end, &new_pk) {
+            match mercs2_formats::anim::perturb::replace_clip(&mut work, havok_off, clip_end, &new_pk) {
                 Ok(_) => ok += 1,
                 Err(_) => skipped += 1,
             }
@@ -501,7 +501,7 @@ fn run() -> Result<(), String> {
                 .map(|&(_, o)| o)
                 .find(|&o| o > havok_off)
                 .unwrap_or(work.len());
-            match perturb::freeze_clip(&mut work, name_hash, havok_off, clip_end) {
+            match mercs2_formats::anim::perturb::freeze_clip(&mut work, name_hash, havok_off, clip_end) {
                 Some(r) => {
                     println!(
                         "  clip 0x{:08X}: zeroed [0x{:X}..0x{:X}) ({} bytes)",
@@ -544,7 +544,7 @@ fn run() -> Result<(), String> {
             .map(|&(_, o)| o)
             .find(|&o| o > havok_off)
             .unwrap_or(work.len());
-        let n = perturb::replace_clip(&mut work, havok_off, clip_end, &new_pk)?;
+        let n = mercs2_formats::anim::perturb::replace_clip(&mut work, havok_off, clip_end, &new_pk)?;
         println!(
             "--replace-clip 0x{target:08X}: spliced {n} B packfile into [0x{havok_off:X}..0x{clip_end:X}) (region {} B)",
             clip_end - havok_off

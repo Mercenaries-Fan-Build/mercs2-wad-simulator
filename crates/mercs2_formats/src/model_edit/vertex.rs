@@ -12,7 +12,7 @@
 //! the position's two 4-byte groups per vertex, then recomputes the container CSUM.
 //! Self-detecting: streams whose position already has `w=1.0` at +6 are untouched.
 
-use mercs2_formats::crc32::crc32_mercs2;
+use crate::crc32::crc32_mercs2;
 
 fn rd_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
