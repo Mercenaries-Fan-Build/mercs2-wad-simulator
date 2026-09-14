@@ -323,6 +323,29 @@ pub fn ucfx_texture(name: &str, w: usize, h: usize, fourcc: &[u8; 4], body: &[u8
     c
 }
 
+/// DXT5nm packing: `normal.x -> alpha`, `normal.y -> greyscale RGB`. See
+/// `docs/format_reference.md` and the retail proof (ztz98 slot 2, 0xE1F66E9B): under this packing
+/// 100.00% of texels satisfy `x^2+y^2 <= 1`. Shipping an RGB normal here (implicit alpha=255) makes
+/// `normal.x = 1.0` and lighting explodes -- matte black surfaces render white.
+///
+/// Input `rgb` is w*h*3 floats in [0,255] (R = normal.x source, G = normal.y source, B ignored).
+/// Output is a fully-resident UCFX texture container ready to drop into a mod block.
+pub fn build_dxt5nm_container(name: &str, w: usize, h: usize, rgb: &[f32], invert_g: bool) -> Vec<u8> {
+    let px = w * h;
+    debug_assert_eq!(rgb.len(), px * 3);
+    let mut rgba = vec![0.0f32; px * 4];
+    for i in 0..px {
+        let x = rgb[i * 3];
+        let y = if invert_g { 255.0 - rgb[i * 3 + 1] } else { rgb[i * 3 + 1] };
+        rgba[i * 4] = y;      // R = greyscale
+        rgba[i * 4 + 1] = y;  // G = greyscale
+        rgba[i * 4 + 2] = y;  // B = greyscale
+        rgba[i * 4 + 3] = x;  // A = normal.x
+    }
+    let body = mip_chain(w, h, 4, &rgba, encode_bc3);
+    ucfx_texture(name, w, h, b"DXT5", &body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
