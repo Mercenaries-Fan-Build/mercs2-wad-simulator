@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use mercs2_luac::rt::{Function, Lua, MultiValue, Result as LuaResult, Value};
 
+use crate::attribution::LuaFnExt;
 use crate::{Guid, SharedHost};
 use super::{Installed, NsBuilder, Required};
 
@@ -61,7 +62,7 @@ pub fn pump_hud_callbacks(lua: &Lua, host: &SharedHost, dt: f32) -> LuaResult<()
     for id in fires {
         let entry = cbs.borrow().fns.get(&id).cloned();
         if let Some((f, ctx)) = entry {
-            f.call::<()>(mercs2_luac::rt::MultiValue::from_vec(ctx))?;
+            f.call_attr::<()>(mercs2_luac::rt::MultiValue::from_vec(ctx), "Hud.MovieEnd")?;
         }
     }
     Ok(())

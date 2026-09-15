@@ -28,6 +28,7 @@ use std::rc::Rc;
 use mercs2_luac::rt::{Function, IntoLua, Lua, Result as LuaResult, Table, Value, Variadic};
 
 use super::{Installed, NsBuilder, Required};
+use crate::attribution::LuaFnExt;
 use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -259,11 +260,13 @@ fn post(mgr: &Mgr, name: &str, data: Value) -> LuaResult<()> {
     };
     for (h, filter, callback, cbargs, persistent) in candidates {
         let pass = match filter {
-            Some(f) => f.call::<bool>(data.clone()).unwrap_or(false),
+            Some(f) => f
+                .call_attr::<bool>(data.clone(), "Event.ScriptEvent.Filter")
+                .unwrap_or(false),
             None => true,
         };
         if pass {
-            callback.call::<()>(Variadic::from_iter(cbargs))?;
+            callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.ScriptEvent")?;
             if !persistent {
                 mgr.borrow_mut().regs.remove(&h);
             }
@@ -289,7 +292,7 @@ fn pump(mgr: &Mgr, dt: f32) -> LuaResult<()> {
         due
     };
     for (h, callback, cbargs, persistent) in due {
-        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.TimerRelative")?;
         let mut m = mgr.borrow_mut();
         if persistent {
             if let Some(r) = m.regs.get_mut(&h) {
@@ -399,7 +402,7 @@ pub fn fire_game_state_change(lua: &Lua, state: &str, phase: &str) -> LuaResult<
             .collect()
     };
     for (h, callback, cbargs, persistent) in fired {
-        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.GameStateChange")?;
         if !persistent {
             mgr.borrow_mut().regs.remove(&h);
         }
@@ -421,7 +424,7 @@ pub fn fire_object_death(lua: &Lua, guid: u64) -> LuaResult<()> {
             .collect()
     };
     for (h, callback, cbargs, persistent) in fired {
-        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.ObjectDeath")?;
         if !persistent {
             mgr.borrow_mut().regs.remove(&h);
         }
@@ -512,7 +515,7 @@ pub fn fire_object_hibernation(lua: &Lua, guid: u64, phase: &str) -> LuaResult<(
             .collect()
     };
     for (h, callback, cbargs, persistent) in fired {
-        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.ObjectHibernation")?;
         if !persistent {
             mgr.borrow_mut().regs.remove(&h);
         }
@@ -571,7 +574,7 @@ pub fn fire_object_in_seat(
         // these values type-check them with `type(u) == "userdata"`.
         cbargs.push(Guid::from(occupant).into_lua(lua)?);
         cbargs.push(Guid::from(vehicle).into_lua(lua)?);
-        callback.call::<()>(Variadic::from_iter(cbargs))?;
+        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.ObjectInSeat")?;
         if !persistent {
             mgr.borrow_mut().regs.remove(&h);
         }

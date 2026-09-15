@@ -12,6 +12,7 @@
 use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Table};
 
 use super::{Installed, NsBuilder, Required};
+use crate::attribution::LuaFnExt;
 use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -306,8 +307,12 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
             if req != "Unload" {
                 streamed.push(layer.clone())?;
             }
-            if let Err(err) = cb.call::<()>((req, layer.clone(), "layer", true)) {
+            if let Err(err) =
+                cb.call_attr::<()>((req, layer.clone(), "layer", true), "Pg.LayerLoadComplete")
+            {
                 // Surface the divergence (was silently swallowed → the layer load never cascaded).
+                // `pf.call` (below) is engine-internal Debug.Printf — not a mod callback — so it
+                // stays a plain `call`, not `call_attr`.
                 if let Ok(dbg) = lua.globals().get::<mercs2_luac::rt::Table>("Debug") {
                     if let Ok(pf) = dbg.get::<mercs2_luac::rt::Function>("Printf") {
                         let _ = pf.call::<()>(format!("layer '{layer}' completion aborted: {err}"));

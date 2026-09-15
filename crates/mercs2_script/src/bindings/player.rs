@@ -48,6 +48,7 @@ use mercs2_player::{
 };
 
 use super::{Installed, NsBuilder, Required};
+use crate::attribution::LuaFnExt;
 use crate::{Guid, SharedHost};
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
@@ -304,7 +305,7 @@ pub fn pump_player_callbacks(lua: &Lua, host: &SharedHost) -> LuaResult<()> {
                 mercs2_player::CallbackArg::Nil => Value::Nil,
             });
         }
-        f.call::<()>(MultiValue::from_vec(args))?;
+        f.call_attr::<()>(MultiValue::from_vec(args), "Player.Callback")?;
     }
     Ok(())
 }

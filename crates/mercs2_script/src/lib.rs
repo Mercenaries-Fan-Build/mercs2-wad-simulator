@@ -61,6 +61,7 @@ pub use mercs2_luac;
 pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
 pub mod stubs;
 pub mod docs;
+pub mod attribution;
 /// The canonical `ObjectHibernation` phases + the folding function, re-exported because the ENGINE is
 /// the producer: it must fire the same canonical spelling the registrations were folded onto, and the
 /// `bindings` submodules are otherwise private. See `bindings::event::canon_phase` for why the corpus's
@@ -86,6 +87,14 @@ pub mod corpus;
 pub trait EngineHost {
     /// `Debug.Printf` / `Debug.Print` sink (the game's Lua log stream — the `[lua]` lines).
     fn log(&mut self, source: &str, msg: &str);
+    /// A Lua callback threw and the seam caught it — see [`crate::attribution`]. Defaults to
+    /// routing through [`log`](Self::log) with source `"mod-crash"`, so any host that already
+    /// captures Lua-level logs picks these up for free; a host that wants a dedicated sink
+    /// (write to `Sys.WriteToConsole`, a persistent `[mod-crash]` log, a Modkit dashboard) can
+    /// override.
+    fn log_mod_crash(&mut self, msg: &str) {
+        self.log("mod-crash", msg);
+    }
     /// `Sys.GetLevelName` — the current master level (e.g. `"vz"`).
     fn get_level_name(&self) -> String;
     /// `Sys.StartWithResources` — the dev/cheat "start rich" flag.
@@ -1481,7 +1490,7 @@ impl Loader {
                 i += 1;
                 let init: mercs2_luac::rt::Function = m.get("Init")?;
                 self.stack.borrow_mut().push(m.clone());
-                let r = init.call::<()>(());
+                let r = crate::attribution::call_attributed::<()>(&init, (), "Module.Init");
                 self.stack.borrow_mut().pop();
                 r?;
             }
@@ -1545,7 +1554,11 @@ impl ScriptHost {
                         None => Vec::new(),
                     };
                     vals.push(mercs2_luac::rt::Value::Table(m.clone()));
-                    cb.call::<()>(mercs2_luac::rt::Variadic::from_iter(vals))?;
+                    crate::attribution::call_attributed::<()>(
+                        &cb,
+                        mercs2_luac::rt::Variadic::from_iter(vals),
+                        "DynamicImport.Callback",
+                    )?;
                 }
                 Ok(m)
             },
@@ -1605,6 +1618,11 @@ impl ScriptHost {
         // The engine's own bootstrap glue runs AFTER the namespaces exist — it aliases members of them
         // into `_G`. See [`BOOTSTRAP_GLUE`].
         self.lua.load(BOOTSTRAP_GLUE).set_name("@bootstrap_glue").exec()?;
+        // Install the host as the target for `[mod-crash]` attribution — see `attribution.rs`.
+        // Every subsequent `Function::call_attr(...)` in this crate emits through it; without
+        // this, callers of `call_attr` still work but the crash log lines are dropped. Called
+        // last so a registration that fails does not leave a partially-wired attribution sink.
+        attribution::set_active_host(host);
         Ok(cov)
     }
 
@@ -1713,7 +1731,11 @@ impl ScriptHost {
     pub fn pump_events(&self, dt: f32) -> LuaResult<()> {
         let ev: Table = self.lua.globals().get("Event")?;
         let pump: mercs2_luac::rt::Function = ev.get("__pump")?;
-        pump.call::<()>(dt)
+        // `Event.__pump` fires script-authored `Event.TimerRelative` callbacks in a loop; each
+        // callback is attribution-wrapped at its own site inside `bindings::event::pump`, so
+        // this outer call routes any error the pump-driver itself raises (bad state) rather
+        // than a script's own throw.
+        crate::attribution::call_attributed::<()>(&pump, dt, "Event.Pump")
     }
 
     /// How many event handlers are still registered. Tooling only — a script that re-registers on each
@@ -2042,5 +2064,172 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // `attribution` — the seam-hardening step 3 pcall wrapper. Lives here (not next to
+    // `attribution.rs`) because `RecordingHost` covers the 200+-method `EngineHost` surface
+    // this needs and there is no in-crate host that would satisfy the trait with less.
+    // ---------------------------------------------------------------------------
+
+    /// A `Function` in a live Lua state that throws when called — the raw material every
+    /// attribution test needs. Kept local because building it in-line at each test would be
+    /// three lines each; extracting makes the tests read like assertions.
+    fn erroring_fn(h: &ScriptHost, body: &str) -> mercs2_luac::rt::Function {
+        h.eval::<mercs2_luac::rt::Function>(&format!(
+            "return function() {body} end"
+        ))
+        .expect("compile")
+    }
+
+    #[test]
+    fn attribution_a_thrown_callback_emits_mod_crash_and_propagates() {
+        // `RecordingHost::log` discards the source string and keeps only the message; since the
+        // default `log_mod_crash` prefixes every emitted line with `[mod-crash]`, filtering the
+        // stored messages by that prefix reproduces the same signal. The attribution TL slot
+        // is populated by `register_engine`, so nothing here has to set it up explicitly.
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+        let f = erroring_fn(&h, "error('kaboom')");
+
+        let result: mercs2_luac::rt::Result<()> =
+            crate::attribution::call_attributed(&f, (), "Event.TimerRelative");
+        assert!(result.is_err(), "error must propagate after logging");
+        let host_borrow = host.borrow();
+        let crashes: Vec<&String> = host_borrow
+            .logs
+            .iter()
+            .filter(|m| m.starts_with("[mod-crash]"))
+            .collect();
+        assert_eq!(crashes.len(), 1, "one crash line per throw: {crashes:?}");
+        assert!(
+            crashes[0].starts_with("[mod-crash] Event.TimerRelative:"),
+            "site must be named: {}",
+            crashes[0]
+        );
+        assert!(
+            crashes[0].contains("kaboom"),
+            "raised error must round-trip: {}",
+            crashes[0]
+        );
+    }
+
+    #[test]
+    fn attribution_a_clean_call_produces_no_crash_line() {
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+        let f = h
+            .eval::<mercs2_luac::rt::Function>("return function() return 42 end")
+            .unwrap();
+
+        let v: i64 = crate::attribution::call_attributed(&f, (), "Test.Ok").unwrap();
+        assert_eq!(v, 42);
+        let any_crash = host
+            .borrow()
+            .logs
+            .iter()
+            .any(|m| m.starts_with("[mod-crash]"));
+        assert!(!any_crash, "clean calls must not emit [mod-crash]");
+    }
+
+    #[test]
+    fn attribution_method_form_is_equivalent_to_call_attributed() {
+        use crate::attribution::LuaFnExt;
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+        let f = erroring_fn(&h, "error('boom')");
+
+        let _: mercs2_luac::rt::Result<()> = f.call_attr((), "Test.Method");
+        let crashes = host
+            .borrow()
+            .logs
+            .iter()
+            .filter(|m| m.starts_with("[mod-crash]"))
+            .count();
+        assert_eq!(crashes, 1, "method form must go through the same sink");
+    }
+
+    #[test]
+    fn attribution_degrades_silently_when_no_host_is_registered() {
+        // Without a `register_engine` call the TL slot is `None`; `call_attributed` still
+        // returns the propagated error but drops the log line. That is exactly the shape a
+        // test-only ScriptHost with no engine binding shows, and it MUST not panic.
+        crate::attribution::clear_active_host();
+        let h = ScriptHost::bare().unwrap();
+        let f = erroring_fn(&h, "error('lonely')");
+
+        let result: mercs2_luac::rt::Result<()> =
+            crate::attribution::call_attributed(&f, (), "Test.NoHost");
+        assert!(result.is_err(), "the error still propagates");
+    }
+
+    #[test]
+    fn attribution_flows_through_a_real_event_scriptevent_dispatch() {
+        // End-to-end proof that `bindings::event::fire_script_event` — one of the 12 sites
+        // routed to `call_attr` — actually emits `[mod-crash]` when the mission-authored
+        // callback throws. Without this, the routing edits could go stale silently.
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+
+        // A mission-style registration: `Event.Create(Event.ScriptEvent, {"mpPlayerLeft"},
+        // bad_callback, {})` — the shape a real contract script uses. The callback throws.
+        h.eval::<()>(
+            "handle = Event.Create(Event.ScriptEvent, {'boom'}, function() error('kaboom') end, {})",
+        )
+        .unwrap();
+
+        // Fire the event — this is what `Event.Post` on the engine side does. The wrapped
+        // call inside `fire_script_event` should propagate the error AND emit the crash line.
+        let result: mercs2_luac::rt::Result<()> = h.eval("Event.Post('boom', {})");
+        assert!(
+            result.is_err(),
+            "the throw must still propagate: {result:?}"
+        );
+
+        let host_borrow = host.borrow();
+        let crashes: Vec<&String> = host_borrow
+            .logs
+            .iter()
+            .filter(|m| m.starts_with("[mod-crash]"))
+            .collect();
+        assert_eq!(
+            crashes.len(),
+            1,
+            "one crash line per throw: {:?}",
+            host_borrow.logs
+        );
+        assert!(
+            crashes[0].starts_with("[mod-crash] Event.ScriptEvent:"),
+            "site must name Event.ScriptEvent: {}",
+            crashes[0]
+        );
+        assert!(
+            crashes[0].contains("kaboom"),
+            "raised error must round-trip: {}",
+            crashes[0]
+        );
+    }
+
+    #[test]
+    fn attribution_survives_a_reentrant_borrow_without_panicking() {
+        // A live cfunc-triggered callback can throw while the host is already `borrow_mut`-ed
+        // higher in the stack. `emit_mod_crash` uses `try_borrow_mut` for exactly this: it
+        // drops the log line rather than panicking. The point of this test is only that it
+        // does not crash — behaviour there is graceful-degrade, not correct-attribution.
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+        let f = erroring_fn(&h, "error('busy')");
+
+        let held = host.borrow_mut(); // simulate the reentrant frame
+        let _: mercs2_luac::rt::Result<()> =
+            crate::attribution::call_attributed(&f, (), "Test.Reentry");
+        drop(held);
+        // No crash line asserted (the drop is intentional under contention); the test asserts
+        // reaching this line at all.
     }
 }
