@@ -60,6 +60,7 @@ pub mod bindings;
 pub use mercs2_luac;
 pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
 pub mod stubs;
+pub mod docs;
 /// The canonical `ObjectHibernation` phases + the folding function, re-exported because the ENGINE is
 /// the producer: it must fire the same canonical spelling the registrations were folded onto, and the
 /// `bindings` submodules are otherwise private. See `bindings::event::canon_phase` for why the corpus's
