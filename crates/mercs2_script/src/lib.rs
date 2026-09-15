@@ -59,6 +59,7 @@ pub mod bindings;
 /// implementation's `lua_State` through the other's functions.
 pub use mercs2_luac;
 pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
+pub mod stubs;
 /// The canonical `ObjectHibernation` phases + the folding function, re-exported because the ENGINE is
 /// the producer: it must fire the same canonical spelling the registrations were folded onto, and the
 /// `bindings` submodules are otherwise private. See `bindings::event::canon_phase` for why the corpus's
@@ -1742,6 +1743,9 @@ fn index_lua_files(dir: &Path, out: &mut HashMap<String, PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `NAMESPACES` is a `pub` const inside the `bindings` module but not re-exported at the crate
+    // root (only in-crate consumers — `stubs`, this test — need it). Pull it in explicitly.
+    use super::bindings::NAMESPACES;
 
     /// An `EngineHost` that records what the bindings called, for assertions.
     #[derive(Default)]
@@ -1993,5 +1997,49 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("binding_coverage.json");
         std::fs::write(&out, &json).expect("write binding_coverage.json");
         assert!(json.contains("\"remaining\""));
+
+        // Drift alarm: `NAMESPACES` (the offline-enumerable metadata table used by tooling like
+        // the EmmyLua stubs generator) MUST agree with `install_all`'s output. When a namespace is
+        // added under `bindings/`, BOTH `install_all`'s inner macro AND `NAMESPACES` must be
+        // updated — this pins the two together so silent drift is a hard test failure.
+        assert_eq!(
+            cov.len(),
+            NAMESPACES.len(),
+            "install_all wires {} namespaces but NAMESPACES lists {} — one was updated, the other \
+             was not",
+            cov.len(),
+            NAMESPACES.len()
+        );
+        for (c, m) in cov.iter().zip(NAMESPACES.iter()) {
+            assert_eq!(
+                c.namespace, m.namespace,
+                "order mismatch between install_all and NAMESPACES"
+            );
+            assert_eq!(c.global, m.global, "{}: global drift", c.namespace);
+            assert_eq!(c.table_va, m.table_va, "{}: table_va drift", c.namespace);
+            // Compare the REQUIRED arrays by value, not by slice-pointer: the compiler may
+            // materialize distinct copies of the same `pub const REQUIRED: &[Required]` across
+            // translation units, so pointer equality is not guaranteed even when the data is.
+            assert_eq!(
+                c.required.len(),
+                m.required.len(),
+                "{}: REQUIRED length drift ({} vs {})",
+                c.namespace,
+                c.required.len(),
+                m.required.len()
+            );
+            for (a, b) in c.required.iter().zip(m.required.iter()) {
+                assert_eq!(
+                    a.name, b.name,
+                    "{}: REQUIRED name drift",
+                    c.namespace
+                );
+                assert_eq!(
+                    a.corpus_calls, b.corpus_calls,
+                    "{} {}: corpus_calls drift",
+                    c.namespace, a.name
+                );
+            }
+        }
     }
 }

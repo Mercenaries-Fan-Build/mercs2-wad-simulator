@@ -293,6 +293,247 @@ pub struct NsCoverage {
     pub stub: Vec<&'static str>,
 }
 
+/// Static metadata for one engine namespace — [`NsCoverage`] without the run-time `real`/`stub`
+/// tallies. Enumerable via [`NAMESPACES`] without a Lua VM or an [`crate::EngineHost`], so tooling
+/// (EmmyLua stub generation, docs-site rendering) can walk the surface offline.
+#[derive(Clone, Copy)]
+pub struct NamespaceMeta {
+    pub namespace: &'static str,
+    pub global: &'static str,
+    pub table_va: u32,
+    pub required: &'static [Required],
+}
+
+/// Every engine namespace's static declaration, in the same order [`install_all`] wires them.
+///
+/// **Drift note:** this is a second listing of the 36 modules that [`install_all`]'s inner macro
+/// walks. When a new namespace is added under [`bindings/`](self), it must be added to BOTH — the
+/// `binding_coverage_matches_static_metadata` unit test below enforces that.
+pub const NAMESPACES: &[NamespaceMeta] = &[
+    NamespaceMeta {
+        namespace: object_filter::NAMESPACE,
+        global: object_filter::GLOBAL,
+        table_va: object_filter::TABLE_VA,
+        required: object_filter::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: event::NAMESPACE,
+        global: event::GLOBAL,
+        table_va: event::TABLE_VA,
+        required: event::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: debug::NAMESPACE,
+        global: debug::GLOBAL,
+        table_va: debug::TABLE_VA,
+        required: debug::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: weapon::NAMESPACE,
+        global: weapon::GLOBAL,
+        table_va: weapon::TABLE_VA,
+        required: weapon::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: vo::NAMESPACE,
+        global: vo::GLOBAL,
+        table_va: vo::TABLE_VA,
+        required: vo::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: vehicle::NAMESPACE,
+        global: vehicle::GLOBAL,
+        table_va: vehicle::TABLE_VA,
+        required: vehicle::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: sys::NAMESPACE,
+        global: sys::GLOBAL,
+        table_va: sys::TABLE_VA,
+        required: sys::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: sound::NAMESPACE,
+        global: sound::GLOBAL,
+        table_va: sound::TABLE_VA,
+        required: sound::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: report::NAMESPACE,
+        global: report::GLOBAL,
+        table_va: report::TABLE_VA,
+        required: report::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: player::NAMESPACE,
+        global: player::GLOBAL,
+        table_va: player::TABLE_VA,
+        required: player::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: pg::NAMESPACE,
+        global: pg::GLOBAL,
+        table_va: pg::TABLE_VA,
+        required: pg::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: object_state::NAMESPACE,
+        global: object_state::GLOBAL,
+        table_va: object_state::TABLE_VA,
+        required: object_state::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: object::NAMESPACE,
+        global: object::GLOBAL,
+        table_va: object::TABLE_VA,
+        required: object::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: movie::NAMESPACE,
+        global: movie::GLOBAL,
+        table_va: movie::TABLE_VA,
+        required: movie::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: net::NAMESPACE,
+        global: net::GLOBAL,
+        table_va: net::TABLE_VA,
+        required: net::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: timer::NAMESPACE,
+        global: timer::GLOBAL,
+        table_va: timer::TABLE_VA,
+        required: timer::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: math_ns::NAMESPACE,
+        global: math_ns::GLOBAL,
+        table_va: math_ns::TABLE_VA,
+        required: math_ns::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: lti::NAMESPACE,
+        global: lti::GLOBAL,
+        table_va: lti::TABLE_VA,
+        required: lti::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: pg_world::NAMESPACE,
+        global: pg_world::GLOBAL,
+        table_va: pg_world::TABLE_VA,
+        required: pg_world::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: human::NAMESPACE,
+        global: human::GLOBAL,
+        table_va: human::TABLE_VA,
+        required: human::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: inventory::NAMESPACE,
+        global: inventory::GLOBAL,
+        table_va: inventory::TABLE_VA,
+        required: inventory::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: hud::NAMESPACE,
+        global: hud::GLOBAL,
+        table_va: hud::TABLE_VA,
+        required: hud::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: gui::NAMESPACE,
+        global: gui::GLOBAL,
+        table_va: gui::TABLE_VA,
+        required: gui::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: graphics::NAMESPACE,
+        global: graphics::GLOBAL,
+        table_va: graphics::TABLE_VA,
+        required: graphics::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: camera::NAMESPACE,
+        global: camera::GLOBAL,
+        table_va: camera::TABLE_VA,
+        required: camera::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: atmosphere::NAMESPACE,
+        global: atmosphere::GLOBAL,
+        table_va: atmosphere::TABLE_VA,
+        required: atmosphere::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: bloom::NAMESPACE,
+        global: bloom::GLOBAL,
+        table_va: bloom::TABLE_VA,
+        required: bloom::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: fade::NAMESPACE,
+        global: fade::GLOBAL,
+        table_va: fade::TABLE_VA,
+        required: fade::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: fire::NAMESPACE,
+        global: fire::GLOBAL,
+        table_va: fire::TABLE_VA,
+        required: fire::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: camera_fx::NAMESPACE,
+        global: camera_fx::GLOBAL,
+        table_va: camera_fx::TABLE_VA,
+        required: camera_fx::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: sys_module::NAMESPACE,
+        global: sys_module::GLOBAL,
+        table_va: sys_module::TABLE_VA,
+        required: sys_module::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: face::NAMESPACE,
+        global: face::GLOBAL,
+        table_va: face::TABLE_VA,
+        required: face::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: airstrike::NAMESPACE,
+        global: airstrike::GLOBAL,
+        table_va: airstrike::TABLE_VA,
+        required: airstrike::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: ai::NAMESPACE,
+        global: ai::GLOBAL,
+        table_va: ai::TABLE_VA,
+        required: ai::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: socket::NAMESPACE,
+        global: socket::GLOBAL,
+        table_va: socket::TABLE_VA,
+        required: socket::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: string_ext::NAMESPACE,
+        global: string_ext::GLOBAL,
+        table_va: string_ext::TABLE_VA,
+        required: string_ext::REQUIRED,
+    },
+    NamespaceMeta {
+        namespace: table_ext::NAMESPACE,
+        global: table_ext::GLOBAL,
+        table_va: table_ext::TABLE_VA,
+        required: table_ext::REQUIRED,
+    },
+];
+
 impl NsCoverage {
     pub fn required_count(&self) -> usize {
         self.required.len()
