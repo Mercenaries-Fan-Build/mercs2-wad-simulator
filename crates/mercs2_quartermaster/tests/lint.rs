@@ -786,3 +786,269 @@ fn the_language_rules_are_registered() {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// M0300 / M0301 / M0302 — Lua source rules
+// ---------------------------------------------------------------------------
+
+/// Write a Shipment scratch directory with the given file entries, using a per-test unique root
+/// under `%TEMP%` so parallel `cargo test` runs do not step on each other. Removes and recreates
+/// the root each call.
+fn scratch(label: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let root = std::env::temp_dir()
+        .join(format!("qm_lint_lua_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("scratch");
+    for (rel, body) in files {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("scratch parent");
+        }
+        std::fs::write(&path, body).expect("write scratch");
+    }
+    root
+}
+
+/// A Shipment whose add_script registers itself as a mission (its name shows up as an
+/// `sModuleName = "…"` in a `patch_lua mrxmissionflow` append) but whose source does not
+/// `inherit("MrxTaskContract")` is M0300. This is [[custom-mission-inherit-mrxtask-required]] —
+/// the FioDef001 support-drop bug caught before it ships.
+#[test]
+fn m0300_fires_on_a_mission_add_script_missing_inherit() {
+    let module_body = "\
+-- Missing inherit here; without it, oMission:IsActive resolves to nil.
+function LoadAssets(self, tSaveData)
+end
+function Activated(self)
+end
+function Cleanup(self)
+end
+";
+    let register_body = "\
+tMissionData['FioDef001'] = {
+  sModuleName = 'FioDef001',
+  sFactionId = 'Pmc',
+  bContract = true,
+}
+";
+    let root = scratch(
+        "m0300_fires",
+        &[
+            ("src/fiodef001.lua", module_body),
+            ("src/register.lua", register_body),
+        ],
+    );
+    let m = shipment_with(
+        "  - kind: add_script
+    name: FioDef001
+    source: src/fiodef001.lua
+  - kind: patch_lua
+    target: mrxmissionflow
+    append: src/register.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0300").collect();
+    assert_eq!(found.len(), 1, "{diags:?}");
+    assert_eq!(found[0].severity, Severity::Error);
+    assert!(lint::blocks_build(&diags), "M0300 must block the build");
+    assert!(
+        found[0].message.contains("FioDef001"),
+        "message must name the module: {}",
+        found[0].message
+    );
+    assert_eq!(
+        found[0].fix.as_deref(),
+        Some("inherit(\"MrxTaskContract\")"),
+        "the fix is a concrete inherit call the modder can paste in"
+    );
+}
+
+/// The same shape with a proper `inherit("MrxTaskContract")` at the top is quiet. Every retail
+/// contract / job script writes this line, so a rule that fired here would fire on the shipping
+/// game.
+#[test]
+fn m0300_is_quiet_when_the_add_script_inherits_mrxtask() {
+    let module_body = "\
+inherit(\"MrxTaskContract\")
+function LoadAssets(self, tSaveData)
+end
+function Activated(self)
+end
+function Cleanup(self)
+end
+";
+    let register_body = "\
+tMissionData['FioDef001'] = {
+  sModuleName = 'FioDef001',
+  bContract = true,
+}
+";
+    let root = scratch(
+        "m0300_quiet",
+        &[
+            ("src/fiodef001.lua", module_body),
+            ("src/register.lua", register_body),
+        ],
+    );
+    let m = shipment_with(
+        "  - kind: add_script
+    name: FioDef001
+    source: src/fiodef001.lua
+  - kind: patch_lua
+    target: mrxmissionflow
+    append: src/register.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0300"),
+        "{diags:?}"
+    );
+}
+
+/// An `add_script` that ships a helper library — no `sModuleName` reference in this Shipment's
+/// Lua — is not a mission, so M0300 must not fire on it. A rule that flagged every AddScript
+/// would refuse a bespoke utility module.
+#[test]
+fn m0300_stays_quiet_on_a_non_mission_add_script() {
+    let root = scratch(
+        "m0300_non_mission",
+        &[(
+            "src/util.lua",
+            "function ClampToRange(x, lo, hi) return math.max(lo, math.min(hi, x)) end\n",
+        )],
+    );
+    let m = shipment_with(
+        "  - kind: add_script
+    name: my_util
+    source: src/util.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0300"),
+        "helper libs are not missions: {diags:?}"
+    );
+}
+
+/// A Shipment whose Lua calls `Event.Create(` directly leaks the handle: `MrxTask.DestroyEvents`
+/// on Cleanup cannot delete an event that was never inserted into `self._tEvents`. M0301 flags
+/// each call with a (line, col) anchor so the modder can jump to the site.
+#[test]
+fn m0301_fires_on_bare_event_create() {
+    let body = "\
+inherit(\"MrxTaskContract\")
+function Activated(self)
+  local uHandle = Event.Create(Event.TimerRelative, {5}, DoStuff, {self})
+  local uPersist = Event.CreatePersistent(Event.ScriptEvent, {'x'}, F, {self})
+end
+";
+    let root = scratch("m0301_fires", &[("src/mission.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: MyMission
+    source: src/mission.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0301").collect();
+    assert_eq!(found.len(), 2, "one hit per call: {diags:?}");
+    assert!(found.iter().all(|d| d.severity == Severity::Error));
+    assert!(
+        found.iter().any(|d| d.message.contains("Event.CreatePersistent(")),
+        "persistent variant is named explicitly (survives level transitions): {found:?}"
+    );
+    assert!(lint::blocks_build(&diags));
+}
+
+/// The safe form — `self:_CreateEvent(…)` / `self:_CreatePersistentEvent(…)` — is not caught,
+/// because `_CreateEvent` is a method on `MrxTask` and inserts the handle into `self._tEvents`
+/// before returning it. Every retail contract / job uses this form; a rule that flagged it would
+/// fire on all of them.
+#[test]
+fn m0301_is_quiet_on_the_self_createevent_form() {
+    let body = "\
+inherit(\"MrxTaskContract\")
+function Activated(self)
+  self:_CreateEvent(Event.TimerRelative, {5}, DoStuff, {self})
+  self:_CreatePersistentEvent(Event.ScriptEvent, {'x'}, F, {self})
+end
+";
+    let root = scratch("m0301_quiet", &[("src/mission.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: MyMission
+    source: src/mission.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0301"),
+        "self:_CreateEvent must be silent: {diags:?}"
+    );
+}
+
+/// A Shipment's Lua writes to `_G.<name>` or `_MODULES[<name>]` at file scope — either pollutes
+/// the global environment or reaches into another module's namespace. Both are the M0302
+/// class — the `__newindex` on `_G` crash at `0x0059C82A` is the concrete failure this exists to
+/// keep out of the shipped ecosystem.
+#[test]
+fn m0302_fires_on_g_and_modules_writes() {
+    let body = "\
+inherit(\"MrxTaskContract\")
+_G.MyGlobal = 42
+_MODULES['MrxTaskContract'] = { hacked = true }
+_MODULES.MrxPmc = nil
+";
+    let root = scratch("m0302_fires", &[("src/mission.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: MyMission
+    source: src/mission.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0302").collect();
+    assert_eq!(found.len(), 3, "one hit per write: {diags:?}");
+    assert!(found.iter().all(|d| d.severity == Severity::Error));
+    assert!(
+        found.iter().any(|d| d.message.contains("_G.MyGlobal")),
+        "the _G. hit names the exact identifier: {found:?}"
+    );
+    assert!(lint::blocks_build(&diags));
+}
+
+/// A comparison like `if _G.foo == nil then` is a READ, not a write, and must not be flagged —
+/// the rule scans for `= ` not `==`. Similarly a legitimate module-local write (`tEvents =
+/// tEvents or {}` in module scope) is silent: it targets the module's own env, not `_G`.
+#[test]
+fn m0302_is_quiet_on_reads_and_module_locals() {
+    let body = "\
+inherit(\"MrxTaskContract\")
+if _G.OptionalHook == nil then return end
+if _MODULES.MrxPmc then Debug.Printf('ok') end
+tEvents = tEvents or {}
+local uHandle = self:_CreateEvent(Event.TimerRelative, {1}, F, {self})
+";
+    let root = scratch("m0302_quiet", &[("src/mission.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: MyMission
+    source: src/mission.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0302"),
+        "reads and module-scoped writes must stay silent: {diags:?}"
+    );
+}
+
+/// Every new rule is registered, so `qm rules` can list them.
+#[test]
+fn the_lua_source_rules_are_registered() {
+    for code in ["M0300", "M0301", "M0302"] {
+        assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
+    }
+}

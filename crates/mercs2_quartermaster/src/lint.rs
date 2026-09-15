@@ -228,6 +228,44 @@ pub const M0202_COLLISION_ON_SKINNED: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_model",
 };
 
+/// An `add_script` whose Lua registers itself as a mission (its `name` appears as an
+/// `sModuleName = "…"` in a `tMissionData` row shipped by this Shipment, or a hook it emits) but
+/// whose top-level does not `inherit("MrxTask…")`. The engine's `_ModuleLoaded`
+/// ([mrxtask.lua:294](../mercs2-luacd/src/resident/mrxtask.lua)) replaces `oMission`'s metatable
+/// with `{__index = <this module>}` at contract activation; missing inherit → `oMission:IsActive`,
+/// `:Configure`, `:SaveInstance`, `:Cleanup` all resolve to nil, `RefreshAllPdaMissionDetails`
+/// crashes on the first `:IsActive()`, the containing pcall unwinds, and the game degrades
+/// silently (fuel deducted, delivery never fires — [[custom-mission-inherit-mrxtask-required]]).
+pub const M0300_MISSION_ADD_SCRIPT_NO_INHERIT: Rule = Rule {
+    code: "M0300",
+    title: "an add_script that registers as a mission does not inherit an MrxTask subclass",
+    doc: "docs/modding/lua_engine_seam_hardening.md",
+};
+
+/// A Shipment's Lua calls `Event.Create` / `Event.CreatePersistent` directly rather than through
+/// `MrxTask`'s `self:_CreateEvent(…)` / `self:_CreatePersistentEvent(…)`. The direct handle is
+/// not tracked by the task's `_tEvents` set, so `MrxTask.DestroyEvents(self)` cannot delete it —
+/// the callback keeps firing after mission Cleanup, capturing `self` past the mission's lifetime.
+/// `Event.CreatePersistent` is worse: it survives level transitions forever. See
+/// `docs/modding/lua_engine_seam_hardening.md#f7--event--callback-handle-leaks`.
+pub const M0301_BARE_EVENT_CREATE: Rule = Rule {
+    code: "M0301",
+    title: "Event.Create called directly instead of through self:_CreateEvent",
+    doc: "docs/modding/lua_engine_seam_hardening.md",
+};
+
+/// A Shipment's Lua writes to `_G.<name>` or `_MODULES[<name>]` at file scope — either directly
+/// pollutes the global environment or reaches into another module's namespace. Both surface as
+/// silent breakage: the engine's own writes to `_G` (via `dynamic_import`) crash a `__newindex`
+/// meta-hook at `0x0059C82A` (`docs/dlc_mission_loading.md`), and a module clobbered through
+/// `_MODULES` continues to be `import`ed but with unpredictable state. See
+/// `docs/modding/lua_engine_seam_hardening.md#qm--compile-time-correct-by-construction`.
+pub const M0302_GLOBAL_SHADOWING: Rule = Rule {
+    code: "M0302",
+    title: "Shipment Lua writes to _G or _MODULES — engine-state clobber",
+    doc: "docs/modding/lua_engine_seam_hardening.md",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -264,6 +302,9 @@ pub const RULES: &[Rule] = &[
     M0191_SHARED_STRING_TABLE,
     M0200_LANGUAGE_NAME_UNUSABLE,
     M0201_LANGUAGE_NO_SELECTOR,
+    M0300_MISSION_ADD_SCRIPT_NO_INHERIT,
+    M0301_BARE_EVENT_CREATE,
+    M0302_GLOBAL_SHADOWING,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -857,6 +898,8 @@ pub fn lint(
     }
 
     if let Some(root) = root {
+        out.extend(lua_source_checks(manifest, root));
+
         for issue in discover::check_sources(manifest, root) {
             let (rule, severity, at) = match &issue {
                 SourceIssue::Missing { index, .. } => {
@@ -1158,6 +1201,372 @@ pub fn lint(
 /// Gate on this, never on a printed count (standing mandate).
 pub fn blocks_build(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity >= Severity::Error)
+}
+
+/// The MrxTask class family. An `add_script` that registers as a mission (its name is an
+/// `sModuleName` in this Shipment's Lua) must `inherit` one of these — every retail contract
+/// and job script does, from `pmccon001` (`inherit("MrxTaskContract")`) through the outpost /
+/// verify-set / destroy-set / destroy-type variants (`docs/mercs2-luacd/03_contracts_jobs.md`).
+/// A missing inherit is the [[custom-mission-inherit-mrxtask-required]] failure.
+const MRXTASK_BASES: &[&str] = &[
+    "MrxTask",
+    "MrxTaskMission",
+    "MrxTaskJob",
+    "MrxTaskContract",
+    "MrxTaskContractOutpost",
+    "MrxTaskJobVerifySet",
+    "MrxTaskJobDestroySet",
+    "MrxTaskJobDestroyType",
+    "MrxTaskObjective",
+    "MrxTaskObjectiveDeliver",
+    "MrxTaskObjectiveDestroy",
+    "MrxTaskObjectiveEnterVehicle",
+    "MrxTaskObjectiveVerify",
+    "MrxTaskObjectiveAction",
+    "MrxTaskRace",
+];
+
+/// Return true if a Lua source contains `inherit("<any MrxTask class>")` — matched literally
+/// because retail scripts spell it as one line, unambiguously (`inherit("MrxTaskContract")`).
+/// Comments and string-inside-comments are not stripped: the rule is conservative — a shipped
+/// script that lints as compliant must actually inherit; a comment mention is not enough. The
+/// modder is 3 characters away from making it a real call.
+fn inherits_mrxtask(source: &str) -> bool {
+    for base in MRXTASK_BASES {
+        let single = format!("inherit(\"{base}\"");
+        let double = format!("inherit('{base}'");
+        if source.contains(&single) || source.contains(&double) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Every `sModuleName = "<name>"` in a Lua source. This is how retail's `tMissionData` rows point
+/// at the script that implements a mission — a `patch_lua mrxmissionflow` append that adds a row
+/// like `tMissionData["FioDef001"] = { sModuleName = "FioDef001", ... }` names the AddScript
+/// that must inherit MrxTask.
+///
+/// Simple character-walking scan: no regex dependency, and the field name is distinctive enough
+/// to have no false-positive class in shipped Lua (verified across `docs/mercs2-luacd/`).
+fn scan_module_names(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let key = b"sModuleName";
+    let mut i = 0;
+    while i + key.len() < bytes.len() {
+        if &bytes[i..i + key.len()] != key {
+            i += 1;
+            continue;
+        }
+        // Skip past the key.
+        let mut j = i + key.len();
+        // Skip whitespace.
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b'=' {
+            i = j;
+            continue;
+        }
+        j += 1;
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+            j += 1;
+        }
+        if j >= bytes.len() || !matches!(bytes[j], b'"' | b'\'') {
+            i = j;
+            continue;
+        }
+        let quote = bytes[j];
+        j += 1;
+        let start = j;
+        while j < bytes.len() && bytes[j] != quote && bytes[j] != b'\n' {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == quote {
+            if let Ok(name) = std::str::from_utf8(&bytes[start..j]) {
+                if !name.is_empty() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// One byte offset in a Lua source, translated to a `(line, col)` for a human-readable diagnostic.
+/// Both 1-indexed, following the convention `qm build`'s Lua errors use.
+fn line_col(source: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for (i, ch) in source.char_indices() {
+        if i >= byte_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Every occurrence of `Event.Create(` or `Event.CreatePersistent(` in a Lua source, returning
+/// (line, col, kind) for each. Matches greedily on the literal form the shipped scripts use —
+/// `Event . Create ( ... )` with arbitrary whitespace is uncommon in retail (0 hits across the
+/// decompiled corpus) but if a modder writes it that way we deliberately do not catch it: the
+/// rule targets the readable form, and a workaround that goes out of its way to hide from the
+/// linter is on the author, not us.
+fn scan_event_create(source: &str) -> Vec<(usize, usize, &'static str)> {
+    let mut out = Vec::new();
+    for needle in ["Event.CreatePersistent(", "Event.Create("] {
+        let mut start = 0;
+        while let Some(off) = source[start..].find(needle) {
+            let abs = start + off;
+            // Deduplicate: `Event.CreatePersistent(` also matches `Event.Create(` as a prefix,
+            // so once we record it for the persistent match, skip past it before falling through
+            // to the shorter needle.
+            let (line, col) = line_col(source, abs);
+            let kind = if needle.starts_with("Event.CreatePersistent") {
+                "Event.CreatePersistent"
+            } else {
+                // Refuse to double-report the SAME byte offset the persistent scan already reported.
+                if out.iter().any(|(l, c, _)| *l == line && *c == col) {
+                    start = abs + needle.len();
+                    continue;
+                }
+                "Event.Create"
+            };
+            out.push((line, col, kind));
+            start = abs + needle.len();
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every top-level write to `_G.<name>`, `_MODULES.<name>`, or `_MODULES[<expr>]` in a Lua
+/// source. Reads the source line-by-line and looks for the pattern at any position — a write
+/// nested inside a function is still a write. Returns (line, col, target) tuples.
+///
+/// `_G.<name> = …` writes to the global environment, competing with the engine's own globals
+/// and, worse, tripping the `__newindex` crash at `0x0059C82A` if a mod later installs one
+/// (`docs/dlc_mission_loading.md`). `_MODULES[<name>] = …` overwrites another module's table,
+/// bypassing every `import()`er of that module.
+fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Find the start of a potential match.
+        let rest = &bytes[i..];
+        let (kind, base_len) = if rest.starts_with(b"_G.") {
+            ("_G", 3usize)
+        } else if rest.starts_with(b"_MODULES.") {
+            ("_MODULES.", 9usize)
+        } else if rest.starts_with(b"_MODULES[") {
+            ("_MODULES[", 9usize)
+        } else {
+            i += 1;
+            continue;
+        };
+        // The prior character must not be `[A-Za-z0-9_]` — otherwise we matched inside a longer
+        // identifier like `MY_MODULES.foo` or a table field lookup.
+        if i > 0 {
+            let prev = bytes[i - 1];
+            if prev == b'_' || prev.is_ascii_alphanumeric() {
+                i += 1;
+                continue;
+            }
+        }
+        // Skip past the base plus its name / bracketed expression.
+        let mut j = i + base_len;
+        if kind == "_MODULES[" {
+            // Walk to the closing bracket.
+            let mut depth = 1;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+        } else {
+            // `_G.name` / `_MODULES.name` — walk over the identifier.
+                while j < bytes.len()
+                    && (bytes[j] == b'_'
+                        || bytes[j].is_ascii_alphanumeric()
+                        || bytes[j] == b'.')
+                {
+                    j += 1;
+                }
+        }
+        // Skip whitespace, then check for `=` (not `==`).
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'=' && bytes.get(j + 1) != Some(&b'=') {
+            let (line, col) = line_col(source, i);
+            let target = std::str::from_utf8(&bytes[i..j])
+                .unwrap_or("(non-utf8)")
+                .trim()
+                .to_string();
+            out.push((line, col, target));
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// Read a Lua source file. On error, produces no diagnostic — [`M0110_SOURCE_MISSING`] already
+/// reports missing / unreadable sources; adding a second complaint would be noise.
+fn read_lua(root: &Path, rel: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(rel)).ok()
+}
+
+/// The three Lua-source rules — M0300 / M0301 / M0302. Read every `add_script` / `patch_lua` /
+/// `replace_lua` source in the Shipment, scan for the danger patterns, emit diagnostics.
+///
+/// Runs only when [`lint`] has a `root` — the hermetic manifest-only pass has no files to read.
+/// Every finding is anchored to a `(line, col)` in the emitted message so a modder can jump to
+/// the exact site from their editor.
+fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+
+    // First pass: collect the set of `sModuleName = "…"` names referenced anywhere in this
+    // Shipment's Lua. Used by the M0300 check below. Also builds the (index, name, path) list of
+    // AddScripts.
+    let mut referenced_module_names: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    let mut add_scripts: Vec<(usize, &str, &Path)> = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        match c {
+            Contribution::AddScript { name, source } => {
+                add_scripts.push((index, name.as_str(), source.as_path()));
+                if let Some(src) = read_lua(root, source) {
+                    for m in scan_module_names(&src) {
+                        referenced_module_names.insert(m);
+                    }
+                }
+            }
+            Contribution::PatchLua { append, .. } => {
+                if let Some(src) = read_lua(root, append) {
+                    for m in scan_module_names(&src) {
+                        referenced_module_names.insert(m);
+                    }
+                }
+            }
+            Contribution::ReplaceLua { source, .. } => {
+                if let Some(src) = read_lua(root, source) {
+                    for m in scan_module_names(&src) {
+                        referenced_module_names.insert(m);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // M0300: every AddScript whose name is referenced as an sModuleName in this Shipment's Lua
+    // must inherit an MrxTask subclass at the top of its own source.
+    for (index, name, source_path) in &add_scripts {
+        if !referenced_module_names.contains(*name) {
+            continue;
+        }
+        let Some(src) = read_lua(root, source_path) else {
+            continue;
+        };
+        if !inherits_mrxtask(&src) {
+            out.push(Diagnostic {
+                rule: M0300_MISSION_ADD_SCRIPT_NO_INHERIT,
+                severity: Severity::Error,
+                message: format!(
+                    "add_script {name:?} is referenced by a `sModuleName = \"{name}\"` \
+                     registration in this Shipment, so at contract activation the engine's \
+                     `_ModuleLoaded` will replace `oMission`'s metatable with `{{__index = <this \
+                     module>}}`. Without an `inherit(\"MrxTaskContract\")` (or `MrxTaskMission` \
+                     / `MrxTaskJob` / `MrxTaskContractOutpost` / …) at the top of {source}, \
+                     `oMission:IsActive`, `:Configure`, `:SaveInstance`, `:Cleanup` all resolve \
+                     to nil. `RefreshAllPdaMissionDetails` will call `:IsActive()` on every \
+                     support drop, unwind the surrounding pcall, and the game degrades silently \
+                     (fuel deducted, delivery never fires). Add one of these lines at the top of \
+                     the module: {suggestions}.",
+                    source = source_path.display(),
+                    suggestions = MRXTASK_BASES
+                        .iter()
+                        .take(4)
+                        .map(|b| format!("`inherit(\"{b}\")`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                at: Some(*index),
+                fix: Some("inherit(\"MrxTaskContract\")".to_string()),
+            });
+        }
+    }
+
+    // M0301 and M0302: scan every Lua source in the Shipment.
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let (rel, kind_label): (&Path, &str) = match c {
+            Contribution::AddScript { source, .. } => (source.as_path(), "add_script"),
+            Contribution::PatchLua { append, .. } => (append.as_path(), "patch_lua"),
+            Contribution::ReplaceLua { source, .. } => (source.as_path(), "replace_lua"),
+            _ => continue,
+        };
+        let Some(src) = read_lua(root, rel) else {
+            continue;
+        };
+
+        for (line, col, kind) in scan_event_create(&src) {
+            out.push(Diagnostic {
+                rule: M0301_BARE_EVENT_CREATE,
+                severity: Severity::Error,
+                message: format!(
+                    "{kind}( called directly at {rel}:{line}:{col} in this {kind_label} \
+                     contribution. The handle returned by a direct `Event.Create` is not \
+                     tracked by any `MrxTask._tEvents` set, so `DestroyEvents(self)` on mission \
+                     Cleanup cannot delete it — the callback keeps firing against a torn-down \
+                     mission, capturing `self` past the mission's lifetime. \
+                     `Event.CreatePersistent` is worse: it survives level transitions. Call it \
+                     through `self:_CreateEvent(nEventId, tArgs, fCallback, tCallbackArgs)` (or \
+                     `self:_CreatePersistentEvent(…)`) instead — MrxTask's inherited helper \
+                     table-inserts the handle so Cleanup can drain it.",
+                    rel = rel.display(),
+                ),
+                at: Some(index),
+                fix: Some("self:_CreateEvent(...)".to_string()),
+            });
+        }
+
+        for (line, col, target) in scan_global_writes(&src) {
+            let sink = if target.starts_with("_G") {
+                "the global environment"
+            } else {
+                "another module's table"
+            };
+            out.push(Diagnostic {
+                rule: M0302_GLOBAL_SHADOWING,
+                severity: Severity::Error,
+                message: format!(
+                    "top-level write to `{target}` at {rel}:{line}:{col} in this {kind_label} \
+                     contribution. Assigning to {sink} at file scope silently competes with the \
+                     engine's own writes (`dynamic_import` targets `_G`, `_SYS._IMPORT` targets \
+                     `_MODULES`) — a `__newindex` set later on either can crash at \
+                     `0x0059C82A`. Keep module state module-scoped (a plain local or a table \
+                     under this module's own name).",
+                    rel = rel.display(),
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
+    }
+
+    out
 }
 
 /// Cheap edit-distance-1-ish suggestion for a misspelled key. Deliberately conservative: it only
