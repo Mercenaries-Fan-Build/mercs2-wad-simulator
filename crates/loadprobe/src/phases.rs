@@ -172,6 +172,36 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // full-tree walk gate (validate_multi_wrapper_chain) proves every relocated pointer lands in-bounds.
     KnownEip { eip: 0x0248C0E9, label: "Havok PHY2 wrapper relocator — authored-wrapper pointer fault (base + garbage offset); merged BV-tree wrapper is the fix", teardown: false },
     KnownEip { eip: 0x0248C15A, label: "Havok PHY2 wrapper relocator — authored-wrapper pointer fault (base + garbage offset); merged BV-tree wrapper is the fix", teardown: false },
+    // 0x00868AEA / 0x00868611: retail Lua VM state-reader "victim" EIPs. When an external ASI hooks
+    // lua_pcall (retail entry 0x0085DF50 — verified via disassembly) without a strictly correct
+    // register+stack contract, retail's own Lua VM eventually reads a corrupted `L`/`TValue` and
+    // AVs at one of these two sites. NOT retail bugs — retail is doing legitimate 32-bit pointer
+    // arithmetic on inputs an external hook was supposed to supply cleanly. Both were historically
+    // triggered by iterations of pmc_bb/mod_crash_hook.c during the 2026-09 seam-hardening work.
+    //
+    //   0x00868AEA: inside luaD_pcall (fn entry 0x00868AD0; called by retail lua_pcall @0x0085DF97).
+    //               Instruction: `mov edi, [esi+0x60]` where ESI=L. AV when the hook clobbered EAX
+    //               (=L in retail's LTCG-specialised lua_pcall convention) before jumping into the
+    //               trampoline, so retail entered luaD_pcall with a garbage `L`. Historic: pmc_bb
+    //               v1/v2 mod_crash_hook — cdecl detour body clobbered EAX. Fixed 2026-09 in v4 by
+    //               a naked-stub wrapper that preserves all input registers verbatim.
+    //
+    //   0x00868611: inside a Lua VM helper at fn entry 0x00868610. Instruction: `cmp [eax+4], 6`
+    //               — the LUA_TFUNCTION type-tag check on a TValue* in EAX. AV when the hook did
+    //               NOT re-push retail's one stack arg (`nargs`) before calling the trampoline,
+    //               so retail's `push ebp; mov ebp, esp; mov eax, [ebp+8]` read the hook's own
+    //               return address as nargs — lua_pcall then computed a bogus function-slot offset
+    //               via `lea ecx, [eax*8+8]`, luaD_pcall's setjmp caught the internal error, and
+    //               after 2-3 rounds a corrupted L->top surfaced here on the next Lua VM read.
+    //               Historic: pmc_bb v3 mod_crash_hook — naked stub without nargs re-push. Fixed
+    //               2026-09 in v4 by `pushl 4(%esp)` before the trampoline call + `addl $4, %esp`
+    //               after. See tools/pmc_blackbox/mod_crash_hook.c and commit 0a41fbf on branch
+    //               lua-seam-hardening.
+    //
+    // If either recurs: first suspect is a new lua_pcall MinHook detour (any external Lua-hook
+    // wrapper) whose stack/register contract doesn't match retail's specialised convention.
+    KnownEip { eip: 0x00868AEA, label: "retail luaD_pcall reads L->0x60 (fn 0x00868AD0) — external lua_pcall hook clobbered EAX=L (historic: pmc_bb v1/v2 mod_crash_hook, fixed 2026-09 v4)", teardown: false },
+    KnownEip { eip: 0x00868611, label: "retail Lua VM state-walker reads TValue.tt (cmp [eax+4],6 — LUA_TFUNCTION; fn 0x00868610) — external lua_pcall hook shifted the stack, retail read return-addr as nargs (historic: pmc_bb v3 mod_crash_hook, fixed 2026-09 v4)", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
