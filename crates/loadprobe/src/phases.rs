@@ -94,6 +94,7 @@ pub static KNOWN_SOURCES: &[&str] = &[
     "lua", "world", "pool", "blackbox", "compat", "lualog",
     "crash", "mtrl", "cc", "stall", "seg", "prmg", "prmg-bw", "prmg-key", "prmg-key2", "heap",
     "raw",
+    "mod-crash", "trace-base", "trace-fault",
 ];
 
 pub fn is_known_source(s: &str) -> bool {
