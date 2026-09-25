@@ -71,6 +71,53 @@ enum Command {
         /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
+        /// Also write the findings as JSON (lint-report.json) to this file. Any older file there is
+        /// removed first; when lint cannot run (exit 2), no report is written.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
+    },
+    /// Check version ranges with the same semver grammar qm applies to manifest ranges (M0172).
+    /// Hermetic: no Shipment, no game, no network.
+    ///
+    /// Put the ranges after `--`, so that no range can be read as an option. Exit 0: every range
+    /// parses. Exit 1: at least one does not (the report has one M0172 finding per bad range).
+    /// Exit 2: nothing was checked (no ranges, or the report could not be written), and no report
+    /// is left behind.
+    CheckRange {
+        /// Where to write range-report.json. Any older file there is removed first.
+        #[arg(long, value_name = "FILE")]
+        report: PathBuf,
+        /// The ranges, e.g. ">=0.7, <1" "^1.0.0".
+        ranges: Vec<String>,
+    },
+    /// Print a manifest's Shipment name and version as one JSON object. Hermetic: parses and
+    /// validates the manifest file alone — no source files, no game.
+    ///
+    /// Exit 0: stdout is exactly `{"name": "<shipment.name>", "version": "<shipment.version>"}`.
+    /// Exit 2: the file cannot be read, has no manifest extension (yaml, yml, json, toml), does not
+    /// parse, or fails validation; the reason goes to stderr and stdout is empty.
+    ManifestInfo {
+        /// The manifest file.
+        manifest: PathBuf,
+    },
+    /// Compile Lua files with the game's Lua compiler and check each chunk's LuaQ header.
+    ///
+    /// Each file is compiled under a bare chunk name: --chunk-name, or the file stem. With --out-dir
+    /// the bytecode is written to <dir>/<chunk>.luac, read back and its header checked. Prints
+    /// `ok <file> <bytes> <sha256>` per file. Exit 0: all compiled and verified. Exit 1: a syntax
+    /// error, or a name that is not a bare chunk name. Exit 2: could not run (a file missing,
+    /// unreadable or not UTF-8, --chunk-name with several files, an unwritable output, or a header
+    /// mismatch, which is a toolchain defect).
+    CompileLua {
+        /// The `.lua` files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// The chunk name, instead of the file stem. Only with exactly one file.
+        #[arg(long, value_name = "NAME")]
+        chunk_name: Option<String>,
+        /// Write each chunk to <dir>/<chunk>.luac and verify it from disk.
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
     },
     /// Build a Shipment into an overlay WAD. Needs the retail WADs.
     Build {
@@ -80,7 +127,7 @@ enum Command {
         /// Where the game is installed. Defaults to host discovery.
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// Output directory. Defaults to <shipment>/build.
+        /// Output directory. Defaults to <shipment>/_build.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
         /// The decompiled Lua corpus root, for script-touching contributions.
@@ -180,7 +227,21 @@ fn main() -> ExitCode {
             with_game,
             game,
             names,
-        } => cmd_lint(&shipment, with_game, game.as_deref(), names.as_deref()),
+            report,
+        } => cmd_lint(
+            &shipment,
+            with_game,
+            game.as_deref(),
+            names.as_deref(),
+            report.as_deref(),
+        ),
+        Command::CheckRange { report, ranges } => cmd_check_range(&report, &ranges),
+        Command::ManifestInfo { manifest } => cmd_manifest_info(&manifest),
+        Command::CompileLua {
+            files,
+            chunk_name,
+            out_dir,
+        } => cmd_compile_lua(&files, chunk_name.as_deref(), out_dir.as_deref()),
         Command::Build {
             shipment,
             game,
@@ -305,7 +366,15 @@ fn cmd_lint(
     with_game: bool,
     game_dir: Option<&Path>,
     names_path: Option<&Path>,
+    report_file: Option<&Path>,
 ) -> ExitCode {
+    // The stale report goes first, so every exit-2 path below leaves no report behind.
+    if let Some(file) = report_file {
+        if let Err(e) = plan::remove_stale_file(file) {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    }
     let shipment = match load(root) {
         Ok(s) => s,
         Err(code) => return code,
@@ -320,11 +389,193 @@ fn cmd_lint(
         }
     }
 
+    let blocked = lint::blocks_build(&found);
+    if let Some(file) = report_file {
+        let mut findings: Vec<plan::Finding> = found.iter().map(Diagnostic::to_finding).collect();
+        plan::sort_findings(&mut findings, |_| None);
+        let lint_report = plan::LintReport {
+            format: plan::REPORT_FORMAT,
+            producer: "lint",
+            quartermaster: compat::QUARTERMASTER_VERSION,
+            ok: !blocked,
+            manifest: &shipment.manifest,
+            findings,
+        };
+        if let Err(e) = plan::write_json(file, &lint_report, "the lint report") {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    }
+
     report(&shipment.manifest.shipment.name, &found);
-    if lint::blocks_build(&found) {
+    if blocked {
         ExitCode::from(EXIT_FINDINGS)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn cmd_manifest_info(path: &Path) -> ExitCode {
+    let unusable = |message: String| {
+        eprintln!("error: {}: {message}", path.display());
+        ExitCode::from(EXIT_UNUSABLE)
+    };
+    let Some(format) = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(mercs2_quartermaster::Format::from_extension)
+    else {
+        return unusable("-: not a manifest file — expected a .yaml, .yml, .json or .toml".into());
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return unusable(format!("-: reading the manifest: {e}")),
+    };
+    let manifest = match mercs2_quartermaster::from_str(&text, format) {
+        Ok(m) => m,
+        Err(ReadError::Validate(v)) => return unusable(format!("{}: {v}", v.code().unwrap_or("-"))),
+        Err(e @ ReadError::Parse { .. }) => return unusable(format!("-: {e}")),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "name": manifest.shipment.name,
+            "version": manifest.shipment.version,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// Compile each file; the exit code is the worst outcome across them, so every file is reported.
+fn cmd_compile_lua(files: &[PathBuf], chunk_name: Option<&str>, out_dir: Option<&Path>) -> ExitCode {
+    if chunk_name.is_some() && files.len() != 1 {
+        eprintln!(
+            "error: --chunk-name names one chunk, but {} files were given",
+            files.len()
+        );
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    let mut worst: u8 = 0;
+    for file in files {
+        let outcome = compile_one(file, chunk_name, out_dir);
+        match outcome {
+            Ok(line) => println!("{line}"),
+            Err((code, message)) => {
+                eprintln!("error: {}: {message}", file.display());
+                worst = worst.max(code);
+            }
+        }
+    }
+    ExitCode::from(worst)
+}
+
+/// One file: `Ok(the stdout line)` or `Err((exit code, message))`.
+fn compile_one(
+    file: &Path,
+    chunk_name: Option<&str>,
+    out_dir: Option<&Path>,
+) -> Result<String, (u8, String)> {
+    let bytes = std::fs::read(file).map_err(|e| (EXIT_UNUSABLE, format!("reading: {e}")))?;
+    let source = String::from_utf8(bytes)
+        .map_err(|e| (EXIT_UNUSABLE, format!("the file is not UTF-8: {e}")))?;
+    let chunk = match chunk_name {
+        Some(name) => name.to_string(),
+        None => file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                (
+                    EXIT_FINDINGS,
+                    "the file stem is not UTF-8, so it cannot be a chunk name".to_string(),
+                )
+            })?,
+    };
+    if let Some(why) = mercs2_quartermaster::link::chunk_name_refusal(&chunk) {
+        return Err((
+            EXIT_FINDINGS,
+            format!("{chunk:?} is not a bare chunk name: {why}"),
+        ));
+    }
+    let bytecode = mercs2_luac::compile(&source, &chunk).map_err(|e| match e {
+        mercs2_luac::CompileError::Syntax(m) => (EXIT_FINDINGS, m),
+        other => (EXIT_UNUSABLE, other.to_string()),
+    })?;
+    if let Some(dir) = out_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| (EXIT_UNUSABLE, format!("creating {}: {e}", dir.display())))?;
+        let path = dir.join(format!("{chunk}.luac"));
+        std::fs::write(&path, &bytecode)
+            .map_err(|e| (EXIT_UNUSABLE, format!("writing {}: {e}", path.display())))?;
+        let on_disk = std::fs::read(&path)
+            .map_err(|e| (EXIT_UNUSABLE, format!("reading back {}: {e}", path.display())))?;
+        mercs2_luac::check_header(&on_disk)
+            .map_err(|e| (EXIT_UNUSABLE, format!("{}: {e}", path.display())))?;
+        if on_disk != bytecode {
+            return Err((
+                EXIT_UNUSABLE,
+                format!("{} does not read back as the bytes written", path.display()),
+            ));
+        }
+    }
+    Ok(format!(
+        "ok {} {} {}",
+        file.display(),
+        bytecode.len(),
+        build::sha256_hex(&bytecode)
+    ))
+}
+
+fn cmd_check_range(report_file: &Path, ranges: &[String]) -> ExitCode {
+    // The stale report goes first, so every exit-2 path below leaves no report behind.
+    if let Err(e) = plan::remove_stale_file(report_file) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    if ranges.is_empty() {
+        eprintln!("error: give at least one range to check, after `--`");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    let findings: Vec<plan::Finding> = ranges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, range)| {
+            mercs2_quartermaster::manifest::parse_range(range)
+                .err()
+                .map(|message| plan::Finding {
+                    code: lint::M0172_BAD_VERSION_REQ.code,
+                    severity: FindingSeverity::Error,
+                    message,
+                    items: Vec::new(),
+                    refs: vec![plan::FindingRef {
+                        section: plan::Section::Ranges,
+                        index,
+                    }],
+                    fix: None,
+                })
+        })
+        .collect();
+    for f in &findings {
+        let index = f.refs[0].index;
+        eprintln!("[{}] error: ranges[{index}] {:?}: {}", f.code, ranges[index], f.message);
+    }
+    let ok = findings.is_empty();
+    let range_report = plan::RangeReport {
+        format: plan::REPORT_FORMAT,
+        producer: "check-range",
+        quartermaster: compat::QUARTERMASTER_VERSION,
+        ok,
+        findings,
+    };
+    if let Err(e) = plan::write_json(report_file, &range_report, "the range report") {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    if ok {
+        eprintln!("{} range(s): all valid", ranges.len());
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_FINDINGS)
     }
 }
 
@@ -525,11 +776,13 @@ fn open_items(items: &[RequestItem]) -> Result<Vec<LoadedShipment>, ExitCode> {
 /// Print a plan's findings, then a one-line verdict naming the file.
 fn report_plan(plan_: &LoadPlan, out: &Path) {
     for f in &plan_.findings {
-        let sev = match f.severity {
-            FindingSeverity::Warning => "warning",
-            FindingSeverity::Error => "error",
-        };
-        eprintln!("[{}] {sev}: {}: {}", f.code, f.items.join(", "), f.message);
+        eprintln!(
+            "[{}] {}: {}: {}",
+            f.code,
+            f.severity.as_str(),
+            f.items.join(", "),
+            f.message
+        );
     }
     eprintln!(
         "load plan {}: {} finding(s) → {}",
