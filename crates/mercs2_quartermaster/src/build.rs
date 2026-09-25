@@ -3544,173 +3544,12 @@ fn lower(
             })?))
         }
 
-        // Same-hash string-table edit. Reads the base container from the stack (like
-        // replace_texture reads a texture's dims), applies the author's key→text edits through the
-        // proven codec, and emits an overlay copy that wins by mount order.
-        Contribution::EditStringDb { target, strings } => {
-            let Some(game) = game else {
-                return Err(BuildError::GameRequired { index, kind });
-            };
-            let hash = crate::manifest::asset_hash(target);
-            let container = game
-                .container_for_asset(hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
-                .ok_or_else(|| BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{target:?} (0x{hash:08X}) is not a string table in the configured game \
-                         stack — check the spelling; a name that does not exist hashes to a lookup \
-                         that simply misses"
-                    ),
-                })?;
-
-            let text = std::fs::read_to_string(root.join(strings)).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", root.join(strings).display()),
-            })?;
-            let edits = parse_string_edits(&text).map_err(|m| BuildError::Lower {
-                index,
-                kind,
-                message: m,
-            })?;
-            if edits.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{} declares no edits — an edit_stringdb that changes nothing would ship a \
-                         same-hash overlay that only restates the base table",
-                        root.join(strings).display()
-                    ),
-                });
-            }
-
-            let edited = mercs2_formats::stringdb::edit_container(&container, &edits).map_err(|m| {
-                BuildError::Lower { index, kind, message: m }
-            })?;
-            log.push(format!(
-                "contributions[{index}] edit_stringdb {target} 0x{hash:08X}: {} key(s) edited, \
-                 container {} -> {} bytes",
-                edits.len(),
-                container.len(),
-                edited.len()
-            ));
-
-            // A stringdb is INFO/KEYS/STRS, not an opaque `data` leaf, so `build_wrapped_block`
-            // does not apply — the container is its own single-entry block.
-            let block = stringdb_block(hash, &edited)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowering::Block(block))
-        }
-
-        // Adds NEW keys to a shipped string table. Same container-emit shape as edit_stringdb --
-        // reads the base container, rebuilds with our added keys (heap grows, descriptors re-emit),
-        // ships as a same-hash overlay. Distinct kind from edit_stringdb so the claim graph sees
-        // "additive" vs "replace" as different intents.
-        Contribution::AddStringDbKeys { target, strings } => {
-            let Some(game) = game else {
-                return Err(BuildError::GameRequired { index, kind });
-            };
-            let hash = crate::manifest::asset_hash(target);
-            let container = game
-                .container_for_asset(hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
-                .ok_or_else(|| BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{target:?} (0x{hash:08X}) is not a string table in the configured game \
-                         stack — check the spelling"
-                    ),
-                })?;
-            let text = std::fs::read_to_string(root.join(strings)).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", root.join(strings).display()),
-            })?;
-            let adds = parse_string_edits(&text).map_err(|m| BuildError::Lower {
-                index,
-                kind,
-                message: m,
-            })?;
-            if adds.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{} declares no keys to add",
-                        root.join(strings).display()
-                    ),
-                });
-            }
-            let edited = mercs2_formats::stringdb::add_keys_to_container(&container, &adds)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            log.push(format!(
-                "contributions[{index}] add_stringdb_keys {target} 0x{hash:08X}: {} key(s) added, \
-                 container {} -> {} bytes",
-                adds.len(),
-                container.len(),
-                edited.len()
-            ));
-            let block = stringdb_block(hash, &edited)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowering::Block(block))
-        }
-
-        // Rewrite strings by exact-text match. Reads the container, applies each
-        // (old, new) pair via replace_exact_text, ships as a same-hash overlay.
-        Contribution::ReplaceStringDbText { target, pairs } => {
-            let Some(game) = game else {
-                return Err(BuildError::GameRequired { index, kind });
-            };
-            let hash = crate::manifest::asset_hash(target);
-            let container = game
-                .container_for_asset(hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
-                .ok_or_else(|| BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{target:?} (0x{hash:08X}) is not a string table in the configured game stack"
-                    ),
-                })?;
-            let text = std::fs::read_to_string(root.join(pairs)).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", root.join(pairs).display()),
-            })?;
-            let list = parse_text_pairs(&text, &pairs.display().to_string())
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            if list.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!("{} declares no pairs", root.join(pairs).display()),
-                });
-            }
-            let (edited, counts) =
-                mercs2_formats::stringdb::replace_text_in_container(&container, &list)
-                    .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            // A pair that matches nothing is an error: a fix that silently does nothing is the
-            // failure this kind exists to prevent.
-            let misses: Vec<&String> =
-                counts.iter().filter(|(_, n)| *n == 0).map(|(k, _)| k).collect();
-            if !misses.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: text_misses_message(shipment_name, target, &misses),
-                });
-            }
-            let hit_total: usize = counts.iter().map(|(_, n)| n).sum();
-            log.push(format!(
-                "contributions[{index}] replace_stringdb_text {target} 0x{hash:08X}: {hit_total} \
-                 row(s) rewritten across {} pair(s)",
-                counts.len()
-            ));
-            let block = stringdb_block(hash, &edited)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowering::Block(block))
-        }
+        // String tables are lowered after the loop, all of a Shipment's writes to one table
+        // together and in contribution order ([`merge_string_tables`], strict), so a later
+        // contribution sees an earlier one's edits and each table ships as ONE block.
+        Contribution::EditStringDb { .. }
+        | Contribution::AddStringDbKeys { .. }
+        | Contribution::ReplaceStringDbText { .. } => Ok(Lowering::Nothing),
 
         // A NEW language. Forks the base string table out of the stack (like edit_stringdb reads a
         // table), applies the translation, and RE-KEYS the container under the new language's own hash
@@ -4110,6 +3949,24 @@ pub fn build(
             } => files.push((name, relative, bytes)),
         }
     }
+    // String tables: every edit_stringdb / add_stringdb_keys / replace_stringdb_text of this
+    // Shipment, per table, in contribution order — the same code `qm link` merges a set with.
+    if let Some((index, c)) = manifest.contributions.iter().enumerate().find(|(_, c)| {
+        matches!(
+            c,
+            Contribution::EditStringDb { .. }
+                | Contribution::AddStringDbKeys { .. }
+                | Contribution::ReplaceStringDbText { .. }
+        )
+    }) {
+        let Some(game) = game.as_deref_mut() else {
+            return Err(BuildError::GameRequired {
+                index,
+                kind: c.kind(),
+            });
+        };
+        blocks.extend(merge_string_tables(&[shipment], game, StringMerge::Strict, &mut log)?);
+    }
     let mutations = script_mutations(manifest, &shipment.root)?;
     let ui_regs = ui_registrations(manifest);
     let layer_regs = layer_registrations(manifest);
@@ -4394,9 +4251,9 @@ pub fn build(
 
 /// The PTHS path of the single-entry block a string table ships in: `blocks\VZ\mod_<hash>.block`.
 ///
-/// One function for every producer of one — `edit_stringdb`, `add_stringdb_keys` and
-/// `replace_stringdb_text` lowering, and the link's merged table — so a merged table shadows the
-/// per-Shipment copies at exactly their path.
+/// One function for both producers of one — a Shipment's own build and the link, both through
+/// [`merge_string_tables`] — so the link's merged table shadows the per-Shipment copies at exactly
+/// their path.
 pub fn stringdb_block_path(table: u32) -> String {
     format!("blocks\\VZ\\mod_{table:08x}.block")
 }
@@ -4449,38 +4306,69 @@ pub fn link_block_paths<'a>(
         .collect()
 }
 
-/// One write the link applies to a merged string table, in load order.
-enum TableWrite {
-    /// `edit_stringdb` / `add_stringdb_keys`: set the key's text, adding the key if it is absent.
-    Key { key: u32, text: String },
-    /// `replace_stringdb_text`: every entry whose CURRENT text is exactly `old` — in the table as
-    /// merged so far — gets `new`. `shipment` is named when it matches nothing.
-    Text { old: String, new: String, shipment: String },
+/// How [`merge_string_tables`] treats key writes: the one difference between a Shipment's own
+/// build and the set-wide link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StringMerge {
+    /// `qm build` of ONE Shipment: an `edit_stringdb` key must exist in the table as edited so far,
+    /// an `add_stringdb_keys` key must not, and a file with no rows is refused. These are the rules
+    /// each kind has always had, now checked in contribution order.
+    Strict,
+    /// `qm link` of the set: every key write is an upsert, the later winning, with
+    /// no existence check — each Shipment's own build already applied [`StringMerge::Strict`].
+    Upsert,
 }
 
-/// Merge every Shipment's string-table writes into one table per target, in load order.
+/// Which kind of key write a row is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyWrite {
+    Edit,
+    Add,
+}
+
+/// One write to a string table, in order.
+enum TableWrite {
+    /// `edit_stringdb` / `add_stringdb_keys`: set the key's text. `label` is the key as written.
+    Key {
+        key: u32,
+        label: String,
+        text: String,
+        write: KeyWrite,
+        who: String,
+    },
+    /// `replace_stringdb_text`: every entry whose CURRENT text is exactly `old` — in the table as
+    /// edited so far — gets `new`. Matching nothing is an error naming `who`.
+    Text { old: String, new: String, who: String },
+}
+
+/// Apply string-table writes, in order, into one table per target. The ONE implementation of
+/// string-table lowering: `qm build` calls it for a single Shipment ([`StringMerge::Strict`]) and
+/// `qm link` for the whole set ([`StringMerge::Upsert`]).
 ///
 /// Each `edit_stringdb`, `add_stringdb_keys` and `replace_stringdb_text` of each Shipment in
-/// `shipments` (the plan's order), in contribution order, is applied to the base table:
+/// `shipments` (for the link, the plan's order), in contribution order, is applied to the base table
+/// as edited so far:
 ///
-/// * a key write goes by key hash ([`mercs2_formats::stringdb::key_hash`]) — a key that exists is
-///   overwritten, one that does not is added;
-/// * a text replacement resolves against the table AS MERGED SO FAR: every entry whose current text
-///   is exactly `old` becomes `new` ([`mercs2_formats::stringdb::StringDb::replace_exact_text`]).
+/// * a key write goes by key hash ([`mercs2_formats::stringdb::key_hash`]); how a missing or an
+///   existing key is treated is `mode`'s;
+/// * a text replacement changes every entry whose current text is exactly `old`
+///   ([`mercs2_formats::stringdb::StringDb::replace_exact_text`]), and matching nothing is an error
+///   naming the Shipment, the table and the text, in both modes.
 ///
-/// A later write wins. There is no existence check for keys — each Shipment's own build already
-/// refused an edit of a missing key and an addition of an existing one. A text pair that matches
-/// nothing in the table as merged so far is an error naming the Shipment, the table and the text,
-/// the same rule the per-Shipment lowering has.
+/// A later write wins. One block per table comes back ([`stringdb_block`]).
 fn merge_string_tables(
     shipments: &[&LoadedShipment],
     game: &mut GameStack,
+    mode: StringMerge,
     log: &mut Vec<String>,
 ) -> Result<Vec<PatchBlock>, BuildError> {
-    const KIND: &str = "link";
+    let stage: &'static str = match mode {
+        StringMerge::Strict => "string tables",
+        StringMerge::Upsert => "link",
+    };
     let fail = |message: String| BuildError::Lower {
         index: 0,
-        kind: KIND,
+        kind: stage,
         message,
     };
     let mut by_table: std::collections::BTreeMap<u32, (String, Vec<TableWrite>, Vec<String>)> =
@@ -4494,23 +4382,25 @@ fn merge_string_tables(
                 _ => continue,
             };
             let name = &s.manifest.shipment.name;
+            let who = format!("{name} contributions[{index}] ({})", c.kind());
             let path = s.root.join(file);
-            let text = std::fs::read_to_string(&path).map_err(|e| {
-                fail(format!(
-                    "{name} contributions[{index}] ({}): reading {}: {e}",
-                    c.kind(),
-                    path.display()
-                ))
-            })?;
-            // The same parsers the per-Shipment lowering uses: a pairs file for text replacements,
-            // a strings file for the key kinds.
-            let rows = match c {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| fail(format!("{who}: reading {}: {e}", path.display())))?;
+            // A pairs file for text replacements, a strings file for the key kinds.
+            let rows: Vec<(String, String)> = match c {
                 Contribution::ReplaceStringDbText { .. } => {
                     parse_text_pairs(&text, &file.display().to_string())
                 }
                 _ => parse_string_edits(&text).map(|m| m.into_iter().collect()),
             }
-            .map_err(|m| fail(format!("{name} contributions[{index}] ({}): {m}", c.kind())))?;
+            .map_err(|m| fail(format!("{who}: {m}")))?;
+            if mode == StringMerge::Strict && rows.is_empty() {
+                return Err(fail(format!(
+                    "{who}: {} declares nothing — a contribution that changes nothing would ship a \
+                     same-hash overlay that only restates the base table",
+                    file.display()
+                )));
+            }
             let entry = by_table
                 .entry(crate::manifest::asset_hash(target))
                 .or_insert_with(|| (target.clone(), Vec::new(), Vec::new()));
@@ -4519,11 +4409,18 @@ fn merge_string_tables(
                     Contribution::ReplaceStringDbText { .. } => TableWrite::Text {
                         old: left,
                         new: right,
-                        shipment: format!("{name} contributions[{index}]"),
+                        who: who.clone(),
                     },
                     _ => TableWrite::Key {
                         key: mercs2_formats::stringdb::key_hash(&left),
+                        label: left,
                         text: right,
+                        write: if matches!(c, Contribution::AddStringDbKeys { .. }) {
+                            KeyWrite::Add
+                        } else {
+                            KeyWrite::Edit
+                        },
+                        who: who.clone(),
                     },
                 });
             }
@@ -4538,32 +4435,50 @@ fn merge_string_tables(
             .container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
             .ok_or_else(|| {
                 fail(format!(
-                    "{target:?} (0x{table:08X}) is not a string table in the game stack, so there is \
-                     no base table to merge {} into",
+                    "{target:?} (0x{table:08X}) is not a string table in the game stack — check the \
+                     spelling; there is no base table for {} to edit",
                     contributors.join(", ")
                 ))
             })?;
         let merged = mercs2_formats::stringdb::apply_container(&container, |db| {
             for w in &writes {
                 match w {
-                    TableWrite::Key { key, text } => {
-                        if !db.set_by_hash(*key, text) {
-                            db.add_by_hash(*key, text);
+                    TableWrite::Key { key, label, text, write, who } => {
+                        let exists = db.set_by_hash(*key, text);
+                        match (mode, write, exists) {
+                            (StringMerge::Strict, KeyWrite::Edit, false) => {
+                                return Err(format!(
+                                    "{who}: {label} is not a key in {target} — check the spelling; \
+                                     the engine hashes the bracket key verbatim, so an unknown key \
+                                     is a lookup that simply misses. To add a key, use \
+                                     add_stringdb_keys"
+                                ))
+                            }
+                            (StringMerge::Strict, KeyWrite::Add, true) => {
+                                return Err(format!(
+                                    "{who}: {label} already exists in {target} — use \
+                                     edit_stringdb to overwrite, not add_stringdb_keys"
+                                ))
+                            }
+                            (_, _, true) => {}
+                            (_, _, false) => {
+                                db.add_by_hash(*key, text);
+                            }
                         }
                     }
-                    TableWrite::Text { old, new, shipment } => {
+                    TableWrite::Text { old, new, who } => {
                         if db.replace_exact_text(old, new) == 0 {
-                            return Err(text_misses_message(shipment, &target, &[old]));
+                            return Err(text_misses_message(who, &target, &[old]));
                         }
                     }
                 }
             }
             Ok(())
         })
-        .map_err(|m| fail(format!("merging {target:?} (0x{table:08X}): {m}")))?;
+        .map_err(|m| fail(format!("{target:?} (0x{table:08X}): {m}")))?;
         log.push(format!(
-            "merged string table {target} 0x{table:08X}: {} write(s) from {} in load order, \
-             container {} -> {} bytes",
+            "string table {target} 0x{table:08X}: {} write(s) from {} applied in order, container \
+             {} -> {} bytes",
             writes.len(),
             contributors.join(", "),
             container.len(),
@@ -4805,7 +4720,7 @@ pub fn link_installed(
 
     // The merged string tables. The plan's `link_block_paths` promised exactly these, and a deploy
     // step drops the per-Shipment copies of each on that promise, so a mismatch is an internal error.
-    let table_blocks = merge_string_tables(&shipments, game, &mut log)?;
+    let table_blocks = merge_string_tables(&shipments, game, StringMerge::Upsert, &mut log)?;
     let promised: Vec<String> = plan
         .link_block_paths
         .iter()
