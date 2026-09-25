@@ -179,8 +179,9 @@ pub struct LoadPlan {
     pub capabilities: Vec<CapabilityRow>,
     pub conflicts: Vec<ConflictRow>,
     pub supersedes: Vec<SupersededRow>,
-    /// The PTHS path of every block the link step owns.
-    pub script_block_paths: Vec<String>,
+    /// The PTHS path of every block `qm link` re-emits: the scripts blocks, then each merged string
+    /// table's block. A deploy step drops the per-Shipment copies of exactly these.
+    pub link_block_paths: Vec<String>,
     pub findings: Vec<Finding>,
 }
 
@@ -385,14 +386,34 @@ pub struct SupersededRow {
 }
 
 /// A finding's severity.
+///
+/// A load plan and a range report use only `warning` and `error`. `lint-report.json` uses all four,
+/// because it carries lint's own levels ([`crate::lint::Severity`]); it is one finding shape, not
+/// three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingSeverity {
+    Info,
     Warning,
     Error,
+    Hang,
 }
 
-/// The plan section a finding points into.
+impl FindingSeverity {
+    /// The wire spelling, for text output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingSeverity::Info => "info",
+            FindingSeverity::Warning => "warning",
+            FindingSeverity::Error => "error",
+            FindingSeverity::Hang => "hang",
+        }
+    }
+}
+
+/// The section a finding points into. The first five are load-plan sections; `contributions` is the
+/// manifest's list (`lint-report.json` only) and `ranges` the command's arguments
+/// (`range-report.json` only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Section {
@@ -401,6 +422,8 @@ pub enum Section {
     Requirements,
     Conflicts,
     Supersedes,
+    Contributions,
+    Ranges,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -418,15 +441,62 @@ pub struct Finding {
     pub message: String,
     pub items: Vec<String>,
     pub refs: Vec<FindingRef>,
-    /// Always `None` in a plan; only `lint` carries mechanical fixes.
+    /// Exact replacement text when the fix is mechanical. Only `lint` fills it; a plan and a range
+    /// report always write `null`.
     pub fix: Option<String>,
+}
+
+/// The `format` of `lint-report.json` and `range-report.json`. Unrelated to the manifest format.
+pub const REPORT_FORMAT: u32 = 1;
+
+/// `lint-report.json`: what `qm lint --report` writes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LintReport<'a> {
+    pub format: u32,
+    /// Always `"lint"`.
+    pub producer: &'static str,
+    pub quartermaster: &'static str,
+    /// `true` exactly when lint exits 0: no finding at `error` or `hang`.
+    pub ok: bool,
+    /// The parsed manifest, as serde writes qm's model.
+    pub manifest: &'a crate::manifest::Manifest,
+    pub findings: Vec<Finding>,
+}
+
+/// `range-report.json`: what `qm check-range --report` writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RangeReport {
+    pub format: u32,
+    /// Always `"check-range"`.
+    pub producer: &'static str,
+    pub quartermaster: &'static str,
+    /// `true` exactly when every range parses.
+    pub ok: bool,
+    pub findings: Vec<Finding>,
+}
+
+/// Sort findings the one way every report sorts them: by code, then by the first item's request
+/// index (`requested_of`), stable otherwise.
+pub fn sort_findings(findings: &mut [Finding], requested_of: impl Fn(&str) -> Option<usize>) {
+    findings.sort_by(|a, b| {
+        a.code.cmp(b.code).then_with(|| {
+            let fa = a.items.first().and_then(|i| requested_of(i));
+            let fb = b.items.first().and_then(|i| requested_of(i));
+            fa.cmp(&fb)
+        })
+    });
 }
 
 /// Delete `<out>/load-plan.json` if it exists, so a failed run never leaves a stale plan that reads
 /// as this run's.
 pub fn remove_stale(out: &Path) -> Result<(), String> {
-    let path = out.join(PLAN_FILE);
-    match std::fs::remove_file(&path) {
+    remove_stale_file(&out.join(PLAN_FILE))
+}
+
+/// Delete `path` if it exists. Used before a report is produced, so a run that cannot write one
+/// never leaves an older report that reads as this run's.
+pub fn remove_stale_file(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("removing the stale {}: {e}", path.display())),
@@ -436,11 +506,21 @@ pub fn remove_stale(out: &Path) -> Result<(), String> {
 /// Write `<out>/load-plan.json` through `<out>/load-plan.json.tmp` and a rename. On any failure the
 /// tmp file is removed and nothing is left at the plan's path.
 pub fn write_plan(out: &Path, plan: &LoadPlan) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(plan)
-        .map_err(|e| format!("serialising the load plan: {e}"))?;
     std::fs::create_dir_all(out).map_err(|e| format!("creating {}: {e}", out.display()))?;
-    let tmp = out.join(format!("{PLAN_FILE}.tmp"));
-    let path = out.join(PLAN_FILE);
+    write_json(&out.join(PLAN_FILE), plan, "the load plan")
+}
+
+/// Write `value` as pretty JSON to `path` through `<path>.tmp` and a rename. On any failure the tmp
+/// file is removed and nothing is left at `path`. `what` names the document in errors.
+pub fn write_json<T: Serialize>(path: &Path, value: &T, what: &str) -> Result<(), String> {
+    let text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("serialising {what}: {e}"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a file path", path.display()))?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
     let written = std::fs::write(&tmp, text + "\n")
         .map_err(|e| format!("writing {}: {e}", tmp.display()))
         .and_then(|()| {
