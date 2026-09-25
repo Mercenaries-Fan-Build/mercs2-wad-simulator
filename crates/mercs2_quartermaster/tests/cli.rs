@@ -27,7 +27,7 @@ fn shipment(dir: &Path, contributions: &str) -> PathBuf {
     std::fs::write(
         dir.join("manifest.yaml"),
         format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: cli-test, version: 1.0.0, target: retail }}
 contributions:
 {contributions}"
@@ -345,4 +345,138 @@ fn the_name_table_is_found_by_walking_up_not_by_a_compiled_in_path() {
         !stderr.contains("no name table found"),
         "the table is in this checkout and must be found: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `qm preflight` — exit codes and the plan file
+// ---------------------------------------------------------------------------
+
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/load_plan")
+}
+
+fn preflight(args: &[&str], out: &Path) -> Output {
+    let mut all = vec!["preflight", "--out", out.to_str().unwrap()];
+    all.extend_from_slice(args);
+    qm(&all)
+}
+
+fn fixture(rel: &str) -> String {
+    fixtures().join(rel).to_string_lossy().into_owned()
+}
+
+/// Exit 0: an ok plan is written.
+#[test]
+fn preflight_ok_exits_0_and_writes_the_plan() {
+    let out = scratch("pf-ok");
+    let o = preflight(
+        &["--request", &fixture("request.chain.json"), "--game", &fixture("game-clean")],
+        &out,
+    );
+    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    assert_eq!(plan["ok"], true);
+    assert_eq!(plan["producer"], "preflight");
+}
+
+/// Exit 1: findings, and the plan is still written with its order.
+#[test]
+fn preflight_findings_exit_1_and_still_write_the_plan() {
+    let out = scratch("pf-findings");
+    let o = preflight(
+        &["--request", &fixture("request.chain-old-ess.json"), "--game", &fixture("game-clean")],
+        &out,
+    );
+    assert_eq!(code(&o), EXIT_FINDINGS, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    assert_eq!(plan["ok"], false);
+    assert!(plan["order"].is_array(), "the order survives a non-cycle error");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("M0204"));
+}
+
+/// The positional form: `arg:<n>` ids in argument order.
+#[test]
+fn preflight_takes_shipment_directories() {
+    let out = scratch("pf-dirs");
+    let o = preflight(
+        &[&fixture("shipments/my-mod"), &fixture("shipments/ess-0.7.0"), &fixture("shipments/lua-bridge"), "--game", &fixture("game-clean")],
+        &out,
+    );
+    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    assert_eq!(plan["order"], serde_json::json!(["arg:3", "arg:2", "arg:1"]));
+}
+
+/// The plan's `quartermaster` is the number `qm --version` prints.
+#[test]
+fn the_plan_names_the_running_qm() {
+    let out = scratch("pf-version");
+    preflight(
+        &["--request", &fixture("request.chain.json"), "--game", &fixture("game-clean")],
+        &out,
+    );
+    let plan: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    let version = String::from_utf8_lossy(&qm(&["--version"]).stdout).into_owned();
+    assert_eq!(version.trim(), format!("qm {}", plan["quartermaster"].as_str().unwrap()));
+}
+
+/// Exit 2 cases: nothing could be checked, no plan is written, and a stale plan is removed.
+#[test]
+fn preflight_that_cannot_run_exits_2_and_leaves_no_plan() {
+    let cases: Vec<(Vec<String>, &str)> = vec![
+        (vec!["--request".into(), fixture("invalid/bad-format.json")], "request format"),
+        (vec!["--request".into(), fixture("invalid/duplicate-id.json")], "duplicate id"),
+        (vec!["--request".into(), fixture("invalid/id-backslash.json")], "id with a backslash"),
+        (vec!["--request".into(), fixture("invalid/unknown-key.json")], "unknown key"),
+        (vec!["--request".into(), fixture("invalid/self-requires.json")], "self-requires"),
+        (vec!["--request".into(), fixture("invalid/bad-range.json")], "bad range"),
+        (vec!["--request".into(), fixture("invalid/name-version.json")], "{ name, version }"),
+        (vec!["--request".into(), fixture("invalid/format-1.json")], "format 1"),
+        (vec!["--request".into(), fixture("invalid/url-sha256.json")], "{ url, sha256 }"),
+        (vec!["--request".into(), fixture("invalid/reserved-name.json")], "reserved name"),
+        (
+            vec![fixture("shipments/ess-0.7.0"), "--game".into(), fixture("game-bad/vz.wad")],
+            "game root not under data/",
+        ),
+        (
+            vec!["--request".into(), fixture("request.chain.json"), fixture("shipments/my-mod")],
+            "both --request and directories",
+        ),
+        (vec![], "neither --request nor directories"),
+    ];
+    for (args, what) in cases {
+        let out = scratch("pf-unusable");
+        std::fs::write(out.join("load-plan.json"), "stale").unwrap();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let o = preflight(&refs, &out);
+        assert_eq!(
+            code(&o),
+            EXIT_UNUSABLE,
+            "{what}: stderr: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(!out.join("load-plan.json").exists(), "{what}: a plan (or the stale one) is left");
+    }
+}
+
+/// A manifest failure is reported as `error: <id>: <code or ->: <message>`, never with the path.
+#[test]
+fn preflight_names_the_item_and_code_not_the_path() {
+    let out = scratch("pf-stderr");
+    for (request, id, code_) in [
+        ("invalid/self-requires.json", "shipment:self-requires", "M0173"),
+        ("invalid/bad-range.json", "shipment:bad-range", "M0172"),
+        ("invalid/reserved-name.json", "shipment:reserved-name", "M0211"),
+        ("invalid/format-1.json", "shipment:format-1", "-"),
+        ("invalid/url-sha256.json", "shipment:url-sha256", "-"),
+    ] {
+        let o = preflight(&["--request", &fixture(request)], &out);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(stderr.contains(&format!("error: {id}: {code_}: ")), "{request}: {stderr}");
+        assert!(!stderr.contains("invalid/shipments"), "{request}: a request path leaked: {stderr}");
+    }
 }
