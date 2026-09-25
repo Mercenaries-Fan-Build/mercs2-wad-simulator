@@ -15,7 +15,7 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 const MINIMAL_YAML: &str = "\
-format: 1
+format: 2
 shipment:
   name: boss-reskin
   version: 1.0.0
@@ -26,7 +26,7 @@ contributions:
     image: src/boss_ub.png
 ";
 
-const MINIMAL_JSON: &str = r#"{"format":1,"shipment":{"name":"boss-reskin","version":"1.0.0","target":"retail"},"contributions":[]}"#;
+const MINIMAL_JSON: &str = r#"{"format":2,"shipment":{"name":"boss-reskin","version":"1.0.0","target":"retail"},"contributions":[]}"#;
 
 fn write(dir: &Path, name: &str, body: &str) {
     std::fs::write(dir.join(name), body).expect("write fixture");
@@ -137,10 +137,23 @@ fn open_surfaces_validation_failures() {
     write(
         &dir,
         "manifest.yaml",
-        &MINIMAL_YAML.replace("format: 1", "format: 99"),
+        &MINIMAL_YAML.replace("format: 2", "format: 99"),
     );
     let err = discover::open(&dir).expect_err("future format");
     assert!(err.to_string().contains("refusing to guess"), "{err}");
+}
+
+/// Format 1 no longer exists: an older format is refused through the same check as a newer one.
+#[test]
+fn open_refuses_format_1() {
+    let dir = scratch("open_format_1");
+    write(
+        &dir,
+        "manifest.yaml",
+        &MINIMAL_YAML.replace("format: 2", "format: 1"),
+    );
+    let err = discover::open(&dir).expect_err("format 1");
+    assert!(err.to_string().contains("the only manifest format is 2"), "{err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +163,7 @@ fn open_surfaces_validation_failures() {
 #[test]
 fn every_referenced_path_is_collected_with_its_field() {
     let text = "\
-format: 1
+format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: add_outfit
@@ -301,7 +314,7 @@ fn a_source_outside_src_is_reported_separately() {
 #[test]
 fn checking_does_not_short_circuit() {
     let text = "\
-format: 1
+format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: replace_texture
