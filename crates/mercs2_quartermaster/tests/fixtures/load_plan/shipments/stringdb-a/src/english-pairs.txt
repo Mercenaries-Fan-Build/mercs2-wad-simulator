@@ -1,0 +1,2 @@
+# Parsed like a `strings:` file: the left side is a `[Bracket]` token or a `0xHASH`.
+[Menu.Quit] = Quit (replaced by text)
