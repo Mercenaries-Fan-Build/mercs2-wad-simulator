@@ -1350,6 +1350,60 @@ fn a_text_replacement_that_matches_nothing_fails_the_build() {
     }
 }
 
+/// A Shipment's own `qm build` applies its string contributions in contribution order, against the
+/// table as edited so far — the same code as `qm link`. So a text
+/// replacement of the text the Shipment's own earlier `edit_stringdb` wrote builds, into ONE
+/// block for the table; in the reverse order the replacement runs first, matches nothing, and the
+/// build fails naming the Shipment, the table and the text.
+#[test]
+fn a_shipment_build_applies_its_string_writes_in_order() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let entries = string_entries(&base);
+    let key = entries[0].0;
+    let marker = "QM own-build marker: written by edit_stringdb = step 1";
+    assert!(entries.iter().all(|(_, t)| t != marker));
+
+    let make = |label: &str, edit_first: bool| {
+        let dir = scratch(label);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/english.txt"), format!("0x{key:08X} = {marker}\n")).unwrap();
+        std::fs::write(dir.join("src/pairs.txt"), format!("{marker}\tQM OWN BUILD REPLACED\n")).unwrap();
+        let edit = "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n";
+        let replace = "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n";
+        let body = if edit_first { format!("{edit}{replace}") } else { format!("{replace}{edit}") };
+        (dir.clone(), shipment(&dir, &body))
+    };
+
+    let (dir, s) = make("own_order_ok", true);
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit then replace builds");
+    let wad = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+    let table_path = build::stringdb_block_path(english);
+    let tables: Vec<_> = contents.blocks.iter().filter(|b| b.path_string == table_path).collect();
+    assert_eq!(tables.len(), 1, "ONE block for the table, carrying both contributions");
+    assert_eq!(contents.blocks.len(), 1);
+    let dec = mercs2_formats::sges::decompress_sges(&tables[0].compressed_data).expect("sges");
+    let text = string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == key).map(|(_, t)| t);
+    assert_eq!(text.as_deref(), Some("QM OWN BUILD REPLACED"));
+    assert!(dir.join("_build/test-shipment.wad").is_file());
+
+    let (_, s) = make("own_order_reversed", false);
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("test-shipment") && m.contains("english") && m.contains(marker), "{m}");
+        }
+        other => panic!("replace before edit must fail with the no-match error, got {other:?}"),
+    }
+}
+
 /// A plan that is not ok links nothing: the plan is written as the explanation, and no link WAD or
 /// placement record appears.
 #[test]
