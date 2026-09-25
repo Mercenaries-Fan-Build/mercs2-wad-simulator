@@ -120,7 +120,7 @@
       "present": false
     }
   ],
-  "script_block_paths": [
+  "link_block_paths": [
     "blocks\\VZ\\scripts_vz_P000_Q3.block",
     "blocks\\VZ\\resident_P000_Q3.block"
   ],
