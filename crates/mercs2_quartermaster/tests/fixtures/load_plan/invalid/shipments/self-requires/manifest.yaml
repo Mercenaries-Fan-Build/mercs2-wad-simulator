@@ -1,0 +1,9 @@
+format: 2
+shipment:
+  name: self-requires
+  version: 1.0.0
+  target: retail
+load:
+  requires:
+    - self-requires
+contributions: []
