@@ -1265,6 +1265,71 @@ fn disjoint_stringdb_edits_both_survive_link() {
     assert_eq!(merged_text(&reverse, only_b), "QM B ONLY");
 }
 
+/// `replace_stringdb_text` in the merge: a text replacement resolves
+/// against the table AS MERGED SO FAR in load order. Shipment `setter` sets a key's text to a marker;
+/// `replacer` replaces that marker text. Setter first: the replacement sees the marker and wins.
+/// Replacer first: it runs against the base, matches nothing (noted in the log), and the setter's
+/// marker stays.
+#[test]
+fn a_text_replacement_resolves_against_the_table_merged_so_far() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let entries = string_entries(&base);
+    let key = entries[0].0;
+    // The pairs file is read with the same parser as `strings:` files, whose left side is a
+    // `[Bracket]` token or a `0xHASH` — so the marker text is a bracket token no retail string is.
+    let marker = "[QmMergeTest.Marker]";
+    assert!(entries.iter().all(|(_, t)| t != marker));
+
+    let root = scratch("deploy_replace_text");
+    let setter = english_editor(&root.join("setter"), "text-setter", &[format!("0x{key:08X} = {marker}")], &[]);
+    let rdir = root.join("replacer");
+    std::fs::create_dir_all(rdir.join("src")).unwrap();
+    std::fs::write(rdir.join("src/pairs.txt"), format!("{marker} = QM REPLACED\n")).unwrap();
+    std::fs::write(
+        rdir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: text-replacer, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n",
+    )
+    .unwrap();
+    let replacer = discover::open(&rdir).expect("open");
+
+    let table_path = build::stringdb_block_path(english);
+    let text_of = |out: &Path| -> String {
+        let wad = std::fs::read(out.join(build::LINK_WAD_NAME)).expect("a link WAD");
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+        let block = contents.blocks.iter().find(|b| b.path_string == table_path).expect("table");
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == key).map(|(_, t)| t).unwrap()
+    };
+    let ids = arg_ids(2);
+
+    let forward = root.join("forward");
+    let report = build::link_installed(&request(&[&setter, &replacer], &ids), &mut game, &corpus, &forward)
+        .expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    assert_eq!(text_of(&forward), "QM REPLACED", "the replacement sees the earlier write");
+
+    let reverse = root.join("reverse");
+    let report = build::link_installed(&request(&[&replacer, &setter], &ids), &mut game, &corpus, &reverse)
+        .expect("link");
+    assert_eq!(text_of(&reverse), marker, "run first, the replacement saw only the base");
+    let log = report.log.join("\n");
+    assert!(
+        log.contains("matched nothing") && log.contains("text-replacer contributions[0]") && log.contains(marker),
+        "the no-hit pair is noted with its Shipment and text: {log}"
+    );
+}
+
 /// A plan that is not ok links nothing: the plan is written as the explanation, and no link WAD or
 /// placement record appears.
 #[test]
