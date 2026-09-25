@@ -1,2 +1,2 @@
-# Parsed like a `strings:` file: the left side is a `[Bracket]` token or a `0xHASH`.
-[Menu.Quit] = Quit (replaced by text)
+# The text stringdb-a's own edit gives [Menu.Quit]: old<TAB>new, free text.
+Quit (stringdb-a)	Quit (replaced by text)
