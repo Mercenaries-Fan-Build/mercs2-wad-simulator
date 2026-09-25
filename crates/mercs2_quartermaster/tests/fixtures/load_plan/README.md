@@ -27,9 +27,11 @@ Golden plans are compared as parsed JSON, with `quartermaster` replaced by the r
 
 - `shipments/m2-sdk/` is a runtime Shipment: one `add_runtime_dll`, `src/m2-sdk.dll`.
 - `shipments/dup-runtime/` ships `src/m2-sdk.dll` too, so it collides with `m2-sdk`.
-- `shipments/stringdb-a/` edits `[Menu.Play]` and `[Menu.Quit]`; `shipments/stringdb-b/` edits
-  `[Menu.Play]` and adds `[StringdbB.Added]`. Editors of one table never conflict: the link
-  applies their edits by key hash in load order, the later text winning.
+- `shipments/stringdb-a/` edits `[Menu.Play]` and `[Menu.Quit]` and also replaces a text
+  (`replace_stringdb_text`); `shipments/stringdb-b/` edits `[Menu.Play]` and adds
+  `[StringdbB.Added]`. Writers to one table never conflict, across Shipments or inside one: the
+  link applies their writes in load order, the later winning, a
+  text replacement resolving against the table as merged so far.
 
 ## Game layouts
 
