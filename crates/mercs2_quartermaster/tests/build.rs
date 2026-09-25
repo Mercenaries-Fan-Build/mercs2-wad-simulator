@@ -60,7 +60,7 @@ fn a_blocking_diagnostic_fails_the_build() {
         other => panic!("expected Blocked, got {other:?}"),
     }
     assert!(
-        !dir.join("build").join("test-shipment.wad").exists(),
+        !dir.join("_build").join("test-shipment.wad").exists(),
         "nothing may be emitted"
     );
 }
@@ -241,8 +241,8 @@ fn an_empty_shipment_still_emits_a_record_and_a_log() {
     let report = build::build(&s, None, None, None, None).expect("empty shipment builds");
     assert!(report.wad.is_none(), "nothing to put in a WAD");
     assert!(report.placements.is_empty());
-    assert!(dir.join("build/placement.json").is_file());
-    assert!(dir.join("build/build.log").is_file());
+    assert!(dir.join("_build/placement.json").is_file());
+    assert!(dir.join("_build/build.log").is_file());
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn the_output_directory_can_be_redirected() {
     let s = shipment(&dir, "  []\n");
     build::build(&s, None, None, Some(&out), None).expect("build");
     assert!(out.join("placement.json").is_file());
-    assert!(!dir.join("build").exists());
+    assert!(!dir.join("_build").exists());
 }
 
 /// Known SHA-256 vectors — the mandate is verify-BY-HASH, so a wrong digest silently defeats every
@@ -274,7 +274,7 @@ fn the_placement_record_is_well_formed_json() {
     let dir = scratch("record");
     let s = shipment(&dir, "  []\n");
     build::build(&s, None, None, None, None).expect("build");
-    let text = std::fs::read_to_string(dir.join("build/placement.json")).unwrap();
+    let text = std::fs::read_to_string(dir.join("_build/placement.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
     assert_eq!(doc["format"], 1);
     assert!(doc["placements"].is_array());
@@ -1089,6 +1089,149 @@ fn the_deploy_link_follows_the_request_order() {
     );
 }
 
+/// M0209 reaches the plan: `qm link` appends a warning per unresolved literal import to the plan's
+/// findings, on the item whose source carries it, and the plan stays ok.
+#[test]
+fn an_unresolved_literal_import_is_a_warning_in_the_link_plan() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    let root = scratch("deploy_m0209");
+    std::fs::create_dir_all(root.join("mod/src")).unwrap();
+    std::fs::write(
+        root.join("mod/src/probe.lua"),
+        "local lib = import(\"qm_no_such_module\")\nreturn {}\n",
+    )
+    .unwrap();
+    let s = shipment(
+        &root.join("mod"),
+        "  - kind: add_script\n    name: qm_m0209_probe\n    source: src/probe.lua\n",
+    );
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out)
+        .expect("an unresolved import is a warning, not a refusal");
+    assert!(report.plan.ok);
+    let m0209: Vec<_> = report.plan.findings.iter().filter(|f| f.code == "M0209").collect();
+    assert_eq!(m0209.len(), 1, "{:?}", report.plan.findings);
+    assert_eq!(m0209[0].items, vec!["arg:1".to_string()]);
+    assert!(m0209[0].message.contains("qm_no_such_module"), "{}", m0209[0].message);
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    assert_eq!(written["ok"], true);
+    assert_eq!(written["findings"][0]["code"], "M0209");
+    assert_eq!(written["findings"][0]["severity"], "warning");
+    assert_eq!(
+        written["findings"][0]["refs"],
+        serde_json::json!([{ "section": "items", "index": 0 }])
+    );
+}
+
+/// `(key hash, text)` for every entry of a stringdb container, read through the codec.
+fn string_entries(container: &[u8]) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    mercs2_formats::stringdb::apply_container(container, |db| {
+        out = db.entries.iter().map(|e| (e.key_hash, e.text.clone())).collect();
+        Ok(())
+    })
+    .expect("a readable stringdb container");
+    out
+}
+
+/// A Shipment that edits `english` with `edits` and adds `adds` to it (one `0xKEY = text` each).
+fn english_editor(
+    dir: &Path,
+    name: &str,
+    edits: &[String],
+    adds: &[String],
+) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/english.txt"), edits.join("\n") + "\n").unwrap();
+    std::fs::write(dir.join("src/english-new.txt"), adds.join("\n") + "\n").unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!(
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+             contributions:\n  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n\
+             \x20 - kind: add_stringdb_keys\n    target: english\n    strings: src/english-new.txt\n"
+        ),
+    )
+    .unwrap();
+    discover::open(dir).expect("open")
+}
+
+/// Each `edit_stringdb` Shipment's own overlay carries a WHOLE edited copy of the
+/// table, so installed together the last mounted would silently drop the other's edits. The link
+/// merges every Shipment's edits into ONE table: disjoint keys both survive, and a key both edit
+/// takes the text of the later Shipment in the load order — for an edited key and for a key both
+/// add alike.
+#[test]
+fn disjoint_stringdb_edits_both_survive_link() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let keys: Vec<u32> = string_entries(&base).iter().map(|(k, _)| *k).take(3).collect();
+    let [only_a, both, only_b] = [keys[0], keys[1], keys[2]];
+    let added = mercs2_formats::stringdb::key_hash("[QmMergeTest.Added]");
+    assert!(!keys.contains(&added) && string_entries(&base).iter().all(|(k, _)| *k != added));
+
+    let root = scratch("deploy_stringdb");
+    let a = english_editor(
+        &root.join("a"),
+        "strings-a",
+        &[format!("0x{only_a:08X} = QM A ONLY"), format!("0x{both:08X} = QM A BOTH")],
+        &["[QmMergeTest.Added] = QM A ADDED".to_string()],
+    );
+    let b = english_editor(
+        &root.join("b"),
+        "strings-b",
+        &[format!("0x{both:08X} = QM B BOTH"), format!("0x{only_b:08X} = QM B ONLY")],
+        &["[QmMergeTest.Added] = QM B ADDED".to_string()],
+    );
+    let table_path = build::stringdb_block_path(english);
+
+    let merged_text = |out: &Path, key: u32| -> String {
+        let wad = std::fs::read(out.join(build::LINK_WAD_NAME)).expect("a link WAD");
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+        let blocks: Vec<_> = contents.blocks.iter().filter(|b| b.path_string == table_path).collect();
+        assert_eq!(blocks.len(), 1, "exactly one merged english table in the link WAD");
+        let dec = mercs2_formats::sges::decompress_sges(&blocks[0].compressed_data).expect("sges");
+        string_entries(&dec[20..])
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t)
+            .expect("key present")
+    };
+
+    let forward = root.join("forward");
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &forward)
+        .expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    assert!(report.plan.link_block_paths.contains(&table_path));
+    assert_eq!(merged_text(&forward, only_a), "QM A ONLY");
+    assert_eq!(merged_text(&forward, only_b), "QM B ONLY");
+    assert_eq!(merged_text(&forward, both), "QM B BOTH", "the later Shipment in the order wins");
+    assert_eq!(merged_text(&forward, added), "QM B ADDED", "an added key merges the same way");
+
+    let reverse = root.join("reverse");
+    build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &reverse).expect("link");
+    assert_eq!(merged_text(&reverse, both), "QM A BOTH", "reversed order, reversed winner");
+    assert_eq!(merged_text(&reverse, added), "QM A ADDED");
+    assert_eq!(merged_text(&reverse, only_b), "QM B ONLY");
+}
+
 /// A plan that is not ok links nothing: the plan is written as the explanation, and no link WAD or
 /// placement record appears.
 #[test]
@@ -1507,7 +1650,7 @@ fn a_retail_block_survives_being_carried_through_raw() {
 
 /// A PE image carrying only the headers the loadability check reads.
 ///
-/// Deliberately header-only. `asi_load_blocker` inspects exactly four things — `MZ`, `e_lfanew`,
+/// Deliberately header-only. `pe::pe_dll_load_blocker` inspects exactly four things — `MZ`, `e_lfanew`,
 /// the `PE\0\0` signature, and the COFF `Machine`/`Characteristics` words — so a fixture with a
 /// real body would add bytes no assertion depends on. The offsets are pinned against the real
 /// `pmc_bb.dll` v3.0.0, which reads `e_lfanew=0x80, machine=0x014C, characteristics=0x230E`.
@@ -1573,7 +1716,7 @@ fn a_native_hook_places_a_file_and_records_its_digest() {
     // Verified BY HASH against what is on disk, not against the buffer the builder held. The output
     // directory MIRRORS the tree this is copied into, so the same relative path names it in both.
     let written = std::fs::read(
-        dir.join("build")
+        dir.join("_build")
             .join(format!("{}/mybridge.asi", build::ASI_SUBDIR)),
     )
     .expect("the .asi must be emitted");
@@ -1583,7 +1726,7 @@ fn a_native_hook_places_a_file_and_records_its_digest() {
 
     // The record deploy consumes has to carry all three, or an undo cannot verify what it removes.
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(dir.join("_build/placement.json")).unwrap())
             .unwrap();
     let entry = &doc["placements"][0];
     assert_eq!(entry["name"], "mybridge.asi");
@@ -1669,6 +1812,172 @@ fn a_plugin_the_game_cannot_load_is_refused() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// add_runtime_dll — a runtime DLL in the game root, named after its Shipment
+// ---------------------------------------------------------------------------
+
+/// A Shipment (`test-shipment`) whose contributions are one `add_runtime_dll` per `(path, bytes)`.
+fn runtime_shipment(dir: &Path, dlls: &[(&str, Vec<u8>)]) -> discover::LoadedShipment {
+    let mut contributions = String::new();
+    for (path, bytes) in dlls {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, bytes).unwrap();
+        contributions.push_str(&format!("  - kind: add_runtime_dll\n    dll: {path}\n"));
+    }
+    shipment(dir, &contributions)
+}
+
+/// The lint findings a build was blocked by, or a panic naming what happened instead.
+fn blocked_codes(result: Result<build::BuildReport, BuildError>) -> Vec<(String, String)> {
+    match result {
+        Err(BuildError::Blocked(d)) => d
+            .iter()
+            .map(|x| (x.rule.code.to_string(), x.message.clone()))
+            .collect(),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}
+
+/// ★ The DLL lands in the game root — the directory Windows searches first for a plugin's imports —
+/// under its own name, recorded with its digest like every other game-folder file.
+#[test]
+fn add_runtime_dll_places_in_game_root_with_placement_record() {
+    let dir = scratch("rtdll_ok");
+    let dll = loadable_asi();
+    let s = runtime_shipment(&dir, &[("src/test-shipment.dll", dll.clone())]);
+    let report = build::build(&s, None, None, None, None).expect("add_runtime_dll must build");
+    assert!(report.wad.is_none(), "a runtime DLL contributes nothing to a WAD");
+    assert_eq!(report.placements.len(), 1);
+    let p = &report.placements[0];
+    assert_eq!(p.name, "test-shipment.dll");
+    assert_eq!(
+        p.destination,
+        Destination::GameFolder {
+            relative: "test-shipment.dll".into()
+        },
+        "the game root: no directory in the relative path"
+    );
+    let written = std::fs::read(dir.join("_build/test-shipment.dll")).expect("emitted");
+    assert_eq!(written, dll);
+    assert_eq!(p.sha256, build::sha256_hex(&written));
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("_build/placement.json")).unwrap())
+            .unwrap();
+    assert_eq!(doc["placements"][0]["destination"]["kind"], "game_folder");
+    assert_eq!(doc["placements"][0]["destination"]["relative"], "test-shipment.dll");
+    assert!(report.log.join("\n").contains("UNRESTRICTED NATIVE CODE"));
+}
+
+#[test]
+fn add_runtime_dll_refuses_non_dll() {
+    let dir = scratch("rtdll_ext");
+    let s = runtime_shipment(&dir, &[("src/test-shipment.asi", loadable_asi())]);
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found.iter().any(|(c, m)| c == "M0162" && m.contains("not a `.dll`")),
+        "{found:?}"
+    );
+}
+
+/// A runtime DLL is named `<shipment.name>.dll`, so one runtime Shipment ships one DLL.
+#[test]
+fn add_runtime_dll_refuses_name_not_equal_to_shipment_name() {
+    let dir = scratch("rtdll_name");
+    let s = runtime_shipment(&dir, &[("src/m2-sdk.dll", loadable_asi())]);
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0162" && m.contains("`test-shipment.dll`")),
+        "{found:?}"
+    );
+}
+
+/// The name is compared lowercased, and the file keeps the spelling the author gave it.
+#[test]
+fn add_runtime_dll_accepts_name_differing_only_in_case() {
+    let dir = scratch("rtdll_case");
+    let s = runtime_shipment(&dir, &[("src/Test-Shipment.DLL", loadable_asi())]);
+    let report = build::build(&s, None, None, None, None).expect("case differs only");
+    assert_eq!(
+        report.placements[0].destination,
+        Destination::GameFolder {
+            relative: "Test-Shipment.DLL".into()
+        }
+    );
+}
+
+/// A second `add_runtime_dll` in one Shipment would need the same name, and the Exclusive
+/// FileArtifact claim refuses that within one Shipment (M0120).
+#[test]
+fn add_runtime_dll_refuses_second_runtime_dll_in_one_shipment() {
+    let dir = scratch("rtdll_two");
+    let s = runtime_shipment(
+        &dir,
+        &[
+            ("src/a/test-shipment.dll", loadable_asi()),
+            ("src/b/TEST-SHIPMENT.dll", loadable_asi()),
+        ],
+    );
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0120" && m.contains("file artifact test-shipment.dll")),
+        "{found:?}"
+    );
+}
+
+/// The deny list: the loader, its sidecar and the DLLs the loader reports, in any case.
+#[test]
+fn add_runtime_dll_refuses_deny_listed_dlls() {
+    for file in ["pmc_bb.dll", "cruise.dll", "dxwrapper.dll", "binkw32.dll", "BinkW32.DLL"] {
+        let dir = scratch("rtdll_deny");
+        let path = format!("src/{file}");
+        let s = runtime_shipment(&dir, &[(path.as_str(), loadable_asi())]);
+        let found = blocked_codes(build::build(&s, None, None, None, None));
+        assert!(
+            found
+                .iter()
+                .any(|(c, m)| c == "M0162" && m.contains("is a DLL no Shipment may ship")),
+            "{file}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn add_runtime_dll_refuses_amd64() {
+    let dir = scratch("rtdll_amd64");
+    let s = runtime_shipment(&dir, &[("src/test-shipment.dll", fake_asi(0x8664, 0x230E))]);
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0178" && m.contains("32-bit process")),
+        "{found:?}"
+    );
+}
+
+/// `add_runtime_dll` is the one route for a DLL; `place_file` still refuses one.
+#[test]
+fn place_file_still_refuses_dll() {
+    let dir = scratch("placefile_dll");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/test-shipment.dll"), loadable_asi()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: place_file\n    file: src/test-shipment.dll\n    dest: game_root\n",
+    );
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0162" && m.contains("add_runtime_dll")),
+        "the refusal names the route that does exist: {found:?}"
+    );
+}
+
 /// A `symbol` with no payload asks the Quartermaster to produce native code, which it does not do.
 /// The reason has to point at both real options rather than just refusing.
 #[test]
@@ -1706,7 +2015,7 @@ fn an_asi_on_a_reimpl_target_never_reaches_lowering() {
         other => panic!("expected Blocked, got {other:?}"),
     }
     assert!(
-        !dir.join("build")
+        !dir.join("_build")
             .join(format!("{}/mybridge.asi", build::ASI_SUBDIR))
             .exists(),
         "nothing may be placed"
@@ -1795,14 +2104,14 @@ fn a_place_file_places_a_companion_and_records_its_digest() {
 
     // The digest must match the bytes actually on disk, not the buffer the builder held — a digest
     // of the intended bytes would still verify after a truncated write.
-    let written = std::fs::read(dir.join("build/scripts/quiet_freeplay_vo.ini"))
+    let written = std::fs::read(dir.join("_build/scripts/quiet_freeplay_vo.ini"))
         .expect("the companion must be emitted, mirroring the tree it is copied into");
     assert_eq!(written, ini, "the companion is copied verbatim");
     assert_eq!(p.sha256, build::sha256_hex(&written));
     assert_eq!(p.bytes, written.len());
 
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(dir.join("_build/placement.json")).unwrap())
             .unwrap();
     let entry = &doc["placements"][0];
     assert_eq!(entry["name"], "quiet_freeplay_vo.ini");
@@ -1855,7 +2164,7 @@ fn every_destination_stays_inside_the_game_folder() {
         assert!(!relative.contains(':'), "{relative}");
         assert!(!relative.contains('\\'), "{relative}");
         // And the file really lands there, under the build directory that mirrors the game folder.
-        assert!(dir.join("build").join(relative).is_file(), "{relative}");
+        assert!(dir.join("_build").join(relative).is_file(), "{relative}");
     }
 }
 
@@ -2086,11 +2395,11 @@ fn one_filename_in_two_destinations_is_two_files() {
         "each record must describe its own file"
     );
     assert_eq!(
-        std::fs::read(dir.join("build/scripts/OnBoot/init.lua")).unwrap(),
+        std::fs::read(dir.join("_build/scripts/OnBoot/init.lua")).unwrap(),
         b"-- boot\n"
     );
     assert_eq!(
-        std::fs::read(dir.join("build/scripts/OnLoad/init.lua")).unwrap(),
+        std::fs::read(dir.join("_build/scripts/OnLoad/init.lua")).unwrap(),
         b"-- load\n"
     );
 }
