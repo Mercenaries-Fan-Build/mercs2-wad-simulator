@@ -829,3 +829,130 @@ fn manifest_info_failures_exit_2_with_empty_stdout() {
         assert!(!out.stderr.is_empty(), "{what}: the reason goes to stderr");
     }
 }
+
+// ---------------------------------------------------------------------------
+// `qm link` — exit codes and the plan file
+// ---------------------------------------------------------------------------
+
+fn link(args: &[&str], out: &Path) -> Output {
+    let mut all = vec!["link", "--out", out.to_str().unwrap()];
+    all.extend_from_slice(args);
+    qm(&all)
+}
+
+/// The names in a directory, sorted.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Exit 2: a usage error or a request that cannot be read. Nothing was checked, no plan is written,
+/// and a stale plan from an earlier run is removed. Hermetic: the request is read before the game
+/// stack is resolved, so every case fails on the request and not on a missing game.
+#[test]
+fn link_that_cannot_run_exits_2_and_leaves_no_plan() {
+    let missing = scratch("ln-missing-request").join("load-request.json");
+    let cases: Vec<(Vec<String>, &str, &str)> = vec![
+        (
+            vec!["--request".into(), missing.to_string_lossy().into_owned()],
+            "reading the request",
+            "unreadable request",
+        ),
+        (
+            vec!["--request".into(), fixture("invalid/bad-format.json")],
+            "format",
+            "request format",
+        ),
+        (
+            vec!["--request".into(), fixture("request.chain.json"), fixture("shipments/my-mod")],
+            "give either --request or Shipment directories, not both",
+            "both --request and directories",
+        ),
+        (
+            vec![],
+            "give --request <load-request.json> or at least one Shipment directory",
+            "neither --request nor directories",
+        ),
+    ];
+    for (args, says, what) in cases {
+        let out = scratch("ln-unusable");
+        std::fs::write(out.join("load-plan.json"), "stale").unwrap();
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let o = link(&refs, &out);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(code(&o), EXIT_UNUSABLE, "{what}: stderr: {stderr}");
+        assert!(stderr.contains(says), "{what}: expected {says:?} in stderr: {stderr}");
+        assert!(!out.join("load-plan.json").exists(), "{what}: a plan (or the stale one) is left");
+    }
+}
+
+/// `--out` is required: without it clap refuses the command line, which is exit 2 as well.
+#[test]
+fn link_without_out_exits_2() {
+    let o = qm(&["link", &fixture("shipments/m2-sdk")]);
+    assert_eq!(code(&o), EXIT_UNUSABLE, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--out"));
+}
+
+/// Exit 1: the set's load plan is not ok (`dup-runtime` and `m2-sdk` both ship `m2-sdk.dll`:
+/// M0162 and M0207). The plan is written and is the explanation; nothing else is — no link WAD, no
+/// placement record.
+///
+/// `qm link` opens the game stack before it plans, so this runs when a PC `vz.wad` is discoverable
+/// and SKIPS loudly otherwise, like `build_default_out_is_root_underscore_build`. The corpus only
+/// has to be a directory: a plan that is not ok never reaches the linker.
+#[test]
+fn link_plan_not_ok_exits_1_writes_the_plan_and_links_nothing() {
+    if mercs2_quartermaster::game::discover().is_none() {
+        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
+        return;
+    }
+    let dir = scratch("ln-not-ok");
+    let out = dir.join("out");
+    let o = link(
+        &[
+            "--request",
+            &fixture("request.dup-runtime.json"),
+            "--corpus",
+            dir.join("src").to_str().unwrap(),
+        ],
+        &out,
+    );
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(code(&o), EXIT_FINDINGS, "stderr: {stderr}");
+    assert!(stderr.contains("M0207"), "{stderr}");
+    let plan = read_json(&out.join("load-plan.json"));
+    assert_eq!(plan["ok"], false);
+    assert_eq!(plan["producer"], "link");
+    assert_eq!(listing(&out), ["load-plan.json"], "only the plan is written");
+}
+
+/// Exit 0: an ok plan. `m2-sdk` touches no script and no string table, so there is nothing to link:
+/// the plan and an empty placement record are written, and no link WAD.
+///
+/// Needs a game stack for the same reason as the exit-1 case, and SKIPS loudly without one.
+#[test]
+fn link_ok_plan_exits_0_and_writes_the_plan() {
+    if mercs2_quartermaster::game::discover().is_none() {
+        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
+        return;
+    }
+    let dir = scratch("ln-ok");
+    let out = dir.join("out");
+    let o = link(
+        &[&fixture("shipments/m2-sdk"), "--corpus", dir.join("src").to_str().unwrap()],
+        &out,
+    );
+    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("nothing to link"));
+    let plan = read_json(&out.join("load-plan.json"));
+    assert_eq!(plan["ok"], true);
+    assert_eq!(plan["producer"], "link");
+    let placement = read_json(&out.join("placement.json"));
+    assert_eq!(placement["placements"], serde_json::json!([]));
+    assert_eq!(listing(&out), ["load-plan.json", "placement.json"], "no link WAD");
+}
