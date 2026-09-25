@@ -28,7 +28,7 @@
 //! [`blocks_build`] is the build gate. `Hang` and `Error` block; `Warning` and `Info` do not. The
 //! standing mandate is that a build is gated on EXIT CODE, never on a printed count.
 
-use crate::blast::{self, MergeClass};
+use crate::blast;
 use crate::discover::{self, SourceIssue};
 use crate::game::GameStack;
 use crate::manifest::{Contribution, Manifest, Target};
@@ -110,11 +110,6 @@ pub const M0140_UNKNOWN_WEARER: Rule = Rule {
     title: "outfit targets a hero the wardrobe has no list for",
     doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
 };
-pub const M0141_UNMERGEABLE_SCRIPT: Rule = Rule {
-    code: "M0141",
-    title: "patching a script whose composition is not reversed makes the Shipment exclusive",
-    doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
-};
 pub const M0150_RAW_NO_TOUCHES: Rule = Rule {
     code: "M0150",
     title: "a raw contribution declares no blast radius",
@@ -138,6 +133,14 @@ pub const M0162_PLACED_FILE_REFUSED: Rule = Rule {
 pub const M0163_COMPANION_NOT_BESIDE_PLUGIN: Rule = Rule {
     code: "M0163",
     title: "a companion file is not in the directory the plugin will look for it in",
+    doc: "docs/modding/manifest_format.md#the-code-layer",
+};
+/// A plugin or runtime DLL the game could not load: not an i386 PE DLL
+/// ([`crate::pe::pe_dll_load_blocker`]). Needs the file, so it runs only when lint has the Shipment
+/// root.
+pub const M0178_DLL_NOT_LOADABLE: Rule = Rule {
+    code: "M0178",
+    title: "a plugin or runtime DLL is not a loadable i386 PE DLL",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
 /// Reported by validation (`ValidateError::BadRange`).
@@ -254,7 +257,6 @@ pub const RULES: &[Rule] = &[
     M0120_SELF_CONFLICT,
     M0130_BARE_HASH,
     M0140_UNKNOWN_WEARER,
-    M0141_UNMERGEABLE_SCRIPT,
     M0150_RAW_NO_TOUCHES,
     M0160_ASI_ON_REIMPL,
     M0161_HOOK_DOES_NOTHING,
@@ -262,6 +264,7 @@ pub const RULES: &[Rule] = &[
     M0163_COMPANION_NOT_BESIDE_PLUGIN,
     M0172_BAD_VERSION_REQ,
     M0173_SELF_REFERENCE,
+    M0178_DLL_NOT_LOADABLE,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
     M0200_LANGUAGE_NAME_UNUSABLE,
@@ -690,15 +693,17 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
 /// message about what a `.gfx` is supposed to look like, and that is a better place to say so than a
 /// rule about AS3 — a rule that reported "no AS3 found" for a file that is not a movie would be
 /// answering a question nobody asked.
-fn movie_checks(index: usize, name: &str, path: &Path) -> Vec<Diagnostic> {
-    let Ok(bytes) = std::fs::read(path) else {
+fn movie_checks(index: usize, name: &str, root: &Path, movie: &Path) -> Vec<Diagnostic> {
+    // The message names `movie` as the manifest wrote it, never the joined path: a report must not
+    // carry the local machine's absolute path.
+    let Ok(bytes) = std::fs::read(root.join(movie)) else {
         // M0110 already reports a missing source; an unreadable one is not this rule's business.
         return Vec::new();
     };
-    let Ok(movie) = mercs2_formats::gfx::GfxMovie::parse(&bytes) else {
+    let Ok(parsed) = mercs2_formats::gfx::GfxMovie::parse(&bytes) else {
         return Vec::new();
     };
-    let features = movie.features();
+    let features = parsed.features();
     if features.do_abc == 0 {
         return Vec::new();
     }
@@ -711,7 +716,7 @@ fn movie_checks(index: usize, name: &str, path: &Path) -> Vec<Diagnostic> {
              movie loads, {name} renders, and none of its script ever runs. Nothing is logged, \
              because as far as the loader is concerned nothing failed. None of the 64 movies retail \
              ships carries AS3. Re-author the logic as AS2 (AVM1).",
-            path.display(),
+            movie.display(),
             features.do_abc
         ),
         at: Some(index),
@@ -729,6 +734,36 @@ pub struct Diagnostic {
     pub at: Option<usize>,
     /// Exact replacement text, when the fix is mechanical.
     pub fix: Option<String>,
+}
+
+impl Diagnostic {
+    /// This diagnostic as the shared finding element, for `lint-report.json`.
+    ///
+    /// `items` is always empty — a lint report covers one manifest and has no request ids — and
+    /// `refs` points into `contributions` when the diagnostic belongs to one.
+    pub fn to_finding(&self) -> crate::plan::Finding {
+        use crate::plan::{Finding, FindingRef, FindingSeverity, Section};
+        Finding {
+            code: self.rule.code,
+            severity: match self.severity {
+                Severity::Info => FindingSeverity::Info,
+                Severity::Warning => FindingSeverity::Warning,
+                Severity::Error => FindingSeverity::Error,
+                Severity::Hang => FindingSeverity::Hang,
+            },
+            message: self.message.clone(),
+            items: Vec::new(),
+            refs: self
+                .at
+                .map(|index| FindingRef {
+                    section: Section::Contributions,
+                    index,
+                })
+                .into_iter()
+                .collect(),
+            fix: self.fix.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -829,6 +864,64 @@ fn placed_file_checks(
     out
 }
 
+/// M0162 and M0178 for an `add_runtime_dll`.
+///
+/// **M0162 (Error)** — the name is refused by [`crate::build::runtime_dll_name_refusal`], the same
+/// function the lowering and the load plan call: not a single `.dll` file name, a deny-listed stem,
+/// or not `<shipment.name>.dll`. Needs only the manifest, so it runs with or without a root.
+///
+/// **M0178 (Error)** — the bytes are not a loadable i386 PE DLL
+/// ([`crate::pe::pe_dll_load_blocker`]). Needs the file, so it runs only with a `root`, and not for
+/// a contribution whose source path is already an error (`source_issue_at`).
+fn runtime_dll_checks(
+    index: usize,
+    dll: &Path,
+    shipment_name: &str,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let Some(name) = dll.file_name().and_then(|n| n.to_str()) else {
+        out.push(Diagnostic {
+            rule: M0162_PLACED_FILE_REFUSED,
+            severity: Severity::Error,
+            message: "the `dll` path has no UTF-8 file name, so it cannot be placed.".into(),
+            at: Some(index),
+            fix: None,
+        });
+        return out;
+    };
+    if let Some(why) = crate::build::runtime_dll_name_refusal(name, shipment_name) {
+        out.push(Diagnostic {
+            rule: M0162_PLACED_FILE_REFUSED,
+            severity: Severity::Error,
+            message: format!("{name} cannot be placed in the game folder: {why}."),
+            at: Some(index),
+            fix: None,
+        });
+    }
+    let Some(root) = root else {
+        return out;
+    };
+    if source_issue_at.contains(&index) {
+        return out;
+    }
+    let why = match std::fs::read(root.join(dll)) {
+        Ok(bytes) => crate::pe::pe_dll_load_blocker(&bytes, "add_runtime_dll"),
+        Err(e) => Some(format!("it cannot be read: {e}")),
+    };
+    if let Some(why) = why {
+        out.push(Diagnostic {
+            rule: M0178_DLL_NOT_LOADABLE,
+            severity: Severity::Error,
+            message: format!("{name} cannot be loaded by the game: {why}."),
+            at: Some(index),
+            fix: None,
+        });
+    }
+    out
+}
+
 /// The game root prints as `<game folder>`; an empty string in a diagnostic reads as a bug.
 fn display_dest(dest: crate::manifest::PlaceIn) -> String {
     match dest.relative_dir() {
@@ -866,6 +959,10 @@ pub fn lint(
         });
     }
 
+    // Contributions whose source path is already an error (missing, absolute, escaping, outside
+    // `src/`). A rule that reads the file does not read those: the path is reported, and reading an
+    // escaping path would read outside the Shipment.
+    let mut source_issue_at: Vec<usize> = Vec::new();
     if let Some(root) = root {
         for issue in discover::check_sources(manifest, root) {
             let (rule, severity, at) = match &issue {
@@ -881,6 +978,7 @@ pub fn lint(
                     (M0112_SOURCE_OUTSIDE_SRC, Severity::Warning, *index)
                 }
             };
+            source_issue_at.push(at);
             out.push(Diagnostic {
                 rule,
                 severity,
@@ -952,28 +1050,7 @@ pub fn lint(
             }
             Contribution::AddMovie { name, movie } => {
                 if let Some(root) = root {
-                    out.extend(movie_checks(index, name, &root.join(movie)));
-                }
-            }
-            Contribution::PatchLua { target, .. } => {
-                let claim = blast::Claim::Script {
-                    name: target.clone(),
-                };
-                let class =
-                    blast::merge_class(&claim, blast::Access::Write, blast::Intent::Additive);
-                if class == MergeClass::Exclusive {
-                    out.push(Diagnostic {
-                        rule: M0141_UNMERGEABLE_SCRIPT,
-                        severity: Severity::Warning,
-                        message: format!(
-                            "we have not reversed how {target:?} composes, so this claim is treated \
-                             as exclusive: your Shipment will refuse to install alongside any other \
-                             that patches the same script. This is deliberate — the alternative is \
-                             the two silently annihilating each other."
-                        ),
-                        at: Some(index),
-                        fix: None,
-                    });
+                    out.extend(movie_checks(index, name, root, movie));
                 }
             }
             Contribution::EditStringDb { target, .. } => {
@@ -1043,6 +1120,15 @@ pub fn lint(
             }
             Contribution::PlaceFile { file, dest } => {
                 out.extend(placed_file_checks(index, file, *dest, &plugin_stems));
+            }
+            Contribution::AddRuntimeDll { dll } => {
+                out.extend(runtime_dll_checks(
+                    index,
+                    dll,
+                    &manifest.shipment.name,
+                    root,
+                    &source_issue_at,
+                ));
             }
             Contribution::AddLanguage { name, .. } => {
                 // The `data/` safety pivot: refuse a name that is not a usable language token or that
