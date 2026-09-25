@@ -31,7 +31,7 @@
 use crate::blast::{self, MergeClass};
 use crate::discover::{self, SourceIssue};
 use crate::game::GameStack;
-use crate::manifest::{Contribution, Manifest, Requirement, Target};
+use crate::manifest::{Contribution, Manifest, Target};
 use crate::names::{self, NameTable};
 use std::path::Path;
 
@@ -140,20 +140,23 @@ pub const M0163_COMPANION_NOT_BESIDE_PLUGIN: Rule = Rule {
     title: "a companion file is not in the directory the plugin will look for it in",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
-pub const M0170_BAD_DIGEST: Rule = Rule {
-    code: "M0170",
-    title: "an external requirement's sha256 is not a 64-character hex digest",
-    doc: "docs/modding/manifest_format.md#the-code-layer",
-};
-pub const M0171_INSECURE_URL: Rule = Rule {
-    code: "M0171",
-    title: "an external requirement is fetched over an untrusted transport",
-    doc: "docs/modding/manifest_format.md#the-code-layer",
-};
+/// Reported by validation (`ValidateError::BadRange`).
 pub const M0172_BAD_VERSION_REQ: Rule = Rule {
     code: "M0172",
-    title: "a managed requirement's version is not a valid semver range",
+    title: "a version range is not a valid semver range",
     doc: "docs/modding/manifest_format.md#the-code-layer",
+};
+/// Reported by validation (`ValidateError::SelfReference`).
+pub const M0173_SELF_REFERENCE: Rule = Rule {
+    code: "M0173",
+    title: "load.requires or load.conflicts names the Shipment itself",
+    doc: "docs/modding/manifest_format.md#dependencies",
+};
+/// Reported by validation (`ValidateError::ReservedName`).
+pub const M0211_RESERVED_NAME: Rule = Rule {
+    code: "M0211",
+    title: "shipment.name is a reserved name: the stem of a DLL no Shipment may ship",
+    doc: "docs/modding/manifest_format.md#dependencies",
 };
 pub const M0190_MOVIE_CARRIES_AS3: Rule = Rule {
     code: "M0190",
@@ -257,13 +260,13 @@ pub const RULES: &[Rule] = &[
     M0161_HOOK_DOES_NOTHING,
     M0162_PLACED_FILE_REFUSED,
     M0163_COMPANION_NOT_BESIDE_PLUGIN,
-    M0170_BAD_DIGEST,
-    M0171_INSECURE_URL,
     M0172_BAD_VERSION_REQ,
+    M0173_SELF_REFERENCE,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
     M0200_LANGUAGE_NAME_UNUSABLE,
     M0201_LANGUAGE_NO_SELECTOR,
+    M0211_RESERVED_NAME,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -847,8 +850,15 @@ pub fn lint(
     let mut out = Vec::new();
 
     if let Err(e) = manifest.validate() {
+        // A validation failure with a code of its own is reported under it; the rest are M0100.
+        let rule = match e.code() {
+            None => M0100_MANIFEST_INVALID,
+            Some(code) => *RULES.iter().find(|r| r.code == code).unwrap_or_else(|| {
+                panic!("ValidateError reports {code}, which is not a registered rule in RULES")
+            }),
+        };
         out.push(Diagnostic {
-            rule: M0100_MANIFEST_INVALID,
+            rule,
             severity: Severity::Error,
             message: e.to_string(),
             at: None,
@@ -1099,54 +1109,6 @@ pub fn lint(
                 }
             }
             _ => {}
-        }
-    }
-
-    for req in &manifest.load.requires {
-        // A managed requirement carries a semver RANGE that resolution compares releases against.
-        // An unparseable range is a hard error: nothing downstream can pick a version from it.
-        if let Requirement::Compatible { name, version } = req {
-            if semver::VersionReq::parse(version).is_err() {
-                out.push(Diagnostic {
-                    rule: M0172_BAD_VERSION_REQ,
-                    severity: Severity::Error,
-                    message: format!(
-                        "requirement {name:?} pins version {version:?}, which is not a valid semver \
-                         range. Use a range resolution can compare against — e.g. \"^0.1\" or \
-                         \">=0.0.3, <1.0.0\"."
-                    ),
-                    at: None,
-                    fix: None,
-                });
-            }
-        }
-        if let Requirement::External { url, sha256 } = req {
-            let looks_like_digest =
-                sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit());
-            if !looks_like_digest {
-                out.push(Diagnostic {
-                    rule: M0170_BAD_DIGEST,
-                    severity: Severity::Error,
-                    message: format!(
-                        "external requirement {url} pins {sha256:?}, which is not a 64-character \
-                         hex sha256. An unusable pin is worse than none: it reads as verified."
-                    ),
-                    at: None,
-                    fix: None,
-                });
-            }
-            if !url.starts_with("https://") {
-                out.push(Diagnostic {
-                    rule: M0171_INSECURE_URL,
-                    severity: Severity::Warning,
-                    message: format!(
-                        "external requirement {url} is not https. The pinned digest still protects \
-                         INTEGRITY, so this is not fatal — but the fetch itself is interceptable."
-                    ),
-                    at: None,
-                    fix: None,
-                });
-            }
         }
     }
 
