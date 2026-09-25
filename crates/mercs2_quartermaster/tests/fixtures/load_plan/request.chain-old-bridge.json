@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:ess",
+      "path": "shipments/ess-0.7.0"
+    },
+    {
+      "id": "shipment:lua-bridge",
+      "path": "shipments/lua-bridge-0.5.4"
+    },
+    {
+      "id": "shipment:my-mod",
+      "path": "shipments/my-mod"
+    }
+  ]
+}
