@@ -129,6 +129,10 @@ fn the_fixture_binaries_match_their_generators() {
         let bytes = std::fs::read(f.join(format!("shipments/{dir}/src/lua_bridge.asi"))).unwrap();
         assert_eq!(bytes, minimal_i386_dll(), "{dir}");
     }
+    for dir in ["m2-sdk", "dup-runtime"] {
+        let bytes = std::fs::read(f.join(format!("shipments/{dir}/src/m2-sdk.dll"))).unwrap();
+        assert_eq!(bytes, minimal_i386_dll(), "{dir}");
+    }
     for dir in ["ess-0.7.0", "ess-0.6.1"] {
         let bytes = std::fs::read(f.join(format!("shipments/{dir}/src/ess_ui.gfx"))).unwrap();
         assert_eq!(bytes, minimal_gfx(), "{dir}");
@@ -779,4 +783,104 @@ fn plan_findings_carry_a_null_fix() {
         .findings
         .iter()
         .all(|f| f.severity == FindingSeverity::Error));
+}
+
+// ---------------------------------------------------------------------------
+// add_runtime_dll
+// ---------------------------------------------------------------------------
+
+/// A runtime Shipment on its own: ok, with its DLL in `runtime_dlls[]` at the game root.
+#[test]
+fn a_runtime_dll_is_described_in_runtime_dlls() {
+    let f = fixtures();
+    let sdk = discover::open(&f.join("shipments/m2-sdk")).unwrap();
+    let p = plan_of(&[&sdk], None);
+    assert!(p.ok, "{:?}", p.findings);
+    let dlls = &p.items[0].runtime_dlls;
+    assert_eq!(dlls.len(), 1);
+    assert_eq!(dlls[0].contribution, 0);
+    assert_eq!(dlls[0].file_name, "m2-sdk.dll");
+    assert_eq!(dlls[0].source, "m2-sdk.dll");
+    assert_eq!(dlls[0].relative, "m2-sdk.dll", "the game root: no directory");
+    assert_eq!(
+        dlls[0].sha256,
+        mercs2_quartermaster::sha256_hex(&minimal_i386_dll())
+    );
+}
+
+/// Two Shipments shipping `m2-sdk.dll`: M0207. The second one is not named `m2-sdk`, so
+/// its DLL name is also refused (M0162) — the golden plan is the fixture's.
+#[test]
+fn two_shipments_same_runtime_dll_conflict() {
+    let p = fixture_plan("request.dup-runtime.json", "game-clean");
+    assert!(!p.ok);
+    assert_eq!(codes(&p), vec!["M0162", "M0207"]);
+    assert_golden(&p, "plan.dup-runtime.json");
+}
+
+/// A runtime DLL the game could not load is M0178 on its item; the entry is still described.
+#[test]
+fn a_runtime_dll_that_is_not_i386_is_m0178() {
+    let root = scratch("rtdll-amd64");
+    let s = shipment_at(
+        &root.join("rt"),
+        "shipment: { name: rt, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_runtime_dll\n    dll: src/rt.dll\n",
+    );
+    std::fs::write(s.root.join("src/rt.dll"), pe_image(0x8664, 0x230E)).unwrap();
+    let p = plan_of(&[&s], None);
+    assert_eq!(codes(&p), vec!["M0178"]);
+    assert_eq!(p.findings[0].refs[0].section, Section::Items);
+    assert_eq!(p.items[0].runtime_dlls.len(), 1);
+}
+
+/// A runtime DLL that cannot be read is exit 2 (no plan), never an empty entry.
+#[test]
+fn a_missing_runtime_dll_is_an_error() {
+    let root = scratch("rtdll-missing");
+    let s = shipment_at(
+        &root.join("rt"),
+        "shipment: { name: rt, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_runtime_dll\n    dll: src/rt.dll\n",
+    );
+    let inputs = [PlanInput { id: "shipment:rt", shipment: &s }];
+    match compat::plan(&inputs, Producer::Preflight, None) {
+        Err(CompatError::Item { id, message }) => {
+            assert_eq!(id, "shipment:rt");
+            assert!(message.contains("add_runtime_dll") && message.contains("src/rt.dll"), "{message}");
+        }
+        other => panic!("expected CompatError::Item, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// String tables: merged by the link, never a conflict between editors
+// ---------------------------------------------------------------------------
+
+/// Two Shipments editing the SAME key of one table: not a conflict — `qm link` merges both into one
+/// table in load order and the later one's text wins. The plan names that merged table's block in
+/// `link_block_paths`, after the scripts blocks, so a deploy step drops the per-Shipment copies.
+#[test]
+fn stringdb_editors_of_one_table_compose() {
+    let p = fixture_plan("request.stringdb.json", "game-clean");
+    assert!(p.ok, "{:?}", p.findings);
+    assert!(p.conflicts.is_empty(), "{:?}", p.conflicts);
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    assert_eq!(
+        p.link_block_paths,
+        vec![
+            link::SCRIPT_BLOCKS[0].1.to_string(),
+            link::SCRIPT_BLOCKS[1].1.to_string(),
+            format!("blocks\\VZ\\mod_{english:08x}.block"),
+        ]
+    );
+    assert_golden(&p, "plan.stringdb.json");
+}
+
+/// A set that edits no string table: `link_block_paths` is the scripts blocks alone.
+#[test]
+fn link_block_paths_without_string_tables_are_the_script_blocks() {
+    let root = scratch("lbp-none");
+    let a = ship(&root, "plain", "1.0.0", "");
+    let p = plan_of(&[&a], None);
+    let scripts: Vec<String> = link::SCRIPT_BLOCKS.iter().map(|(_, p)| p.to_string()).collect();
+    assert_eq!(p.link_block_paths, scripts);
 }
