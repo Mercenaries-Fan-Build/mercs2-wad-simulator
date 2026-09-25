@@ -446,7 +446,7 @@ pub const M0001_DANGLING_RUNG: Rule = Rule {
 pub const M0002_PACKED_FIELD_UNDER_CLAIM: Rule = Rule {
     code: "M0002",
     title: "packed_field under-claims decompressed size — heap overrun",
-    doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packedfield-bug",
+    doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packed_field-bug",
 };
 
 /// M0003, promoted out of [`PENDING`]. Answerable only against an emitted WAD: the INFO/BODY pair
