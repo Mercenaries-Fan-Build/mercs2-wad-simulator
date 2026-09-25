@@ -148,8 +148,8 @@ pub enum Intent {
     /// makes both edits true, and the loser's is silently absent.
     ReplaceExclusive,
     /// Editing a shipped table that `qm link` MERGES across the installed set, in load order: a
-    /// string table's `edit_stringdb` / `add_stringdb_keys`, applied by key hash with the later
-    /// Shipment's text winning. Many writers compose.
+    /// string table's `edit_stringdb` / `add_stringdb_keys` / `replace_stringdb_text`, the later
+    /// write winning. Many writers compose.
     Merged,
     /// Opaque bytes we cannot reason about (`raw`). Always fails closed.
     Opaque,
@@ -438,19 +438,15 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Intent::Additive,
                 );
             }
-            // Key edits and key additions on a shipped string table. `qm link` merges every installed
-            // Shipment's edits to one table into ONE link-owned copy, by key hash in load order, the
-            // later Shipment's text winning — so writers to one table compose, whatever keys they
-            // touch. The claim is on the table's asset hash, so a `raw` declaring that table still
-            // fails closed against them.
+            // Key edits, key additions and text replacements on a shipped string table. `qm link`
+            // merges every installed Shipment's writes to one table into ONE link-owned copy, in
+            // load order, the later write winning (a text replacement resolves against the table as
+            // merged so far) — so writers to one table compose, whatever they touch. The claim is on
+            // the table's asset hash, so a `raw` declaring that table still fails closed.
             Contribution::EditStringDb { target, .. }
-            | Contribution::AddStringDbKeys { target, .. } => {
+            | Contribution::AddStringDbKeys { target, .. }
+            | Contribution::ReplaceStringDbText { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::Merged);
-            }
-            // Rewrites strings by content match, so it can touch any key: it cannot be merged by
-            // key, and it conflicts with every other writer to the table.
-            Contribution::ReplaceStringDbText { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
             // A NEW language: mints a new stringdb hash (`hash(name)`) carried in a new base WAD.
             // Additive, so two Shipments adding the same language collide (KeyedSet) rather than one
