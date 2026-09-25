@@ -990,9 +990,11 @@ pub enum Contribution {
     /// `edit_stringdb`) and rewrites every entry whose current text matches exactly. Requiring the
     /// FULL string match keeps this from mangling unrelated lines that merely contain the phrase.
     ///
-    /// It matches by text, so it can touch any key of the table: it cannot be merged by key, and it
-    /// conflicts with every other writer to the same table (another Shipment's `edit_stringdb`,
-    /// `add_stringdb_keys` or `replace_stringdb_text`, and a second contribution in this one).
+    /// Installed together, `qm link` merges it with every other Shipment's writes to the table, in
+    /// load order: the text match runs against the table AS MERGED SO FAR (the base plus every
+    /// earlier write), and a later write wins. So it composes with `edit_stringdb` /
+    /// `add_stringdb_keys` on the same table, in this Shipment and others. A pair that matches
+    /// nothing is noted in the build and link logs.
     // `snake_case` would derive `replace_string_db_text`; pinned to the documented tag, as
     // `edit_stringdb`'s is.
     #[serde(rename = "replace_stringdb_text")]
