@@ -1,0 +1,10 @@
+format: 2
+shipment:
+  name: dup-runtime
+  version: 1.0.0
+  target: retail
+contributions:
+  # A second Shipment shipping m2-sdk.dll. Its name is not dup-runtime.dll, so this is M0162 as well
+  # as the M0207 collision with m2-sdk's DLL.
+  - kind: add_runtime_dll
+    dll: src/m2-sdk.dll
