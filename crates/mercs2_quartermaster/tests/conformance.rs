@@ -11,10 +11,10 @@
 
 use mercs2_quartermaster::{from_str, manifest::*, Format};
 
-/// Fixture A+B+C combined — every v1 kind in one document, so the tagged enum is exercised for all
-/// of them in every format.
+/// Fixture A+B+C combined — every kind in one document, so the tagged enum is exercised for all of
+/// them in every format, together with every requirement and conflict form and `supersedes`.
 const YAML: &str = r#"
-format: 1
+format: 2
 
 shipment:
   name: sean-devlin-outfit
@@ -25,14 +25,18 @@ shipment:
   target: retail
   quartermaster: ">=0.1"
 
+supersedes:
+  - { dest: on_load, file: 1_Sean.lua }
+
 load:
-  after: []
-  before: []
   requires:
     - some-other-shipment
-    - url: https://github.com/loganw234/mercs2-lua-mods/releases/download/v1/bridge.asi
-      sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-  conflicts: []
+    - { shipment: lua-bridge, version: "^1.0.0" }
+    - { capability: widescreen }
+  conflicts:
+    - old-sean-outfit
+    - { shipment: sean-legacy, version: "<2" }
+  provides: [sean-outfit]
 
 contributions:
   - kind: add_outfit
@@ -131,7 +135,7 @@ contributions:
 
 const JSON: &str = r#"
 {
-  "format": 1,
+  "format": 2,
   "shipment": {
     "name": "sean-devlin-outfit",
     "title": "Sean Devlin Outfit",
@@ -141,17 +145,20 @@ const JSON: &str = r#"
     "target": "retail",
     "quartermaster": ">=0.1"
   },
+  "supersedes": [
+    { "dest": "on_load", "file": "1_Sean.lua" }
+  ],
   "load": {
-    "after": [],
-    "before": [],
     "requires": [
       "some-other-shipment",
-      {
-        "url": "https://github.com/loganw234/mercs2-lua-mods/releases/download/v1/bridge.asi",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-      }
+      { "shipment": "lua-bridge", "version": "^1.0.0" },
+      { "capability": "widescreen" }
     ],
-    "conflicts": []
+    "conflicts": [
+      "old-sean-outfit",
+      { "shipment": "sean-legacy", "version": "<2" }
+    ],
+    "provides": ["sean-outfit"]
   },
   "contributions": [
     {
@@ -271,7 +278,7 @@ const JSON: &str = r#"
 // sub-tables (`[contributions.textures]`), or TOML reports a value-after-table error. That is a
 // property of the FORMAT, not of our schema.
 const TOML: &str = r#"
-format = 1
+format = 2
 
 [shipment]
 name = "sean-devlin-outfit"
@@ -282,14 +289,21 @@ description = "Adds Sean Devlin as a wearable outfit for Mattias."
 target = "retail"
 quartermaster = ">=0.1"
 
+[[supersedes]]
+dest = "on_load"
+file = "1_Sean.lua"
+
 [load]
-after = []
-before = []
-conflicts = []
 requires = [
   "some-other-shipment",
-  { url = "https://github.com/loganw234/mercs2-lua-mods/releases/download/v1/bridge.asi", sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+  { shipment = "lua-bridge", version = "^1.0.0" },
+  { capability = "widescreen" },
 ]
+conflicts = [
+  "old-sean-outfit",
+  { shipment = "sean-legacy", version = "<2" },
+]
+provides = ["sean-outfit"]
 
 [[contributions]]
 kind = "add_outfit"
@@ -477,11 +491,11 @@ fn every_destination_spells_the_same_in_all_three_formats() {
         ("on_load", PlaceIn::OnLoad),
         ("on_key", PlaceIn::OnKey),
     ] {
-        let head = "\"format\":1,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
+        let head = "\"format\":2,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
         let cases = [
             (
                 format!(
-                    "format: 1\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
+                    "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
                      contributions:\n  - kind: place_file\n    file: src/x.ini\n    dest: {yaml_name}\n"
                 ),
                 Format::Yaml,
@@ -495,7 +509,7 @@ fn every_destination_spells_the_same_in_all_three_formats() {
             ),
             (
                 format!(
-                    "format = 1\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                    "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
                      [[contributions]]\nkind = \"place_file\"\nfile = \"src/x.ini\"\n\
                      dest = \"{yaml_name}\"\n"
                 ),
@@ -521,11 +535,11 @@ fn every_destination_spells_the_same_in_all_three_formats() {
 fn a_path_shaped_destination_parses_in_no_format() {
     for attempt in ["..", "../..", "/etc", "C:\\\\Windows", "data", "scripts/.."] {
         let head =
-            "\"format\":1,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
+            "\"format\":2,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
         let cases = [
             (
                 format!(
-                    "format: 1\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
+                    "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
                      contributions:\n  - kind: place_file\n    file: src/x.ini\n    dest: '{attempt}'\n"
                 ),
                 Format::Yaml,
@@ -539,7 +553,7 @@ fn a_path_shaped_destination_parses_in_no_format() {
             ),
             (
                 format!(
-                    "format = 1\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                    "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
                      [[contributions]]\nkind = \"place_file\"\nfile = \"src/x.ini\"\n\
                      dest = \"{attempt}\"\n"
                 ),
@@ -555,28 +569,50 @@ fn a_path_shaped_destination_parses_in_no_format() {
     }
 }
 
-/// The `requires` dual form (bare name | pinned external artifact) is an UNTAGGED enum — the other
-/// serde feature that formats disagree about. Exercise it everywhere too.
+/// Every requirement form, both conflict forms and `supersedes`: the requirement and conflict
+/// enums are UNTAGGED — the serde feature formats disagree about — so each form is checked in all
+/// three formats.
 #[test]
-fn requires_dual_form_agrees_across_formats() {
+fn format2_forms_agree_yaml_json_toml() {
     for (text, fmt) in [
         (YAML, Format::Yaml),
         (JSON, Format::Json),
         (TOML, Format::Toml),
     ] {
         let m = from_str(text, fmt).unwrap_or_else(|e| panic!("{fmt:?}: {e}"));
-        assert_eq!(m.load.requires.len(), 2, "{fmt:?}");
-        assert!(
-            matches!(&m.load.requires[0], Requirement::Shipment(s) if s == "some-other-shipment"),
-            "{fmt:?}: first requirement should be a bare shipment name"
+        assert_eq!(
+            m.load.requires,
+            vec![
+                Requirement::Shipment("some-other-shipment".into()),
+                Requirement::ShipmentRange(ShipmentReq {
+                    shipment: "lua-bridge".into(),
+                    version: "^1.0.0".into()
+                }),
+                Requirement::Capability(CapabilityReq {
+                    capability: "widescreen".into()
+                }),
+            ],
+            "{fmt:?}"
         );
-        match &m.load.requires[1] {
-            Requirement::External { url, sha256 } => {
-                assert!(url.starts_with("https://"), "{fmt:?}");
-                assert_eq!(sha256.len(), 64, "{fmt:?}: expected a hex sha256");
-            }
-            other => panic!("{fmt:?}: expected an external requirement, got {other:?}"),
-        }
+        assert_eq!(
+            m.load.conflicts,
+            vec![
+                ConflictDecl::Name("old-sean-outfit".into()),
+                ConflictDecl::Range(ShipmentReq {
+                    shipment: "sean-legacy".into(),
+                    version: "<2".into()
+                }),
+            ],
+            "{fmt:?}"
+        );
+        assert_eq!(
+            m.supersedes,
+            vec![Superseded {
+                dest: PlaceIn::OnLoad,
+                file: "1_Sean.lua".into()
+            }],
+            "{fmt:?}"
+        );
     }
 }
 
@@ -621,29 +657,67 @@ fn minimal(target: &str, name: &str, format: u32) -> String {
     )
 }
 
-/// Direction matters: NEWER than known is the reject; older is accepted.
-#[test]
-fn a_future_format_version_is_loudly_rejected() {
-    let err = from_str(
-        &minimal("retail", "ok-name", FORMAT_VERSION + 1),
-        Format::Yaml,
+/// A document with the given shipment name and version and `extra` top-level YAML.
+fn doc(name: &str, version: &str, extra: &str) -> String {
+    format!(
+        "format: 2\nshipment:\n  name: {name}\n  version: {version}\n  target: retail\n{extra}contributions: []\n"
     )
-    .expect_err("a future format must be rejected");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("refusing to guess"),
-        "unhelpful message: {msg}"
-    );
+}
+
+/// The validation failure `text` produces, with the code it is reported under.
+fn validation_failure(text: &str, fmt: Format) -> ValidateError {
+    match from_str(text, fmt) {
+        Err(mercs2_quartermaster::ReadError::Validate(e)) => e,
+        Err(other) => panic!("expected a validation failure, got a parse failure: {other}\n{text}"),
+        Ok(_) => panic!("expected a validation failure, got a manifest:\n{text}"),
+    }
+}
+
+/// What lint reports for a manifest that parses but fails validation. Lint receives manifests
+/// that did not come through `from_str` (the Workshop edits one in memory), so this is the code a
+/// modder sees.
+fn lint_code(text: &str) -> &'static str {
+    let m: Manifest = serde_norway::from_str(text).expect("parses");
+    let found = mercs2_quartermaster::lint(&m, None, None);
+    assert_eq!(found.len(), 1, "{found:?}");
+    found[0].rule.code
+}
+
+/// A future format is refused, and says why.
+#[test]
+fn format3_future_rejected() {
+    let text = minimal("retail", "ok-name", FORMAT_VERSION + 1);
+    let e = validation_failure(&text, Format::Yaml);
+    assert!(e.to_string().contains("refusing to guess"), "unhelpful message: {e}");
+    assert_eq!(e.code(), None);
+    assert_eq!(lint_code(&text), "M0100");
+}
+
+/// Format 1 no longer exists: it fails exactly like any other unknown format.
+#[test]
+fn format1_rejected_as_unsupported_m0100() {
+    let text = minimal("retail", "ok-name", 1);
+    let e = validation_failure(&text, Format::Yaml);
+    assert!(e.to_string().contains("the only manifest format is 2"), "{e}");
+    assert_eq!(lint_code(&text), "M0100");
+}
+
+#[test]
+fn format0_rejected_as_unsupported_m0100() {
+    let text = minimal("retail", "ok-name", 0);
+    validation_failure(&text, Format::Yaml);
+    assert_eq!(lint_code(&text), "M0100");
 }
 
 #[test]
 fn the_current_format_version_is_accepted() {
+    assert_eq!(FORMAT_VERSION, 2);
     from_str(&minimal("retail", "ok-name", FORMAT_VERSION), Format::Yaml).expect("current format");
 }
 
 #[test]
 fn target_both_is_rejected_by_name() {
-    let err = from_str(&minimal("both", "ok-name", 1), Format::Yaml)
+    let err = from_str(&minimal("both", "ok-name", FORMAT_VERSION), Format::Yaml)
         .expect_err("target: both is reserved in v1");
     let msg = err.to_string();
     assert!(
@@ -663,19 +737,194 @@ fn shipment_name_must_be_a_slug() {
         "",
     ] {
         assert!(
-            from_str(&minimal("retail", &format!("{bad:?}"), 1), Format::Yaml).is_err(),
+            from_str(&minimal("retail", &format!("{bad:?}"), FORMAT_VERSION), Format::Yaml).is_err(),
             "{bad:?} should not be a valid shipment name"
         );
     }
     for good in ["sean-devlin-outfit", "boss-reskin", "a", "mod123"] {
-        from_str(&minimal("retail", good, 1), Format::Yaml)
+        from_str(&minimal("retail", good, FORMAT_VERSION), Format::Yaml)
             .unwrap_or_else(|e| panic!("{good:?} should be valid: {e}"));
     }
 }
 
+/// `after` and `before` are gone; `Load` denies unknown fields, so either is refused.
+#[test]
+fn after_before_rejected() {
+    for field in ["after", "before"] {
+        let text = doc("s", "1.0.0", &format!("load:\n  {field}: [other]\n"));
+        assert!(from_str(&text, Format::Yaml).is_err(), "{field} must not parse");
+    }
+}
+
+#[test]
+fn non_semver_version_rejected_m0100() {
+    for bad in ["1.0", "v1.0.0", "latest", "1"] {
+        let text = doc("s", &format!("\"{bad}\""), "");
+        let e = validation_failure(&text, Format::Yaml);
+        assert!(matches!(e, ValidateError::VersionNotSemver { .. }), "{bad}: {e:?}");
+        assert_eq!(lint_code(&text), "M0100", "{bad}");
+    }
+}
+
+/// A range that does not parse is M0172 wherever it appears.
+#[test]
+fn bad_range_rejected_m0172() {
+    for extra in [
+        "load:\n  requires:\n    - { shipment: other, version: \"not a range\" }\n",
+        "load:\n  conflicts:\n    - { shipment: other, version: \"~>1\" }\n",
+    ] {
+        let text = doc("s", "1.0.0", extra);
+        assert_eq!(validation_failure(&text, Format::Yaml).code(), Some("M0172"), "{extra}");
+        assert_eq!(lint_code(&text), "M0172", "{extra}");
+    }
+    let text = "format: 2\nshipment:\n  name: s\n  version: 1.0.0\n  target: retail\n  \
+                quartermaster: \"newest\"\ncontributions: []\n";
+    assert_eq!(validation_failure(text, Format::Yaml).code(), Some("M0172"));
+}
+
+/// Requiring or conflicting with yourself is a recursive dependency: M0173, in every form.
+#[test]
+fn self_reference_rejected_m0173() {
+    for extra in [
+        "load:\n  requires: [self-ref]\n",
+        "load:\n  requires:\n    - { shipment: self-ref, version: \"^1\" }\n",
+        "load:\n  conflicts: [self-ref]\n",
+        "load:\n  conflicts:\n    - { shipment: self-ref, version: \"^1\" }\n",
+    ] {
+        let text = doc("self-ref", "1.0.0", extra);
+        assert_eq!(validation_failure(&text, Format::Yaml).code(), Some("M0173"), "{extra}");
+        assert_eq!(lint_code(&text), "M0173", "{extra}");
+    }
+}
+
+/// A Shipment named after a deny-listed DLL stem is refused, whatever its case.
+#[test]
+fn reserved_shipment_name_rejected_m0211() {
+    for name in DENY_LISTED_DLL_STEMS.iter().copied().chain(["Cruise", "PMC_BB", "DxWrapper"]) {
+        let text = doc(name, "1.0.0", "");
+        let e = validation_failure(&text, Format::Yaml);
+        assert_eq!(e.code(), Some("M0211"), "{name}: {e}");
+        assert_eq!(lint_code(&text), "M0211", "{name}");
+    }
+    assert_eq!(DENY_LISTED_DLL_STEMS, &["pmc_bb", "cruise", "dxwrapper", "binkw32"]);
+}
+
+/// A Shipment name in `requires` / `conflicts` must be a slug, or it can name nothing.
+#[test]
+fn a_referenced_name_that_is_not_a_slug_is_rejected() {
+    for extra in [
+        "load:\n  requires: [Some_Mod]\n",
+        "load:\n  conflicts: [\"has space\"]\n",
+    ] {
+        let text = doc("s", "1.0.0", extra);
+        let e = validation_failure(&text, Format::Yaml);
+        assert!(matches!(e, ValidateError::ReferenceNotSlug { .. }), "{extra}: {e:?}");
+    }
+}
+
+/// `{ name, version }` is not a form this format has; the message names the one it does.
+#[test]
+fn compatible_form_rejected() {
+    let text = doc(
+        "s",
+        "1.0.0",
+        "load:\n  requires:\n    - { name: lua-bridge, version: \"^1.0.0\" }\n",
+    );
+    let e = validation_failure(&text, Format::Yaml);
+    assert!(
+        e.to_string().contains("{ shipment: lua-bridge, version: \"^1.0.0\" }"),
+        "{e}"
+    );
+    assert_eq!(lint_code(&text), "M0100");
+}
+
+/// `{ url, sha256 }` has no variant: it fails to PARSE, like any shape the model does not have.
+#[test]
+fn external_form_fails_to_parse() {
+    let yaml = doc(
+        "s",
+        "1.0.0",
+        "load:\n  requires:\n    - { url: \"https://example.com/x.asi\", sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 }\n",
+    );
+    let json = r#"{"format":2,"shipment":{"name":"s","version":"1.0.0","target":"retail"},
+        "load":{"requires":[{"url":"https://example.com/x.asi","sha256":"e3b0"}]}}"#;
+    let toml = "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                [load]\nrequires = [{ url = \"https://example.com/x.asi\", sha256 = \"e3b0\" }]\n";
+    for (text, fmt) in [(yaml.as_str(), Format::Yaml), (json, Format::Json), (toml, Format::Toml)] {
+        match from_str(text, fmt) {
+            Err(mercs2_quartermaster::ReadError::Parse { .. }) => {}
+            other => panic!("{fmt:?}: expected a parse failure, got {other:?}"),
+        }
+    }
+}
+
+/// An object carrying keys from two forms matches neither (each wraps a `deny_unknown_fields`
+/// struct), in every format.
+#[test]
+fn mixed_key_objects_rejected_all_formats() {
+    let yaml = doc(
+        "s",
+        "1.0.0",
+        "load:\n  requires:\n    - { shipment: a, name: a, version: \"^1\" }\n",
+    );
+    let json = r#"{"format":2,"shipment":{"name":"s","version":"1.0.0","target":"retail"},
+        "load":{"requires":[{"shipment":"a","capability":"c"}]}}"#;
+    let toml = "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                [load]\nconflicts = [{ shipment = \"a\", version = \"^1\", name = \"a\" }]\n";
+    for (text, fmt) in [(yaml.as_str(), Format::Yaml), (json, Format::Json), (toml, Format::Toml)] {
+        match from_str(text, fmt) {
+            Err(mercs2_quartermaster::ReadError::Parse { .. }) => {}
+            other => panic!("{fmt:?}: expected a parse failure, got {other:?}"),
+        }
+    }
+}
+
+/// `supersedes` is a top-level field.
+#[test]
+fn supersedes_top_level_parses() {
+    let text = doc(
+        "ess",
+        "0.7.0",
+        "supersedes:\n  - { dest: on_load, file: 1_Ess.lua }\n  - { dest: on_load, file: 2_EssNames.lua }\n",
+    );
+    let m = from_str(&text, Format::Yaml).expect("parses");
+    assert_eq!(m.supersedes.len(), 2);
+    assert_eq!(m.supersedes[1].file, "2_EssNames.lua");
+}
+
+#[test]
+fn supersedes_under_load_rejected() {
+    let text = doc(
+        "ess",
+        "0.7.0",
+        "load:\n  supersedes:\n    - { dest: on_load, file: 1_Ess.lua }\n",
+    );
+    assert!(from_str(&text, Format::Yaml).is_err());
+}
+
+/// A superseded `file` is one filename; the destination half is the closed `dest` set.
+#[test]
+fn a_superseded_path_is_rejected() {
+    for file in ["../1_Ess.lua", "OnLoad/1_Ess.lua", "C:x.lua", "..", ""] {
+        let text = doc(
+            "ess",
+            "0.7.0",
+            &format!("supersedes:\n  - {{ dest: on_load, file: \"{file}\" }}\n"),
+        );
+        let e = validation_failure(&text, Format::Yaml);
+        assert!(matches!(e, ValidateError::SupersededNotAFilename { .. }), "{file:?}: {e:?}");
+    }
+    // Not a write, so the placement extension ban does not apply to what is only detected.
+    from_str(
+        &doc("ess", "0.7.0", "supersedes:\n  - { dest: game_root, file: legacy.dll }\n"),
+        Format::Yaml,
+    )
+    .expect("a .dll may be superseded");
+}
+
 #[test]
 fn an_unknown_contribution_kind_is_rejected() {
-    let text = "format: 1\nshipment:\n  name: x\n  version: 1.0.0\n  target: retail\ncontributions:\n  - kind: reticulate_splines\n    foo: bar\n";
+    let text = "format: 2\nshipment:\n  name: x\n  version: 1.0.0\n  target: retail\ncontributions:\n  - kind: reticulate_splines\n    foo: bar\n";
     assert!(from_str(text, Format::Yaml).is_err());
 }
 
