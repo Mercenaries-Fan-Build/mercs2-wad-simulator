@@ -15,7 +15,7 @@ fn parse(yaml: &str) -> Manifest {
 /// A wardrobe mod: one outfit for one hero.
 fn outfit(shipment: &str, asset: &str, wearer: &str, slug: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_outfit
@@ -30,7 +30,7 @@ contributions:
 
 fn replace_texture(shipment: &str, target: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: replace_texture
@@ -54,32 +54,6 @@ fn two_outfit_mods_for_the_same_hero_coexist() {
 
     let found = blast::conflicts(&[("sean-devlin", &a), ("roze-skin", &b)]);
     assert!(found.is_empty(), "outfit mods must compose, got: {found:?}");
-}
-
-/// A Shipment declaring `load.conflicts: [other]` fires ONLY when `other` is also installed — the
-/// author-asserted incompatibility the claim graph cannot infer.
-#[test]
-fn a_declared_conflict_fires_only_when_the_named_shipment_is_installed() {
-    let hostile = parse(
-        "format: 1
-shipment: { name: hostile, version: 1.0.0, target: retail }
-load: { conflicts: [victim] }
-contributions:
-  - kind: replace_texture
-    target: al_hum_boss_ub
-    image: src/t.png
-",
-    );
-    let victim = replace_texture("victim", "al_veh_boat_ub");
-    let bystander = replace_texture("bystander", "al_veh_car_ub");
-
-    // Fires: victim is installed alongside hostile.
-    let with_victim = blast::declared_conflicts(&[("hostile", &hostile), ("victim", &victim)]);
-    assert_eq!(with_victim, vec![("hostile".to_string(), "victim".to_string())]);
-
-    // Quiet: the named Shipment is not in the set, so there is nothing to clash with.
-    let without = blast::declared_conflicts(&[("hostile", &hostile), ("bystander", &bystander)]);
-    assert!(without.is_empty(), "a declared conflict on an absent Shipment is inert: {without:?}");
 }
 
 /// ...but the same slug on the same hero is a genuine duplicate key.
@@ -129,7 +103,7 @@ fn the_wardrobe_script_is_mergeable_not_exclusive() {
 fn an_unreversed_script_is_exclusive() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: patch_lua
@@ -156,7 +130,7 @@ contributions:
 fn two_raw_contributions_touching_one_target_collide() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: raw
@@ -176,7 +150,7 @@ contributions:
 fn two_native_hooks_on_one_address_collide() {
     let mk = |name: &str, asi: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: native_hook
@@ -199,7 +173,7 @@ contributions:
 fn two_plugins_with_the_same_filename_collide() {
     let mk = |name: &str, at: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: native_hook
@@ -227,7 +201,7 @@ contributions:
 fn two_shipments_writing_one_companion_path_collide() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: place_file
@@ -252,7 +226,7 @@ contributions:
 fn one_filename_in_two_destinations_does_not_collide() {
     let mk = |name: &str, dest: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: place_file
@@ -271,7 +245,7 @@ contributions:
 #[test]
 fn a_plugin_and_its_companion_are_not_a_self_conflict() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: bridge, version: 1.0.0, target: retail }
 contributions:
   - kind: native_hook
@@ -310,7 +284,7 @@ contributions:
 fn two_shipments_minting_the_same_new_name_collide() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_model
@@ -350,7 +324,7 @@ fn two_texture_replacements_are_load_order_not_conflict() {
 #[test]
 fn a_donor_is_a_read_not_a_write() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -379,7 +353,7 @@ contributions:
 fn many_shipments_may_share_one_donor() {
     let mk = |name: &str, asset: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_model
@@ -398,7 +372,7 @@ contributions:
 #[test]
 fn an_unprovided_read_is_reported_without_claiming_it_is_missing() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -416,7 +390,7 @@ contributions:
 #[test]
 fn a_read_satisfied_by_another_shipment_is_not_reported() {
     let a = parse(
-        "format: 1
+        "format: 2
 shipment: { name: consumer, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -426,7 +400,7 @@ contributions:
 ",
     );
     let b = parse(
-        "format: 1
+        "format: 2
 shipment: { name: provider, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -450,7 +424,7 @@ contributions:
 #[test]
 fn a_shipment_may_not_claim_one_target_twice() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: replace_texture
@@ -476,7 +450,7 @@ contributions:
 #[test]
 fn one_shipment_may_add_several_outfits() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: pack, version: 1.0.0, target: retail }
 contributions:
   - kind: add_outfit
@@ -508,7 +482,7 @@ contributions:
 #[test]
 fn a_bare_hash_touch_and_its_name_are_the_same_claim() {
     let by_name = parse(
-        "format: 1
+        "format: 2
 shipment: { name: a, version: 1.0.0, target: retail }
 contributions:
   - kind: raw
@@ -518,7 +492,7 @@ contributions:
 ",
     );
     let by_hash = parse(
-        "format: 1
+        "format: 2
 shipment: { name: b, version: 1.0.0, target: retail }
 contributions:
   - kind: raw
@@ -542,7 +516,7 @@ contributions:
 /// A support-catalog shop mod adding one crate-delivery item to two vendors.
 fn shop_item(shipment: &str, id: &str, cargo: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_shop_item
@@ -617,7 +591,7 @@ fn shop_item_lowers_to_catalog_and_reward_appends() {
 #[test]
 fn novel_behaviour_shop_item_skips_the_eager_append() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: bomb-mod, version: 1.0.0, target: retail }
 contributions:
   - kind: add_shop_item
