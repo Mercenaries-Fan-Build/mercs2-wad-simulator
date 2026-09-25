@@ -168,7 +168,7 @@ fn our_compiler_agrees_with_the_bytecode_retail_shipped() {
                     differed.push((name, ours.len(), theirs.len()));
                 }
             }
-            Err(e) => failed.push((name, e.lines().next().unwrap_or("").to_string())),
+            Err(e) => failed.push((name, e.to_string().lines().next().unwrap_or("").to_string())),
         }
     }
 
