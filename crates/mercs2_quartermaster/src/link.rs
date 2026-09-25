@@ -44,6 +44,37 @@ use mercs2_formats::scripts_block::ScriptsBlock;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// Why `name` cannot be a bare chunk name, or `None` when it can.
+///
+/// Retail's LuaQ headers store the bare script name (the module note above): no `@` prefix and no
+/// `.lua` suffix. Lua 5.1 treats a leading `@` (a file name) and a leading `=` (a literal) as sigils
+/// when it prints a chunk name, so neither may start one. A name is also one path component, never
+/// empty, and carries no NUL. `qm compile-lua` checks the chunk name it compiles under with this.
+pub fn chunk_name_refusal(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("it is empty".into());
+    }
+    if name.starts_with('@') || name.starts_with('=') {
+        return Some(format!(
+            "it starts with {:?}, which Lua reads as a chunk-name sigil; retail chunk names are the \
+             bare script name",
+            &name[..1]
+        ));
+    }
+    if name.to_ascii_lowercase().ends_with(".lua") {
+        return Some(
+            "it ends in `.lua`; retail chunk names are the bare script name, with no extension".into(),
+        );
+    }
+    if name.contains('\0') {
+        return Some("it contains a NUL byte".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Some("it contains a path separator; a chunk name is one bare name".into());
+    }
+    None
+}
+
 /// Every block a `patch_lua` target may live in, as `(PTHS needle, PTHS path)`.
 ///
 /// Game scripts are split across blocks: `scripts_vz` holds the 114 content scripts (contracts,
@@ -176,6 +207,222 @@ pub struct LinkedScript {
     /// Index into the `blocks` slice handed to [`link_into_blocks`] — which block this script was
     /// spliced into, so the caller emits only the blocks that actually changed.
     pub block: usize,
+}
+
+/// A literal `import("x")` whose `x` nothing in the link provides (M0209, a warning).
+///
+/// Resolved means: after every script is linked and every module minted, some loaded block holds a
+/// script named `x` — a shipped script, an `add_script` module, a minted support module — or `x`
+/// is `qm_modloader`. Anything else will fail at runtime unless something provides it by other
+/// means, which the linker cannot see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedImport {
+    /// The Shipment whose source carries the import.
+    pub shipment: String,
+    /// The module name inside the literal.
+    pub module: String,
+    /// Which source it is in, for the message: `patch_lua append to <target>`, `add_script <name>`,
+    /// `replace_lua <target>`, or `support module <name>`.
+    pub source: String,
+}
+
+impl std::fmt::Display for UnresolvedImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: import({:?}) in its {} names no script in the linked blocks, no add_script in \
+             the set and no module the Quartermaster mints, so it will fail at runtime unless \
+             something provides it another way",
+            self.shipment, self.module, self.source
+        )
+    }
+}
+
+/// What [`link_into_blocks`] produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkOutput {
+    /// Every script linked, replaced or minted.
+    pub scripts: Vec<LinkedScript>,
+    /// Literal imports nothing provides (M0209), in the order they were found.
+    pub unresolved_imports: Vec<UnresolvedImport>,
+}
+
+/// Every literal `import("x")` / `import('x')` in `source`: the `x` of each call to the global
+/// `import` whose only argument is one short string literal.
+///
+/// A small Lua 5.1 lexer, so that comments and string contents are never read as code: `--` line
+/// and `--[[ ]]` / `--[==[ ]==]` long comments, `"…"` / `'…'` short strings with their escapes, and
+/// `[[ ]]` / `[==[ ]==]` long strings. A call counts only when `import` is not a field or method
+/// (`t.import(…)`, `t:import(…)`) and is not being defined (`function import(…)`).
+///
+/// **Not checked, by design:** `dynamic_import(…)`, `import(<expression>)`, a concatenated name
+/// (`import("a" .. b)`), the call forms without parentheses (`import "x"`), and module names reached
+/// through data such as a task's `sModuleName`. Those are resolved at runtime and the linker cannot
+/// see them.
+pub fn literal_imports(source: &str) -> Vec<String> {
+    let tokens = lua_tokens(source);
+    let mut out = Vec::new();
+    for i in 0..tokens.len() {
+        if tokens[i] != LuaToken::Name("import".into()) {
+            continue;
+        }
+        let before = i.checked_sub(1).map(|p| &tokens[p]);
+        let is_field_or_definition = matches!(
+            before,
+            Some(LuaToken::Punct(".")) | Some(LuaToken::Punct(":"))
+        ) || before == Some(&LuaToken::Name("function".into()));
+        if is_field_or_definition {
+            continue;
+        }
+        if let (Some(LuaToken::Punct("(")), Some(LuaToken::ShortString(module)), Some(LuaToken::Punct(")"))) =
+            (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+        {
+            out.push(module.clone());
+        }
+    }
+    out
+}
+
+/// A Lua token, as far as [`literal_imports`] needs one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LuaToken {
+    Name(String),
+    /// A `"…"` or `'…'` string, escapes decoded.
+    ShortString(String),
+    /// A `[[…]]` string.
+    LongString,
+    Number,
+    Punct(&'static str),
+}
+
+/// The level of a long bracket opening at `b[i]` (`[[` is 0, `[==[` is 2), or `None`.
+fn long_bracket_level(b: &[u8], i: usize) -> Option<usize> {
+    if b.get(i) != Some(&b'[') {
+        return None;
+    }
+    let mut j = i + 1;
+    while b.get(j) == Some(&b'=') {
+        j += 1;
+    }
+    (b.get(j) == Some(&b'[')).then_some(j - i - 1)
+}
+
+/// The index just past the long bracket close `]=*]` of `level` at or after `from`, or the end of
+/// the input when it is unterminated (the compiler reports that; here it only has to stop).
+fn long_bracket_end(b: &[u8], from: usize, level: usize) -> usize {
+    let mut k = from;
+    while k < b.len() {
+        if b[k] == b']' {
+            let mut j = k + 1;
+            while b.get(j) == Some(&b'=') {
+                j += 1;
+            }
+            if j - k - 1 == level && b.get(j) == Some(&b']') {
+                return j + 1;
+            }
+        }
+        k += 1;
+    }
+    b.len()
+}
+
+fn lua_tokens(source: &str) -> Vec<LuaToken> {
+    const PUNCT: &[&str] = &[
+        "...", "..", "==", "~=", "<=", ">=", "(", ")", "{", "}", "[", "]", ";", ":", ",", ".", "+",
+        "-", "*", "/", "%", "^", "#", "<", ">", "=",
+    ];
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if c == b'-' && b.get(i + 1) == Some(&b'-') {
+            match long_bracket_level(b, i + 2) {
+                Some(level) => i = long_bracket_end(b, i + 2 + level + 2, level),
+                None => {
+                    while i < b.len() && b[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+            }
+        } else if let Some(level) = long_bracket_level(b, i) {
+            i = long_bracket_end(b, i + level + 2, level);
+            out.push(LuaToken::LongString);
+        } else if c == b'"' || c == b'\'' {
+            let (text, next) = short_string(b, i + 1, c);
+            out.push(LuaToken::ShortString(text));
+            i = next;
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            out.push(LuaToken::Name(source[start..i].to_string()));
+        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
+            // A numeral, including `0x1F`, `1e-5` and `.5`: letters, digits, `.`, and a sign right
+            // after an exponent marker.
+            i += 1;
+            while i < b.len() {
+                let d = b[i];
+                let signed_exponent = (d == b'+' || d == b'-') && matches!(b[i - 1], b'e' | b'E');
+                if d.is_ascii_alphanumeric() || d == b'.' || signed_exponent {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(LuaToken::Number);
+        } else if let Some(p) = PUNCT.iter().find(|p| b[i..].starts_with(p.as_bytes())) {
+            out.push(LuaToken::Punct(p));
+            i += p.len();
+        } else {
+            // A byte Lua itself would reject; the compiler reports it. Stepping over it keeps the
+            // scan going without inventing a token. Non-ASCII bytes only occur inside strings and
+            // comments in valid Lua 5.1, and those are consumed above.
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Decode a short string whose body starts at `b[start]` and ends at the unescaped `quote`, and
+/// return it with the index just past the closing quote. Lua 5.1's escapes: `\a \b \f \n \r \t
+/// \v \\ \" \'`, a backslash-newline, and `\ddd` (up to three decimal digits).
+fn short_string(b: &[u8], start: usize, quote: u8) -> (String, usize) {
+    let mut bytes = Vec::new();
+    let mut i = start;
+    while i < b.len() && b[i] != quote && b[i] != b'\n' {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            let e = b[i + 1];
+            i += 2;
+            match e {
+                b'a' => bytes.push(0x07),
+                b'b' => bytes.push(0x08),
+                b'f' => bytes.push(0x0C),
+                b'n' | b'\n' => bytes.push(b'\n'),
+                b'r' => bytes.push(b'\r'),
+                b't' => bytes.push(b'\t'),
+                b'v' => bytes.push(0x0B),
+                d if d.is_ascii_digit() => {
+                    let mut value = u32::from(d - b'0');
+                    let mut n = 1;
+                    while n < 3 && i < b.len() && b[i].is_ascii_digit() {
+                        value = value * 10 + u32::from(b[i] - b'0');
+                        i += 1;
+                        n += 1;
+                    }
+                    bytes.push(value as u8);
+                }
+                other => bytes.push(other),
+            }
+        } else {
+            bytes.push(b[i]);
+            i += 1;
+        }
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), (i + 1).min(b.len()))
 }
 
 /// One candidate scripts block, with the PTHS path the overlay must carry for it.
@@ -833,7 +1080,7 @@ pub fn link_into(
     corpus_root: &Path,
     mutations: &[ScriptMutation],
     order: &[String],
-) -> Result<Vec<LinkedScript>, LinkError> {
+) -> Result<LinkOutput, LinkError> {
     let mut blocks = [TargetBlock {
         path: String::new(),
         block,
@@ -855,6 +1102,11 @@ pub fn link_into(
 /// decision here follows it: append concatenation, which `replace_lua` wins (the later one), the
 /// mint order of `add_script` modules and support subclasses, and the `qm_modloader` bake. A
 /// contributor missing from it is [`LinkError::NotInOrder`].
+///
+/// Once everything is linked and minted, every Shipment-authored Lua source — `patch_lua` appends,
+/// `add_script` modules, `replace_lua` sources and support modules — is scanned for literal
+/// `import("x")` calls ([`literal_imports`]); the ones nothing provides come back as
+/// [`LinkOutput::unresolved_imports`] (M0209). They are warnings: they never fail the link.
 pub fn link_into_blocks(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
@@ -865,7 +1117,7 @@ pub fn link_into_blocks(
     additions: &[ScriptAddition],
     replacements: &[ScriptReplacement],
     order: &[String],
-) -> Result<Vec<LinkedScript>, LinkError> {
+) -> Result<LinkOutput, LinkError> {
     // Anything that lives in the load space — a UI widget, a layer activation, or a novel support
     // behaviour — needs the loader minted and the resident trampoline installed.
     let needs_loader =
@@ -921,7 +1173,7 @@ pub fn link_into_blocks(
         // BARE chunk name — see the module note. `@name.lua` produces a chunk 5 bytes off retail.
         let bytecode = mercs2_luac::compile(&source, target).map_err(|e| LinkError::Compile {
             target: target.to_string(),
-            message: e,
+            message: e.to_string(),
         })?;
         block
             .replace_lua(idx, &bytecode)
@@ -943,9 +1195,9 @@ pub fn link_into_blocks(
     // Apply each `replace_lua` wholesale swap. Same asset hash, new bytecode -- every existing
     // `import(<target>)` call site now returns the new module without rebinding. Applied in load
     // order, so where two replace one target the later Shipment's is what remains.
-    let mut replacements: Vec<&ScriptReplacement> = replacements.iter().collect();
-    sort_by_order(&mut replacements, order, |r| r.shipment.as_str(), |_| ())?;
-    for r in replacements {
+    let mut in_order: Vec<&ScriptReplacement> = replacements.iter().collect();
+    sort_by_order(&mut in_order, order, |r| r.shipment.as_str(), |_| ())?;
+    for r in in_order {
         let (bi, idx) = blocks
             .iter()
             .enumerate()
@@ -957,7 +1209,7 @@ pub fn link_into_blocks(
         let bytecode = mercs2_luac::compile(&r.source, &r.target)
             .map_err(|e| LinkError::Compile {
                 target: r.target.clone(),
-                message: e,
+                message: e.to_string(),
             })?;
         blocks[bi]
             .block
@@ -996,7 +1248,7 @@ pub fn link_into_blocks(
             let bytecode = mercs2_luac::compile(&a.source, &a.name)
                 .map_err(|e| LinkError::Compile {
                     target: a.name.clone(),
-                    message: e,
+                    message: e.to_string(),
                 })?;
             blocks[bi]
                 .block
@@ -1042,7 +1294,7 @@ pub fn link_into_blocks(
             let bytecode =
                 mercs2_luac::compile(&r.source, &r.module).map_err(|e| LinkError::Compile {
                     target: r.module.clone(),
-                    message: e,
+                    message: e.to_string(),
                 })?;
             blocks[bi]
                 .block
@@ -1066,7 +1318,7 @@ pub fn link_into_blocks(
         let bytecode =
             mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
                 target: QM_MODLOADER_NAME.to_string(),
-                message: e,
+                message: e.to_string(),
             })?;
         blocks[bi]
             .block
@@ -1103,12 +1355,78 @@ pub fn link_into_blocks(
             .verify_csums()
             .map_err(|e| LinkError::Block(format!("CSUMs after linking {}: {e}", blocks[bi].path)))?;
     }
-    Ok(linked)
+
+    // M0209. Checked only now, when every addition, support module and `qm_modloader` has been
+    // minted into the blocks, so "a script by that name is in a loaded block" covers all of them.
+    let mut sources: Vec<(&str, String, &str)> = Vec::new();
+    for m in mutations {
+        sources.push((&m.shipment, format!("patch_lua append to {}", m.target), &m.append));
+    }
+    for a in additions {
+        sources.push((&a.shipment, format!("add_script {}", a.name), &a.source));
+    }
+    for r in replacements {
+        sources.push((&r.shipment, format!("replace_lua {}", r.target), &r.source));
+    }
+    for r in support_regs {
+        sources.push((&r.shipment, format!("support module {}", r.module), &r.source));
+    }
+    let mut unresolved_imports: Vec<UnresolvedImport> = Vec::new();
+    for (shipment, what, source) in sources {
+        for module in literal_imports(source) {
+            let provided = module == QM_MODLOADER_NAME
+                || blocks
+                    .iter()
+                    .any(|tb| tb.block.find_script_by_name(&module).is_some());
+            let entry = UnresolvedImport {
+                shipment: shipment.to_string(),
+                module,
+                source: what.clone(),
+            };
+            if !provided && !unresolved_imports.contains(&entry) {
+                unresolved_imports.push(entry);
+            }
+        }
+    }
+    Ok(LinkOutput {
+        scripts: linked,
+        unresolved_imports,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The literal forms are found; comments, strings, fields, methods, definitions and the
+    /// documented-unchecked forms are not.
+    #[test]
+    fn literal_imports_finds_only_literal_calls_to_the_global_import() {
+        let src = r#"
+local a = import("ess")
+local b = import ( 'ess_names' )
+-- import("in_a_line_comment")
+--[[ import("in_a_long_comment") ]]
+--[==[ import("in_a_level_2_comment") ]]==]
+local s = "import(\"in_a_string\")"
+local l = [[ import("in_a_long_string") ]]
+local c = t.import("a_field")
+local d = t:import("a_method")
+function import(name) return name end
+local e = dynamic_import("dynamic")
+local f = import(name)
+local g = import("a" .. suffix)
+local h = import "no_parens"
+local i = import("esc\097ped")
+"#;
+        assert_eq!(literal_imports(src), vec!["ess", "ess_names", "escaped"]);
+    }
+
+    #[test]
+    fn literal_imports_survives_numbers_and_operators() {
+        let src = "x = 1e-5 + 0x1F .. import('after_concat') ... y = .5; z = a..import(\"b\")\n";
+        assert_eq!(literal_imports(src), vec!["after_concat", "b"]);
+    }
 
     fn mutation(shipment: &str, target: &str, append: &str) -> ScriptMutation {
         ScriptMutation {
