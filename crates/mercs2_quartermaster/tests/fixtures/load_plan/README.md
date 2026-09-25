@@ -31,7 +31,11 @@ Golden plans are compared as parsed JSON, with `quartermaster` replaced by the r
   (`replace_stringdb_text`); `shipments/stringdb-b/` edits `[Menu.Play]` and adds
   `[StringdbB.Added]`. Writers to one table never conflict, across Shipments or inside one: the
   link applies their writes in load order, the later winning, a
-  text replacement resolving against the table as merged so far.
+  text replacement resolving against the table as merged so far. `stringdb-a`'s pairs file
+  (`old<TAB>new`, free text) replaces the text its own edit gives `[Menu.Quit]`.
+- These two sets are for `qm preflight`, which never reads their text files: `[Menu.Play]` and
+  `[Menu.Quit]` are not keys of the retail `english` table (read from the game, 2026-09-25), so they
+  do not build against it. The merge is exercised against the real table by `tests/build.rs`.
 
 ## Game layouts
 
