@@ -1007,9 +1007,11 @@ pub enum Contribution {
     },
     /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
     ///
-    /// The Shipment's own overlay carries an edited copy of the target `stringdb`. Installed
-    /// together, every Shipment's edits to one table are merged by `qm link` into one table, by key
-    /// hash in load order, the later Shipment's text winning — so editors of one table compose. The codec
+    /// The Shipment's own overlay carries ONE edited copy of the target `stringdb`, with all of this
+    /// Shipment's `edit_stringdb` / `add_stringdb_keys` / `replace_stringdb_text` on that table
+    /// applied in contribution order, each seeing the earlier ones' edits. Installed together, every
+    /// Shipment's writes to one table are merged by `qm link` into one table, in load order, the later
+    /// write winning — so editors of one table compose. The codec
     /// (`mercs2_formats::stringdb`) is proven byte-identical against all six retail language tables,
     /// and arbitrary-length edits are supported — the heap is rebuilt and the descriptors repointed.
     ///
