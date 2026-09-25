@@ -18,22 +18,46 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Schema version this build understands. A manifest declaring a NEWER version is a loud reject;
-/// an older one is accepted (see [`Manifest::validate`]).
-pub const FORMAT_VERSION: u32 = 1;
+/// The manifest format this build reads. It is the ONLY format: any other value, older or newer, is
+/// a loud reject (see [`Manifest::validate`]).
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Maximum length of `shipment.name` — it becomes the output filename `build/<name>.wad`.
 pub const MAX_NAME_LEN: usize = 64;
+
+/// DLL stems no Shipment may be named after (M0211), lowercase.
+///
+/// One list with two uses: a Shipment named after one of these is refused by validation, and the
+/// same names are the DLLs a Shipment may never ship into the game root. Names only, never
+/// versions. `pmc_bb` is the loader,
+/// `cruise` its sidecar, and `dxwrapper` / `binkw32` are DLLs the loader writes a `BUILD dll=` line
+/// for. Compared lowercased.
+pub const DENY_LISTED_DLL_STEMS: &[&str] = &["pmc_bb", "cruise", "dxwrapper", "binkw32"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: u32,
     pub shipment: Shipment,
+    /// Legacy files this Shipment replaces. qm refuses while any of them is still in the game
+    /// folder (`qm build`, `qm preflight`, `qm link`); it never deletes one.
+    #[serde(default)]
+    pub supersedes: Vec<Superseded>,
     #[serde(default)]
     pub load: Load,
     #[serde(default)]
     pub contributions: Vec<Contribution>,
+}
+
+/// One legacy file a Shipment supersedes: a file NAME inside a named game-folder destination.
+///
+/// `dest` is a [`PlaceIn`] for the same reason `place_file`'s is: the directory half is a name out
+/// of a closed set, never a path. `file` must be a single filename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Superseded {
+    pub dest: PlaceIn,
+    pub file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,13 +68,14 @@ pub struct Shipment {
     pub name: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// Semver (`semver::Version`). Anything else fails validation.
     pub version: String,
     #[serde(default)]
     pub authors: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
     pub target: Target,
-    /// Minimum `mercs2_quartermaster` that can build this.
+    /// The range of `mercs2_quartermaster` versions that can build this (a semver range, M0172).
     #[serde(default)]
     pub quartermaster: Option<String>,
     #[serde(default)]
@@ -75,52 +100,92 @@ pub enum Target {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Load {
-    #[serde(default)]
-    pub after: Vec<String>,
-    #[serde(default)]
-    pub before: Vec<String>,
-    /// Hard deps — build fails if absent. Cross-shipment references are COMPUTED (read-set); this
-    /// field carries only what the Quartermaster cannot infer.
+    /// Hard deps — `qm preflight` / `qm link` fail if one is unsatisfied. They are also the only
+    /// declared ordering source: a requirement's provider loads before its consumer. Cross-shipment
+    /// references are COMPUTED (read-set); this field carries only what the Quartermaster cannot
+    /// infer.
     #[serde(default)]
     pub requires: Vec<Requirement>,
+    /// Shipments this one cannot be installed beside — by name, or by name within a version range.
     #[serde(default)]
-    pub conflicts: Vec<String>,
+    pub conflicts: Vec<ConflictDecl>,
     /// Capability tokens this Shipment declares it provides — the other side of
     /// [`Requirement::Capability`]. Multiple Shipments can `provides` the same token so a consumer
     /// can `requires` it interchangeably (e.g., three different widescreen-fix mods all
-    /// `provides: [widescreen]`, a UI mod `requires: [Capability("widescreen")]`, and any one of
+    /// `provides: [widescreen]`, a UI mod `requires: [{capability: widescreen}]`, and any one of
     /// them satisfies the dep). Free-form strings; conventionally lowercase-kebab.
     #[serde(default)]
     pub provides: Vec<String>,
 }
 
-/// A hard dependency, in one of three forms:
+/// `{ shipment, version }`: a Shipment by name, within a semver range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentReq {
+    pub shipment: String,
+    pub version: String,
+}
+
+/// `{ capability }`: any Shipment that `provides` the token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityReq {
+    pub capability: String,
+}
+
+/// `{ name, version }`: a form this format does NOT accept. It parses only so validation can name
+/// the replacement (`{ shipment, version }`) instead of printing a bare "no variant matched".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibleReq {
+    pub name: String,
+    pub version: String,
+}
+
+/// A hard dependency.
 ///
-/// * `Shipment(name)` — another Shipment, by name.
-/// * `Compatible { name, version }` — a Modkit-MANAGED component (e.g. `m2-sdk`) at a semver
-///   RANGE (`"^0.1"`). Resolved like a package manager: Modkit installs the highest released
-///   version that satisfies the range, ONE copy shared across every Shipment that needs it. This
-///   is the form for a first-party managed runtime — it updates on its own cadence and two mods
-///   can share a single install, neither of which a byte-exact pin allows.
-/// * `External { url, sha256 }` — a third-party artifact pinned by digest. For an ASI with no
-///   managed component and no semver contract: the digest makes the reference tamper-evident (see
-///   the spec's trust discussion — integrity, not authenticity). Do NOT reach for it to lock a
-///   managed component to one build; that defeats resolution and freezes the dependency.
+/// * `Shipment(name)` — another Shipment, by name, any version.
+/// * `ShipmentRange { shipment, version }` — another Shipment within a semver range (`"^1.0.0"`).
+/// * `Capability { capability }` — any Shipment that `provides` the token.
+/// * `Compatible { name, version }` — rejected by validation, with the `{ shipment, version }`
+///   spelling in the message.
 ///
-/// Untagged and unambiguous: a bare string is a `Shipment`; `{name,version}` is `Compatible`;
-/// `{url,sha256}` is `External` — disjoint required keys, so serde cannot confuse them.
+/// Untagged. Each object variant wraps a `deny_unknown_fields` struct, so an object with a key from
+/// two forms (`{ shipment, name, version }`) matches none of them and fails to parse, and so does
+/// any shape the model does not have.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Requirement {
     Shipment(String),
-    Compatible { name: String, version: String },
-    External { url: String, sha256: String },
-    /// A capability token any Shipment with a matching `provides:` satisfies. Lets consumers
-    /// depend on WHAT is provided rather than WHO provides it, so three interchangeable "widescreen
-    /// fix" mods can each `provides: [widescreen]` and a UI mod `requires: [{capability: widescreen}]`
-    /// picks up whichever the user installed. Disjoint from the other three variants by the
-    /// unique `capability` field, so `#[serde(untagged)]` disambiguates cleanly.
-    Capability { capability: String },
+    ShipmentRange(ShipmentReq),
+    Capability(CapabilityReq),
+    Compatible(CompatibleReq),
+}
+
+/// A declared incompatibility: a Shipment by name, or by name within a semver range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ConflictDecl {
+    Name(String),
+    Range(ShipmentReq),
+}
+
+impl ConflictDecl {
+    /// The Shipment name this entry names.
+    pub fn name(&self) -> &str {
+        match self {
+            ConflictDecl::Name(n) => n,
+            ConflictDecl::Range(r) => &r.shipment,
+        }
+    }
+
+    /// The version range, when one is given.
+    pub fn range(&self) -> Option<&str> {
+        match self {
+            ConflictDecl::Name(_) => None,
+            ConflictDecl::Range(r) => Some(&r.version),
+        }
+    }
 }
 
 /// Parse a bare `0xHHHHHHHH` asset reference into the hash it names.
@@ -984,9 +1049,9 @@ pub enum Contribution {
         base: Option<String>,
     },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
-    /// else's ASI use `load.requires` with a pinned digest instead — never vendor a third-party
-    /// binary. `dest` is deliberately absent: the author cannot name a path, so the exe and
-    /// `vz.wad` stay unreachable by construction.
+    /// else's ASI, require the Shipment that ships it in `load.requires` — never vendor a
+    /// third-party binary. `dest` is deliberately absent: the author cannot name a path, so the exe
+    /// and `vz.wad` stay unreachable by construction.
     NativeHook {
         target: Target,
         #[serde(default)]
@@ -1180,10 +1245,9 @@ impl Contribution {
 /// mode the format most wants to avoid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidateError {
-    /// The manifest declares a schema version this build does not know.
-    FutureFormat {
+    /// The manifest declares any format other than [`FORMAT_VERSION`] — older or newer.
+    UnsupportedFormat {
         found: u32,
-        known: u32,
     },
     /// `target: both` — reserved, rejected in v1.
     TargetBothReserved,
@@ -1191,18 +1255,76 @@ pub enum ValidateError {
     NameTooLong {
         len: usize,
     },
+    /// `shipment.name`, lowercased, is a deny-listed DLL stem ([`DENY_LISTED_DLL_STEMS`]).
+    ReservedName {
+        name: String,
+    },
     NameNotSlug {
         name: String,
     },
+    /// `shipment.version` is not a semver version.
+    VersionNotSemver {
+        version: String,
+        error: String,
+    },
+    /// A version range does not parse as a `semver::VersionReq`. `at` names the field.
+    BadRange {
+        at: String,
+        range: String,
+        error: String,
+    },
+    /// A `{ name, version }` requirement — not a form this format has.
+    CompatibleForm {
+        at: String,
+        name: String,
+        version: String,
+    },
+    /// A Shipment name in `requires` / `conflicts` is not a slug, so it can name no Shipment.
+    ReferenceNotSlug {
+        at: String,
+        name: String,
+    },
+    /// `requires` / `conflicts` names this Shipment itself.
+    SelfReference {
+        at: String,
+        name: String,
+    },
+    /// A `supersedes` entry's `file` is not a single filename.
+    SupersededNotAFilename {
+        at: String,
+        file: String,
+        why: String,
+    },
+}
+
+impl ValidateError {
+    /// The rule code this failure is reported under, for the failures that have one of their own.
+    /// `None` is the generic "manifest fails schema validation" (lint reports it as M0100).
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            ValidateError::BadRange { .. } => Some("M0172"),
+            ValidateError::SelfReference { .. } => Some("M0173"),
+            ValidateError::ReservedName { .. } => Some("M0211"),
+            ValidateError::UnsupportedFormat { .. }
+            | ValidateError::TargetBothReserved
+            | ValidateError::EmptyName
+            | ValidateError::NameTooLong { .. }
+            | ValidateError::NameNotSlug { .. }
+            | ValidateError::VersionNotSemver { .. }
+            | ValidateError::CompatibleForm { .. }
+            | ValidateError::ReferenceNotSlug { .. }
+            | ValidateError::SupersededNotAFilename { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ValidateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidateError::FutureFormat { found, known } => write!(
+            ValidateError::UnsupportedFormat { found } => write!(
                 f,
-                "manifest declares format {found}, but this Quartermaster only knows up to {known} — \
-                 refusing to guess. Upgrade the Quartermaster."
+                "manifest declares format {found}, but the only manifest format is \
+                 {FORMAT_VERSION} — refusing to guess. Write `format: {FORMAT_VERSION}`."
             ),
             ValidateError::TargetBothReserved => write!(
                 f,
@@ -1214,10 +1336,45 @@ impl std::fmt::Display for ValidateError {
                 f,
                 "shipment.name is {len} chars; the limit is {MAX_NAME_LEN} (it becomes build/<name>.wad)"
             ),
+            ValidateError::ReservedName { name } => write!(
+                f,
+                "shipment.name {name:?} is reserved: it is the name of a DLL no Shipment may ship \
+                 ({}), compared case-insensitively. Pick another name.",
+                DENY_LISTED_DLL_STEMS.join(", ")
+            ),
             ValidateError::NameNotSlug { name } => write!(
                 f,
                 "shipment.name {name:?} is not a slug — expected ^[a-z0-9]+(-[a-z0-9]+)*$ \
                  (lowercase, digits, single hyphens, no leading/trailing hyphen)"
+            ),
+            ValidateError::VersionNotSemver { version, error } => write!(
+                f,
+                "shipment.version {version:?} is not a semver version ({error}) — write \
+                 MAJOR.MINOR.PATCH, e.g. 1.0.0"
+            ),
+            ValidateError::BadRange { at, range, error } => write!(
+                f,
+                "{at}: {range:?} is not a valid semver range ({error}). Use a range resolution can \
+                 compare against — e.g. \"^1.0.0\" or \">=0.7.0, <1.0.0\"."
+            ),
+            ValidateError::CompatibleForm { at, name, version } => write!(
+                f,
+                "{at}: `{{ name, version }}` is not a requirement form. Write \
+                 `{{ shipment: {name}, version: \"{version}\" }}`."
+            ),
+            ValidateError::ReferenceNotSlug { at, name } => write!(
+                f,
+                "{at}: {name:?} is not a Shipment name — Shipment names are slugs, \
+                 ^[a-z0-9]+(-[a-z0-9]+)*$"
+            ),
+            ValidateError::SelfReference { at, name } => write!(
+                f,
+                "{at}: names this Shipment itself ({name:?}). A Shipment cannot require or \
+                 conflict with itself."
+            ),
+            ValidateError::SupersededNotAFilename { at, file, why } => write!(
+                f,
+                "{at}: file {file:?} is not a single filename: {why}"
             ),
         }
     }
@@ -1234,16 +1391,41 @@ fn is_slug(s: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// A semver range check, reported under M0172 with the field it came from.
+fn check_range(at: String, range: &str) -> Result<(), ValidateError> {
+    semver::VersionReq::parse(range)
+        .map(|_| ())
+        .map_err(|e| ValidateError::BadRange {
+            at,
+            range: range.to_string(),
+            error: e.to_string(),
+        })
+}
+
+/// A Shipment name referenced from `requires` / `conflicts`: a slug, and not this Shipment.
+fn check_reference(at: String, name: &str, own: &str) -> Result<(), ValidateError> {
+    if !is_slug(name) {
+        return Err(ValidateError::ReferenceNotSlug {
+            at,
+            name: name.to_string(),
+        });
+    }
+    if name == own {
+        return Err(ValidateError::SelfReference {
+            at,
+            name: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
 impl Manifest {
     /// Schema-level checks that do not need the filesystem or a game install — so this runs in CI.
     pub fn validate(&self) -> Result<(), ValidateError> {
-        // Version gate FIRST: a newer manifest may mean anything, so no other check is meaningful.
-        // Direction matters — NEWER than known is the reject; older is accepted.
-        if self.format > FORMAT_VERSION {
-            return Err(ValidateError::FutureFormat {
-                found: self.format,
-                known: FORMAT_VERSION,
-            });
+        // Format gate FIRST: another format may mean anything, so no other check is meaningful.
+        // There is one format; older and newer are both refused.
+        if self.format != FORMAT_VERSION {
+            return Err(ValidateError::UnsupportedFormat { found: self.format });
         }
         if self.shipment.target == Target::Both {
             return Err(ValidateError::TargetBothReserved);
@@ -1255,8 +1437,57 @@ impl Manifest {
         if name.len() > MAX_NAME_LEN {
             return Err(ValidateError::NameTooLong { len: name.len() });
         }
+        // Before the slug check: `pmc_bb` and a mixed-case `Cruise` are not slugs either, and the
+        // reserved-name refusal is the one that says why the name cannot be used.
+        let lowered = name.to_ascii_lowercase();
+        if DENY_LISTED_DLL_STEMS.contains(&lowered.as_str()) {
+            return Err(ValidateError::ReservedName { name: name.clone() });
+        }
         if !is_slug(name) {
             return Err(ValidateError::NameNotSlug { name: name.clone() });
+        }
+        if let Err(e) = semver::Version::parse(&self.shipment.version) {
+            return Err(ValidateError::VersionNotSemver {
+                version: self.shipment.version.clone(),
+                error: e.to_string(),
+            });
+        }
+        if let Some(range) = &self.shipment.quartermaster {
+            check_range("shipment.quartermaster".into(), range)?;
+        }
+        for (i, req) in self.load.requires.iter().enumerate() {
+            let at = format!("load.requires[{i}]");
+            match req {
+                Requirement::Shipment(target) => check_reference(at, target, name)?,
+                Requirement::ShipmentRange(r) => {
+                    check_reference(at.clone(), &r.shipment, name)?;
+                    check_range(at, &r.version)?;
+                }
+                Requirement::Capability(_) => {}
+                Requirement::Compatible(c) => {
+                    return Err(ValidateError::CompatibleForm {
+                        at,
+                        name: c.name.clone(),
+                        version: c.version.clone(),
+                    })
+                }
+            }
+        }
+        for (i, decl) in self.load.conflicts.iter().enumerate() {
+            let at = format!("load.conflicts[{i}]");
+            check_reference(at.clone(), decl.name(), name)?;
+            if let Some(range) = decl.range() {
+                check_range(at, range)?;
+            }
+        }
+        for (i, s) in self.supersedes.iter().enumerate() {
+            if let Some(why) = crate::build::single_filename_refusal(&s.file) {
+                return Err(ValidateError::SupersededNotAFilename {
+                    at: format!("supersedes[{i}]"),
+                    file: s.file.clone(),
+                    why,
+                });
+            }
         }
         Ok(())
     }
