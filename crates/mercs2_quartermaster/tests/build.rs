@@ -10,6 +10,7 @@
 //! precisely the ones that caught every structural bug so far.
 
 use mercs2_quartermaster::build::{self, BuildError, Destination};
+use mercs2_quartermaster::compat::PlanInput;
 use mercs2_quartermaster::discover;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +25,7 @@ fn shipment(dir: &Path, contributions: &str) -> discover::LoadedShipment {
     std::fs::write(
         dir.join("manifest.yaml"),
         format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: test-shipment, version: 1.0.0, target: retail }}
 contributions:
 {contributions}"
@@ -768,7 +769,8 @@ fn the_availability_lift_is_emitted_exactly_once() {
         target: "wifpmcinterior".into(),
         append: link::outfit_row_append("mattias", "Two", "m_two", "Two"),
     };
-    let (src, _) = link::linked_source("base\n", &[&a, &b], &[]);
+    let (src, _) = link::linked_source("base\n", &[&a, &b], &["a".into(), "b".into()])
+        .expect("both contributors are in the order");
     let epilogue = link::derived_epilogue("wifpmcinterior").unwrap();
     let full = format!("{src}{epilogue}");
     assert_eq!(
@@ -828,7 +830,7 @@ fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover:
     std::fs::write(
         dir.join("manifest.yaml"),
         format!(
-            "format: 1\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
              contributions:\n  - kind: add_outfit\n    name: {asset}\n    slug: {slug}\n\
              \x20   display: {slug}\n    wearer: mattias\n    model: src/m.glb\n\
              \x20   donor: pmc_hum_mattias\n"
@@ -836,6 +838,20 @@ fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover:
     )
     .unwrap();
     discover::open(dir).expect("open")
+}
+
+/// A request over opened Shipments, with `arg:<n>` ids in the given order — what `qm link` builds
+/// from positional directories.
+fn request<'a>(shipments: &[&'a discover::LoadedShipment], ids: &'a [String]) -> Vec<PlanInput<'a>> {
+    shipments
+        .iter()
+        .zip(ids)
+        .map(|(s, id)| PlanInput { id, shipment: s })
+        .collect()
+}
+
+fn arg_ids(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("arg:{i}")).collect()
 }
 
 /// ★ The deploy-side failure this design exists to prevent.
@@ -868,7 +884,8 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     }
 
     let deploy = root.join("deploy");
-    let report = build::link_installed(&[&a, &b], &mut game, &corpus, &deploy)
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &deploy)
         .expect("deploy link");
     eprintln!("{}", report.log.join("\n"));
 
@@ -898,9 +915,11 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     );
     assert_eq!(
         report.linked[0].contributors,
-        vec!["roze-skin", "sean-devlin"],
-        "sorted by Shipment name so the bytes do not depend on install order"
+        vec!["sean-devlin", "roze-skin"],
+        "neither requires the other, so the request order is the load order"
     );
+    // The plan the link followed is written beside the placement record.
+    assert!(deploy.join("load-plan.json").is_file(), "the link writes its load plan");
 
     // The emitted overlay must carry BOTH rows.
     let wad = report.wad.expect("a link WAD");
@@ -970,7 +989,7 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
     .unwrap();
     std::fs::write(
         root.join("manifest.yaml"),
-        "format: 1\nshipment: { name: resident-lua, version: 1.0.0, target: retail }\n\
+        "format: 2\nshipment: { name: resident-lua, version: 1.0.0, target: retail }\n\
          contributions:\n  - kind: patch_lua\n    target: mrxplayer\n    append: src/append.lua\n",
     )
     .unwrap();
@@ -1037,10 +1056,10 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
     );
 }
 
-/// Deploy order must not change the bytes, or verify-by-hash is meaningless and a saved costume
-/// index can shift under a player between deploys.
+/// The request order is the tie-break: with no `requires` between two Shipments, reversing the
+/// request reverses the link order, and the same request always gives the same bytes.
 #[test]
-fn the_deploy_link_is_order_independent() {
+fn the_deploy_link_follows_the_request_order() {
     let Some(mut game) = discovered_game() else {
         return;
     };
@@ -1050,13 +1069,102 @@ fn the_deploy_link_is_order_independent() {
     let root = scratch("deploy_order");
     let a = outfit_shipment(&root.join("a"), "aaa-mod", "qm_a", "Aaa");
     let b = outfit_shipment(&root.join("b"), "zzz-mod", "qm_b", "Zzz");
+    let ids = arg_ids(2);
 
-    let one = build::link_installed(&[&a, &b], &mut game, &corpus, &root.join("one")).unwrap();
-    let two = build::link_installed(&[&b, &a], &mut game, &corpus, &root.join("two")).unwrap();
+    let one = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("one"))
+        .unwrap();
+    let again = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("again"))
+        .unwrap();
+    let two = build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &root.join("two"))
+        .unwrap();
     assert_eq!(
-        one.placements[0].sha256, two.placements[0].sha256,
-        "install order must not change the linked bytes"
+        one.placements[0].sha256, again.placements[0].sha256,
+        "one request must always link to the same bytes"
     );
+    assert_eq!(one.linked[0].contributors, vec!["aaa-mod", "zzz-mod"]);
+    assert_eq!(
+        two.linked[0].contributors,
+        vec!["zzz-mod", "aaa-mod"],
+        "reversing the request reverses the order"
+    );
+}
+
+/// A plan that is not ok links nothing: the plan is written as the explanation, and no link WAD or
+/// placement record appears.
+#[test]
+fn an_unsatisfied_requirement_refuses_the_link() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    let root = scratch("deploy_refused");
+    let a = outfit_shipment(&root.join("a"), "needs-ess", "qm_a", "Aaa");
+    std::fs::write(
+        root.join("a/manifest.yaml"),
+        std::fs::read_to_string(root.join("a/manifest.yaml"))
+            .unwrap()
+            .replace("contributions:", "load: { requires: [ess] }\ncontributions:"),
+    )
+    .unwrap();
+    let a = discover::open(&a.root).expect("reopen");
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    match build::link_installed(&request(&[&a], &ids), &mut game, &corpus, &out) {
+        Err(BuildError::Plan(plan)) => {
+            assert!(!plan.ok);
+            assert!(plan.findings.iter().any(|f| f.code == "M0204"), "{:?}", plan.findings);
+        }
+        other => panic!("expected BuildError::Plan, got {other:?}"),
+    }
+    assert!(out.join("load-plan.json").is_file(), "the refused plan is written");
+    assert!(!out.join(build::LINK_WAD_NAME).exists(), "nothing is linked");
+    assert!(!out.join("placement.json").exists(), "nothing is placed");
+}
+
+/// `qm build` refuses while a superseded file is in the game folder. The probe is read-only, so this
+/// names a file every game folder has — the `data` directory `vz.wad` sits in — rather than writing
+/// anything into the real install.
+#[test]
+fn build_refuses_a_superseded_file() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("superseded");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: sup, version: 1.0.0, target: retail }\n\
+         supersedes:\n  - { dest: game_root, file: DATA }\ncontributions: []\n",
+    )
+    .unwrap();
+    let s = discover::open(&dir).expect("open");
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(BuildError::Superseded { shipment, relative }) => {
+            assert_eq!(shipment, "sup");
+            assert_eq!(relative, "DATA");
+        }
+        other => panic!("expected BuildError::Superseded, got {other:?}"),
+    }
+}
+
+/// With no game, a Shipment that declares `supersedes` cannot be checked, so it does not build.
+#[test]
+fn build_with_supersedes_and_no_game_is_refused() {
+    let dir = scratch("superseded_nogame");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: sup, version: 1.0.0, target: retail }\n\
+         supersedes:\n  - { dest: on_load, file: 1_Sup.lua }\ncontributions: []\n",
+    )
+    .unwrap();
+    let s = discover::open(&dir).expect("open");
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Compat(e)) => assert!(e.to_string().contains("supersedes"), "{e}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 /// Nothing to link means no overlay — an overlay that merely restates the base block is noise a
@@ -1077,7 +1185,8 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
     let out = root.join("out");
-    let report = build::link_installed(&[&s], &mut game, &corpus, &out).expect("link");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out).expect("link");
     assert!(report.wad.is_none());
     assert!(report.linked.is_empty());
 
@@ -1771,7 +1880,7 @@ fn a_destination_that_is_a_path_does_not_parse() {
         std::fs::write(
             dir.join("manifest.yaml"),
             format!(
-                "format: 1
+                "format: 2
 shipment: {{ name: test-shipment, version: 1.0.0, target: retail }}
 contributions:
   - kind: place_file
@@ -2731,7 +2840,7 @@ fn activate_layer_builds_the_layer_marks_into_the_mod_loader() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("manifest.yaml"),
-        "format: 1\nshipment: { name: layer-mod, version: 1.0.0, target: retail }\n\
+        "format: 2\nshipment: { name: layer-mod, version: 1.0.0, target: retail }\n\
          contributions:\n  - kind: activate_layer\n    layer: vz_state_pmccon004_destroyed\n\
          \x20   replaces:\n      - vz_state_pmccon004_pristine\n",
     )
