@@ -127,7 +127,8 @@ fn a_resident_script_links_into_the_resident_block() {
         })
         .collect();
     let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["fixpack"]))
-        .expect("link must succeed");
+        .expect("link must succeed")
+        .scripts;
     drop(targets);
 
     assert_eq!(linked.len(), 1);
@@ -184,7 +185,8 @@ fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
         .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
         .collect();
     let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs, &[], &[], &[], &[], &order(&["hud-mod"]))
-        .expect("link must succeed");
+        .expect("link must succeed")
+        .scripts;
     drop(targets);
 
     // Both the trampoline host and the minted loader come back as linked, both in scripts_vz.
@@ -248,7 +250,8 @@ fn vz_and_resident_targets_split_across_two_blocks() {
         })
         .collect();
     let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["fixpack"]))
-        .expect("link");
+        .expect("link")
+        .scripts;
     drop(targets);
 
     assert_eq!(linked.len(), 2);
@@ -291,7 +294,8 @@ fn two_script_mods_both_survive_the_link() {
     ];
 
     let linked = link::link_into(&mut block, &corpus, &muts, &order(&["sean-devlin", "roze-skin"]))
-        .expect("link must succeed");
+        .expect("link must succeed")
+        .scripts;
     assert_eq!(
         linked.len(),
         1,
@@ -356,7 +360,7 @@ fn mutations_on_different_scripts_are_independent() {
             append: "-- b\n".into(),
         },
     ];
-    let linked = link::link_into(&mut block, &corpus, &muts, &order(&["a", "b"])).expect("link");
+    let linked = link::link_into(&mut block, &corpus, &muts, &order(&["a", "b"])).expect("link").scripts;
     assert_eq!(linked.len(), 2);
     block.verify_csums().expect("CSUMs");
 }
@@ -415,7 +419,7 @@ fn linking_nothing_changes_nothing() {
         return;
     };
     let original = block.serialize();
-    let linked = link::link_into(&mut block, &corpus, &[], &[]).expect("link");
+    let linked = link::link_into(&mut block, &corpus, &[], &[]).expect("link").scripts;
     assert!(linked.is_empty());
     assert!(
         block.serialize() == original,
@@ -484,7 +488,8 @@ fn link_output_follows_the_order_not_the_input_order() {
         &[],
         &resolved,
     )
-    .expect("link forward");
+    .expect("link forward")
+    .scripts;
     let two = link::link_into_blocks(
         &mut [link::TargetBlock { path, block: &mut rev }],
         &corpus,
@@ -496,7 +501,8 @@ fn link_output_follows_the_order_not_the_input_order() {
         &[],
         &resolved,
     )
-    .expect("link reversed");
+    .expect("link reversed")
+    .scripts;
 
     assert_eq!(
         one.len(),
@@ -576,4 +582,74 @@ fn replace_lua_and_add_script_follow_the_order() {
     let z = block.find_script_by_name("qm_order_zzz").expect("zzz minted");
     let a = block.find_script_by_name("qm_order_aaa").expect("aaa minted");
     assert!(z < a, "minted in load order: zzz ({z}) before aaa ({a})");
+}
+
+/// A literal `import("x")` nothing provides is a WARNING — the link still succeeds — and
+/// a literal naming a shipped script, an `add_script` in the set or `qm_modloader` is resolved.
+#[test]
+fn literal_import_unknown_warns_but_links() {
+    let (Some(mut loaded), Some(corpus)) = (retail_blocks(), corpus_root()) else {
+        eprintln!("SKIPPING: need a vz.wad and the Lua corpus");
+        return;
+    };
+    let muts = vec![ScriptMutation {
+        shipment: "consumer".into(),
+        target: "wifpmcinterior".into(),
+        append: "local e = import(\"ess\")\nlocal m = import(\"mrxplayer\")\n\
+                 local q = import(\"qm_modloader\")\nlocal n = import(\"no_such_module\")\n"
+            .into(),
+    }];
+    let additions = [link::ScriptAddition {
+        shipment: "ess".into(),
+        name: "ess".into(),
+        source: "return {}\n".into(),
+    }];
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
+        .collect();
+    let out = link::link_into_blocks(
+        &mut targets,
+        &corpus,
+        &muts,
+        &[],
+        &[],
+        &[],
+        &additions,
+        &[],
+        &order(&["ess", "consumer"]),
+    )
+    .expect("an unresolved import never fails the link");
+    assert_eq!(
+        out.unresolved_imports,
+        vec![link::UnresolvedImport {
+            shipment: "consumer".into(),
+            module: "no_such_module".into(),
+            source: "patch_lua append to wifpmcinterior".into(),
+        }]
+    );
+    assert!(out.scripts.iter().any(|l| l.target == "ess"), "the addition was minted");
+}
+
+/// `dynamic_import(...)` and `import(<expr>)` are unchecked by design: never flagged.
+#[test]
+fn dynamic_import_not_flagged() {
+    let (Some(mut loaded), Some(corpus)) = (retail_blocks(), corpus_root()) else {
+        eprintln!("SKIPPING: need a vz.wad and the Lua corpus");
+        return;
+    };
+    let muts = vec![ScriptMutation {
+        shipment: "consumer".into(),
+        target: "wifpmcinterior".into(),
+        append: "local a = dynamic_import(\"not_here\")\nlocal b = import(sName)\n\
+                 local c = import(\"not\" .. \"_here\")\n"
+            .into(),
+    }];
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
+        .collect();
+    let out = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["consumer"]))
+        .expect("link");
+    assert_eq!(out.unresolved_imports, vec![]);
 }
