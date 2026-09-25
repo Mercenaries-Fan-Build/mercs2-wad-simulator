@@ -22,7 +22,7 @@ use std::path::PathBuf;
 /// a loud reject (see [`Manifest::validate`]).
 pub const FORMAT_VERSION: u32 = 2;
 
-/// Maximum length of `shipment.name` — it becomes the output filename `build/<name>.wad`.
+/// Maximum length of `shipment.name` — it becomes the output filename `_build/<name>.wad`.
 pub const MAX_NAME_LEN: usize = 64;
 
 /// DLL stems no Shipment may be named after (M0211), lowercase.
@@ -968,7 +968,8 @@ pub enum Contribution {
     /// introduce their own names — a new mission id (`[FioDef001.Title]`), a new ability slug,
     /// a new HUD prompt.
     ///
-    /// ⚠ Two Shipments adding the same key are a hard conflict (Additive intent). To OVERRIDE an
+    /// Installed together, every Shipment's additions and edits to one table are merged by `qm link`
+    /// into one table, by key hash in load order; the later Shipment's text wins. To OVERRIDE an
     /// existing key's text, use [`EditStringDb`]; a mixed intent must be split into two rows.
     /// The same shell/vz duplication caveat applies as for [`EditStringDb`] (M0191 warns).
     // `snake_case` would derive `add_string_db_keys`; the kind is `add_stringdb_keys` everywhere else
@@ -989,9 +990,9 @@ pub enum Contribution {
     /// `edit_stringdb`) and rewrites every entry whose current text matches exactly. Requiring the
     /// FULL string match keeps this from mangling unrelated lines that merely contain the phrase.
     ///
-    /// Runs on top of `edit_stringdb` (both apply, in author order), so a Shipment can co-fix by
-    /// key AND by text. Two Shipments rewriting overlapping text is a load-order question, same
-    /// shape as `replace_texture` — `Replace` intent, `LastWins`.
+    /// It matches by text, so it can touch any key of the table: it cannot be merged by key, and it
+    /// conflicts with every other writer to the same table (another Shipment's `edit_stringdb`,
+    /// `add_stringdb_keys` or `replace_stringdb_text`, and a second contribution in this one).
     // `snake_case` would derive `replace_string_db_text`; pinned to the documented tag, as
     // `edit_stringdb`'s is.
     #[serde(rename = "replace_stringdb_text")]
@@ -1003,8 +1004,9 @@ pub enum Contribution {
     },
     /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
     ///
-    /// Same-hash and last-wins, like [`Contribution::ReplaceTexture`]: the overlay carries an
-    /// edited copy of the target `stringdb` and the mount order decides which wins. The codec
+    /// The Shipment's own overlay carries an edited copy of the target `stringdb`. Installed
+    /// together, every Shipment's edits to one table are merged by `qm link` into one table, by key
+    /// hash in load order, the later Shipment's text winning — so editors of one table compose. The codec
     /// (`mercs2_formats::stringdb`) is proven byte-identical against all six retail language tables,
     /// and arbitrary-length edits are supported — the heap is rebuilt and the descriptors repointed.
     ///
@@ -1097,6 +1099,20 @@ pub enum Contribution {
     /// [`Contribution::NativeHook`], which reads the PE headers the loader will `LoadLibrary` and
     /// records the hooked addresses. Letting a companion be a plugin would be a way around both.
     PlaceFile { file: PathBuf, dest: PlaceIn },
+    /// Code. A runtime DLL placed in the game root, where the plugins that import it by name find
+    /// it (the directory of `Mercenaries2.exe` is the first place Windows searches).
+    ///
+    /// Three rules keep this from being a way to overwrite the game's own DLLs or the loader:
+    ///
+    /// * the file name must be `<shipment.name>.dll`, compared lowercased — so a runtime Shipment
+    ///   ships exactly one DLL, named after itself;
+    /// * its stem must not be on [`DENY_LISTED_DLL_STEMS`] (which also makes those stems reserved
+    ///   Shipment names, M0211);
+    /// * it must be a loadable i386 PE DLL.
+    ///
+    /// `dll` is a `src/`-relative source path. There is no destination field and no rename: the
+    /// destination is always the game root and the placed name is the source file's name.
+    AddRuntimeDll { dll: PathBuf },
     /// Script (composed). A purchasable item added to one or more faction shops.
     ///
     /// Delivered as LINKED APPENDS onto the resident catalog scripts, never a block replace: a
@@ -1203,6 +1219,7 @@ impl Contribution {
         "add_language",
         "native_hook",
         "place_file",
+        "add_runtime_dll",
         "add_shop_item",
         "raw",
     ];
@@ -1241,6 +1258,7 @@ impl Contribution {
             Contribution::AddLanguage { .. } => "add_language",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
+            Contribution::AddRuntimeDll { .. } => "add_runtime_dll",
             Contribution::AddShopItem { .. } => "add_shop_item",
             Contribution::Raw { .. } => "raw",
         }
@@ -1340,7 +1358,7 @@ impl std::fmt::Display for ValidateError {
             ValidateError::EmptyName => write!(f, "shipment.name is empty"),
             ValidateError::NameTooLong { len } => write!(
                 f,
-                "shipment.name is {len} chars; the limit is {MAX_NAME_LEN} (it becomes build/<name>.wad)"
+                "shipment.name is {len} chars; the limit is {MAX_NAME_LEN} (it becomes _build/<name>.wad)"
             ),
             ValidateError::ReservedName { name } => write!(
                 f,
@@ -1388,8 +1406,9 @@ impl std::fmt::Display for ValidateError {
 
 impl std::error::Error for ValidateError {}
 
-/// `^[a-z0-9]+(-[a-z0-9]+)*$`, hand-rolled to avoid a regex dependency for one pattern.
-fn is_slug(s: &str) -> bool {
+/// `^[a-z0-9]+(-[a-z0-9]+)*$`, hand-rolled to avoid a regex dependency for one pattern. The rule for
+/// `shipment.name` and for every Shipment name `requires` / `conflicts` refers to.
+pub fn is_slug(s: &str) -> bool {
     if s.is_empty() || s.starts_with('-') || s.ends_with('-') || s.contains("--") {
         return false;
     }
@@ -1397,14 +1416,21 @@ fn is_slug(s: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Parse a version range the one way qm parses every range: `semver::VersionReq`, the grammar
+/// Cargo uses. Manifest validation (M0172) and `qm check-range` both come through here, so a range
+/// is valid in a manifest exactly when it is valid anywhere else.
+pub fn parse_range(range: &str) -> Result<semver::VersionReq, String> {
+    semver::VersionReq::parse(range).map_err(|e| e.to_string())
+}
+
 /// A semver range check, reported under M0172 with the field it came from.
 fn check_range(at: String, range: &str) -> Result<(), ValidateError> {
-    semver::VersionReq::parse(range)
+    parse_range(range)
         .map(|_| ())
-        .map_err(|e| ValidateError::BadRange {
+        .map_err(|error| ValidateError::BadRange {
             at,
             range: range.to_string(),
-            error: e.to_string(),
+            error,
         })
 }
 
