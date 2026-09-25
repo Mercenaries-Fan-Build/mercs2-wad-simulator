@@ -97,10 +97,10 @@ fn the_wardrobe_script_is_mergeable_not_exclusive() {
 // Fail closed.
 // ---------------------------------------------------------------------------
 
-/// A script whose composition we have NOT reversed falls to Exclusive. Being wrong here costs a
-/// false conflict (visible, annoying) instead of silent mutual annihilation (invisible, fatal).
+/// An append to ANY script composes: the linker concatenates every Shipment's appends onto
+/// the base source and compiles once, so there is no curated list of scripts that may be patched.
 #[test]
-fn an_unreversed_script_is_exclusive() {
+fn patch_lua_any_script_composes() {
     let mk = |name: &str| {
         parse(&format!(
             "format: 2
@@ -114,14 +114,8 @@ contributions:
     };
     let a = mk("mod-a");
     let b = mk("mod-b");
-    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
-    assert_eq!(found.len(), 1, "got {found:?}");
-    assert_eq!(found[0].class, MergeClass::Exclusive);
-    assert!(
-        found[0].to_string().contains("no load order resolves"),
-        "{}",
-        found[0]
-    );
+    assert!(blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]).is_empty());
+    assert_eq!(blast::claims(&a)[0].class, MergeClass::OrderedList);
 }
 
 /// Raw is the open lower bound: we cannot infer anything about the bytes, so the declared blast
@@ -269,8 +263,9 @@ contributions:
         .collect();
     assert_eq!(
         paths,
-        vec!["scripts/lua_bridge_DEV.asi", "scripts/lua_bridge_DEV.ini"],
-        "the plugin and its companion each claim their own path, in the same directory"
+        vec!["scripts/lua_bridge_dev.asi", "scripts/lua_bridge_dev.ini"],
+        "the plugin and its companion each claim their own path, in the same directory, keyed \
+         lowercased"
     );
 }
 
@@ -610,4 +605,149 @@ contributions:
         muts.is_empty(),
         "a novel behaviour must not emit a load-time append (it defers to the loader): {muts:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scripts, same-target replacements, and game-folder case.
+// ---------------------------------------------------------------------------
+
+/// One contribution per Shipment, from a YAML block.
+fn one(shipment: &str, contribution: &str) -> Manifest {
+    parse(&format!(
+        "format: 2
+shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
+contributions:
+{contribution}"
+    ))
+}
+
+/// The single cross-Shipment conflict `a` and `b` produce, which must be Exclusive.
+fn exclusive_conflict(a: &Manifest, b: &Manifest) -> blast::Conflict {
+    let found = blast::conflicts(&[("mod-a", a), ("mod-b", b)]);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].class, MergeClass::Exclusive, "{}", found[0]);
+    found.into_iter().next().unwrap()
+}
+
+#[test]
+fn two_replace_lua_conflict() {
+    let c = "  - kind: replace_lua\n    target: wifpmcgarage\n    source: src/g.lua\n";
+    let found = exclusive_conflict(&one("mod-a", c), &one("mod-b", c));
+    assert_eq!(found.claim, Claim::Script { name: "wifpmcgarage".into() });
+}
+
+/// Decided: an append beside a wholesale replacement of the same script is a hard conflict — the
+/// append would be applied to source that is no longer there.
+#[test]
+fn patch_and_replace_lua_conflict() {
+    let a = one("mod-a", "  - kind: patch_lua\n    target: wifpmcgarage\n    append: src/a.lua\n");
+    let b = one("mod-b", "  - kind: replace_lua\n    target: wifpmcgarage\n    source: src/g.lua\n");
+    exclusive_conflict(&a, &b);
+}
+
+/// Every kind that is a hard conflict on the same target, one pair each.
+#[test]
+fn each_newly_exclusive_kind_conflicts_on_the_same_target() {
+    for block in [
+        "  - kind: replace_shader\n    target: s_hero\n    blob: src/b.bin\n",
+        "  - kind: replace_fx\n    target: fx_boom\n    payload: src/p.bin\n",
+        "  - kind: replace_animation\n    target: a_run\n    clip: src/c.bin\n    trnm: src/t.bin\n",
+        "  - kind: replace_phy2\n    target: m_crate\n    phy2: src/p.bin\n",
+        "  - kind: replace_terrain_cell\n    target: cell_0_0\n    cell: src/c.bin\n",
+        "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/s.yaml\n",
+        "  - kind: edit_world\n    layer: vz_state_pmccon004\n    edits: src/w.yaml\n",
+    ] {
+        exclusive_conflict(&one("mod-a", block), &one("mod-b", block));
+    }
+}
+
+/// `edit_world` edits the whole layer, so an `add_placement` on that layer in another Shipment
+/// cannot compose with it: the stricter class wins.
+#[test]
+fn edit_world_and_add_placement_on_one_layer_conflict() {
+    let a = one("mod-a", "  - kind: edit_world\n    layer: layers_static\n    edits: src/w.yaml\n");
+    let b = one("mod-b", "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n");
+    exclusive_conflict(&a, &b);
+}
+
+/// Windows file names are case-insensitive, so two Shipments placing names that differ only in
+/// case write one file.
+#[test]
+fn place_file_names_differing_only_in_case_collide() {
+    let a = one("mod-a", "  - kind: place_file\n    file: src/Config.ini\n    dest: scripts\n");
+    let b = one("mod-b", "  - kind: place_file\n    file: src/config.INI\n    dest: scripts\n");
+    let found = exclusive_conflict(&a, &b);
+    assert_eq!(found.claim, Claim::FileArtifact { path: "scripts/config.ini".into() });
+}
+
+#[test]
+fn native_hook_names_differing_only_in_case_collide() {
+    let a = one("mod-a", "  - kind: native_hook\n    target: retail\n    plugin: src/Bridge.asi\n");
+    let b = one("mod-b", "  - kind: native_hook\n    target: retail\n    plugin: src/bridge.ASI\n");
+    let found = exclusive_conflict(&a, &b);
+    assert_eq!(found.claim, Claim::FileArtifact { path: "scripts/bridge.asi".into() });
+}
+
+/// An `add_runtime_dll` claims its game-root path, lowercased; two Shipments shipping one DLL name
+/// conflict.
+#[test]
+fn runtime_dll_name_case_collides() {
+    let a = one("m2-sdk", "  - kind: add_runtime_dll\n    dll: src/m2-sdk.dll\n");
+    let b = one("dup-runtime", "  - kind: add_runtime_dll\n    dll: src/M2-SDK.DLL\n");
+    let found = blast::conflicts(&[("m2-sdk", &a), ("dup-runtime", &b)]);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].claim, Claim::FileArtifact { path: "m2-sdk.dll".into() });
+    assert_eq!(found[0].class, MergeClass::Exclusive);
+}
+
+/// Within ONE Shipment the same rule is a self-conflict (M0120): two placements differing only in
+/// case.
+#[test]
+fn a_case_only_difference_within_one_shipment_is_a_self_conflict() {
+    let m = one(
+        "mod-a",
+        "  - kind: place_file\n    file: src/a/Readme.txt\n    dest: scripts\n  - kind: place_file\n    file: src/b/README.TXT\n    dest: scripts\n",
+    );
+    let found = blast::self_conflicts(&m);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].indices, vec![0, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// String tables: editors compose; text replacement is exclusive.
+// ---------------------------------------------------------------------------
+
+const EDIT_ENGLISH: &str = "  - kind: edit_stringdb\n    target: english\n    strings: src/e.txt\n";
+
+/// Any two Shipments editing one table compose, whatever keys they touch: `qm link` merges them.
+#[test]
+fn edit_stringdb_on_one_table_composes() {
+    let a = one("mod-a", EDIT_ENGLISH);
+    let b = one("mod-b", EDIT_ENGLISH);
+    assert!(blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]).is_empty());
+    assert_eq!(blast::claims(&a)[0].class, MergeClass::OrderedList);
+    // Two edits of one table in ONE Shipment are fine too: both are merged.
+    let both = one("mod-a", &format!("{EDIT_ENGLISH}{EDIT_ENGLISH}"));
+    assert!(blast::self_conflicts(&both).is_empty());
+}
+
+/// `replace_stringdb_text` matches by text, so it can touch any key: it conflicts with every other
+/// writer to the table.
+#[test]
+fn replace_stringdb_text_conflicts_with_any_table_writer() {
+    let replace = one("mod-b", "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/p.txt\n");
+    let found = exclusive_conflict(&one("mod-a", EDIT_ENGLISH), &replace);
+    assert_eq!(found.claim, Claim::Asset { hash: mercs2_quartermaster::manifest::asset_hash("english") });
+    exclusive_conflict(&replace, &one("mod-c", "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/q.txt\n"));
+}
+
+/// The table claim is on the table's asset hash, so an opaque `raw` declaring that table still
+/// fails closed against an editor.
+#[test]
+fn a_raw_block_on_an_edited_table_conflicts() {
+    let raw = one(
+        "mod-b",
+        "  - kind: raw\n    payload: src/x.bin\n    target_layer: data\n    touches: [english]\n",
+    );
+    exclusive_conflict(&one("mod-a", EDIT_ENGLISH), &raw);
 }
