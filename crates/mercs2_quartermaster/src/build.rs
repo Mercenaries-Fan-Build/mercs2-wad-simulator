@@ -3678,12 +3678,8 @@ fn lower(
                 kind,
                 message: format!("reading {}: {e}", root.join(pairs).display()),
             })?;
-            let map = parse_string_edits(&text).map_err(|m| BuildError::Lower {
-                index,
-                kind,
-                message: m,
-            })?;
-            let list: Vec<(String, String)> = map.into_iter().collect();
+            let list = parse_text_pairs(&text, &pairs.display().to_string())
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             if list.is_empty() {
                 return Err(BuildError::Lower {
                     index,
@@ -3694,21 +3690,23 @@ fn lower(
             let (edited, counts) =
                 mercs2_formats::stringdb::replace_text_in_container(&container, &list)
                     .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            // A pair that matches nothing is an error: a fix that silently does nothing is the
+            // failure this kind exists to prevent.
+            let misses: Vec<&String> =
+                counts.iter().filter(|(_, n)| *n == 0).map(|(k, _)| k).collect();
+            if !misses.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: text_misses_message(shipment_name, target, &misses),
+                });
+            }
             let hit_total: usize = counts.iter().map(|(_, n)| n).sum();
             log.push(format!(
                 "contributions[{index}] replace_stringdb_text {target} 0x{hash:08X}: {hit_total} \
                  row(s) rewritten across {} pair(s)",
                 counts.len()
             ));
-            let misses: Vec<&String> =
-                counts.iter().filter(|(_, n)| *n == 0).map(|(k, _)| k).collect();
-            if !misses.is_empty() {
-                log.push(format!(
-                    "  note: {} pair(s) matched nothing (likely a typo): {:?}",
-                    misses.len(),
-                    misses
-                ));
-            }
             let block = stringdb_block(hash, &edited)
                 .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::Block(block))
@@ -3892,6 +3890,50 @@ fn parse_string_edits(text: &str) -> Result<std::collections::BTreeMap<String, S
             .ok_or_else(|| format!("line {}: expected `=` or `:` after the key", n + 1))?
             .trim();
         out.insert(key, value.to_string());
+    }
+    Ok(out)
+}
+
+/// The refusal for `replace_stringdb_text` pairs whose old text matches no entry: it names the
+/// Shipment, the table and every unmatched old text.
+fn text_misses_message(shipment: &str, table: &str, misses: &[&String]) -> String {
+    format!(
+        "{shipment}: in the string table {table}, no entry's text is exactly {} — a replacement that \
+         matches nothing changes nothing, so it is refused (check the spelling, and that the text is \
+         the table's text at this point in the load order)",
+        misses.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// Parse a `replace_stringdb_text` pairs file: one `old<TAB>new` pair per line, in file order.
+///
+/// The format is the kind's documented one (`manifest::Contribution::ReplaceStringDbText`): a line
+/// starting with `#` is a comment and a blank line is skipped; every other line is exactly one tab
+/// between the old text and the new. Nothing is trimmed or unescaped — the text is compared with the
+/// table's text exactly, so a space or a `:` in it is part of it. A trailing `\r` (a CRLF file) is
+/// not part of the text. A line with no tab, more than one tab, or an empty old text is refused,
+/// naming `file` and the line.
+pub(crate) fn parse_text_pairs(text: &str, file: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for (n, raw) in text.split('\n').enumerate() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let at = format!("{file}:{}", n + 1);
+        let mut parts = line.split('\t');
+        let (Some(old), Some(new)) = (parts.next(), parts.next()) else {
+            return Err(format!("{at}: no tab — each line is `old<TAB>new`"));
+        };
+        if parts.next().is_some() {
+            return Err(format!(
+                "{at}: more than one tab — each line is exactly `old<TAB>new`"
+            ));
+        }
+        if old.is_empty() {
+            return Err(format!("{at}: the old text is empty — there is nothing to match"));
+        }
+        out.push((old.to_string(), new.to_string()));
     }
     Ok(out)
 }
@@ -4412,8 +4454,8 @@ enum TableWrite {
     /// `edit_stringdb` / `add_stringdb_keys`: set the key's text, adding the key if it is absent.
     Key { key: u32, text: String },
     /// `replace_stringdb_text`: every entry whose CURRENT text is exactly `old` — in the table as
-    /// merged so far — gets `new`. `who` names the contribution for the no-hit note.
-    Text { old: String, new: String, who: String },
+    /// merged so far — gets `new`. `shipment` is named when it matches nothing.
+    Text { old: String, new: String, shipment: String },
 }
 
 /// Merge every Shipment's string-table writes into one table per target, in load order.
@@ -4426,10 +4468,10 @@ enum TableWrite {
 /// * a text replacement resolves against the table AS MERGED SO FAR: every entry whose current text
 ///   is exactly `old` becomes `new` ([`mercs2_formats::stringdb::StringDb::replace_exact_text`]).
 ///
-/// A later write wins. There is no existence check — each Shipment's own build already refused an
-/// edit of a missing key and an addition of an existing one. A text pair that matches nothing keeps
-/// the rule the per-Shipment lowering has: a note in the log, naming the Shipment, the table and
-/// the text, never a silent success.
+/// A later write wins. There is no existence check for keys — each Shipment's own build already
+/// refused an edit of a missing key and an addition of an existing one. A text pair that matches
+/// nothing in the table as merged so far is an error naming the Shipment, the table and the text,
+/// the same rule the per-Shipment lowering has.
 fn merge_string_tables(
     shipments: &[&LoadedShipment],
     game: &mut GameStack,
@@ -4460,9 +4502,15 @@ fn merge_string_tables(
                     path.display()
                 ))
             })?;
-            // The same parser the per-Shipment lowering uses for all three kinds.
-            let rows = parse_string_edits(&text)
-                .map_err(|m| fail(format!("{name} contributions[{index}] ({}): {m}", c.kind())))?;
+            // The same parsers the per-Shipment lowering uses: a pairs file for text replacements,
+            // a strings file for the key kinds.
+            let rows = match c {
+                Contribution::ReplaceStringDbText { .. } => {
+                    parse_text_pairs(&text, &file.display().to_string())
+                }
+                _ => parse_string_edits(&text).map(|m| m.into_iter().collect()),
+            }
+            .map_err(|m| fail(format!("{name} contributions[{index}] ({}): {m}", c.kind())))?;
             let entry = by_table
                 .entry(crate::manifest::asset_hash(target))
                 .or_insert_with(|| (target.clone(), Vec::new(), Vec::new()));
@@ -4471,7 +4519,7 @@ fn merge_string_tables(
                     Contribution::ReplaceStringDbText { .. } => TableWrite::Text {
                         old: left,
                         new: right,
-                        who: format!("{name} contributions[{index}]"),
+                        shipment: format!("{name} contributions[{index}]"),
                     },
                     _ => TableWrite::Key {
                         key: mercs2_formats::stringdb::key_hash(&left),
@@ -4495,7 +4543,6 @@ fn merge_string_tables(
                     contributors.join(", ")
                 ))
             })?;
-        let mut misses: Vec<String> = Vec::new();
         let merged = mercs2_formats::stringdb::apply_container(&container, |db| {
             for w in &writes {
                 match w {
@@ -4504,9 +4551,9 @@ fn merge_string_tables(
                             db.add_by_hash(*key, text);
                         }
                     }
-                    TableWrite::Text { old, new, who } => {
+                    TableWrite::Text { old, new, shipment } => {
                         if db.replace_exact_text(old, new) == 0 {
-                            misses.push(format!("{who}: {old:?}"));
+                            return Err(text_misses_message(shipment, &target, &[old]));
                         }
                     }
                 }
@@ -4522,13 +4569,6 @@ fn merge_string_tables(
             container.len(),
             merged.len()
         ));
-        if !misses.is_empty() {
-            log.push(format!(
-                "  note: {} text pair(s) matched nothing in {target} (likely a typo): {}",
-                misses.len(),
-                misses.join(", ")
-            ));
-        }
         blocks.push(stringdb_block(table, &merged).map_err(fail)?);
     }
     Ok(blocks)
@@ -4944,6 +4984,37 @@ contributions:
         assert_eq!(muts[0].target, "wifpmcinterior");
         assert!(muts[0].append.contains("_tOutfits.chris"));
         assert!(muts[0].append.contains("vz_hum_solano"));
+    }
+}
+
+#[cfg(test)]
+mod text_pairs_tests {
+    use super::parse_text_pairs;
+
+    /// Free text on both sides, exactly as written: spaces, `:`, `=`, `[` and `%s` are text.
+    #[test]
+    fn pairs_are_old_tab_new_verbatim() {
+        let text = "# a comment\n\nPress Start: to begin\tPress [A] = %s\r\n  \n Leading space\t\n";
+        assert_eq!(
+            parse_text_pairs(text, "src/p.txt"),
+            Ok(vec![
+                ("Press Start: to begin".to_string(), "Press [A] = %s".to_string()),
+                (" Leading space".to_string(), String::new()),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_malformed_line_names_the_file_and_line() {
+        for (text, line, why) in [
+            ("ok\tfine\nno tab here\n", 2, "no tab"),
+            ("a\tb\tc\n", 1, "more than one tab"),
+            ("# c\n\tnew\n", 2, "old text is empty"),
+        ] {
+            let e = parse_text_pairs(text, "src/p.txt").unwrap_err();
+            assert!(e.starts_with(&format!("src/p.txt:{line}: ")), "{e}");
+            assert!(e.contains(why), "{e}");
+        }
     }
 }
 
