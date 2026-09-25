@@ -293,7 +293,11 @@ fn two_script_mods_both_survive_the_link() {
         },
     ];
 
-    let linked = link::link_into(&mut block, &corpus, &muts, &order(&["sean-devlin", "roze-skin"]))
+    // Neither requires the other, so the resolved load order is the request order (the lowest
+    // request index goes first on a tie): sean-devlin, then roze-skin — deliberately NOT name order,
+    // so an assertion that still expected sorting by name could not pass here by accident.
+    let resolved = order(&["sean-devlin", "roze-skin"]);
+    let linked = link::link_into(&mut block, &corpus, &muts, &resolved)
         .expect("link must succeed")
         .scripts;
     assert_eq!(
@@ -304,9 +308,8 @@ fn two_script_mods_both_survive_the_link() {
     let l = &linked[0];
     assert_eq!(l.target, "wifpmcinterior");
     assert_eq!(
-        l.contributors,
-        vec!["roze-skin", "sean-devlin"],
-        "sorted by Shipment name"
+        l.contributors, resolved,
+        "appends concatenate in the resolved load order, not by Shipment name"
     );
     assert!(
         l.linked_source_bytes > l.base_source_bytes,
