@@ -309,6 +309,33 @@ const FORBIDDEN_PLACEMENT_EXT: &[(&str, &str)] = &[
 /// Applies to `native_hook` too. Its extension check is narrower — it REQUIRES `.asi` — but the
 /// component and reserved-name rules are the same file-in-the-game-folder rules.
 pub fn game_folder_name_refusal(name: &str) -> Option<String> {
+    if let Some(why) = single_filename_refusal(name) {
+        return Some(why);
+    }
+    if name.eq_ignore_ascii_case(RESERVED_ASI) {
+        return Some(format!(
+            "{RESERVED_ASI} is reserved: the loader skips its own name, so a file shipped under it \
+             is never loaded and nothing is logged, because the file is never considered"
+        ));
+    }
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if let Some(ext) = ext {
+        for (denied, why) in FORBIDDEN_PLACEMENT_EXT {
+            if ext == *denied {
+                return Some(format!("it is a `.{denied}`, and {why}"));
+            }
+        }
+    }
+    None
+}
+
+/// Reject a name that is not ONE filename: empty, `.`/`..`, or carrying a separator or a drive
+/// colon.
+///
+/// The component half of [`game_folder_name_refusal`], on its own because a name can need it without
+/// being a file qm writes: a `supersedes` entry names a legacy file to DETECT in the game folder, so
+/// the extension and reserved-name refusals, which exist to stop a write, do not apply to it.
+pub fn single_filename_refusal(name: &str) -> Option<String> {
     if name.is_empty() {
         return Some("it has no filename at all".into());
     }
@@ -325,20 +352,6 @@ pub fn game_folder_name_refusal(name: &str) -> Option<String> {
              prefix (`\\\\host\\share`) would leave the game folder entirely — while on the \
              machine that built the Shipment all three are ordinary characters in a filename"
         ));
-    }
-    if name.eq_ignore_ascii_case(RESERVED_ASI) {
-        return Some(format!(
-            "{RESERVED_ASI} is reserved: the loader skips its own name, so a file shipped under it \
-             is never loaded and nothing is logged, because the file is never considered"
-        ));
-    }
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    if let Some(ext) = ext {
-        for (denied, why) in FORBIDDEN_PLACEMENT_EXT {
-            if ext == *denied {
-                return Some(format!("it is a `.{denied}`, and {why}"));
-            }
-        }
     }
     None
 }
@@ -411,7 +424,7 @@ enum Lowering {
 /// Both failures are observable in `pmc_blackbox.log` as `[FAILED] … (error: …)` — which is rare
 /// good news for this codebase — but only to a modder who knows to look. Neither is recoverable at
 /// deploy time, and both are cheap to see here.
-fn asi_load_blocker(bytes: &[u8]) -> Option<String> {
+pub(crate) fn asi_load_blocker(bytes: &[u8]) -> Option<String> {
     if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
         return Some("it is not a PE image at all (no `MZ` header)".into());
     }
@@ -505,6 +518,16 @@ pub enum BuildError {
     Artifact {
         diagnostics: Vec<crate::lint::Diagnostic>,
     },
+    /// The load plan over the set is not ok, so nothing is linked. The plan carries the findings
+    /// and has been written beside where the link output would go.
+    Plan(Box<crate::plan::LoadPlan>),
+    /// A file this Shipment supersedes is still in the game folder. qm never deletes it.
+    Superseded {
+        shipment: String,
+        relative: String,
+    },
+    /// The plan or a superseded-file probe could not be computed at all.
+    Compat(crate::compat::CompatError),
 }
 
 impl std::fmt::Display for BuildError {
@@ -555,6 +578,28 @@ impl std::fmt::Display for BuildError {
                 }
                 Ok(())
             }
+            BuildError::Plan(plan) => {
+                let errors: Vec<&crate::plan::Finding> = plan
+                    .findings
+                    .iter()
+                    .filter(|x| x.severity == crate::plan::FindingSeverity::Error)
+                    .collect();
+                write!(
+                    f,
+                    "the load plan is not ok — {} error finding(s), so nothing was linked:",
+                    errors.len()
+                )?;
+                for x in errors {
+                    write!(f, "\n  [{}] {}: {}", x.code, x.items.join(", "), x.message)?;
+                }
+                Ok(())
+            }
+            BuildError::Superseded { shipment, relative } => write!(
+                f,
+                "{shipment} supersedes {relative}, which is still in the game folder — remove it \
+                 first (qm never deletes it)"
+            ),
+            BuildError::Compat(e) => write!(f, "{e}"),
         }
     }
 }
@@ -3023,8 +3068,8 @@ fn lower(
                         "this contribution names the symbol {} but ships no `plugin:`, and the \
                          Quartermaster does not compile native code — there is no binary for it to \
                          produce. Build the hook into an `.asi` and ship that, or, if the plugin is \
-                         somebody else's, depend on it through `load.requires` with a pinned \
-                         sha256 rather than vendoring their binary.",
+                         somebody else's, require the Shipment that ships it in `load.requires` \
+                         rather than vendoring their binary.",
                         symbol.as_deref().unwrap_or("(none)")
                     ),
                 });
@@ -3934,6 +3979,38 @@ pub fn build(
         diagnostics.len()
     ));
 
+    // Superseded legacy files, before anything is lowered. The probe needs the game folder, so a
+    // Shipment that declares `supersedes` cannot build without a game: the check is never skipped.
+    if !manifest.supersedes.is_empty() {
+        let name = &manifest.shipment.name;
+        let Some(vz) = game.as_deref().and_then(|g| g.paths().first().map(|p| p.to_path_buf()))
+        else {
+            return Err(BuildError::Compat(crate::compat::CompatError::GameRootRequired {
+                id: name.clone(),
+            }));
+        };
+        let root = crate::compat::game_root_of(&vz)
+            .map_err(|message| BuildError::Compat(crate::compat::CompatError::GameRoot { message }))?;
+        for entry in &manifest.supersedes {
+            let present = crate::compat::superseded_present(&root, entry).map_err(|message| {
+                BuildError::Compat(crate::compat::CompatError::Probe {
+                    id: name.clone(),
+                    message,
+                })
+            })?;
+            if present {
+                return Err(BuildError::Superseded {
+                    shipment: name.clone(),
+                    relative: place_path(entry.dest.relative_dir(), &entry.file),
+                });
+            }
+        }
+        log.push(format!(
+            "supersedes: none of {} legacy file(s) is in the game folder",
+            manifest.supersedes.len()
+        ));
+    }
+
     // NOTE: self-conflicts are NOT re-checked here. `lint` already reports them as blocking M0120
     // findings, so a Shipment that claims one target twice never reaches this point. A second check
     // would be a redundant path with different formatting — and the first version of it returned on
@@ -4018,8 +4095,9 @@ pub fn build(
                 block: &mut lb.block,
             })
             .collect();
-        // A single Shipment has nothing to order against, so the resolved order is trivially itself
-        // and `&[]` (name-sort fallback) is correct. Cross-Shipment order is `link_installed`'s job.
+        // A single Shipment has nothing to order against, so the resolved order is itself.
+        // Cross-Shipment order is `link_installed`'s job.
+        let solo_order = [manifest.shipment.name.clone()];
         let linked = link::link_into_blocks(
             &mut targets,
             corpus,
@@ -4029,7 +4107,7 @@ pub fn build(
             &support_regs,
             &additions,
             &replacements,
-            &[],
+            &solo_order,
         )
         .map_err(|e| BuildError::Lower {
             index: 0,
@@ -4248,12 +4326,9 @@ pub struct LinkReport {
     pub wad: Option<PathBuf>,
     pub placements: Vec<Placement>,
     pub linked: Vec<crate::link::LinkedScript>,
-    /// Cross-Shipment collisions over the installed set: two Shipments claiming one target in a way
-    /// no load order resolves (an `Exclusive` new-asset hash, a `KeyedSet` duplicate key). Computed
-    /// from the claim graph and also from each Shipment's DECLARED `load.conflicts`. Empty is the
-    /// good case; the Workshop renders these in the Problems panel rather than the build failing,
-    /// because the merged WAD is still emittable — it just does not carry what one Shipment intended.
-    pub conflicts: Vec<crate::blast::Conflict>,
+    /// The load plan the link followed — always `ok`, since a plan that is not ok refuses the link
+    /// ([`BuildError::Plan`]). Also written to `load-plan.json` beside `placement.json`.
+    pub plan: crate::plan::LoadPlan,
     pub log: Vec<String>,
 }
 
@@ -4271,70 +4346,74 @@ pub struct LinkReport {
 ///
 /// Returns `wad: None` when no installed Shipment touches a script — there is nothing to shadow, and
 /// emitting an overlay that merely restates the base block would be noise a user has to reason about.
+///
+/// **Plan first.** The set's load plan ([`crate::compat::plan`]) is computed before anything is
+/// linked: a missing or out-of-range requirement, a declared or claimed conflict, a superseded file
+/// still present, or a requirement cycle refuses the link with [`BuildError::Plan`], after writing
+/// the plan to `out_dir`. Everything the link orders — append concatenation, `replace_lua`, the
+/// `add_script` mint order and the `qm_modloader` bake — follows the plan's `order`, in which a
+/// Shipment always comes after the Shipments it requires and the request order breaks ties.
 pub fn link_installed(
-    shipments: &[&LoadedShipment],
+    inputs: &[crate::compat::PlanInput<'_>],
     game: &mut GameStack,
     corpus_root: &Path,
     out_dir: &Path,
 ) -> Result<LinkReport, BuildError> {
+    // A stale plan must never read as this run's, whatever happens below.
+    crate::plan::remove_stale(out_dir).map_err(|message| BuildError::Io {
+        path: out_dir.join(crate::plan::PLAN_FILE),
+        message,
+    })?;
     if game.platform() != Platform::Pc {
         return Err(BuildError::ConsoleOutputUnsupported);
     }
     let mut log = Vec::new();
     let mut mutations = Vec::new();
 
-    // Order is load-bearing here, and `linked_source` already owns it: it sorts mutations by
-    // Shipment name so the merge is a function of the installed SET, not of the order the caller
-    // happened to name them in — which for a shell glob is filesystem order.
-    //
-    // That matters because `_tOutfits[hero]` is an ordered list and the save file persists a
-    // POSITION, not a name: a set that appended in a different order on reinstall would silently
-    // resolve a saved game to the wrong costume.
-    //
-    // So this does NOT re-sort. It reports the order that will be used, because a guarantee nobody
-    // can see is one the next person re-implements.
-    // The deterministic load order: an alphabetical base (so saved costume positions are stable
-    // across installs) that `load.after` / `load.before` constrain. Computed once and REPORTED,
-    // because a guarantee nobody can see is one the next person re-implements. A cyclic constraint is
-    // a named build error, not a silent arbitrary pick.
-    let load_inputs: Vec<(String, crate::manifest::Load)> = shipments
-        .iter()
-        .map(|s| (s.manifest.shipment.name.clone(), s.manifest.load.clone()))
-        .collect();
-    let order = link::resolve_load_order(&load_inputs).map_err(|e| BuildError::Lower {
+    let root = if crate::compat::needs_game_root(inputs.iter().map(|i| &i.shipment.manifest)) {
+        let vz = game.paths()[0].to_path_buf();
+        Some(
+            crate::compat::game_root_of(&vz)
+                .map_err(|message| BuildError::Compat(crate::compat::CompatError::GameRoot { message }))?,
+        )
+    } else {
+        None
+    };
+    let plan = crate::compat::plan(inputs, crate::plan::Producer::Link, root.as_deref())
+        .map_err(BuildError::Compat)?;
+    let write_plan = |plan: &crate::plan::LoadPlan| {
+        crate::plan::write_plan(out_dir, plan).map_err(|message| BuildError::Io {
+            path: out_dir.join(crate::plan::PLAN_FILE),
+            message,
+        })
+    };
+    if !plan.ok {
+        write_plan(&plan)?;
+        return Err(BuildError::Plan(Box::new(plan)));
+    }
+    // `ok` means no M0174, so the order exists; and no M0203, so each name is one item.
+    let order_ids = plan.order.clone().ok_or_else(|| BuildError::Lower {
         index: 0,
         kind: "link",
-        message: e.to_string(),
+        message: "internal error: an ok load plan has no order".into(),
     })?;
+    let mut shipments: Vec<&LoadedShipment> = Vec::with_capacity(inputs.len());
+    for oid in &order_ids {
+        let input = inputs.iter().find(|i| i.id == oid.as_str()).ok_or_else(|| BuildError::Lower {
+            index: 0,
+            kind: "link",
+            message: format!("internal error: the load order names {oid}, which is not in the request"),
+        })?;
+        shipments.push(input.shipment);
+    }
+    let order: Vec<String> = shipments
+        .iter()
+        .map(|s| s.manifest.shipment.name.clone())
+        .collect();
     if shipments.len() > 1 {
         log.push(format!(
-            "load order (name base, constrained by load.after / load.before): {}",
+            "load order (requires first, then request order): {}",
             order.join(", ")
-        ));
-    }
-
-    // ── Cross-Shipment conflicts (F2) ───────────────────────────────────────────────────────────
-    //
-    // `blast::conflicts` is the claim graph over the whole installed set — two Shipments claiming one
-    // target no load order resolves (an `Exclusive` new-asset hash both mint, a `KeyedSet` duplicate
-    // key). It is computed here, at the one place that sees every Shipment, and reported rather than
-    // made fatal: the merged WAD still emits, it just does not carry what one Shipment intended, and
-    // the Workshop renders these in Problems. Note what is NOT here — two `replace_texture` on one
-    // target are `LastWins`, a load-order choice, not a conflict.
-    let shipment_refs: Vec<(&str, &crate::manifest::Manifest)> = shipments
-        .iter()
-        .map(|s| (s.manifest.shipment.name.as_str(), &s.manifest))
-        .collect();
-    let conflicts = crate::blast::conflicts(&shipment_refs);
-    for c in &conflicts {
-        log.push(format!("CONFLICT: {c}"));
-    }
-    // Author-DECLARED incompatibility: a Shipment naming another installed one in `load.conflicts`.
-    // This is the modder saying "we do not coexist" for reasons the claim graph cannot see (a runtime
-    // clash, a design assumption); surfaced the same way.
-    for (declarer, named) in crate::blast::declared_conflicts(&shipment_refs) {
-        log.push(format!(
-            "CONFLICT (declared): {declarer} declares it is incompatible with {named}, also installed"
         ));
     }
 
@@ -4343,7 +4422,7 @@ pub fn link_installed(
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
     let mut additions: Vec<link::ScriptAddition> = Vec::new();
     let mut replacements: Vec<link::ScriptReplacement> = Vec::new();
-    for s in shipments {
+    for s in &shipments {
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
@@ -4366,17 +4445,17 @@ pub fn link_installed(
         // overlay that merely restates the base block is a file deploy has to reason about for
         // nothing — but emitting no RECORD makes that indistinguishable from "link was never run",
         // and deploy has to tell those apart. An empty `placements` array says which one it is.
+        write_plan(&plan)?;
         write_placement_record(out_dir, &[])?;
         log.push(format!(
-            "wrote {PLACEMENT_RECORD}: 0 placement(s) — nothing to mount from the link step"
+            "wrote {}, {PLACEMENT_RECORD}: 0 placement(s) — nothing to mount from the link step",
+            crate::plan::PLAN_FILE
         ));
-        // A Data-only install still has cross-Shipment conflicts worth reporting (two mods minting
-        // the same texture name), so carry them even when there is no script overlay to emit.
         return Ok(LinkReport {
             wad: None,
             placements: Vec::new(),
             linked: Vec::new(),
-            conflicts,
+            plan,
             log,
         });
     }
@@ -4473,9 +4552,11 @@ pub fn link_installed(
         sha256: digest,
         destination: Destination::Overlay,
     }];
+    write_plan(&plan)?;
     write_placement_record(out_dir, &placements)?;
     log.push(format!(
-        "wrote {PLACEMENT_RECORD}: {} placement(s)",
+        "wrote {}, {PLACEMENT_RECORD}: {} placement(s)",
+        crate::plan::PLAN_FILE,
         placements.len()
     ));
 
@@ -4483,7 +4564,7 @@ pub fn link_installed(
         wad: Some(path),
         placements,
         linked,
-        conflicts,
+        plan,
         log,
     })
 }
@@ -4556,7 +4637,7 @@ mod existing_model_outfit {
     #[test]
     fn add_outfit_without_a_model_file_still_appends_the_wardrobe_row() {
         let yaml = r#"
-format: 1
+format: 2
 shipment:
   name: wear-solano
   version: "1.0.0"
