@@ -1,0 +1,9 @@
+format: 2
+shipment:
+  name: name-version
+  version: 1.0.0
+  target: retail
+load:
+  requires:
+    - { name: lua-bridge, version: "^1.0.0" }
+contributions: []
