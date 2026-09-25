@@ -279,7 +279,7 @@ const FORBIDDEN_PLACEMENT_EXT: &[(&str, &str)] = &[
     (
         "wad",
         "a WAD is the base game's data (`data\\vz.wad`) or a Shipment's own overlay. The overlay is \
-         emitted as `build/<name>.wad` and mounted by the deploy step — it is never placed by an \
+         emitted as `_build/<name>.wad` and mounted by the deploy step — it is never placed by an \
          author, and the format cannot express a write into the base WAD at all",
     ),
     (
@@ -289,10 +289,10 @@ const FORBIDDEN_PLACEMENT_EXT: &[(&str, &str)] = &[
     ),
     (
         "dll",
-        "the DLLs in the game folder are the game's own, and `pmc_bb.dll` is the LOADER — Modkit \
-         installs and manages it, and a Shipment never ships it (N Shipments carrying their own \
-         copies would collide on one filename with no arbitration). The sanctioned way to add \
-         native code is an `.asi` through `native_hook`",
+        "a DLL in the game folder is either the game's own, the loader (`pmc_bb.dll`) or a runtime \
+         other plugins import by name. A plugin ships as an `.asi` through `native_hook`, and a \
+         runtime DLL ships through `add_runtime_dll`, which places `<shipment.name>.dll` in the \
+         game root and refuses the loader's and the game's names",
     ),
 ];
 
@@ -356,6 +356,54 @@ pub fn single_filename_refusal(name: &str) -> Option<String> {
     None
 }
 
+/// Reject the file name of an `add_runtime_dll`, or `None` when it may be placed in the game root.
+///
+/// The single-filename rule is [`single_filename_refusal`], the same one every game-folder placement
+/// uses. On top of it, and all compared lowercased because Windows file names are case-insensitive:
+///
+/// * the extension must be `.dll`;
+/// * the stem must not be on [`crate::manifest::DENY_LISTED_DLL_STEMS`] — the loader, its sidecar
+///   and the game-folder DLLs the loader reports;
+/// * the name must be `<shipment_name>.dll`, so a runtime Shipment ships exactly one DLL, named
+///   after itself.
+///
+/// One function, called by the linter (M0162), `qm preflight` / `qm link` (M0162 in the plan) and
+/// the lowering (so the refusal survives a rule being suppressed).
+pub fn runtime_dll_name_refusal(name: &str, shipment_name: &str) -> Option<String> {
+    if let Some(why) = single_filename_refusal(name) {
+        return Some(why);
+    }
+    let lowered = name.to_lowercase();
+    let Some(stem) = lowered.strip_suffix(".dll") else {
+        return Some(
+            "it is not a `.dll`. `add_runtime_dll` places a runtime DLL that plugins import by \
+             name; a plugin is an `.asi` shipped through `native_hook`, and any other file is a \
+             `place_file`"
+                .into(),
+        );
+    };
+    if crate::manifest::DENY_LISTED_DLL_STEMS.contains(&stem) {
+        return Some(format!(
+            "`{stem}.dll` is a DLL no Shipment may ship ({}, compared case-insensitively): the \
+             loader, its sidecar and the game-folder DLLs the loader reports",
+            crate::manifest::DENY_LISTED_DLL_STEMS
+                .iter()
+                .map(|s| format!("{s}.dll"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let wanted = format!("{}.dll", shipment_name.to_lowercase());
+    if lowered != wanted {
+        return Some(format!(
+            "a runtime DLL must be named after its Shipment, `{wanted}` (compared \
+             case-insensitively), so that one runtime Shipment ships exactly one DLL and two \
+             Shipments can never ship one name"
+        ));
+    }
+    None
+}
+
 /// Reject a filename a `place_file` may not use: everything [`game_folder_name_refusal`] rejects,
 /// plus an `.asi`.
 ///
@@ -380,11 +428,6 @@ pub fn companion_name_refusal(name: &str) -> Option<String> {
     }
     game_folder_name_refusal(name)
 }
-
-/// `IMAGE_FILE_MACHINE_I386`. The game is a 32-bit process, so a 64-bit plugin cannot load into it.
-const PE_MACHINE_I386: u16 = 0x014C;
-/// `IMAGE_FILE_DLL`. The loader calls `LoadLibrary`, which will not run an executable image.
-const PE_CHARACTERISTICS_DLL: u16 = 0x2000;
 
 /// What lowering one contribution produced.
 ///
@@ -417,39 +460,6 @@ enum Lowering {
         relative: String,
         bytes: Vec<u8>,
     },
-}
-
-/// Reject a plugin the game's loader could not load, by reading its PE header.
-///
-/// Both failures are observable in `pmc_blackbox.log` as `[FAILED] … (error: …)` — which is rare
-/// good news for this codebase — but only to a modder who knows to look. Neither is recoverable at
-/// deploy time, and both are cheap to see here.
-pub(crate) fn asi_load_blocker(bytes: &[u8]) -> Option<String> {
-    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
-        return Some("it is not a PE image at all (no `MZ` header)".into());
-    }
-    let pe_at = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
-    if pe_at + 24 > bytes.len() || &bytes[pe_at..pe_at + 4] != b"PE\0\0" {
-        return Some("its `e_lfanew` does not point at a `PE\\0\\0` signature".into());
-    }
-    let coff = pe_at + 4;
-    let machine = u16::from_le_bytes([bytes[coff], bytes[coff + 1]]);
-    let characteristics = u16::from_le_bytes([bytes[coff + 18], bytes[coff + 19]]);
-    if machine != PE_MACHINE_I386 {
-        return Some(format!(
-            "it is built for machine 0x{machine:04X}, not i386 (0x{PE_MACHINE_I386:04X}). \
-             Mercenaries2.exe is a 32-bit process and `LoadLibrary` refuses a foreign architecture"
-        ));
-    }
-    if characteristics & PE_CHARACTERISTICS_DLL == 0 {
-        return Some(
-            "its COFF characteristics do not set `IMAGE_FILE_DLL`, so it is an executable image \
-             rather than a DLL. An `.asi` is a DLL with a different extension; the loader calls \
-             `LoadLibrary` on it"
-                .into(),
-        );
-    }
-    None
 }
 
 /// Read the assembled WAD back and run [`crate::lint::artifact_checks`] on it.
@@ -2196,6 +2206,8 @@ fn lower(
     // Load-bearing for the skinned path: without bone NAMES the retarget correction tables have
     // nothing to match against and every build silently falls back to the generic automap.
     names: Option<&NameTable>,
+    // `shipment.name`: an `add_runtime_dll` must be named after it.
+    shipment_name: &str,
     log: &mut Vec<String>,
 ) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
@@ -3131,7 +3143,7 @@ fn lower(
                     message: format!("{name} cannot be placed: {why}. Rename it."),
                 });
             }
-            if let Some(why) = asi_load_blocker(&bytes) {
+            if let Some(why) = crate::pe::pe_dll_load_blocker(&bytes, kind) {
                 return Err(BuildError::Lower {
                     index,
                     kind,
@@ -3215,6 +3227,56 @@ fn lower(
                 sha256_hex(&bytes),
             ));
 
+            Ok(Lowering::File {
+                name,
+                relative,
+                bytes,
+            })
+        }
+
+        // A runtime DLL, placed in the game root. The same shape as `native_hook`'s placement —
+        // bytes read once, the name refused before anything is written, the PE header checked —
+        // with the destination fixed to the game root and the name fixed to `<shipment.name>.dll`.
+        // Needs no game stack, so it lowers in template CI.
+        Contribution::AddRuntimeDll { dll } => {
+            let path = root.join(dll);
+            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
+                index,
+                kind,
+                message: format!("reading {}: {e}", path.display()),
+            })?;
+            let name = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{} has no usable file name", path.display()),
+                })?
+                .to_string();
+            // M0162 already blocks these as an Error; this is the belt to its braces.
+            if let Some(why) = runtime_dll_name_refusal(&name, shipment_name) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{name} cannot be placed: {why}."),
+                });
+            }
+            if let Some(why) = crate::pe::pe_dll_load_blocker(&bytes, kind) {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!("{name} cannot be loaded by the game: {why}."),
+                });
+            }
+            let relative = place_path(crate::manifest::PlaceIn::GameRoot.relative_dir(), &name);
+            log.push(format!(
+                "contributions[{index}] add_runtime_dll {name} → {relative}: {} bytes, sha256 {} — \
+                 UNRESTRICTED NATIVE CODE in the game process; the digest proves the bytes are \
+                 unmodified, not that they are safe",
+                bytes.len(),
+                sha256_hex(&bytes),
+            ));
             Ok(Lowering::File {
                 name,
                 relative,
@@ -3535,27 +3597,10 @@ fn lower(
                 edited.len()
             ));
 
-            // Wrap the edited container as a single-entry block. A stringdb is INFO/KEYS/STRS, not
-            // an opaque `data` leaf, so `build_wrapped_block` does not apply — the container is
-            // spliced straight into the block table `[count][name][type][field_c][size][container]`.
-            // Same hash, stringdb type, PRIMARY: a string table has no LOD chain, so anything but
-            // the sentinel in the low 16 would dangle (M0001).
-            let mut block_data = Vec::new();
-            block_data.extend_from_slice(&1u32.to_le_bytes()); // entry count
-            block_data.extend_from_slice(&hash.to_le_bytes());
-            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
-            block_data.extend_from_slice(&0u32.to_le_bytes());
-            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
-            block_data.extend_from_slice(&edited);
-
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
-            let block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            // A stringdb is INFO/KEYS/STRS, not an opaque `data` leaf, so `build_wrapped_block`
+            // does not apply — the container is its own single-entry block.
+            let block = stringdb_block(hash, &edited)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::Block(block))
         }
 
@@ -3607,21 +3652,8 @@ fn lower(
                 container.len(),
                 edited.len()
             ));
-            let mut block_data = Vec::new();
-            block_data.extend_from_slice(&1u32.to_le_bytes());
-            block_data.extend_from_slice(&hash.to_le_bytes());
-            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
-            block_data.extend_from_slice(&0u32.to_le_bytes());
-            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
-            block_data.extend_from_slice(&edited);
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
-            let block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let block = stringdb_block(hash, &edited)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::Block(block))
         }
 
@@ -3677,21 +3709,8 @@ fn lower(
                     misses
                 ));
             }
-            let mut block_data = Vec::new();
-            block_data.extend_from_slice(&1u32.to_le_bytes());
-            block_data.extend_from_slice(&hash.to_le_bytes());
-            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
-            block_data.extend_from_slice(&0u32.to_le_bytes());
-            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
-            block_data.extend_from_slice(&edited);
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
-            let block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let block = stringdb_block(hash, &edited)
+                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::Block(block))
         }
 
@@ -3945,7 +3964,7 @@ fn mip0_len(w: usize, h: usize, format: TexFormat) -> usize {
 
 /// Lint, lower, assemble, emit.
 ///
-/// `out_dir` defaults to `<root>/build`. Returns `Err(BuildError::Blocked)` rather than a report
+/// `out_dir` defaults to `<root>/_build`. Returns `Err(BuildError::Blocked)` rather than a report
 /// when the linter blocks — the gate is the return type, not a field a caller might not read.
 pub fn build(
     shipment: &LoadedShipment,
@@ -4020,7 +4039,15 @@ pub fn build(
     let mut files = Vec::new();
     let mut lang_wads: Vec<(String, Vec<PatchBlock>)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        match lower(index, c, &shipment.root, game.as_deref_mut(), names, &mut log)? {
+        match lower(
+            index,
+            c,
+            &shipment.root,
+            game.as_deref_mut(),
+            names,
+            &manifest.shipment.name,
+            &mut log,
+        )? {
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
             Lowering::Blocks(bs) => blocks.extend(bs),
@@ -4115,6 +4142,12 @@ pub fn build(
             message: e.to_string(),
         })?;
         drop(targets);
+        // M0209 is a load-plan finding, and a single-Shipment build writes no plan; the warning goes
+        // to the build log, where `qm link` over the installed set reports it again as a finding.
+        for u in &linked.unresolved_imports {
+            log.push(format!("warning [M0209]: {u}"));
+        }
+        let linked = linked.scripts;
         for l in &linked {
             log.push(format!(
                 "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
@@ -4163,7 +4196,7 @@ pub fn build(
 
     let out_dir = out_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| shipment.root.join("build"));
+        .unwrap_or_else(|| shipment.root.join("_build"));
     std::fs::create_dir_all(&out_dir).map_err(|e| BuildError::Io {
         path: out_dir.clone(),
         message: e.to_string(),
@@ -4317,6 +4350,151 @@ pub fn build(
     })
 }
 
+/// The PTHS path of the single-entry block a string table ships in: `blocks\VZ\mod_<hash>.block`.
+///
+/// One function for every producer of one — `edit_stringdb`, `add_stringdb_keys` and
+/// `replace_stringdb_text` lowering, and the link's merged table — so a merged table shadows the
+/// per-Shipment copies at exactly their path.
+pub fn stringdb_block_path(table: u32) -> String {
+    format!("blocks\\VZ\\mod_{table:08x}.block")
+}
+
+/// Wrap a string-table container as its own single-entry block: `[count][name][type][field_c]
+/// [size][container]`, one PRIMARY stringdb ASET row. A string table has no LOD chain, so the low 16
+/// bits carry the sentinel — anything else would dangle (M0001).
+fn stringdb_block(table: u32, container: &[u8]) -> Result<PatchBlock, String> {
+    let mut block_data = Vec::with_capacity(20 + container.len());
+    block_data.extend_from_slice(&1u32.to_le_bytes()); // entry count
+    block_data.extend_from_slice(&table.to_le_bytes());
+    block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
+    block_data.extend_from_slice(&0u32.to_le_bytes());
+    block_data.extend_from_slice(&(container.len() as u32).to_le_bytes());
+    block_data.extend_from_slice(container);
+    let aset = AsetEntry::new(table, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
+    PatchBlock::from_decompressed(&block_data, stringdb_block_path(table), vec![aset], None)
+}
+
+/// Every string table `qm link` merges across a set: the targets of every `edit_stringdb` and
+/// `add_stringdb_keys` in it, by asset hash.
+pub fn merged_string_tables<'a>(
+    manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
+) -> std::collections::BTreeSet<u32> {
+    manifests
+        .into_iter()
+        .flat_map(|m| m.contributions.iter())
+        .filter_map(|c| match c {
+            Contribution::EditStringDb { target, .. }
+            | Contribution::AddStringDbKeys { target, .. } => {
+                Some(crate::manifest::asset_hash(target))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every block `qm link` re-emits for a set, as the load plan's `link_block_paths` states it: the
+/// scripts blocks ([`link::SCRIPT_BLOCKS`]), then each merged string table's block in hash order.
+/// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
+/// the set-wide version of each.
+pub fn link_block_paths<'a>(
+    manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
+) -> Vec<String> {
+    link::SCRIPT_BLOCKS
+        .iter()
+        .map(|(_, p)| p.to_string())
+        .chain(merged_string_tables(manifests).into_iter().map(stringdb_block_path))
+        .collect()
+}
+
+/// Merge every Shipment's string-table edits into one table per target, in load order.
+///
+/// Each `edit_stringdb` and `add_stringdb_keys` of each Shipment in `shipments` (the plan's order),
+/// in contribution order, is applied to the base table by key hash
+/// ([`mercs2_formats::stringdb::key_hash`]): a key that exists is overwritten, one that does not is
+/// added. A later write to a key wins. There is no existence check — each Shipment's own build
+/// already refused an edit of a missing key and an addition of an existing one against the base.
+fn merge_string_tables(
+    shipments: &[&LoadedShipment],
+    game: &mut GameStack,
+    log: &mut Vec<String>,
+) -> Result<Vec<PatchBlock>, BuildError> {
+    const KIND: &str = "link";
+    let fail = |message: String| BuildError::Lower {
+        index: 0,
+        kind: KIND,
+        message,
+    };
+    let mut by_table: std::collections::BTreeMap<u32, (String, Vec<(u32, String)>, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for s in shipments {
+        for (index, c) in s.manifest.contributions.iter().enumerate() {
+            let (target, strings) = match c {
+                Contribution::EditStringDb { target, strings }
+                | Contribution::AddStringDbKeys { target, strings } => (target, strings),
+                _ => continue,
+            };
+            let path = s.root.join(strings);
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                fail(format!(
+                    "{} contributions[{index}] ({}): reading {}: {e}",
+                    s.manifest.shipment.name,
+                    c.kind(),
+                    path.display()
+                ))
+            })?;
+            let edits = parse_string_edits(&text).map_err(|m| {
+                fail(format!(
+                    "{} contributions[{index}] ({}): {m}",
+                    s.manifest.shipment.name,
+                    c.kind()
+                ))
+            })?;
+            let entry = by_table
+                .entry(crate::manifest::asset_hash(target))
+                .or_insert_with(|| (target.clone(), Vec::new(), Vec::new()));
+            entry.1.extend(
+                edits
+                    .into_iter()
+                    .map(|(key, value)| (mercs2_formats::stringdb::key_hash(&key), value)),
+            );
+            if !entry.2.contains(&s.manifest.shipment.name) {
+                entry.2.push(s.manifest.shipment.name.clone());
+            }
+        }
+    }
+    let mut blocks = Vec::with_capacity(by_table.len());
+    for (table, (target, writes, contributors)) in by_table {
+        let container = game
+            .container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+            .ok_or_else(|| {
+                fail(format!(
+                    "{target:?} (0x{table:08X}) is not a string table in the game stack, so there is \
+                     no base table to merge {} into",
+                    contributors.join(", ")
+                ))
+            })?;
+        let merged = mercs2_formats::stringdb::apply_container(&container, |db| {
+            for (key, text) in &writes {
+                if !db.set_by_hash(*key, text) {
+                    db.add_by_hash(*key, text);
+                }
+            }
+            Ok(())
+        })
+        .map_err(|m| fail(format!("merging {target:?} (0x{table:08X}): {m}")))?;
+        log.push(format!(
+            "merged string table {target} 0x{table:08X}: {} write(s) from {} in load order, \
+             container {} -> {} bytes",
+            writes.len(),
+            contributors.join(", "),
+            container.len(),
+            merged.len()
+        ));
+        blocks.push(stringdb_block(table, &merged).map_err(fail)?);
+    }
+    Ok(blocks)
+}
+
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
 pub const LINK_WAD_NAME: &str = "zz-quartermaster-link.wad";
 
@@ -4379,7 +4557,7 @@ pub fn link_installed(
     } else {
         None
     };
-    let plan = crate::compat::plan(inputs, crate::plan::Producer::Link, root.as_deref())
+    let mut plan = crate::compat::plan(inputs, crate::plan::Producer::Link, root.as_deref())
         .map_err(BuildError::Compat)?;
     let write_plan = |plan: &crate::plan::LoadPlan| {
         crate::plan::write_plan(out_dir, plan).map_err(|message| BuildError::Io {
@@ -4432,15 +4610,19 @@ pub fn link_installed(
     }
     // A UI, layer, add_script, or replace_lua mod touches the Script layer too — the first two mint
     // `qm_modloader` and the trampoline; add_script mints its own fresh scripts_vz entry;
-    // replace_lua swaps a shipped script's bytecode. Any of them needs the link to run.
-    if mutations.is_empty()
+    // replace_lua swaps a shipped script's bytecode. Any of them needs the script link to run.
+    let touches_scripts = !(mutations.is_empty()
         && ui_regs.is_empty()
         && layer_regs.is_empty()
         && support_regs.is_empty()
         && additions.is_empty()
-        && replacements.is_empty()
-    {
-        log.push("no installed Shipment touches a script — nothing to link".into());
+        && replacements.is_empty());
+    // Every string table any Shipment edits or adds keys to is merged into one link-owned copy.
+    let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
+    if !touches_scripts && tables.is_empty() {
+        log.push(
+            "no installed Shipment touches a script or a string table — nothing to link".into(),
+        );
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
         // overlay that merely restates the base block is a file deploy has to reason about for
         // nothing — but emitting no RECORD makes that indistinguishable from "link was never run",
@@ -4460,50 +4642,109 @@ pub fn link_installed(
         });
     }
     log.push(format!(
-        "linking {} mutation(s), {} UI and {} layer registration(s) from {} Shipment(s)",
+        "linking {} mutation(s), {} UI and {} layer registration(s) and {} string table(s) from {} \
+         Shipment(s)",
         mutations.len(),
         ui_regs.len(),
         layer_regs.len(),
+        tables.len(),
         shipments.len()
     ));
 
-    let mut loaded = load_script_blocks(game, "link")?;
-    let mut targets: Vec<link::TargetBlock<'_>> = loaded
-        .iter_mut()
-        .map(|lb| link::TargetBlock {
-            path: lb.path.clone(),
-            block: &mut lb.block,
-        })
-        .collect();
-    let linked = link::link_into_blocks(
-        &mut targets,
-        corpus_root,
-        &mutations,
-        &ui_regs,
-        &layer_regs,
-        &support_regs,
-        &additions,
-        &replacements,
-        &order,
-    )
-    .map_err(|e| BuildError::Lower {
-        index: 0,
-        kind: "link",
-        message: e.to_string(),
-    })?;
-    drop(targets);
-    for l in &linked {
-        log.push(format!(
-            "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
-            l.target,
-            loaded[l.block].path,
-            l.base_source_bytes,
-            l.linked_source_bytes,
-            l.bytecode_bytes,
-            l.contributors
-        ));
+    let mut patches: Vec<PatchBlock> = Vec::new();
+    let mut linked: Vec<link::LinkedScript> = Vec::new();
+    if touches_scripts {
+        let mut loaded = load_script_blocks(game, "link")?;
+        let mut targets: Vec<link::TargetBlock<'_>> = loaded
+            .iter_mut()
+            .map(|lb| link::TargetBlock {
+                path: lb.path.clone(),
+                block: &mut lb.block,
+            })
+            .collect();
+        let linked_out = link::link_into_blocks(
+            &mut targets,
+            corpus_root,
+            &mutations,
+            &ui_regs,
+            &layer_regs,
+            &support_regs,
+            &additions,
+            &replacements,
+            &order,
+        )
+        .map_err(|e| BuildError::Lower {
+            index: 0,
+            kind: "link",
+            message: e.to_string(),
+        })?;
+        drop(targets);
+        // M0209: literal imports nothing in the link provides. Warnings — `ok` does not change —
+        // placed on the item whose source carries them. An ok plan has one item per name (no M0203).
+        for u in &linked_out.unresolved_imports {
+            let requested = inputs
+                .iter()
+                .position(|i| i.shipment.manifest.shipment.name == u.shipment)
+                .ok_or_else(|| BuildError::Lower {
+                    index: 0,
+                    kind: "link",
+                    message: format!(
+                        "internal error: {} carries an import but is not in the request",
+                        u.shipment
+                    ),
+                })?;
+            plan.findings.push(crate::plan::Finding {
+                code: "M0209",
+                severity: crate::plan::FindingSeverity::Warning,
+                message: u.to_string(),
+                items: vec![inputs[requested].id.to_string()],
+                refs: vec![crate::plan::FindingRef {
+                    section: crate::plan::Section::Items,
+                    index: requested,
+                }],
+                fix: None,
+            });
+            log.push(format!("warning [M0209]: {u}"));
+        }
+        crate::plan::sort_findings(&mut plan.findings, |item| {
+            inputs.iter().position(|p| p.id == item)
+        });
+        linked = linked_out.scripts;
+        for l in &linked {
+            log.push(format!(
+                "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
+                l.target,
+                loaded[l.block].path,
+                l.base_source_bytes,
+                l.linked_source_bytes,
+                l.bytecode_bytes,
+                l.contributors
+            ));
+        }
+        patches.extend(script_patch_blocks(&loaded, &linked, "link")?);
     }
-    let patches = script_patch_blocks(&loaded, &linked, "link")?;
+
+    // The merged string tables. The plan's `link_block_paths` promised exactly these, and a deploy
+    // step drops the per-Shipment copies of each on that promise, so a mismatch is an internal error.
+    let table_blocks = merge_string_tables(&shipments, game, &mut log)?;
+    let promised: Vec<String> = plan
+        .link_block_paths
+        .iter()
+        .filter(|p| !link::SCRIPT_BLOCKS.iter().any(|(_, s)| s == p))
+        .cloned()
+        .collect();
+    let emitted: Vec<String> = table_blocks.iter().map(|b| b.path_string.clone()).collect();
+    if promised != emitted {
+        return Err(BuildError::Lower {
+            index: 0,
+            kind: "link",
+            message: format!(
+                "internal error: the plan promised the string-table blocks {promised:?}, and the \
+                 link merged {emitted:?}"
+            ),
+        });
+    }
+    patches.extend(table_blocks);
 
     let csum =
         mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
