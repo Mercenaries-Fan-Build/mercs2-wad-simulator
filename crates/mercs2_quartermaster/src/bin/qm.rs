@@ -5,9 +5,10 @@
 //! - **A modder's machine**, where the retail WADs exist and `qm build` can lower for real.
 //! - **A template repo's CI**, where they never will. `qm lint` is hermetic on purpose — manifest
 //!   text plus the Shipment directory, no game, no network — so a public runner can gate every push.
-//! - **A deploy step**, which needs `qm link` across the whole installed set, because Lua scripts
-//!   load from a block rather than per-hash and two script-touching Shipments would otherwise
-//!   silently annihilate each other.
+//! - **A deploy step**, which runs `qm preflight` over the whole installed set (requirements,
+//!   versions, conflicts, superseded files and the load order, written to `load-plan.json`), then
+//!   `qm link` across it, because Lua scripts load from a block rather than per-hash and two
+//!   script-touching Shipments would otherwise silently annihilate each other.
 //!
 //! ## Exit codes
 //!
@@ -24,9 +25,12 @@
 //! misconfigured", and a single nonzero code conflates a real finding with a missing game folder.
 
 use clap::{Parser, Subcommand};
+use mercs2_quartermaster::compat::{self, PlanInput};
+use mercs2_quartermaster::discover::{DiscoverError, OpenError};
+use mercs2_quartermaster::plan::{self, FindingSeverity, LoadPlan, Producer, RequestItem};
 use mercs2_quartermaster::{
-    build, game, lint, open_shipment, BuildError, Diagnostic, GameStack, LoadedShipment, NameTable,
-    Severity,
+    build, lint, open_shipment, BuildError, Diagnostic, GameStack, LoadedShipment, NameTable,
+    ReadError, Severity,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -90,15 +94,40 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
+    /// Check a set of Shipments before building: requirements, versions, conflicts, superseded
+    /// legacy files and the load order. Writes <out>/load-plan.json. No WAD is opened.
+    ///
+    /// Exit 0: the plan is ok. Exit 1: the plan has error findings (it is still written, with the
+    /// load order unless the requirements form a cycle). Exit 2: nothing could be checked, and no
+    /// plan is written.
+    Preflight {
+        /// Every Shipment directory, in request order (the tie-break). Each gets the id `arg:<n>`.
+        /// Give either these or --request.
+        shipments: Vec<PathBuf>,
+        /// A load-request.json naming the Shipments and their ids, in request order.
+        #[arg(long, value_name = "FILE")]
+        request: Option<PathBuf>,
+        /// Where to write load-plan.json.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Where the game is installed: vz.wad, the install root or its data folder. Defaults to
+        /// host discovery. Needed only when a Shipment declares `supersedes`; resolved whenever
+        /// given.
+        #[arg(long, value_name = "PATH")]
+        game: Option<PathBuf>,
+    },
     /// Link the Lua of several installed Shipments into one WAD, mounted last.
     ///
     /// Scripts load from the block, not per-hash, so a Shipment's own overlay is only valid
-    /// standalone. This is what makes two script-touching Shipments coexist.
+    /// standalone. This is what makes two script-touching Shipments coexist. The set's load plan
+    /// is computed first and written beside the output; a plan that is not ok links nothing.
     Link {
-        /// Every installed Shipment directory.
-        #[arg(required = true)]
+        /// Every installed Shipment directory, in request order. Give either these or --request.
         shipments: Vec<PathBuf>,
-        #[arg(long, value_name = "DIR")]
+        /// A load-request.json naming the Shipments and their ids, in request order.
+        #[arg(long, value_name = "FILE")]
+        request: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
         game: Option<PathBuf>,
         /// Where to write the link WAD. Required — it is not any one Shipment's output.
         #[arg(long, value_name = "DIR")]
@@ -167,14 +196,22 @@ fn main() -> ExitCode {
             workshop_data.as_deref(),
             names.as_deref(),
         ),
+        Command::Preflight {
+            shipments,
+            request,
+            out,
+            game,
+        } => cmd_preflight(&shipments, request.as_deref(), &out, game.as_deref()),
         Command::Link {
             shipments,
+            request,
             game,
             out,
             corpus,
             workshop_data,
         } => cmd_link(
             &shipments,
+            request.as_deref(),
             game.as_deref(),
             &out,
             corpus.as_deref(),
@@ -248,24 +285,16 @@ fn resolve_names(explicit: Option<&Path>) -> Option<NameTable> {
 
 /// Resolve the game stack: an explicit path wins, otherwise host discovery.
 ///
-/// The manifest is never consulted. A Shipment that could name its own game folder would be a
-/// Shipment that behaves differently on the author's machine than on anyone else's.
+/// `--game` may name `vz.wad`, the install root or its `data` folder, the same as for
+/// `qm preflight` ([`compat::resolve_vz_wad`]). The manifest is never consulted. A Shipment that
+/// could name its own game folder would be a Shipment that behaves differently on the author's
+/// machine than on anyone else's.
 fn resolve_game(explicit: Option<&Path>) -> Result<GameStack, ExitCode> {
-    let paths = match explicit {
-        Some(dir) => vec![dir.to_path_buf()],
-        None => match game::discover() {
-            Some(found) => vec![found.path],
-            None => {
-                eprintln!(
-                    "error: no game install found. Pass --game <dir>, or run \
-                     scripts/find-vz-wad.sh --write.\n\
-                     note: `qm lint` needs no game install and will still run."
-                );
-                return Err(ExitCode::from(EXIT_UNUSABLE));
-            }
-        },
-    };
-    GameStack::open(&paths).map_err(|e| {
+    let vz = compat::resolve_vz_wad(explicit).map_err(|e| {
+        eprintln!("error: {e}\nnote: `qm lint` needs no game install and will still run.");
+        ExitCode::from(EXIT_UNUSABLE)
+    })?;
+    GameStack::open(&[vz]).map_err(|e| {
         eprintln!("error: {e}");
         ExitCode::from(EXIT_UNUSABLE)
     })
@@ -348,7 +377,9 @@ fn cmd_build(
             // `Blocked` is a finding, not a misconfiguration; everything else means we could not
             // run. CI wants to tell those apart.
             let code = match e {
-                BuildError::Blocked(_) | BuildError::Artifact { .. } => EXIT_FINDINGS,
+                BuildError::Blocked(_)
+                | BuildError::Artifact { .. }
+                | BuildError::Superseded { .. } => EXIT_FINDINGS,
                 _ => EXIT_UNUSABLE,
             };
             eprintln!("error: {e}");
@@ -421,20 +452,174 @@ fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&P
     ExitCode::SUCCESS
 }
 
+/// The request items: from `--request`, or `arg:<n>` for each positional directory. Exactly one of
+/// the two must be given.
+fn request_items(dirs: &[PathBuf], request: Option<&Path>) -> Result<Vec<RequestItem>, ExitCode> {
+    match (request, dirs.is_empty()) {
+        (Some(file), true) => plan::read_request(file).map_err(|e| {
+            eprintln!("error: {e}");
+            ExitCode::from(EXIT_UNUSABLE)
+        }),
+        (None, false) => Ok(plan::request_from_dirs(dirs)),
+        (Some(_), false) => {
+            eprintln!("error: give either --request or Shipment directories, not both");
+            Err(ExitCode::from(EXIT_UNUSABLE))
+        }
+        (None, true) => {
+            eprintln!("error: give --request <load-request.json> or at least one Shipment directory");
+            Err(ExitCode::from(EXIT_UNUSABLE))
+        }
+    }
+}
+
+/// Why an item's manifest could not be opened, as `<code or ->: <message>` — never naming the
+/// item's path, which the caller maps back through the id.
+fn open_failure(e: &OpenError) -> String {
+    match e {
+        OpenError::Discover(DiscoverError::NotADirectory(_)) => "-: the path is not a directory".into(),
+        OpenError::Discover(DiscoverError::NoManifest { .. }) => {
+            "-: no manifest in the directory — expected one of manifest.yaml, manifest.yml, \
+             manifest.json, manifest.toml"
+                .into()
+        }
+        OpenError::Discover(DiscoverError::Ambiguous { found, .. }) => {
+            let names: Vec<String> = found
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            format!(
+                "-: the directory holds {} manifests ({}) — keep exactly one",
+                found.len(),
+                names.join(", ")
+            )
+        }
+        OpenError::Discover(DiscoverError::Io { message, .. }) => {
+            format!("-: reading the manifest: {message}")
+        }
+        OpenError::Read(ReadError::Validate(v)) => format!("{}: {v}", v.code().unwrap_or("-")),
+        OpenError::Read(r @ ReadError::Parse { .. }) => format!("-: {r}"),
+    }
+}
+
+/// Open every item's Shipment, reporting EVERY failure (one line each) before giving up.
+fn open_items(items: &[RequestItem]) -> Result<Vec<LoadedShipment>, ExitCode> {
+    let mut opened = Vec::with_capacity(items.len());
+    let mut failed = false;
+    for item in items {
+        match open_shipment(&item.path) {
+            Ok(s) => opened.push(s),
+            Err(e) => {
+                eprintln!("error: {}: {}", item.id, open_failure(&e));
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        Err(ExitCode::from(EXIT_UNUSABLE))
+    } else {
+        Ok(opened)
+    }
+}
+
+/// Print a plan's findings, then a one-line verdict naming the file.
+fn report_plan(plan_: &LoadPlan, out: &Path) {
+    for f in &plan_.findings {
+        let sev = match f.severity {
+            FindingSeverity::Warning => "warning",
+            FindingSeverity::Error => "error",
+        };
+        eprintln!("[{}] {sev}: {}: {}", f.code, f.items.join(", "), f.message);
+    }
+    eprintln!(
+        "load plan {}: {} finding(s) → {}",
+        if plan_.ok { "ok" } else { "NOT ok" },
+        plan_.findings.len(),
+        out.join(plan::PLAN_FILE).display()
+    );
+}
+
+fn cmd_preflight(
+    dirs: &[PathBuf],
+    request: Option<&Path>,
+    out: &Path,
+    game_path: Option<&Path>,
+) -> ExitCode {
+    // The stale plan goes first, so every exit-2 path below leaves no plan behind.
+    if let Err(e) = plan::remove_stale(out) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    let items = match request_items(dirs, request) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let opened = match open_items(&items) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    // The game folder is derived only when something needs probing — but a --game that was given
+    // is always resolved, so a wrong one never passes silently.
+    let root = if game_path.is_some() || compat::needs_game_root(opened.iter().map(|s| &s.manifest)) {
+        let derived = compat::resolve_vz_wad(game_path).and_then(|vz| compat::game_root_of(&vz));
+        match derived {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(EXIT_UNUSABLE);
+            }
+        }
+    } else {
+        None
+    };
+    let inputs: Vec<PlanInput<'_>> = items
+        .iter()
+        .zip(&opened)
+        .map(|(item, shipment)| PlanInput {
+            id: &item.id,
+            shipment,
+        })
+        .collect();
+    let plan_ = match compat::plan(&inputs, Producer::Preflight, root.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    };
+    if let Err(e) = plan::write_plan(out, &plan_) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    report_plan(&plan_, out);
+    if plan_.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_FINDINGS)
+    }
+}
+
 fn cmd_link(
-    roots: &[PathBuf],
+    dirs: &[PathBuf],
+    request: Option<&Path>,
     game_dir: Option<&Path>,
     out: &Path,
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
 ) -> ExitCode {
-    let mut loaded = Vec::new();
-    for root in roots {
-        match load(root) {
-            Ok(s) => loaded.push(s),
-            Err(code) => return code,
-        }
+    // The stale plan goes first, so every exit-2 path below leaves no plan behind.
+    if let Err(e) = plan::remove_stale(out) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
     }
+    let items = match request_items(dirs, request) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let opened = match open_items(&items) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let mut stack = match resolve_game(game_dir) {
         Ok(s) => s,
         Err(code) => return code,
@@ -456,8 +641,15 @@ fn cmd_link(
         }
     };
 
-    let refs: Vec<&LoadedShipment> = loaded.iter().collect();
-    match build::link_installed(&refs, &mut stack, &corpus, out) {
+    let inputs: Vec<PlanInput<'_>> = items
+        .iter()
+        .zip(&opened)
+        .map(|(item, shipment)| PlanInput {
+            id: &item.id,
+            shipment,
+        })
+        .collect();
+    match build::link_installed(&inputs, &mut stack, &corpus, out) {
         Ok(report_) => {
             for line in &report_.log {
                 println!("{line}");
@@ -468,23 +660,17 @@ fn cmd_link(
                 // emitting an empty one would be a file deploy has to reason about for nothing.
                 None => println!(
                     "no script mutations across {} Shipment(s); nothing to link",
-                    refs.len()
+                    inputs.len()
                 ),
             }
-            // Cross-Shipment conflicts are findings, not a hard failure: the WAD emitted, but two
-            // Shipments fight over a target no load order resolves, so exit non-zero so CI notices.
-            if report_.conflicts.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                eprintln!(
-                    "\n{} cross-Shipment conflict(s) — the install is not clean:",
-                    report_.conflicts.len()
-                );
-                for c in &report_.conflicts {
-                    eprintln!("  {c}");
-                }
-                ExitCode::from(EXIT_FINDINGS)
-            }
+            report_plan(&report_.plan, out);
+            ExitCode::SUCCESS
+        }
+        Err(BuildError::Plan(plan_)) => {
+            // The plan was written; it is the explanation. Nothing was linked.
+            report_plan(&plan_, out);
+            eprintln!("error: the load plan is not ok, so nothing was linked");
+            ExitCode::from(EXIT_FINDINGS)
         }
         Err(e) => {
             eprintln!("error: {e}");
