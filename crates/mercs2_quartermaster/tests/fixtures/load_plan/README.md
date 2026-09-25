@@ -18,6 +18,19 @@ in this chain, because Ess does not require it.
 
 Golden plans are compared as parsed JSON, with `quartermaster` replaced by the running version.
 
+## Runtime DLLs and string tables
+
+| Request | Game | Golden plan | Result |
+|---|---|---|---|
+| `request.dup-runtime.json` | `game-clean` | `plan.dup-runtime.json` | M0162 + M0207: `dup-runtime` ships `m2-sdk.dll`, which is not `dup-runtime.dll` and collides with `m2-sdk`'s |
+| `request.stringdb.json` | `game-clean` | `plan.stringdb.json` | ok: `stringdb-a` and `stringdb-b` both edit `english`, one key alike; `qm link` merges them, and `link_block_paths` names the merged table's block |
+
+- `shipments/m2-sdk/` is a runtime Shipment: one `add_runtime_dll`, `src/m2-sdk.dll`.
+- `shipments/dup-runtime/` ships `src/m2-sdk.dll` too, so it collides with `m2-sdk`.
+- `shipments/stringdb-a/` edits `[Menu.Play]` and `[Menu.Quit]`; `shipments/stringdb-b/` edits
+  `[Menu.Play]` and adds `[StringdbB.Added]`. Editors of one table never conflict: the link
+  applies their edits by key hash in load order, the later text winning.
+
 ## Game layouts
 
 - `game-clean/data/vz.wad` and `game-legacy/data/vz.wad` are empty: preflight only needs the file to
@@ -30,9 +43,9 @@ Golden plans are compared as parsed JSON, with `quartermaster` replaced by the r
 Both are generated, not captured, and `tests/compat.rs::the_fixture_binaries_match_their_generators`
 checks the committed bytes against the generators:
 
-- `shipments/lua-bridge*/src/lua_bridge.asi`: `minimal_i386_dll()` in `tests/compat.rs`, a
-  header-only i386 PE32 DLL (`MZ`, `e_lfanew`, `PE\0\0`, machine `0x014C`, characteristics
-  `0x230E`).
+- `shipments/lua-bridge*/src/lua_bridge.asi`, `shipments/m2-sdk/src/m2-sdk.dll` and
+  `shipments/dup-runtime/src/m2-sdk.dll`: `minimal_i386_dll()` in `tests/compat.rs`, a header-only
+  i386 PE32 DLL (`MZ`, `e_lfanew`, `PE\0\0`, machine `0x014C`, characteristics `0x230E`).
 - `shipments/ess-*/src/ess_ui.gfx`: `minimal_gfx()` in `tests/compat.rs`, a small uncompressed GFX
   movie.
 
@@ -42,6 +55,3 @@ Each request there makes `qm preflight` exit 2 and write no plan: a bad request 
 duplicate id, an id containing `\`, an unknown key (a leftover `kind`), and manifests with a
 self-`requires` (M0173), a bad range (M0172), the `{ name, version }` form, `format: 1`, the
 `{ url, sha256 }` form (a parse failure), and a Shipment named after a deny-listed DLL stem (M0211).
-
-Not here yet: `dup-runtime` (needs `add_runtime_dll`) and `stringdb-a` / `stringdb-b` (need per-key
-stringdb claims).
