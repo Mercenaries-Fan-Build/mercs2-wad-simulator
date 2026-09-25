@@ -1,0 +1,4 @@
+# The key stringdb-b also edits: merged by qm link, the later Shipment in the order wins.
+[Menu.Play] = Play (stringdb-a)
+# A key only stringdb-a edits.
+[Menu.Quit] = Quit (stringdb-a)
