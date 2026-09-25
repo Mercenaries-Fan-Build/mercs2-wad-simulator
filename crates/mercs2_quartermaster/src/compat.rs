@@ -14,11 +14,11 @@ use crate::blast::{self, Access, MergeClass};
 use crate::build::{self, ASI_SUBDIR};
 use crate::discover::LoadedShipment;
 use crate::link::{self, OrderEdge};
-use crate::manifest::{Contribution, Manifest, Requirement, Superseded};
+use crate::manifest::{Contribution, Manifest, PlaceIn, Requirement, Superseded};
 use crate::plan::{
     CapabilityRow, ClaimClass, ClaimConflictRow, ClaimantEntry, ConflictRow, ConflictSource,
     DeclaredConflictRow, DeclaredStatus, EdgeSource, Finding, FindingRef, FindingSeverity,
-    LoadPlan, PlacedDestination, PlacedFileEntry, PlanEdge, PlanItem, PluginEntry, Producer,
+    LoadPlan, PlacedDestination, PlacedFileEntry, PlanEdge, PlanItem, PluginEntry, Producer, RuntimeDllEntry,
     RequirementKind, RequirementRow, RequirementStatus, Section, SupersededRow, PLAN_FORMAT,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -202,7 +202,7 @@ pub fn plan(
     let mut items = Vec::with_capacity(inputs.len());
     for (requested, input) in inputs.iter().enumerate() {
         let m = &input.shipment.manifest;
-        let (plugins, placed_files) = item_files(input, requested, &mut findings)?;
+        let (plugins, runtime_dlls, placed_files) = item_files(input, requested, &mut findings)?;
         if let Some(range) = &m.shipment.quartermaster {
             let req = semver::VersionReq::parse(range).map_err(|e| CompatError::Item {
                 id: id(requested),
@@ -236,7 +236,7 @@ pub fn plan(
             quartermaster_range: m.shipment.quartermaster.clone(),
             provides: m.load.provides.clone(),
             plugins,
-            runtime_dlls: Vec::new(),
+            runtime_dlls,
             placed_files,
         });
     }
@@ -634,13 +634,8 @@ pub fn plan(
     }
 
     // Sorted by code, then by the first item's request index; stable otherwise.
-    let requested_of = |item: &str| inputs.iter().position(|p| p.id == item);
-    findings.sort_by(|a, b| {
-        a.code.cmp(b.code).then_with(|| {
-            let fa = a.items.first().and_then(|i| requested_of(i));
-            let fb = b.items.first().and_then(|i| requested_of(i));
-            fa.cmp(&fb)
-        })
+    crate::plan::sort_findings(&mut findings, |item| {
+        inputs.iter().position(|p| p.id == item)
     });
     let ok = !findings
         .iter()
@@ -658,10 +653,7 @@ pub fn plan(
         capabilities,
         conflicts,
         supersedes,
-        script_block_paths: link::SCRIPT_BLOCKS
-            .iter()
-            .map(|(_, p)| p.to_string())
-            .collect(),
+        link_block_paths: build::link_block_paths(inputs.iter().map(|i| &i.shipment.manifest)),
         findings,
     })
 }
@@ -682,16 +674,17 @@ fn range_matches(range: &str, version: &str, id: &str, index: usize) -> Result<b
     Ok(req.matches(&v))
 }
 
-/// An item's `plugins[]` and `placed_files[]`, with their M0162 / M0178 findings.
+/// An item's `plugins[]`, `runtime_dlls[]` and `placed_files[]`, with their M0162 / M0178 findings.
 ///
-/// Reads every plugin (for its digest and PE header) and checks every placed file exists. A file
+/// Reads every plugin and runtime DLL (for its digest and PE header) and checks every placed file
+/// exists. A file
 /// that cannot be read, or a path that is not under `src/`, is a [`CompatError`]: the plan cannot
 /// describe it.
 fn item_files(
     input: &PlanInput<'_>,
     requested: usize,
     findings: &mut Vec<Finding>,
-) -> Result<(Vec<PluginEntry>, Vec<PlacedFileEntry>), CompatError> {
+) -> Result<(Vec<PluginEntry>, Vec<RuntimeDllEntry>, Vec<PlacedFileEntry>), CompatError> {
     let m = &input.shipment.manifest;
     let root = &input.shipment.root;
     let fail = |message: String| CompatError::Item {
@@ -708,7 +701,16 @@ fn item_files(
             vec![at(Section::Items, requested)],
         )
     };
+    let not_loadable = |contribution: usize, name: &str, why: &str| {
+        error(
+            "M0178",
+            format!("contributions[{contribution}]: {name} cannot be loaded by the game: {why}"),
+            vec![input.id.to_string()],
+            vec![at(Section::Items, requested)],
+        )
+    };
     let mut plugins = Vec::new();
+    let mut runtime_dlls = Vec::new();
     let mut placed = Vec::new();
     for (contribution, c) in m.contributions.iter().enumerate() {
         match c {
@@ -740,20 +742,39 @@ fn item_files(
                 if let Some(why) = why {
                     findings.push(refused(contribution, &file_name, &why));
                 }
-                if let Some(why) = build::asi_load_blocker(&bytes) {
-                    findings.push(error(
-                        "M0178",
-                        format!(
-                            "contributions[{contribution}]: {file_name} cannot be loaded by the \
-                             game: {why}"
-                        ),
-                        vec![input.id.to_string()],
-                        vec![at(Section::Items, requested)],
-                    ));
+                if let Some(why) = crate::pe::pe_dll_load_blocker(&bytes, "native_hook") {
+                    findings.push(not_loadable(contribution, &file_name, &why));
                 }
                 plugins.push(PluginEntry {
                     contribution,
                     relative: build::place_path(ASI_SUBDIR, &file_name),
+                    sha256: build::sha256_hex(&bytes),
+                    file_name,
+                    source,
+                });
+            }
+            Contribution::AddRuntimeDll { dll } => {
+                let source = src_relative(dll).ok_or_else(|| {
+                    fail(format!(
+                        "contributions[{contribution}] (add_runtime_dll): the dll path is not a \
+                         relative path under src/"
+                    ))
+                })?;
+                let bytes = std::fs::read(root.join(dll)).map_err(|e| {
+                    fail(format!(
+                        "contributions[{contribution}] (add_runtime_dll): reading src/{source}: {e}"
+                    ))
+                })?;
+                let file_name = file_name_of(dll, contribution, "add_runtime_dll").map_err(fail)?;
+                if let Some(why) = build::runtime_dll_name_refusal(&file_name, &m.shipment.name) {
+                    findings.push(refused(contribution, &file_name, &why));
+                }
+                if let Some(why) = crate::pe::pe_dll_load_blocker(&bytes, "add_runtime_dll") {
+                    findings.push(not_loadable(contribution, &file_name, &why));
+                }
+                runtime_dlls.push(RuntimeDllEntry {
+                    contribution,
+                    relative: build::place_path(PlaceIn::GameRoot.relative_dir(), &file_name),
                     sha256: build::sha256_hex(&bytes),
                     file_name,
                     source,
@@ -795,7 +816,7 @@ fn item_files(
             _ => {}
         }
     }
-    Ok((plugins, placed))
+    Ok((plugins, runtime_dlls, placed))
 }
 
 fn file_name_of(path: &Path, contribution: usize, kind: &str) -> Result<String, String> {
