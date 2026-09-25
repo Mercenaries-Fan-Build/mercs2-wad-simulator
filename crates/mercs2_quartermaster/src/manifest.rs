@@ -986,22 +986,23 @@ pub enum Contribution {
     /// Data, SAME-HASH. Rewrite every string whose current text is EXACTLY `old` (fix-pack surface).
     ///
     /// A community bug report almost always names a string by the text the player sees, not by its
-    /// bracket key. This kind takes a `.pairs` file of `old\tnew` (or a YAML map, same encoding as
-    /// `edit_stringdb`) and rewrites every entry whose current text matches exactly. Requiring the
-    /// FULL string match keeps this from mangling unrelated lines that merely contain the phrase.
+    /// bracket key. This kind takes a `.pairs` file — one `old<TAB>new` pair per line, `#` starting
+    /// a comment line, blank lines skipped, nothing trimmed or unescaped — and rewrites every entry
+    /// whose current text is exactly `old`. Requiring the FULL string match keeps this from mangling
+    /// unrelated lines that merely contain the phrase. A pair whose `old` matches no entry is an
+    /// error, and so is a line with no tab, more than one tab, or an empty `old`.
     ///
     /// Installed together, `qm link` merges it with every other Shipment's writes to the table, in
     /// load order: the text match runs against the table AS MERGED SO FAR (the base plus every
     /// earlier write), and a later write wins. So it composes with `edit_stringdb` /
-    /// `add_stringdb_keys` on the same table, in this Shipment and others. A pair that matches
-    /// nothing is noted in the build and link logs.
+    /// `add_stringdb_keys` on the same table, in this Shipment and others.
     // `snake_case` would derive `replace_string_db_text`; pinned to the documented tag, as
     // `edit_stringdb`'s is.
     #[serde(rename = "replace_stringdb_text")]
     ReplaceStringDbText {
         /// The string-table asset.
         target: String,
-        /// A `src/`-relative file mapping old text → new text, one pair per row.
+        /// A `src/`-relative pairs file: one `old<TAB>new` per line.
         pairs: PathBuf,
     },
     /// Data, SAME-HASH. Correct or localise strings in a shipped string table.
