@@ -18,7 +18,7 @@ const DESTROYER_HASH: u32 = 0xE540_47D5;
 fn raw_touching(shipment: &str, touch: &str) -> Manifest {
     from_str(
         &format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: raw
@@ -162,7 +162,7 @@ fn an_unnameable_hash_is_not_nagged_about() {
 #[test]
 fn native_hook_addresses_are_never_suggested_as_asset_names() {
     let m = from_str(
-        "format: 1
+        "format: 2
 shipment: { name: a, version: 1.0.0, target: retail }
 contributions:
   - kind: native_hook
