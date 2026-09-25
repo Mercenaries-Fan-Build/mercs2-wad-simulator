@@ -29,7 +29,7 @@ use egui::Color32;
 use mercs2_quartermaster::build::{self, BuildError, BuildReport};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::lint::{Diagnostic, Severity};
-use mercs2_quartermaster::manifest::{Contribution, Touch};
+use mercs2_quartermaster::manifest::{ConflictDecl, Contribution, Touch};
 use mercs2_quartermaster::names::NameTable;
 
 use crate::gui::theme;
@@ -554,6 +554,7 @@ impl Panel {
                 homepage: None,
                 tags: Vec::new(),
             },
+            supersedes: Vec::new(),
             load: Load::default(),
             contributions: Vec::new(),
         };
@@ -2063,28 +2064,53 @@ fn identity_form(
     theme::section(ui, "Load order", None, false, |ui| {
         ui.label(
             egui::RichText::new(
-                "Names of other Shipments. `after`/`before` constrain the deploy-time link order; \
-                 `conflicts` declares one that cannot be installed alongside this.",
+                "Names of other Shipments. `conflicts` declares one that cannot be installed \
+                 alongside this. Load order comes from `requires`: a Shipment loads after the \
+                 Shipments it requires.",
             )
             .size(11.0)
             .color(theme::FAINT),
         );
         ui.add_space(6.0);
-        for (lbl, list) in [
-            ("After", &mut load.after),
-            ("Before", &mut load.before),
-            ("Conflicts", &mut load.conflicts),
-        ] {
-            let mut joined = list.join(", ");
-            if theme::text_field(ui, lbl, &mut joined, "other-shipment", theme::FieldState::Neutral)
-                .lost_focus()
-            {
-                *list = joined
-                    .split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect();
-                commit = true;
+        // This field edits the bare-name entries only. A ranged entry (`{ shipment, version }`) is
+        // shown read-only below and kept as it is, so editing the names never drops a range.
+        let mut joined = load
+            .conflicts
+            .iter()
+            .filter_map(|c| match c {
+                ConflictDecl::Name(n) => Some(n.as_str()),
+                ConflictDecl::Range(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if theme::text_field(ui, "Conflicts", &mut joined, "other-shipment", theme::FieldState::Neutral)
+            .lost_focus()
+        {
+            let ranged: Vec<ConflictDecl> = load
+                .conflicts
+                .iter()
+                .filter(|c| matches!(c, ConflictDecl::Range(_)))
+                .cloned()
+                .collect();
+            load.conflicts = joined
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .map(ConflictDecl::Name)
+                .chain(ranged)
+                .collect();
+            commit = true;
+        }
+        for c in &load.conflicts {
+            if let ConflictDecl::Range(r) = c {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Conflicts with {} {} (a ranged entry — edit it in the manifest)",
+                        r.shipment, r.version
+                    ))
+                    .size(11.0)
+                    .color(theme::FAINT),
+                );
             }
         }
     });
@@ -2905,7 +2931,7 @@ mod tests {
         let d = tmp("nooverwrite");
         let mut p = Panel::default();
         p.scaffold(&d, None).unwrap();
-        std::fs::write(d.join("manifest.yaml"), "format: 1\n# hand-edited\n").unwrap();
+        std::fs::write(d.join("manifest.yaml"), "format: 2\n# hand-edited\n").unwrap();
 
         let mut q = Panel::default();
         let err = q.scaffold(&d, None).expect_err("must refuse");
