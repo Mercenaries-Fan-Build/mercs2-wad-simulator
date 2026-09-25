@@ -29,6 +29,7 @@ pub mod link;
 pub mod lint;
 pub mod manifest;
 pub mod names;
+pub mod pe;
 pub mod plan;
 pub mod states;
 pub mod world;
