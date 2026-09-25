@@ -971,6 +971,9 @@ pub enum Contribution {
     /// ⚠ Two Shipments adding the same key are a hard conflict (Additive intent). To OVERRIDE an
     /// existing key's text, use [`EditStringDb`]; a mixed intent must be split into two rows.
     /// The same shell/vz duplication caveat applies as for [`EditStringDb`] (M0191 warns).
+    // `snake_case` would derive `add_string_db_keys`; the kind is `add_stringdb_keys` everywhere else
+    // (`kind()`, `ALL_KINDS`, the docs), so the tag is pinned, as `edit_stringdb`'s is.
+    #[serde(rename = "add_stringdb_keys")]
     AddStringDbKeys {
         /// The string-table asset — `english`, `french`, `english_dlc01`, …
         target: String,
@@ -989,6 +992,9 @@ pub enum Contribution {
     /// Runs on top of `edit_stringdb` (both apply, in author order), so a Shipment can co-fix by
     /// key AND by text. Two Shipments rewriting overlapping text is a load-order question, same
     /// shape as `replace_texture` — `Replace` intent, `LastWins`.
+    // `snake_case` would derive `replace_string_db_text`; pinned to the documented tag, as
+    // `edit_stringdb`'s is.
+    #[serde(rename = "replace_stringdb_text")]
     ReplaceStringDbText {
         /// The string-table asset.
         target: String,
