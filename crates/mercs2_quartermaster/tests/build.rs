@@ -432,6 +432,39 @@ fn solid_png(width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// Nobody resizes a texture. An image whose size differs from the shipped texture is a
+/// hard error, and the message names BOTH sizes — the image's and the target's — so the author knows
+/// what to export at without looking it up.
+#[test]
+fn size_mismatch_refused_message_names_both_sizes() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let existing = game.texture(hash).expect("al_hum_boss_ub must exist in vz.wad");
+    let (w, h) = (existing.width, existing.height);
+    // Half the width, same height: a different size, and still a multiple of 4.
+    let (iw, ih) = (w / 2, h);
+    assert_ne!((iw, ih), (w, h));
+
+    let dir = scratch("size_mismatch");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/t.png"), solid_png(iw, ih)).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains(&format!("{iw}x{ih}")), "names the image size: {m}");
+            assert!(m.contains(&format!("{w}x{h}")), "names the target size: {m}");
+        }
+        other => panic!("expected a Lower refusal, got {other:?}"),
+    }
+    assert!(!dir.join("_build/test-shipment.wad").exists(), "nothing is written");
+}
+
 /// M0007/M0009 against real ASET rows, in both directions.
 ///
 /// The classes are the opposite of what "character texture" intuition suggests, which is exactly
