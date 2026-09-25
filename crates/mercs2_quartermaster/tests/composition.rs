@@ -731,14 +731,19 @@ fn edit_stringdb_on_one_table_composes() {
     assert!(blast::self_conflicts(&both).is_empty());
 }
 
-/// `replace_stringdb_text` matches by text, so it can touch any key: it conflicts with every other
-/// writer to the table.
+/// `replace_stringdb_text` composes too: the link applies it, in load
+/// order, against the table as merged so far. So it never conflicts with another writer to the
+/// table, across Shipments or inside one.
 #[test]
-fn replace_stringdb_text_conflicts_with_any_table_writer() {
-    let replace = one("mod-b", "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/p.txt\n");
-    let found = exclusive_conflict(&one("mod-a", EDIT_ENGLISH), &replace);
-    assert_eq!(found.claim, Claim::Asset { hash: mercs2_quartermaster::manifest::asset_hash("english") });
-    exclusive_conflict(&replace, &one("mod-c", "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/q.txt\n"));
+fn replace_stringdb_text_composes_with_other_table_writers() {
+    const REPLACE: &str = "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/p.txt\n";
+    let replace = one("mod-b", REPLACE);
+    assert!(blast::conflicts(&[("mod-a", &one("mod-a", EDIT_ENGLISH)), ("mod-b", &replace)]).is_empty());
+    assert!(blast::conflicts(&[("mod-b", &replace), ("mod-c", &one("mod-c", REPLACE))]).is_empty());
+    assert_eq!(blast::claims(&replace)[0].class, MergeClass::OrderedList);
+    // One Shipment may fix a table by key and by text.
+    let both = one("mod-a", &format!("{EDIT_ENGLISH}{REPLACE}"));
+    assert!(blast::self_conflicts(&both).is_empty());
 }
 
 /// The table claim is on the table's asset hash, so an opaque `raw` declaring that table still
