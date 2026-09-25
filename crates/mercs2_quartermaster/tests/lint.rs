@@ -57,14 +57,17 @@ fn errors_block_the_build_and_warnings_do_not() {
         "an unknown wearer must block"
     );
 
+    // A new language with no selector plugin in the Shipment is advisory (M0201): the selector may
+    // be installed separately.
     let warning_only = shipment_with(
-        "  - kind: patch_lua
-    target: wifmissionflow
-    append: src/a.lua
+        "  - kind: add_language
+    name: klingon
+    display: Klingon
+    strings: src/klingon.txt
 ",
     );
     let diags = lint::lint(&warning_only, None, None);
-    assert_eq!(codes(&diags), vec!["M0141"]);
+    assert_eq!(codes(&diags), vec!["M0201"]);
     assert_eq!(diags[0].severity, Severity::Warning);
     assert!(!lint::blocks_build(&diags), "a warning must not block");
 }
@@ -685,5 +688,93 @@ fn a_language_without_a_selector_warns_but_does_not_block() {
 fn the_language_rules_are_registered() {
     for code in ["M0200", "M0201"] {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M0162 / M0178 — add_runtime_dll
+// ---------------------------------------------------------------------------
+
+/// A header-only PE image with the given COFF machine and characteristics (the four fields
+/// `pe::pe_dll_load_blocker` reads).
+fn pe_image(machine: u16, characteristics: u16) -> Vec<u8> {
+    let pe_at = 0x80usize;
+    let mut out = vec![0u8; pe_at + 24];
+    out[0..2].copy_from_slice(b"MZ");
+    out[0x3C..0x40].copy_from_slice(&(pe_at as u32).to_le_bytes());
+    out[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+    out[pe_at + 4..pe_at + 6].copy_from_slice(&machine.to_le_bytes());
+    out[pe_at + 22..pe_at + 24].copy_from_slice(&characteristics.to_le_bytes());
+    out
+}
+
+/// M0162 needs only the manifest, so it fires with no root; M0178 needs the
+/// bytes, so it fires only with one — and is quiet on a loadable i386 DLL.
+#[test]
+fn m0162_and_m0178_from_lint() {
+    // Shipment `s`: its runtime DLL must be `s.dll`.
+    let wrong_name = shipment_with("  - kind: add_runtime_dll\n    dll: src/m2-sdk.dll\n");
+    let diags = lint::lint(&wrong_name, None, None);
+    assert_eq!(codes(&diags), vec!["M0162"], "{diags:?}");
+    assert!(diags[0].message.contains("`s.dll`"), "{}", diags[0].message);
+    assert_eq!(diags[0].at, Some(0));
+
+    let deny = shipment_with("  - kind: add_runtime_dll\n    dll: src/Cruise.dll\n");
+    assert_eq!(codes(&lint::lint(&deny, None, None)), vec!["M0162"]);
+
+    let right = shipment_with("  - kind: add_runtime_dll\n    dll: src/s.dll\n");
+    assert!(lint::lint(&right, None, None).is_empty(), "no root: M0178 cannot run");
+
+    let root = std::env::temp_dir().join(format!("qm_lint_rtdll_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/s.dll"), pe_image(0x8664, 0x2102)).unwrap();
+    let diags = lint::lint(&right, Some(&root), None);
+    assert_eq!(codes(&diags), vec!["M0178"], "{diags:?}");
+    assert!(diags[0].message.contains("not i386"), "{}", diags[0].message);
+    assert!(lint::blocks_build(&diags));
+
+    std::fs::write(root.join("src/s.dll"), pe_image(0x014C, 0x2102)).unwrap();
+    assert!(lint::lint(&right, Some(&root), None).is_empty(), "a loadable i386 DLL is clean");
+
+    // A missing file is M0110's to report; M0178 does not also fire on it.
+    std::fs::remove_file(root.join("src/s.dll")).unwrap();
+    assert_eq!(codes(&lint::lint(&right, Some(&root), None)), vec!["M0110"]);
+}
+
+/// The finding element a `lint-report.json` carries: lint's four severities
+/// map one to one, `at` becomes a `contributions` ref, and `fix` is carried through. No hermetic rule
+/// emits HANG today (the HANG-class rules run against a built WAD), so the mapping is pinned here.
+#[test]
+fn a_diagnostic_becomes_the_shared_finding_element() {
+    use mercs2_quartermaster::plan::{FindingSeverity, Section};
+    let d = lint::Diagnostic {
+        rule: lint::M0001_DANGLING_RUNG,
+        severity: Severity::Hang,
+        message: "m".into(),
+        at: Some(3),
+        fix: Some("f".into()),
+    };
+    let f = d.to_finding();
+    assert_eq!(f.code, "M0001");
+    assert_eq!(f.severity, FindingSeverity::Hang);
+    assert_eq!(f.items, Vec::<String>::new());
+    assert_eq!(f.refs.len(), 1);
+    assert_eq!(f.refs[0].section, Section::Contributions);
+    assert_eq!(f.refs[0].index, 3);
+    assert_eq!(f.fix.as_deref(), Some("f"));
+    let json = serde_json::to_value(&f).unwrap();
+    assert_eq!(json["severity"], "hang");
+    assert_eq!(json["refs"], serde_json::json!([{ "section": "contributions", "index": 3 }]));
+
+    for (severity, wire) in [
+        (Severity::Info, "info"),
+        (Severity::Warning, "warning"),
+        (Severity::Error, "error"),
+    ] {
+        let f = lint::Diagnostic { severity, at: None, fix: None, ..d.clone() }.to_finding();
+        assert_eq!(serde_json::to_value(&f).unwrap()["severity"], wire);
+        assert!(f.refs.is_empty(), "no `at`, no ref");
+        assert_eq!(f.fix, None);
     }
 }
