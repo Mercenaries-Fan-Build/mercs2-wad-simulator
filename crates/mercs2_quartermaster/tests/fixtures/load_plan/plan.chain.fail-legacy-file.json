@@ -1,0 +1,144 @@
+{
+  "format": 1,
+  "producer": "preflight",
+  "quartermaster": "3.0.0",
+  "ok": false,
+  "order": [
+    "shipment:lua-bridge",
+    "shipment:ess",
+    "shipment:my-mod"
+  ],
+  "items": [
+    {
+      "id": "shipment:ess",
+      "requested": 0,
+      "resolved": 1,
+      "held_back_by": 0,
+      "name": "ess",
+      "version": "0.7.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [],
+      "runtime_dlls": [],
+      "placed_files": []
+    },
+    {
+      "id": "shipment:lua-bridge",
+      "requested": 1,
+      "resolved": 0,
+      "held_back_by": null,
+      "name": "lua-bridge",
+      "version": "1.0.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [
+        {
+          "contribution": 0,
+          "file_name": "lua_bridge.asi",
+          "source": "lua_bridge.asi",
+          "relative": "scripts/lua_bridge.asi",
+          "sha256": "361406ebf38f9d1f98b49545cc61ab88b8f0ebd5cbea8435bddb7df6b73b6aa4"
+        }
+      ],
+      "runtime_dlls": [],
+      "placed_files": []
+    },
+    {
+      "id": "shipment:my-mod",
+      "requested": 2,
+      "resolved": 2,
+      "held_back_by": null,
+      "name": "my-mod",
+      "version": "1.0.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [],
+      "runtime_dlls": [],
+      "placed_files": []
+    }
+  ],
+  "edges": [
+    {
+      "first": "shipment:lua-bridge",
+      "then": "shipment:ess",
+      "source": "requires",
+      "requirement": 0
+    },
+    {
+      "first": "shipment:ess",
+      "then": "shipment:my-mod",
+      "source": "requires",
+      "requirement": 1
+    }
+  ],
+  "requirements": [
+    {
+      "consumer": "shipment:ess",
+      "index": 0,
+      "kind": "shipment",
+      "target": "lua-bridge",
+      "range": "^1.0.0",
+      "providers": [
+        "shipment:lua-bridge"
+      ],
+      "resolved_version": "1.0.0",
+      "status": "satisfied"
+    },
+    {
+      "consumer": "shipment:my-mod",
+      "index": 0,
+      "kind": "shipment",
+      "target": "ess",
+      "range": ">=0.7, <1",
+      "providers": [
+        "shipment:ess"
+      ],
+      "resolved_version": "0.7.0",
+      "status": "satisfied"
+    }
+  ],
+  "capabilities": [],
+  "conflicts": [],
+  "supersedes": [
+    {
+      "declared_by": "shipment:ess",
+      "index": 0,
+      "dest": "on_load",
+      "file": "1_Ess.lua",
+      "relative": "scripts/OnLoad/1_Ess.lua",
+      "present": true
+    },
+    {
+      "declared_by": "shipment:ess",
+      "index": 1,
+      "dest": "on_load",
+      "file": "2_EssNames.lua",
+      "relative": "scripts/OnLoad/2_EssNames.lua",
+      "present": false
+    }
+  ],
+  "script_block_paths": [
+    "blocks\\VZ\\scripts_vz_P000_Q3.block",
+    "blocks\\VZ\\resident_P000_Q3.block"
+  ],
+  "findings": [
+    {
+      "code": "M0208",
+      "severity": "error",
+      "message": "ess supersedes scripts/OnLoad/1_Ess.lua, which is still in the game folder — remove it first (qm never deletes it)",
+      "items": [
+        "shipment:ess"
+      ],
+      "refs": [
+        {
+          "section": "supersedes",
+          "index": 0
+        }
+      ],
+      "fix": null
+    }
+  ]
+}
