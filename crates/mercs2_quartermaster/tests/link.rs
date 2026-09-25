@@ -12,6 +12,11 @@ use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::sges::decompress_block;
 use mercs2_quartermaster::link::{self, ScriptMutation, UiRegistration};
 
+/// A resolved load order, as the Shipment names `link_into_blocks` sorts its contributors by.
+fn order(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
 fn corpus_root() -> Option<PathBuf> {
     let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
     while let Some(d) = dir {
@@ -121,7 +126,8 @@ fn a_resident_script_links_into_the_resident_block() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &[]).expect("link must succeed");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["fixpack"]))
+        .expect("link must succeed");
     drop(targets);
 
     assert_eq!(linked.len(), 1);
@@ -177,7 +183,8 @@ fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
         .iter_mut()
         .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs, &[], &[], &[], &[], &[]).expect("link must succeed");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs, &[], &[], &[], &[], &order(&["hud-mod"]))
+        .expect("link must succeed");
     drop(targets);
 
     // Both the trampoline host and the minted loader come back as linked, both in scripts_vz.
@@ -240,7 +247,8 @@ fn vz_and_resident_targets_split_across_two_blocks() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &[]).expect("link");
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["fixpack"]))
+        .expect("link");
     drop(targets);
 
     assert_eq!(linked.len(), 2);
@@ -282,7 +290,8 @@ fn two_script_mods_both_survive_the_link() {
         },
     ];
 
-    let linked = link::link_into(&mut block, &corpus, &muts).expect("link must succeed");
+    let linked = link::link_into(&mut block, &corpus, &muts, &order(&["sean-devlin", "roze-skin"]))
+        .expect("link must succeed");
     assert_eq!(
         linked.len(),
         1,
@@ -347,7 +356,7 @@ fn mutations_on_different_scripts_are_independent() {
             append: "-- b\n".into(),
         },
     ];
-    let linked = link::link_into(&mut block, &corpus, &muts).expect("link");
+    let linked = link::link_into(&mut block, &corpus, &muts, &order(&["a", "b"])).expect("link");
     assert_eq!(linked.len(), 2);
     block.verify_csums().expect("CSUMs");
 }
@@ -365,7 +374,8 @@ fn an_unknown_target_is_reported() {
         target: "no_such_script".into(),
         append: "-- x\n".into(),
     }];
-    let err = link::link_into(&mut block, &corpus, &muts).expect_err("must not silently skip");
+    let err = link::link_into(&mut block, &corpus, &muts, &order(&["mod"]))
+        .expect_err("must not silently skip");
     let msg = err.to_string();
     assert!(
         msg.contains("no_such_script") && msg.contains("mod"),
@@ -386,7 +396,8 @@ fn a_syntax_error_in_an_append_fails_the_link_with_a_line_number() {
         target: "wifpmcinterior".into(),
         append: "this is not ) valid lua\n".into(),
     }];
-    let err = link::link_into(&mut block, &corpus, &muts).expect_err("must reject broken Lua");
+    let err = link::link_into(&mut block, &corpus, &muts, &order(&["broken-mod"]))
+        .expect_err("must reject broken Lua");
     let msg = err.to_string();
     eprintln!("compile error surfaced: {msg}");
     assert!(
@@ -404,7 +415,7 @@ fn linking_nothing_changes_nothing() {
         return;
     };
     let original = block.serialize();
-    let linked = link::link_into(&mut block, &corpus, &[]).expect("link");
+    let linked = link::link_into(&mut block, &corpus, &[], &[]).expect("link");
     assert!(linked.is_empty());
     assert!(
         block.serialize() == original,
@@ -430,20 +441,17 @@ fn the_corpus_lookup_finds_a_vz_script_and_reports_what_it_tried() {
     );
 }
 
-/// The linked block must be a function of the installed SET, not of the order it was named in.
-///
-/// `linked_source` already sorts by Shipment name and says why; this is the regression test that
-/// was missing, and Plan 05 names it as the verification this design needs.
+/// The linked block is a function of the resolved load ORDER, not of the order the mutations are
+/// handed over in.
 ///
 /// The property is worth pinning because breaking it is silent and it corrupts player state:
 /// `_tOutfits[hero]` is an ordered list and the save file persists a POSITION, not a name, so a set
 /// that appended in a different order on reinstall would resolve a saved game to the wrong costume
-/// — no error, no crash, just the wrong clothes on a character the player already owns.
-///
-/// The caller's order is whatever the shell globbed, which is filesystem order and differs between
-/// machines and after a rename.
+/// — no error, no crash, just the wrong clothes on a character the player already owns. The order
+/// comes from the load plan (requires edges, then the request order), never from how the caller
+/// happened to collect the mutations.
 #[test]
-fn link_order_does_not_depend_on_the_order_shipments_are_named() {
+fn link_output_follows_the_order_not_the_input_order() {
     let Some(corpus) = corpus_root() else {
         return eprintln!("SKIPPING: no Lua corpus under crates/mercs2_script/corpus");
     };
@@ -451,7 +459,8 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
         return eprintln!("SKIPPING: no vz.wad discovered, so there is no base block to link into");
     };
 
-    // Two mutations on one target, named so that source order and sorted order DISAGREE.
+    // Two mutations on one target, handed over in opposite orders under one resolved order that
+    // is NOT the alphabetical one.
     let mk = |shipment: &str, marker: &str| ScriptMutation {
         shipment: shipment.to_string(),
         target: "wifpmcinterior".to_string(),
@@ -459,6 +468,7 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
     };
     let a = mk("alpha-outfit", "ALPHA");
     let z = mk("zulu-outfit", "ZULU");
+    let resolved = order(&["zulu-outfit", "alpha-outfit"]);
 
     let mut fwd = ScriptsBlock::parse(&base).expect("parse the retail scripts block");
     let mut rev = ScriptsBlock::parse(&base).expect("parse the retail scripts block");
@@ -472,7 +482,7 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
         &[],
         &[],
         &[],
-        &[],
+        &resolved,
     )
     .expect("link forward");
     let two = link::link_into_blocks(
@@ -484,7 +494,7 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
         &[],
         &[],
         &[],
-        &[],
+        &resolved,
     )
     .expect("link reversed");
 
@@ -496,12 +506,74 @@ fn link_order_does_not_depend_on_the_order_shipments_are_named() {
     for (f, r) in one.iter().zip(two.iter()) {
         assert_eq!(
             f.contributors, r.contributors,
-            "contributor order must be sorted, not as-supplied"
+            "contributor order must follow the resolved order, not the input order"
         );
+        assert_eq!(f.contributors, resolved, "the appends concatenate in the resolved order");
         assert_eq!(
             f.bytecode_bytes, r.bytecode_bytes,
-            "identical input sets must compile to identical bytecode, or saved costume \
-             positions move when a mod is reinstalled"
+            "one order must compile to identical bytecode, or saved costume positions move when a \
+             mod is reinstalled"
         );
     }
+}
+
+/// Every ordered decision follows the resolved order. With the order `zzz` then `aaa`
+/// (not the names' sort order), `aaa`'s `replace_lua` is applied last and so is what remains, and
+/// `zzz`'s `add_script` module is minted before `aaa`'s.
+#[test]
+fn replace_lua_and_add_script_follow_the_order() {
+    let Some(corpus) = corpus_root() else {
+        return eprintln!("SKIPPING: no Lua corpus under crates/mercs2_script/corpus");
+    };
+    let Some(base) = retail_block_bytes("scripts_vz") else {
+        return eprintln!("SKIPPING: no vz.wad discovered, so there is no base block to link into");
+    };
+    let resolved = order(&["zzz", "aaa"]);
+    let replacements = [
+        link::ScriptReplacement {
+            shipment: "aaa".into(),
+            target: "wifpmcgarage".into(),
+            source: "QM_ORDER_MARKER = \"aaa-replaced\"\n".into(),
+        },
+        link::ScriptReplacement {
+            shipment: "zzz".into(),
+            target: "wifpmcgarage".into(),
+            source: "QM_ORDER_MARKER = \"zzz-replaced\"\n".into(),
+        },
+    ];
+    let additions = [
+        link::ScriptAddition {
+            shipment: "aaa".into(),
+            name: "qm_order_aaa".into(),
+            source: "QM_ORDER_AAA = true\n".into(),
+        },
+        link::ScriptAddition {
+            shipment: "zzz".into(),
+            name: "qm_order_zzz".into(),
+            source: "QM_ORDER_ZZZ = true\n".into(),
+        },
+    ];
+    let mut block = ScriptsBlock::parse(&base).expect("parse the retail scripts block");
+    link::link_into_blocks(
+        &mut [link::TargetBlock { path: "blocks\\VZ\\scripts_vz_P000_Q3.block".into(), block: &mut block }],
+        &corpus,
+        &[],
+        &[],
+        &[],
+        &[],
+        &additions,
+        &replacements,
+        &resolved,
+    )
+    .expect("link");
+
+    let idx = block.find_script_by_name("wifpmcgarage").expect("wifpmcgarage");
+    let luaq = block.extract_lua(idx).unwrap();
+    let text = String::from_utf8_lossy(&luaq);
+    assert!(text.contains("aaa-replaced"), "the later Shipment in the order wins");
+    assert!(!text.contains("zzz-replaced"), "the earlier replacement is overwritten");
+
+    let z = block.find_script_by_name("qm_order_zzz").expect("zzz minted");
+    let a = block.find_script_by_name("qm_order_aaa").expect("aaa minted");
+    assert!(z < a, "minted in load order: zzz ({z}) before aaa ({a})");
 }
