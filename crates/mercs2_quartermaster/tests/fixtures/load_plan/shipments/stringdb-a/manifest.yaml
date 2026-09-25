@@ -1,0 +1,9 @@
+format: 2
+shipment:
+  name: stringdb-a
+  version: 1.0.0
+  target: retail
+contributions:
+  - kind: edit_stringdb
+    target: english
+    strings: src/english.txt
