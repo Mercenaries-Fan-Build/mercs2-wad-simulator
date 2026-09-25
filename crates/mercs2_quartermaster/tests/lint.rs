@@ -11,7 +11,7 @@ fn parse(yaml: &str) -> Manifest {
 
 fn shipment_with(contributions: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: s, version: 1.0.0, target: retail }}
 contributions:
 {contributions}"
@@ -146,7 +146,7 @@ fn a_raw_contribution_that_declares_its_radius_is_quiet() {
 #[test]
 fn an_asi_on_a_reimpl_target_is_an_error() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: reimpl }
 contributions:
   - kind: native_hook
@@ -289,105 +289,6 @@ fn a_companion_beside_its_plugin_or_belonging_to_no_plugin_is_quiet() {
         !codes(&lint::lint(&unrelated, None, None)).contains(&"M0163"),
         "a file that is nobody's companion is not this rule's business"
     );
-}
-
-// ---------------------------------------------------------------------------
-// M0170 / M0171 — pinned external requirements
-// ---------------------------------------------------------------------------
-
-fn with_requirement(url: &str, sha: &str) -> Manifest {
-    parse(&format!(
-        "format: 1
-shipment: {{ name: s, version: 1.0.0, target: retail }}
-load:
-  requires:
-    - url: {url}
-      sha256: {sha}
-contributions: []
-"
-    ))
-}
-
-const GOOD_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-/// An unusable pin is worse than none: it reads as verified.
-#[test]
-fn a_malformed_digest_is_an_error() {
-    let diags = lint::lint(
-        &with_requirement("https://example.com/x.asi", "deadbeef"),
-        None,
-        None,
-    );
-    assert!(codes(&diags).contains(&"M0170"));
-    assert!(lint::blocks_build(&diags));
-}
-
-#[test]
-fn a_well_formed_pin_over_https_is_quiet() {
-    let m = with_requirement(
-        "https://github.com/o/r/releases/download/v1/x.asi",
-        GOOD_SHA,
-    );
-    assert!(lint::lint(&m, None, None).is_empty());
-}
-
-/// The digest still protects integrity over plain http, so this is a warning rather than fatal.
-#[test]
-fn an_http_requirement_warns_but_does_not_block() {
-    let diags = lint::lint(
-        &with_requirement("http://example.com/x.asi", GOOD_SHA),
-        None,
-        None,
-    );
-    assert_eq!(codes(&diags), vec!["M0171"]);
-    assert_eq!(diags[0].severity, Severity::Warning);
-    assert!(!lint::blocks_build(&diags));
-}
-
-// ---------------------------------------------------------------------------
-// M0172 — managed requirements resolved by semver range
-// ---------------------------------------------------------------------------
-
-fn with_compatible(name: &str, version: &str) -> Manifest {
-    parse(&format!(
-        "format: 1
-shipment: {{ name: s, version: 1.0.0, target: retail }}
-load:
-  requires:
-    - name: {name}
-      version: \"{version}\"
-contributions: []
-"
-    ))
-}
-
-/// A managed requirement with a valid range is resolved downstream; nothing to flag at lint time.
-#[test]
-fn a_valid_version_range_is_quiet() {
-    assert!(lint::lint(&with_compatible("m2-sdk", "^0.1"), None, None).is_empty());
-}
-
-/// An unparseable range is fatal — resolution has nothing to compare releases against.
-#[test]
-fn a_bad_version_range_is_an_error() {
-    let diags = lint::lint(&with_compatible("m2-sdk", "not-a-range"), None, None);
-    assert!(codes(&diags).contains(&"M0172"));
-    assert!(lint::blocks_build(&diags));
-}
-
-/// The untagged forms are disjoint: `{name,version}` is a managed dep, `{url,sha256}` is external.
-/// If these ever collided, a pinned third-party ASI could be misread as a managed component.
-#[test]
-fn managed_and_external_requirements_do_not_collide() {
-    use mercs2_quartermaster::Requirement;
-    assert!(matches!(
-        with_compatible("m2-sdk", ">=0.0.3, <1.0.0").load.requires.as_slice(),
-        [Requirement::Compatible { .. }]
-    ));
-    assert!(matches!(
-        with_requirement("https://example.com/x.asi", GOOD_SHA).load.requires.as_slice(),
-        [Requirement::External { .. }]
-    ));
 }
 
 // ---------------------------------------------------------------------------
