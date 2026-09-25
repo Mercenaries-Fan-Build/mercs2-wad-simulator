@@ -4374,8 +4374,8 @@ fn stringdb_block(table: u32, container: &[u8]) -> Result<PatchBlock, String> {
     PatchBlock::from_decompressed(&block_data, stringdb_block_path(table), vec![aset], None)
 }
 
-/// Every string table `qm link` merges across a set: the targets of every `edit_stringdb` and
-/// `add_stringdb_keys` in it, by asset hash.
+/// Every string table `qm link` merges across a set: the targets of every `edit_stringdb`,
+/// `add_stringdb_keys` and `replace_stringdb_text` in it, by asset hash.
 pub fn merged_string_tables<'a>(
     manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
 ) -> std::collections::BTreeSet<u32> {
@@ -4384,7 +4384,8 @@ pub fn merged_string_tables<'a>(
         .flat_map(|m| m.contributions.iter())
         .filter_map(|c| match c {
             Contribution::EditStringDb { target, .. }
-            | Contribution::AddStringDbKeys { target, .. } => {
+            | Contribution::AddStringDbKeys { target, .. }
+            | Contribution::ReplaceStringDbText { target, .. } => {
                 Some(crate::manifest::asset_hash(target))
             }
             _ => None,
@@ -4406,13 +4407,29 @@ pub fn link_block_paths<'a>(
         .collect()
 }
 
-/// Merge every Shipment's string-table edits into one table per target, in load order.
+/// One write the link applies to a merged string table, in load order.
+enum TableWrite {
+    /// `edit_stringdb` / `add_stringdb_keys`: set the key's text, adding the key if it is absent.
+    Key { key: u32, text: String },
+    /// `replace_stringdb_text`: every entry whose CURRENT text is exactly `old` — in the table as
+    /// merged so far — gets `new`. `who` names the contribution for the no-hit note.
+    Text { old: String, new: String, who: String },
+}
+
+/// Merge every Shipment's string-table writes into one table per target, in load order.
 ///
-/// Each `edit_stringdb` and `add_stringdb_keys` of each Shipment in `shipments` (the plan's order),
-/// in contribution order, is applied to the base table by key hash
-/// ([`mercs2_formats::stringdb::key_hash`]): a key that exists is overwritten, one that does not is
-/// added. A later write to a key wins. There is no existence check — each Shipment's own build
-/// already refused an edit of a missing key and an addition of an existing one against the base.
+/// Each `edit_stringdb`, `add_stringdb_keys` and `replace_stringdb_text` of each Shipment in
+/// `shipments` (the plan's order), in contribution order, is applied to the base table:
+///
+/// * a key write goes by key hash ([`mercs2_formats::stringdb::key_hash`]) — a key that exists is
+///   overwritten, one that does not is added;
+/// * a text replacement resolves against the table AS MERGED SO FAR: every entry whose current text
+///   is exactly `old` becomes `new` ([`mercs2_formats::stringdb::StringDb::replace_exact_text`]).
+///
+/// A later write wins. There is no existence check — each Shipment's own build already refused an
+/// edit of a missing key and an addition of an existing one. A text pair that matches nothing keeps
+/// the rule the per-Shipment lowering has: a note in the log, naming the Shipment, the table and
+/// the text, never a silent success.
 fn merge_string_tables(
     shipments: &[&LoadedShipment],
     game: &mut GameStack,
@@ -4424,41 +4441,46 @@ fn merge_string_tables(
         kind: KIND,
         message,
     };
-    let mut by_table: std::collections::BTreeMap<u32, (String, Vec<(u32, String)>, Vec<String>)> =
+    let mut by_table: std::collections::BTreeMap<u32, (String, Vec<TableWrite>, Vec<String>)> =
         std::collections::BTreeMap::new();
     for s in shipments {
         for (index, c) in s.manifest.contributions.iter().enumerate() {
-            let (target, strings) = match c {
+            let (target, file) = match c {
                 Contribution::EditStringDb { target, strings }
                 | Contribution::AddStringDbKeys { target, strings } => (target, strings),
+                Contribution::ReplaceStringDbText { target, pairs } => (target, pairs),
                 _ => continue,
             };
-            let path = s.root.join(strings);
+            let name = &s.manifest.shipment.name;
+            let path = s.root.join(file);
             let text = std::fs::read_to_string(&path).map_err(|e| {
                 fail(format!(
-                    "{} contributions[{index}] ({}): reading {}: {e}",
-                    s.manifest.shipment.name,
+                    "{name} contributions[{index}] ({}): reading {}: {e}",
                     c.kind(),
                     path.display()
                 ))
             })?;
-            let edits = parse_string_edits(&text).map_err(|m| {
-                fail(format!(
-                    "{} contributions[{index}] ({}): {m}",
-                    s.manifest.shipment.name,
-                    c.kind()
-                ))
-            })?;
+            // The same parser the per-Shipment lowering uses for all three kinds.
+            let rows = parse_string_edits(&text)
+                .map_err(|m| fail(format!("{name} contributions[{index}] ({}): {m}", c.kind())))?;
             let entry = by_table
                 .entry(crate::manifest::asset_hash(target))
                 .or_insert_with(|| (target.clone(), Vec::new(), Vec::new()));
-            entry.1.extend(
-                edits
-                    .into_iter()
-                    .map(|(key, value)| (mercs2_formats::stringdb::key_hash(&key), value)),
-            );
-            if !entry.2.contains(&s.manifest.shipment.name) {
-                entry.2.push(s.manifest.shipment.name.clone());
+            for (left, right) in rows {
+                entry.1.push(match c {
+                    Contribution::ReplaceStringDbText { .. } => TableWrite::Text {
+                        old: left,
+                        new: right,
+                        who: format!("{name} contributions[{index}]"),
+                    },
+                    _ => TableWrite::Key {
+                        key: mercs2_formats::stringdb::key_hash(&left),
+                        text: right,
+                    },
+                });
+            }
+            if !entry.2.contains(name) {
+                entry.2.push(name.clone());
             }
         }
     }
@@ -4473,10 +4495,20 @@ fn merge_string_tables(
                     contributors.join(", ")
                 ))
             })?;
+        let mut misses: Vec<String> = Vec::new();
         let merged = mercs2_formats::stringdb::apply_container(&container, |db| {
-            for (key, text) in &writes {
-                if !db.set_by_hash(*key, text) {
-                    db.add_by_hash(*key, text);
+            for w in &writes {
+                match w {
+                    TableWrite::Key { key, text } => {
+                        if !db.set_by_hash(*key, text) {
+                            db.add_by_hash(*key, text);
+                        }
+                    }
+                    TableWrite::Text { old, new, who } => {
+                        if db.replace_exact_text(old, new) == 0 {
+                            misses.push(format!("{who}: {old:?}"));
+                        }
+                    }
                 }
             }
             Ok(())
@@ -4490,6 +4522,13 @@ fn merge_string_tables(
             container.len(),
             merged.len()
         ));
+        if !misses.is_empty() {
+            log.push(format!(
+                "  note: {} text pair(s) matched nothing in {target} (likely a typo): {}",
+                misses.len(),
+                misses.join(", ")
+            ));
+        }
         blocks.push(stringdb_block(table, &merged).map_err(fail)?);
     }
     Ok(blocks)
