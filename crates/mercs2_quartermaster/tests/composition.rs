@@ -714,7 +714,7 @@ fn a_case_only_difference_within_one_shipment_is_a_self_conflict() {
 }
 
 // ---------------------------------------------------------------------------
-// String tables: editors compose; text replacement is exclusive.
+// String tables: every writer to a table composes; an opaque raw block still conflicts.
 // ---------------------------------------------------------------------------
 
 const EDIT_ENGLISH: &str = "  - kind: edit_stringdb\n    target: english\n    strings: src/e.txt\n";
