@@ -114,6 +114,9 @@ contributions:
     file: src/native/mybridge.ini
     dest: scripts
 
+  - kind: add_runtime_dll
+    dll: src/native/sean-devlin-outfit.dll
+
   - kind: add_shop_item
     id: dlcm1a1
     name: "[vehicle.m1a1]"
@@ -249,6 +252,10 @@ const JSON: &str = r#"
       "kind": "place_file",
       "file": "src/native/mybridge.ini",
       "dest": "scripts"
+    },
+    {
+      "kind": "add_runtime_dll",
+      "dll": "src/native/sean-devlin-outfit.dll"
     },
     {
       "kind": "add_shop_item",
@@ -395,6 +402,10 @@ file = "src/native/mybridge.ini"
 dest = "scripts"
 
 [[contributions]]
+kind = "add_runtime_dll"
+dll = "src/native/sean-devlin-outfit.dll"
+
+[[contributions]]
 kind = "add_shop_item"
 id = "dlcm1a1"
 name = "[vehicle.m1a1]"
@@ -448,6 +459,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "patch_lua",
             "native_hook",
             "place_file",
+            "add_runtime_dll",
             "add_shop_item",
             "raw"
         ]
@@ -981,4 +993,46 @@ fn the_fixtures_exercise_every_kind_the_format_knows() {
         "kinds in the format with no conformance fixture: {missing:?} — add one to YAML, JSON and \
          TOML, or remove the kind"
     );
+}
+
+/// The two string-table kinds are spelled `add_stringdb_keys` and `replace_stringdb_text` — the tag
+/// `kind()`, `ALL_KINDS` and the docs use — in every format, and the `string_db` spelling that
+/// serde's `snake_case` would derive does not parse.
+#[test]
+fn stringdb_kind_tags_are_the_documented_spellings() {
+    let head = "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n";
+    for (tag, field, kind) in [
+        ("add_stringdb_keys", "strings", "add_stringdb_keys"),
+        ("replace_stringdb_text", "pairs", "replace_stringdb_text"),
+    ] {
+        let yaml = format!(
+            "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\ncontributions:\n  - kind: {tag}\n    target: english\n    {field}: src/x.txt\n"
+        );
+        let json = format!(
+            "{{\"format\":2,\"shipment\":{{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}},\"contributions\":[{{\"kind\":\"{tag}\",\"target\":\"english\",\"{field}\":\"src/x.txt\"}}]}}"
+        );
+        let toml = format!(
+            "{head}[[contributions]]\nkind = \"{tag}\"\ntarget = \"english\"\n{field} = \"src/x.txt\"\n"
+        );
+        for (fmt, text) in [(Format::Yaml, &yaml), (Format::Json, &json), (Format::Toml, &toml)] {
+            let m = from_str(text, fmt).unwrap_or_else(|e| panic!("{fmt:?} `{tag}` must parse: {e}"));
+            assert_eq!(m.contributions[0].kind(), kind, "{fmt:?}");
+            // And it serializes back under the same tag.
+            let yaml_back = mercs2_quartermaster::to_yaml(&m).unwrap();
+            assert!(yaml_back.contains(&format!("kind: {tag}")), "{yaml_back}");
+        }
+        let underscored = tag.replace("stringdb", "string_db");
+        for (fmt, text) in [
+            (Format::Yaml, yaml.replace(tag, &underscored)),
+            (Format::Json, json.replace(tag, &underscored)),
+            (Format::Toml, toml.replace(tag, &underscored)),
+        ] {
+            match from_str(&text, fmt) {
+                Err(mercs2_quartermaster::ReadError::Parse { message, .. }) => {
+                    assert!(message.contains(&underscored), "{fmt:?}: {message}")
+                }
+                other => panic!("{fmt:?} `{underscored}` must not parse, got {other:?}"),
+            }
+        }
+    }
 }
