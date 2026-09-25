@@ -1,0 +1,8 @@
+format: 2
+shipment:
+  name: m2-sdk
+  version: 0.1.1
+  target: retail
+contributions:
+  - kind: add_runtime_dll
+    dll: src/m2-sdk.dll
