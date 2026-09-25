@@ -29,7 +29,9 @@ use egui::Color32;
 use mercs2_quartermaster::build::{self, BuildError, BuildReport};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::lint::{Diagnostic, Severity};
-use mercs2_quartermaster::manifest::{ConflictDecl, Contribution, Touch};
+use mercs2_quartermaster::manifest::{
+    CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, Touch,
+};
 use mercs2_quartermaster::names::NameTable;
 
 use crate::gui::theme;
@@ -746,6 +748,7 @@ fn contribution_name(c: &Contribution) -> String {
             .or_else(|| symbol.clone())
             .unwrap_or_else(|| "native hook".into()),
         Contribution::PlaceFile { file, .. } => leaf(file),
+        Contribution::AddRuntimeDll { dll } => leaf(dll),
         Contribution::Raw { payload, .. } => leaf(payload),
         // New Contribution kinds (add_script/replace_lua/replace_phy2/add_placement/add_layer/
         // add_animation/replace_animation/add_shader/replace_shader/add_fx/replace_fx/add_schema/
@@ -884,6 +887,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("native_hook", "An ASI plugin, or a symbol to detour"),
             ("place_file", "A companion file beside a plugin"),
+            ("add_runtime_dll", "A runtime DLL in the game root, named after the Shipment"),
         ],
     ),
     ("Any", &[("raw", "Opaque bytes plus a declared blast radius")]),
@@ -1030,6 +1034,12 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "place_file" => Contribution::PlaceFile {
             file: PathBuf::from("src/plugin.ini"),
             dest: PlaceIn::Scripts,
+        },
+        // The placeholder is not `<shipment.name>.dll` (the stub does not know the name), so M0162
+        // fires until the author points it at their DLL — the same "valid to serialize, loud to lint"
+        // contract as every other stub.
+        "add_runtime_dll" => Contribution::AddRuntimeDll {
+            dll: PathBuf::from("src/runtime.dll"),
         },
         "raw" => Contribution::Raw {
             description: None,
@@ -1257,7 +1267,14 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                         .filter(|a| a.is_file())
                         .and_then(|a| p.model_facts_for(&a));
                     let mut edited = c.clone();
-                    let commit = contribution_form(ui, &mut edited, root, names, facts.as_ref());
+                    let commit = contribution_form(
+                        ui,
+                        &mut edited,
+                        root,
+                        &s.manifest.shipment.name,
+                        names,
+                        facts.as_ref(),
+                    );
                     if commit && edited != *c {
                         acts.push(Act::Edit(i, Box::new(edited)));
                     }
@@ -1514,6 +1531,7 @@ fn contribution_form(
     ui: &mut egui::Ui,
     c: &mut Contribution,
     root: &Path,
+    shipment_name: &str,
     names: Option<&NameTable>,
     facts: Option<&GlbFacts>,
 ) -> bool {
@@ -1898,6 +1916,27 @@ fn contribution_form(
                 "a NAME from a closed set, never a path — that is the security property",
             );
         }
+        Contribution::AddRuntimeDll { dll } => {
+            commit |= source_row(ui, "DLL", dll, root, &["dll"]);
+            // Live, against the builder's OWN refusal rather than a copy of it.
+            if let Some(n) = dll.file_name().map(|s| s.to_string_lossy().to_string()) {
+                match mercs2_quartermaster::build::runtime_dll_name_refusal(&n, shipment_name) {
+                    Some(why) => {
+                        theme::field_note(ui, theme::FieldState::Bad, &format!("M0162 — {why}"))
+                    }
+                    None => theme::field_note(
+                        ui,
+                        theme::FieldState::Good,
+                        "placed in the game root under this name",
+                    ),
+                }
+            }
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "a runtime DLL is named after its Shipment, so a Shipment ships at most one",
+            );
+        }
         Contribution::Raw { description, payload, target_layer, touches } => {
             let mut d = description.clone().unwrap_or_default();
             if text_row(ui, "Description", &mut d, "what these bytes are", false) {
@@ -1952,7 +1991,7 @@ fn contribution_form(
 /// The Shipment's OWN identity — what it is called, who wrote it, and how it orders against others.
 ///
 /// Shown where "pick a contribution" used to be. That space was doing nothing, and these fields had
-/// no editor at all: `shipment.name` decides the output filename (`build/<name>.wad`) and every
+/// no editor at all: `shipment.name` decides the output filename (`_build/<name>.wad`) and every
 /// cross-Shipment reference, and was reachable only by hand-editing YAML.
 fn identity_form(
     ui: &mut egui::Ui,
@@ -1982,7 +2021,7 @@ fn identity_form(
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
-                &format!("builds to build/{}.wad", sh.name),
+                &format!("builds to _build/{}.wad", sh.name),
             );
         } else {
             theme::field_note(
@@ -2061,61 +2100,292 @@ fn identity_form(
         }
     });
 
-    theme::section(ui, "Load order", None, false, |ui| {
+    let own = sh.name.clone();
+    theme::section(ui, "Dependencies", None, false, |ui| {
         ui.label(
             egui::RichText::new(
-                "Names of other Shipments. `conflicts` declares one that cannot be installed \
-                 alongside this. Load order comes from `requires`: a Shipment loads after the \
-                 Shipments it requires.",
+                "`requires` names what must be installed for this Shipment to work — a Shipment \
+                 (optionally within a version range) or a capability some Shipment provides. A \
+                 Shipment loads after the Shipments it requires. `conflicts` names a Shipment \
+                 (optionally within a range) that cannot be installed alongside this.",
             )
             .size(11.0)
             .color(theme::FAINT),
         );
         ui.add_space(6.0);
-        // This field edits the bare-name entries only. A ranged entry (`{ shipment, version }`) is
-        // shown read-only below and kept as it is, so editing the names never drops a range.
-        let mut joined = load
-            .conflicts
-            .iter()
-            .filter_map(|c| match c {
-                ConflictDecl::Name(n) => Some(n.as_str()),
-                ConflictDecl::Range(_) => None,
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        if theme::text_field(ui, "Conflicts", &mut joined, "other-shipment", theme::FieldState::Neutral)
-            .lost_focus()
-        {
-            let ranged: Vec<ConflictDecl> = load
-                .conflicts
-                .iter()
-                .filter(|c| matches!(c, ConflictDecl::Range(_)))
-                .cloned()
-                .collect();
-            load.conflicts = joined
-                .split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .map(ConflictDecl::Name)
-                .chain(ranged)
-                .collect();
-            commit = true;
-        }
-        for c in &load.conflicts {
-            if let ConflictDecl::Range(r) = c {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Conflicts with {} {} (a ranged entry — edit it in the manifest)",
-                        r.shipment, r.version
-                    ))
-                    .size(11.0)
-                    .color(theme::FAINT),
-                );
-            }
-        }
+        theme::eyebrow(ui, "Requires");
+        commit |= requires_editor(ui, &mut load.requires, &own);
+        ui.add_space(6.0);
+        theme::eyebrow(ui, "Conflicts");
+        commit |= conflicts_editor(ui, &mut load.conflicts, &own);
     });
 
     commit
+}
+
+// ---- dependencies: `load.requires` / `load.conflicts` ------------------------------------
+
+/// The forms a `load.requires` entry is edited as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequireForm {
+    /// A Shipment, any version.
+    Shipment,
+    /// A Shipment within a semver range.
+    ShipmentRange,
+    /// Any Shipment that provides a capability token.
+    Capability,
+}
+
+/// One requirement or conflict row as the author is typing it. Kept apart from the manifest until
+/// it is valid, so a half-typed range is never written — a manifest that fails validation could not
+/// be reopened — and is never thrown away either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DepDraft {
+    pub form: RequireForm,
+    /// A Shipment name, or a capability token.
+    pub target: String,
+    /// The range; used only by [`RequireForm::ShipmentRange`].
+    pub range: String,
+}
+
+impl DepDraft {
+    /// The draft of an existing requirement. The `{ name, version }` form is not a requirement form
+    /// (validation refuses it, so an opened manifest never holds one); it is shown as the ranged form
+    /// it has to become.
+    pub(crate) fn of_requirement(r: &Requirement) -> DepDraft {
+        let (form, target, range) = match r {
+            Requirement::Shipment(n) => (RequireForm::Shipment, n.clone(), String::new()),
+            Requirement::ShipmentRange(r) => {
+                (RequireForm::ShipmentRange, r.shipment.clone(), r.version.clone())
+            }
+            Requirement::Capability(c) => (RequireForm::Capability, c.capability.clone(), String::new()),
+            Requirement::Compatible(c) => (RequireForm::ShipmentRange, c.name.clone(), c.version.clone()),
+        };
+        DepDraft { form, target, range }
+    }
+
+    /// The draft of an existing conflict. A conflict has no capability form.
+    pub(crate) fn of_conflict(c: &ConflictDecl) -> DepDraft {
+        match c {
+            ConflictDecl::Name(n) => DepDraft {
+                form: RequireForm::Shipment,
+                target: n.clone(),
+                range: String::new(),
+            },
+            ConflictDecl::Range(r) => DepDraft {
+                form: RequireForm::ShipmentRange,
+                target: r.shipment.clone(),
+                range: r.version.clone(),
+            },
+        }
+    }
+}
+
+/// Why `name` cannot be referred to from this Shipment's `requires` / `conflicts`, with the code
+/// validation reports it under — the same two rules `Manifest::validate` applies.
+fn reference_problem(name: &str, own: &str) -> Option<String> {
+    if !mercs2_quartermaster::manifest::is_slug(name) {
+        return Some(format!(
+            "M0100 — {name:?} is not a Shipment name: names are slugs, lowercase letters, digits and \
+             single hyphens"
+        ));
+    }
+    if name == own {
+        return Some("M0173 — a Shipment cannot require or conflict with itself".into());
+    }
+    None
+}
+
+/// The range parsed the one way qm parses every range (M0172).
+fn range_problem(range: &str) -> Option<String> {
+    mercs2_quartermaster::manifest::parse_range(range)
+        .err()
+        .map(|e| format!("M0172 — {range:?} is not a valid semver range: {e}"))
+}
+
+/// The `load.requires` entry a draft stands for, or why it cannot be written yet.
+pub(crate) fn requirement_from_draft(d: &DepDraft, own: &str) -> Result<Requirement, String> {
+    let target = d.target.trim();
+    match d.form {
+        RequireForm::Capability => {
+            if target.is_empty() {
+                return Err("name the capability token".into());
+            }
+            Ok(Requirement::Capability(CapabilityReq {
+                capability: target.to_string(),
+            }))
+        }
+        RequireForm::Shipment => match reference_problem(target, own) {
+            Some(why) => Err(why),
+            None => Ok(Requirement::Shipment(target.to_string())),
+        },
+        RequireForm::ShipmentRange => {
+            if let Some(why) = reference_problem(target, own).or_else(|| range_problem(d.range.trim())) {
+                return Err(why);
+            }
+            Ok(Requirement::ShipmentRange(ShipmentReq {
+                shipment: target.to_string(),
+                version: d.range.trim().to_string(),
+            }))
+        }
+    }
+}
+
+/// The `load.conflicts` entry a draft stands for, or why it cannot be written yet.
+pub(crate) fn conflict_from_draft(d: &DepDraft, own: &str) -> Result<ConflictDecl, String> {
+    let target = d.target.trim();
+    match d.form {
+        RequireForm::Capability => Err("a conflict names a Shipment, not a capability".into()),
+        RequireForm::Shipment => match reference_problem(target, own) {
+            Some(why) => Err(why),
+            None => Ok(ConflictDecl::Name(target.to_string())),
+        },
+        RequireForm::ShipmentRange => {
+            if let Some(why) = reference_problem(target, own).or_else(|| range_problem(d.range.trim())) {
+                return Err(why);
+            }
+            Ok(ConflictDecl::Range(ShipmentReq {
+                shipment: target.to_string(),
+                version: d.range.trim().to_string(),
+            }))
+        }
+    }
+}
+
+/// A draft kept in egui's temp memory, remembering the entry it was started from so a draft left
+/// over from another Shipment (or from before a list changed) is dropped rather than shown.
+#[derive(Clone)]
+struct HeldDraft<T: Clone> {
+    origin: Option<T>,
+    draft: DepDraft,
+}
+
+/// Edit one row. `origin` is the committed entry (`None` for the "add" row). Returns the entry to
+/// write when the draft is valid, changed, and the author has finished with it (a field lost focus,
+/// the form changed, or `Add` was pressed).
+fn dep_row<T: Clone + PartialEq + Send + Sync + 'static>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    origin: Option<&T>,
+    to_draft: impl Fn(&T) -> DepDraft,
+    from_draft: impl Fn(&DepDraft) -> Result<T, String>,
+    forms: &[(RequireForm, &str)],
+    empty: DepDraft,
+) -> Option<T> {
+    let fresh = HeldDraft {
+        origin: origin.cloned(),
+        draft: origin.map(&to_draft).unwrap_or(empty),
+    };
+    let mut held: HeldDraft<T> = ui
+        .data_mut(|d| d.get_temp::<HeldDraft<T>>(id))
+        .filter(|h| h.origin.as_ref() == origin)
+        .unwrap_or(fresh);
+    let mut finished = false;
+    ui.push_id(id, |ui| {
+        finished |= theme::combo_field(ui, "form", &mut held.draft.form, forms, theme::FieldState::Neutral);
+        let result = from_draft(&held.draft);
+        let state = if result.is_ok() { theme::FieldState::Neutral } else { theme::FieldState::Bad };
+        let hint = match held.draft.form {
+            RequireForm::Capability => "capability-token",
+            _ => "other-shipment",
+        };
+        finished |= theme::text_field(ui, "name", &mut held.draft.target, hint, state).lost_focus();
+        if held.draft.form == RequireForm::ShipmentRange {
+            finished |= theme::text_field(ui, "range", &mut held.draft.range, "^1.0.0", state).lost_focus();
+        }
+        if let Err(why) = &result {
+            theme::field_note(ui, theme::FieldState::Bad, why);
+        }
+        if origin.is_none() {
+            finished = result.is_ok() && ui.button("Add").clicked();
+        }
+    });
+    let wanted = from_draft(&held.draft).ok();
+    let changed = wanted.as_ref() != origin;
+    if finished && changed {
+        if let Some(entry) = wanted {
+            ui.data_mut(|d| d.remove::<HeldDraft<T>>(id));
+            return Some(entry);
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, held));
+    None
+}
+
+/// Rows plus an add row for any `load.requires` / `load.conflicts`-shaped list. Returns true when
+/// the list changed and should be written.
+fn dep_list<T: Clone + PartialEq + Send + Sync + 'static>(
+    ui: &mut egui::Ui,
+    salt: &str,
+    list: &mut Vec<T>,
+    to_draft: impl Fn(&T) -> DepDraft + Copy,
+    from_draft: impl Fn(&DepDraft) -> Result<T, String> + Copy,
+    forms: &[(RequireForm, &str)],
+) -> bool {
+    let mut commit = false;
+    let mut remove = None;
+    for i in 0..list.len() {
+        let id = ui.make_persistent_id((salt, i));
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                if let Some(entry) =
+                    dep_row(ui, id, Some(&list[i]), to_draft, from_draft, forms, to_draft(&list[i]))
+                {
+                    list[i] = entry;
+                    commit = true;
+                }
+            });
+            if ui.small_button("✕").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        list.remove(i);
+        commit = true;
+    }
+    let add_id = ui.make_persistent_id((salt, "add"));
+    let empty = DepDraft {
+        form: RequireForm::Shipment,
+        target: String::new(),
+        range: String::new(),
+    };
+    if let Some(entry) = dep_row(ui, add_id, None, to_draft, from_draft, forms, empty) {
+        list.push(entry);
+        commit = true;
+    }
+    commit
+}
+
+/// `load.requires`: a Shipment, a Shipment within a range, or a capability.
+fn requires_editor(ui: &mut egui::Ui, requires: &mut Vec<Requirement>, own: &str) -> bool {
+    dep_list(
+        ui,
+        "qm-requires",
+        requires,
+        DepDraft::of_requirement,
+        |d| requirement_from_draft(d, own),
+        &[
+            (RequireForm::Shipment, "Shipment, any version"),
+            (RequireForm::ShipmentRange, "Shipment within a range"),
+            (RequireForm::Capability, "capability"),
+        ],
+    )
+}
+
+/// `load.conflicts`: a Shipment, or a Shipment within a range.
+fn conflicts_editor(ui: &mut egui::Ui, conflicts: &mut Vec<ConflictDecl>, own: &str) -> bool {
+    dep_list(
+        ui,
+        "qm-conflicts",
+        conflicts,
+        DepDraft::of_conflict,
+        |d| conflict_from_draft(d, own),
+        &[
+            (RequireForm::Shipment, "Shipment, any version"),
+            (RequireForm::ShipmentRange, "Shipment within a range"),
+        ],
+    )
 }
 
 /// An optional `src/` file (a texture slot). Absent is a meaningful value, so the widget owns its
@@ -2277,6 +2547,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::PlaceFile { file, .. } => {
             vec![("Writes".to_string(), format!("file {}", leaf(file)))]
         }
+        Contribution::AddRuntimeDll { dll } => vec![(
+            "Writes".to_string(),
+            format!("file {} in the game root  \u{2014} EXCLUSIVE", leaf(dll)),
+        )],
         Contribution::Raw { touches, .. } => touches
             .iter()
             .map(|t| ("Declares".to_string(), t.0.clone()))
@@ -2923,6 +3197,147 @@ mod tests {
         assert_eq!(s.manifest.shipment.name, "mercs2-qm-test-scaffold");
         s.manifest.validate().expect("scaffolded manifest must validate");
         assert!(s.manifest.contributions.is_empty());
+    }
+
+    // ---- dependencies editor ------------------------------------------------------------
+
+    fn draft(form: RequireForm, target: &str, range: &str) -> DepDraft {
+        DepDraft {
+            form,
+            target: target.into(),
+            range: range.into(),
+        }
+    }
+
+    /// Every requirement form round-trips through the editor's draft unchanged.
+    #[test]
+    fn every_requirement_form_round_trips_through_a_draft() {
+        for r in [
+            Requirement::Shipment("lua-bridge".into()),
+            Requirement::ShipmentRange(ShipmentReq {
+                shipment: "lua-bridge".into(),
+                version: "^1.0.0".into(),
+            }),
+            Requirement::Capability(CapabilityReq {
+                capability: "widescreen".into(),
+            }),
+        ] {
+            let d = DepDraft::of_requirement(&r);
+            assert_eq!(requirement_from_draft(&d, "ess"), Ok(r.clone()), "{d:?}");
+        }
+        for c in [
+            ConflictDecl::Name("old-ess".into()),
+            ConflictDecl::Range(ShipmentReq {
+                shipment: "old-ess".into(),
+                version: "<0.7".into(),
+            }),
+        ] {
+            let d = DepDraft::of_conflict(&c);
+            assert_eq!(conflict_from_draft(&d, "ess"), Ok(c.clone()), "{d:?}");
+        }
+    }
+
+    /// A bad range is refused with M0172 and the SAME parse error qm's validation gives — one semver
+    /// implementation, not a second one in the UI.
+    #[test]
+    fn a_bad_range_is_m0172_with_qms_own_message() {
+        let bad = ">= one";
+        let want = mercs2_quartermaster::manifest::parse_range(bad).unwrap_err();
+        let err = requirement_from_draft(&draft(RequireForm::ShipmentRange, "lua-bridge", bad), "ess")
+            .unwrap_err();
+        assert!(err.starts_with("M0172") && err.contains(&want), "{err}");
+        let err = conflict_from_draft(&draft(RequireForm::ShipmentRange, "old-ess", bad), "ess")
+            .unwrap_err();
+        assert!(err.starts_with("M0172") && err.contains(&want), "{err}");
+
+        // The manifest validator refuses the same range with the same text.
+        let text = format!(
+            "format: 2\nshipment: {{ name: ess, version: 0.7.0, target: retail }}\n\
+             load: {{ requires: [{{ shipment: lua-bridge, version: \"{bad}\" }}] }}\n"
+        );
+        match mercs2_quartermaster::from_str(&text, mercs2_quartermaster::Format::Yaml) {
+            Err(mercs2_quartermaster::ReadError::Validate(v)) => {
+                assert_eq!(v.code(), Some("M0172"));
+                assert!(v.to_string().contains(&want));
+            }
+            other => panic!("expected a validation failure, got {other:?}"),
+        }
+    }
+
+    /// The two reference rules validation applies: a slug, and not this Shipment.
+    #[test]
+    fn a_draft_names_a_real_shipment_that_is_not_this_one() {
+        let e = requirement_from_draft(&draft(RequireForm::Shipment, "Lua Bridge", ""), "ess")
+            .unwrap_err();
+        assert!(e.starts_with("M0100"), "{e}");
+        let e = requirement_from_draft(&draft(RequireForm::Shipment, "ess", ""), "ess").unwrap_err();
+        assert!(e.starts_with("M0173"), "{e}");
+        let e = conflict_from_draft(&draft(RequireForm::ShipmentRange, "ess", "^1"), "ess").unwrap_err();
+        assert!(e.starts_with("M0173"), "{e}");
+        assert!(requirement_from_draft(&draft(RequireForm::Capability, "  ", ""), "ess").is_err());
+        assert!(
+            conflict_from_draft(&draft(RequireForm::Capability, "widescreen", ""), "ess").is_err(),
+            "a conflict has no capability form"
+        );
+    }
+
+    /// Whitespace around a name or range is not written into the manifest.
+    #[test]
+    fn a_draft_is_trimmed() {
+        assert_eq!(
+            requirement_from_draft(&draft(RequireForm::ShipmentRange, " lua-bridge ", " ^1.0.0 "), "ess"),
+            Ok(Requirement::ShipmentRange(ShipmentReq {
+                shipment: "lua-bridge".into(),
+                version: "^1.0.0".into(),
+            }))
+        );
+    }
+
+    /// The `{ name, version }` form (which validation refuses) is shown as the ranged form it must
+    /// become.
+    #[test]
+    fn the_name_version_form_is_shown_as_a_ranged_requirement() {
+        let r = Requirement::Compatible(mercs2_quartermaster::manifest::CompatibleReq {
+            name: "lua-bridge".into(),
+            version: "^1.0.0".into(),
+        });
+        assert_eq!(
+            DepDraft::of_requirement(&r),
+            draft(RequireForm::ShipmentRange, "lua-bridge", "^1.0.0")
+        );
+    }
+
+    /// Entries the editor produces are what the manifest takes: written through the page's own
+    /// `mutate`, the Shipment reopens and validates with every form in place.
+    #[test]
+    fn edited_requires_and_conflicts_are_written_and_reopen() {
+        let d = tmp("deps");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+        let own = p.shipment.as_ref().unwrap().manifest.shipment.name.clone();
+        let requires: Vec<Requirement> = [
+            draft(RequireForm::Shipment, "lua-bridge", ""),
+            draft(RequireForm::ShipmentRange, "ess", ">=0.7, <1"),
+            draft(RequireForm::Capability, "widescreen", ""),
+        ]
+        .iter()
+        .map(|x| requirement_from_draft(x, &own).expect("valid"))
+        .collect();
+        let conflicts: Vec<ConflictDecl> = [
+            draft(RequireForm::Shipment, "old-ui", ""),
+            draft(RequireForm::ShipmentRange, "ess", "<0.7"),
+        ]
+        .iter()
+        .map(|x| conflict_from_draft(x, &own).expect("valid"))
+        .collect();
+        p.mutate(None, |m| {
+            m.load.requires = requires.clone();
+            m.load.conflicts = conflicts.clone();
+        })
+        .expect("write");
+        let s = p.shipment.as_ref().expect("the edited Shipment reopens");
+        assert_eq!(s.manifest.load.requires, requires);
+        assert_eq!(s.manifest.load.conflicts, conflicts);
     }
 
     /// Reached from a folder picker, so picking the wrong folder must not destroy someone's work.
