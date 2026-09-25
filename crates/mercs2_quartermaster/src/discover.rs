@@ -357,6 +357,7 @@ impl Contribution {
             // `../../etc/passwd`, `/etc/passwd` and a symlink pointing out of the Shipment M0111
             // errors rather than a bespoke rule that could drift from this one.
             Contribution::PlaceFile { file, .. } => out.push(("file", file.as_path())),
+            Contribution::AddRuntimeDll { dll } => out.push(("dll", dll.as_path())),
             // No `src/` artifact: every field is inline data (ids, tokens, faction keys, the
             // behaviour MODULE name). A novel behaviour subclass would ship a script, but that path
             // is not offered yet — see the kind's doc.
