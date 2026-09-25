@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:name-version",
+      "path": "shipments/name-version"
+    }
+  ]
+}
