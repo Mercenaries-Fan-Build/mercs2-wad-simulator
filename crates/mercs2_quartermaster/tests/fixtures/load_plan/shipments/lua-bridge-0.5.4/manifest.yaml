@@ -1,0 +1,9 @@
+format: 2
+shipment:
+  name: lua-bridge
+  version: 0.5.4
+  target: retail
+contributions:
+  - kind: native_hook
+    target: retail
+    plugin: src/lua_bridge.asi
