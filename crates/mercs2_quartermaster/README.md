@@ -93,9 +93,10 @@ win. `qm link` therefore composes the installed set's declared source-appends on
 compiles once, and emits a single WAD mounted last. Appends to any script compose; a wholesale
 `replace_lua` conflicts with any other writer to that script.
 
-String tables work the same way. Each `edit_stringdb` / `add_stringdb_keys` / `replace_stringdb_text`
-Shipment's own overlay carries a whole edited copy of the table, so installed together the last
-mounted would drop the others' edits. `qm link` merges every Shipment's writes to one table into one
+String tables work the same way. A Shipment's own build applies its `edit_stringdb` /
+`add_stringdb_keys` / `replace_stringdb_text` contributions to a table in contribution order and
+ships ONE edited copy of that table, so installed together the last mounted would drop the others'
+edits. `qm link` merges every Shipment's writes to one table into one
 link-owned table in load order, the later write winning: key edits by key hash, text replacements
 against the table as merged so far. The load plan's `link_block_paths` names every
 block the link re-emits, so a deploy step drops the per-Shipment copies of exactly those.
