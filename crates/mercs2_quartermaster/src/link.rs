@@ -40,7 +40,6 @@
 //! the crate's standing discipline and partly forced: the crate that owns the corpus
 //! (`mercs2_script`) links a second, incompatible Lua runtime — see the note in `Cargo.toml`.
 
-use crate::manifest::Load;
 use mercs2_formats::scripts_block::ScriptsBlock;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -123,10 +122,11 @@ pub enum LinkError {
         target: String,
         message: String,
     },
-    /// `load.after`/`load.before` across the installed set form a cycle, so no deterministic order
-    /// exists. Names the Shipments still tangled after everything orderable was placed.
-    LoadCycle {
-        names: Vec<String>,
+    /// A contributor that is not in the resolved `order`. Every real contributor comes from a
+    /// Shipment in the set, so this is an internal error in whatever built `order`, never an
+    /// author's mistake — and never something to paper over with a fallback position.
+    NotInOrder {
+        shipment: String,
     },
     Block(String),
 }
@@ -152,11 +152,10 @@ impl std::fmt::Display for LinkError {
             LinkError::Splice { target, message } => {
                 write!(f, "splicing {target:?} back into the block: {message}")
             }
-            LinkError::LoadCycle { names } => write!(
+            LinkError::NotInOrder { shipment } => write!(
                 f,
-                "load order is cyclic — {} reference each other through load.after / load.before, so \
-                 no order satisfies them all. Break the cycle by removing one constraint",
-                names.join(", ")
+                "internal error: {shipment} contributes to the link but is not in the resolved load \
+                 order — the order must name every Shipment in the set"
             ),
             LinkError::Block(m) => write!(f, "{m}"),
         }
@@ -216,83 +215,169 @@ pub fn base_source_path(corpus_root: &Path, target: &str) -> Result<PathBuf, Vec
     Err(tried)
 }
 
-/// The deterministic load order over an installed set: an alphabetical base that `load.after` /
-/// `load.before` then constrain, tie-broken by name so it is stable.
-///
-/// **Name is the base, not install order.** Two installs of the same set must produce byte-identical
-/// output, or verify-by-hash means nothing and a saved costume position can shift under the player
-/// between deploys. `after`/`before` do not replace that sort — they constrain it: a Kahn
-/// topological pass that, among ready Shipments, always takes the alphabetically smallest. A
-/// constraint naming an uninstalled Shipment is inert (you cannot order against what is not there); a
-/// cycle is a named error, never a silent arbitrary pick.
-pub fn resolve_load_order(shipments: &[(String, Load)]) -> Result<Vec<String>, LinkError> {
-    let names: BTreeSet<&str> = shipments.iter().map(|(n, _)| n.as_str()).collect();
-    // Directed edges `x -> y` meaning x loads before y. `after: A` on N ⇒ A before N. `before: B` on
-    // N ⇒ N before B. Edges touching an uninstalled name, or self-edges, are dropped.
-    let mut edges: Vec<(&str, &str)> = Vec::new();
-    for (n, load) in shipments {
-        for a in &load.after {
-            if names.contains(a.as_str()) && a != n {
-                edges.push((a.as_str(), n.as_str()));
-            }
-        }
-        for b in &load.before {
-            if names.contains(b.as_str()) && b != n {
-                edges.push((n.as_str(), b.as_str()));
-            }
-        }
-    }
-    let mut succ: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    let mut indeg: BTreeMap<&str, usize> = names.iter().map(|&n| (n, 0)).collect();
-    for (from, to) in edges {
-        if succ.entry(from).or_default().insert(to) {
-            *indeg.get_mut(to).unwrap() += 1;
-        }
-    }
-    let mut ready: BTreeSet<&str> =
-        indeg.iter().filter(|(_, &d)| d == 0).map(|(&n, _)| n).collect();
-    let mut order: Vec<String> = Vec::with_capacity(names.len());
-    while let Some(&n) = ready.iter().next() {
-        ready.remove(n);
-        order.push(n.to_string());
-        if let Some(ss) = succ.get(n) {
-            for &s in ss {
-                let d = indeg.get_mut(s).unwrap();
-                *d -= 1;
-                if *d == 0 {
-                    ready.insert(s);
-                }
-            }
-        }
-    }
-    if order.len() != names.len() {
-        let placed: BTreeSet<&str> = order.iter().map(|s| s.as_str()).collect();
-        let tangled: Vec<String> =
-            names.iter().filter(|n| !placed.contains(*n)).map(|s| s.to_string()).collect();
-        return Err(LinkError::LoadCycle { names: tangled });
-    }
-    Ok(order)
+/// The name the synthetic mod-loader trampoline contributes under. It is not a Shipment, so it is
+/// never in a resolved `order`; it sorts after every real contributor.
+pub const MODLOADER_CONTRIBUTOR: &str = "quartermaster-modloader";
+
+/// One ordering edge between two request items (indices into the request): `first` loads before
+/// `then`. Built from `requires` alone (a provider before its consumer); nothing else orders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderEdge {
+    pub first: usize,
+    pub then: usize,
 }
 
-/// Concatenate the base source with every mutation's append, in the deterministic load order.
+/// A resolved load order over request items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedOrder {
+    /// Request indices, in load order. Every index appears exactly once.
+    pub order: Vec<usize>,
+    /// Per request index: the edge that last delayed the item, when an item with a LARGER request
+    /// index loaded before it; otherwise `None`.
+    pub held_back_by: Vec<Option<usize>>,
+}
+
+/// The load order over `n` request items and the `requires` edges between them.
 ///
-/// `order` is the resolved sequence from [`resolve_load_order`]; a Shipment absent from it (an empty
-/// `order`, or the synthetic mod-loader trampoline) falls back to name order, so the historical
-/// behaviour — pure alphabetical — is exactly the empty-`order` case. Load order decides who *wins* a
-/// conflict; it does not get to decide the bytes of a merge that has no conflict, which is why the
-/// tie-break is still the name.
+/// A Kahn topological sort. Whenever more than one item is ready, the one with the LOWEST request
+/// index goes first, so the request order (the player's list) breaks every tie and declared edges
+/// always beat it. The result is a function of the request and its edges alone.
+///
+/// A cycle has no order: the error carries the edges on each cycle (indices into `edges`), one list
+/// per strongly connected tangle, so every one can be named rather than an arbitrary pick made.
+pub fn resolve_load_order(n: usize, edges: &[OrderEdge]) -> Result<ResolvedOrder, Vec<Vec<usize>>> {
+    let mut indeg = vec![0usize; n];
+    let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, e) in edges.iter().enumerate() {
+        indeg[e.then] += 1;
+        outgoing[e.first].push(i);
+    }
+    let mut ready: BTreeSet<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut position: Vec<Option<usize>> = vec![None; n];
+    while let Some(&next) = ready.iter().next() {
+        ready.remove(&next);
+        position[next] = Some(order.len());
+        order.push(next);
+        for &ei in &outgoing[next] {
+            let t = edges[ei].then;
+            indeg[t] -= 1;
+            if indeg[t] == 0 {
+                ready.insert(t);
+            }
+        }
+    }
+    if order.len() != n {
+        return Err(cycle_edges(n, edges, &position));
+    }
+
+    let mut held_back_by = vec![None; n];
+    for (pos, &x) in order.iter().enumerate() {
+        if !order[..pos].iter().any(|&y| y > x) {
+            continue;
+        }
+        // X waited on something: an item with a larger request index went first, which only an
+        // incoming edge can cause. Name the edge from its last-emitted predecessor (the lowest-index
+        // edge when there are several between the same pair).
+        let last = edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.then == x)
+            .max_by_key(|(i, e)| (position[e.first], std::cmp::Reverse(*i)))
+            .map(|(i, _)| i)
+            .expect("an item that is held back has at least one incoming edge");
+        held_back_by[x] = Some(last);
+    }
+    Ok(ResolvedOrder {
+        order,
+        held_back_by,
+    })
+}
+
+/// The edges on a cycle, grouped by strongly connected component, among the items the sort could
+/// not place (`position[i] == None`).
+///
+/// An unplaced item is on a cycle or downstream of one; only edges whose ends reach each other are
+/// cycle edges. Groups are sorted by their lowest item index, edges within a group by index.
+fn cycle_edges(n: usize, edges: &[OrderEdge], position: &[Option<usize>]) -> Vec<Vec<usize>> {
+    let stuck: Vec<bool> = (0..n).map(|i| position[i].is_none()).collect();
+    // reach[a] = every stuck item reachable from `a` through stuck items.
+    let reach: Vec<BTreeSet<usize>> = (0..n)
+        .map(|a| {
+            let mut seen = BTreeSet::new();
+            if !stuck[a] {
+                return seen;
+            }
+            let mut stack = vec![a];
+            while let Some(u) = stack.pop() {
+                for e in edges.iter().filter(|e| e.first == u && stuck[e.then]) {
+                    if seen.insert(e.then) {
+                        stack.push(e.then);
+                    }
+                }
+            }
+            seen
+        })
+        .collect();
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, e) in edges.iter().enumerate() {
+        if stuck[e.first] && stuck[e.then] && reach[e.then].contains(&e.first) {
+            // The component's representative: its lowest item index. Both ends of a cycle edge
+            // share one component, so either end names it.
+            let rep = (0..n)
+                .find(|&m| m == e.first || (reach[m].contains(&e.first) && reach[e.first].contains(&m)))
+                .expect("e.first is itself a candidate");
+            groups.entry(rep).or_default().push(i);
+        }
+    }
+    groups.into_values().collect()
+}
+
+/// An item's position in `order`, for sorting what it contributed.
+///
+/// The synthetic mod-loader trampoline ([`MODLOADER_CONTRIBUTOR`]) sorts after every real
+/// contributor. Any other name missing from `order` is [`LinkError::NotInOrder`].
+fn order_rank(order: &[String], shipment: &str) -> Result<usize, LinkError> {
+    if shipment == MODLOADER_CONTRIBUTOR {
+        return Ok(order.len());
+    }
+    order
+        .iter()
+        .position(|n| n == shipment)
+        .ok_or_else(|| LinkError::NotInOrder {
+            shipment: shipment.to_string(),
+        })
+}
+
+/// Stable-sort `items` by their contributor's position in `order`, keeping each contributor's own
+/// relative order, then by `key` within a contributor.
+fn sort_by_order<T, K: Ord>(
+    items: &mut Vec<&T>,
+    order: &[String],
+    shipment: impl Fn(&T) -> &str,
+    key: impl Fn(&T) -> K,
+) -> Result<(), LinkError> {
+    let mut ranked = Vec::with_capacity(items.len());
+    for it in items.drain(..) {
+        ranked.push((order_rank(order, shipment(it))?, it));
+    }
+    ranked.sort_by(|(ra, a), (rb, b)| ra.cmp(rb).then_with(|| key(a).cmp(&key(b))));
+    items.extend(ranked.into_iter().map(|(_, it)| it));
+    Ok(())
+}
+
+/// Concatenate the base source with every mutation's append, in the resolved load order.
+///
+/// `order` is the resolved sequence of Shipment names (the load plan's `order`). Appends follow it;
+/// one Shipment's own appends keep their manifest order. The synthetic mod-loader trampoline goes
+/// last, and any other contributor missing from `order` is [`LinkError::NotInOrder`].
 pub fn linked_source(
     base: &str,
     mutations: &[&ScriptMutation],
     order: &[String],
-) -> (String, Vec<String>) {
-    let rank = |name: &str| order.iter().position(|n| n == name).unwrap_or(usize::MAX);
-    let mut ordered: Vec<&&ScriptMutation> = mutations.iter().collect();
-    ordered.sort_by(|a, b| {
-        rank(&a.shipment)
-            .cmp(&rank(&b.shipment))
-            .then_with(|| a.shipment.cmp(&b.shipment))
-    });
+) -> Result<(String, Vec<String>), LinkError> {
+    let mut ordered: Vec<&ScriptMutation> = mutations.to_vec();
+    sort_by_order(&mut ordered, order, |m| m.shipment.as_str(), |_| ())?;
 
     let mut out = String::with_capacity(
         base.len() + ordered.iter().map(|m| m.append.len()).sum::<usize>() + 256,
@@ -315,7 +400,7 @@ pub fn linked_source(
         }
         contributors.push(m.shipment.clone());
     }
-    (out, contributors)
+    Ok((out, contributors))
 }
 
 /// The `_tOutfits` row for one outfit, as source.
@@ -518,15 +603,18 @@ pub struct SupportRegistration {
 /// Idempotent and fail-soft: `_registered`/`_ran` guards make a re-import or a re-entered interior a
 /// no-op, and each registration runs under `pcall` so one bad movie cannot wedge the loader.
 ///
-/// Registrations are ordered by `(shipment, movie)` / `(shipment, add)` so the same set bakes
-/// byte-identically whatever order they arrive in — the same determinism rule [`linked_source`] holds.
+/// Registrations are baked in the resolved load `order` — the same order [`linked_source`] follows —
+/// and within one Shipment by movie / layer / id, so one request bakes byte-identically whatever
+/// order the registrations arrive in. A Shipment that requires another is therefore registered
+/// after it. A contributor missing from `order` is [`LinkError::NotInOrder`].
 pub fn qm_modloader_source(
     regs: &[UiRegistration],
     layers: &[LayerRegistration],
     support: &[SupportRegistration],
-) -> String {
+    order: &[String],
+) -> Result<String, LinkError> {
     let mut ordered: Vec<&UiRegistration> = regs.iter().collect();
-    ordered.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.movie.cmp(&b.movie)));
+    sort_by_order(&mut ordered, order, |r| r.shipment.as_str(), |r| r.movie.clone())?;
 
     let mut inits = String::new();
     for r in &ordered {
@@ -550,10 +638,11 @@ pub fn qm_modloader_source(
     // Layer activations bake into the SAME `_QM._inits` list, so they run under the same once-guard
     // and the same `pcall` as the UI widgets. Each is `MarkForRemoval`(old) then `MarkForAddition`
     // (new) — the vanilla-contract order (remove pristine, add act) so the two never both apply.
-    // Ordered by `(shipment, add)` for the byte-identical bake. `MarkForAddition`/`MarkForRemoval`
-    // are the immediate mark forms (no callback), existence-checked so a stripped table degrades.
+    // Ordered by load order, then `add`, for the byte-identical bake. `MarkForAddition`/
+    // `MarkForRemoval` are the immediate mark forms (no callback), existence-checked so a stripped
+    // table degrades.
     let mut ordered_layers: Vec<&LayerRegistration> = layers.iter().collect();
-    ordered_layers.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.add.cmp(&b.add)));
+    sort_by_order(&mut ordered_layers, order, |r| r.shipment.as_str(), |r| r.add.clone())?;
     for r in &ordered_layers {
         let add = lua_string(&r.add);
         let mut body = String::new();
@@ -580,9 +669,10 @@ pub fn qm_modloader_source(
     // imports its minted subclass, constructs `oSupport`, DEFERS the catalog + reward rows (the eager
     // append can't — the module is nil at resident-load), re-applies the `SetSupportName` the
     // `mrxsupportdata.Init` tail loop already ran without, and nulls the never-invalidated
-    // `gtAllSupport` cache so the next shop Open rebuilds with the new id. Ordered by `(shipment, id)`.
+    // `gtAllSupport` cache so the next shop Open rebuilds with the new id. Ordered by load order,
+    // then `id`.
     let mut ordered_support: Vec<&SupportRegistration> = support.iter().collect();
-    ordered_support.sort_by(|a, b| a.shipment.cmp(&b.shipment).then_with(|| a.id.cmp(&b.id)));
+    sort_by_order(&mut ordered_support, order, |r| r.shipment.as_str(), |r| r.id.clone())?;
     for r in &ordered_support {
         let mut body = String::new();
         body.push_str(&format!("    import({})\n", lua_string(&r.module)));
@@ -635,7 +725,7 @@ pub fn qm_modloader_source(
         ));
     }
 
-    format!(
+    Ok(format!(
         "-- {name} — Quartermaster's expandable mod load space (generated; do not hand-edit).\n\
          --\n\
          -- The resident scripts import this by name; it defines the global _QM and its run() entry.\n\
@@ -654,7 +744,7 @@ pub fn qm_modloader_source(
          \x20 end\n\
          end\n",
         name = QM_MODLOADER_NAME,
-    )
+    ))
 }
 
 /// The one-line trampoline appended to `wifpmcinterior` — the ONLY thing the resident carries.
@@ -736,17 +826,19 @@ pub fn derived_epilogue(target: &str) -> Option<String> {
 /// `block` is the base game's `scripts_vz`, already parsed. Mutations targeting the same script are
 /// merged; mutations targeting different scripts are independent.
 ///
-/// The single-block convenience case of [`link_into_blocks`].
+/// The single-block convenience case of [`link_into_blocks`]. `order` is the resolved load order of
+/// the contributing Shipments' names.
 pub fn link_into(
     block: &mut ScriptsBlock,
     corpus_root: &Path,
     mutations: &[ScriptMutation],
+    order: &[String],
 ) -> Result<Vec<LinkedScript>, LinkError> {
     let mut blocks = [TargetBlock {
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[], &[])
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[], order)
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -758,6 +850,11 @@ pub fn link_into(
 /// Only blocks that were spliced come back in the results (via [`LinkedScript::block`]) — a block
 /// nothing targeted must not be re-emitted, or the overlay would shadow a base block with a
 /// byte-identical copy for no reason.
+///
+/// `order` is the resolved load order of the contributing Shipments' names, and every ordered
+/// decision here follows it: append concatenation, which `replace_lua` wins (the later one), the
+/// mint order of `add_script` modules and support subclasses, and the `qm_modloader` bake. A
+/// contributor missing from it is [`LinkError::NotInOrder`].
 pub fn link_into_blocks(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
@@ -779,7 +876,7 @@ pub fn link_into_blocks(
     let mut all_mutations: Vec<ScriptMutation> = mutations.to_vec();
     if needs_loader {
         all_mutations.push(ScriptMutation {
-            shipment: "quartermaster-modloader".into(),
+            shipment: MODLOADER_CONTRIBUTOR.into(),
             target: "wifpmcinterior".into(),
             append: qm_trampoline_append(),
         });
@@ -815,7 +912,7 @@ pub fn link_into_blocks(
             message: format!("reading base source {}: {e}", source_path.display()),
         })?;
 
-        let (mut source, contributors) = linked_source(&base, &group, order);
+        let (mut source, contributors) = linked_source(&base, &group, order)?;
         // Emitted once, AFTER every Shipment's append — see `derived_epilogue`. Putting it here
         // rather than in each Shipment is what makes "exactly once" structural.
         if let Some(epilogue) = derived_epilogue(target) {
@@ -844,7 +941,10 @@ pub fn link_into_blocks(
     }
 
     // Apply each `replace_lua` wholesale swap. Same asset hash, new bytecode -- every existing
-    // `import(<target>)` call site now returns the new module without rebinding.
+    // `import(<target>)` call site now returns the new module without rebinding. Applied in load
+    // order, so where two replace one target the later Shipment's is what remains.
+    let mut replacements: Vec<&ScriptReplacement> = replacements.iter().collect();
+    sort_by_order(&mut replacements, order, |r| r.shipment.as_str(), |_| ())?;
     for r in replacements {
         let (bi, idx) = blocks
             .iter()
@@ -890,6 +990,8 @@ pub fn link_into_blocks(
                 target: "wifpmcinterior".to_string(),
                 shipment: additions[0].shipment.clone(),
             })?;
+        let mut additions: Vec<&ScriptAddition> = additions.iter().collect();
+        sort_by_order(&mut additions, order, |a| a.shipment.as_str(), |_| ())?;
         for a in additions {
             let bytecode = mercs2_luac::compile(&a.source, &a.name)
                 .map_err(|e| LinkError::Compile {
@@ -924,14 +1026,16 @@ pub fn link_into_blocks(
             .position(|tb| tb.block.find_script_by_name("wifpmcinterior").is_some())
             .ok_or_else(|| LinkError::UnknownScript {
                 target: "wifpmcinterior".to_string(),
-                shipment: "quartermaster-modloader".to_string(),
+                shipment: MODLOADER_CONTRIBUTOR.to_string(),
             })?;
 
         // Mint each NOVEL support subclass as its own new `scripts_vz` script, so the loader can
         // `import` it by name at `_OnEnter`. Same `add_script` mechanism as `qm_modloader` below.
         // Deduped by module name — two items sharing one subclass mint it once.
         let mut minted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        for r in support_regs {
+        let mut support_in_order: Vec<&SupportRegistration> = support_regs.iter().collect();
+        sort_by_order(&mut support_in_order, order, |r| r.shipment.as_str(), |_| ())?;
+        for r in support_in_order {
             if !minted.insert(r.module.as_str()) {
                 continue;
             }
@@ -957,7 +1061,7 @@ pub fn link_into_blocks(
             });
         }
 
-        let source = qm_modloader_source(ui_regs, layer_regs, support_regs);
+        let source = qm_modloader_source(ui_regs, layer_regs, support_regs, order)?;
         // BARE chunk name, like every other script here — see the module note.
         let bytecode =
             mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
@@ -971,14 +1075,16 @@ pub fn link_into_blocks(
                 target: QM_MODLOADER_NAME.to_string(),
                 message: m,
             })?;
-        let mut contributors: Vec<String> = ui_regs
+        let mut names: Vec<&String> = ui_regs
             .iter()
-            .map(|r| r.shipment.clone())
-            .chain(layer_regs.iter().map(|r| r.shipment.clone()))
-            .chain(support_regs.iter().map(|r| r.shipment.clone()))
+            .map(|r| &r.shipment)
+            .chain(layer_regs.iter().map(|r| &r.shipment))
+            .chain(support_regs.iter().map(|r| &r.shipment))
             .collect();
-        contributors.sort();
-        contributors.dedup();
+        names.sort();
+        names.dedup();
+        sort_by_order(&mut names, order, |n| n.as_str(), |_| ())?;
+        let contributors: Vec<String> = names.into_iter().cloned().collect();
         linked.push(LinkedScript {
             target: QM_MODLOADER_NAME.to_string(),
             contributors,
@@ -1025,15 +1131,20 @@ mod tests {
         assert!(outfit_row_append("chris", "F", "m", "d").contains("_tOutfits.chris"));
     }
 
-    /// The ordering property the whole design rests on: same set of Shipments, same bytes, whatever
-    /// order they arrive in.
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The ordering property the whole design rests on: one resolved order, same bytes, whatever
+    /// order the mutations arrive in.
     #[test]
-    fn concatenation_order_is_deterministic_regardless_of_input_order() {
+    fn concatenation_follows_the_order_not_the_input_order() {
         let a = mutation("aaa-mod", "s", "-- A\n");
         let b = mutation("zzz-mod", "s", "-- Z\n");
-        let (one, c1) = linked_source("base\n", &[&a, &b], &[]);
-        let (two, c2) = linked_source("base\n", &[&b, &a], &[]);
-        assert_eq!(one, two, "install order must not change the linked source");
+        let order = names(&["aaa-mod", "zzz-mod"]);
+        let (one, c1) = linked_source("base\n", &[&a, &b], &order).unwrap();
+        let (two, c2) = linked_source("base\n", &[&b, &a], &order).unwrap();
+        assert_eq!(one, two, "input order must not change the linked source");
         assert_eq!(c1, c2);
         assert_eq!(c1, vec!["aaa-mod", "zzz-mod"]);
         // Both appends must survive — this is the annihilation the linker exists to prevent.
@@ -1044,7 +1155,7 @@ mod tests {
     #[test]
     fn a_base_without_a_trailing_newline_is_separated() {
         let m = mutation("mod", "s", "print('x')\n");
-        let (src, _) = linked_source("local t = 1", &[&m], &[]);
+        let (src, _) = linked_source("local t = 1", &[&m], &names(&["mod"])).unwrap();
         assert!(src.starts_with("local t = 1\n"), "{src}");
         assert!(
             !src.contains("local t = 1--"),
@@ -1055,93 +1166,87 @@ mod tests {
     #[test]
     fn each_append_is_attributed_in_the_source() {
         let m = mutation("sean-devlin", "s", "-- outfit\n");
-        let (src, _) = linked_source("base\n", &[&m], &[]);
+        let (src, _) = linked_source("base\n", &[&m], &names(&["sean-devlin"])).unwrap();
         assert!(src.contains("appended by Shipment: sean-devlin"), "{src}");
     }
 
-    fn with_load(name: &str, after: &[&str], before: &[&str]) -> (String, Load) {
-        (
-            name.to_string(),
-            Load {
-                after: after.iter().map(|s| s.to_string()).collect(),
-                before: before.iter().map(|s| s.to_string()).collect(),
-                ..Default::default()
-            },
-        )
+    fn edge(first: usize, then: usize) -> OrderEdge {
+        OrderEdge { first, then }
     }
 
-    /// With no constraints the order is pure alphabetical — the stable base every install shares.
+    /// With no edges the order IS the request order, and nothing is held back.
     #[test]
-    fn load_order_defaults_to_alphabetical() {
-        let ships = [with_load("zulu", &[], &[]), with_load("alpha", &[], &[]), with_load("mike", &[], &[])];
-        assert_eq!(resolve_load_order(&ships).unwrap(), vec!["alpha", "mike", "zulu"]);
+    fn with_no_edges_the_order_is_the_request_order() {
+        let r = resolve_load_order(3, &[]).unwrap();
+        assert_eq!(r.order, vec![0, 1, 2]);
+        assert_eq!(r.held_back_by, vec![None, None, None]);
     }
 
-    /// `after` / `before` constrain that base, and the result is the same whatever order the set is
-    /// presented in — the determinism the whole design rests on, now with constraints.
+    /// A consumer listed before its provider waits for it, and records the edge that held it back.
     #[test]
-    fn after_and_before_constrain_the_alphabetical_base() {
-        // `zulu` must load before `alpha` (via before), and `mike` after `alpha` (via after).
-        let a = [
-            with_load("alpha", &[], &[]),
-            with_load("mike", &["alpha"], &[]),
-            with_load("zulu", &[], &["alpha"]),
-        ];
-        let want = vec!["zulu".to_string(), "alpha".to_string(), "mike".to_string()];
-        assert_eq!(resolve_load_order(&a).unwrap(), want);
-        // Same set, reversed input — identical output.
-        let b = [
-            with_load("zulu", &[], &["alpha"]),
-            with_load("mike", &["alpha"], &[]),
-            with_load("alpha", &[], &[]),
-        ];
-        assert_eq!(resolve_load_order(&b).unwrap(), want);
+    fn a_requires_edge_beats_request_order() {
+        // 0 = ess, 1 = lua-bridge; ess requires lua-bridge.
+        let r = resolve_load_order(2, &[edge(1, 0)]).unwrap();
+        assert_eq!(r.order, vec![1, 0]);
+        assert_eq!(r.held_back_by, vec![Some(0), None]);
     }
 
-    /// `after` and `before` are two spellings of one edge and must agree: X.before=[Y] and
-    /// Y.after=[X] both mean X loads first.
+    /// The held-back edge is the one from the LAST-emitted predecessor.
     #[test]
-    fn before_and_after_are_symmetric() {
-        let via_before = [with_load("x", &[], &["y"]), with_load("y", &[], &[])];
-        let via_after = [with_load("x", &[], &[]), with_load("y", &["x"], &[])];
-        assert_eq!(resolve_load_order(&via_before).unwrap(), vec!["x", "y"]);
-        assert_eq!(resolve_load_order(&via_after).unwrap(), vec!["x", "y"]);
+    fn held_back_names_the_last_emitted_predecessor() {
+        // 0 = consumer of both 1 and 2; 1 and 2 have no edges between them.
+        let r = resolve_load_order(3, &[edge(1, 0), edge(2, 0)]).unwrap();
+        assert_eq!(r.order, vec![1, 2, 0]);
+        assert_eq!(r.held_back_by[0], Some(1), "2 went last, so its edge (index 1) held 0 back");
     }
 
-    /// A constraint naming a Shipment that is not installed is inert — you cannot order against what
-    /// is not there — so the rest still order alphabetically rather than failing.
+    /// A cycle has no order. Every edge on it is named, and an edge merely downstream of it is not.
     #[test]
-    fn a_constraint_on_an_absent_shipment_is_inert() {
-        let ships = [with_load("beta", &["not-installed"], &[]), with_load("alpha", &[], &[])];
-        assert_eq!(resolve_load_order(&ships).unwrap(), vec!["alpha", "beta"]);
+    fn a_cycle_names_every_edge_on_it_and_only_those() {
+        // 0 -> 1 -> 2 -> 0 is the cycle; 2 -> 3 hangs off it.
+        let edges = [edge(0, 1), edge(1, 2), edge(2, 0), edge(2, 3)];
+        let cycles = resolve_load_order(4, &edges).expect_err("a cycle has no order");
+        assert_eq!(cycles, vec![vec![0, 1, 2]]);
     }
 
-    /// A cycle has no valid order, so it is a named error rather than an arbitrary pick.
+    /// Two separate cycles are two findings, each with its own edges.
     #[test]
-    fn a_cycle_is_a_named_error() {
-        let ships = [with_load("a", &["b"], &[]), with_load("b", &["a"], &[])];
-        match resolve_load_order(&ships) {
-            Err(LinkError::LoadCycle { names }) => {
-                assert!(names.contains(&"a".to_string()) && names.contains(&"b".to_string()));
-            }
-            other => panic!("expected a LoadCycle, got {other:?}"),
+    fn two_cycles_are_reported_separately() {
+        let edges = [edge(0, 1), edge(1, 0), edge(2, 3), edge(3, 2)];
+        let cycles = resolve_load_order(4, &edges).expect_err("cycles");
+        assert_eq!(cycles, vec![vec![0, 1], vec![2, 3]]);
+    }
+
+    /// The resolved order actually reorders the appends: `b` ahead of `a` in `order` puts `b`'s source
+    /// first, whatever the names sort to.
+    #[test]
+    fn the_order_reorders_the_appends() {
+        let a = mutation("a-mod", "s", "-- A\n");
+        let b = mutation("b-mod", "s", "-- B\n");
+        let order = names(&["b-mod", "a-mod"]);
+        let (forced, contrib) = linked_source("base\n", &[&a, &b], &order).unwrap();
+        assert!(forced.find("-- B").unwrap() < forced.find("-- A").unwrap(), "{forced}");
+        assert_eq!(contrib, vec!["b-mod", "a-mod"]);
+    }
+
+    /// A contributor the order does not name is an internal error, never a guessed position.
+    #[test]
+    fn a_contributor_missing_from_the_order_is_an_error() {
+        let a = mutation("a-mod", "s", "-- A\n");
+        match linked_source("base\n", &[&a], &names(&["other"])) {
+            Err(LinkError::NotInOrder { shipment }) => assert_eq!(shipment, "a-mod"),
+            other => panic!("expected NotInOrder, got {other:?}"),
         }
     }
 
-    /// Load order actually reorders the appends: `b` forced before `a` overrides the alphabetical
-    /// default, so `b`'s source concatenates first.
+    /// The synthetic trampoline is not a Shipment: it is never in `order`, and it goes last.
     #[test]
-    fn load_order_reorders_the_appends() {
+    fn the_modloader_contributor_sorts_last() {
+        let t = mutation(MODLOADER_CONTRIBUTOR, "s", "-- T\n");
         let a = mutation("a-mod", "s", "-- A\n");
-        let b = mutation("b-mod", "s", "-- B\n");
-        // Default (empty order) is alphabetical: A then B.
-        let (def, _) = linked_source("base\n", &[&a, &b], &[]);
-        assert!(def.find("-- A").unwrap() < def.find("-- B").unwrap());
-        // Force b before a.
-        let order = vec!["b-mod".to_string(), "a-mod".to_string()];
-        let (forced, contrib) = linked_source("base\n", &[&a, &b], &order);
-        assert!(forced.find("-- B").unwrap() < forced.find("-- A").unwrap(), "{forced}");
-        assert_eq!(contrib, vec!["b-mod", "a-mod"]);
+        let (src, contrib) = linked_source("base\n", &[&t, &a], &names(&["a-mod"])).unwrap();
+        assert!(src.find("-- A").unwrap() < src.find("-- T").unwrap(), "{src}");
+        assert_eq!(contrib, vec!["a-mod", MODLOADER_CONTRIBUTOR]);
     }
 
     fn reg(shipment: &str, movie: &str) -> UiRegistration {
@@ -1155,7 +1260,13 @@ mod tests {
     /// movie's FlashWidget under the proven creation sequence.
     #[test]
     fn the_mod_loader_defines_qm_and_registers_each_movie() {
-        let src = qm_modloader_source(&[reg("mod-a", "my_hud"), reg("mod-b", "my_map")], &[], &[]);
+        let src = qm_modloader_source(
+            &[reg("mod-a", "my_hud"), reg("mod-b", "my_map")],
+            &[],
+            &[],
+            &names(&["mod-a", "mod-b"]),
+        )
+        .unwrap();
         assert!(src.contains("_QM = _QM or"), "must define the _QM global: {src}");
         assert!(src.contains("function _QM.run()"), "must expose run(): {src}");
         // Each movie enrols via the loadingscreen_standalone sequence.
@@ -1168,21 +1279,40 @@ mod tests {
         assert!(src.contains("pcall(f)"), "each init must be fail-soft: {src}");
     }
 
-    /// Same registrations, same bytes, whatever order they arrive in — the determinism rule the whole
-    /// linker rests on, applied to the bake.
+    /// Same registrations and order, same bytes, whatever order the registrations arrive in.
     #[test]
-    fn the_bake_is_order_independent() {
-        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[], &[]);
-        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[], &[]);
-        assert_eq!(a, b, "install order must not change the baked loader");
-        // ordered by (shipment, movie): aaa/one appears before zzz/two.
+    fn the_bake_is_independent_of_input_order() {
+        let order = names(&["aaa", "zzz"]);
+        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[], &[], &order).unwrap();
+        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[], &[], &order).unwrap();
+        assert_eq!(a, b, "input order must not change the baked loader");
         assert!(a.find("one").unwrap() < a.find("two").unwrap(), "{a}");
+    }
+
+    /// The bake follows the resolved order, not the names. `ess` is ahead of the consumer in
+    /// `order` (the consumer requires it), so its registration is baked first even though the
+    /// consumer's name sorts earlier.
+    #[test]
+    fn the_bake_follows_the_resolved_order() {
+        let order = names(&["ess", "a-consumer"]);
+        let src = qm_modloader_source(
+            &[reg("a-consumer", "consumer_hud"), reg("ess", "ess_ui")],
+            &[],
+            &[],
+            &order,
+        )
+        .unwrap();
+        assert!(
+            src.find("ess_ui").unwrap() < src.find("consumer_hud").unwrap(),
+            "ess must be registered before the Shipment that requires it: {src}"
+        );
     }
 
     /// A movie name cannot break out of its Lua string and inject code into the block we compile.
     #[test]
     fn a_movie_name_is_escaped_in_the_bake() {
-        let src = qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[], &[]);
+        let src =
+            qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[], &[], &names(&["m"])).unwrap();
         // The escaped form keeps the payload INSIDE the string literal ...
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         // ... and the unescaped breakout (a bare `evil") ` that would end the string early) is absent.
@@ -1205,7 +1335,9 @@ mod tests {
             &[],
             &[layer("act-mod", "vz_state_pmccon004_destroyed", &["vz_state_pmccon004_pristine"])],
             &[],
-        );
+            &names(&["act-mod"]),
+        )
+        .unwrap();
         assert!(src.contains("_QM = _QM or"), "must still define the _QM global: {src}");
         assert!(
             src.contains("MrxLayerManager.MarkForAddition(\"vz_state_pmccon004_destroyed\")"),
@@ -1225,29 +1357,40 @@ mod tests {
         assert!(src.contains("pcall(f)"), "runs under the shared pcall: {src}");
     }
 
-    /// UI and layer registrations coexist in one loader, and the same set bakes byte-identically
-    /// whatever order it arrives in.
+    /// UI and layer registrations coexist in one loader, and one order bakes byte-identically
+    /// whatever order the registrations arrive in.
     #[test]
     fn ui_and_layer_registrations_share_one_deterministic_loader() {
+        let order = names(&["aaa", "ui-mod", "zzz"]);
         let a = qm_modloader_source(
             &[reg("ui-mod", "my_hud")],
             &[layer("aaa", "layer_a", &[]), layer("zzz", "layer_z", &[])],
             &[],
-        );
+            &order,
+        )
+        .unwrap();
         let b = qm_modloader_source(
             &[reg("ui-mod", "my_hud")],
             &[layer("zzz", "layer_z", &[]), layer("aaa", "layer_a", &[])],
             &[],
-        );
-        assert_eq!(a, b, "install order must not change the baked loader");
+            &order,
+        )
+        .unwrap();
+        assert_eq!(a, b, "input order must not change the baked loader");
         assert!(a.contains("w:SetSwfFile(\"my_hud\")"), "the widget is still baked: {a}");
-        assert!(a.find("layer_a").unwrap() < a.find("layer_z").unwrap(), "ordered by (shipment,add): {a}");
+        assert!(a.find("layer_a").unwrap() < a.find("layer_z").unwrap(), "ordered by load order: {a}");
     }
 
     /// A layer name cannot break out of its Lua string and inject code into the block we compile.
     #[test]
     fn a_layer_name_is_escaped_in_the_bake() {
-        let src = qm_modloader_source(&[], &[layer("m", "evil\") os.exit() --", &[])], &[]);
+        let src = qm_modloader_source(
+            &[],
+            &[layer("m", "evil\") os.exit() --", &[])],
+            &[],
+            &names(&["m"]),
+        )
+        .unwrap();
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         assert!(!src.contains("Addition(\"evil\") os"), "the injection must not close the string: {src}");
     }
@@ -1278,8 +1421,13 @@ mod tests {
     /// none of which can run at resident-load, which is the entire reason this path exists.
     #[test]
     fn the_mod_loader_defers_a_novel_support_behaviour() {
-        let src =
-            qm_modloader_source(&[], &[], &[support("bomb-mod", "ggbomb", "DLC_MrxGreenGoblinBomb")]);
+        let src = qm_modloader_source(
+            &[],
+            &[],
+            &[support("bomb-mod", "ggbomb", "DLC_MrxGreenGoblinBomb")],
+            &names(&["bomb-mod"]),
+        )
+        .unwrap();
         assert!(src.contains("import(\"DLC_MrxGreenGoblinBomb\")"), "imports the subclass: {src}");
         assert!(src.contains("DLC_MrxGreenGoblinBomb:Create()"), "constructs oSupport: {src}");
         assert!(
