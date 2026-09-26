@@ -778,3 +778,73 @@ fn a_diagnostic_becomes_the_shared_finding_element() {
         assert_eq!(f.fix, None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// M0199 — native_hook signature guards (hermetic half; the exe-byte check is in game_checks)
+// ---------------------------------------------------------------------------
+
+/// A native_hook with `symbol` (so M0161 stays quiet) touching two addresses, plus whatever guard
+/// block the test supplies.
+fn hook(guard: &str) -> Manifest {
+    shipment_with(&format!(
+        "  - kind: native_hook
+    target: retail
+    symbol: SomeDetour
+    touches: ['0x004CF340', '0x004CF400']
+{guard}"
+    ))
+}
+
+#[test]
+fn m0199_guard_for_an_untouched_address_is_an_error() {
+    let m = hook("    signature_guard:\n      '0x00DEAD00': '55 8B EC'\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags
+        .iter()
+        .find(|d| d.rule.code == "M0199")
+        .unwrap_or_else(|| panic!("M0199 should fire, got {diags:?}"));
+    assert_eq!(d.severity, Severity::Error);
+    assert!(lint::blocks_build(&diags), "a guard for an un-touched address must block");
+}
+
+#[test]
+fn m0199_malformed_prologue_bytes_are_an_error() {
+    let m = hook("    signature_guard:\n      '0x004CF340': 'not hex'\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags
+        .iter()
+        .find(|d| d.rule.code == "M0199")
+        .unwrap_or_else(|| panic!("M0199 should fire, got {diags:?}"));
+    assert_eq!(d.severity, Severity::Error);
+}
+
+#[test]
+fn m0199_partial_coverage_warns_on_the_unguarded_touch() {
+    // One of two touched addresses guarded — the other is likely an oversight.
+    let m = hook("    signature_guard:\n      '0x004CF340': '55 8B EC'\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags
+        .iter()
+        .find(|d| d.rule.code == "M0199")
+        .unwrap_or_else(|| panic!("M0199 should warn, got {diags:?}"));
+    assert_eq!(d.severity, Severity::Warning);
+    assert!(!lint::blocks_build(&diags), "a coverage gap is advisory, not blocking");
+    assert!(d.message.contains("0x004CF400"), "names the unguarded address: {}", d.message);
+}
+
+#[test]
+fn m0199_is_quiet_with_no_guards_or_full_valid_coverage() {
+    // Opt-out: declaring no guards at all is legitimate.
+    assert!(
+        !codes(&lint::lint(&hook(""), None, None)).contains(&"M0199"),
+        "no guards must be silent"
+    );
+    // Full, well-formed coverage of every touched address.
+    let full = hook(
+        "    signature_guard:\n      '0x004CF340': '55 8B EC'\n      '0x004CF400': '53 56 57'\n",
+    );
+    assert!(
+        !codes(&lint::lint(&full, None, None)).contains(&"M0199"),
+        "full valid coverage must be silent"
+    );
+}
