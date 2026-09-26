@@ -391,6 +391,16 @@ impl GameStack {
             .unwrap_or(Platform::Pc)
     }
 
+    /// `Mercenaries2.exe` beside this install (`<game_root>/Mercenaries2.exe`), derived from the base
+    /// WAD the stack was opened from, or `None` when no exe sits alongside (a WAD-only stack). M0199's
+    /// signature-guard verification reads it; the `None` case is why that check self-skips there.
+    pub fn exe_path(&self) -> Option<PathBuf> {
+        let base = &self.wads.first()?.path;
+        let root = crate::compat::game_root_of(base).ok()?;
+        let exe = root.join("Mercenaries2.exe");
+        exe.is_file().then_some(exe)
+    }
+
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is
     /// never a mystery.
     pub fn paths(&self) -> Vec<&Path> {
