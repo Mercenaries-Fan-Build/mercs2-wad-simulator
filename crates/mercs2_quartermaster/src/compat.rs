@@ -716,6 +716,8 @@ fn item_files(
         match c {
             Contribution::NativeHook {
                 plugin: Some(plugin),
+                touches,
+                signature_guard,
                 ..
             } => {
                 let source = src_relative(plugin).ok_or_else(|| {
@@ -751,6 +753,8 @@ fn item_files(
                     sha256: build::sha256_hex(&bytes),
                     file_name,
                     source,
+                    touches: touches.iter().map(|t| t.0.clone()).collect(),
+                    signature_guard: signature_guard.clone(),
                 });
             }
             Contribution::AddRuntimeDll { dll } => {
