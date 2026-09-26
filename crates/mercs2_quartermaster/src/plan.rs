@@ -217,6 +217,15 @@ pub struct PluginEntry {
     pub relative: String,
     /// Lowercase hex.
     pub sha256: String,
+    /// The exe addresses this plugin patches (`0xHHHHHHHH`), carried from the manifest's `touches`
+    /// so a loader knows what it hooks without disassembling the plugin. Empty when none declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touches: Vec<String>,
+    /// Expected prologue bytes per hooked address (`touches` address → space-separated hex), so the
+    /// plugin can verify the exe has not shifted under it before patching, and M0199 can check the
+    /// declaration against a known build. Empty when the author declared no guards.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub signature_guard: std::collections::BTreeMap<String, String>,
 }
 
 /// One runtime DLL placed in the game root.
