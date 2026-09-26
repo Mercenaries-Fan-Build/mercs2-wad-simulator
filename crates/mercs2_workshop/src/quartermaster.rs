@@ -873,6 +873,21 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("edit_state_machine", "Rewrite a destructible's states"),
             ("edit_world", "Move / rotate / re-model a layer's placed entities"),
             ("edit_stringdb", "Correct or localise UI text"),
+            ("replace_phy2", "Swap a shipped model's collision (PHY2), same hash"),
+            ("add_placement", "Add one entity to an existing layer"),
+            ("add_layer", "Mint a whole new placement layer"),
+            ("add_animation", "Add a new animation clip"),
+            ("replace_animation", "Replace a shipped animation, same hash"),
+            ("add_shader", "Add a compiled SM3 shader"),
+            ("replace_shader", "Replace a shipped shader, same hash"),
+            ("add_fx", "Add a particle effect"),
+            ("replace_fx", "Replace a shipped fx, same hash"),
+            ("add_schema", "Add an ECS component schema"),
+            ("add_ai_squad_template", "Add an AI squad template"),
+            ("replace_terrain_cell", "Replace a terrain cell, same hash"),
+            ("add_stringdb_keys", "Add brand-new string-table keys"),
+            ("replace_stringdb_text", "Rewrite strings by exact text match"),
+            ("add_language", "Add a new selectable language (new base WAD)"),
         ],
     ),
     (
@@ -880,6 +895,9 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("patch_lua", "Append to a shipped script"),
             ("activate_layer", "Turn a hidden world-state layer on (permanent)"),
+            ("add_script", "Mint a new Lua module (import-able)"),
+            ("replace_lua", "Replace a shipped script's bytecode"),
+            ("add_shop_item", "Add a purchasable shop item"),
         ],
     ),
     (
@@ -1046,6 +1064,99 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             payload: PathBuf::from("src/payload.bin"),
             target_layer: Layer::Data,
             touches: Vec::new(),
+        },
+        "add_script" => Contribution::AddScript {
+            name,
+            source: PathBuf::from("src/module.lua"),
+        },
+        "replace_lua" => Contribution::ReplaceLua {
+            target: "wifpmcinterior".into(),
+            source: PathBuf::from("src/module.lua"),
+        },
+        "replace_phy2" => Contribution::ReplacePhy2 {
+            target: "al_veh_boat_destroyer".into(),
+            phy2: PathBuf::from("src/collision.phy2"),
+        },
+        "add_placement" => Contribution::AddPlacement {
+            layer: "layers_static".into(),
+            entity: PathBuf::from("src/placement.yaml"),
+        },
+        "add_layer" => Contribution::AddLayer {
+            name,
+            template: "layers_static".into(),
+            entities: PathBuf::from("src/entities.yaml"),
+        },
+        "add_animation" => Contribution::AddAnimation {
+            name,
+            clip: PathBuf::from("src/clip.hkx"),
+            trnm: PathBuf::from("src/clip.trnm"),
+        },
+        "replace_animation" => Contribution::ReplaceAnimation {
+            target: "shipped_anim".into(),
+            clip: PathBuf::from("src/clip.hkx"),
+            trnm: PathBuf::from("src/clip.trnm"),
+        },
+        "add_shader" => Contribution::AddShader {
+            name,
+            blob: PathBuf::from("src/shader.bin"),
+        },
+        "replace_shader" => Contribution::ReplaceShader {
+            target: "shipped_shader".into(),
+            blob: PathBuf::from("src/shader.bin"),
+        },
+        "add_fx" => Contribution::AddFx {
+            name,
+            payload: PathBuf::from("src/effect.fxdict"),
+        },
+        "replace_fx" => Contribution::ReplaceFx {
+            target: "shipped_fx".into(),
+            payload: PathBuf::from("src/effect.fxdict"),
+        },
+        "add_schema" => Contribution::AddSchema {
+            name,
+            schm: PathBuf::from("src/component.schm"),
+        },
+        // type_id / type_hash placeholder 0: the author MUST supply the real values (the AI-squad
+        // type-id is not in `aset_type_ids`), so a 0 serializes fine and lints loud — the same
+        // "valid to serialize, loud to lint" contract as every other stub's placeholder path.
+        "add_ai_squad_template" => Contribution::AddAiSquadTemplate {
+            name,
+            config: PathBuf::from("src/squad.bin"),
+            type_id: 0,
+            type_hash: 0,
+        },
+        "replace_terrain_cell" => Contribution::ReplaceTerrainCell {
+            target: "shipped_cell".into(),
+            cell: PathBuf::from("src/terrain_cell.bin"),
+        },
+        "add_stringdb_keys" => Contribution::AddStringDbKeys {
+            target: "english".into(),
+            strings: PathBuf::from("src/new_keys.txt"),
+        },
+        "replace_stringdb_text" => Contribution::ReplaceStringDbText {
+            target: "english".into(),
+            pairs: PathBuf::from("src/text.pairs"),
+        },
+        "add_language" => Contribution::AddLanguage {
+            name,
+            display: "My Language".into(),
+            strings: PathBuf::from("src/strings.txt"),
+            base: None,
+        },
+        "add_shop_item" => Contribution::AddShopItem {
+            id: format!("my_item_{n}"),
+            name: "[my.item]".into(),
+            description: String::new(),
+            icon: "vehicles_tank_m1a2".into(),
+            shops: vec![mercs2_quartermaster::manifest::ShopVendor::Pmc],
+            catalog: mercs2_quartermaster::manifest::ShopCatalog::default(),
+            item_type: Some(mercs2_quartermaster::manifest::ShopItemType::Heavy),
+            cash_cost: 0,
+            fuel_cost: 0,
+            max_stock: 1,
+            unlocked: false,
+            behaviour: None,
+            equipment_type: None,
         },
         _ => return None,
     })
