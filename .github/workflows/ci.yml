@@ -1,0 +1,67 @@
+name: CI
+
+# Pull requests only, per the repo's CI contract. Pushes to main are not gated here
+# (the Release workflow handles tags); add a `push:` block if that changes.
+on:
+  pull_request:
+
+# One in-flight run per PR branch; a new push cancels the previous run's spend.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to the toolchain the repo declares in .tool-versions, so CI exercises the
+      # same compiler developers use rather than whatever "stable" happens to be.
+      - uses: dtolnay/rust-toolchain@1.94.1
+
+      # mercs2_engine links two C system libraries on Linux: gilrs -> libudev-sys
+      # (gamepad hotplug via evdev) and cpal -> alsa-sys (audio output). The workspace
+      # test build compiles the engine, so both are required — the same packages the
+      # Release workflow installs for its 64-bit Linux rows.
+      - name: Install engine system libraries
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libasound2-dev
+
+      # Cache the registry, git deps and target dir keyed on the lockfile + toolchain.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # One pass over the whole workspace. nextest runs every crate's tests as parallel
+      # processes and (via the `ci` profile's fail-fast = false) does not stop at the
+      # first failure, so all 40 crates are exercised in a single run. Results are
+      # written to target/nextest/ci/junit.xml for the per-crate rollup below.
+      #
+      # NOTE: tests that need the retail vz.wad self-skip (they print "SKIPPING: no
+      # vz.wad discovered" and return early) because that asset cannot be committed.
+      # In CI those cases run and pass without asserting — they are exercised but do
+      # not verify game-data behaviour. Set MERCS2_GAME_DIR on a self-hosted runner to
+      # exercise them for real.
+      - name: Run workspace tests (nextest)
+        run: cargo nextest run --workspace --profile ci
+
+      # nextest does not run doctests. Run them separately so the crates carrying
+      # fenced doc examples are exercised too; cargo attributes each as `Doc-tests <crate>`.
+      # `always()` so a nextest failure doesn't skip doctest coverage.
+      - name: Run doctests
+        if: always()
+        run: cargo test --workspace --doc
+
+      # Roll the JUnit report up into a per-crate Passed/Failed/Skipped table in the
+      # PR's checks summary, so a failure is attributable to a specific crate at a
+      # glance. `always()` so the table is produced even when tests failed.
+      - name: Per-crate summary
+        if: always()
+        run: python3 scripts/ci/nextest_summary.py target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY"
