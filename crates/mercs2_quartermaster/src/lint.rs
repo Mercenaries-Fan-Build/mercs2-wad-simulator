@@ -234,6 +234,18 @@ pub const M0202_COLLISION_ON_SKINNED: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_model",
 };
 
+/// A native_hook `signature_guard` is malformed — a guard for an address the hook does not
+/// `touch`, or a value that is not hex prologue bytes — or, with the game exe in hand, names bytes
+/// that do not match `Mercenaries2.exe` at that address. The guard is a plugin's load-time defence
+/// against patching an exe that has shifted under it; a wrong or missing guard defeats it silently.
+/// The malformed cases are hermetic errors; the exe mismatch is a game-gated warning (the local exe
+/// may be a different build than the hook targets), and an unguarded touch is an advisory.
+pub const M0199_SIGNATURE_GUARD: Rule = Rule {
+    code: "M0199",
+    title: "a native_hook signature guard is malformed, or does not match the exe it names",
+    doc: "docs/modding/manifest_format.md#native_hook",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -267,6 +279,7 @@ pub const RULES: &[Rule] = &[
     M0178_DLL_NOT_LOADABLE,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
+    M0199_SIGNATURE_GUARD,
     M0200_LANGUAGE_NAME_UNUSABLE,
     M0201_LANGUAGE_NO_SELECTOR,
     M0211_RESERVED_NAME,
@@ -324,11 +337,81 @@ pub fn aset_row_is_single_block(packed_block_ref: u32, secondary_ref: u32) -> bo
     packed_block_ref & 0xFFFF == 0xFFFF && secondary_ref == 0xFFFF_FFFF
 }
 
+/// Parse a signature-guard value — space-separated hex byte pairs like `"55 8B EC"` — into bytes.
+/// `None` if it is empty or any token is not a single hex byte. Shared by the hermetic M0199 check
+/// (validity) and the game-gated one (the bytes to compare against the exe).
+fn parse_prologue_bytes(s: &str) -> Option<Vec<u8>> {
+    let bytes: Option<Vec<u8>> = s
+        .split_whitespace()
+        .map(|tok| (tok.len() <= 2).then(|| u8::from_str_radix(tok, 16).ok()).flatten())
+        .collect();
+    bytes.filter(|b| !b.is_empty())
+}
+
+/// Render bytes back as the guard's own `"55 8B EC"` spelling, for a diagnostic that quotes them.
+fn hex_bytes(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+}
+
+/// An absolute `0xHHHHHHHH` address (a native_hook `touches` / guard key) as a u32, or `None`.
+fn parse_address(s: &str) -> Option<u32> {
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
 /// Rules that need the retail WADs. Separate from [`lint`] on purpose: everything there runs in CI
 /// with no game, and mixing the two would make the hermetic set impossible to run alone.
 pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
+        // M0199 (game-gated half): compare each declared signature guard against the bytes actually
+        // at that address in `Mercenaries2.exe`. Self-skips when the exe is not beside the install.
+        if let Contribution::NativeHook { touches: _, signature_guard, .. } = c {
+            if !signature_guard.is_empty() {
+                if let Some(exe_path) = game.exe_path() {
+                    if let Ok(exe) = std::fs::read(&exe_path) {
+                        for (addr, sig) in signature_guard {
+                            // Malformed addr/bytes are the hermetic half's job (M0199 error there);
+                            // here we only verify the ones we can actually read.
+                            let (Some(va), Some(expected)) =
+                                (parse_address(addr), parse_prologue_bytes(sig))
+                            else {
+                                continue;
+                            };
+                            match crate::pe::read_at_va(&exe, va, expected.len()) {
+                                Some(actual) if actual == expected => {}
+                                Some(actual) => out.push(Diagnostic {
+                                    rule: M0199_SIGNATURE_GUARD,
+                                    severity: Severity::Warning,
+                                    message: format!(
+                                        "signature_guard for {addr} expects [{}] but {} has [{}] \
+                                         there. The local exe may be a different build than this \
+                                         hook targets — verify against the intended \
+                                         Mercenaries2.exe before shipping.",
+                                        hex_bytes(&expected),
+                                        exe_path.display(),
+                                        hex_bytes(&actual)
+                                    ),
+                                    at: Some(index),
+                                    fix: None,
+                                }),
+                                None => out.push(Diagnostic {
+                                    rule: M0199_SIGNATURE_GUARD,
+                                    severity: Severity::Warning,
+                                    message: format!(
+                                        "signature_guard names {addr}, which maps into no readable \
+                                         code of {} — that address is not part of this exe build.",
+                                        exe_path.display()
+                                    ),
+                                    at: Some(index),
+                                    fix: None,
+                                }),
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Contribution::ReplaceTexture { target, .. } = c {
             let hash = crate::manifest::asset_hash(target);
             // Use EVERY row, not just the primary one: a shared texture may have no primary row at
@@ -1091,7 +1174,8 @@ pub fn lint(
                 target,
                 plugin,
                 symbol,
-                ..
+                touches,
+                signature_guard,
             } => {
                 if *target == Target::Reimpl && plugin.is_some() {
                     out.push(Diagnostic {
@@ -1116,6 +1200,59 @@ pub fn lint(
                         at: Some(index),
                         fix: None,
                     });
+                }
+                // M0199 (hermetic half). A guard defends a PATCHED address, so it must name one the
+                // hook `touches` and carry real prologue bytes; a touched address with no guard is a
+                // missed defence. The byte-vs-exe check is the game-gated half in `game_checks`.
+                let touched: std::collections::BTreeSet<&str> =
+                    touches.iter().map(|t| t.0.as_str()).collect();
+                for (addr, sig) in signature_guard {
+                    if !touched.contains(addr.as_str()) {
+                        out.push(Diagnostic {
+                            rule: M0199_SIGNATURE_GUARD,
+                            severity: Severity::Error,
+                            message: format!(
+                                "signature_guard names {addr}, which is not in this hook's \
+                                 `touches`. A guard protects a patched address; guarding one the \
+                                 hook never touches is a mistake."
+                            ),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
+                    if parse_prologue_bytes(sig).is_none() {
+                        out.push(Diagnostic {
+                            rule: M0199_SIGNATURE_GUARD,
+                            severity: Severity::Error,
+                            message: format!(
+                                "signature_guard for {addr} is not hex prologue bytes ({sig:?}); \
+                                 write space-separated byte pairs like \"55 8B EC\"."
+                            ),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
+                }
+                // Guards are opt-in: a hook that declares none is not flagged. But once SOME
+                // addresses are guarded, a touched address left unguarded is almost certainly an
+                // oversight — that partial-coverage gap is the advisory.
+                if !signature_guard.is_empty() {
+                    for t in touches {
+                        if !signature_guard.contains_key(&t.0) {
+                            out.push(Diagnostic {
+                                rule: M0199_SIGNATURE_GUARD,
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "hook touches {} but guards other addresses and not this one, \
+                                     so a plugin cannot tell whether the exe shifted under it here. \
+                                     Record the expected prologue bytes for that address too.",
+                                    t.0
+                                ),
+                                at: Some(index),
+                                fix: None,
+                            });
+                        }
+                    }
                 }
             }
             Contribution::PlaceFile { file, dest } => {
