@@ -19,7 +19,7 @@
 //!
 //! # Examples
 //! ```no_run
-//! # use ucfx_byteswap::convert;
+//! # use mercs2_formats::be_to_le::convert;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
 //! let le_block = convert::convert_block(&be_block, false, None)?;
