@@ -109,6 +109,8 @@ contributions:
     target: retail
     plugin: src/native/mybridge.asi
     touches: ["0x004CF340"]
+    signature_guard:
+      "0x004CF340": "55 8B EC 51 53 56 57"
 
   - kind: place_file
     file: src/native/mybridge.ini
@@ -128,6 +130,75 @@ contributions:
     max_stock: 4
     unlocked: true
     behaviour: { module: mrxcratedelivery, cargo: "LAVIII (Minigun)", delivery_vehicle: "Mi26 (PMC) (Driver)" }
+
+  - kind: add_script
+    name: my_module
+    source: src/scripts/my_module.lua
+
+  - kind: replace_lua
+    target: wifpmcinterior
+    source: src/scripts/replacement.lua
+
+  - kind: replace_phy2
+    target: al_veh_boat_destroyer
+    phy2: src/collision/destroyer.phy2
+
+  - kind: add_placement
+    layer: layers_static
+    entity: src/world/my_entity.yaml
+
+  - kind: add_layer
+    name: my_new_layer
+    template: layers_static
+    entities: src/world/my_layer.yaml
+
+  - kind: add_animation
+    name: my_clip
+    clip: src/anim/my_clip.hkx
+    trnm: src/anim/my_clip.trnm
+
+  - kind: replace_animation
+    target: shipped_anim
+    clip: src/anim/new_clip.hkx
+    trnm: src/anim/new_clip.trnm
+
+  - kind: add_shader
+    name: my_shader
+    blob: src/shaders/my_shader.bin
+
+  - kind: replace_shader
+    target: shipped_shader
+    blob: src/shaders/new_shader.bin
+
+  - kind: add_fx
+    name: my_fx
+    payload: src/fx/my_fx.fxdict
+
+  - kind: replace_fx
+    target: shipped_fx
+    payload: src/fx/new_fx.fxdict
+
+  - kind: add_schema
+    name: my_component
+    schm: src/schema/my_component.schm
+
+  - kind: add_ai_squad_template
+    name: my_squad
+    config: src/ai/my_squad.bin
+    type_id: 100
+    type_hash: 200
+
+  - kind: replace_terrain_cell
+    target: shipped_cell
+    cell: src/terrain/new_cell.bin
+
+  - kind: add_stringdb_keys
+    target: english
+    strings: src/text/new_keys.txt
+
+  - kind: replace_stringdb_text
+    target: english
+    pairs: src/text/fixes.pairs
 
   - kind: raw
     description: hand-tuned destruction states for the destroyer
@@ -246,7 +317,8 @@ const JSON: &str = r#"
       "kind": "native_hook",
       "target": "retail",
       "plugin": "src/native/mybridge.asi",
-      "touches": ["0x004CF340"]
+      "touches": ["0x004CF340"],
+      "signature_guard": { "0x004CF340": "55 8B EC 51 53 56 57" }
     },
     {
       "kind": "place_file",
@@ -269,6 +341,91 @@ const JSON: &str = r#"
       "max_stock": 4,
       "unlocked": true,
       "behaviour": { "module": "mrxcratedelivery", "cargo": "LAVIII (Minigun)", "delivery_vehicle": "Mi26 (PMC) (Driver)" }
+    },
+    {
+      "kind": "add_script",
+      "name": "my_module",
+      "source": "src/scripts/my_module.lua"
+    },
+    {
+      "kind": "replace_lua",
+      "target": "wifpmcinterior",
+      "source": "src/scripts/replacement.lua"
+    },
+    {
+      "kind": "replace_phy2",
+      "target": "al_veh_boat_destroyer",
+      "phy2": "src/collision/destroyer.phy2"
+    },
+    {
+      "kind": "add_placement",
+      "layer": "layers_static",
+      "entity": "src/world/my_entity.yaml"
+    },
+    {
+      "kind": "add_layer",
+      "name": "my_new_layer",
+      "template": "layers_static",
+      "entities": "src/world/my_layer.yaml"
+    },
+    {
+      "kind": "add_animation",
+      "name": "my_clip",
+      "clip": "src/anim/my_clip.hkx",
+      "trnm": "src/anim/my_clip.trnm"
+    },
+    {
+      "kind": "replace_animation",
+      "target": "shipped_anim",
+      "clip": "src/anim/new_clip.hkx",
+      "trnm": "src/anim/new_clip.trnm"
+    },
+    {
+      "kind": "add_shader",
+      "name": "my_shader",
+      "blob": "src/shaders/my_shader.bin"
+    },
+    {
+      "kind": "replace_shader",
+      "target": "shipped_shader",
+      "blob": "src/shaders/new_shader.bin"
+    },
+    {
+      "kind": "add_fx",
+      "name": "my_fx",
+      "payload": "src/fx/my_fx.fxdict"
+    },
+    {
+      "kind": "replace_fx",
+      "target": "shipped_fx",
+      "payload": "src/fx/new_fx.fxdict"
+    },
+    {
+      "kind": "add_schema",
+      "name": "my_component",
+      "schm": "src/schema/my_component.schm"
+    },
+    {
+      "kind": "add_ai_squad_template",
+      "name": "my_squad",
+      "config": "src/ai/my_squad.bin",
+      "type_id": 100,
+      "type_hash": 200
+    },
+    {
+      "kind": "replace_terrain_cell",
+      "target": "shipped_cell",
+      "cell": "src/terrain/new_cell.bin"
+    },
+    {
+      "kind": "add_stringdb_keys",
+      "target": "english",
+      "strings": "src/text/new_keys.txt"
+    },
+    {
+      "kind": "replace_stringdb_text",
+      "target": "english",
+      "pairs": "src/text/fixes.pairs"
     },
     {
       "kind": "raw",
@@ -395,6 +552,7 @@ kind = "native_hook"
 target = "retail"
 plugin = "src/native/mybridge.asi"
 touches = ["0x004CF340"]
+signature_guard = { "0x004CF340" = "55 8B EC 51 53 56 57" }
 
 [[contributions]]
 kind = "place_file"
@@ -417,6 +575,91 @@ fuel_cost = 75
 max_stock = 4
 unlocked = true
 behaviour = { module = "mrxcratedelivery", cargo = "LAVIII (Minigun)", delivery_vehicle = "Mi26 (PMC) (Driver)" }
+
+[[contributions]]
+kind = "add_script"
+name = "my_module"
+source = "src/scripts/my_module.lua"
+
+[[contributions]]
+kind = "replace_lua"
+target = "wifpmcinterior"
+source = "src/scripts/replacement.lua"
+
+[[contributions]]
+kind = "replace_phy2"
+target = "al_veh_boat_destroyer"
+phy2 = "src/collision/destroyer.phy2"
+
+[[contributions]]
+kind = "add_placement"
+layer = "layers_static"
+entity = "src/world/my_entity.yaml"
+
+[[contributions]]
+kind = "add_layer"
+name = "my_new_layer"
+template = "layers_static"
+entities = "src/world/my_layer.yaml"
+
+[[contributions]]
+kind = "add_animation"
+name = "my_clip"
+clip = "src/anim/my_clip.hkx"
+trnm = "src/anim/my_clip.trnm"
+
+[[contributions]]
+kind = "replace_animation"
+target = "shipped_anim"
+clip = "src/anim/new_clip.hkx"
+trnm = "src/anim/new_clip.trnm"
+
+[[contributions]]
+kind = "add_shader"
+name = "my_shader"
+blob = "src/shaders/my_shader.bin"
+
+[[contributions]]
+kind = "replace_shader"
+target = "shipped_shader"
+blob = "src/shaders/new_shader.bin"
+
+[[contributions]]
+kind = "add_fx"
+name = "my_fx"
+payload = "src/fx/my_fx.fxdict"
+
+[[contributions]]
+kind = "replace_fx"
+target = "shipped_fx"
+payload = "src/fx/new_fx.fxdict"
+
+[[contributions]]
+kind = "add_schema"
+name = "my_component"
+schm = "src/schema/my_component.schm"
+
+[[contributions]]
+kind = "add_ai_squad_template"
+name = "my_squad"
+config = "src/ai/my_squad.bin"
+type_id = 100
+type_hash = 200
+
+[[contributions]]
+kind = "replace_terrain_cell"
+target = "shipped_cell"
+cell = "src/terrain/new_cell.bin"
+
+[[contributions]]
+kind = "add_stringdb_keys"
+target = "english"
+strings = "src/text/new_keys.txt"
+
+[[contributions]]
+kind = "replace_stringdb_text"
+target = "english"
+pairs = "src/text/fixes.pairs"
 
 [[contributions]]
 kind = "raw"
@@ -461,6 +704,22 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "place_file",
             "add_runtime_dll",
             "add_shop_item",
+            "add_script",
+            "replace_lua",
+            "replace_phy2",
+            "add_placement",
+            "add_layer",
+            "add_animation",
+            "replace_animation",
+            "add_shader",
+            "replace_shader",
+            "add_fx",
+            "replace_fx",
+            "add_schema",
+            "add_ai_squad_template",
+            "replace_terrain_cell",
+            "add_stringdb_keys",
+            "replace_stringdb_text",
             "raw"
         ]
     );
