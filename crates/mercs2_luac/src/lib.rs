@@ -70,24 +70,62 @@ extern "C-unwind" fn writer(
     0 // 0 = ok
 }
 
+/// Why [`compile`] produced no bytecode.
+///
+/// Three different kinds of failure, and a caller treats them differently: a [`Syntax`] error is
+/// the author's to fix, a [`Header`] mismatch means this toolchain lost one of its Mercs2 patches,
+/// and [`Internal`] means the compiler could not run at all.
+///
+/// [`Syntax`]: CompileError::Syntax
+/// [`Header`]: CompileError::Header
+/// [`Internal`]: CompileError::Internal
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompileError {
+    /// Lua refused the source. The message is Lua's own, with the chunk name and line number.
+    Syntax(String),
+    /// The compiled chunk does not start with [`MERCS2_LUAQ_HEADER`]. `got` holds up to the first
+    /// 12 bytes that were produced.
+    Header { got: Vec<u8>, want: [u8; 12] },
+    /// The compiler itself failed: no Lua state, a NUL in the chunk name, or `lua_dump` failing.
+    Internal(String),
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileError::Syntax(message) => write!(f, "{message}"),
+            CompileError::Header { got, want } => write!(
+                f,
+                "compiled a chunk the game cannot load: header {got:02x?} != expected {want:02x?} \
+                 (the vendored Lua lost one of its Mercs2 patches)"
+            ),
+            CompileError::Internal(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for CompileError {}
+
 /// Compile Lua 5.1 source to Mercenaries 2 LuaQ bytecode.
 ///
 /// `chunk_name` is what the VM reports in a runtime traceback — pass the script's name
 /// (e.g. `"wifpmcinterior"`) so an error in a mod's Lua points somewhere useful.
 ///
-/// A syntax error returns `Err` with Lua's own message (including a line number), which is
-/// exactly what we want to surface to a mod author.
-pub fn compile(source: &str, chunk_name: &str) -> Result<Vec<u8>, String> {
+/// A syntax error returns [`CompileError::Syntax`] with Lua's own message (including a line
+/// number), which is exactly what we want to surface to a mod author.
+pub fn compile(source: &str, chunk_name: &str) -> Result<Vec<u8>, CompileError> {
     // Lua expects a NUL-terminated chunk name; the source is passed with an explicit length.
     let name = std::ffi::CString::new(chunk_name)
-        .map_err(|_| "chunk name contains a NUL byte".to_string())?;
+        .map_err(|_| CompileError::Internal("chunk name contains a NUL byte".to_string()))?;
 
     // SAFETY: single-threaded use of a state we create and close here. Every raw pointer
     // is derived from a live local, and we check each return code before proceeding.
     unsafe {
         let l = luaL_newstate();
         if l.is_null() {
-            return Err("could not create a Lua state (out of memory)".into());
+            return Err(CompileError::Internal(
+                "could not create a Lua state (out of memory)".into(),
+            ));
         }
 
         // Guard so an early return still closes the state.
@@ -116,7 +154,7 @@ pub fn compile(source: &str, chunk_name: &str) -> Result<Vec<u8>, String> {
                     .into_owned()
             };
             lua_settop(l, -2);
-            return Err(text);
+            return Err(CompileError::Syntax(text));
         }
 
         // Dump the compiled function at the top of the stack.
@@ -125,27 +163,67 @@ pub fn compile(source: &str, chunk_name: &str) -> Result<Vec<u8>, String> {
         drop(guard);
 
         if rc != 0 {
-            return Err(format!("lua_dump failed (code {rc})"));
+            return Err(CompileError::Internal(format!("lua_dump failed (code {rc})")));
         }
 
         // Never hand back a chunk in the wrong dialect. If this ever trips, the vendored
         // sources lost a patch and the bytecode would be silently unloadable in-game.
-        if out.len() < MERCS2_LUAQ_HEADER.len() || out[..12] != MERCS2_LUAQ_HEADER {
-            return Err(format!(
-                "compiled a chunk the game cannot load: header {:02x?} != expected {:02x?} \
-                 (the vendored Lua lost one of its Mercs2 patches)",
-                &out[..out.len().min(12)],
-                MERCS2_LUAQ_HEADER
-            ));
-        }
+        check_header(&out)?;
 
         Ok(out)
     }
 }
 
+/// Check that `chunk` starts with [`MERCS2_LUAQ_HEADER`].
+///
+/// [`compile`] runs this on every chunk it returns. It is public so that a caller that writes the
+/// bytecode out and reads it back (`qm compile-lua --out-dir`) checks the bytes on disk with the
+/// same rule.
+pub fn check_header(chunk: &[u8]) -> Result<(), CompileError> {
+    if chunk.len() < MERCS2_LUAQ_HEADER.len() || chunk[..12] != MERCS2_LUAQ_HEADER {
+        return Err(CompileError::Header {
+            got: chunk[..chunk.len().min(12)].to_vec(),
+            want: MERCS2_LUAQ_HEADER,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each failure comes back as its own variant, so a caller can tell an author's syntax error
+    /// from a toolchain defect without matching on message text.
+    #[test]
+    fn compile_error_is_typed() {
+        match compile("function oops(\nreturn 1", "t") {
+            Err(CompileError::Syntax(m)) => assert!(m.contains(":2:"), "line number: {m}"),
+            other => panic!("expected a Syntax error, got {other:?}"),
+        }
+        match compile("return 1", "has\0nul") {
+            Err(CompileError::Internal(m)) => assert!(m.contains("NUL"), "{m}"),
+            other => panic!("expected an Internal error, got {other:?}"),
+        }
+        let stock = [0x1b, 0x4c, 0x75, 0x61, 0x51, 0x00, 0x01, 0x04, 0x08, 0x04, 0x08, 0x00];
+        assert_eq!(
+            check_header(&stock),
+            Err(CompileError::Header {
+                got: stock.to_vec(),
+                want: MERCS2_LUAQ_HEADER
+            })
+        );
+        assert_eq!(
+            check_header(b"\x1bLua"),
+            Err(CompileError::Header {
+                got: b"\x1bLua".to_vec(),
+                want: MERCS2_LUAQ_HEADER
+            }),
+            "a short chunk reports what it has"
+        );
+        let good = compile("return 1", "t").expect("compile");
+        assert_eq!(check_header(&good), Ok(()));
+    }
 
     /// The whole point of the crate: the header must match the game's, from THIS host.
     #[test]
@@ -162,7 +240,9 @@ mod tests {
     /// A mod author's typo must come back as a message with a line number, not a panic.
     #[test]
     fn syntax_errors_are_reported_with_a_line_number() {
-        let err = compile("function oops(\nreturn 1", "wifpmcinterior").unwrap_err();
+        let err = compile("function oops(\nreturn 1", "wifpmcinterior")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("wifpmcinterior"), "names the chunk: {err}");
     }
 

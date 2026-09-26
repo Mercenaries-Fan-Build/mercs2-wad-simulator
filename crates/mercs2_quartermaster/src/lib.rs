@@ -22,12 +22,15 @@
 
 pub mod blast;
 pub mod build;
+pub mod compat;
 pub mod discover;
 pub mod game;
 pub mod link;
 pub mod lint;
 pub mod manifest;
 pub mod names;
+pub mod pe;
+pub mod plan;
 pub mod states;
 pub mod world;
 
@@ -43,8 +46,9 @@ pub use discover::{
 pub use game::{GameStack, GameStackError};
 pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use manifest::{
-    Contribution, Layer, Load, Manifest, PlaceIn, Requirement, Retarget, Shipment, Target,
-    Textures, Touch, ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
+    CapabilityReq, CompatibleReq, ConflictDecl, Contribution, Layer, Load, Manifest, PlaceIn,
+    Requirement, Retarget, Shipment, ShipmentReq, Superseded, Target, Textures, Touch,
+    ValidateError, DENY_LISTED_DLL_STEMS, FORMAT_VERSION, MAX_NAME_LEN,
 };
 pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 

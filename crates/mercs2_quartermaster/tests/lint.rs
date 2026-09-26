@@ -11,7 +11,7 @@ fn parse(yaml: &str) -> Manifest {
 
 fn shipment_with(contributions: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: s, version: 1.0.0, target: retail }}
 contributions:
 {contributions}"
@@ -57,14 +57,17 @@ fn errors_block_the_build_and_warnings_do_not() {
         "an unknown wearer must block"
     );
 
+    // A new language with no selector plugin in the Shipment is advisory (M0201): the selector may
+    // be installed separately.
     let warning_only = shipment_with(
-        "  - kind: patch_lua
-    target: wifmissionflow
-    append: src/a.lua
+        "  - kind: add_language
+    name: klingon
+    display: Klingon
+    strings: src/klingon.txt
 ",
     );
     let diags = lint::lint(&warning_only, None, None);
-    assert_eq!(codes(&diags), vec!["M0141"]);
+    assert_eq!(codes(&diags), vec!["M0201"]);
     assert_eq!(diags[0].severity, Severity::Warning);
     assert!(!lint::blocks_build(&diags), "a warning must not block");
 }
@@ -146,7 +149,7 @@ fn a_raw_contribution_that_declares_its_radius_is_quiet() {
 #[test]
 fn an_asi_on_a_reimpl_target_is_an_error() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: reimpl }
 contributions:
   - kind: native_hook
@@ -289,105 +292,6 @@ fn a_companion_beside_its_plugin_or_belonging_to_no_plugin_is_quiet() {
         !codes(&lint::lint(&unrelated, None, None)).contains(&"M0163"),
         "a file that is nobody's companion is not this rule's business"
     );
-}
-
-// ---------------------------------------------------------------------------
-// M0170 / M0171 — pinned external requirements
-// ---------------------------------------------------------------------------
-
-fn with_requirement(url: &str, sha: &str) -> Manifest {
-    parse(&format!(
-        "format: 1
-shipment: {{ name: s, version: 1.0.0, target: retail }}
-load:
-  requires:
-    - url: {url}
-      sha256: {sha}
-contributions: []
-"
-    ))
-}
-
-const GOOD_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-/// An unusable pin is worse than none: it reads as verified.
-#[test]
-fn a_malformed_digest_is_an_error() {
-    let diags = lint::lint(
-        &with_requirement("https://example.com/x.asi", "deadbeef"),
-        None,
-        None,
-    );
-    assert!(codes(&diags).contains(&"M0170"));
-    assert!(lint::blocks_build(&diags));
-}
-
-#[test]
-fn a_well_formed_pin_over_https_is_quiet() {
-    let m = with_requirement(
-        "https://github.com/o/r/releases/download/v1/x.asi",
-        GOOD_SHA,
-    );
-    assert!(lint::lint(&m, None, None).is_empty());
-}
-
-/// The digest still protects integrity over plain http, so this is a warning rather than fatal.
-#[test]
-fn an_http_requirement_warns_but_does_not_block() {
-    let diags = lint::lint(
-        &with_requirement("http://example.com/x.asi", GOOD_SHA),
-        None,
-        None,
-    );
-    assert_eq!(codes(&diags), vec!["M0171"]);
-    assert_eq!(diags[0].severity, Severity::Warning);
-    assert!(!lint::blocks_build(&diags));
-}
-
-// ---------------------------------------------------------------------------
-// M0172 — managed requirements resolved by semver range
-// ---------------------------------------------------------------------------
-
-fn with_compatible(name: &str, version: &str) -> Manifest {
-    parse(&format!(
-        "format: 1
-shipment: {{ name: s, version: 1.0.0, target: retail }}
-load:
-  requires:
-    - name: {name}
-      version: \"{version}\"
-contributions: []
-"
-    ))
-}
-
-/// A managed requirement with a valid range is resolved downstream; nothing to flag at lint time.
-#[test]
-fn a_valid_version_range_is_quiet() {
-    assert!(lint::lint(&with_compatible("m2-sdk", "^0.1"), None, None).is_empty());
-}
-
-/// An unparseable range is fatal — resolution has nothing to compare releases against.
-#[test]
-fn a_bad_version_range_is_an_error() {
-    let diags = lint::lint(&with_compatible("m2-sdk", "not-a-range"), None, None);
-    assert!(codes(&diags).contains(&"M0172"));
-    assert!(lint::blocks_build(&diags));
-}
-
-/// The untagged forms are disjoint: `{name,version}` is a managed dep, `{url,sha256}` is external.
-/// If these ever collided, a pinned third-party ASI could be misread as a managed component.
-#[test]
-fn managed_and_external_requirements_do_not_collide() {
-    use mercs2_quartermaster::Requirement;
-    assert!(matches!(
-        with_compatible("m2-sdk", ">=0.0.3, <1.0.0").load.requires.as_slice(),
-        [Requirement::Compatible { .. }]
-    ));
-    assert!(matches!(
-        with_requirement("https://example.com/x.asi", GOOD_SHA).load.requires.as_slice(),
-        [Requirement::External { .. }]
-    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -785,4 +689,162 @@ fn the_language_rules_are_registered() {
     for code in ["M0200", "M0201"] {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// M0162 / M0178 — add_runtime_dll
+// ---------------------------------------------------------------------------
+
+/// A header-only PE image with the given COFF machine and characteristics (the four fields
+/// `pe::pe_dll_load_blocker` reads).
+fn pe_image(machine: u16, characteristics: u16) -> Vec<u8> {
+    let pe_at = 0x80usize;
+    let mut out = vec![0u8; pe_at + 24];
+    out[0..2].copy_from_slice(b"MZ");
+    out[0x3C..0x40].copy_from_slice(&(pe_at as u32).to_le_bytes());
+    out[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+    out[pe_at + 4..pe_at + 6].copy_from_slice(&machine.to_le_bytes());
+    out[pe_at + 22..pe_at + 24].copy_from_slice(&characteristics.to_le_bytes());
+    out
+}
+
+/// M0162 needs only the manifest, so it fires with no root; M0178 needs the
+/// bytes, so it fires only with one — and is quiet on a loadable i386 DLL.
+#[test]
+fn m0162_and_m0178_from_lint() {
+    // Shipment `s`: its runtime DLL must be `s.dll`.
+    let wrong_name = shipment_with("  - kind: add_runtime_dll\n    dll: src/m2-sdk.dll\n");
+    let diags = lint::lint(&wrong_name, None, None);
+    assert_eq!(codes(&diags), vec!["M0162"], "{diags:?}");
+    assert!(diags[0].message.contains("`s.dll`"), "{}", diags[0].message);
+    assert_eq!(diags[0].at, Some(0));
+
+    let deny = shipment_with("  - kind: add_runtime_dll\n    dll: src/Cruise.dll\n");
+    assert_eq!(codes(&lint::lint(&deny, None, None)), vec!["M0162"]);
+
+    let right = shipment_with("  - kind: add_runtime_dll\n    dll: src/s.dll\n");
+    assert!(lint::lint(&right, None, None).is_empty(), "no root: M0178 cannot run");
+
+    let root = std::env::temp_dir().join(format!("qm_lint_rtdll_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/s.dll"), pe_image(0x8664, 0x2102)).unwrap();
+    let diags = lint::lint(&right, Some(&root), None);
+    assert_eq!(codes(&diags), vec!["M0178"], "{diags:?}");
+    assert!(diags[0].message.contains("not i386"), "{}", diags[0].message);
+    assert!(lint::blocks_build(&diags));
+
+    std::fs::write(root.join("src/s.dll"), pe_image(0x014C, 0x2102)).unwrap();
+    assert!(lint::lint(&right, Some(&root), None).is_empty(), "a loadable i386 DLL is clean");
+
+    // A missing file is M0110's to report; M0178 does not also fire on it.
+    std::fs::remove_file(root.join("src/s.dll")).unwrap();
+    assert_eq!(codes(&lint::lint(&right, Some(&root), None)), vec!["M0110"]);
+}
+
+/// The finding element a `lint-report.json` carries: lint's four severities
+/// map one to one, `at` becomes a `contributions` ref, and `fix` is carried through. No hermetic rule
+/// emits HANG today (the HANG-class rules run against a built WAD), so the mapping is pinned here.
+#[test]
+fn a_diagnostic_becomes_the_shared_finding_element() {
+    use mercs2_quartermaster::plan::{FindingSeverity, Section};
+    let d = lint::Diagnostic {
+        rule: lint::M0001_DANGLING_RUNG,
+        severity: Severity::Hang,
+        message: "m".into(),
+        at: Some(3),
+        fix: Some("f".into()),
+    };
+    let f = d.to_finding();
+    assert_eq!(f.code, "M0001");
+    assert_eq!(f.severity, FindingSeverity::Hang);
+    assert_eq!(f.items, Vec::<String>::new());
+    assert_eq!(f.refs.len(), 1);
+    assert_eq!(f.refs[0].section, Section::Contributions);
+    assert_eq!(f.refs[0].index, 3);
+    assert_eq!(f.fix.as_deref(), Some("f"));
+    let json = serde_json::to_value(&f).unwrap();
+    assert_eq!(json["severity"], "hang");
+    assert_eq!(json["refs"], serde_json::json!([{ "section": "contributions", "index": 3 }]));
+
+    for (severity, wire) in [
+        (Severity::Info, "info"),
+        (Severity::Warning, "warning"),
+        (Severity::Error, "error"),
+    ] {
+        let f = lint::Diagnostic { severity, at: None, fix: None, ..d.clone() }.to_finding();
+        assert_eq!(serde_json::to_value(&f).unwrap()["severity"], wire);
+        assert!(f.refs.is_empty(), "no `at`, no ref");
+        assert_eq!(f.fix, None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M0199 — native_hook signature guards (hermetic half; the exe-byte check is in game_checks)
+// ---------------------------------------------------------------------------
+
+/// A native_hook with `symbol` (so M0161 stays quiet) touching two addresses, plus whatever guard
+/// block the test supplies.
+fn hook(guard: &str) -> Manifest {
+    shipment_with(&format!(
+        "  - kind: native_hook
+    target: retail
+    symbol: SomeDetour
+    touches: ['0x004CF340', '0x004CF400']
+{guard}"
+    ))
+}
+
+#[test]
+fn m0199_guard_for_an_untouched_address_is_an_error() {
+    let m = hook("    signature_guard:\n      '0x00DEAD00': '55 8B EC'\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags
+        .iter()
+        .find(|d| d.rule.code == "M0199")
+        .unwrap_or_else(|| panic!("M0199 should fire, got {diags:?}"));
+    assert_eq!(d.severity, Severity::Error);
+    assert!(lint::blocks_build(&diags), "a guard for an un-touched address must block");
+}
+
+#[test]
+fn m0199_malformed_prologue_bytes_are_an_error() {
+    let m = hook("    signature_guard:\n      '0x004CF340': 'not hex'\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags
+        .iter()
+        .find(|d| d.rule.code == "M0199")
+        .unwrap_or_else(|| panic!("M0199 should fire, got {diags:?}"));
+    assert_eq!(d.severity, Severity::Error);
+}
+
+#[test]
+fn m0199_partial_coverage_warns_on_the_unguarded_touch() {
+    // One of two touched addresses guarded — the other is likely an oversight.
+    let m = hook("    signature_guard:\n      '0x004CF340': '55 8B EC'\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags
+        .iter()
+        .find(|d| d.rule.code == "M0199")
+        .unwrap_or_else(|| panic!("M0199 should warn, got {diags:?}"));
+    assert_eq!(d.severity, Severity::Warning);
+    assert!(!lint::blocks_build(&diags), "a coverage gap is advisory, not blocking");
+    assert!(d.message.contains("0x004CF400"), "names the unguarded address: {}", d.message);
+}
+
+#[test]
+fn m0199_is_quiet_with_no_guards_or_full_valid_coverage() {
+    // Opt-out: declaring no guards at all is legitimate.
+    assert!(
+        !codes(&lint::lint(&hook(""), None, None)).contains(&"M0199"),
+        "no guards must be silent"
+    );
+    // Full, well-formed coverage of every touched address.
+    let full = hook(
+        "    signature_guard:\n      '0x004CF340': '55 8B EC'\n      '0x004CF400': '53 56 57'\n",
+    );
+    assert!(
+        !codes(&lint::lint(&full, None, None)).contains(&"M0199"),
+        "full valid coverage must be silent"
+    );
 }

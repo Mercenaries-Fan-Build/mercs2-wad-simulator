@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:self-requires",
+      "path": "shipments/self-requires"
+    }
+  ]
+}

@@ -24,20 +24,36 @@ fn notes_repo() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// GitHub's heading→anchor rule: lowercase, drop everything that is not alphanumeric/space/hyphen,
-/// then spaces to hyphens.
+/// GitHub's heading→anchor rule, as `github-slugger` (the slugger GitHub's renderer uses) applies
+/// it: lowercase; remove every character that is not a letter, a number, connector punctuation
+/// (`_`), a space or a hyphen; then each space becomes a hyphen.
 ///
-/// The em dashes in these headings are what make the anchors long and ugly: `## Trap 7 — Your…`
-/// becomes `trap-7--your…`, with the doubled hyphen coming from the dropped dash plus its spaces.
-/// That is exactly why this test exists — nobody derives those by hand correctly.
+/// `_` is KEPT — `### \`edit_stringdb\`` is `#edit_stringdb` — and the backticks around it are
+/// dropped like any other punctuation. The em dashes in these headings are what make the anchors
+/// long and ugly: `## Trap 7 — Your…` becomes `trap-7--your…`, with the doubled hyphen coming from
+/// the dropped dash plus its spaces. That is exactly why this test exists — nobody derives those by
+/// hand correctly.
 fn github_anchor(heading: &str) -> String {
     heading
         .trim()
         .to_lowercase()
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-')
+        .filter(|c| c.is_alphanumeric() || matches!(c, '_' | ' ' | '-'))
         .map(|c| if c == ' ' { '-' } else { c })
         .collect()
+}
+
+/// The rule on headings whose anchors the rules link to.
+#[test]
+fn github_anchor_keeps_underscores_and_drops_punctuation() {
+    assert_eq!(github_anchor("`edit_stringdb`"), "edit_stringdb");
+    assert_eq!(github_anchor("`add_language`"), "add_language");
+    assert_eq!(github_anchor("The Code layer"), "the-code-layer");
+    assert_eq!(
+        github_anchor("Trap 7 — Your reskin makes the game HANG"),
+        "trap-7--your-reskin-makes-the-game-hang"
+    );
+    assert_eq!(github_anchor("1. SDK version — settled"), "1-sdk-version--settled");
 }
 
 fn every_rule() -> Vec<lint::Rule> {

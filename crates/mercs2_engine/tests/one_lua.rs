@@ -59,7 +59,7 @@ fn quartermaster_is_usable_alongside_the_runtime() {
 
     // A Shipment manifest, parsed by the Quartermaster's own model.
     let manifest_src = r#"
-format = 1
+format = 2
 
 [shipment]
 name = "one-lua-probe"

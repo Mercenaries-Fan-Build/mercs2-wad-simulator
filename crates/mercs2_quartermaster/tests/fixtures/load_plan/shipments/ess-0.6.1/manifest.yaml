@@ -1,0 +1,15 @@
+format: 2
+shipment:
+  name: ess
+  version: 0.6.1
+  target: retail
+supersedes:
+  - { dest: on_load, file: 1_Ess.lua }
+  - { dest: on_load, file: 2_EssNames.lua }
+load:
+  requires:
+    - { shipment: lua-bridge, version: "^1.0.0" }
+contributions:
+  - { kind: add_script, name: ess, source: src/ess.lua }
+  - { kind: add_script, name: ess_names, source: src/ess_names.lua }
+  - { kind: add_movie, name: ess_ui, movie: src/ess_ui.gfx }

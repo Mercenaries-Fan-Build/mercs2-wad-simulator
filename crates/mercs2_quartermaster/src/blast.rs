@@ -71,7 +71,11 @@ pub enum Claim {
     OutfitSlot { wearer: String, slug: String },
     /// A hooked native address or symbol.
     NativeHook { at: String },
-    /// A file placed in the game folder, keyed on its PATH relative to that folder.
+    /// A file placed in the game folder, keyed on its PATH relative to that folder, LOWERCASED.
+    ///
+    /// Lowercased because the game folder is on Windows, where `Foo.ini` and `foo.ini` are one file:
+    /// two Shipments whose names differ only in case overwrite each other. Build keys only through
+    /// [`Claim::file_artifact`].
     ///
     /// The path, not the filename: `scripts/config.ini` and `plugins/config.ini` are two different
     /// files and do not fight, while two Shipments both writing `scripts/config.ini` overwrite each
@@ -81,6 +85,14 @@ pub enum Claim {
 }
 
 impl Claim {
+    /// The claim on a game-folder file at `relative` (as [`crate::build::place_path`] joins it),
+    /// keyed lowercased — Windows file names are case-insensitive.
+    pub fn file_artifact(relative: &str) -> Claim {
+        Claim::FileArtifact {
+            path: relative.to_lowercase(),
+        }
+    }
+
     /// `(claim, display name)` for a named asset.
     fn asset(name: &str) -> (Claim, Option<String>) {
         (
@@ -129,27 +141,19 @@ impl Claim {
 pub enum Intent {
     /// Minting a brand-new hash of our own.
     Additive,
-    /// Overwriting a shipped asset, same hash.
+    /// Overwriting a shipped asset, same hash, where the WAD stack's last-mounted-wins is an
+    /// acceptable answer (a texture: the loser is visibly overridden, and load order picks).
     Replace,
+    /// Overwriting a shipped asset, same hash, where two writers are a hard conflict: no load order
+    /// makes both edits true, and the loser's is silently absent.
+    ReplaceExclusive,
+    /// Editing a shipped table that `qm link` MERGES across the installed set, in load order: a
+    /// string table's `edit_stringdb` / `add_stringdb_keys` / `replace_stringdb_text`, the later
+    /// write winning. Many writers compose.
+    Merged,
     /// Opaque bytes we cannot reason about (`raw`). Always fails closed.
     Opaque,
 }
-
-/// Scripts whose composition semantics we have actually reversed, and which therefore merge by
-/// source concatenation instead of whole-block replacement.
-///
-/// This is the curated half of the composition catalog. It is deliberately a SHORT allow-list:
-/// everything absent from it falls to `Exclusive`, so being wrong here costs a false conflict
-/// (annoying, visible) rather than a silent mutual annihilation (catastrophic, invisible).
-const MERGEABLE_SCRIPTS: &[&str] = &[
-    "wifpmcinterior",
-    // The resident shop catalogs `add_shop_item` appends to. Their target tables (`tSupportData`,
-    // `_tEquipment`, `_tRewards`) are module-globals populated at load, so N top-level append rows
-    // union by concatenation exactly as `_tOutfits` does — reversed and safe to merge.
-    "mrxsupportdata",
-    "wifequipmentdata",
-    "mrxrewarddata",
-];
 
 /// The merge class for a claim. Curated domain knowledge; **default is Exclusive**.
 pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass {
@@ -167,12 +171,20 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // Minting a NEW asset name: two Shipments choosing the same name collide, and the chunk
         // registry is FIRST-wins, so one of them silently vanishes. A hard error, not load order.
         Claim::Asset { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        // A table the link merges across the set: every writer's edits land in one link-owned copy.
+        Claim::Asset { .. } if intent == Intent::Merged => MergeClass::OrderedList,
+        // A replacement whose loser would be silently absent (a shader, an effect, a layer edit):
+        // no load order makes both true, so a second writer is a hard conflict.
+        Claim::Asset { .. } if intent == Intent::ReplaceExclusive => MergeClass::Exclusive,
         // Replacing a shipped asset: the WAD stack is last-mounted-wins and picking the winner is
         // exactly what load order is for.
         Claim::Asset { .. } => MergeClass::LastWins,
-        Claim::Script { name } if MERGEABLE_SCRIPTS.contains(&name.as_str()) => {
-            MergeClass::OrderedList
-        }
+        // An APPEND to any script composes: the linker concatenates every Shipment's appends onto
+        // the base source, in load order, and compiles once. A wholesale replacement (`replace_lua`)
+        // cannot compose with anything — neither with a second replacement nor with an append,
+        // which would be appended to source that is no longer there. Both use the SAME claim, so
+        // the stricter class wins and an append beside a replacement is a conflict.
+        Claim::Script { .. } if intent == Intent::Additive => MergeClass::OrderedList,
         Claim::Script { .. } => MergeClass::Exclusive,
         Claim::OutfitSlot { .. } => MergeClass::KeyedSet,
         // No arbitration exists: ASI discovery is filesystem order across four directories, so
@@ -318,10 +330,9 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddScript { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
-            // replace_lua swaps a shipped script's bytecode in place. Same-hash write, `Replace`
-            // intent -- last-mounted wins if two Shipments claim one target, same shape as
-            // `replace_texture`. Note the claim is on the SCRIPT (not the asset hash) so it also
-            // conflicts cleanly with a `patch_lua` on the same target, which we DO want -- an
+            // replace_lua swaps a shipped script's bytecode in place. `Replace` on a script is
+            // `Exclusive`: two replacements of one script conflict. The claim is on the SCRIPT (not
+            // the asset hash) so it also conflicts with a `patch_lua` on the same target -- an
             // append + a wholesale replace of the same script cannot both be true.
             Contribution::ReplaceLua { target, .. } => {
                 push(
@@ -332,9 +343,10 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Intent::Replace,
                 );
             }
-            // replace_phy2 swaps a shipped model's collision. Same-hash asset write, `Replace`.
+            // replace_phy2 swaps a shipped model's collision. Same-hash, and a second Shipment
+            // swapping the same model's collision is a hard conflict.
             Contribution::ReplacePhy2 { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
             // add_placement writes into an existing layer's placement block. Additive by design --
             // two Shipments adding disjoint entity keys to the same layer merge, same-key is the
@@ -351,23 +363,23 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddAnimation { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
-            // Same-hash animation swap. LastWins.
+            // Same-hash animation swap. Two swaps of one clip are a hard conflict.
             Contribution::ReplaceAnimation { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
             // Novel shader. New hash, Additive.
             Contribution::AddShader { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
             Contribution::ReplaceShader { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
             // Novel particle effect. New hash, Additive.
             Contribution::AddFx { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
             Contribution::ReplaceFx { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
             // ECS component schema. New hash, Additive.
             Contribution::AddSchema { name, .. } => {
@@ -377,13 +389,13 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddAiSquadTemplate { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
-            // Terrain cell wholesale replace. Same-hash, LastWins.
+            // Terrain cell wholesale replace. Same-hash; two replacements are a hard conflict.
             Contribution::ReplaceTerrainCell { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
             // A shop item claims the catalog script it appends a row to (support vs equipment) plus
-            // `mrxrewarddata` for the reward row. All are in `MERGEABLE_SCRIPTS`, so these are
-            // `OrderedList` (Additive) — N shop mods union rather than clobber.
+            // `mrxrewarddata` for the reward row. Appends are `OrderedList`, so N shop mods union
+            // rather than clobber.
             Contribution::AddShopItem { catalog, .. } => {
                 let catalog_script = match catalog {
                     crate::manifest::ShopCatalog::Support => "mrxsupportdata",
@@ -405,13 +417,14 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 );
             }
             Contribution::EditStateMachine { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
-            // Edits the WHOLE layer block, emitted as an overlay — last-mounted-wins, like editing a
-            // model's states. Two Shipments editing one layer is a load-order question here (the later
-            // overlay's edits win); a real layer-merge would be the linker's job, not this claim's.
+            // Edits the WHOLE layer block, emitted as an overlay. Two Shipments editing one layer
+            // cannot both win — the earlier overlay's edits would be silently absent — so it is a
+            // hard conflict, and with an `add_placement` on the same layer too (the stricter class
+            // wins).
             Contribution::EditWorld { layer, .. } => {
-                push(Access::Write, Claim::asset(layer), Intent::Replace);
+                push(Access::Write, Claim::asset(layer), Intent::ReplaceExclusive);
             }
             // No Data half — its whole effect is a registration baked into `qm_modloader`, reached by
             // the same one-line trampoline `add_ui` appends to `wifpmcinterior`. Additive, so N layer
@@ -425,22 +438,15 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Intent::Additive,
                 );
             }
-            // Same-hash edit of a shipped table: a Write on the asset, last-wins (like
-            // replace_texture). Two Shipments editing the same table is a load-order question, not
-            // a conflict — whichever mounts last serves the lookup.
-            Contribution::EditStringDb { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
-            }
-            // Adds NEW keys, `Additive` on the target string-table asset. Same first-writer-wins
-            // shape as add_texture / add_movie: two Shipments adding to the same table is fine
-            // if their key sets are disjoint (the build rejects duplicate keys at file load);
-            // two Shipments adding the SAME new key is a hard conflict.
-            Contribution::AddStringDbKeys { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Additive);
-            }
-            // Rewrites strings by content match. Same-hash edit, same shape as edit_stringdb.
-            Contribution::ReplaceStringDbText { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::Replace);
+            // Key edits, key additions and text replacements on a shipped string table. `qm link`
+            // merges every installed Shipment's writes to one table into ONE link-owned copy, in
+            // load order, the later write winning (a text replacement resolves against the table as
+            // merged so far) — so writers to one table compose, whatever they touch. The claim is on
+            // the table's asset hash, so a `raw` declaring that table still fails closed.
+            Contribution::EditStringDb { target, .. }
+            | Contribution::AddStringDbKeys { target, .. }
+            | Contribution::ReplaceStringDbText { target, .. } => {
+                push(Access::Write, Claim::asset(target), Intent::Merged);
             }
             // A NEW language: mints a new stringdb hash (`hash(name)`) carried in a new base WAD.
             // Additive, so two Shipments adding the same language collide (KeyedSet) rather than one
@@ -472,11 +478,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     if let Some(file) = p.file_name().and_then(|f| f.to_str()) {
                         push(
                             Access::Write,
-                            bare(Claim::FileArtifact {
-                                // Built with the SAME joiner the lowering uses, so the claim and
-                                // the emitted placement cannot describe different paths.
-                                path: crate::build::place_path(crate::build::ASI_SUBDIR, file),
-                            }),
+                            // Built with the SAME joiner the lowering uses, so the claim and the
+                            // emitted placement cannot describe different paths.
+                            bare(Claim::file_artifact(&crate::build::place_path(
+                                crate::build::ASI_SUBDIR,
+                                file,
+                            ))),
                             Intent::Replace,
                         );
                     }
@@ -490,9 +497,24 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 if let Some(name) = file.file_name().and_then(|f| f.to_str()) {
                     push(
                         Access::Write,
-                        bare(Claim::FileArtifact {
-                            path: crate::build::place_path(dest.relative_dir(), name),
-                        }),
+                        bare(Claim::file_artifact(&crate::build::place_path(
+                            dest.relative_dir(),
+                            name,
+                        ))),
+                        Intent::Replace,
+                    );
+                }
+            }
+            // A runtime DLL in the game root: the same FileArtifact claim as any other placement,
+            // so two Shipments shipping one DLL name are a hard conflict.
+            Contribution::AddRuntimeDll { dll } => {
+                if let Some(name) = dll.file_name().and_then(|f| f.to_str()) {
+                    push(
+                        Access::Write,
+                        bare(Claim::file_artifact(&crate::build::place_path(
+                            crate::manifest::PlaceIn::GameRoot.relative_dir(),
+                            name,
+                        ))),
                         Intent::Replace,
                     );
                 }
@@ -660,27 +682,6 @@ pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
             }
         })
         .collect()
-}
-
-/// A Shipment's DECLARED incompatibility that is actually present: it names another Shipment in
-/// `load.conflicts` and that Shipment is also installed.
-///
-/// This is distinct from [`conflicts`], which INFERS collisions from the claim graph. A declared
-/// conflict is the author asserting "we do not coexist" for a reason the claims cannot show — a
-/// runtime clash, a shared save assumption. Returns `(declarer, named)` pairs; a `load.conflicts`
-/// entry naming an uninstalled Shipment is inert (there is nothing to clash with) and a
-/// self-reference is ignored.
-pub fn declared_conflicts(shipments: &[(&str, &Manifest)]) -> Vec<(String, String)> {
-    let installed: std::collections::BTreeSet<&str> = shipments.iter().map(|(n, _)| *n).collect();
-    let mut out = Vec::new();
-    for (name, m) in shipments {
-        for other in &m.load.conflicts {
-            if other != name && installed.contains(other.as_str()) {
-                out.push(((*name).to_string(), other.clone()));
-            }
-        }
-    }
-    out
 }
 
 /// A read that no Shipment in the set provides.

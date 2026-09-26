@@ -1,0 +1,9 @@
+format: 2
+shipment:
+  name: my-mod
+  version: 1.0.0
+  target: retail
+load:
+  requires:
+    - { shipment: ess, version: ">=0.7, <1" }
+contributions: []

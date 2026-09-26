@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:stringdb-a",
+      "path": "shipments/stringdb-a"
+    },
+    {
+      "id": "shipment:stringdb-b",
+      "path": "shipments/stringdb-b"
+    }
+  ]
+}

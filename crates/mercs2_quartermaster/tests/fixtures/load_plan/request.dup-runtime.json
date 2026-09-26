@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:m2-sdk",
+      "path": "shipments/m2-sdk"
+    },
+    {
+      "id": "shipment:dup-runtime",
+      "path": "shipments/dup-runtime"
+    }
+  ]
+}

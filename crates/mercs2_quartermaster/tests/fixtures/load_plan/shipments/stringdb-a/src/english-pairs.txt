@@ -1,0 +1,2 @@
+# The text stringdb-a's own edit gives [Menu.Quit]: old<TAB>new, free text.
+Quit (stringdb-a)	Quit (replaced by text)

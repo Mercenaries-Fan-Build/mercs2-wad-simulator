@@ -338,6 +338,21 @@ where
     rebuild_container(container, &[(*b"KEYS", &new_keys), (*b"STRS", &new_strs)])
 }
 
+/// The key hash a string-edit key names: a bare `0xHHHHHHHH` IS the hash; anything else is a bracket
+/// key (`[Menu.Play]`), hashed the way the engine does. An author who only has the hash from a dump
+/// can still write the key — the reverse of a bracket key is not always known.
+///
+/// The one rule for every caller that turns an edit key into a hash: [`edit_container`],
+/// [`add_keys_to_container`], and a caller merging several tables' edits by hash.
+pub fn key_hash(key: &str) -> u32 {
+    key.trim()
+        .strip_prefix("0x")
+        .or_else(|| key.trim().strip_prefix("0X"))
+        .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+        .unwrap_or_else(|| pandemic_hash_m2(key))
+}
+
 /// Add NEW keys to a stringdb container. The companion to [`edit_container`] (which errors on
 /// unknown keys) — this one errors on keys that ALREADY exist. Mixing intents is a design bug:
 /// an author who wants to overwrite existing text should call `edit_container`, and one who
@@ -348,16 +363,7 @@ pub fn add_keys_to_container(
 ) -> Result<Vec<u8>, String> {
     apply_container(container, |db| {
         for (key, text) in additions {
-            let ok = match key
-                .trim()
-                .strip_prefix("0x")
-                .or_else(|| key.trim().strip_prefix("0X"))
-                .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
-                .and_then(|h| u32::from_str_radix(h, 16).ok())
-            {
-                Some(h) => db.add_by_hash(h, text),
-                None => db.add_by_name(key, text),
-            };
+            let ok = db.add_by_hash(key_hash(key), text);
             if !ok {
                 return Err(format!(
                     "{key} already exists in this string table — use edit_stringdb to overwrite, \
@@ -396,19 +402,7 @@ pub fn edit_container(
     let mut db = parse(&container[ks..ks + kl], &container[ss..ss + sl])?;
 
     for (key, text) in edits {
-        // A bare `0xHHHHHHHH` IS the key hash; anything else is a bracket key, hashed the way the
-        // engine does. Same rule as `manifest::asset_hash`, so an author who only has the hash from
-        // a dump can still edit — the reverse of a bracket key is not always known.
-        let hit = match key
-            .trim()
-            .strip_prefix("0x")
-            .or_else(|| key.trim().strip_prefix("0X"))
-            .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
-            .and_then(|h| u32::from_str_radix(h, 16).ok())
-        {
-            Some(h) => db.set_by_hash(h, text),
-            None => db.set_by_name(key, text),
-        };
+        let hit = db.set_by_hash(key_hash(key), text);
         if !hit {
             return Err(format!(
                 "{key} is not a key in this string table — check the spelling; the engine hashes \

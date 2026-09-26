@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:bad-range",
+      "path": "shipments/bad-range"
+    }
+  ]
+}
