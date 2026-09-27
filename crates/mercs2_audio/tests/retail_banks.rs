@@ -393,6 +393,11 @@ fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     assert_eq!(vz_only.streamed.values().sum::<usize>(), 177);
     assert_eq!(vz_only.absent.values().map(Vec::len).sum::<usize>(), 9);
     assert_eq!(vz_only.resolved, 1198 - 177 - 9);
+    assert_eq!(vz_only.refused["a looping wave (group +0x2C)"], REFUSED_LOOPING_WAVE);
+    assert_eq!(vz_only.refused["the filter curves (kind 9)"], REFUSED_FILTER);
+    assert_eq!(vz_only.refused.len(), 2, "no other refusal");
+    assert_eq!(vz_only.played, vz_only.resolved - REFUSED_LOOPING_WAVE.len() - REFUSED_FILTER.len());
+    assert_eq!(vz_only.played, 733);
 
     let Some(english) = english else {
         return eprintln!("SKIPPING the English.wad pass: English.wad not found beside vz.wad");
@@ -404,20 +409,77 @@ fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     assert_eq!(with_english.streamed.values().sum::<usize>(), 179);
     assert!(with_english.absent.is_empty());
     assert_eq!(with_english.resolved, 1198 - 179);
+    let mut looping: Vec<u32> = REFUSED_LOOPING_WAVE.iter().chain(&REFUSED_LOOPING_WAVE_ENGLISH).copied().collect();
+    looping.sort_unstable();
+    assert_eq!(with_english.refused["a looping wave (group +0x2C)"], looping);
+    assert_eq!(with_english.refused["the filter curves (kind 9)"], REFUSED_FILTER);
+    assert_eq!(with_english.played, 735);
 }
+
+/// The `vz.wad` cues (sounddb guids) that resolve but are refused because a group they can reach
+/// loops its wave (`+0x2C` ≠ 0): the wave-level loop is read only behind the SecuROM-protected
+/// pointer at `0x0244F65C` (`FUN_00839e90` → `0x024B5EB0`), so how a wave repeats is not traced.
+const REFUSED_LOOPING_WAVE: [u32; 278] = [
+    0x0016_FCE7, 0x00BD_27AB, 0x0585_E46D, 0x05A8_9198, 0x06C9_BEB2, 0x0745_A4F8, 0x0787_3231, 0x088B_F1D4,
+    0x08DA_6515, 0x097F_1626, 0x0B8B_F9DB, 0x0CDF_A3A7, 0x0DF4_2E83, 0x10E8_4EAF, 0x113C_ACF2, 0x128D_7756,
+    0x1594_8DB2, 0x1683_9356, 0x16B3_E27E, 0x174D_62D1, 0x178E_BD44, 0x1793_3A72, 0x19F9_C7B0, 0x1B2C_8599,
+    0x1C23_83FC, 0x1C89_B183, 0x1F17_3024, 0x1FF7_A450, 0x2130_2C2F, 0x219E_5C43, 0x229D_0B74, 0x24B3_3959,
+    0x25B0_115D, 0x25C8_D0C8, 0x279F_A753, 0x2A89_6BC9, 0x2AAA_0B62, 0x2B5D_D674, 0x2C58_9023, 0x2C66_5119,
+    0x2D07_10A8, 0x2D3A_7CCA, 0x2D9F_6C15, 0x2DA2_EA12, 0x2DEA_8C16, 0x2EE5_D43B, 0x2F5B_FA94, 0x311F_5638,
+    0x3121_8B78, 0x312B_9CAF, 0x3187_437C, 0x31A4_AC81, 0x322A_B2D9, 0x32E1_1E58, 0x3465_9B09, 0x34BE_40AB,
+    0x3743_1832, 0x381B_2F51, 0x3860_47CD, 0x3909_3900, 0x3995_AE8F, 0x3A24_9447, 0x3C64_6729, 0x40E5_D97A,
+    0x42D3_9BA5, 0x442A_E8E1, 0x4525_CD97, 0x46A9_AF4E, 0x4757_5E61, 0x4957_F4DD, 0x4A10_F91C, 0x4A6F_FDF7,
+    0x4BB9_F74C, 0x4CFF_252A, 0x4D8F_1F3E, 0x4E6B_DC65, 0x4E72_43A4, 0x4FEC_6846, 0x5167_007A, 0x51C2_CE22,
+    0x51DA_112F, 0x53D4_95E6, 0x56F9_41BA, 0x5889_FEA0, 0x589F_A9B7, 0x59FE_30CE, 0x5A7D_35D3, 0x5B83_7744,
+    0x5C0F_C7AE, 0x5C18_56C1, 0x5E0D_A733, 0x6044_C34D, 0x6187_8B4C, 0x61E7_222D, 0x62F8_148E, 0x63B1_E6A7,
+    0x63E1_188C, 0x642D_0999, 0x646F_2829, 0x6766_5F05, 0x683D_534F, 0x687B_29B1, 0x6BDF_4558, 0x6D39_7DDC,
+    0x6DA1_804E, 0x6F35_D8CE, 0x6F80_7724, 0x709D_32D8, 0x7139_E42B, 0x7226_B409, 0x7255_3CA9, 0x7281_D15E,
+    0x72A1_8B02, 0x77BB_255F, 0x780A_8ED2, 0x7863_D6E7, 0x787B_2676, 0x78DA_AE01, 0x796E_BCC7, 0x79FB_FC79,
+    0x7A90_1A3C, 0x7AE1_B42B, 0x7BE1_5F8C, 0x7D1B_4318, 0x7D23_E93E, 0x7DB0_D0B0, 0x7EA1_0363, 0x7EC0_F47A,
+    0x7F0E_F16C, 0x7F97_C440, 0x800B_20B5, 0x80FB_0A1E, 0x8114_C5B4, 0x828C_7F55, 0x8498_32CB, 0x8503_8C6B,
+    0x8573_20E0, 0x857F_A9C6, 0x86D9_56AD, 0x873A_44F7, 0x89B1_7D30, 0x8A31_1ED6, 0x8A45_6562, 0x8B54_901F,
+    0x8C2B_F988, 0x8D4B_3D07, 0x8F89_69FE, 0x8FC2_7EB1, 0x900B_FD44, 0x924A_EDC3, 0x94FA_3E86, 0x9566_9C4C,
+    0x9575_5D14, 0x972C_79DF, 0x9908_462F, 0x999A_C2DD, 0x99D0_2C22, 0x9A41_6330, 0x9D14_1AE0, 0x9D43_565B,
+    0x9EBE_1CC1, 0x9F25_9FE3, 0x9FD1_47BC, 0xA1DE_2A81, 0xA25C_431C, 0xA29E_B5EE, 0xA3C3_7324, 0xA4EB_978E,
+    0xA51B_442A, 0xA5B5_B30B, 0xA5C3_D085, 0xA6A6_0B2E, 0xA772_04C8, 0xA84F_5013, 0xA88D_9D17, 0xAD02_81B5,
+    0xAD86_1896, 0xAD96_4C6F, 0xADE4_96EE, 0xAF98_A6E8, 0xB0C4_BA27, 0xB14C_F8E8, 0xB18B_DE1B, 0xB246_FB78,
+    0xB24A_5DF2, 0xB501_6596, 0xB509_E514, 0xB53E_7A38, 0xB5BB_A500, 0xB637_3CAA, 0xB865_0B74, 0xB9B4_ACA0,
+    0xBA9B_C27A, 0xBBF9_8914, 0xBC28_C45C, 0xBE9B_2CA7, 0xC113_AAC1, 0xC205_CD8E, 0xC28D_6B28, 0xC29C_B8CA,
+    0xC44B_EEFD, 0xC472_7A58, 0xC5BB_001A, 0xC67B_B828, 0xC6DC_6B1B, 0xC6F2_B995, 0xC77B_97FA, 0xC87E_4E19,
+    0xC881_51C6, 0xC984_7AD0, 0xC98E_5D53, 0xCBDB_7A1D, 0xCBE5_6258, 0xCC23_4CDC, 0xCCC9_06AD, 0xCE45_81B0,
+    0xCFAA_F998, 0xD0CC_4C8E, 0xD107_09A9, 0xD1FF_2AD9, 0xD2E9_8367, 0xD312_E3BC, 0xD825_6DCA, 0xD91E_AF87,
+    0xD945_7847, 0xD99D_69C9, 0xDA7A_2F61, 0xDACA_9352, 0xDB73_1F7E, 0xDB91_4A57, 0xDBA9_AD29, 0xDDB6_01B1,
+    0xDFBA_467C, 0xE084_C48A, 0xE0EF_D6D6, 0xE128_7EB7, 0xE12D_2050, 0xE18D_6D7E, 0xE271_2561, 0xE32D_D777,
+    0xE36B_4631, 0xE388_8734, 0xE40B_9F62, 0xE467_E3E5, 0xE587_97C5, 0xE5D5_10D8, 0xE810_4BF1, 0xE8AA_7210,
+    0xE8C9_0E8D, 0xE90F_17D4, 0xE979_C660, 0xEA05_46E8, 0xEA67_7C41, 0xEA88_B1FB, 0xEB2E_2137, 0xEBBC_159D,
+    0xEC33_A9B3, 0xEC48_3E3F, 0xECB8_826E, 0xECCB_2207, 0xEDD5_7EC3, 0xEE97_6688, 0xEEC3_EA85, 0xEF1D_3325,
+    0xEF54_4942, 0xF034_6812, 0xF129_A4FA, 0xF23B_9836, 0xF425_F957, 0xF7F1_5237, 0xF88C_4BFB, 0xF99A_8E4F,
+    0xFA7E_BB45, 0xFA82_AEE1, 0xFAED_86A8, 0xFC63_9562, 0xFE9E_7626, 0xFF9C_12D5,
+];
+
+/// The cues that resolve only with `English.wad`'s wavebanks and are refused for the same reason.
+const REFUSED_LOOPING_WAVE_ENGLISH: [u32; 5] = [0x2417_22F2, 0x904F_C40D, 0xA156_2A38, 0xDF09_1314, 0xDF37_C1E2];
+
+/// The cue refused because it carries a kind-9 record: the filter it drives runs over samples chosen
+/// in `MixWavesToOutput` (`0x00838860`), reached only through a SecuROM-protected pointer.
+const REFUSED_FILTER: [u32; 1] = [0xD8CE_1427];
 
 #[derive(Default)]
 struct Tally {
     total: usize,
     resolved: usize,
+    played: usize,
     streamed: BTreeMap<u32, usize>,
     absent: BTreeMap<u32, Vec<u32>>,
+    /// Refused cue guids, by reason.
+    refused: BTreeMap<&'static str, Vec<u32>>,
 }
 
 fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
     let mut t = Tally::default();
     let (mut multi_track, mut multi_wave, mut fired, mut played) = (0, 0, 0, 0);
-    let mut refused: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut looped, mut with_children) = (0, 0);
+    let mut detail: BTreeMap<&'static str, String> = BTreeMap::new();
     for table in of_type(tables, TYPE_HASH_SOUNDDB) {
         let db = SoundDb::parse(&table.body).expect("sounddb");
         for e in &db.cues {
@@ -431,12 +493,19 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
                     if r.sounds.iter().any(|s| s.choices.iter().any(|c| c.selection.is_some())) {
                         multi_wave += 1;
                     }
+                    let loops = r.multitrack.as_ref().is_some_and(|m| m.byte_10 != 0 || m.tracks.iter().any(|t| t.byte_00 != 0));
                     match play_once(eng, e, &r) {
-                        Ok(n) => {
+                        Ok((n, children)) => {
                             fired += n;
                             played += 1;
+                            looped += usize::from(loops);
+                            with_children += usize::from(children);
                         }
-                        Err(reason) => *refused.entry(reason).or_default() += 1,
+                        Err(err) => {
+                            let key = refusal_key(&err);
+                            detail.entry(key).or_insert_with(|| err.to_string());
+                            t.refused.entry(key).or_default().push(e.guid);
+                        }
                     }
                 }
                 Err(ResolveError::Streamed { clip_hash }) => {
@@ -448,13 +517,16 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
             }
         }
     }
+    t.played = played;
     println!(
         "[{label}] {} retail cues: {} resolve ({multi_track} multi-track, {multi_wave} reaching a \
-         multi-wave group); {played} played for 2 s each, firing {fired} sounds",
+         multi-wave group); {played} played for 2 s each ({looped} with a track or cue loop, \
+         {with_children} starting a child cue), firing {fired} sounds",
         t.total, t.resolved
     );
-    for (reason, n) in &refused {
-        println!("  refused at start: {n} cues — {reason}");
+    for (key, guids) in &mut t.refused {
+        guids.sort_unstable();
+        println!("  refused at start: {} cues — {key}, e.g. {}: {guids:08X?}", guids.len(), detail[key]);
     }
     for (bank, n) in &t.streamed {
         println!("  not resolved, a wave streams from a .pws: {n} cues of soundbank 0x{bank:08X}");
@@ -465,10 +537,27 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
     t
 }
 
+/// The refusal reasons the retail pass may meet.
+fn refusal_key(err: &mercs2_audio::CueError) -> &'static str {
+    use mercs2_audio::automation::AutomationError;
+    use mercs2_audio::CueError;
+    match err {
+        CueError::Looping { .. } => "a looping wave (group +0x2C)",
+        CueError::Automation(AutomationError::Unsupported { kind: 8 | 9 }) => "the filter curves (kind 9)",
+        CueError::Child { error, .. } if matches!(**error, CueError::Looping { .. }) => "a child cue that plays a looping wave",
+        other => panic!("unexpected refusal: {other}"),
+    }
+}
+
 /// Start a resolved cue with every cue-local curve parameter at its curve's first point, run it for
-/// two seconds of 1/60 s frames, and return how many sounds fired. A cue the engine cannot play here
-/// (looping, or automation with no counterpart) is refused at start; anything else failing panics.
-fn play_once(eng: &mut AudioEngine, e: &mercs2_audio::CueEntry, r: &mercs2_audio::ResolvedCue) -> Result<usize, String> {
+/// two seconds of 1/60 s frames, stop it (a stop starts tail cues), run another second, and return
+/// how many sounds it held at most and whether it started a child cue. A cue the engine cannot play
+/// is refused at start ([`refusal_key`]); anything else failing panics.
+fn play_once(
+    eng: &mut AudioEngine,
+    e: &mercs2_audio::CueEntry,
+    r: &mercs2_audio::ResolvedCue,
+) -> Result<(usize, bool), mercs2_audio::CueError> {
     use mercs2_audio::multitrack::Automation;
     let params: Vec<(u32, f32)> = r
         .multitrack
@@ -482,22 +571,24 @@ fn play_once(eng: &mut AudioEngine, e: &mercs2_audio::CueEntry, r: &mercs2_audio
             })
         })
         .collect();
+    eng.stop_and_flush_all_sounds();
     eng.pool = mercs2_audio::VoicePool::new(64);
-    match eng.cue_sound_with_params(e.guid, None, &params) {
-        Ok(h) => {
-            let mut fired = 0;
-            for _ in 0..120 {
-                eng.tick(1.0 / 60.0);
-                fired = fired.max(eng.cue_instances(h).len());
-            }
-            eng.stop_sound(h);
-            Ok(fired)
-        }
-        Err(err @ mercs2_audio::CueError::Looping { .. }) | Err(err @ mercs2_audio::CueError::Automation(_)) => {
-            Err(err.to_string())
-        }
-        Err(other) => panic!("cue 0x{:08X}: {other}", e.guid),
+    let h = eng.cue_sound_with_params(e.guid, None, &params)?;
+    let (mut fired, mut children) = (0, false);
+    for _ in 0..120 {
+        eng.tick(1.0 / 60.0);
+        eng.render(735);
+        fired = fired.max(eng.cue_instances(h).len());
+        children |= !eng.cue_children(h).is_empty();
     }
+    eng.stop_sound(h);
+    children |= !eng.cue_children(h).is_empty();
+    for _ in 0..60 {
+        eng.tick(1.0 / 60.0);
+        eng.render(735);
+    }
+    eng.stop_and_flush_all_sounds();
+    Ok((fired, children))
 }
 
 /// Retail `sound_resident` cue 20 (guid 0xF2937330): two tracks, each a volume ramp (the second a
@@ -545,7 +636,7 @@ fn a_retail_fade_reaches_the_voices() {
         assert!(t > start_s, "active");
         let ramp = (to - from) / ((duration_s + start_s) - start_s) * (t - start_s) + from;
         let ramp = ramp.clamp(0.0, 1.0);
-        let gain = eng.pool.get(inst.voice).expect("voice").gain;
+        let gain = eng.pool.get(inst.voice.expect("a voice")).expect("voice").gain;
         println!("track ramp {from}->{to} over {duration_s}s: t={t} factor {ramp}, voice gain {gain}");
         assert_eq!(gain, inst.volume * (ramp * cue_volume));
     }
