@@ -37,14 +37,22 @@
 //! a substitute for DirectSound's fold-down, which is not engine code. Three to five output channels
 //! are refused.
 //!
-//! **3D sources are not traced here yet:** the engine's per-emitter source gains come from
-//! `FUN_0083d090` (five speaker directions against the listener) with the distance volume of
-//! `FUN_0083d3a0`; this mixer gives an emitter source the left/right gains [`crate::spatial`]
-//! computes (outputs 0 and 1, the other four 0), as before (`DEFERRED.md`).
+//! **Emitter (3D) sources.** `MixWavesToOutput` computes the emitter's distance to listener 0
+//! ([`spatial::listener_distance`]); `FUN_0083ade0` gives the source its speaker gains
+//! ([`spatial::speaker_gains`]: front left, front right, back left, back right and centre on
+//! channels 0, 1, 4, 5 and 2; LFE keeps the constructor's 0.0) and its Doppler factor
+//! ([`spatial::source_doppler`]). Each positional wave then takes its distance volume
+//! ([`spatial::distance_volume`], wave `+0xAC`, a factor of the master volume) and its Doppler factor
+//! ([`spatial::wave_doppler`], wave `+0xA8`), which multiplies the frequency the kernel steps at
+//! (`FUN_0083e170`: `trunc((f32) freq × doppler)`). A 2D source's waves take Doppler 1.0 and no
+//! distance volume.
 
 use std::collections::HashMap;
 
+use mercs2_core::glam::Vec3;
+
 use crate::filter::Biquad;
+use crate::spatial::{self, Listener, ListenerSet};
 use crate::voice::{VoiceId, VoicePool};
 
 /// Mixer thread cadence in milliseconds (`Sleep(0x2d)` = 45, audio_code_map.md §2).
@@ -88,6 +96,8 @@ pub struct PcmSource {
     dst_rate: Option<u32>,
     /// Wave loops left (the wave's `+0xBC`).
     loops: u32,
+    /// The Doppler factor the mix multiplies the frequency by (wave `+0xA8`).
+    doppler: f32,
     /// The wave stopped at its end.
     finished: bool,
 }
@@ -95,7 +105,16 @@ pub struct PcmSource {
 impl PcmSource {
     /// Samples **already at the mixer rate**.
     pub fn new(data: Vec<i16>, channels: usize) -> PcmSource {
-        PcmSource { data, channels: channels.max(1), pos: 0, freq: None, dst_rate: None, loops: 0, finished: false }
+        PcmSource {
+            data,
+            channels: channels.max(1),
+            pos: 0,
+            freq: None,
+            dst_rate: None,
+            loops: 0,
+            doppler: 1.0,
+            finished: false,
+        }
     }
 
     /// A clip that plays at `src_rate` Hz into a `dst_rate` mixer.
@@ -107,6 +126,7 @@ impl PcmSource {
             freq: Some(src_rate),
             dst_rate: Some(dst_rate),
             loops: 0,
+            doppler: 1.0,
             finished: false,
         }
     }
@@ -139,6 +159,23 @@ impl PcmSource {
         self.freq
     }
 
+    /// Set the Doppler factor (wave `+0xA8`, vtable `+0xE4`). Only a source built with
+    /// [`with_rate`](Self::with_rate) has a frequency to scale.
+    pub fn set_doppler(&mut self, factor: f32) -> Result<(), MixerError> {
+        if self.freq.is_none() {
+            return Err(MixerError::NoMixerRate);
+        }
+        self.doppler = factor;
+        Ok(())
+    }
+
+    /// The frequency the kernel steps at (`FUN_0083e170`): the set frequency as a single times the
+    /// Doppler factor, on the x87 stack (the product of two singles is exact in double), truncated
+    /// (`fistp` with the rounding control set to chop) and kept to its low 32 bits.
+    fn mixing_freq(&self, f: u32) -> u32 {
+        (f64::from(f as f32) * f64::from(self.doppler)).trunc() as i64 as u32
+    }
+
     fn frames(&self) -> i64 {
         (self.data.len() / self.channels) as i64
     }
@@ -151,7 +188,7 @@ impl PcmSource {
     fn step(&self, rate: u32) -> i64 {
         match self.freq {
             None => 1 << 32,
-            Some(f) => (i64::from(f) << 32) / i64::from(rate.max(1)),
+            Some(f) => (i64::from(self.mixing_freq(f)) << 32) / i64::from(rate.max(1)),
         }
     }
 
@@ -358,6 +395,28 @@ pub enum SourceKey {
     Emitter(u32),
 }
 
+/// A positional wave's 3D parameters (wave `+0x5C`..`+0x70`), copied from its group's `+0x14`..`+0x28`
+/// when its instance plays through an emitter (`FUN_00837830` at `0x00837C08`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wave3d {
+    /// Group `+0x18`: the distance up to which the wave is at full volume.
+    pub min_distance: f32,
+    /// Group `+0x1C`: the distance from which it is silent.
+    pub max_distance: f32,
+    /// Group `+0x24`: the exponent of the fall-off between them.
+    pub exponent: f32,
+    /// Group `+0x28`: how much of the source's Doppler factor the wave takes.
+    pub doppler_scale: f32,
+}
+
+/// An emitter's place and motion (the source holder's `+0x2C` position and `+0x5C` velocity).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Emitter {
+    key: u32,
+    position: Vec3,
+    velocity: Vec3,
+}
+
 /// A voice's source: a decoded clip, or any other source at the mixer rate.
 enum VoiceSource {
     Pcm(PcmSource),
@@ -367,9 +426,10 @@ enum VoiceSource {
 /// Per-voice mixing state beyond the FSM state in [`VoicePool`].
 struct MixVoice {
     source: VoiceSource,
-    /// Left/right gains from [`crate::spatial`], used as an emitter source's gains.
-    left_gain: f32,
-    right_gain: f32,
+    /// The wave's 3D parameters, when it plays through an emitter.
+    wave3d: Option<Wave3d>,
+    /// The wave's distance volume (wave `+0xAC`), set every pass for a positional wave.
+    distance_volume: f32,
     /// The instance's six output-channel multipliers (wave `+0xD8`..`+0xEC`).
     channels: [f32; 6],
     /// Which source it mixes through.
@@ -403,7 +463,9 @@ pub struct Mixer {
     cfg: MixerConfig,
     voices: HashMap<VoiceId, MixVoice>,
     /// Emitter sources in creation order.
-    emitters: Vec<u32>,
+    emitters: Vec<Emitter>,
+    /// Listener slot 0, which the mix reads ([`crate::spatial`]).
+    listener: Listener,
     next_order: u64,
     /// The int32 accumulator (six per frame).
     accum: Vec<i32>,
@@ -427,6 +489,7 @@ impl Mixer {
             cfg,
             voices: HashMap::new(),
             emitters: Vec::new(),
+            listener: ListenerSet::default().mix_listener().to_owned(),
             next_order: 0,
             accum: Vec::new(),
             scratch: Vec::new(),
@@ -451,8 +514,8 @@ impl Mixer {
             id,
             MixVoice {
                 source,
-                left_gain: 1.0,
-                right_gain: 1.0,
+                wave3d: None,
+                distance_volume: 1.0,
                 channels: [1.0; 6],
                 key: SourceKey::Flat,
                 filter: None,
@@ -503,11 +566,40 @@ impl Mixer {
         self.voices.remove(&id);
     }
 
-    /// Set a voice's left/right spatial gains (an emitter source's gains).
-    pub fn set_channel_gains(&mut self, id: VoiceId, left: f32, right: f32) {
+    /// Place an emitter (created on first use, in creation order).
+    pub fn set_emitter(&mut self, key: u32, position: Vec3, velocity: Vec3) {
+        match self.emitters.iter_mut().find(|e| e.key == key) {
+            Some(e) => {
+                e.position = position;
+                e.velocity = velocity;
+            }
+            None => self.emitters.push(Emitter { key, position, velocity }),
+        }
+    }
+
+    /// Set the listener the mix reads (slot 0).
+    pub fn set_listener(&mut self, listener: Listener) {
+        self.listener = listener;
+    }
+
+    /// Give a voice its 3D parameters (it must mix through an emitter).
+    pub fn set_wave_3d(&mut self, id: VoiceId, params: Wave3d) {
         if let Some(v) = self.voices.get_mut(&id) {
-            v.left_gain = left;
-            v.right_gain = right;
+            v.wave3d = Some(params);
+        }
+    }
+
+    /// A voice's distance volume (wave `+0xAC`) after the last pass.
+    pub fn distance_volume(&self, id: VoiceId) -> Option<f32> {
+        self.voices.get(&id).map(|v| v.distance_volume)
+    }
+
+    /// A PCM voice's frequency after its Doppler factor (what the kernel steps at).
+    pub fn mixing_rate(&self, id: VoiceId) -> Result<Option<u32>, MixerError> {
+        match self.voices.get(&id) {
+            None => Err(MixerError::NotAttached(id)),
+            Some(MixVoice { source: VoiceSource::Pcm(p), .. }) => Ok(p.freq.map(|f| p.mixing_freq(f))),
+            Some(_) => Err(MixerError::NotPcm(id)),
         }
     }
 
@@ -518,12 +610,15 @@ impl Mixer {
         }
     }
 
-    /// Route a voice through a source.
+    /// Route a voice through a source. An emitter must be placed first
+    /// ([`set_emitter`](Self::set_emitter)); routing to an unplaced one panics.
     pub fn set_source(&mut self, id: VoiceId, key: SourceKey) {
         if let SourceKey::Emitter(e) = key {
-            if !self.emitters.contains(&e) {
-                self.emitters.push(e);
-            }
+            assert!(
+                self.emitters.iter().any(|x| x.key == e),
+                "mixer: voice {} routed to emitter {e}, which has no position",
+                id.0
+            );
         }
         if let Some(v) = self.voices.get_mut(&id) {
             v.key = key;
@@ -571,7 +666,7 @@ impl Mixer {
         }
         let mut finished: Vec<VoiceId> = Vec::new();
 
-        let mut keys: Vec<SourceKey> = self.emitters.iter().map(|&e| SourceKey::Emitter(e)).collect();
+        let mut keys: Vec<SourceKey> = self.emitters.iter().map(|e| SourceKey::Emitter(e.key)).collect();
         keys.push(SourceKey::Flat);
         keys.push(SourceKey::FlatWide);
         for key in keys {
@@ -581,24 +676,55 @@ impl Mixer {
                 continue;
             }
             ids.sort_unstable_by_key(|(order, _)| *order);
-            // FUN_0083ade0: zero the scratch; a 2D source's gains are 1.0.
+            // FUN_0083ade0: zero the scratch; a 2D source's gains are 1.0 and its Doppler factor is
+            // not computed (FUN_0083b120 hands its waves 1.0).
             for s in &mut self.scratch[..n] {
                 *s = 0;
             }
             let mut gains = [1.0f32; 6];
-            if let SourceKey::Emitter(_) = key {
-                let v = &self.voices[&ids[0].1];
-                gains = [v.left_gain, v.right_gain, 0.0, 0.0, 0.0, 0.0];
+            let (mut source_doppler, mut distance) = (None, 0.0f32);
+            if let SourceKey::Emitter(e) = key {
+                let em = *self.emitters.iter().find(|x| x.key == e).expect("listed");
+                let s = spatial::speaker_gains(em.position, &self.listener, spatial::PROXIMITY_RADIUS);
+                // FUN_0083afc0 applies +0x1C, +0x20, +0x2C, +0x30, +0x24, +0x28 to channels 0..5; +0x30
+                // (LFE) stays at the constructor's 0.0.
+                gains = [s[0], s[1], s[4], 0.0, s[2], s[3]];
+                source_doppler = Some(spatial::source_doppler(em.position, em.velocity, &self.listener));
+                distance = spatial::listener_distance(em.position, &self.listener);
             }
             for (_, id) in ids {
                 let Some(voice) = pool.get(id).filter(|v| v.state.is_audible()) else { continue };
                 // FUN_00836c70 clamps the instance volume (0x008373AA); FUN_0083e1d0 clamps to [0, 2].
                 let d = (voice.gain * voice.fade * category_gain(u32::from(voice.category))).clamp(0.0, 1.0);
                 let mv = self.voices.get_mut(&id).expect("listed");
-                let master = trunc_i32(d.clamp(0.0, 2.0) * 32768.0);
+                // FUN_00839ae0: a positional wave's distance volume (FUN_0083d3a0), then its Doppler
+                // factor (FUN_0083b120 scales the source's by the wave's +0x70; clamped to [0.1, 2]).
+                if let Some(w) = mv.wave3d {
+                    mv.distance_volume = spatial::distance_volume(distance, w.min_distance, w.max_distance, w.exponent);
+                }
+                let doppler = match source_doppler {
+                    Some(sd) => spatial::wave_doppler(sd, mv.wave3d.map_or(0.0, |w| w.doppler_scale)),
+                    None => spatial::wave_doppler(1.0, 0.0),
+                };
+                match &mut mv.source {
+                    VoiceSource::Pcm(p) => {
+                        if p.freq.is_some() {
+                            p.set_doppler(doppler).expect("a PCM source with a frequency");
+                        } else {
+                            assert_eq!(doppler, 1.0, "mixer: voice {} has no frequency to Doppler-shift", id.0);
+                        }
+                    }
+                    VoiceSource::Other(_) => {
+                        assert_eq!(doppler, 1.0, "mixer: voice {} is not PCM and cannot be Doppler-shifted", id.0)
+                    }
+                }
+                // FUN_0083e1d0: master = d × ((ac × a4) × a0), gain[c] = ch[c] × that; a4 and a0 are
+                // 1.0, so the product is d × ac exactly.
+                let f = d * mv.distance_volume;
+                let master = trunc_i32(f.clamp(0.0, 2.0) * 32768.0);
                 let mut g = [0i32; 6];
                 for (c, gc) in g.iter_mut().enumerate() {
-                    *gc = trunc_i32((mv.channels[c] * d).clamp(0.0, 2.0) * 32768.0);
+                    *gc = trunc_i32((mv.channels[c] * f).clamp(0.0, 2.0) * 32768.0);
                 }
                 match &mut mv.source {
                     VoiceSource::Pcm(p) => {
@@ -758,5 +884,37 @@ mod tests {
         let want: Vec<i16> = scratch.iter().map(|&s| s.clamp(-32768, 32767) as i16).collect();
         assert_eq!(out, want);
         assert_ne!(out[0..6], [8000i16; 6], "voice a was filtered by voice b's filter");
+    }
+
+    /// A positional wave in an emitter source: the source's speaker gains (FUN_0083d090, committed by
+    /// FUN_0083afc0 in the order +0x1C, +0x20, +0x2C, +0x30, +0x24, +0x28), the wave's distance volume
+    /// in its gains (FUN_0083d3a0, FUN_0083e1d0) and its Doppler factor in its frequency
+    /// (FUN_0083ade0, FUN_0083b120, FUN_00839ae0, FUN_0083e170).
+    #[test]
+    fn an_emitter_source_applies_speaker_gains_distance_volume_and_doppler() {
+        let mut pool = VoicePool::new(4);
+        let mut mixer = Mixer::new(MixerConfig { sample_rate: 44100, channels: 6 });
+        let id = pool.acquire(&VoiceRequest::default()).unwrap();
+        mixer.attach_pcm(id, PcmSource::with_rate(vec![1000; 4096], 1, 22050, 44100));
+        // Listener 0 at the origin, identity basis, at rest; the emitter 10 m along +X, closing at 20 m/s.
+        mixer.set_emitter(7, Vec3::new(10.0, 0.0, 0.0), Vec3::new(-20.0, 0.0, 0.0));
+        mixer.set_source(id, SourceKey::Emitter(7));
+        mixer.set_wave_3d(id, Wave3d { min_distance: 5.0, max_distance: 50.0, exponent: 2.0, doppler_scale: 0.5 });
+        pool.tick(0.0);
+        pool.tick(0.0);
+        let mut out = vec![0i16; 6 * 8];
+        mixer.mix(&mut pool, &mut out, |_| 1.0);
+
+        let t = (10.0f32 - 5.0) / (50.0 - 5.0);
+        let dv = 1.0 - f64::from(t).powf(2.0) as f32;
+        assert_eq!(mixer.distance_volume(id), Some(dv));
+        let d = 1.0 - (-20.0f32 * 1.0) * f32::from_bits(0x3B3F_A030);
+        let wd = ((f64::from(d) - 1.0) * 0.5 + 1.0) as f32;
+        assert!(wd > 1.0, "a closing source plays higher");
+        assert_eq!(mixer.mixing_rate(id), Ok(Some((22050.0f64 * f64::from(wd)).trunc() as u32)));
+        // Along +X the speaker gains are clamp01(v.x): 0.7 on front left and back left, 0 elsewhere.
+        let s = (1000 * trunc_i32(dv * 32768.0)) >> 15;
+        let fl = trunc_i32(s as f32 * 0.7);
+        assert_eq!(&out[..6], &[fl as i16, 0, 0, 0, fl as i16, 0]);
     }
 }
