@@ -641,6 +641,16 @@ pub enum Contribution {
         group: Option<u32>,
         /// The model's OWN skin. Empty means it wears the donor's materials, which is right for a
         /// prop and wrong for a novel mesh — the case this field exists for.
+        ///
+        /// Each supplied map ships as its own resident texture (`<name>_dm` / `_sm` / `_nm`) and the
+        /// donor's MTRL is repointed onto it, slot by slot (diffuse, specular, normal):
+        ///
+        /// * with `retarget:` (skinned), every donor material's hash at that slot;
+        /// * without it (rigid), the hashes the HOST `group:`'s materials name at that slot. Each of
+        ///   those materials must carry the textured flag `0x0080` — a `0x0000` material is
+        ///   flat-shaded and ignores bound textures — and the build refuses one that does not.
+        ///
+        /// A map with nothing to repoint onto is a build error rather than a texture shipped unused.
         #[serde(default)]
         textures: Textures,
         #[serde(default)]
@@ -839,32 +849,44 @@ pub enum Contribution {
         /// one row per entity).
         entities: PathBuf,
     },
-    /// Data. Add a NEW animation clip to the world's animation-asset table, callable by the
-    /// engine's animation system when the containing model's HIER queries it by name.
+    /// Data. Add a NEW animation clip: an `animation` asset (ASET type id 16) under the clip's name.
     ///
-    /// The `clip` is a pre-encoded Havok 5.5 packfile (the exact bytes the Havok content pipeline
-    /// -- `AssetCc2.exe --strip --rules4101` per memory `havok-anim-toolchain-roundtrip-proven` --
-    /// produces). Ship it verbatim; the engine's Havok reader consumes it identically to any
-    /// stock animation asset.
-    ///
-    /// The `trnm` binding (bone-name → clip-track index) MUST be paired: without it the engine
-    /// cannot select tracks by bone. Ship it alongside as the second file.
+    /// The build assembles the container every retail Havok clip uses
+    /// (`mercs2_formats::anim_container`): `info` (`01 00`), `data` (the `clip` packfile, verbatim),
+    /// `trnm` (the `trnm` file, verbatim) and, when `events` is given, `evnt` (verbatim). The three
+    /// sources must belong together — the `trnm` count equals the clip's `numTransformTracks`, the
+    /// events parse and run in time order — and M0213 checks that before anything is built.
     AddAnimation {
         /// The clip name (hashed to become the ASET key; what the engine's animation lookups use).
         name: String,
-        /// The pre-encoded Havok packfile carrying the clip.
+        /// A Havok 5.5 packfile carrying one `hka*Animation` — what the Havok content tools emit.
         clip: PathBuf,
-        /// The `trnm` bone-name → track-index binding.
+        /// The track→bone binding, as the `trnm` chunk body:
+        /// `[u16 count][u16 flags][u32 lead][count × u32 HIER bone name-hash]`.
         trnm: PathBuf,
+        /// Optional timed events, as the `evnt` chunk body:
+        /// `[u32 count]` then per event `[f32 seconds][name NUL][category NUL]`. Retail uses these
+        /// for sound cues, voice lines and gameplay markers (`opendoor`). Omit for a clip with none.
+        #[serde(default)]
+        events: Option<PathBuf>,
     },
-    /// Data, SAME-HASH. Wholesale REPLACE a shipped animation's data (both the Havok packfile and
-    /// its `trnm` binding), keeping the clip name. Every model that queries the clip by name
-    /// picks up the new data on next lookup.
+    /// Data, SAME-HASH. Wholesale REPLACE a shipped Havok clip, keeping its name: the same container
+    /// [`Contribution::AddAnimation`] builds, under the target's hash. Every model that queries the
+    /// clip by name picks up the new data on next lookup.
+    ///
+    /// The target must be a Havok clip. The 29 retail `animation` assets that are `MANM` keyframe
+    /// animations instead are refused by name at build time — these sources cannot express one.
     ReplaceAnimation {
         /// The shipped animation to replace.
         target: String,
+        /// As [`Contribution::AddAnimation::clip`].
         clip: PathBuf,
+        /// As [`Contribution::AddAnimation::trnm`].
         trnm: PathBuf,
+        /// As [`Contribution::AddAnimation::events`]. Omitting it ships the clip with no `evnt`,
+        /// whether or not the clip it replaces had one.
+        #[serde(default)]
+        events: Option<PathBuf>,
     },
     /// Data. Add a NEW compiled shader (SM3 blob) to `shader3.bin`. Author is responsible for
     /// producing the binary via an external SM3 compiler (fxc `/T vs_3_0` or `ps_3_0`).
@@ -896,31 +918,6 @@ pub enum Contribution {
     ReplaceFx {
         target: String,
         payload: PathBuf,
-    },
-    /// Data. Add a NEW ECS component-type schema (`.schm` binary the ECS registry indexes for
-    /// field layout). Modders who wire a new ECS component through the reimpl can pack its schema
-    /// this way. Author supplies the pre-encoded `.schm` bytes.
-    AddSchema {
-        /// The component-type name (hashed to become the ASET key).
-        name: String,
-        /// Pre-encoded `.schm` bytes.
-        schm: PathBuf,
-    },
-    /// Data. Add a NEW AI squad-composition template the game's AI-squad system can spawn by name.
-    /// Payload is the pre-encoded squad-config binary (format author-side; the engine consumes
-    /// whatever the ASET row's type-id says).
-    AddAiSquadTemplate {
-        /// The squad name.
-        name: String,
-        /// Pre-encoded squad-config bytes.
-        config: PathBuf,
-        /// The type-id the engine registers this squad under. Author must know the value; qm
-        /// cannot infer it because the AI-squad system's type-id has not been reverse-engineered
-        /// into `aset_type_ids` yet. Common conventions: reuse an existing squad's row from a
-        /// dump.
-        type_id: u32,
-        /// The type-hash that pairs with `type_id`.
-        type_hash: u32,
     },
     /// Data, SAME-HASH. REPLACE a single shipped terrain cell (heightmap / texturing / MOPP
     /// collision) with pre-encoded bytes. The heightmap format + MOPP-baked collision codec are
@@ -1040,10 +1037,9 @@ pub enum Contribution {
     /// ships (`build::language_name_refusal`), so it can only ever ADD, never shadow `vz.wad` or a
     /// shipped language.
     ///
-    /// Selection is a SEPARATE concern: PC has no in-game language selector (the language is chosen at
-    /// boot from OS-locale), so a companion `native_hook` — the language-selector `.asi` — forces the
-    /// index. `add_language` ships the CONTENT; pairing it with that plugin is what makes the language
-    /// reachable (M0201 warns when it is missing). The RE and the plugin contract are in
+    /// Selection is a SEPARATE concern, and not this kind's: PC has no in-game language selector (the
+    /// language is chosen at boot from OS-locale), and switching the game into an installed language
+    /// is handled by Modkit. `add_language` ships the CONTENT only. The RE is in
     /// `docs/reverse_engineer/language_asi_hook_contract.md`.
     AddLanguage {
         /// The language name → the mounted `.\Data\<name>.wad` filename AND `pandemic_hash_m2(name)`
@@ -1212,8 +1208,6 @@ impl Contribution {
         "replace_shader",
         "add_fx",
         "replace_fx",
-        "add_schema",
-        "add_ai_squad_template",
         "replace_terrain_cell",
         "edit_state_machine",
         "edit_world",
@@ -1227,6 +1221,24 @@ impl Contribution {
         "add_runtime_dll",
         "add_shop_item",
         "raw",
+    ];
+
+    /// Kinds the format once had and no longer does, each with the reason. A manifest naming one
+    /// fails to parse with that reason ([`crate::ReadError::RemovedKind`]) rather than with serde's
+    /// bare "unknown variant", so an author learns the kind is gone rather than misspelled.
+    pub const REMOVED_KINDS: &'static [(&'static str, &'static str)] = &[
+        (
+            "add_ai_squad_template",
+            "removed in qm 3.1.0. It shipped author bytes under an author-supplied type id and \
+             type hash for an AI squad asset whose format and type id have not been \
+             reverse-engineered, so nothing about it could be checked. Opaque bytes with a \
+             declared blast radius are what `raw` is for.",
+        ),
+        (
+            "add_schema",
+            "removed in qm 3.1.0. A schema is the column layout of a component table inside a \
+             placement layer, not a standalone asset, and nothing loads one on its own.",
+        ),
     ];
 
     /// The kind tag as written in the manifest — for diagnostics that must name it back to the author.
@@ -1251,8 +1263,6 @@ impl Contribution {
             Contribution::ReplaceShader { .. } => "replace_shader",
             Contribution::AddFx { .. } => "add_fx",
             Contribution::ReplaceFx { .. } => "replace_fx",
-            Contribution::AddSchema { .. } => "add_schema",
-            Contribution::AddAiSquadTemplate { .. } => "add_ai_squad_template",
             Contribution::ReplaceTerrainCell { .. } => "replace_terrain_cell",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",

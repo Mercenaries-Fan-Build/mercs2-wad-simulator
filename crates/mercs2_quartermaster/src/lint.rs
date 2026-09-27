@@ -216,15 +216,6 @@ pub const M0200_LANGUAGE_NAME_UNUSABLE: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_language",
 };
 
-/// An `add_language` with no `native_hook` in the same Shipment. PC has no in-game language selector,
-/// so without the language-selector plugin the new language ships but nothing switches the game into
-/// it. Advisory: the plugin MAY be installed separately, which a single manifest cannot see.
-pub const M0201_LANGUAGE_NO_SELECTOR: Rule = Rule {
-    code: "M0201",
-    title: "an add_language ships no selector plugin, so nothing switches the game into it",
-    doc: "docs/modding/manifest_format.md#add_language",
-};
-
 /// `collision: follow_geometry` set alongside `retarget:` on the same `add_model`. `retarget` takes
 /// the SKINNED lowering (character rig → ragdoll/capsule collision), where the rigid static-collision
 /// regeneration never runs — so `follow_geometry` is silently ignored. It is a rigid-path-only option.
@@ -232,6 +223,18 @@ pub const M0202_COLLISION_ON_SKINNED: Rule = Rule {
     code: "M0202",
     title: "collision: follow_geometry is ignored on a skinned (retarget) add_model",
     doc: "docs/modding/manifest_format.md#add_model",
+};
+
+/// An `add_animation` / `replace_animation` whose sources do not belong together: the clip is not a
+/// Havok 5.5 packfile with a readable `hkaAnimation`, the `trnm` is malformed or binds a different
+/// number of tracks than the clip's `numTransformTracks`, or the `events` do not parse or are not
+/// in time order. The rules are [`mercs2_formats::anim_container::clip_pairing_problems`] — the same
+/// check the lowering makes, and one all 4,232 retail clips pass. Needs the files, so it runs only
+/// when lint has the Shipment root.
+pub const M0213_ANIMATION_PAIRING: Rule = Rule {
+    code: "M0213",
+    title: "an animation's clip, trnm and events do not belong together",
+    doc: "docs/modding/manifest_format.md#add_animation",
 };
 
 /// A native_hook `signature_guard` is malformed — a guard for an address the hook does not
@@ -281,8 +284,9 @@ pub const RULES: &[Rule] = &[
     M0191_SHARED_STRING_TABLE,
     M0199_SIGNATURE_GUARD,
     M0200_LANGUAGE_NAME_UNUSABLE,
-    M0201_LANGUAGE_NO_SELECTOR,
+    M0202_COLLISION_ON_SKINNED,
     M0211_RESERVED_NAME,
+    M0213_ANIMATION_PAIRING,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -807,6 +811,53 @@ fn movie_checks(index: usize, name: &str, root: &Path, movie: &Path) -> Vec<Diag
     }]
 }
 
+/// M0213 — an animation's clip, `trnm` and `events` read and checked as the triple they ship as.
+///
+/// Error, because the lowering refuses the same triple: the rule only says so earlier, in the
+/// hermetic stage template CI runs. A file that cannot be read is reported here too (the source
+/// checks already passed, so the path exists and resolves inside the Shipment).
+fn animation_checks(
+    index: usize,
+    root: &Path,
+    clip: &Path,
+    trnm: &Path,
+    events: Option<&Path>,
+) -> Vec<Diagnostic> {
+    let finding = |message: String| Diagnostic {
+        rule: M0213_ANIMATION_PAIRING,
+        severity: Severity::Error,
+        message,
+        at: Some(index),
+        fix: None,
+    };
+    let read = |p: &Path| {
+        std::fs::read(root.join(p)).map_err(|e| finding(format!("{}: cannot be read: {e}", p.display())))
+    };
+    let (clip_bytes, trnm_bytes) = match (read(clip), read(trnm)) {
+        (Ok(c), Ok(t)) => (c, t),
+        (c, t) => return c.err().into_iter().chain(t.err()).collect(),
+    };
+    let evnt_bytes = match events.map(read).transpose() {
+        Ok(e) => e,
+        Err(d) => return vec![d],
+    };
+    mercs2_formats::anim_container::clip_pairing_problems(
+        &clip_bytes,
+        &trnm_bytes,
+        evnt_bytes.as_deref(),
+    )
+    .into_iter()
+    .map(|p| {
+        finding(format!(
+            "{} + {}{}: {p}",
+            clip.display(),
+            trnm.display(),
+            events.map(|e| format!(" + {}", e.display())).unwrap_or_default()
+        ))
+    })
+    .collect()
+}
+
 /// One finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -1148,7 +1199,10 @@ pub fn lint(
                         rule: M0191_SHARED_STRING_TABLE,
                         severity: Severity::Warning,
                         message: format!(
-                            "`{target}` is served from BOTH shell.wad (front end) and vz.wad                              (gameplay). One overlay reaches one mount point, so a shared UI string                              edited here may show in only one. Deploy it to mount last in every                              session, or ship a shell copy too."
+                            "`{target}` is served from BOTH shell.wad (front end) and vz.wad \
+                             (gameplay). One overlay reaches one mount point, so a shared UI string \
+                             edited here may show in only one. Deploy it to mount last in every \
+                             session, or ship a shell copy too."
                         ),
                         at: Some(index),
                         fix: None,
@@ -1280,27 +1334,17 @@ pub fn lint(
                         fix: None,
                     });
                 }
-                // Selection is a separate concern — PC chooses its language at boot from OS-locale and
-                // has no in-game selector — so a language with no companion `native_hook` in this
-                // Shipment ships content nothing switches into. Advisory: the selector may be installed
-                // separately, which this manifest cannot see.
-                let has_selector = manifest
-                    .contributions
-                    .iter()
-                    .any(|o| matches!(o, Contribution::NativeHook { .. }));
-                if !has_selector {
-                    out.push(Diagnostic {
-                        rule: M0201_LANGUAGE_NO_SELECTOR,
-                        severity: Severity::Warning,
-                        message: format!(
-                            "add_language {name:?} ships no `native_hook` selector in this Shipment. \
-                             PC has no in-game language selector, so without the language-selector \
-                             plugin the new language ships but nothing switches the game into it — \
-                             ship the selector here, or install it separately."
-                        ),
-                        at: Some(index),
-                        fix: None,
-                    });
+            }
+            Contribution::AddAnimation {
+                clip, trnm, events, ..
+            }
+            | Contribution::ReplaceAnimation {
+                clip, trnm, events, ..
+            } => {
+                if let Some(root) = root {
+                    if !source_issue_at.contains(&index) {
+                        out.extend(animation_checks(index, root, clip, trnm, events.as_deref()));
+                    }
                 }
             }
             Contribution::AddModel {

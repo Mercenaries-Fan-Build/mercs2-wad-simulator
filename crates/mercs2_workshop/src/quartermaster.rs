@@ -751,8 +751,8 @@ fn contribution_name(c: &Contribution) -> String {
         Contribution::AddRuntimeDll { dll } => leaf(dll),
         Contribution::Raw { payload, .. } => leaf(payload),
         // New Contribution kinds (add_script/replace_lua/replace_phy2/add_placement/add_layer/
-        // add_animation/replace_animation/add_shader/replace_shader/add_fx/replace_fx/add_schema/
-        // add_ai_squad_template/replace_terrain_cell/add_stringdb_keys/replace_stringdb_text)
+        // add_animation/replace_animation/add_shader/replace_shader/add_fx/replace_fx/
+        // replace_terrain_cell/add_stringdb_keys/replace_stringdb_text)
         // don't have first-class workshop UI yet; fall back to the machine tag.
         other => other.kind().to_string(),
     }
@@ -882,8 +882,6 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("replace_shader", "Replace a shipped shader, same hash"),
             ("add_fx", "Add a particle effect"),
             ("replace_fx", "Replace a shipped fx, same hash"),
-            ("add_schema", "Add an ECS component schema"),
-            ("add_ai_squad_template", "Add an AI squad template"),
             ("replace_terrain_cell", "Replace a terrain cell, same hash"),
             ("add_stringdb_keys", "Add brand-new string-table keys"),
             ("replace_stringdb_text", "Rewrite strings by exact text match"),
@@ -1090,11 +1088,13 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             name,
             clip: PathBuf::from("src/clip.hkx"),
             trnm: PathBuf::from("src/clip.trnm"),
+            events: None,
         },
         "replace_animation" => Contribution::ReplaceAnimation {
             target: "shipped_anim".into(),
             clip: PathBuf::from("src/clip.hkx"),
             trnm: PathBuf::from("src/clip.trnm"),
+            events: None,
         },
         "add_shader" => Contribution::AddShader {
             name,
@@ -1111,19 +1111,6 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "replace_fx" => Contribution::ReplaceFx {
             target: "shipped_fx".into(),
             payload: PathBuf::from("src/effect.fxdict"),
-        },
-        "add_schema" => Contribution::AddSchema {
-            name,
-            schm: PathBuf::from("src/component.schm"),
-        },
-        // type_id / type_hash placeholder 0: the author MUST supply the real values (the AI-squad
-        // type-id is not in `aset_type_ids`), so a 0 serializes fine and lints loud — the same
-        // "valid to serialize, loud to lint" contract as every other stub's placeholder path.
-        "add_ai_squad_template" => Contribution::AddAiSquadTemplate {
-            name,
-            config: PathBuf::from("src/squad.bin"),
-            type_id: 0,
-            type_hash: 0,
         },
         "replace_terrain_cell" => Contribution::ReplaceTerrainCell {
             target: "shipped_cell".into(),

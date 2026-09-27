@@ -38,6 +38,8 @@ qm check-range --report FILE -- RANGE... check version ranges with qm's semver g
 qm compile-lua FILE... [--out-dir DIR]   compile Lua with the game's compiler and check the header
 qm manifest-info FILE                    print a manifest's name and version as JSON
 qm rules                                 what is checked, what is not, and where each is documented
+qm kinds [--json]                        every contribution kind this qm reads, one per line; --json
+                                         prints {"format":2,"kinds":[...]} — the authoritative list
 ```
 
 Prebuilt binaries are attached to each release, so nothing here requires a Rust toolchain. Modkit

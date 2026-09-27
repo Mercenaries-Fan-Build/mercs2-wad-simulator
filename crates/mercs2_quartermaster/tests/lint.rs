@@ -57,17 +57,16 @@ fn errors_block_the_build_and_warnings_do_not() {
         "an unknown wearer must block"
     );
 
-    // A new language with no selector plugin in the Shipment is advisory (M0201): the selector may
-    // be installed separately.
+    // Editing one copy of a string table shared between shell.wad and vz.wad is advisory (M0191):
+    // the fix is a deploy question, not a defect in the manifest.
     let warning_only = shipment_with(
-        "  - kind: add_language
-    name: klingon
-    display: Klingon
-    strings: src/klingon.txt
+        "  - kind: edit_stringdb
+    target: english
+    strings: src/english.txt
 ",
     );
     let diags = lint::lint(&warning_only, None, None);
-    assert_eq!(codes(&diags), vec!["M0201"]);
+    assert_eq!(codes(&diags), vec!["M0191"]);
     assert_eq!(diags[0].severity, Severity::Warning);
     assert!(!lint::blocks_build(&diags), "a warning must not block");
 }
@@ -598,25 +597,8 @@ fn m0190_is_registered() {
 }
 
 // ---------------------------------------------------------------------------
-// add_language (M0200 / M0201)
+// add_language (M0200)
 // ---------------------------------------------------------------------------
-
-/// A novel language paired with its selector plugin is clean — the ordinary, correct shape.
-#[test]
-fn a_novel_language_with_a_selector_is_quiet() {
-    let m = shipment_with(
-        "  - kind: add_language
-    name: polski
-    display: Polski
-    strings: src/text/polski.txt
-  - kind: native_hook
-    target: retail
-    plugin: src/mercs2_language.asi
-    touches: [\"0x004BFE20\"]
-",
-    );
-    assert!(lint::lint(&m, None, None).is_empty());
-}
 
 /// A name the game already ships (`.\Data\english.wad`) is an ERROR: add_language may only ADD, and
 /// placing over a shipped WAD would shadow base-game data — the `data/` safety pivot.
@@ -628,10 +610,6 @@ fn a_language_name_that_collides_with_a_shipped_wad_is_an_error() {
     name: {name}
     display: X
     strings: src/text/x.txt
-  - kind: native_hook
-    target: retail
-    plugin: src/x.asi
-    touches: [\"0x004BFE20\"]
 "
         ));
         let diags = lint::lint(&m, None, None);
@@ -652,10 +630,6 @@ fn a_language_name_that_is_not_a_token_is_an_error() {
     name: \"{name}\"
     display: X
     strings: src/text/x.txt
-  - kind: native_hook
-    target: retail
-    plugin: src/x.asi
-    touches: [\"0x1\"]
 "
         ));
         assert!(
@@ -665,11 +639,10 @@ fn a_language_name_that_is_not_a_token_is_an_error() {
     }
 }
 
-/// An add_language with no selector plugin in the same Shipment is a WARNING, not a block: PC has no
-/// in-game selector, so nothing switches the game into the language — but the plugin may be installed
-/// separately, so it does not fail the build.
+/// A novel language on its own is clean. Switching the game into it is Modkit's job, not something a
+/// Shipment has to carry, so nothing asks for a companion plugin.
 #[test]
-fn a_language_without_a_selector_warns_but_does_not_block() {
+fn a_language_alone_lints_clean() {
     let m = shipment_with(
         "  - kind: add_language
     name: polski
@@ -678,17 +651,114 @@ fn a_language_without_a_selector_warns_but_does_not_block() {
 ",
     );
     let diags = lint::lint(&m, None, None);
-    assert!(codes(&diags).contains(&"M0201"), "{diags:?}");
-    assert!(!lint::blocks_build(&diags), "M0201 is advisory, not blocking");
-    assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+    assert!(diags.is_empty(), "{diags:?}");
 }
 
-/// Both new rules are registered, so `qm rules` can list them.
+/// M0200 is registered, so `qm rules` can list it; M0201 (a language without a selector plugin) is
+/// gone, because selection is not the Shipment's concern.
 #[test]
 fn the_language_rules_are_registered() {
-    for code in ["M0200", "M0201"] {
+    assert!(lint::RULES.iter().any(|r| r.code == "M0200"));
+    assert!(!lint::RULES.iter().any(|r| r.code == "M0201"));
+}
+
+// ---------------------------------------------------------------------------
+// M0191 / M0202 — message text and registration
+// ---------------------------------------------------------------------------
+
+/// The M0191 message is one sentence run, not a string with the source's indentation embedded in it.
+#[test]
+fn the_m0191_message_has_no_runs_of_spaces() {
+    let m = shipment_with("  - kind: edit_stringdb\n    target: english\n    strings: src/e.txt\n");
+    let diags = lint::lint(&m, None, None);
+    let d = diags.iter().find(|d| d.rule.code == "M0191").expect("M0191 fires");
+    assert!(!d.message.contains("  "), "double space in: {:?}", d.message);
+}
+
+/// Every rule the hermetic `lint` can emit is registered, so a modder can look its code up.
+#[test]
+fn m0202_and_m0213_are_registered() {
+    for code in ["M0202", "M0213"] {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// M0213 — an animation's clip / trnm / events pairing
+// ---------------------------------------------------------------------------
+
+/// A real Havok 5.5 clip, shared with `mercs2_formats`' own tests.
+const CLIP: &[u8] = include_bytes!("../../mercs2_formats/tests/fixtures/anim_ks750_le.bin");
+
+fn trnm_of(count: u32) -> Vec<u8> {
+    let mut t = count.to_le_bytes().to_vec();
+    t.extend_from_slice(&0u32.to_le_bytes());
+    for k in 0..count {
+        t.extend_from_slice(&(0x1000 + k).to_le_bytes());
+    }
+    t
+}
+
+/// A scratch Shipment with `src/clip.hkx`, `src/clip.trnm` and optionally `src/clip.evnt`, linted
+/// with an `add_animation` naming them.
+fn lint_animation(label: &str, trnm: &[u8], events: Option<&[u8]>) -> Vec<lint::Diagnostic> {
+    let root = std::env::temp_dir().join(format!("qm_lint_anim_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/clip.hkx"), CLIP).unwrap();
+    std::fs::write(root.join("src/clip.trnm"), trnm).unwrap();
+    let mut yaml = "  - kind: add_animation\n    name: my_clip\n    clip: src/clip.hkx\n    trnm: src/clip.trnm\n".to_string();
+    if let Some(e) = events {
+        std::fs::write(root.join("src/clip.evnt"), e).unwrap();
+        yaml.push_str("    events: src/clip.evnt\n");
+    }
+    lint::lint(&shipment_with(&yaml), Some(&root), None)
+}
+
+fn clip_tracks() -> u32 {
+    mercs2_formats::animgroup::read_clip_header(CLIP)
+        .expect("fixture is a clip")
+        .num_transform_tracks
+}
+
+#[test]
+fn m0213_is_quiet_on_a_consistent_clip_trnm_and_events() {
+    use mercs2_formats::anim_container::{build_evnt, AnimEvent};
+    let evnt = build_evnt(&[
+        AnimEvent { time: 0.0, name: "fol_rustle_human".into(), category: "sound".into() },
+        AnimEvent { time: 0.2, name: "opendoor".into(), category: String::new() },
+    ])
+    .unwrap();
+    let diags = lint_animation("ok", &trnm_of(clip_tracks()), Some(&evnt));
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn m0213_fires_when_the_trnm_count_is_not_the_clips_track_count() {
+    let diags = lint_animation("count", &trnm_of(clip_tracks() + 2), None);
+    assert_eq!(codes(&diags), vec!["M0213"], "{diags:?}");
+    assert!(diags[0].message.contains("numTransformTracks"), "{}", diags[0].message);
+    assert!(lint::blocks_build(&diags));
+}
+
+#[test]
+fn m0213_fires_on_events_that_do_not_parse() {
+    // Declares two events, carries one.
+    let mut evnt = 2u32.to_le_bytes().to_vec();
+    evnt.extend_from_slice(&0f32.to_le_bytes());
+    evnt.extend_from_slice(b"a\0sound\0");
+    let diags = lint_animation("evnt", &trnm_of(clip_tracks()), Some(&evnt));
+    assert_eq!(codes(&diags), vec!["M0213"], "{diags:?}");
+    assert!(diags[0].message.contains("evnt"), "{}", diags[0].message);
+}
+
+/// Without a root the files cannot be read, so the rule does not run rather than guess.
+#[test]
+fn m0213_needs_the_files() {
+    let m = shipment_with(
+        "  - kind: add_animation\n    name: c\n    clip: src/c.hkx\n    trnm: src/c.trnm\n",
+    );
+    assert!(lint::lint(&m, None, None).is_empty());
 }
 
 // ---------------------------------------------------------------------------

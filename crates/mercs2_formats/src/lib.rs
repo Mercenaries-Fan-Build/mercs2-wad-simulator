@@ -46,6 +46,8 @@
 //! - [`skeleton`], [`havok`], [`anim`], [`animgroup`], [`anim_select`] — `HIER` rest pose; the
 //!   little-endian Havok 5.5 packfile reader (`PHY2` collision); `hkaAnimation` clip decode; the
 //!   `animation` block; the engine's data-driven clip picker.
+//! - [`anim_container`] — the `animation` asset container, read and written byte-identically:
+//!   `info`/`data`/`trnm`/`evnt` Havok clips and `MANM`/`MINF`/`TRCK` keyframe animations.
 //! - [`terrain`], [`placement`], [`world_index`], [`world`] — low-res terrain; `layers_static`
 //!   placements; the Layer-1 world block index that feeds streaming; world spatial constants.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
@@ -79,6 +81,7 @@
 //! x32dbg capture.
 
 pub mod anim;
+pub mod anim_container;
 pub mod anim_select;
 pub mod animgroup;
 pub mod aset_type_ids;
