@@ -48,7 +48,7 @@ struct HarnessHost {
     driver: HashMap<u64, u64>,    // vehicle -> driver rider
     rider_veh: HashMap<u64, u64>, // rider -> vehicle
     // audio (stand-in for mercs2_audio::AudioEngine)
-    cues: Vec<String>,
+    cues: Vec<(u64, String)>,
     next_voice: u64,
     music_states: HashSet<String>,
     current_music: String,
@@ -274,9 +274,9 @@ impl EngineHost for HarnessHost {
     }
 
     // audio
-    fn sound_cue(&mut self, cue: &str) -> u64 {
+    fn sound_cue(&mut self, emitter: u64, cue: &str) -> u64 {
         self.next_voice += 1;
-        self.cues.push(cue.to_string());
+        self.cues.push((emitter, cue.to_string()));
         self.next_voice
     }
     fn sound_add_music_state(&mut self, name: &str) {
@@ -532,7 +532,18 @@ fn h_sound_cuesound() {
     // play 2D" form the UI cues use (`wifvzboundary.lua:87`, `mrxguiinterface.lua:367`).
     let ok: bool = sh.eval(r#"return Sound.CueSound(0, "ui_confirm") ~= nil"#).unwrap();
     assert!(ok, "CueSound must return a voice id, not nil");
-    assert_eq!(host.borrow().cues, vec!["ui_confirm".to_string()]);
+    assert_eq!(host.borrow().cues, vec![(0, "ui_confirm".to_string())]);
+    // `pmccon001.lua:496` `Sound.CueSound(Pg.GetGuidByName("PMC001_EntourageScorpion"), …)`: the
+    // object's guid reaches the host as the cue's emitter.
+    let guid: mercs2_script::Guid = sh
+        .eval(
+            r#"local u = Pg.Spawn("PmcHqInterior", 0,0,0, 0, false, true)
+               Sound.CueSound(u, "exp_bust_thru_wall")
+               return u"#,
+        )
+        .unwrap();
+    assert!(guid.is_some());
+    assert_eq!(host.borrow().cues[1], (guid.raw(), "exp_bust_thru_wall".to_string()));
 }
 fn h_sound_music_transition() {
     let (sh, _h) = setup();

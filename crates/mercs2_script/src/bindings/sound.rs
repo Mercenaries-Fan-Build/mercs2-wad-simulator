@@ -140,11 +140,12 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // `"268435456"`); once `Pg.GetGuidByName` returns lightuserdata that same signature **raises**,
     // which would abort the caller's chain. Hence the explicit `(Guid, String)`.
     //
-    // The emitter is accepted and not yet placed: `AudioEngine` has no per-emitter 3D voice pool, so
-    // playback is the 2D path either way. Tracked in the burn-down.
+    // The emitter reaches the host: the shim (`FUN_005E0FF0`) posts `{object, cue hash}` and the
+    // sound player starts the cue through the object's emitter record, whose emitter follows the
+    // object every frame (`mercs2_audio::AudioEngine::cue_sound_on_object`); object 0 plays 2D.
     let h = host.clone();
-    b.real("CueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
-        Ok(voice_opt(h.borrow_mut().sound_cue(&cue)))
+    b.real("CueSound", lua.create_function(move |_, (emitter, cue): (Guid, String)| {
+        Ok(voice_opt(h.borrow_mut().sound_cue(emitter.raw(), &cue)))
     })?)?;
     // Stop/pause are addressed by `(emitter, cue)`, but the host's stop is keyed by the voice id
     // `sound_cue` minted and there is no `(emitter, cue) → voice` index yet, so a cue-addressed stop
@@ -201,10 +202,23 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("_GetLibVersion", lua.create_function(move |_, ()| Ok(h.borrow().sound_lib_version()))?)?;
 
-    // --- test cue variants (same `(emitter, cue)` shape, same playback path) ---
+    // --- test cue variants ---
+    // `Sound.TestCueSound(sCue)` (shim `FUN_005E0DB0`) takes one argument, the cue name
+    // (`FUN_0059FA40`, hashed by `FUN_00824270` at `0x005E0DFB`), and finds the object itself: local
+    // player slot 0 (`FUN_006CD960(0)`, `0x005E0E04`: the first joined, local record's index `+0x2C`)
+    // → that player (`FUN_006CDAF0`, `0x005E0E0A`) → its attached character `+0x20` (`0x005E0E16`) —
+    // the lookup `Player.GetLocalCharacter()` with no argument makes (`0x005DE1F2`..`0x005DE21F`).
+    // With no such player, or one with no character (`0x005E0E14` / `0x005E0E1B`), it posts nothing;
+    // otherwise it posts the `CueSound` message `{0, character, 4, 0, −1.0, hash, 0}`
+    // (`0x005E0E29`..`0x005E0E54`), so the cue plays on the character's emitter. It returns no value
+    // (`xor eax, eax` at `0x005E0E5A`).
     let h = host.clone();
-    b.real("TestCueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
-        Ok(voice_opt(h.borrow_mut().sound_cue(&cue)))
+    b.real("TestCueSound", lua.create_function(move |_, cue: String| {
+        let character = h.borrow().player_world_ref().and_then(|w| w.roster.local()).map(|p| p.character);
+        if let Some(character) = character.filter(|&c| c != 0) {
+            h.borrow_mut().sound_cue(character, &cue);
+        }
+        Ok(())
     })?)?;
     let h = host.clone();
     b.real("TestStopSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {

@@ -2,11 +2,11 @@
 //!
 //! ## How VO is stored
 //!
-//! Per `mrxsoundbootstrap.lua`, `vo_stream` is the only VO **wavebank**; the per-character
-//! banks (`vo_mattias`, `vo_Chris`, `vo_Jen`, `vo_Fiona`, …) are **soundbanks** that route a
-//! cue to `(bank_hash, wave_index)`. So all spoken audio lives in ONE wavebank whose clips
-//! are codec `0x04` (streamed): the samples are NOT in the WAD, only a `(data_offset,
-//! data_size)` pair pointing into `data/Audios/vo_stream.<lang>.pws`.
+//! Per `mrxsoundbootstrap.lua`, `vo_stream` is the streamed VO **wavebank**; the per-character
+//! banks (`vo_mattias`, `vo_Chris`, `vo_Jen`, `vo_Fiona`, …) are **soundbanks** whose cues play
+//! groups of its waves. Its records are format `0x04` (streamed): the samples are NOT in the WAD,
+//! only a `(data_offset, data_size)` pair pointing into `data/Audios/vo_stream.<lang>.pws`. The
+//! per-scene VO blocks in `English.wad` also carry small embedded wavebanks.
 //!
 //! A `.pws` is a HEADERLESS blob store (see `wad_simulator::pws`) — it carries no index and
 //! no per-blob header, so it cannot be parsed standalone. The wavebank record is the index.
@@ -15,10 +15,11 @@
 //!   WAD: wavebank record -> (clip_hash, channels, sample_rate, data_offset, data_size)
 //!   PWS: bytes[data_offset .. data_offset+data_size]  -> decode -> WAV
 //!
-//! Names come from the `sounddb` cue tables: a cue is `{guid, bank_hash, wave_index}`, so a
-//! cue landing on our bank names the wave at `wave_index`. The guid is
-//! `pandemic_hash_m2(cue_name)`, reversed through the rainbow table + the fragments cracked
-//! from the WAD, which is what turns `clip_0413.wav` into a named line.
+//! Names come from the cues that play each wave, found the way the engine finds them: sounddb
+//! entry `{guid, soundbank, cue index}` → soundbank cue → (every track's sounds →) group → wave
+//! (`mercs2_audio::route`). The guid is `pandemic_hash_m2(cue_name)`, reversed through the rainbow
+//! table + the fragments cracked from the WAD, which is what turns `clip_0413.wav` into a named
+//! line.
 //!
 //! `--list` is the recon mode: it dumps the clip records and hexdumps the head of a blob so
 //! the payload encoding can be confirmed before committing to a decode.
@@ -30,8 +31,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use mercs2_audio::route::route;
+use mercs2_audio::soundbank::Soundbank;
 use mercs2_audio::sounddb::SoundDb;
-use mercs2_audio::wave;
+use mercs2_audio::wave::{self, WaveData, WavebankFile};
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::sges::decompress_block;
@@ -103,6 +106,7 @@ fn is_vo(block_path: &str, label: &str) -> bool {
 /// ASET type ids (docs/type_hash_registry.md).
 const TYPE_WAVEBANK: u32 = 6;
 const TYPE_SOUNDDB: u32 = 13;
+const TYPE_SOUNDBANK: u32 = 21;
 
 /// UCFX container type hashes. These matter: ONE asset hash commonly carries three ASET rows
 /// (wavebank + soundbank + sounddb share a name), so the block holds three different containers
@@ -111,89 +115,14 @@ const TYPE_SOUNDDB: u32 = 13;
 /// container's type_hash.
 const TH_WAVEBANK: u32 = 0xF753_F6D0; // pandemic_hash_m2("wavebank")
 const TH_SOUNDDB: u32 = 0xE527_3C14; // pandemic_hash_m2("sounddb")
+const TH_SOUNDBANK: u32 = 0x9F8B_CA10; // pandemic_hash_m2("soundbank")
 
 fn type_hash_for(aset_type: u32) -> u32 {
     match aset_type {
         TYPE_SOUNDDB => TH_SOUNDDB,
+        TYPE_SOUNDBANK => TH_SOUNDBANK,
         _ => TH_WAVEBANK,
     }
-}
-
-/// A wavebank clip record, kept RAW.
-///
-/// `mercs2_audio::wave::Wavebank` decodes clips and then discards `(data_offset, data_size,
-/// codec)` — which is exactly what a streamed clip has instead of samples, so it is exactly
-/// what we need. Parse the record layout ourselves (it is stable and documented in wave.rs)
-/// and reuse that crate's decoders for the payload.
-/// ## Record layout — corrected against the shipped data
-///
-/// `mercs2_audio::wave.rs` reads `data_offset` @+12 and `data_size` @+16. That is WRONG for the
-/// VO banks, and provably so:
-///
-///   * `+12 == 2 * +16` on every clip in every bank.
-///   * Sorting the clips by the field at **+32** yields ZERO overlaps and the blobs tile the
-///     body exactly (`sum(+12)` == body length to within the header+record bytes). Sorting by
-///     +12 does not.
-///
-/// So `+32` is the data offset, `+12` is the byte size, and `+16` is the sample count. Since
-/// `samples == bytes / 2`, each sample is TWO bytes — i.e. 16-bit PCM, not 4-bit IMA (IMA packs
-/// 2 samples *per* byte, which would make samples == 2 * bytes). Re-reading the format dword
-/// `[00 01 02 00]` as `{_, channels, bytes_per_sample, _}` agrees: the "codec = 2" that wave.rs
-/// sees is a sample WIDTH of 2 bytes.
-#[derive(Clone, Copy)]
-struct ClipRec {
-    clip_hash: u32,
-    channels: u8,
-    /// Bytes per sample (2 = PCM16). Named for what it is, not what wave.rs calls it.
-    bytes_per_sample: u8,
-    sample_rate: u32,
-    data_offset: u32,
-    data_size: u32,
-    sample_count: u32,
-}
-
-const WB_HEADER: usize = 24;
-const WB_RECORD: usize = 36;
-
-fn rd_u32(b: &[u8], o: usize) -> u32 {
-    if o + 4 > b.len() {
-        return 0;
-    }
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-
-fn parse_records(body: &[u8]) -> Vec<ClipRec> {
-    let mut out = Vec::new();
-    if body.len() < WB_HEADER {
-        return out;
-    }
-    let capacity = rd_u32(body, 0) as usize;
-    let populated = u16::from_le_bytes([body[8], body[9]]) as usize;
-    let records_off = rd_u32(body, 16) as usize;
-    // `count` @0 is CAPACITY; `populated` @8 is how many records really exist (retail streaming
-    // banks ship fewer than capacity). Take the smaller so we never run off the body.
-    let n = if populated > 0 && populated <= capacity { populated } else { capacity };
-
-    for i in 0..n {
-        let roff = records_off + i * WB_RECORD;
-        if roff + WB_RECORD > body.len() {
-            break;
-        }
-        let rec = ClipRec {
-            clip_hash: rd_u32(body, roff),
-            channels: { let c = body[roff + 5]; if c == 0 { 1 } else { c } },
-            bytes_per_sample: { let w = body[roff + 6]; if w == 0 { 2 } else { w } },
-            sample_rate: rd_u32(body, roff + 8),
-            data_size: rd_u32(body, roff + 12),
-            sample_count: rd_u32(body, roff + 16),
-            data_offset: rd_u32(body, roff + 32),
-        };
-        if rec.clip_hash == 0 && rec.sample_rate == 0 && rec.data_size == 0 {
-            continue; // padding slot
-        }
-        out.push(rec);
-    }
-    out
 }
 
 /// The VO banks, from `mrxsoundbootstrap.lua`. `vo_stream` is the wavebank (the audio);
@@ -301,26 +230,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rb = rainbow();
     eprintln!("rainbow: {} names", rb.len());
 
-    // ── 1. cue tables: guid -> (bank_hash, wave_index) ──────────────
-    // Collected from every sounddb in every open wad; the VO soundbanks route into the
-    // vo_stream wavebank, so these are what NAME the waves.
-    let mut cues: Vec<(u32, u32, u32)> = Vec::new();
+    // ── 1. routing: (wavebank, wave index) -> the cues that play it ─
+    // Every sounddb and soundbank in every open wad; the VO soundbanks' groups play the VO
+    // wavebanks' waves, so these are what NAME the waves.
+    let (mut dbs, mut sbs) = (Vec::new(), Vec::new());
     for src in &sources {
         for (_, _, body) in load_bodies(src, TYPE_SOUNDDB)? {
-            if let Ok(db) = SoundDb::parse(&body) {
-                for c in &db.cues {
-                    cues.push((c.guid, c.bank_hash, c.wave_index));
-                }
-            }
+            dbs.push(SoundDb::parse(&body)?);
+        }
+        for (_, _, body) in load_bodies(src, TYPE_SOUNDBANK)? {
+            sbs.push(Soundbank::parse(&body)?);
         }
     }
-    eprintln!("cues: {}", cues.len());
+    let routing = route(&dbs, &sbs)?;
+    eprintln!(
+        "routing: {} sounddbs, {} soundbanks, {} waves in groups",
+        dbs.len(),
+        sbs.len(),
+        routing.waves.len()
+    );
 
     // ── 2. the VO wavebank(s) ───────────────────────────────────────
     let vo_hashes: HashMap<u32, &str> =
         VO_BANKS.iter().map(|n| (pandemic_hash_m2(n), *n)).collect();
 
-    let mut found: Vec<(String, u32, u32, Vec<u8>, Vec<ClipRec>)> = Vec::new();
+    let mut found: Vec<(String, u32, WavebankFile)> = Vec::new();
     let mut skipped_sfx = 0usize;
     for src in &sources {
         for (hash, block_path, body) in load_bodies(src, TYPE_WAVEBANK)? {
@@ -344,9 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 skipped_sfx += 1;
                 continue;
             }
-            let recs = parse_records(&body);
-            let self_hash = rd_u32(&body, 4);
-            found.push((label, hash, self_hash, body, recs));
+            found.push((label, hash, WavebankFile::parse(&body)?));
         }
     }
     eprintln!("VO wavebanks: {} (skipped {skipped_sfx} SFX banks)", found.len());
@@ -364,31 +296,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut written = 0usize;
 
     // ── what indexes the .pws? ──────────────────────────────────────
-    // A .pws has no index of its own, so only a wavebank record can address it. Report every
-    // clip whose (offset,size) lands OUTSIDE its bank body — those are the stream references.
+    // A .pws has no index of its own; a streamed bank's records are the index.
     if cli.streams {
         let mut n = 0usize;
         let mut max_end = 0u64;
         let mut bytes = 0u64;
-        for (label, _, _, body, clips) in &found {
-            for (i, c) in clips.iter().enumerate() {
-                let end = c.data_offset as usize + c.data_size as usize;
-                if end <= body.len() || c.data_size == 0 {
-                    continue;
-                }
+        for (label, _, file) in &found {
+            for (i, r) in file.records.iter().enumerate() {
+                let WaveData::Streamed { offset, size, .. } = r.data else { continue };
                 n += 1;
-                bytes += c.data_size as u64;
-                max_end = max_end.max(end as u64);
+                bytes += size as u64;
+                max_end = max_end.max(offset as u64 + size as u64);
                 if n <= 20 {
                     println!(
-                        "  {label} [{i}] 0x{:08X} off={} size={} rate={} ch={}",
-                        c.clip_hash, c.data_offset, c.data_size, c.sample_rate, c.channels
+                        "  {label} [{i}] 0x{:08X} off={offset} size={size} rate={} ch={}",
+                        r.clip_hash, r.sample_rate, r.channels
                     );
                 }
             }
         }
         println!(
-            "\n{n} stream-referencing clips, {:.1} MB addressed, furthest byte {} ({:.1} MB)",
+            "\n{n} streamed records, {:.1} MB addressed, furthest byte {} ({:.1} MB)",
             bytes as f64 / 1e6,
             max_end,
             max_end as f64 / 1e6
@@ -402,138 +330,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut named = 0usize;
     let mut total_secs = 0.0f64;
 
-    for (label, bank_hash, self_hash, body, clips) in &found {
-        // wave_index -> cue name. A cue is {guid, bank_hash, wave_index}; guid is
-        // pandemic_hash_m2(cue_name), so reversing it names the line. Cues reference the bank by
-        // its SELF hash (body @+4), which is not always the ASET name hash — accept either.
-        let mut name_of_index: HashMap<u32, String> = HashMap::new();
-        for (guid, bh, wi) in &cues {
-            if bh == bank_hash || bh == self_hash {
-                if let Some(n) = rb.resolve(*guid) {
-                    name_of_index.entry(*wi).or_insert_with(|| n.to_string());
-                }
-            }
-        }
-
+    for (label, bank_hash, file) in &found {
         if cli.list {
+            let routed = (0..file.records.len() as u32)
+                .filter(|&i| routing.first_cue(file.bank_hash, i).is_some())
+                .count();
             println!(
-                "\n=== {label} (0x{bank_hash:08X} self=0x{self_hash:08X}) — {} clips, body {} B, {} cue-named",
-                clips.len(), body.len(), name_of_index.len()
+                "\n=== {label} (0x{bank_hash:08X} table 0x{:08X}{}) — {} records, {routed} reached by a cue",
+                file.bank_hash,
+                file.stream_name.as_deref().map(|n| format!(", streams from {n}")).unwrap_or_default(),
+                file.records.len(),
             );
-            // Layout proof. wave.rs reads offset@+12/size@+16, but +12 == 2*+16 on EVERY clip and
-            // IMA yields exactly 2 samples/byte -- so +12 is a SAMPLE COUNT and +16 is the byte
-            // size. The unread field at +32 is the real data offset. Verify by sorting on +32 and
-            // checking the blobs tile the body without overlap.
-            let records_off = rd_u32(body, 16) as usize;
-            let capacity = rd_u32(body, 0);
-            let mut rows: Vec<(u32, u32, u32)> = Vec::new(); // (off@32, size@16, samples@12)
-            for i in 0..clips.len() {
-                let roff = records_off + i * WB_RECORD;
-                if roff + WB_RECORD > body.len() {
-                    break;
-                }
-                rows.push((
-                    rd_u32(body, roff + 32),
-                    rd_u32(body, roff + 16),
-                    rd_u32(body, roff + 12),
-                ));
-            }
-            rows.sort_by_key(|r| r.0);
-            let mut overlaps = 0usize;
-            let mut covered = 0u64;
-            let mut prev_end = 0u64;
-            for (off, size, _) in &rows {
-                let (o, s) = (*off as u64, *size as u64);
-                if o < prev_end {
-                    overlaps += 1;
-                }
-                covered += s;
-                prev_end = o + s;
-            }
-            println!(
-                "  capacity={capacity} records_off={records_off} body={} B",
-                body.len()
-            );
-            println!(
-                "  sorted by +32 with size=+16: overlaps={overlaps}, covered={covered} B, \
-                 last_end={prev_end} (body {})",
-                body.len()
-            );
-            for (off, size, samples) in rows.iter().take(4) {
-                println!("    off={off:>9} size={size:>8} samples={samples:>9} (2*size={})", size * 2);
+            for (i, r) in file.records.iter().enumerate().take(8) {
+                let cue = routing
+                    .first_cue(file.bank_hash, i as u32)
+                    .map(|g| rb.resolve(g).map(str::to_string).unwrap_or(format!("cue_{g:08X}")))
+                    .unwrap_or_default();
+                println!(
+                    "  [{i:>5}] clip 0x{:08X} {} ch {} Hz {} frames  {cue}",
+                    r.clip_hash, r.channels, r.sample_rate, r.frames
+                );
             }
             continue;
         }
 
-        for (i, clip) in clips.iter().enumerate() {
+        for (i, rec) in file.records.iter().enumerate() {
             if cli.limit > 0 && written >= cli.limit {
                 break;
             }
-            if clip.data_size == 0 {
-                continue;
-            }
-            let end = clip.data_offset as usize + clip.data_size as usize;
-
-            // Embedded (codec 0x02 IMA / 0x00 PCM): the samples are in the bank body, inside the
-            // WAD. Streamed (codec 0x04): only a reference — the bytes live in the .pws.
-            let blob: Vec<u8> = if end <= body.len() {
-                embedded_n += 1;
-                body[clip.data_offset as usize..end].to_vec()
-            } else if (clip.data_offset as u64 + clip.data_size as u64) <= pws_len {
-                streamed_n += 1;
-                let mut b = vec![0u8; clip.data_size as usize];
-                pws.seek(SeekFrom::Start(clip.data_offset as u64))?;
-                pws.read_exact(&mut b)?;
-                b
-            } else {
-                continue; // reference fits neither the body nor the .pws
-            };
-
-            let ch = clip.channels.max(1) as u16;
-            // 2 bytes/sample = interleaved PCM16 LE (the VO case — see ClipRec docs).
-            // 1 byte/sample = 4-bit IMA ADPCM, decoded with the engine's tested decoder.
-            let pcm: Vec<i16> = match clip.bytes_per_sample {
-                2 => blob
-                    .chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
-                    .collect(),
-                _ if ch >= 2 => wave::decode_ima_stereo(&blob),
-                _ => wave::decode_ima_mono(&blob),
+            let ch = rec.channels as u16;
+            // Embedded: interleaved PCM16 in the bank body. Streamed: the bytes live in the .pws and
+            // are IMA ADPCM there (mercs2_workshop::vostream decodes the same stream the same way).
+            let pcm: Vec<i16> = match &rec.data {
+                WaveData::Embedded(bytes) => {
+                    embedded_n += 1;
+                    bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+                }
+                WaveData::Streamed { offset, size, .. } => {
+                    if *offset as u64 + *size as u64 > pws_len {
+                        return Err(format!(
+                            "{label} record {i}: {size} bytes at {offset} run past the {pws_len}-byte {}",
+                            cli.pws
+                        )
+                        .into());
+                    }
+                    streamed_n += 1;
+                    let mut b = vec![0u8; *size as usize];
+                    pws.seek(SeekFrom::Start(*offset as u64))?;
+                    pws.read_exact(&mut b)?;
+                    if ch >= 2 { wave::decode_ima_stereo(&b) } else { wave::decode_ima_mono(&b) }
+                }
             };
             if pcm.is_empty() {
                 continue;
             }
-            // The record states the expected sample count; a mismatch means the layout is wrong.
-            if clip.bytes_per_sample == 2 && clip.sample_count > 0 {
-                let got = pcm.len() as u32;
-                if got.abs_diff(clip.sample_count) > 2 {
-                    eprintln!(
-                        "  WARN {label} clip {i}: decoded {got} samples, record says {} — layout suspect",
-                        clip.sample_count
-                    );
-                }
-            }
-
-            let rate = if clip.sample_rate == 0 { 44100 } else { clip.sample_rate };
+            let rate = rec.sample_rate;
             let secs = pcm.len() as f64 / ch as f64 / rate as f64;
             total_secs += secs;
 
-            // Name the line if a cue claims this wave; otherwise fall back to the scene block
-            // name + index, which still tells you which mission the line belongs to.
             // Name the line, best source first:
-            //   1. the clip's OWN hash — the engine's documented fallback is `clip_hash ==
-            //      cue guid`, and a cue guid is pandemic_hash_m2(cue_name), so this reverses
-            //      straight to the line's authored name when the rainbow table has it.
-            //   2. a cue that claims this wave_index in this bank.
+            //   1. the clip's OWN hash, reversed through the rainbow table;
+            //   2. a cue that plays this wave (sounddb → soundbank cue → group → wave);
             //   3. scene block + index, which still identifies the mission.
-            let base = if let Some(n) = rb.resolve(clip.clip_hash) {
+            let cue_name = routing.first_cue(file.bank_hash, i as u32).and_then(|g| rb.resolve(g));
+            let base = if let Some(n) = rb.resolve(rec.clip_hash) {
                 named += 1;
                 format!("{}__{}", safe(label), safe(n))
-            } else if let Some(n) = name_of_index.get(&(i as u32)) {
+            } else if let Some(n) = cue_name {
                 named += 1;
                 format!("{}__{}", safe(label), safe(n))
             } else {
-                format!("{}__{:04}_0x{:08X}", safe(label), i, clip.clip_hash)
+                format!("{}__{:04}_0x{:08X}", safe(label), i, rec.clip_hash)
             };
             let path = cli.out.join(format!("{base}.wav"));
             write_wav(&path, &pcm, ch, rate)?;

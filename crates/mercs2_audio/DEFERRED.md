@@ -13,28 +13,35 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   `DAT_01176408`). cpal has no portable reverb; environmental reverb (`Sound.SetReverb*`) is accepted
   and stored but not rendered. A software reverb (per-env comb/allpass from the 26-env table) is the
   faithful-substitute upgrade.
-- **Multichannel (4/6-ch) output** `[faithful-blocker: no]` — `CreateDevice` supports 1/2/4/6 ch with
-  `WAVE_FORMAT_EXTENSIBLE`; the mixer here renders the config's channel count but the pan law and
-  listener-gain table (`DAT_00fc34b0`) are implemented for stereo. Surround needs the full per-listener
-  channel-gain matrix.
-- ~~**Sample-rate conversion**~~ **DONE** — `PcmSource::with_rate` resamples per-voice (linear interp,
-  clip rate→mixer rate) so a 22 050 Hz clip plays at correct pitch into a 44 100/48 000 Hz mix, matching
-  the per-wave pitch step of `PalSoundWaveDX8`. The IMA-ADPCM/PCM decoder now lives in `wave.rs`
+- **The device fold-down** `[faithful-blocker: no]` — the mixer renders the engine's 6-channel
+  stream (`FUN_0083f760` creates it with channel mask `0x3F`), emitter sources included (their speaker
+  gains, distance volume and Doppler are the engine's, `spatial`). Folding that stream to the
+  speakers is DirectSound's work, not engine code: a stereo device here takes channels 0 and 1 and a
+  mono device channel 0, as a stand-in; a 3–5 channel device is refused.
+- ~~**Sample-rate conversion**~~ **DONE** — `PcmSource` steps through a clip at the wave kernel's
+  32.32 fixed-point step `(freq << 32) / rate`, taking the nearest (truncated) sample, as
+  `PalSoundWaveDX8`'s mix (`FUN_00839fd0`) does. The IMA-ADPCM/PCM decoder now lives in `wave.rs`
   (ported from the retail-verified tool decoder).
-- **Doppler applied to the mix** `[faithful-blocker: no]` — `spatial::doppler_pitch` is implemented and
-  matches `FUN_0083ade0`; the per-voice resample step now EXISTS (`PcmSource::with_rate`), so wiring
-  Doppler is just folding the doppler ratio into that step — a small follow-up.
+- ~~**Doppler applied to the mix**~~ **DONE** — traced and applied where the engine applies it:
+  `FUN_0083ade0` computes an emitter source's factor (source `+0x34`,
+  `1 − (relative velocity · unit direction) × DAT_00BEB460`) against listener 0; `FUN_0083b120`
+  scales it by each wave's Doppler scale (wave `+0x70`, the group's `+0x28`); `FUN_00839ae0` clamps it
+  to `[0.1, 2]` into wave `+0xA8`; and the frequency getter `FUN_0083e170` multiplies the wave's
+  frequency by it before the kernel's step. 2D sources pass 1.0. The earlier `spatial::doppler_pitch`
+  (a musical ratio clamped to `[0.5, 2]`) was not the engine's and is gone.
 
 ## Voices / mixer
 
-- ~~**Real wave-bind on cue**~~ **DONE** — `AudioEngine::load_wavebank` decodes a `wavebank` body into
-  resident clips (keyed by bank self-hash + clip hash); `cue_sound` auto-binds the resident wave a cue
-  routes to (`resolve_wave`: `cue.bank_hash` → resident `Wavebank`, `cue.wave_index` → its clip; fallback
-  clip-hash == cue-guid). The `sounddb` layout was CALIBRATED against shipped blocks (real 12-B
-  `{guid, bank_hash, wave_index}` record — the old 16-B guess read 0 cues). Verified end-to-end on
-  vz.wad (`mercs2_game/tests/audio_wad_probe.rs`): 226/853 resident cues → decoded PCM, RMS > 0.
-  Still deferred: the global `Mercs2Globals` catalog (extended header, not yet decoded) + streamed
-  `.pws` cues (below).
+- ~~**Real wave-bind on cue**~~ **DONE** — the engine resolves a cue the way the tables route it:
+  `sounddb` entry `{guid, soundbank hash, soundbank cue index}` → the resident soundbank's cue → every
+  sound of every track → the groups they pick → the waves → the resident decoded clip
+  (`AudioEngine::resolve_cue`), and a started cue picks among weighted groups and waves exactly as the
+  engine does (`select`), following its volume / pitch automation (`automation`, `playback`). The three table layouts, multi-track cues included, were measured
+  on all of retail `vz.wad` and re-encode byte-identically (`tests/retail_banks.rs`). Two earlier
+  readings were wrong and are gone: the sounddb's third field was read as a wave index, and the
+  wavebank record's data offset as body-relative (it is record-relative). Over all 1,198 retail cues
+  1,012 resolve with every `vz.wad` bank resident (1,019 with `English.wad`'s wavebanks too); the rest
+  reach `.pws`-streamed waves.
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.
