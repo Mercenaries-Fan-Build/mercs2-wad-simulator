@@ -13,21 +13,26 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   `DAT_01176408`). cpal has no portable reverb; environmental reverb (`Sound.SetReverb*`) is accepted
   and stored but not rendered. A software reverb (per-env comb/allpass from the 26-env table) is the
   faithful-substitute upgrade.
-- **A positional source's speaker gains** `[faithful-blocker: no]` — the mixer renders the engine's
-  6-channel stream (`FUN_0083f760` creates it with channel mask `0x3F`) through per-source scratch
-  buffers (`DAT_00FC34B0` is that scratch, handed to every wave's mix `FUN_00839ae0`, not a gain
-  table). A 2D source's six gains are 1.0 (`FUN_0083ade0`); a positional (emitter) source's gains come
-  from `FUN_0083d090` / `FUN_0083d3a0`, which are not traced, so this crate gives an emitter source the
-  `spatial` left/right gains on channels 0 and 1 and 0 on the other four. A stereo device takes
-  channels 0 and 1 of the stream and a mono device channel 0 — a substitute for DirectSound's
-  fold-down of the 6-channel buffer, which is not modelled; a 3–5 channel device is refused.
+- **The device fold-down** `[faithful-blocker: no]` — the mixer renders the engine's 6-channel
+  stream (`FUN_0083f760` creates it with channel mask `0x3F`), emitter sources included (their speaker
+  gains, distance volume and Doppler are the engine's, `spatial`). Folding that stream to the
+  speakers is DirectSound's work, not engine code: a stereo device here takes channels 0 and 1 and a
+  mono device channel 0, as a stand-in; a 3–5 channel device is refused.
 - ~~**Sample-rate conversion**~~ **DONE** — `PcmSource` steps through a clip at the wave kernel's
   32.32 fixed-point step `(freq << 32) / rate`, taking the nearest (truncated) sample, as
   `PalSoundWaveDX8`'s mix (`FUN_00839fd0`) does. The IMA-ADPCM/PCM decoder now lives in `wave.rs`
   (ported from the retail-verified tool decoder).
-- **Doppler applied to the mix** `[faithful-blocker: no]` — `spatial::doppler_pitch` is implemented and
-  matches `FUN_0083ade0`; the per-voice resample step now EXISTS (`PcmSource::with_rate`), so wiring
-  Doppler is just folding the doppler ratio into that step — a small follow-up.
+- ~~**Doppler applied to the mix**~~ **DONE** — traced and applied where the engine applies it:
+  `FUN_0083ade0` computes an emitter source's factor (source `+0x34`,
+  `1 − (relative velocity · unit direction) × DAT_00BEB460`) against listener 0; `FUN_0083b120`
+  scales it by each wave's Doppler scale (wave `+0x70`, the group's `+0x28`); `FUN_00839ae0` clamps it
+  to `[0.1, 2]` into wave `+0xA8`; and the frequency getter `FUN_0083e170` multiplies the wave's
+  frequency by it before the kernel's step. 2D sources pass 1.0. The earlier `spatial::doppler_pitch`
+  (a musical ratio clamped to `[0.5, 2]`) was not the engine's and is gone.
+- **Emitter velocity** `[faithful-blocker: no]` — the Doppler factor needs the emitter's velocity
+  (source holder `+0x5C`); `AudioEngine::cue_sound` takes a position only, so its emitters are at rest
+  and only listener motion (`Listener::velocity`) shifts pitch. Feeding a moving emitter's velocity
+  needs a cue API that carries it.
 
 ## Voices / mixer
 
