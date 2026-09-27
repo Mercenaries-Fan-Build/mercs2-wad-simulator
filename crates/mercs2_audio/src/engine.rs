@@ -32,10 +32,71 @@ use crate::categories::{category_id, Categories};
 use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
 use crate::music::MusicStateMachine;
 use crate::sounddb::{CueEntry, SoundDb};
+use crate::soundbank::{CueBody, Group, Soundbank, SoundbankError};
 use crate::spatial::{self, ListenerSet, Listener};
 use crate::vo::{VoManager, VoPriority};
 use crate::voice::{VoiceId, VoicePool, VoiceRequest};
-use crate::wave::{DecodedClip, Wavebank};
+use crate::wave::{DecodedClip, WaveError, Wavebank};
+
+/// Why a cue did not resolve to a resident clip ([`AudioEngine::resolve_wave`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolveError {
+    /// The soundbank the entry (or the cue) names is not resident.
+    SoundbankNotResident(u32),
+    /// The entry's cue index is past the soundbank's cue table.
+    CueIndexOutOfRange { soundbank: u32, index: u32, cues: usize },
+    /// The soundbank cue at the entry's index carries a different guid than the entry.
+    GuidMismatch { entry: u32, soundbank_cue: u32 },
+    /// The cue is multi-track; that layout is not decoded, so its group is unknown.
+    MultiTrackCue { guid: u32 },
+    /// The cue's group index is past the soundbank's group table.
+    GroupIndexOutOfRange { soundbank: u32, index: u16, groups: usize },
+    /// The wavebank a group wave names is not resident.
+    WavebankNotResident(u32),
+    /// A group wave's index is past the wavebank's record table.
+    WaveIndexOutOfRange { wavebank: u32, index: u32, waves: usize },
+    /// The wave lives in a `.pws` stream; it has no resident samples.
+    Streamed { clip_hash: u32 },
+    /// The cue's group lists no waves (4 retail multi-wave groups do; no retail cue plays one).
+    EmptyGroup,
+    /// The group holds this many waves (not one); the engine's pick among them is not established.
+    WaveSelectionUnknown { waves: usize },
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::SoundbankNotResident(h) => write!(f, "soundbank 0x{h:08X} is not resident"),
+            ResolveError::CueIndexOutOfRange { soundbank, index, cues } => {
+                write!(f, "cue index {index} is past soundbank 0x{soundbank:08X}'s {cues} cues")
+            }
+            ResolveError::GuidMismatch { entry, soundbank_cue } => write!(
+                f,
+                "sounddb entry 0x{entry:08X} lands on soundbank cue 0x{soundbank_cue:08X}"
+            ),
+            ResolveError::MultiTrackCue { guid } => {
+                write!(f, "cue 0x{guid:08X} is multi-track; that layout is not decoded")
+            }
+            ResolveError::GroupIndexOutOfRange { soundbank, index, groups } => {
+                write!(f, "group index {index} is past soundbank 0x{soundbank:08X}'s {groups} groups")
+            }
+            ResolveError::WavebankNotResident(h) => write!(f, "wavebank 0x{h:08X} is not resident"),
+            ResolveError::WaveIndexOutOfRange { wavebank, index, waves } => {
+                write!(f, "wave index {index} is past wavebank 0x{wavebank:08X}'s {waves} waves")
+            }
+            ResolveError::Streamed { clip_hash } => {
+                write!(f, "clip 0x{clip_hash:08X} streams from a .pws; no resident samples")
+            }
+            ResolveError::EmptyGroup => write!(f, "the cue's group lists no waves"),
+            ResolveError::WaveSelectionUnknown { waves } => write!(
+                f,
+                "the group holds {waves} waves; how the engine picks one is not established"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
 
 /// Library version reported by `Sound._GetLibVersion` (`FUN_005e4300` → `DAT_00dfdb4c` = 12.0).
 pub const SOUND_LIB_VERSION: f32 = 12.0;
@@ -58,12 +119,11 @@ pub struct AudioEngine {
     pub vo: VoManager,
     /// 3D listeners.
     pub listeners: ListenerSet,
-    /// Resident wavebanks keyed by bank (self) hash — the real `sounddb` routing target
-    /// (`cue.bank_hash` → this bank, `cue.wave_index` → its clip).
+    /// Resident soundbanks keyed by bank hash — the first hop of the cue chain (`sounddb` entry →
+    /// soundbank cue → group).
+    soundbanks: HashMap<u32, Soundbank>,
+    /// Resident wavebanks keyed by bank hash — the last hop (group wave → decoded clip).
     wavebanks: HashMap<u32, Wavebank>,
-    /// Every resident clip flattened by clip hash — the fallback lookup for a cue whose guid *is* its
-    /// wave hash (one-shot SFX), and the store `add_wave` populates directly.
-    waves: HashMap<u32, DecodedClip>,
     /// Device sink (headless [`NullSink`] by default).
     sink: Box<dyn AudioSink>,
     /// True once a real output device is attached ([`attach_output_device`](Self::attach_output_device));
@@ -98,8 +158,8 @@ impl AudioEngine {
             music: MusicStateMachine::new(),
             vo: VoManager::new(),
             listeners: ListenerSet::default(),
+            soundbanks: HashMap::new(),
             wavebanks: HashMap::new(),
-            waves: HashMap::new(),
             sink: Box::new(NullSink {
                 sample_rate: cfg.sample_rate,
                 channels: cfg.channels,
@@ -177,50 +237,98 @@ impl AudioEngine {
         let _ = self.render(frames); // render() mixes + submits to the sink
     }
 
-    // ---- resident waves (LoadWaveBank payload) ----------------------------------------------------
+    // ---- resident banks (LoadSoundBank / LoadWaveBank payloads) ----------------------------------
 
-    /// Decode a `wavebank` body (`Sound.LoadWaveBank`) and hold it resident, both as a bank (keyed by
-    /// its self hash, the `sounddb` routing target) and flattened by clip hash. Returns the number of
-    /// clips that carry decoded samples (streaming/undecodable clips are still registered so the slot
-    /// exists). The cue path binds these automatically via [`resolve_wave`](Self::resolve_wave).
-    pub fn load_wavebank(&mut self, body: &[u8]) -> usize {
-        let bank = Wavebank::parse(body);
-        let mut audible = 0;
-        for clip in &bank.clips {
-            if !clip.samples.is_empty() {
-                audible += 1;
-            }
-            self.waves.insert(clip.clip_hash, clip.clone());
-        }
+    /// Decode a `wavebank` body (`Sound.LoadWaveBank`) and hold it resident under its bank hash.
+    /// Returns the number of clips that carry decoded samples (a streamed bank's clips carry none; the
+    /// slots still exist so a group's wave index lands on them). A body outside the measured layout is
+    /// refused whole.
+    pub fn load_wavebank(&mut self, body: &[u8]) -> Result<usize, WaveError> {
+        let bank = Wavebank::parse(body)?;
+        let audible = bank.clips.iter().filter(|c| !c.samples.is_empty()).count();
         self.wavebanks.insert(bank.self_hash, bank);
-        audible
+        Ok(audible)
     }
 
-    /// Register one decoded clip directly (tests / synthesized banks).
-    pub fn add_wave(&mut self, clip: DecodedClip) {
-        self.waves.insert(clip.clip_hash, clip);
+    /// Parse a `soundbank` body (`Sound.LoadSoundBank`) and hold it resident under its bank hash.
+    /// Returns its cue count.
+    pub fn load_soundbank(&mut self, body: &[u8]) -> Result<usize, SoundbankError> {
+        let bank = Soundbank::parse(body)?;
+        let cues = bank.cues.len();
+        self.soundbanks.insert(bank.bank_hash, bank);
+        Ok(cues)
     }
 
-    /// Number of resident wave clips.
+    /// Number of resident wave clips across every resident wavebank.
     pub fn resident_wave_count(&self) -> usize {
-        self.waves.len()
+        self.wavebanks.values().map(|b| b.clips.len()).sum()
     }
 
-    /// Resolve the resident wave a cue should play, by the real `sounddb` routing: the cue names its
-    /// `bank_hash` (a resident [`Wavebank`]) and a `wave_index` into that bank's clip list (calibrated
-    /// against the shipped `veh_support` block — see [`crate::sounddb`]). Falls back to a clip whose hash
-    /// *is* the cue guid (one-shot SFX). Returns `None` when the wave is not resident or streams
-    /// externally (empty samples) — the voice then plays silent, faithful to the exe allocating a voice
-    /// before its wave streams in.
-    pub fn resolve_wave(&self, cue: &CueEntry) -> Option<&DecodedClip> {
-        if let Some(bank) = self.wavebanks.get(&cue.bank_hash) {
-            if let Some(clip) = bank.clips.get(cue.wave_index as usize) {
-                if !clip.samples.is_empty() {
-                    return Some(clip);
-                }
-            }
+    /// The group a cue plays: `sounddb` entry → its soundbank's cue (`cue_index`) → that cue's group.
+    pub fn resolve_group(&self, cue: &CueEntry) -> Result<&Group, ResolveError> {
+        let bank = self
+            .soundbanks
+            .get(&cue.bank_hash)
+            .ok_or(ResolveError::SoundbankNotResident(cue.bank_hash))?;
+        let sb_cue = bank.cues.get(cue.cue_index as usize).ok_or(ResolveError::CueIndexOutOfRange {
+            soundbank: cue.bank_hash,
+            index: cue.cue_index,
+            cues: bank.cues.len(),
+        })?;
+        if sb_cue.guid != cue.guid {
+            return Err(ResolveError::GuidMismatch { entry: cue.guid, soundbank_cue: sb_cue.guid });
         }
-        self.waves.get(&cue.guid).filter(|c| !c.samples.is_empty())
+        let (group_bank, group_index) = match &sb_cue.body {
+            CueBody::SingleTrack { soundbank, group_index, .. } => (*soundbank, *group_index),
+            CueBody::MultiTrack(_) => return Err(ResolveError::MultiTrackCue { guid: cue.guid }),
+        };
+        let bank = self
+            .soundbanks
+            .get(&group_bank)
+            .ok_or(ResolveError::SoundbankNotResident(group_bank))?;
+        bank.groups.get(group_index as usize).ok_or(ResolveError::GroupIndexOutOfRange {
+            soundbank: group_bank,
+            index: group_index,
+            groups: bank.groups.len(),
+        })
+    }
+
+    /// Every wave a cue's group can play, each resolved to its resident decoded clip, with its weight.
+    pub fn resolve_clips(&self, cue: &CueEntry) -> Result<Vec<(&DecodedClip, f32)>, ResolveError> {
+        let waves = self.resolve_group(cue)?.waves();
+        if waves.is_empty() {
+            return Err(ResolveError::EmptyGroup);
+        }
+        waves
+            .iter()
+            .map(|w| {
+                let bank = self
+                    .wavebanks
+                    .get(&w.wavebank)
+                    .ok_or(ResolveError::WavebankNotResident(w.wavebank))?;
+                let clip = bank.clips.get(w.index as usize).ok_or(ResolveError::WaveIndexOutOfRange {
+                    wavebank: w.wavebank,
+                    index: w.index,
+                    waves: bank.clips.len(),
+                })?;
+                if clip.streaming {
+                    return Err(ResolveError::Streamed { clip_hash: clip.clip_hash });
+                }
+                Ok((clip, w.weight))
+            })
+            .collect()
+    }
+
+    /// The one resident clip a cue plays. The full chain — `sounddb` entry → soundbank cue → group →
+    /// wavebank wave — must resolve, and the group must hold exactly one wave: how the engine picks
+    /// among a multi-wave group's weighted waves is not established, so such a cue is an error here,
+    /// not an arbitrary pick.
+    pub fn resolve_wave(&self, cue: &CueEntry) -> Result<&DecodedClip, ResolveError> {
+        let clips = self.resolve_clips(cue)?;
+        match clips.as_slice() {
+            [(clip, _)] => Ok(*clip),
+            _ => Err(ResolveError::WaveSelectionUnknown { waves: clips.len() }),
+        }
     }
 
     /// Install the parsed sound database (chain: `Sound.AddPgAsset("Mercs2Globals","sounddb")`).
@@ -284,10 +392,12 @@ impl AudioEngine {
         }
 
         // Auto-bind the resident wave when the caller gave no explicit source, so scripted `Sound.*`
-        // cues are actually audible — resampled from the clip's native rate to the mixer rate.
+        // cues are actually audible — resampled from the clip's native rate to the mixer rate. A cue
+        // whose chain does not resolve (see [`ResolveError`]) binds nothing and the voice is silent,
+        // as for a wave that has not streamed in yet.
         let dst_rate = self.mixer.config().sample_rate;
         let source = source.or_else(|| {
-            self.resolve_wave(&cue).map(|clip| {
+            self.resolve_wave(&cue).ok().map(|clip| {
                 Box::new(PcmSource::with_rate(
                     clip.samples.clone(),
                     clip.channels as usize,
