@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::audio::{AudioEngine, VoiceId};
+use crate::audio::{AudioEngine, CueError, CueHandle};
 use mercs2_core::{Entity, GuidMap, Transform, World};
 use mercs2_formats::hash::pandemic_hash_m2;
 use crate::script::{EngineHost, ScriptHost};
@@ -1014,14 +1014,22 @@ impl EngineHost for GameScriptHost {
 
     // ===== Sound / music → the live `crate::audio::AudioEngine` (the fleet audio system, wired in). =====
     fn sound_cue(&mut self, cue: &str) -> u64 {
-        // Unknown cue (no sounddb / not found) returns 0 → Lua nil, faithful to the exe.
-        self.audio.borrow_mut().cue_sound_by_name(cue, None, None).map(|v| v.0 as u64).unwrap_or(0)
+        // Unknown cue (no sounddb / not found) returns 0 → Lua nil, faithful to the exe. A chain that
+        // does not resolve, or a voice the pool refuses, returns 0 as it did before cue playback; a cue
+        // whose looping or automation the engine cannot play is a hard error.
+        match self.audio.borrow_mut().cue_sound_by_name(cue, None) {
+            Ok(h) => u64::from(h.0),
+            Err(CueError::Unknown(_) | CueError::Resolve(_) | CueError::Outranked) => 0,
+            Err(e @ (CueError::Looping { .. } | CueError::Automation(_))) => {
+                panic!("Sound.CueSound(\"{cue}\"): {e}")
+            }
+        }
     }
-    fn sound_stop(&mut self, voice: u64) {
-        self.audio.borrow_mut().stop_sound(VoiceId(voice as u32));
+    fn sound_stop(&mut self, cue: u64) {
+        self.audio.borrow_mut().stop_sound(CueHandle(cue as u32));
     }
-    fn sound_pause(&mut self, voice: u64) {
-        self.audio.borrow_mut().pause_sound(VoiceId(voice as u32));
+    fn sound_pause(&mut self, cue: u64) {
+        self.audio.borrow_mut().pause_sound(CueHandle(cue as u32));
     }
     fn sound_stop_all(&mut self) {
         self.audio.borrow_mut().stop_and_flush_all_sounds();
