@@ -14,24 +14,25 @@
 //!   Sound %d - ID: %x, Has Wave: %d
 //! ```
 //!
-//! So a cue owns TRACKS, a track owns a SOUND GROUP, and a group owns N sounds — which is exactly
-//! how one `wpn_pistol_fire` cue plays ten round-robin/random takes. That grouping lives in the
-//! `soundbank` (0x9F8BCA10), the container `sfx_extract` never opened.
+//! So a cue owns TRACKS, a track owns SOUNDS, each sound picks a SOUND GROUP, and a group owns N
+//! waves — which is exactly how one `wpn_pistol_fire` cue plays ten round-robin/random takes. That
+//! grouping lives in the `soundbank` (0x9F8BCA10).
 //!
-//! This probe dumps every audio container in a block and cross-references each section of the
-//! soundbank against the block's known wave hashes and cue guids, so the group table can be
-//! located by evidence rather than guessed at.
+//! This probe dumps every audio container in a block and prints the full chain the engine follows:
+//! each sounddb entry `{guid, soundbank, cue index}` → the soundbank cue → its tracks' sounds (or
+//! its one group) → the group's waves, marking each wave with the block's clip it lands on.
 //!
 //! ```text
 //! cargo run --release -p wad_simulator --bin sfx_route_probe -- --block wpn_pistol
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
 
 use clap::Parser;
 
+use mercs2_audio::soundbank::{CueBody, GroupForm, Soundbank};
 use mercs2_audio::sounddb::SoundDb;
 use mercs2_audio::wave::Wavebank;
 use mercs2_formats::ffcs::load_ffcs_archive;
@@ -50,16 +51,6 @@ struct Cli {
     /// Block name substring, e.g. `wpn_pistol`.
     #[arg(long, default_value = "wpn_pistol")]
     block: String,
-    /// Bytes of each soundbank section to hexdump as u32 words.
-    #[arg(long, default_value_t = 64)]
-    words: usize,
-}
-
-fn rd32(b: &[u8], o: usize) -> u32 {
-    if o + 4 > b.len() {
-        return 0;
-    }
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -103,15 +94,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── The wave hashes we are trying to account for ─────────────────────────────────────────
-    let mut wave_index: HashMap<u32, (u32, usize)> = HashMap::new(); // clip_hash -> (bank, idx)
+    // ── The waves, by (wavebank, index) ──────────────────────────────────────────────────────
+    let mut clip_at: HashMap<(u32, u32), u32> = HashMap::new(); // (bank, idx) -> clip hash
     for (i, ent) in parsed.entries.iter().enumerate() {
         if ent.type_hash != TH_WAVEBANK {
             continue;
         }
-        let Some(body) = parsed.containers.get(i).and_then(|c| extract_data_chunk(c)) else {
-            continue;
-        };
+        let body = parsed
+            .containers
+            .get(i)
+            .and_then(|c| extract_data_chunk(c))
+            .ok_or("wavebank container without a data chunk")?;
         let bank = Wavebank::parse(&body)?;
         println!("\nwavebank 0x{:08X}: {} clips", bank.self_hash, bank.clips.len());
         for (idx, c) in bank.clips.iter().enumerate() {
@@ -122,174 +115,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 c.sample_rate,
                 c.frames()
             );
-            wave_index.insert(c.clip_hash, (bank.self_hash, idx));
+            clip_at.insert((bank.self_hash, idx as u32), c.clip_hash);
         }
     }
 
-    let mut cue_guids: HashSet<u32> = HashSet::new();
+    let mut soundbanks: HashMap<u32, Soundbank> = HashMap::new();
+    let mut dbs = Vec::new();
     for (i, ent) in parsed.entries.iter().enumerate() {
-        if ent.type_hash != TH_SOUNDDB {
+        if ent.type_hash != TH_SOUNDBANK && ent.type_hash != TH_SOUNDDB {
             continue;
         }
-        let Some(body) = parsed.containers.get(i).and_then(|c| extract_data_chunk(c)) else {
-            continue;
+        let body = parsed
+            .containers
+            .get(i)
+            .and_then(|c| extract_data_chunk(c))
+            .ok_or("audio container without a data chunk")?;
+        if ent.type_hash == TH_SOUNDBANK {
+            let sb = Soundbank::parse(&body)?;
+            soundbanks.insert(sb.bank_hash, sb);
+        } else {
+            dbs.push(SoundDb::parse(&body)?);
+        }
+    }
+
+    let wave_label = |bank: u32, idx: u32| match clip_at.get(&(bank, idx)) {
+        Some(h) => format!("0x{bank:08X}[{idx}] = clip 0x{h:08X}"),
+        None => format!("0x{bank:08X}[{idx}] (not in this block)"),
+    };
+    let group_line = |bank: u32, g: u16| -> String {
+        let Some(sb) = soundbanks.get(&bank) else {
+            return format!("group {g} of soundbank 0x{bank:08X} (not in this block)");
         };
-        let Ok(db) = SoundDb::parse(&body) else { continue };
+        let Some(group) = sb.groups.get(g as usize) else {
+            return format!("group {g} of soundbank 0x{bank:08X}: PAST ITS {} GROUPS", sb.groups.len());
+        };
+        let mode = match &group.form {
+            GroupForm::Single { .. } => "single".to_string(),
+            GroupForm::Multi(m) => format!("selection {}", m.selection),
+        };
+        let waves: Vec<String> = group
+            .waves()
+            .iter()
+            .map(|w| format!("{} w{:.3}", wave_label(w.wavebank, w.index), w.weight))
+            .collect();
+        format!("group {g} ({mode}): {}", waves.join(", "))
+    };
+
+    for db in &dbs {
         println!("\nsounddb 0x{:08X}: {} cues", db.self_hash, db.cues.len());
-        for c in &db.cues {
-            println!(
-                "  cue 0x{:08X} -> bank 0x{:08X} cue_index {}",
-                c.guid, c.bank_hash, c.cue_index
-            );
-            cue_guids.insert(c.guid);
-        }
-    }
-
-    // ── The soundbank: where do the wave hashes actually appear? ─────────────────────────────
-    for (i, ent) in parsed.entries.iter().enumerate() {
-        if ent.type_hash != TH_SOUNDBANK {
-            continue;
-        }
-        let Some(body) = parsed.containers.get(i).and_then(|c| extract_data_chunk(c)) else {
-            continue;
-        };
-        let self_hash = rd32(&body, 4);
-        let sub_count = u16::from_le_bytes([body[8], body[9]]);
-        let sub_count2 = u16::from_le_bytes([body[10], body[11]]);
-        let data_start = rd32(&body, 16) as usize;
-        let s1 = rd32(&body, 20) as usize;
-        let s2 = rd32(&body, 24) as usize;
-        let s3 = rd32(&body, 28) as usize;
-        println!(
-            "\nsoundbank 0x{self_hash:08X}: {} B  sub_count={sub_count} sub_count2={sub_count2}\n  \
-             data_start={data_start} A=[{data_start}..{s1}) B=[{s1}..{s2}) C=[{s2}..{s3}) tail=[{s3}..{})",
-            body.len(),
-            body.len()
-        );
-        if sub_count > 0 && s1 > data_start {
-            println!("  section A stride = {}", (s1 - data_start) / sub_count as usize);
-        }
-        if sub_count2 > 0 && s3 > s2 {
-            println!("  section C stride = {}", (s3 - s2) / sub_count2 as usize);
-        }
-
-        // Scan the WHOLE body for u32s that are wave hashes or cue guids — the decisive test.
-        let mut wave_hits: Vec<(usize, u32, usize)> = Vec::new();
-        let mut cue_hits: Vec<(usize, u32)> = Vec::new();
-        let mut off = 0;
-        while off + 4 <= body.len() {
-            let v = rd32(&body, off);
-            if let Some((_, idx)) = wave_index.get(&v) {
-                wave_hits.push((off, v, *idx));
+        for e in &db.cues {
+            println!("  cue 0x{:08X} -> soundbank 0x{:08X} cue {}", e.guid, e.bank_hash, e.cue_index);
+            let Some(sb) = soundbanks.get(&e.bank_hash) else {
+                println!("    (soundbank not in this block)");
+                continue;
+            };
+            let cue = sb
+                .cues
+                .get(e.cue_index as usize)
+                .ok_or_else(|| format!("cue index {} past soundbank 0x{:08X}", e.cue_index, e.bank_hash))?;
+            if cue.guid != e.guid {
+                return Err(format!("entry 0x{:08X} lands on cue 0x{:08X}", e.guid, cue.guid).into());
             }
-            if cue_guids.contains(&v) {
-                cue_hits.push((off, v));
-            }
-            off += 4;
-        }
-        let section = |o: usize| -> &'static str {
-            if o < data_start {
-                "header"
-            } else if o < s1 {
-                "A"
-            } else if o < s2 {
-                "B"
-            } else if o < s3 {
-                "C"
-            } else {
-                "tail"
-            }
-        };
-        println!(
-            "\n  wave-hash hits: {} of {} waves referenced",
-            wave_hits.len(),
-            wave_index.len()
-        );
-        for (o, v, idx) in &wave_hits {
-            println!("    +0x{o:04X} [{}]  0x{v:08X}  = wave[{idx}]", section(*o));
-        }
-        println!("  cue-guid hits: {}", cue_hits.len());
-        for (o, v) in &cue_hits {
-            println!("    +0x{o:04X} [{}]  0x{v:08X}", section(*o));
-        }
-
-        // Walk the group table the way `sfx_extract` does, and show what each group claims.
-        let mut offs: Vec<usize> = Vec::new();
-        for g in 0..sub_count as usize {
-            offs.push(data_start + rd32(&body, s1 + g * 4) as usize);
-        }
-        println!("\n  groups:");
-        for (g, &start) in offs.iter().enumerate() {
-            let end = offs.get(g + 1).copied().unwrap_or(s1);
-            print!("    g{g}: @{start}..{end} ({} B) ->", end.saturating_sub(start));
-            let mut o = start;
-            let mut any = false;
-            while o + 8 <= end {
-                if rd32(&body, o) == self_hash {
-                    print!(
-                        " ({},{:.3})",
-                        rd32(&body, o + 4),
-                        f32::from_bits(rd32(&body, o + 8))
-                    );
-                    any = true;
-                    o += 12;
-                    continue;
+            match &cue.body {
+                CueBody::SingleTrack { soundbank, group_index, .. } => {
+                    println!("    single-track -> {}", group_line(*soundbank, *group_index));
                 }
-                o += 4;
-            }
-            if !any {
-                print!("  <no wave refs>");
-            }
-            println!();
-        }
-
-        // Section C: one record per cue. Show which groups each cue's tracks reach.
-        if sub_count2 > 0 && s3 > s2 {
-            // The trailing section is section C's offset table, exactly as section B is
-            // section A's — section C records are variable-length too, so a computed
-            // stride is wrong (shotgun: 844/4 = 211, not even 4-byte aligned).
-            let coffs: Vec<usize> = (0..sub_count2 as usize)
-                .map(|c| s2 + rd32(&body, s3 + c * 4) as usize)
-                .collect();
-            println!("\n  cues (section C, offsets {coffs:?}):");
-            for c in 0..sub_count2 as usize {
-                let rec = coffs[c];
-                let stride = coffs.get(c + 1).copied().unwrap_or(s3) - rec;
-                print!("    cue[{c}] 0x{:08X} -> groups", rd32(&body, rec));
-                let mut o = rec + 4;
-                let mut gs: Vec<u32> = Vec::new();
-                while o + 8 <= (rec + stride).min(body.len()) {
-                    if rd32(&body, o) == self_hash {
-                        let g = rd32(&body, o + 4);
-                        if !gs.contains(&g) {
-                            gs.push(g);
+                CueBody::MultiTrack(m) => {
+                    for (t, track) in m.tracks.iter().enumerate() {
+                        for (k, snd) in track.sounds.iter().enumerate() {
+                            println!(
+                                "    track {t} sound {k} @ {:.3}s (selection {}, slot {}):",
+                                snd.start_s, snd.selection, snd.slot
+                            );
+                            for en in &snd.entries {
+                                println!("      w{:.3} -> {}", en.weight, group_line(en.soundbank, en.group_index));
+                            }
                         }
                     }
-                    o += 4;
                 }
-                println!(" {gs:?}");
             }
-        }
-
-        // Head of each section as words, for layout eyeballing.
-        for (name, start, end) in
-            [("A", data_start, s1), ("B", s1, s2), ("C", s2, s3), ("tail", s3, body.len())]
-        {
-            if end <= start {
-                continue;
-            }
-            println!("\n  section {name} @{start}..{end}:");
-            let mut o = start;
-            let mut printed = 0;
-            while o + 4 <= end && printed < cli.words {
-                if printed % 8 == 0 {
-                    print!("\n    +0x{:04X}:", o);
-                }
-                print!(" {:08X}", rd32(&body, o));
-                o += 4;
-                printed += 1;
-            }
-            println!();
         }
     }
     Ok(())
