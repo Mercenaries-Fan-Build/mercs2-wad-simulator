@@ -20,9 +20,11 @@
 //! * [`select`] — the engine's weighted wave / entry selection and its random generator.
 //! * [`route`] — which cues can play which waves, from the tables alone (for tools).
 //! * [`wave`] — the `wavebank` table + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
-//! * [`automation`] — a track's or cue's volume / pitch ramps, LFOs and parameter curves evaluated as
-//!   the engine does (`FUN_0083b4a0`), its sine table, and pitch → playback rate.
-//! * [`playback`] — a started cue's per-frame state: instance start draws, track and cue composition.
+//! * [`automation`] — a track's or cue's automation evaluated as the engine does (`FUN_0083b4a0`):
+//!   volume / pitch ramps, LFOs and parameter curves, output-channel multipliers (kind 4) and child
+//!   cues (kind 7); its sine table, and pitch → playback rate.
+//! * [`playback`] — a started cue's per-frame state: instance start draws, track and cue composition,
+//!   track and cue loops, sound firing and instance update.
 //! * [`duration`] — a cue's `+0x0C` length (what `Sound.GetMaxDuration` returns), as retail carries it.
 //! * [`encode`] — builds a bank's wavebank + soundbank + sounddb: named PCM16 cues, or waves, groups
 //!   (single- and multi-wave) and cues (single- and multi-track) authored table by table.
@@ -45,12 +47,14 @@
 //! [`AudioEngine::resolve_cue`] follows a cue through everything it can play — sounddb entry →
 //! soundbank cue → every track's sounds ([`multitrack`]) → every group they can pick → every wave →
 //! the resident clip. [`AudioEngine::cue_sound`] refuses what it cannot play faithfully ([`CueError`]:
-//! loops, automation kinds with no volume / pitch counterpart, unset curve parameters) and otherwise
+//! a looping wave, the filter curves, unset curve parameters, a refused child cue) and otherwise
 //! starts a playback ([`playback`]). Each [`AudioEngine::tick`] advances it the way the engine
 //! advances a cue: sounds fire at their start times, pick their groups and waves ([`select`]), draw
-//! their base volume, pitch and start delay, and follow the cue's and track's automation
-//! ([`automation`]) — one voice per sound instance (priority-steal if the pool is full), 3D gains
-//! against the closest listener. [`AudioEngine::tick`] also advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
+//! their base volume, pitch and start delay, follow the cue's and track's automation
+//! ([`automation`]), loop their tracks and the cue, and start child cues when they finish — one voice
+//! per sound instance (priority-steal if the pool is full), 3D gains against the closest listener.
+//! [`AudioEngine::stop_sound`] releases a cue the engine's way (tail child cues start).
+//! [`AudioEngine::tick`] also advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
 //! [`AudioEngine::pump`] feeds them to the device at wall-clock rate (a no-op when headless). Retail
 //! coverage: `tests/retail_banks.rs` here and `mercs2_probe/tests/audio_wad_probe.rs`.
 //!
@@ -61,8 +65,9 @@
 //! [`sounddb`] + [`wave`]) can build with `default-features = false` and avoid linking `alsa-sys`,
 //! which breaks the 32-bit cross build.
 //!
-//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, looping cues,
-//! per-region music machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
+//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, looping waves
+//! and the cue filter, per-region music machines, surround channel-gain matrices) are enumerated in
+//! `DEFERRED.md`.
 
 pub mod backend;
 pub mod automation;
