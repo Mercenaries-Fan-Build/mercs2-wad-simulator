@@ -1,7 +1,8 @@
 //! Ignored probe: verify the resident audio pipeline against the real installed `vz.wad` — the one
 //! part of the audio last-mile that can't be proven headlessly. Confirms `extract_container_typed` by
-//! `m2(name)` → `data` chunk → `AudioEngine::load_wavebank` decodes real clips, and that the per-bank
-//! `sounddb` catalog routes real cues to those decoded waves and mixes them to audible PCM.
+//! `m2(name)` → `data` chunk → `AudioEngine::load_wavebank` / `load_soundbank` load real banks, and
+//! that the per-bank `sounddb` catalog routes real cues through their soundbank cue and group to
+//! those decoded waves and mixes them to audible PCM.
 //!
 //! ```text
 //! cargo test -p mercs2_probe --test audio_wad_probe -- --nocapture
@@ -10,7 +11,7 @@
 use mercs2_engine::audio::{AudioEngine, SoundDb};
 use mercs2_engine::wad;
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
-use mercs2_formats::types::TYPE_HASH_WAVEBANK;
+use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK};
 
 /// `sounddb` asset type (`0xE5273C14`, ASET type_id 13).
 const SOUNDDB_TYPE: u32 = 0xE527_3C14;
@@ -48,22 +49,29 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     let mut found_banks = 0usize;
     for name in RESIDENT_WAVEBANKS {
         if let Some(body) = bank_body(&mut w, name, TYPE_HASH_WAVEBANK, false) {
-            let audible = eng.load_wavebank(&body);
+            let audible = eng
+                .load_wavebank(&body)
+                .unwrap_or_else(|e| panic!("wavebank {name}: {e}"));
             found_banks += 1;
             println!("wavebank {name}: {} bytes -> {audible} audible clips", body.len());
         } else {
             println!("wavebank {name}: NOT FOUND");
         }
+        if let Some(body) = bank_body(&mut w, name, TYPE_HASH_SOUNDBANK, false) {
+            let cues = eng
+                .load_soundbank(&body)
+                .unwrap_or_else(|e| panic!("soundbank {name}: {e}"));
+            println!("  soundbank {name}: {cues} cues");
+        }
         if let Some(body) = bank_body(&mut w, name, SOUNDDB_TYPE, true) {
-            if let Ok(db) = SoundDb::parse(&body) {
-                println!("  sounddb {name}: {} cues (self 0x{:08X})", db.cues.len(), db.self_hash);
-                catalog.merge(&db);
-            }
+            let db = SoundDb::parse(&body).unwrap_or_else(|e| panic!("sounddb {name}: {e}"));
+            println!("  sounddb {name}: {} cues (self 0x{:08X})", db.cues.len(), db.self_hash);
+            catalog.merge(&db);
         }
     }
     assert!(found_banks > 0, "no resident wavebank resolved from the WAD by name");
 
-    let resolvable = catalog.cues.iter().filter(|c| eng.resolve_wave(c).is_some()).count();
+    let resolvable = catalog.cues.iter().filter(|c| eng.resolve_wave(c).is_ok()).count();
     println!(
         "\nEND-TO-END: {} resident clips, {} cues, {resolvable} resolve to a decoded wave",
         eng.resident_wave_count(),
@@ -76,7 +84,7 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     let cue = catalog
         .cues
         .iter()
-        .find(|c| eng.resolve_wave(c).is_some())
+        .find(|c| eng.resolve_wave(c).is_ok())
         .expect("a resolvable cue");
     eng.cue_sound(cue.guid, None, None).expect("cue allocates a voice");
     for _ in 0..8 {
