@@ -38,14 +38,20 @@
 //! single-wave form
 //!   +0x2C f32  linear gain    +0x30 f32 unknown        +0x34 wave {wavebank hash, wave index, f32 weight}
 //! multi-wave form
-//!   +0x2C u8x4 [unknown, wave count, unknown, unknown]
-//!   +0x30 f32, +0x34 f32 unknown   +0x38 u32 0x2C   +0x3C f32, +0x40 f32 unknown   +0x44 u32 0
+//!   +0x2C u8   unknown (copied to the sound instance at +0x80 by FUN_008369e0)
+//!   +0x2D u8   wave count
+//!   +0x2E u8   selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
+//!              immediate repeat (FUN_0083d410); any other value plays nothing
+//!   +0x2F u8   unknown
+//!   +0x30 f32, +0x34 f32 unknown   +0x38 u32 0x2C (the wave list is read at group + this + 0x3C)
+//!   +0x3C f32, +0x40 f32 unknown   +0x44 u32 0 (its low byte, when set, adds a distance delay)
 //!   +0x48 u32  unknown flags   +0x4C 6 × f32 unknown   +0x64 f32 unknown
 //!   +0x68 wave count × {wavebank hash, wave index, f32 weight}
 //! ```
 //!
 //! The names "min/max distance", "pitch" and "linear gain" are INFERRED from the values they hold
-//! (e.g. 10/1000, 0.5–1.5, dB-shaped gains), not from engine code.
+//! (e.g. 10/1000, 0.5–1.5, dB-shaped gains), not from engine code. How the engine picks a wave is
+//! in [`crate::select`].
 //!
 //! **Cue** — two forms, told apart by the byte at `+0x05`:
 //!
@@ -59,13 +65,14 @@
 //!   +0x10 u32  soundbank hash
 //!   +0x14 u16  group index      +0x16 u16 unknown (0 in most cues; float-like high halves in others)
 //! multi-track form
-//!   +0x10      a track structure whose layout is NOT decoded; carried verbatim
+//!   +0x10      tracks of timed sounds, each picking a group — see [`crate::multitrack`]
 //! ```
 //!
 //! [`Soundbank::parse`] and [`Soundbank::to_bytes`] are inverses over every retail soundbank
 //! (`tests/retail_banks.rs`). Anything outside this layout is a hard [`SoundbankError`].
 
 use crate::le::{f32_at, put_f32, put_u16, put_u32, u16_at, u32_at, u8_at};
+use crate::multitrack::{MultiTrackCue, MultiTrackError};
 use crate::wave::TABLE_VERSION;
 
 /// Soundbank header size; also the start of the group section (`+0x10` always holds this).
@@ -120,8 +127,9 @@ pub struct GroupHead {
 pub struct MultiGroup {
     /// `+0x2C` byte 0, unknown.
     pub byte_2c: u8,
-    /// `+0x2E`, unknown.
-    pub byte_2e: u8,
+    /// `+0x2E` selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
+    /// immediate repeat ([`crate::select`]).
+    pub selection: u8,
     /// `+0x2F`, unknown.
     pub byte_2f: u8,
     /// `+0x30`, unknown.
@@ -196,9 +204,8 @@ pub enum CueBody {
         /// `+0x16`, unknown (0 in most cues).
         unknown_16: u16,
     },
-    /// Form 1: a multi-track cue. The bytes from `+0x10` to the end of the cue, verbatim — their
-    /// layout is not decoded, so nothing here resolves such a cue to a wave.
-    MultiTrack(Vec<u8>),
+    /// Form 1: tracks of timed sounds ([`crate::multitrack`]).
+    MultiTrack(MultiTrackCue),
 }
 
 /// A cue.
@@ -206,7 +213,8 @@ pub enum CueBody {
 pub struct Cue {
     /// `+0x00` cue guid = m2(cue name).
     pub guid: u32,
-    /// `+0x06`, unknown.
+    /// `+0x06` start limit: the engine starts the cue only while a counter in its runtime record is
+    /// below this (0 = no limit; that the counter counts live instances is inferred).
     pub byte_06: u8,
     /// `+0x08` gain.
     pub gain: f32,
@@ -214,15 +222,6 @@ pub struct Cue {
     pub length_s: f32,
     /// The form-specific tail.
     pub body: CueBody,
-}
-
-impl Cue {
-    fn encoded_len(&self) -> usize {
-        match &self.body {
-            CueBody::SingleTrack { .. } => SINGLE_CUE_SIZE,
-            CueBody::MultiTrack(rest) => 0x10 + rest.len(),
-        }
-    }
 }
 
 /// A soundbank table exactly as it sits in the `data` chunk.
@@ -265,6 +264,8 @@ pub enum SoundbankError {
     TooManyWaves { group: usize, count: usize },
     /// The body does not end at the end of the cue-offset table.
     BadLength { found: usize, expected: usize },
+    /// A multi-track cue's body is outside the measured layout.
+    MultiTrack { cue: usize, error: MultiTrackError },
 }
 
 impl std::fmt::Display for SoundbankError {
@@ -309,6 +310,7 @@ impl std::fmt::Display for SoundbankError {
             SoundbankError::BadLength { found, expected } => {
                 write!(f, "soundbank: body is {found} bytes, the layout implies {expected}")
             }
+            SoundbankError::MultiTrack { cue, error } => write!(f, "soundbank: cue {cue}: {error}"),
         }
     }
 }
@@ -460,8 +462,13 @@ impl Soundbank {
         let group_bytes: usize = self.groups.iter().map(Group::encoded_len).sum();
         let group_table = HEADER_SIZE + group_bytes;
         let cue_section = group_table + 4 * self.groups.len();
-        let cue_bytes: usize = self.cues.iter().map(Cue::encoded_len).sum();
-        let cue_table = cue_section + cue_bytes;
+        let mut cue_bytes = Vec::new();
+        let mut cue_offsets = Vec::with_capacity(self.cues.len());
+        for (i, c) in self.cues.iter().enumerate() {
+            cue_offsets.push(cue_bytes.len() as u32);
+            write_cue(&mut cue_bytes, c, i)?;
+        }
+        let cue_table = cue_section + cue_bytes.len();
 
         let mut out = Vec::with_capacity(cue_table + 4 * self.cues.len());
         put_u32(&mut out, TABLE_VERSION);
@@ -482,11 +489,7 @@ impl Soundbank {
         for off in group_offsets {
             put_u32(&mut out, off);
         }
-        let mut cue_offsets = Vec::with_capacity(self.cues.len());
-        for (i, c) in self.cues.iter().enumerate() {
-            cue_offsets.push((out.len() - cue_section) as u32);
-            write_cue(&mut out, c, i)?;
-        }
+        out.extend_from_slice(&cue_bytes);
         for off in cue_offsets {
             put_u32(&mut out, off);
         }
@@ -526,7 +529,7 @@ fn parse_group(b: &[u8], g: usize, i: usize) -> Result<Group, SoundbankError> {
                 .collect::<Result<_, _>>()?;
             GroupForm::Multi(MultiGroup {
                 byte_2c: rd8(b, g + 0x2C, "group +0x2C")?,
-                byte_2e: rd8(b, g + 0x2E, "group +0x2E")?,
+                selection: rd8(b, g + 0x2E, "group selection")?,
                 byte_2f: rd8(b, g + 0x2F, "group +0x2F")?,
                 unknown_30: rdf(b, g + 0x30, "group +0x30")?,
                 unknown_34: rdf(b, g + 0x34, "group +0x34")?,
@@ -571,7 +574,7 @@ fn write_group(out: &mut Vec<u8>, g: &Group, i: usize) -> Result<(), SoundbankEr
         GroupForm::Multi(m) => {
             let count = u8::try_from(m.waves.len())
                 .map_err(|_| SoundbankError::TooManyWaves { group: i, count: m.waves.len() })?;
-            out.extend_from_slice(&[m.byte_2c, count, m.byte_2e, m.byte_2f]);
+            out.extend_from_slice(&[m.byte_2c, count, m.selection, m.byte_2f]);
             put_f32(out, m.unknown_30);
             put_f32(out, m.unknown_34);
             put_u32(out, MULTI_GROUP_WORD_38);
@@ -625,10 +628,12 @@ fn parse_cue(b: &[u8], start: usize, end: usize, i: usize) -> Result<Cue, Soundb
             }
         }
         1 => {
-            let rest = b
-                .get(start + 0x10..end)
+            let cue = b
+                .get(start..end)
                 .ok_or(SoundbankError::Truncated { field: "cue tracks", offset: start, len: b.len() })?;
-            CueBody::MultiTrack(rest.to_vec())
+            CueBody::MultiTrack(
+                MultiTrackCue::parse(cue).map_err(|error| SoundbankError::MultiTrack { cue: i, error })?,
+            )
         }
         form => return Err(SoundbankError::UnknownCueForm { cue: i, form }),
     };
@@ -636,15 +641,11 @@ fn parse_cue(b: &[u8], start: usize, end: usize, i: usize) -> Result<Cue, Soundb
 }
 
 fn write_cue(out: &mut Vec<u8>, c: &Cue, i: usize) -> Result<(), SoundbankError> {
+    let head_start = out.len();
     put_u32(out, c.guid);
     let form = match &c.body {
         CueBody::SingleTrack { .. } => 0,
-        CueBody::MultiTrack(rest) => {
-            if !rest.len().is_multiple_of(4) {
-                return Err(SoundbankError::BadCueLength { cue: i, len: 0x10 + rest.len() });
-            }
-            1
-        }
+        CueBody::MultiTrack(_) => 1,
     };
     out.extend_from_slice(&[0, form, c.byte_06, 0]);
     put_f32(out, c.gain);
@@ -655,7 +656,12 @@ fn write_cue(out: &mut Vec<u8>, c: &Cue, i: usize) -> Result<(), SoundbankError>
             put_u16(out, *group_index);
             put_u16(out, *unknown_16);
         }
-        CueBody::MultiTrack(rest) => out.extend_from_slice(rest),
+        CueBody::MultiTrack(m) => {
+            // The body's offsets are cue-relative: hand it a buffer holding exactly this cue's head.
+            let mut cue = out.split_off(head_start);
+            m.write(&mut cue).map_err(|error| SoundbankError::MultiTrack { cue: i, error })?;
+            out.extend_from_slice(&cue);
+        }
     }
     Ok(())
 }
@@ -694,7 +700,7 @@ mod tests {
                     head: head(0x1234_5678),
                     form: GroupForm::Multi(MultiGroup {
                         byte_2c: 0xFF,
-                        byte_2e: 1,
+                        selection: 1,
                         byte_2f: 1,
                         unknown_30: 0.1,
                         unknown_34: 0.0,
@@ -723,7 +729,36 @@ mod tests {
                     byte_06: 5,
                     gain: 1.0,
                     length_s: -1.0,
-                    body: CueBody::MultiTrack(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+                    body: CueBody::MultiTrack(crate::multitrack::MultiTrackCue {
+                        byte_10: 0,
+                        sound_slots: 1,
+                        unknown_18: 1.0,
+                        unknown_1c: -1.0,
+                        unknown_20: -1.0,
+                        unknown_24: 0.0,
+                        events: vec![],
+                        curves: vec![],
+                        tracks: vec![crate::multitrack::Track {
+                            byte_00: 0,
+                            unknown_04: -1.0,
+                            unknown_08: -1.0,
+                            automation: vec![],
+                            sounds: vec![crate::multitrack::Sound {
+                                slot: 0,
+                                byte_01: 2,
+                                byte_02: 2,
+                                selection: 1,
+                                start_s: 0.0,
+                                entries: vec![crate::multitrack::SoundEntry {
+                                    soundbank: 0xDD45_73C5,
+                                    group_index: 1,
+                                    unknown_06: 0,
+                                    weight: 1.0,
+                                }],
+                            }],
+                        }],
+                        params: vec![],
+                    }),
                 },
             ],
         }
@@ -734,7 +769,7 @@ mod tests {
         let sb = two_form_bank();
         let bytes = sb.to_bytes().expect("encodes");
         // header + 64 + (0x68 + 24) + 2 group offsets + 24 + 24 + 2 cue offsets
-        assert_eq!(bytes.len(), 0x20 + 64 + 0x80 + 8 + 24 + 24 + 8);
+        assert_eq!(bytes.len(), 0x20 + 64 + 0x80 + 8 + 24 + 0x84 + 8);
         assert_eq!(Soundbank::parse(&bytes).expect("parses"), sb);
     }
 
@@ -746,7 +781,7 @@ mod tests {
         assert_eq!(r(0x10), 0x20);
         assert_eq!(r(0x14), 0x20 + 64 + 0x80, "group table follows the groups");
         assert_eq!(r(0x18), r(0x14) + 8, "cue section follows the group table");
-        assert_eq!(r(0x1C), r(0x18) + 48, "cue table follows the cues");
+        assert_eq!(r(0x1C), r(0x18) + 24 + 0x84, "cue table follows the cues");
         assert_eq!(r(r(0x14) as usize + 4), 64, "group offsets are relative to 0x20");
         assert_eq!(r(r(0x1C) as usize + 4), 24, "cue offsets are relative to the cue section");
         assert_eq!(bytes[0x20 + 64 + 0x2D], 2, "multi-wave count byte");
