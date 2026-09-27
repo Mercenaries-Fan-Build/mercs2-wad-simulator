@@ -196,6 +196,11 @@ pub struct Instance {
     pub delay_s: f32,
     /// Time since start, seconds (`+0x6C`).
     pub elapsed_s: f32,
+    /// The group's wave loop count (`+0x80`, from group `+0x2C`); the wave plays `1 + count` times.
+    pub loop_count: u8,
+    /// Whether it plays from its emitter's (3D) source: its group's `+0x14` byte is set and the cue
+    /// has a position.
+    pub positional: bool,
     /// State 2: it is dropped at its sound list's next update.
     pub finished: bool,
 }
