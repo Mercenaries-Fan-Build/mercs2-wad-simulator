@@ -78,10 +78,10 @@ pub struct GroupParams {
     pub max_distance: f32,
     /// `+0x20`, unknown.
     pub unknown_20: f32,
-    /// `+0x24` pitch.
-    pub pitch: f32,
-    /// `+0x28`, unknown.
-    pub unknown_28: f32,
+    /// `+0x24` distance fall-off exponent.
+    pub distance_exponent: f32,
+    /// `+0x28` Doppler scale.
+    pub doppler_scale: f32,
     /// `+0x2C` linear gain.
     pub gain: f32,
     /// `+0x30`, unknown.
@@ -110,8 +110,8 @@ pub const UI_PDA_OPEN_GROUP: GroupParams = GroupParams {
     min_distance: f32::from_bits(0x4120_0000), // 10.0
     max_distance: f32::from_bits(0x447A_0000), // 1000.0
     unknown_20: f32::from_bits(0x3F80_0000),   // 1.0
-    pitch: f32::from_bits(0x3F80_0000),        // 1.0
-    unknown_28: f32::from_bits(0x3F80_0000),   // 1.0
+    distance_exponent: f32::from_bits(0x3F80_0000), // 1.0
+    doppler_scale: f32::from_bits(0x3F80_0000),     // 1.0
     gain: f32::from_bits(0x3F21_866C),         // 0.630957 (-4 dB)
     unknown_30: f32::from_bits(0x0000_0000),   // 0.0
     wave_weight: f32::from_bits(0x3F80_0000),  // 1.0
@@ -286,10 +286,10 @@ pub struct GroupHeadParams {
     pub max_distance: f32,
     /// `+0x20`, unknown.
     pub unknown_20: f32,
-    /// `+0x24` pitch.
-    pub pitch: f32,
-    /// `+0x28`, unknown.
-    pub unknown_28: f32,
+    /// `+0x24` distance fall-off exponent.
+    pub distance_exponent: f32,
+    /// `+0x28` Doppler scale.
+    pub doppler_scale: f32,
 }
 
 /// A multi-wave group's fields after the head (see [`crate::soundbank::MultiGroup`]).
@@ -505,8 +505,8 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
                 min_distance: h.min_distance,
                 max_distance: h.max_distance,
                 unknown_20: h.unknown_20,
-                pitch: h.pitch,
-                unknown_28: h.unknown_28,
+                distance_exponent: h.distance_exponent,
+                doppler_scale: h.doppler_scale,
             },
             form,
         });
@@ -612,8 +612,8 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
                 min_distance: g.min_distance,
                 max_distance: g.max_distance,
                 unknown_20: g.unknown_20,
-                pitch: g.pitch,
-                unknown_28: g.unknown_28,
+                distance_exponent: g.distance_exponent,
+                doppler_scale: g.doppler_scale,
             },
             form: GroupFormSpec::Single { wave: i, gain: g.gain, unknown_30: g.unknown_30, weight: g.wave_weight },
         });
@@ -757,8 +757,8 @@ mod tests {
             min_distance: 10.0,
             max_distance: 1000.0,
             unknown_20: 1.0,
-            pitch: 1.0,
-            unknown_28: 1.0,
+            distance_exponent: 1.0,
+            doppler_scale: 1.0,
         };
         let multi = MultiGroupParams {
             byte_2c: 0,
