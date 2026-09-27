@@ -218,6 +218,16 @@ enum Command {
     },
     /// List every rule: what is checked, what is known-but-unchecked, and where each is documented.
     Rules,
+    /// List every contribution kind this qm reads — the authoritative list. Hermetic: no Shipment,
+    /// no game, no network.
+    ///
+    /// Prints one kind per line. With --json, prints `{"format":<manifest format>,"kinds":[...]}`
+    /// instead. Exit 0.
+    Kinds {
+        /// Print one JSON object instead of one kind per line.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -289,6 +299,7 @@ fn main() -> ExitCode {
             names,
         } => cmd_extract_world(&layer, game.as_deref(), names.as_deref()),
         Command::Rules => cmd_rules(),
+        Command::Kinds { json } => cmd_kinds(json),
     }
 }
 
@@ -434,7 +445,9 @@ fn cmd_manifest_info(path: &Path) -> ExitCode {
     let manifest = match mercs2_quartermaster::from_str(&text, format) {
         Ok(m) => m,
         Err(ReadError::Validate(v)) => return unusable(format!("{}: {v}", v.code().unwrap_or("-"))),
-        Err(e @ ReadError::Parse { .. }) => return unusable(format!("-: {e}")),
+        Err(e @ (ReadError::Parse { .. } | ReadError::RemovedKind { .. })) => {
+            return unusable(format!("-: {e}"))
+        }
     };
     println!(
         "{}",
@@ -749,7 +762,9 @@ fn open_failure(e: &OpenError) -> String {
             format!("-: reading the manifest: {message}")
         }
         OpenError::Read(ReadError::Validate(v)) => format!("{}: {v}", v.code().unwrap_or("-")),
-        OpenError::Read(r @ ReadError::Parse { .. }) => format!("-: {r}"),
+        OpenError::Read(r @ (ReadError::Parse { .. } | ReadError::RemovedKind { .. })) => {
+            format!("-: {r}")
+        }
     }
 }
 
@@ -995,6 +1010,25 @@ fn cmd_rules() -> ExitCode {
     println!("\nKNOWN AND NOT YET CHECKED — these can still hang the game:");
     for r in lint::PENDING {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
+    }
+    ExitCode::SUCCESS
+}
+
+/// Every kind in `Contribution::ALL_KINDS`, in that order, to stdout.
+fn cmd_kinds(json: bool) -> ExitCode {
+    let kinds = mercs2_quartermaster::Contribution::ALL_KINDS;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "format": mercs2_quartermaster::FORMAT_VERSION,
+                "kinds": kinds,
+            })
+        );
+    } else {
+        for k in kinds {
+            println!("{k}");
+        }
     }
     ExitCode::SUCCESS
 }
