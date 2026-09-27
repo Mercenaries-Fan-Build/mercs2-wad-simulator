@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::audio::{AudioEngine, CueError, CueHandle};
+use mercs2_core::random::Lcg;
 use mercs2_core::{Entity, GuidMap, Transform, World};
 use mercs2_formats::hash::pandemic_hash_m2;
 use crate::script::{EngineHost, ScriptHost};
@@ -123,6 +124,12 @@ pub struct GameScriptHost {
     /// game loop ticks the SAME engine each frame (`GameplaySystems::tick` → `audio.tick`) that the Lua
     /// `EngineHost` forwarding cues into — one `mercs2_audio` stack, driven from both sides.
     audio: Rc<RefCell<AudioEngine>>,
+    /// The game's global random state (`DAT_00DFCBAC`, `mercs2_core::random`): the ONE game-wide
+    /// instance, starting at `GAME_RNG_SEED`. Every system that mirrors a draw the exe takes from it
+    /// takes it from here ([`game_rng`](Self::game_rng)), so the draws interleave in one sequence as
+    /// in the game; the sound emitter jitter ([`update_sound_emitters`](Self::update_sound_emitters))
+    /// is one.
+    game_rng: Rc<RefCell<Lcg>>,
     /// The AI mechanism the game's `Ai.*` Lua drives: the recovered 1024-slot action ring + the
     /// `[-100,100]` relation matrix (`crate::ai::AiWorld`, AI code map §8). `Ai.Goal` posts to the ring;
     /// `Ai.SetRelation`/`GetRelation` read/write the matrix. Per-entity perception records are ticked
@@ -462,6 +469,7 @@ impl GameScriptHost {
             world: None, // attached by the loop via `attach_world`; None in standalone tests
             guids: None,
             audio: Rc::new(RefCell::new(AudioEngine::default())),
+            game_rng: Rc::new(RefCell::new(Lcg::game())),
             ai: crate::ai::AiWorld::new(),
             ai_states: std::collections::HashMap::new(),
             faction: crate::faction::FactionWorld::with_default_relations(),
@@ -784,6 +792,24 @@ impl GameScriptHost {
         self.audio.clone()
     }
 
+    /// A shared handle to the game's global random state (`DAT_00DFCBAC`, `mercs2_core::random`) —
+    /// the one game-wide instance, which every system mirroring a draw from it takes from here.
+    pub fn game_rng(&self) -> Rc<RefCell<Lcg>> {
+        self.game_rng.clone()
+    }
+
+    /// Once a frame, before the audio tick: move every object emitter with its object
+    /// (`AudioEngine::update_object_emitters`, `FUN_006034B0` → `FUN_006036C0`). Each object's
+    /// position is its live `Transform` in the attached World; the jitter draws come from the game's
+    /// global random state. An object with no live entity is not moved (the engine skips an object
+    /// missing from its sound object table).
+    pub fn update_sound_emitters(&self, dt: f32) {
+        let mut rng = self.game_rng.borrow_mut();
+        self.audio
+            .borrow_mut()
+            .update_object_emitters(dt, &mut rng, |guid| self.transform_of(guid).map(|t| t.translation));
+    }
+
     /// Drain the spawn intents recorded since the last call (the loop realizes these into ECS
     /// entities each frame — runtime `Pg.Spawn`s become drivable vehicles / rendered props). Clears
     /// the `by_guid` index too so realized requests aren't re-mutated by a later `Object.Set*`.
@@ -1013,12 +1039,16 @@ impl EngineHost for GameScriptHost {
     fn add_layers(&mut self, _layers: &[String]) {}
 
     // ===== Sound / music → the live `crate::audio::AudioEngine` (the fleet audio system, wired in). =====
-    fn sound_cue(&mut self, cue: &str) -> u64 {
+    fn sound_cue(&mut self, emitter: u64, cue: &str) -> u64 {
+        // The cue plays on the emitter object's record, whose emitter starts at the object's live
+        // position and follows it every frame (`update_sound_emitters`); object 0 plays 2D.
         // Unknown cue (no sounddb / not found) returns 0 → Lua nil, faithful to the exe. A chain that
         // does not resolve, or a voice the pool refuses, returns 0 as it did before cue playback; a cue
         // the engine refuses to play (an automation record it cannot evaluate, a filter scan reaching
         // past the cue's events, or such a child cue) is a hard error.
-        match self.audio.borrow_mut().cue_sound_by_name(cue, None) {
+        let object = if emitter == 0 { 0 } else { self.resolve_guid(emitter) };
+        let position = if object == 0 { None } else { self.transform_of(object).map(|t| t.translation) };
+        match self.audio.borrow_mut().cue_sound_on_object(object, position, pandemic_hash_m2(cue)) {
             Ok(h) => u64::from(h.0),
             Err(CueError::Unknown(_) | CueError::Resolve(_) | CueError::Outranked) => 0,
             Err(e @ (CueError::Automation(_) | CueError::FilterScan { .. } | CueError::Child { .. })) => {
@@ -2516,6 +2546,69 @@ mod tests {
         sh.exec(r#"Sound.SetCategoryPitch("sfx", 1.5, 0.0)"#, "@p").unwrap();
         host.borrow().audio.borrow_mut().tick(1.0 / 60.0);
         assert_eq!(host.borrow().audio.borrow().get_category_pitch("sfx"), 1.5);
+    }
+
+    /// `Sound.CueSound(uGuid, sCue)` plays the cue on that object: the guid reaches the audio engine
+    /// as the cue's emitter object, whose emitter starts at the object's live position, at rest. Each
+    /// frame `update_sound_emitters` moves it with the object — finite-difference velocity, jitter
+    /// drawn from the host's game-wide random state (four draws).
+    #[test]
+    fn cue_sound_plays_on_the_objects_emitter_and_follows_it() {
+        use crate::audio::encode::{encode_bank, BankSpec, CueSpec, GroupParams, Pcm16, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
+        use crate::audio::{Holder, SoundDb};
+        use mercs2_core::glam::Vec3;
+
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids.clone());
+        let start = Vec3::new(10.0, 0.0, 20.0);
+        let e = world.borrow_mut().spawn((Transform::from_translation(start),));
+        let guid = host.borrow().register_named_entity(e, pandemic_hash_m2("test_car"));
+
+        // A bank with one positional cue (group `+0x14` set) long enough to outlive the test.
+        let enc = encode_bank(&BankSpec {
+            name: "mod_emit".into(),
+            cues: vec![CueSpec {
+                name: "mod_engine".into(),
+                category: "sfx".into(),
+                sound_id: pandemic_hash_m2("mod_engine"),
+                clip_hash: pandemic_hash_m2("mod_engine"),
+                pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; 22050 * 4] },
+                group: GroupParams { unknown_14: 1, ..UI_PDA_OPEN_GROUP },
+                cue: UI_PDA_OPEN_CUE,
+            }],
+        })
+        .unwrap();
+        let audio = host.borrow().audio();
+        {
+            let mut a = audio.borrow_mut();
+            a.set_sounddb(SoundDb::parse(&enc.sounddb).unwrap());
+            a.load_soundbank(&enc.soundbank).unwrap();
+            a.load_wavebank(&enc.wavebank).unwrap();
+        }
+
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+        let played: bool =
+            sh.eval(r#"return Sound.CueSound(Pg.GetGuidByName("test_car"), "mod_engine") ~= nil"#).unwrap();
+        assert!(played, "the cue starts");
+        let em = audio.borrow().object_emitter(guid).expect("the guid has an emitter record");
+        assert_eq!(audio.borrow().emitter(em), Some(Holder::at(start)), "at the object's position, at rest");
+
+        // The object moves 1 m along −Z in a 0.1 s frame.
+        world.borrow().get::<&mut Transform>(e).unwrap().translation = Vec3::new(10.0, 0.0, 19.0);
+        let rng = host.borrow().game_rng();
+        assert_eq!(*rng.borrow(), Lcg::game(), "nothing has drawn from the game-wide state yet");
+        host.borrow().update_sound_emitters(0.1);
+        let h = audio.borrow().emitter(em).unwrap();
+        assert!((h.position - Vec3::new(10.0, 0.0, 19.0)).length() < 0.001, "{:?}", h.position);
+        assert!((h.velocity.z + 10.0).abs() < 0.01 && h.velocity.x.abs() < 0.01, "{:?}", h.velocity);
+        let mut reference = Lcg::game();
+        for _ in 0..4 {
+            reference.next_unit();
+        }
+        assert_eq!(*rng.borrow(), reference, "the jitter took four draws from the game-wide state");
     }
 
     /// The `Ai.*` order/faction/spawner surface is WIRED to real mechanisms (not no-ops): game Lua
