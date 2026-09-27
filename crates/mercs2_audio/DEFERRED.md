@@ -27,14 +27,19 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
 
 ## Voices / mixer
 
-- ~~**Real wave-bind on cue**~~ **DONE** — `AudioEngine::load_wavebank` decodes a `wavebank` body into
-  resident clips (keyed by bank self-hash + clip hash); `cue_sound` auto-binds the resident wave a cue
-  routes to (`resolve_wave`: `cue.bank_hash` → resident `Wavebank`, `cue.wave_index` → its clip; fallback
-  clip-hash == cue-guid). The `sounddb` layout was CALIBRATED against shipped blocks (real 12-B
-  `{guid, bank_hash, wave_index}` record — the old 16-B guess read 0 cues). Verified end-to-end on
-  vz.wad (`mercs2_game/tests/audio_wad_probe.rs`): 226/853 resident cues → decoded PCM, RMS > 0.
-  Still deferred: the global `Mercs2Globals` catalog (extended header, not yet decoded) + streamed
-  `.pws` cues (below).
+- ~~**Real wave-bind on cue**~~ **DONE** — the engine resolves a cue the way the tables route it:
+  `sounddb` entry `{guid, soundbank hash, soundbank cue index}` → the resident soundbank's cue → its
+  group → the group's `{wavebank, wave index}` → the resident decoded clip (`AudioEngine::resolve_wave`,
+  after `load_soundbank` + `load_wavebank`). The three table layouts were measured on all of retail
+  `vz.wad` and re-encode byte-identically (`tests/retail_banks.rs`), including the Mercs2Globals
+  catalog (category tree + parameter hashes). Two earlier readings were wrong and are gone: the
+  sounddb's third field was read as a wave index, and the wavebank record's data offset as
+  body-relative (it is record-relative); together they "resolved" 589 of 807 resident cues, only 6 of
+  them to the right wave. Over all 1,198 retail cues the chain now reaches 282 single-wave cues and 102
+  multi-wave groups with every wave decoded. What it does not resolve is a parity gap, not an
+  improvement, so it is listed with the confirm-live targets in `audio_code_map.md` §10: the
+  multi-track cue layout (693 cues, carried verbatim), and how the engine picks among a multi-wave
+  group's weighted waves (`resolve_wave` reports `WaveSelectionUnknown` rather than guessing).
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.
