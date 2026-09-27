@@ -148,8 +148,8 @@ mod tests {
             min_distance: 1.0,
             max_distance: 2.0,
             unknown_20: 1.0,
-            pitch: 1.0,
-            unknown_28: 1.0,
+            distance_exponent: 1.0,
+            doppler_scale: 1.0,
         }
     }
     fn rec(frames: u32) -> WaveRecord {
