@@ -1308,7 +1308,7 @@ impl Scene {
     }
 
     /// Register a named particle-effect template (key = effect name hash, as Lua's `StartEmitter`
-    /// names them). Populate `desc` from a parsed `mercs2_formats::fxdict::EffectTemplate`.
+    /// names them). Populate `desc` from a parsed effect (`particles::EmitterDesc::from_effect`).
     pub fn fx_register(&mut self, name_hash: u32, desc: crate::particles::EmitterDesc) {
         self.particles.register_template(name_hash, desc);
     }
