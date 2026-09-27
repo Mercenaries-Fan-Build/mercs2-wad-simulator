@@ -381,14 +381,6 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::ReplaceFx { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
-            // ECS component schema. New hash, Additive.
-            Contribution::AddSchema { name, .. } => {
-                push(Access::Write, Claim::asset(name), Intent::Additive);
-            }
-            // AI squad-composition template. New hash, Additive.
-            Contribution::AddAiSquadTemplate { name, .. } => {
-                push(Access::Write, Claim::asset(name), Intent::Additive);
-            }
             // Terrain cell wholesale replace. Same-hash; two replacements are a hard conflict.
             Contribution::ReplaceTerrainCell { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
