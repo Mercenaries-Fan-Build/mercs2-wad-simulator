@@ -225,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 hit = true;
             } else if ent.type_hash == TH_WAVEBANK {
-                for clip in &Wavebank::parse(&body).clips {
+                for clip in &Wavebank::parse(&body)?.clips {
                     if rb.resolve(clip.clip_hash).is_none() && targets.insert(clip.clip_hash) {
                         wave_targets += 1;
                     }
