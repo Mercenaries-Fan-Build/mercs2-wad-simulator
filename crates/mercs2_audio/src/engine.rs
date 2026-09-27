@@ -186,11 +186,20 @@ pub struct CueHandle(pub u32);
 pub struct EmitterId(pub u32);
 
 /// An object's emitter record (`0x0047ADC0`, reached from `FUN_006035F0`, in `PgSoundPlayer`'s
-/// record list): the object, its emitter, and the cues started on it.
+/// record list): the object, its emitter, and the cues started on it, in start order.
 struct ObjectEmitter {
     object: u64,
     emitter: u32,
-    cues: Vec<CueHandle>,
+    cues: Vec<ObjectCue>,
+}
+
+/// A cue link in an object's emitter record (`0x00593BA0`): link `+0x00` is the cue hash it was
+/// started with (`mov [esi], edi` at `0x00593C39`, `edi` being the hash `FUN_00835A70` looked up),
+/// link `+0x08` the started cue instance.
+#[derive(Clone, Copy)]
+struct ObjectCue {
+    cue: u32,
+    handle: CueHandle,
 }
 
 /// Why a cue did not start.
@@ -269,6 +278,25 @@ struct Playback {
     /// The emitter its positional instances mix through: its own for a cue the game starts, its
     /// parent's for a child cue (`FUN_0082e930` passes the parent's `+0x118` / `+0xC8`).
     emitter: u32,
+}
+
+/// `FUN_00835910`: whether a cue loops for ever. A multi-track cue (`+0x15E` bit 2, which
+/// `FUN_00834AD0` sets from the soundbank cue's form byte `+0x05`) does when its loop count
+/// (`+0x15D`) is `0xFF`, or when one of its tracks (`+0x11C`, `+0x15C` of them) has loop count
+/// `+0xD5` = `0xFF` or holds an instance whose group loop count `+0x80` is `0xFF`. A single-track
+/// cue does only when its instance (`+0x10`, none before its first frame) has `+0x80` = `0xFF`
+/// (`0x00835982`: the cue's `+0x15D` result is overwritten).
+fn loops_forever(pb: &Playback) -> bool {
+    const FOREVER: u8 = 0xFF;
+    match pb.resolved.multitrack {
+        Some(_) => {
+            pb.loop_count == FOREVER
+                || pb.tracks.iter().any(|t| {
+                    t.loop_count == FOREVER || t.sounds.instances.iter().any(|i| i.loop_count == FOREVER)
+                })
+        }
+        None => pb.single.is_some_and(|i| i.loop_count == FOREVER),
+    }
 }
 
 impl std::error::Error for ResolveError {}
@@ -697,7 +725,7 @@ impl AudioEngine {
         self.check_playable(&resolved, &HashMap::new(), &mut HashSet::from([cue_id]))?;
         let position = self.holders[&emitter].position;
         let handle = self.start_playback(&cue, resolved, Some(position), HashMap::new(), None, Some(emitter));
-        self.objects[record].cues.push(handle);
+        self.objects[record].cues.push(ObjectCue { cue: cue_id, handle });
         Ok(handle)
     }
 
@@ -708,25 +736,60 @@ impl AudioEngine {
     /// are started and before [`tick`](Self::tick) (`PgSoundPlayer::Update` runs it after the cue
     /// commands, `FUN_00607610`, and before the Pal update, `FUN_0082EE60`).
     ///
-    /// // CONFIRM-LIVE: when the object is not in the sound object table (`DAT_01175FAC`) and the
-    /// record has cues, `FUN_006036C0` calls `FUN_00603D20(0, 0, 1)`, which stops the record's cues
-    /// that loop for ever (`FUN_00835910`: cue `+0x15D`, a track's `+0xD5` or an instance's `+0x80`
-    /// is `0xFF`). Not modelled: an object without a position leaves its emitter where it is.
+    /// An object with no position (`position_of` gives `None`) is one no longer in the sound object
+    /// table (`DAT_01175FAC`): its emitter stays where it is, and — the record still holding cues —
+    /// `FUN_006036C0` calls `FUN_00603D20(0, 0, 1)` (`0x00603B18`), which stops the cues that loop
+    /// for ever ([`stop_vanished_object_cues`](Self::stop_vanished_object_cues)). A finite cue plays
+    /// on to its end, and the record stays until its last cue has finished.
     pub fn update_object_emitters(&mut self, dt: f32, rng: &mut Lcg, mut position_of: impl FnMut(u64) -> Option<Vec3>) {
         let mut i = 0;
         while i < self.objects.len() {
-            let playing: Vec<CueHandle> =
-                self.objects[i].cues.iter().copied().filter(|&h| self.cue_is_playing(h)).collect();
+            let playing: Vec<ObjectCue> =
+                self.objects[i].cues.iter().copied().filter(|c| self.cue_is_playing(c.handle)).collect();
             self.objects[i].cues = playing;
             let (object, emitter) = (self.objects[i].object, self.objects[i].emitter);
-            if let Some(p) = position_of(object) {
-                self.update_emitter(EmitterId(emitter), p, dt, rng);
+            match position_of(object) {
+                Some(p) => self.update_emitter(EmitterId(emitter), p, dt, rng),
+                None => self.stop_vanished_object_cues(i),
             }
             if self.objects[i].cues.is_empty() {
                 self.holders.remove(&emitter);
                 self.objects.remove(i);
             } else {
                 i += 1;
+            }
+        }
+    }
+
+    /// `FUN_00603D20(0, 0, 1)` on object record `record`, whose object has left the sound object
+    /// table. The body after its SecuROM splice (`0x00603D3B`, which loads the Pal engine
+    /// `[0x011763FC]` into `ebp`, returning to `0x00603D41`) walks the record's cue links in order;
+    /// for each, with arguments `hash` = 0, `all` = 0, `forever` = 1:
+    ///
+    /// 1. `forever` set: the link's cue instance is found in the Pal cue list (`[ebp+0x50]`, instance
+    ///    `+0x14C` = link `+0x08`) and `FUN_00835910` says whether it loops for ever (`0x00603DC3`);
+    /// 2. the link matches when its cue hash (link `+0x00`) equals `hash` (`0x00603D88`);
+    /// 3. if either holds (or `all`), and the cue's state (`+0x164`) is 0 or 1 (`0x00603DD0`), the
+    ///    link's `+0x05` byte (set to 1 by `FUN_00603C10`; the record here does not carry it) is
+    ///    cleared and the cue stops (`FUN_00835720(0)`, `0x00603E06`, which is
+    ///    [`release`](Self::release)); a matching link then ends the walk (`0x00603E11`).
+    ///
+    /// The links stay in the record: a stopped cue is dropped at the update that finds it done.
+    fn stop_vanished_object_cues(&mut self, record: usize) {
+        const HASH: u32 = 0;
+        for k in 0..self.objects[record].cues.len() {
+            let link = self.objects[record].cues[k];
+            let Some(i) = self.playbacks.iter().position(|p| p.handle == link.handle) else { continue };
+            let forever = loops_forever(&self.playbacks[i]);
+            let matches = link.cue == HASH;
+            if !(forever || matches) || self.playbacks[i].state != RunState::Playing {
+                continue;
+            }
+            let mut pb = self.take_playback(i);
+            self.release(&mut pb);
+            self.playbacks[i] = pb;
+            if matches {
+                break;
             }
         }
     }
@@ -2440,6 +2503,73 @@ mod playback_tests {
         eng.update_object_emitters(0.1, &mut rng, |_| Some(p));
         assert_eq!(eng.object_emitter(7), None);
         assert_eq!(eng.emitter(e), None);
+    }
+
+    /// An object that leaves the table (no position) has its for-ever-looping cues stopped
+    /// (`FUN_006036C0` → `FUN_00603D20(0, 0, 1)`): a track looping `0xFF` times and a cue looping
+    /// `0xFF` times fade out and finish; a finite cue is left to play to its end, and the record
+    /// lasts until it has.
+    #[test]
+    fn a_vanished_objects_forever_looping_cues_stop() {
+        let mut looping_track = track(vec![], vec![sound(0.0, 0)]);
+        looping_track.byte_00 = 0xFF;
+        looping_track.unknown_04 = 0.0;
+        looping_track.unknown_08 = 0.2;
+        let mut looping_cue = multi(vec![track(vec![], vec![sound(0.0, 0)])], vec![], 1.0);
+        looping_cue.byte_10 = 0xFF;
+        looping_cue.unknown_1c = 0.0;
+        looping_cue.unknown_20 = 0.2;
+        let once = multi(vec![track(vec![], vec![sound(0.0, 0)])], vec![], 1.0);
+        let mut eng = engine(
+            vec![
+                ("mod_track_forever", 1.0, CueBodySpec::MultiTrack(multi(vec![looping_track], vec![], 1.0))),
+                ("mod_cue_forever", 1.0, CueBodySpec::MultiTrack(looping_cue)),
+                ("mod_once", 1.0, CueBodySpec::MultiTrack(once)),
+            ],
+            LONG,
+            2,
+        );
+        let p = Vec3::new(1.0, 0.0, 1.0);
+        let track_forever = eng.cue_sound_on_object(5, Some(p), m2("mod_track_forever")).unwrap();
+        let cue_forever = eng.cue_sound_on_object(5, Some(p), m2("mod_cue_forever")).unwrap();
+        let finite = eng.cue_sound_on_object(5, Some(p), m2("mod_once")).unwrap();
+        let mut rng = Lcg::game();
+        let frame = |eng: &mut AudioEngine, rng: &mut Lcg, present: bool| {
+            eng.update_object_emitters(0.1, rng, |o| (o == 5 && present).then_some(p));
+            eng.tick(0.1);
+            eng.render(4410);
+        };
+        for _ in 0..5 {
+            frame(&mut eng, &mut rng, true);
+        }
+        for h in [track_forever, cue_forever, finite] {
+            assert!(eng.cue_is_playing(h));
+        }
+        let finite_voice = eng.cue_voices(finite)[0];
+
+        eng.update_object_emitters(0.1, &mut rng, |_| None);
+        for h in [track_forever, cue_forever] {
+            let voices = eng.cue_voices(h);
+            assert!(!voices.is_empty());
+            for v in voices {
+                assert_eq!(eng.pool.get(v).unwrap().state, crate::voice::InstanceState::FadingOut, "{h:?} is stopped");
+            }
+        }
+        assert_ne!(eng.pool.get(finite_voice).unwrap().state, crate::voice::InstanceState::FadingOut, "the finite cue plays on");
+
+        for _ in 0..10 {
+            frame(&mut eng, &mut rng, false);
+        }
+        assert!(!eng.cue_is_playing(track_forever));
+        assert!(!eng.cue_is_playing(cue_forever));
+        assert!(eng.cue_is_playing(finite));
+        assert!(eng.object_emitter(5).is_some(), "the record lasts while a cue is on it");
+
+        for _ in 0..30 {
+            frame(&mut eng, &mut rng, false);
+        }
+        assert!(!eng.cue_is_playing(finite), "the 4 s wave has ended");
+        assert_eq!(eng.object_emitter(5), None);
     }
 
     /// Object 0 is no object: the cue plays 2D.
