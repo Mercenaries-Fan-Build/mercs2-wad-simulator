@@ -29,7 +29,10 @@ use crate::backend::{AudioSink, NullSink};
 use crate::backend::CpalSink;
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
+use crate::automation::{pitched_rate, AutomationError, AutomationOutput};
 use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
+use crate::multitrack::{Automation, MultiTrackCue};
+use crate::playback::{clamp01, Instance, InstanceParams, TrackPlayback};
 use crate::music::MusicStateMachine;
 use crate::sounddb::{CueEntry, SoundDb};
 use crate::select::{self, PalRng, STATE_INIT};
@@ -121,6 +124,10 @@ pub struct ResolvedChoice {
     pub selection: Option<u8>,
     /// Every wave the group can play, each resident and decoded.
     pub waves: Vec<ResolvedWave>,
+    /// What the group gives a sound instance at start (base volume, pitch, delay).
+    pub instance: InstanceParams,
+    /// The group's `+0x2C` byte when multi-wave (non-zero on groups whose cues carry length −1).
+    pub loop_byte: u8,
 }
 
 /// One sound a cue fires.
@@ -144,6 +151,10 @@ pub struct ResolvedCue {
     pub soundbank: u32,
     /// The cue's index there.
     pub cue_index: u32,
+    /// The cue's `+0x08` gain.
+    pub gain: f32,
+    /// The multi-track body, for its automation, loop counts, parameters and play probability.
+    pub multitrack: Option<MultiTrackCue>,
     /// Every sound of every track.
     pub sounds: Vec<ResolvedSound>,
 }
@@ -155,13 +166,61 @@ impl ResolvedCue {
     }
 }
 
-/// One sound a cue start actually fired, after the engine's picks.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PickedSound {
-    /// When it fires, in seconds after the cue starts.
-    pub start_s: f32,
-    /// The picked wave.
-    pub wave: ResolvedWave,
+/// A started cue ([`AudioEngine::cue_sound`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CueHandle(pub u32);
+
+/// Why a cue did not start.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CueError {
+    /// No sounddb entry matches the cue id.
+    Unknown(u32),
+    /// The chain does not resolve.
+    Resolve(ResolveError),
+    /// The cue loops (a cue, track or group loop count is set); looping is not played here.
+    Looping { what: &'static str },
+    /// The cue's automation cannot be played ([`crate::automation`]).
+    Automation(AutomationError),
+    /// The voice pool refused the voice (every voice outranks it).
+    Outranked,
+}
+
+impl std::fmt::Display for CueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CueError::Unknown(id) => write!(f, "cue 0x{id:08X} is not in the sound database"),
+            CueError::Resolve(e) => write!(f, "{e}"),
+            CueError::Looping { what } => write!(f, "the cue loops ({what}); looping is not played"),
+            CueError::Automation(e) => write!(f, "{e}"),
+            CueError::Outranked => write!(f, "the voice pool refused the voice"),
+        }
+    }
+}
+
+impl std::error::Error for CueError {}
+
+/// One started cue.
+struct Playback {
+    handle: CueHandle,
+    resolved: ResolvedCue,
+    /// Voice request template (priority, category, 3D).
+    req: VoiceRequest,
+    /// Spatial left/right gains, fixed at start.
+    gains: (f32, f32),
+    /// Cue-local parameter values supplied at start.
+    params: HashMap<u32, f32>,
+    /// An explicit-source cue: its one voice, left alone.
+    direct: Option<VoiceId>,
+    /// Single-track: whether its instance has started, and the instance.
+    single: Option<Instance>,
+    started: bool,
+    /// A multi-track cue whose start draw exceeded its play probability: it plays nothing.
+    dropped: bool,
+    /// Multi-track state.
+    cue_time: f32,
+    cue_automation: crate::automation::AutomationState,
+    cue_prev: (f32, f32),
+    tracks: Vec<TrackPlayback>,
 }
 
 impl std::error::Error for ResolveError {}
@@ -198,6 +257,12 @@ pub struct AudioEngine {
     group_state: HashMap<(u32, u16), u32>,
     /// Per-cue sound selection state, `(soundbank, cue index, slot)`, starting at `0xFFFFFFFF`.
     slot_state: HashMap<(u32, u32, u8), u32>,
+    /// Started cues, in start order.
+    playbacks: Vec<Playback>,
+    /// The next cue handle.
+    next_handle: u32,
+    /// Global parameter values (the Pal global table); an absent one reads −1.0, as in the engine.
+    global_params: HashMap<u32, f32>,
     /// Device sink (headless [`NullSink`] by default).
     sink: Box<dyn AudioSink>,
     /// True once a real output device is attached ([`attach_output_device`](Self::attach_output_device));
@@ -237,6 +302,9 @@ impl AudioEngine {
             rng: PalRng::new(clock_seed()),
             group_state: HashMap::new(),
             slot_state: HashMap::new(),
+            playbacks: Vec::new(),
+            next_handle: 1,
+            global_params: HashMap::new(),
             sink: Box::new(NullSink {
                 sample_rate: cfg.sample_rate,
                 channels: cfg.channels,
@@ -403,7 +471,11 @@ impl AudioEngine {
                 sounds
             }
         };
-        Ok(ResolvedCue { soundbank: cue.bank_hash, cue_index: cue.cue_index, sounds })
+        let multitrack = match &sb_cue.body {
+            CueBody::MultiTrack(m) => Some(m.clone()),
+            CueBody::SingleTrack { .. } => None,
+        };
+        Ok(ResolvedCue { soundbank: cue.bank_hash, cue_index: cue.cue_index, gain: sb_cue.gain, multitrack, sounds })
     }
 
     fn resolve_choice(&self, soundbank: u32, group_index: u16, weight: f32) -> Result<ResolvedChoice, ResolveError> {
@@ -413,13 +485,27 @@ impl AudioEngine {
             index: group_index,
             groups: bank.groups.len(),
         })?;
-        let selection = match &group.form {
-            GroupForm::Single { .. } => None,
+        let (selection, instance, loop_byte) = match &group.form {
+            GroupForm::Single { gain, unknown_30, .. } => {
+                (None, InstanceParams::Single { volume: *gain, pitch: *unknown_30 }, 0)
+            }
             GroupForm::Multi(m) => {
                 if m.selection > 2 {
                     return Err(ResolveError::SelectionMode { soundbank, what: "group", mode: m.selection });
                 }
-                Some(m.selection)
+                let f = m.floats_4c;
+                (
+                    Some(m.selection),
+                    InstanceParams::Multi {
+                        pitch_lo: f[4],
+                        pitch_hi: f[5],
+                        volume_lo: f[1],
+                        volume_hi: f[2],
+                        delay_a: m.unknown_3c,
+                        delay_b: m.unknown_40,
+                    },
+                    m.byte_2c,
+                )
             }
         };
         if group.waves().is_empty() {
@@ -436,7 +522,7 @@ impl AudioEngine {
                 Ok(ResolvedWave { wavebank: w.wavebank, index: w.index, weight: w.weight, clip_hash: clip.clip_hash })
             })
             .collect::<Result<_, _>>()?;
-        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves })
+        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves, instance, loop_byte })
     }
 
     /// The resident clip at `(wavebank, index)`.
@@ -447,39 +533,6 @@ impl AudioEngine {
             index,
             waves: bank.clips.len(),
         })
-    }
-
-    /// Start a cue the way the engine does: for each sound, in track and sound order, pick an entry
-    /// (a multi-track sound's selection mode and state slot) and then a wave of that entry's group (the
-    /// group's selection mode and state), drawing from the engine's generator ([`crate::select`]).
-    /// A sound the engine would pick nothing for is left out. The engine makes each pick when its
-    /// sound fires; sounds that start together are picked in this same order.
-    pub fn pick_cue(&mut self, cue: &CueEntry) -> Result<Vec<PickedSound>, ResolveError> {
-        let resolved = self.resolve_cue(cue)?;
-        let mut picked = Vec::new();
-        for s in &resolved.sounds {
-            let choice = match s.selection {
-                None => Some(0),
-                Some((mode, slot)) => {
-                    let weights: Vec<f32> = s.choices.iter().map(|c| c.weight).collect();
-                    let st = self.slot_state.entry((resolved.soundbank, resolved.cue_index, slot)).or_insert(STATE_INIT);
-                    select::pick(mode, &weights, st, &mut self.rng)
-                }
-            };
-            let Some(choice) = choice.and_then(|i| s.choices.get(i)) else { continue };
-            let wave = match choice.selection {
-                None => Some(0),
-                Some(mode) => {
-                    let weights: Vec<f32> = choice.waves.iter().map(|w| w.weight).collect();
-                    let st = self.group_state.entry((choice.soundbank, choice.group_index)).or_insert(STATE_INIT);
-                    select::pick(mode, &weights, st, &mut self.rng)
-                }
-            };
-            if let Some(w) = wave.and_then(|i| choice.waves.get(i)) {
-                picked.push(PickedSound { start_s: s.start_s, wave: *w });
-            }
-        }
-        Ok(picked)
     }
 
     /// Install the parsed sound database (chain: `Sound.AddPgAsset("Mercs2Globals","sounddb")`).
@@ -505,35 +558,144 @@ impl AudioEngine {
     /// `Sound.CueSound(cue [, position])` (shim `FUN_005e0ff0` → `thunk_FUN_024b65e0`).
     ///
     /// // CONFIRM-LIVE: the exe's cue queue-post is SecuROM-morphed (`thunk_FUN_024b65e0`). This models
-    /// the observable result: resolve the cue in the sound DB, allocate a voice (priority-steal if the
-    /// pool is full), and — if `position` is given and the cue is positional — compute 3D channel
-    /// gains against the closest listener. `source` is the decoded wave (from the wave-bank system); pass
-    /// `None` to allocate a silent voice (the wave-bind is the streaming seam). Returns the voice id,
-    /// or `None` if the cue is unknown or the pool denied it (outranked).
-    pub fn cue_sound(
+    /// the observable result: resolve the cue through every path, refuse what cannot be played
+    /// ([`CueError`]), and start a playback ([`crate::playback`]) whose sounds fire, pick their waves
+    /// and follow their automation on each [`tick`](Self::tick). If `position` is given and the cue is
+    /// positional, 3D channel gains and a distance start delay are computed against the closest
+    /// listener at start. Cue-local curve parameters are given by [`cue_sound_with_params`].
+    ///
+    /// [`cue_sound_with_params`]: Self::cue_sound_with_params
+    pub fn cue_sound(&mut self, cue_id: u32, position: Option<Vec3>) -> Result<CueHandle, CueError> {
+        self.cue_sound_with_params(cue_id, position, &[])
+    }
+
+    /// [`cue_sound`](Self::cue_sound) with values for the cue's own curve parameters.
+    pub fn cue_sound_with_params(
         &mut self,
         cue_id: u32,
         position: Option<Vec3>,
-        source: Option<Box<dyn SampleSource>>,
-    ) -> Option<VoiceId> {
-        let cue: CueEntry = *self.sounddb.find_cue(cue_id)?;
+        params: &[(u32, f32)],
+    ) -> Result<CueHandle, CueError> {
+        let cue: CueEntry = *self.sounddb.find_cue(cue_id).ok_or(CueError::Unknown(cue_id))?;
+        let resolved = self.resolve_cue(&cue).map_err(CueError::Resolve)?;
+        let params: HashMap<u32, f32> = params.iter().copied().collect();
+        self.check_playable(&resolved, &params)?;
+        let (req, gains) = self.voice_template(&cue, position);
+        let handle = self.new_handle();
+        let tracks = resolved.multitrack.as_ref().map(|m| vec![TrackPlayback::new(); m.tracks.len()]).unwrap_or_default();
+        let mut pb = Playback {
+            handle,
+            resolved,
+            req,
+            gains,
+            params,
+            direct: None,
+            single: None,
+            started: false,
+            dropped: false,
+            cue_time: 0.0,
+            cue_automation: Default::default(),
+            cue_prev: (1.0, 0.0),
+            tracks,
+        };
+        // FUN_008354e0: a multi-track cue draws once and plays only if its +0x18 value is not below.
+        if let Some(m) = &pb.resolved.multitrack {
+            let r = self.rng.next_unit();
+            pb.dropped = m.unknown_18 < r;
+        }
+        self.playbacks.push(pb);
+        Ok(handle)
+    }
+
+    /// Play an explicit sample source for a cue (tests, synthesized audio): one voice, no automation.
+    pub fn cue_sound_with_source(
+        &mut self,
+        cue_id: u32,
+        position: Option<Vec3>,
+        source: Box<dyn SampleSource>,
+    ) -> Result<CueHandle, CueError> {
+        let cue: CueEntry = *self.sounddb.find_cue(cue_id).ok_or(CueError::Unknown(cue_id))?;
+        let (req, gains) = self.voice_template(&cue, position);
+        let id = self.pool.acquire(&req).ok_or(CueError::Outranked)?;
+        self.mixer.attach(id, source);
+        self.mixer.set_channel_gains(id, gains.0, gains.1);
+        let handle = self.new_handle();
+        self.playbacks.push(Playback {
+            handle,
+            resolved: ResolvedCue { soundbank: 0, cue_index: 0, gain: 1.0, multitrack: None, sounds: Vec::new() },
+            req,
+            gains,
+            params: HashMap::new(),
+            direct: Some(id),
+            single: None,
+            started: true,
+            dropped: false,
+            cue_time: 0.0,
+            cue_automation: Default::default(),
+            cue_prev: (1.0, 0.0),
+            tracks: Vec::new(),
+        });
+        Ok(handle)
+    }
+
+    /// `Sound.CueSound` by cue *name* (hashes then [`cue_sound`](Self::cue_sound)).
+    pub fn cue_sound_by_name(&mut self, name: &str, position: Option<Vec3>) -> Result<CueHandle, CueError> {
+        self.cue_sound(pandemic_hash_m2(name), position)
+    }
+
+    /// The sound instances a started cue has fired, with their current base values.
+    pub fn cue_instances(&self, handle: CueHandle) -> Vec<Instance> {
+        let Some(pb) = self.playbacks.iter().find(|p| p.handle == handle) else { return Vec::new() };
+        pb.single.into_iter().chain(pb.tracks.iter().flat_map(|t| t.instances.iter().copied())).collect()
+    }
+
+    /// The voices a started cue currently owns.
+    pub fn cue_voices(&self, handle: CueHandle) -> Vec<VoiceId> {
+        let Some(pb) = self.playbacks.iter().find(|p| p.handle == handle) else { return Vec::new() };
+        pb.direct
+            .into_iter()
+            .chain(pb.single.map(|i| i.voice))
+            .chain(pb.tracks.iter().flat_map(|t| t.instances.iter().map(|i| i.voice)))
+            .collect()
+    }
+
+    /// Set a global parameter (the Pal global table the curves fall back to). Refused when a playing
+    /// cue has a curve over it that the value lies past.
+    pub fn set_global_param(&mut self, param: u32, value: f32) -> Result<(), CueError> {
+        for pb in &self.playbacks {
+            if let Some(m) = &pb.resolved.multitrack {
+                if !m.params.contains(&param) {
+                    check_curves(m, param, value)?;
+                }
+            }
+        }
+        self.global_params.insert(param, value);
+        Ok(())
+    }
+
+    fn new_handle(&mut self) -> CueHandle {
+        let h = CueHandle(self.next_handle);
+        self.next_handle = self.next_handle.wrapping_add(1).max(1);
+        h
+    }
+
+    /// The voice request and spatial gains a cue's voices share.
+    fn voice_template(&self, cue: &CueEntry, position: Option<Vec3>) -> (VoiceRequest, (f32, f32)) {
         let mut req = VoiceRequest {
             cue_guid: cue.guid,
             priority: cue.priority,
             category: cue.category,
-            gain: if cue.default_gain > 0.0 { cue.default_gain } else { 1.0 },
+            gain: 1.0,
             looping: cue.is_looping(),
             positional: cue.is_positional() && position.is_some(),
             start_delay: 0.0,
         };
-
-        // 3D: start delay from distance to the closest listener (FUN_008369e0).
         let mut gains = (1.0f32, 1.0f32);
         if req.positional {
             if let Some(pos) = position {
                 if let Some((idx, dist)) = self.listeners.closest(pos) {
                     req.start_delay = spatial::start_delay_secs(dist);
-                    let (min_d, max_d) = self.cue_distances(&cue);
+                    let (min_d, max_d) = self.cue_distances(cue);
                     let atten = spatial::distance_attenuation(dist, min_d, max_d);
                     let listener = self.listeners.get(idx).copied().unwrap_or_default();
                     let (l, r) = spatial::stereo_pan(pos, &listener);
@@ -541,51 +703,39 @@ impl AudioEngine {
                 }
             }
         }
-
-        // No explicit source: fire the cue's sounds the way the engine does (`pick_cue`), one voice
-        // per fired sound, each starting at its sound's start time and resampled from the clip's
-        // native rate to the mixer rate. A cue whose chain does not resolve (see [`ResolveError`]), or
-        // for which the engine picks nothing, allocates one silent voice, as for a wave that has not
-        // streamed in yet. Returns the first voice.
-        if let Some(src) = source {
-            let id = self.pool.acquire(&req)?;
-            self.mixer.attach(id, src);
-            self.mixer.set_channel_gains(id, gains.0, gains.1);
-            return Some(id);
-        }
-        let dst_rate = self.mixer.config().sample_rate;
-        let picked = self.pick_cue(&cue).unwrap_or_default();
-        let mut first = None;
-        for p in &picked {
-            let Ok(clip) = self.clip(p.wave.wavebank, p.wave.index) else { continue };
-            let src = Box::new(PcmSource::with_rate(
-                clip.samples.clone(),
-                clip.channels as usize,
-                clip.sample_rate,
-                dst_rate,
-            ));
-            let sound_req = VoiceRequest { start_delay: req.start_delay + p.start_s, ..req.clone() };
-            let Some(id) = self.pool.acquire(&sound_req) else { continue };
-            self.mixer.attach(id, src);
-            self.mixer.set_channel_gains(id, gains.0, gains.1);
-            first.get_or_insert(id);
-        }
-        if first.is_none() {
-            let id = self.pool.acquire(&req)?;
-            self.mixer.set_channel_gains(id, gains.0, gains.1);
-            first = Some(id);
-        }
-        first
+        (req, gains)
     }
 
-    /// `Sound.CueSound` by cue *name* (hashes then [`cue_sound`](Self::cue_sound)).
-    pub fn cue_sound_by_name(
-        &mut self,
-        name: &str,
-        position: Option<Vec3>,
-        source: Option<Box<dyn SampleSource>>,
-    ) -> Option<VoiceId> {
-        self.cue_sound(pandemic_hash_m2(name), position, source)
+    /// Refuse a cue this engine cannot play faithfully: loops, automation kinds with no counterpart,
+    /// unset cue-local parameters, and parameters past a curve.
+    fn check_playable(&self, resolved: &ResolvedCue, params: &HashMap<u32, f32>) -> Result<(), CueError> {
+        if resolved.sounds.iter().any(|s| s.choices.iter().any(|c| c.loop_byte != 0)) {
+            return Err(CueError::Looping { what: "a group's +0x2C loop byte" });
+        }
+        let Some(m) = &resolved.multitrack else { return Ok(()) };
+        if m.byte_10 != 0 {
+            return Err(CueError::Looping { what: "the cue's +0x10 loop count" });
+        }
+        if m.tracks.iter().any(|t| t.byte_00 != 0) {
+            return Err(CueError::Looping { what: "a track's +0x00 loop count" });
+        }
+        for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
+            let kind = match a {
+                Automation::Kind4 { .. } => Some(4),
+                Automation::Kind7 { .. } => Some(7),
+                Automation::Kind9 { .. } => Some(9),
+                Automation::Curve { kind: crate::multitrack::CurveKind::Cue, .. } => Some(8),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Err(CueError::Automation(AutomationError::Unsupported { kind }));
+            }
+            if let Automation::Curve { param, .. } = a {
+                let value = param_value(m, params, &self.global_params, *param).map_err(CueError::Automation)?;
+                check_curves(m, *param, value)?;
+            }
+        }
+        Ok(())
     }
 
     /// Min/max attenuation distances for a cue (from the cue record, or emitter defaults if zero).
@@ -595,15 +745,20 @@ impl AudioEngine {
         (min_d, max_d)
     }
 
-    /// `Sound.StopSound(voice)` — stop a voice (with a short fade).
-    pub fn stop_sound(&mut self, id: VoiceId) {
-        self.pool.stop(id, true);
+    /// `Sound.StopSound(cue)` — stop a started cue: its voices fade out and nothing more fires.
+    pub fn stop_sound(&mut self, handle: CueHandle) {
+        for id in self.cue_voices(handle) {
+            self.pool.stop(id, true);
+        }
+        self.playbacks.retain(|p| p.handle != handle);
     }
 
-    /// `Sound.PauseSound(voice)` — pause a voice's playback.
-    pub fn pause_sound(&mut self, id: VoiceId) {
-        if let Some(v) = self.pool.get_mut(id) {
-            v.state = crate::voice::InstanceState::Paused;
+    /// `Sound.PauseSound(cue)` — pause a started cue's voices.
+    pub fn pause_sound(&mut self, handle: CueHandle) {
+        for id in self.cue_voices(handle) {
+            if let Some(v) = self.pool.get_mut(id) {
+                v.state = crate::voice::InstanceState::Paused;
+            }
         }
     }
 
@@ -832,8 +987,162 @@ impl AudioEngine {
         self.music.tick(dt);
         self.banks.tick();
         if !self.paused {
+            self.advance_playbacks(dt);
             self.pool.tick(dt);
         }
+    }
+
+    // ---- cue playback (FUN_00835060 / FUN_0083c070 / FUN_0083fee0 / FUN_008369e0) ----------------
+
+    fn advance_playbacks(&mut self, dt: f32) {
+        let mut pbs = std::mem::take(&mut self.playbacks);
+        for pb in &mut pbs {
+            self.advance(pb, dt);
+        }
+        pbs.retain(|pb| !self.finished(pb));
+        self.playbacks = pbs;
+    }
+
+    /// A playback is over once everything has fired and no voice of it is left.
+    fn finished(&self, pb: &Playback) -> bool {
+        if pb.dropped {
+            return true;
+        }
+        let live = |id: VoiceId| self.pool.get(id).is_some_and(|v| !v.state.is_terminal()) && self.mixer.is_attached(id);
+        if let Some(id) = pb.direct {
+            return !live(id);
+        }
+        if pb.resolved.multitrack.is_none() {
+            return pb.started && pb.single.is_none_or(|i| !live(i.voice));
+        }
+        let sound_counts: Vec<usize> = pb
+            .resolved
+            .multitrack
+            .as_ref()
+            .map(|m| m.tracks.iter().map(|t| t.sounds.len()).collect())
+            .unwrap_or_default();
+        pb.tracks.iter().enumerate().all(|(t, tr)| {
+            tr.next_sound >= sound_counts.get(t).copied().unwrap_or(0) && tr.instances.iter().all(|i| !live(i.voice))
+        })
+    }
+
+    fn advance(&mut self, pb: &mut Playback, dt: f32) {
+        if pb.direct.is_some() || pb.dropped {
+            return;
+        }
+        let Some(m) = pb.resolved.multitrack.clone() else {
+            // Single-track: start the one instance on the first frame, then hold its parameters.
+            let volume = clamp01(pb.resolved.gain * 1.0);
+            if !pb.started {
+                pb.started = true;
+                pb.single = self.fire(pb, 0, 0, None);
+            }
+            if let Some(inst) = pb.single {
+                self.apply(inst, volume, 0.0);
+            }
+            return;
+        };
+        pb.started = true;
+        // 1. cue parameters from the previous frame's cue automation.
+        let cue_volume = clamp01(pb.resolved.gain * pb.cue_prev.0);
+        let cue_pitch = pb.cue_prev.1;
+        // 2. cue time and cue automation.
+        pb.cue_time += dt;
+        let params = pb.params.clone();
+        let globals = self.global_params.clone();
+        let value = |p: u32| param_value(&m, &params, &globals, p);
+        let cue_out = pb
+            .cue_automation
+            .step(&m.events, pb.cue_time, &value)
+            .expect("automation was validated when the cue started");
+        pb.cue_prev = (cue_out.volume, cue_out.pitch);
+        let cue_override = override_of(&cue_out);
+        // 3. tracks.
+        let mut sound_base = 0usize;
+        for (t, track) in m.tracks.iter().enumerate() {
+            let tp = &mut pb.tracks[t];
+            tp.time += dt;
+            let out = tp
+                .automation
+                .step(&track.automation, tp.time, &value)
+                .expect("automation was validated when the cue started");
+            let volume = out.volume * cue_volume;
+            let pitch = out.pitch + cue_pitch;
+            let over = cue_override.or(override_of(&out));
+            let time = tp.time;
+            let mut fired = Vec::new();
+            for (k, s) in track.sounds.iter().enumerate().skip(tp.next_sound) {
+                if s.start_s <= time {
+                    fired.push(k);
+                    tp.next_sound = k + 1;
+                }
+            }
+            for k in fired {
+                if let Some(inst) = self.fire(pb, sound_base + k, t, over) {
+                    pb.tracks[t].instances.push(inst);
+                }
+            }
+            let tp = &mut pb.tracks[t];
+            if let Some((ov, op)) = over {
+                for inst in &mut tp.instances {
+                    inst.volume = ov;
+                    inst.pitch = op;
+                }
+            }
+            let instances = tp.instances.clone();
+            for inst in instances {
+                self.apply(inst, volume, pitch);
+            }
+            sound_base += track.sounds.len();
+        }
+    }
+
+    /// Fire sound `s` of the resolved cue: pick its entry and the entry group's wave, draw the
+    /// instance's start values, and start a voice.
+    fn fire(&mut self, pb: &Playback, s: usize, _track: usize, over: Option<(f32, f32)>) -> Option<Instance> {
+        let sound = &pb.resolved.sounds[s];
+        let choice = match sound.selection {
+            None => Some(0),
+            Some((mode, slot)) => {
+                let weights: Vec<f32> = sound.choices.iter().map(|c| c.weight).collect();
+                let st = self.slot_state.entry((pb.resolved.soundbank, pb.resolved.cue_index, slot)).or_insert(STATE_INIT);
+                select::pick(mode, &weights, st, &mut self.rng)
+            }
+        };
+        let choice = choice.and_then(|i| sound.choices.get(i))?;
+        let wave = match choice.selection {
+            None => Some(0),
+            Some(mode) => {
+                let weights: Vec<f32> = choice.waves.iter().map(|w| w.weight).collect();
+                let st = self.group_state.entry((choice.soundbank, choice.group_index)).or_insert(STATE_INIT);
+                select::pick(mode, &weights, st, &mut self.rng)
+            }
+        };
+        let wave = *wave.and_then(|i| choice.waves.get(i))?;
+        let start = choice.instance.start(&mut self.rng);
+        let clip = self.clip(wave.wavebank, wave.index).expect("resolved when the cue started");
+        let (samples, channels, clip_rate) = (clip.samples.clone(), clip.channels as usize, clip.sample_rate);
+        let src = PcmSource::with_rate(samples, channels, clip_rate, self.mixer.config().sample_rate);
+        let req = VoiceRequest { start_delay: pb.req.start_delay + start.delay_s, ..pb.req.clone() };
+        let id = self.pool.acquire(&req)?;
+        self.mixer.attach_pcm(id, src);
+        self.mixer.set_channel_gains(id, pb.gains.0, pb.gains.1);
+        let (volume, pitch) = over.unwrap_or((start.volume, start.pitch));
+        Some(Instance { voice: id, volume, pitch, clip_rate, wavebank: wave.wavebank, wave_index: wave.index })
+    }
+
+    /// Give an instance's voice its volume and pitched rate.
+    fn apply(&mut self, inst: Instance, volume: f32, pitch: f32) {
+        if !self.mixer.is_attached(inst.voice) {
+            return; // the voice finished or was stolen
+        }
+        if let Some(v) = self.pool.get_mut(inst.voice) {
+            v.gain = inst.volume * volume;
+        }
+        let rate = pitched_rate(inst.clip_rate, inst.pitch + pitch);
+        self.mixer
+            .set_source_rate(inst.voice, rate)
+            .expect("playback voices carry PCM sources built at the mixer rate");
     }
 
     /// One mixer-thread tick (`FUN_00831ee0` / `FUN_00836610`): render one 45 ms block, submit it to
@@ -863,4 +1172,164 @@ fn clock_seed() -> u32 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the system clock reads before 1970")
         .as_nanos() as u32
+}
+
+/// The override block of an automation step, when a non-zero-mode ramp is active.
+fn override_of(out: &AutomationOutput) -> Option<(f32, f32)> {
+    out.override_active.then_some((out.override_volume, out.override_pitch))
+}
+
+/// Refuse a value that lies past the last point of a curve over `param` in `m`.
+fn check_curves(m: &MultiTrackCue, param: u32, value: f32) -> Result<(), CueError> {
+    for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
+        if let Automation::Curve { param: p, points, .. } = a {
+            if *p != param {
+                continue;
+            }
+            crate::automation::curve(points, param, value).map_err(CueError::Automation)?;
+        }
+    }
+    Ok(())
+}
+
+/// A curve parameter's value: a cue-local one (in the cue's parameter list) from the values given at
+/// start, else the global table, −1.0 when absent (`FUN_008349d0`, `FUN_0082f170`).
+fn param_value(
+    m: &MultiTrackCue,
+    local: &HashMap<u32, f32>,
+    globals: &HashMap<u32, f32>,
+    param: u32,
+) -> Result<f32, AutomationError> {
+    if m.params.contains(&param) {
+        local.get(&param).copied().ok_or(AutomationError::ParameterUnset { param })
+    } else {
+        Ok(globals.get(&param).copied().unwrap_or(-1.0))
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    use crate::encode::{build_general, CueBodySpec, CueDef, GroupFormSpec, GroupHeadParams, GroupSpec, Pcm16, TablesSpec, WaveSpec};
+    use crate::multitrack::{Sound, SoundEntry, Target, Track};
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+
+    fn engine_with(tracks: Vec<Track>, events: Vec<Automation>, gain: f32) -> (AudioEngine, u32) {
+        let bank = m2("mod_auto");
+        let head = GroupHeadParams {
+            unknown_10: 1.0,
+            unknown_14: 0,
+            min_distance: 10.0,
+            max_distance: 100.0,
+            unknown_20: 1.0,
+            pitch: 1.0,
+            unknown_28: 1.0,
+        };
+        let tracks = tracks
+            .into_iter()
+            .map(|mut t| {
+                for s in &mut t.sounds {
+                    for e in &mut s.entries {
+                        e.soundbank = bank;
+                    }
+                }
+                t
+            })
+            .collect();
+        let spec = TablesSpec {
+            name: "mod_auto".into(),
+            waves: vec![WaveSpec { clip_hash: 1, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; 22050 * 4] } }],
+            groups: vec![GroupSpec {
+                sound_id: 1,
+                category: "sfx".into(),
+                head,
+                form: GroupFormSpec::Single { wave: 0, gain: 0.5, unknown_30: 2.0, weight: 1.0 },
+            }],
+            cues: vec![CueDef {
+                name: "mod_auto_cue".into(),
+                byte_06: 0,
+                gain,
+                body: CueBodySpec::MultiTrack(MultiTrackCue {
+                    byte_10: 0,
+                    sound_slots: 1,
+                    unknown_18: 1.0,
+                    unknown_1c: -1.0,
+                    unknown_20: -1.0,
+                    unknown_24: 0.0,
+                    events,
+                    curves: vec![],
+                    tracks,
+                    params: vec![],
+                }),
+            }],
+        };
+        let enc = build_general(&spec).unwrap().to_bytes().unwrap();
+        let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
+        eng.set_rng_seed(7);
+        eng.set_sounddb(SoundDb::parse(&enc.sounddb).unwrap());
+        eng.load_soundbank(&enc.soundbank).unwrap();
+        eng.load_wavebank(&enc.wavebank).unwrap();
+        (eng, m2("mod_auto_cue"))
+    }
+
+    fn one_sound_track(automation: Vec<Automation>) -> Track {
+        Track {
+            byte_00: 0,
+            unknown_04: -1.0,
+            unknown_08: -1.0,
+            automation,
+            sounds: vec![Sound {
+                slot: 0,
+                byte_01: 2,
+                byte_02: 2,
+                selection: 1,
+                start_s: 0.0,
+                entries: vec![SoundEntry { soundbank: 0, group_index: 0, unknown_06: 0, weight: 1.0 }],
+            }],
+        }
+    }
+
+    /// A track volume fade and pitch ramp reach the voice: gain = base volume (group +0x2C) × ramp ×
+    /// clamp01(cue gain); rate = pitched_rate(clip rate, base pitch (+0x30) + ramp).
+    #[test]
+    fn track_automation_drives_the_voice() {
+        let fade = Automation::Ramp { target: Target::Volume, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from: 1.0, to: 0.0 };
+        let bend = Automation::Ramp { target: Target::Pitch, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from: 0.0, to: 12.0 };
+        let (mut eng, cue) = engine_with(vec![one_sound_track(vec![fade, bend])], vec![], 0.8);
+        let h = eng.cue_sound(cue, None).unwrap();
+        for _ in 0..5 {
+            eng.tick(0.1);
+        }
+        let t = 0.1f32 + 0.1 + 0.1 + 0.1 + 0.1;
+        let inst = eng.cue_instances(h)[0];
+        let v = eng.pool.get(inst.voice).unwrap().gain;
+        let ramp_v = (0.0f32 - 1.0) / ((1.0 + 0.0) - 0.0) * (t - 0.0) + 1.0;
+        assert_eq!(v, 0.5 * (ramp_v * 0.8f32.min(1.0)));
+        let ramp_p = (12.0f32 - 0.0) / ((1.0 + 0.0) - 0.0) * (t - 0.0);
+        let rate = pitched_rate(22050, 2.0 + ((ramp_p + 0.0) + 0.0));
+        assert_eq!(eng.mixer.source_step(inst.voice).unwrap(), rate as f64 / 44100.0);
+    }
+
+    /// The cue's event table acts one frame late, through the clamped cue volume.
+    #[test]
+    fn cue_events_lag_a_frame() {
+        let fade = Automation::Ramp { target: Target::Volume, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from: 0.5, to: 0.5 };
+        let (mut eng, cue) = engine_with(vec![one_sound_track(vec![])], vec![fade], 1.0);
+        let h = eng.cue_sound(cue, None).unwrap();
+        eng.tick(0.1);
+        let inst = eng.cue_instances(h)[0];
+        assert_eq!(eng.pool.get(inst.voice).unwrap().gain, 0.5 * 1.0, "frame 1 still uses the start value");
+        eng.tick(0.1);
+        assert_eq!(eng.pool.get(inst.voice).unwrap().gain, 0.5 * 0.5, "frame 2 sees frame 1's event");
+    }
+
+    #[test]
+    fn unsupported_automation_and_loops_refuse_the_cue() {
+        let (mut eng, cue) = engine_with(vec![one_sound_track(vec![Automation::Kind7 { unknown_04: 0, hash: 1 }])], vec![], 1.0);
+        assert_eq!(eng.cue_sound(cue, None), Err(CueError::Automation(AutomationError::Unsupported { kind: 7 })));
+        let mut looping = one_sound_track(vec![]);
+        looping.byte_00 = 0xFF;
+        let (mut eng, cue) = engine_with(vec![looping], vec![], 1.0);
+        assert!(matches!(eng.cue_sound(cue, None), Err(CueError::Looping { .. })));
+    }
 }
