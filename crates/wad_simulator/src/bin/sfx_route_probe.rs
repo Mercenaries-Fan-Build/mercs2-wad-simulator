@@ -112,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(body) = parsed.containers.get(i).and_then(|c| extract_data_chunk(c)) else {
             continue;
         };
-        let bank = Wavebank::parse(&body);
+        let bank = Wavebank::parse(&body)?;
         println!("\nwavebank 0x{:08X}: {} clips", bank.self_hash, bank.clips.len());
         for (idx, c) in bank.clips.iter().enumerate() {
             println!(
@@ -138,8 +138,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nsounddb 0x{:08X}: {} cues", db.self_hash, db.cues.len());
         for c in &db.cues {
             println!(
-                "  cue 0x{:08X} -> bank 0x{:08X} wave_index {}",
-                c.guid, c.bank_hash, c.wave_index
+                "  cue 0x{:08X} -> bank 0x{:08X} cue_index {}",
+                c.guid, c.bank_hash, c.cue_index
             );
             cue_guids.insert(c.guid);
         }
