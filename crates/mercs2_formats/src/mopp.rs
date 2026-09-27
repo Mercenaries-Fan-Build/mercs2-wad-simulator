@@ -361,9 +361,10 @@ pub struct MoppInfo {
 /// median-split BVH; internal nodes are axis splits (`0x10–0x12`, or `0x23–0x25` when the inline
 /// subtree exceeds 255 bytes), leaves are `0x0b <BE32 idx>` + `0x30` (absolute key, delta 0).
 ///
-/// The smaller child is always placed at offset 0 (inline) and the larger at the encoded offset, which
-/// bounds every offset field by half the tree size — keeping the BE16 offsets valid for trees up to
-/// ~128 KB (~20 k triangles), well past any single retail collision mesh.
+/// The smaller child is always placed inline and the larger at the encoded offset, which bounds every
+/// offset by half the tree size. Past 65,535 bytes the offset child is reached through a JUMP24
+/// trampoline (see `push_split`), so trees up to 16 MiB encode; a whole retail terrain cell (17–30 k
+/// triangles, 200+ KiB of bytecode) needs it.
 ///
 /// `verts` is used only to compute split axes and the [`MoppInfo`] frame; a triangle index that is out
 /// of range of `verts` still encodes (its centroid falls back to the origin) — the decoder is
@@ -499,26 +500,8 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
         };
         let lmax = q_up(fhi[axis], axis); // inline child's upper bound (rounded UP)
         let rmin = q_down(slo2[axis], axis); // offset child's lower bound (rounded DOWN)
-        let off = first.len();
-        let mut out = Vec::with_capacity(7 + first.len() + second.len());
-        if off <= 255 {
-            // 0x10+axis: hdr [op, Lmax, Rmin, right_off]; LEFT inline @ +4, RIGHT @ +4+right_off.
-            out.push(0x10 + axis as u8);
-            out.push(lmax);
-            out.push(rmin);
-            out.push(off as u8);
-        } else {
-            // 0x23+axis: hdr [op, Lmax, Rmin, leftoff_be16=0, rightoff_be16=off]; LEFT @ +7, RIGHT @ +7+off.
-            out.push(0x23 + axis as u8);
-            out.push(lmax);
-            out.push(rmin);
-            out.push(0);
-            out.push(0);
-            out.push((off >> 8) as u8);
-            out.push(off as u8);
-        }
-        out.extend_from_slice(&first);
-        out.extend_from_slice(&second);
+        let mut out = Vec::with_capacity(11 + first.len() + second.len());
+        push_split(&mut out, axis as u8, lmax, rmin, &first, &second);
         (out, slo, shi)
     }
 
@@ -566,20 +549,49 @@ pub fn encode_return_all(n_tris: u32) -> Vec<u8> {
         } else {
             (right, left)
         };
-        let off = first.len();
-        if off <= 255 {
-            // 0x10 axis-0 split: [op, Lmax=0xFF, Rmin=0x00, right_off]; LEFT @ +4, RIGHT @ +4+off.
-            out.extend_from_slice(&[0x10, 0xFF, 0x00, off as u8]);
-        } else {
-            // 0x23 axis-0 split, BE16 child offsets: [op, Lmax, Rmin, leftoff=0, rightoff=off].
-            out.extend_from_slice(&[0x23, 0xFF, 0x00, 0, 0, (off >> 8) as u8, off as u8]);
-        }
-        out.extend_from_slice(&first);
-        out.extend_from_slice(&second);
+        // Axis-0 split with Lmax = 0xFF, Rmin = 0x00.
+        push_split(out, 0, 0xFF, 0x00, &first, &second);
     }
     let mut out = Vec::new();
     emit(0, n_tris, &mut out);
     out
+}
+
+/// Append one axis split whose inline (LEFT) child is `first` and offset (RIGHT) child is `second`.
+///
+/// The child offset is the size of `first`, and the engine gives it at most 16 bits. Every one of the 14
+/// MOPP virtual machines in retail `Mercenaries2.exe` reads it that way; e.g. the OBB walker
+/// `FUN_00a48e10` (Ghidra decomp of the unpacked exe):
+///
+/// * `0x10–0x12`: RIGHT at `pc + 4 + code[+3]` — one byte;
+/// * `0x23–0x25`: LEFT at `pc + 7 + BE16(code[+3..+5])`, RIGHT at `pc + 7 + BE16(code[+5..+7])` — two bytes;
+/// * `0x07` (JUMP24): `pc + 4 + BE24(code[+1..+4])` — the only three-byte offset in the instruction set.
+///
+/// So a split whose inline child exceeds 65,535 bytes points its RIGHT offset at a JUMP24 trampoline
+/// laid immediately after the header, and moves the inline child past it:
+///
+/// ```text
+/// [0x23+axis, Lmax, Rmin, 00 04, 00 00] [07 BE24(len(first))] [first …] [second …]
+///   LEFT  = pc + 7 + 4 → first        RIGHT = pc + 7 → JUMP24 → pc + 11 + len(first) → second
+/// ```
+///
+/// Panics if `first` exceeds the 24-bit jump range (16 MiB) — no retail instruction reaches further.
+fn push_split(out: &mut Vec<u8>, axis: u8, lmax: u8, rmin: u8, first: &[u8], second: &[u8]) {
+    let off = first.len();
+    if off <= 0xFF {
+        out.extend_from_slice(&[0x10 + axis, lmax, rmin, off as u8]);
+    } else if off <= 0xFFFF {
+        out.extend_from_slice(&[0x23 + axis, lmax, rmin, 0, 0, (off >> 8) as u8, off as u8]);
+    } else {
+        assert!(
+            off <= 0xFF_FFFF,
+            "MOPP subtree of {off} bytes is past the 24-bit JUMP24 range; the tree cannot address it"
+        );
+        out.extend_from_slice(&[0x23 + axis, lmax, rmin, 0, 4, 0, 0]);
+        out.extend_from_slice(&[0x07, (off >> 16) as u8, (off >> 8) as u8, off as u8]);
+    }
+    out.extend_from_slice(first);
+    out.extend_from_slice(second);
 }
 
 /// Record every leaf's reconstructed node box (`key`, `blo`, `bhi`) by walking the tree exactly as
@@ -1498,6 +1510,51 @@ mod tests {
             [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0],
         ];
         no_miss_gate(&tris, &verts, 0xB0, 2000, "box");
+    }
+
+    /// A tree over 128 KiB puts child offsets past the 16-bit field of the `0x23–0x25` split: the whole
+    /// terrain cell `0xA241BC0C` (16,995 collision triangles) already needs it. Both encoders must still
+    /// yield every key exactly once, walk every byte, and (spatial) miss nothing.
+    #[test]
+    fn a_tree_past_64k_offsets_still_walks_every_key() {
+        let n = 220u32;
+        let verts: Vec<[f32; 3]> = (0..=n)
+            .flat_map(|z| (0..=n).map(move |x| [x as f32, ((x * 7 + z * 3) % 11) as f32 * 0.3, z as f32]))
+            .collect();
+        let w = n + 1;
+        let tris: Vec<[u32; 3]> = (0..n)
+            .flat_map(|z| {
+                (0..n).flat_map(move |x| {
+                    let a = z * w + x;
+                    [[a, a + w, a + 1], [a + 1, a + w, a + w + 1]]
+                })
+            })
+            .collect();
+        let (code, info) = encode(&tris, &verts);
+        assert!(code.len() > 0x2_0000, "the tree ({} B) must be large enough to need wide offsets", code.len());
+        for (label, buf) in [("spatial", code.clone()), ("return-all", encode_return_all(tris.len() as u32))] {
+            let d = decode(&buf);
+            assert!(d.error.is_none(), "{label}: {:?}", d.error);
+            assert_eq!(d.consumed, buf.len(), "{label}: bytes not reached");
+            let mut keys = d.keys;
+            keys.sort_unstable();
+            assert!(
+                keys.iter().copied().eq(0..tris.len() as u32),
+                "{label}: {} keys, not 0..{} once each",
+                keys.len(),
+                tris.len()
+            );
+        }
+        for (k, t) in tris.iter().enumerate().step_by(97) {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for &v in t {
+                for a in 0..3 {
+                    lo[a] = lo[a].min(verts[v as usize][a]);
+                    hi[a] = hi[a].max(verts[v as usize][a]);
+                }
+            }
+            assert!(query_aabb(&code, &info, lo, hi).contains(&(k as u32)), "query misses triangle {k}");
+        }
     }
 
     #[test]
