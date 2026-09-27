@@ -22,6 +22,7 @@
 use std::collections::{HashMap, HashSet};
 
 use mercs2_core::glam::Vec3;
+use mercs2_core::random::Lcg;
 use mercs2_formats::hash::pandemic_hash_m2;
 
 use crate::backend::{AudioSink, NullSink};
@@ -30,6 +31,7 @@ use crate::backend::CpalSink;
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
 use crate::automation::{pitched_rate, AutomationError, AutomationOutput, AutomationState};
+use crate::emitter::Holder;
 use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource, SourceKey, Wave3d};
 use crate::multitrack::{Automation, MultiTrackCue};
 use crate::playback::{
@@ -177,6 +179,20 @@ impl ResolvedCue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CueHandle(pub u32);
 
+/// An emitter a positional cue plays through: its source holder ([`Holder`]). A cue started at a
+/// position has its own; the cues started on one object share the object's
+/// ([`AudioEngine::cue_sound_on_object`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EmitterId(pub u32);
+
+/// An object's emitter record (`0x0047ADC0`, reached from `FUN_006035F0`, in `PgSoundPlayer`'s
+/// record list): the object, its emitter, and the cues started on it.
+struct ObjectEmitter {
+    object: u64,
+    emitter: u32,
+    cues: Vec<CueHandle>,
+}
+
 /// Why a cue did not start.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CueError {
@@ -291,6 +307,10 @@ pub struct AudioEngine {
     slot_state: HashMap<(u32, u32, u8), u32>,
     /// Started cues, in start order.
     playbacks: Vec<Playback>,
+    /// Emitter source holders by emitter key ([`EmitterId`]).
+    holders: HashMap<u32, Holder>,
+    /// Object emitter records, in creation order (the order `FUN_006034B0` walks them).
+    objects: Vec<ObjectEmitter>,
     /// The next cue handle.
     next_handle: u32,
     /// Global parameter values (the Pal global table); an absent one reads −1.0, as in the engine.
@@ -335,6 +355,8 @@ impl AudioEngine {
             group_state: HashMap::new(),
             slot_state: HashMap::new(),
             playbacks: Vec::new(),
+            holders: HashMap::new(),
+            objects: Vec::new(),
             next_handle: 1,
             global_params: HashMap::new(),
             sink: Box::new(NullSink {
@@ -599,17 +621,19 @@ impl AudioEngine {
 
     // ---- Sound.* : playback ----------------------------------------------------------------------
 
-    /// `Sound.CueSound(cue [, position])` (shim `FUN_005e0ff0` → `thunk_FUN_024b65e0`).
+    /// Start a cue, 2D or at a fixed position: the Pal cue start (`FUN_0082E960` → `FUN_00834AD0`,
+    /// then `FUN_008354E0`). `Sound.CueSound(emitter, cue)` reaches it through the object's emitter
+    /// record ([`cue_sound_on_object`]).
     ///
-    /// // CONFIRM-LIVE: the exe's cue queue-post is SecuROM-morphed (`thunk_FUN_024b65e0`). This models
-    /// the observable result: resolve the cue through every path, refuse what cannot be played
-    /// ([`CueError`]), and start a playback ([`crate::playback`]) whose sounds fire, pick their waves
-    /// and follow their automation on each [`tick`](Self::tick). If `position` is given, the cue's
-    /// emitter sits there and its positional instances mix through the emitter's source (speaker
-    /// gains, distance volume and Doppler against listener 0, [`crate::spatial`]); the cue API
-    /// carries no velocity, so the emitter is at rest. Cue-local curve parameters are given by
-    /// [`cue_sound_with_params`].
+    /// Resolve the cue through every path, refuse what cannot be played ([`CueError`]), and start a
+    /// playback ([`crate::playback`]) whose sounds fire, pick their waves and follow their automation
+    /// on each [`tick`](Self::tick). If `position` is given, the cue gets its own emitter there, at
+    /// rest, and its positional instances mix through the emitter's source (speaker gains, distance
+    /// volume and Doppler against listener 0, [`crate::spatial`]); [`update_emitter`] moves it.
+    /// Cue-local curve parameters are given by [`cue_sound_with_params`].
     ///
+    /// [`cue_sound_on_object`]: Self::cue_sound_on_object
+    /// [`update_emitter`]: Self::update_emitter
     /// [`cue_sound_with_params`]: Self::cue_sound_with_params
     pub fn cue_sound(&mut self, cue_id: u32, position: Option<Vec3>) -> Result<CueHandle, CueError> {
         self.cue_sound_with_params(cue_id, position, &[])
@@ -626,23 +650,143 @@ impl AudioEngine {
         let resolved = self.resolve_cue(&cue).map_err(CueError::Resolve)?;
         let params: HashMap<u32, f32> = params.iter().copied().collect();
         self.check_playable(&resolved, &params, &mut HashSet::from([cue_id]))?;
-        Ok(self.start_playback(&cue, resolved, position, params, None))
+        Ok(self.start_playback(&cue, resolved, position, params, None, None))
+    }
+
+    /// `Sound.CueSound(emitter, cue)`: start a cue on an object's emitter.
+    ///
+    /// The shim (`FUN_005E0FF0`) posts `{0, object, 4, 0, …, cue hash, 0}` to the game message queue
+    /// (`0x00446340`, whose SecuROM splice emulates to `cmp byte [0x0122DDA0], 0` and the queue body
+    /// at `0x00446347`); `PgSound`'s `CollisionHandling` (`FUN_005FD5F0`) drains it into
+    /// `FUN_005FD760`, whose case 0 queues a cue command (`FUN_00607510`, mode 0) holding the
+    /// object's position (`FUN_00665AF0`; the vector is zeroed first, `0x00607530`..`0x0060756F`, and
+    /// stays zero when the object has none). `PgSoundPlayer::Update` runs it (`FUN_00607610` case 0 →
+    /// `FUN_006033C0`): find or create the object's emitter record (`FUN_006035F0` → `0x0047ADC0`;
+    /// a new record for a non-zero object gets a holder at that position, at rest, `FUN_00603B30`),
+    /// then `FUN_00603C10` → `FUN_00603EF0` → `0x00593BA0`: find the cue and start it
+    /// (`FUN_0082E960`) with the emitter `record.object ? record +0x14 : 0`, and add it to the
+    /// record's cues. The records are the ones [`update_object_emitters`] moves.
+    ///
+    /// `object` 0 plays 2D (its record gets no holder). `object_position` is the object's position
+    /// now, `None` when it has none. A record is made before the cue is looked up, so a refused cue
+    /// still leaves one, which the next [`update_object_emitters`] updates once and drops, as the
+    /// engine does.
+    ///
+    /// [`update_object_emitters`]: Self::update_object_emitters
+    pub fn cue_sound_on_object(
+        &mut self,
+        object: u64,
+        object_position: Option<Vec3>,
+        cue_id: u32,
+    ) -> Result<CueHandle, CueError> {
+        if object == 0 {
+            return self.cue_sound(cue_id, None);
+        }
+        let record = match self.objects.iter().position(|o| o.object == object) {
+            Some(i) => i,
+            None => {
+                let emitter = self.new_handle().0;
+                self.holders.insert(emitter, Holder::at(object_position.unwrap_or(Vec3::ZERO)));
+                self.objects.push(ObjectEmitter { object, emitter, cues: Vec::new() });
+                self.objects.len() - 1
+            }
+        };
+        let emitter = self.objects[record].emitter;
+        let cue: CueEntry = *self.sounddb.find_cue(cue_id).ok_or(CueError::Unknown(cue_id))?;
+        let resolved = self.resolve_cue(&cue).map_err(CueError::Resolve)?;
+        self.check_playable(&resolved, &HashMap::new(), &mut HashSet::from([cue_id]))?;
+        let position = self.holders[&emitter].position;
+        let handle = self.start_playback(&cue, resolved, Some(position), HashMap::new(), None, Some(emitter));
+        self.objects[record].cues.push(handle);
+        Ok(handle)
+    }
+
+    /// `FUN_006034B0` → `FUN_006036C0` for every object emitter record, in creation order: drop the
+    /// record's finished cues; if the object has a position (`position_of`), move its emitter there
+    /// ([`update_emitter`](Self::update_emitter), four draws from `rng`, the game's global random
+    /// state); then free a record left with no cues. Call it once a frame, after the frame's cues
+    /// are started and before [`tick`](Self::tick) (`PgSoundPlayer::Update` runs it after the cue
+    /// commands, `FUN_00607610`, and before the Pal update, `FUN_0082EE60`).
+    ///
+    /// // CONFIRM-LIVE: when the object is not in the sound object table (`DAT_01175FAC`) and the
+    /// record has cues, `FUN_006036C0` calls `FUN_00603D20(0, 0, 1)`, which stops the record's cues
+    /// that loop for ever (`FUN_00835910`: cue `+0x15D`, a track's `+0xD5` or an instance's `+0x80`
+    /// is `0xFF`). Not modelled: an object without a position leaves its emitter where it is.
+    pub fn update_object_emitters(&mut self, dt: f32, rng: &mut Lcg, mut position_of: impl FnMut(u64) -> Option<Vec3>) {
+        let mut i = 0;
+        while i < self.objects.len() {
+            let playing: Vec<CueHandle> =
+                self.objects[i].cues.iter().copied().filter(|&h| self.cue_is_playing(h)).collect();
+            self.objects[i].cues = playing;
+            let (object, emitter) = (self.objects[i].object, self.objects[i].emitter);
+            if let Some(p) = position_of(object) {
+                self.update_emitter(EmitterId(emitter), p, dt, rng);
+            }
+            if self.objects[i].cues.is_empty() {
+                self.holders.remove(&emitter);
+                self.objects.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Move an emitter with its object ([`Holder::update`], `FUN_006036C0`): its position becomes
+    /// `object_position` plus the jitter drawn from `rng`, its velocity the finite difference over
+    /// `dt` (zero when `dt` is 0), and its source takes both. Panics on an emitter that does not
+    /// exist.
+    pub fn update_emitter(&mut self, emitter: EmitterId, object_position: Vec3, dt: f32, rng: &mut Lcg) {
+        let h = self
+            .holders
+            .get_mut(&emitter.0)
+            .unwrap_or_else(|| panic!("update_emitter: emitter {} does not exist", emitter.0));
+        h.update(object_position, dt, rng);
+        let h = *h;
+        if self.mixer.has_emitter(emitter.0) {
+            self.mixer.set_emitter(emitter.0, h.position, h.velocity);
+        }
+    }
+
+    /// The emitter a started cue plays through, when it is positional.
+    pub fn cue_emitter(&self, handle: CueHandle) -> Option<EmitterId> {
+        let pb = self.playbacks.iter().find(|p| p.handle == handle)?;
+        self.holders.contains_key(&pb.emitter).then_some(EmitterId(pb.emitter))
+    }
+
+    /// An emitter's holder (its position and velocity).
+    pub fn emitter(&self, emitter: EmitterId) -> Option<Holder> {
+        self.holders.get(&emitter.0).copied()
+    }
+
+    /// The emitter of an object's record, while it has one.
+    pub fn object_emitter(&self, object: u64) -> Option<EmitterId> {
+        self.objects.iter().find(|o| o.object == object).map(|o| EmitterId(o.emitter))
     }
 
     /// Allocate and play a resolved, playable cue (`FUN_00834ad0` then `FUN_008354e0`). A multi-track
-    /// cue draws once and, if its `+0x18` value is below the draw, is done at once.
+    /// cue draws once and, if its `+0x18` value is below the draw, is done at once. `emitter` is the
+    /// emitter it plays through — its parent's for a child, its object's for a cue on an object —
+    /// and `None` gives a positional cue its own at `position`.
     fn start_playback(
         &mut self,
         cue: &CueEntry,
         resolved: ResolvedCue,
         position: Option<Vec3>,
         params: HashMap<u32, f32>,
-        parent: Option<(CueHandle, Option<usize>, u32)>,
+        parent: Option<(CueHandle, Option<usize>)>,
+        emitter: Option<u32>,
     ) -> CueHandle {
         let req = self.voice_template(cue, position);
         let handle = self.new_handle();
-        let emitter = parent.map_or(handle.0, |p| p.2);
-        let parent = parent.map(|(h, t, _)| (h, t));
+        let emitter = match emitter {
+            Some(e) => e,
+            None => {
+                if let Some(p) = position {
+                    self.holders.insert(handle.0, Holder::at(p));
+                }
+                handle.0
+            }
+        };
         let (tracks, loop_count) = match &resolved.multitrack {
             Some(m) => (m.tracks.iter().map(|t| TrackPlayback::new(t.byte_00)).collect(), m.byte_10),
             None => (Vec::new(), 0),
@@ -699,7 +843,7 @@ impl AudioEngine {
             Err(ResolveError::SoundbankNotResident(_)) => return None,
             Err(e) => panic!("child cue 0x{guid:08X} was checked playable when its parent started: {e}"),
         };
-        Some(self.start_playback(&cue, resolved, position, HashMap::new(), Some((parent.0, parent.1, emitter))))
+        Some(self.start_playback(&cue, resolved, position, HashMap::new(), Some(parent), Some(emitter)))
     }
 
     /// Play an explicit sample source for a cue (tests, synthesized audio): one voice, no automation.
@@ -717,6 +861,7 @@ impl AudioEngine {
         if let Some(pos) = position {
             // A positional cue's voices are mixed through its emitter's source. An explicit source
             // has no group, so no 3D parameters: speaker gains apply, no distance volume or Doppler.
+            self.holders.insert(handle.0, Holder::at(pos));
             self.mixer.set_emitter(handle.0, pos, Vec3::ZERO);
             self.mixer.set_source(id, SourceKey::Emitter(handle.0));
         }
@@ -985,6 +1130,10 @@ impl AudioEngine {
             self.pool.stop(id, false);
         }
         self.playbacks.clear();
+        // The cues' own emitters go with them; an object's stays with its record, which the next
+        // `update_object_emitters` finds without cues and frees.
+        let objects = &self.objects;
+        self.holders.retain(|k, _| objects.iter().any(|o| o.emitter == *k));
     }
 
     // ---- Sound.* : categories --------------------------------------------------------------------
@@ -1220,7 +1369,16 @@ impl AudioEngine {
             self.playbacks[i] = pb;
             i += 1;
         }
-        self.playbacks.retain(|pb| pb.state != RunState::Done);
+        // A cue that started at a position owns its emitter (its key is its handle; a child's and an
+        // object cue's are not): the emitter goes with it.
+        let holders = &mut self.holders;
+        self.playbacks.retain(|pb| {
+            let keep = pb.state != RunState::Done;
+            if !keep && pb.emitter == pb.handle.0 {
+                holders.remove(&pb.emitter);
+            }
+            keep
+        });
     }
 
     /// Take playback `i` out for mutation, leaving an inert placeholder (handle 0 is never issued).
@@ -1565,10 +1723,11 @@ impl AudioEngine {
         let delay_s = pb.req.start_delay + start.delay_s;
         inst.positional = choice.positional && pb.req.positional;
         if inst.positional {
-            // The instance's emitter source (FUN_00837830 creates it at the cue's position); the cue
-            // API carries no velocity, so it is at rest. Its wave takes the group's 3D parameters.
-            let pos = pb.position.expect("a positional cue has a position");
-            self.mixer.set_emitter(inst.emitter, pos, Vec3::ZERO);
+            // The instance's emitter source (FUN_00837830) takes its holder's position and velocity
+            // as they are now — the emitter may have moved since the cue started. Its wave takes the
+            // group's 3D parameters.
+            let h = *self.holders.get(&inst.emitter).expect("a positional cue's emitter has a holder");
+            self.mixer.set_emitter(inst.emitter, h.position, h.velocity);
             inst.wave3d = Some(choice.wave3d);
         }
         inst.loop_count = choice.loop_byte;
@@ -2184,5 +2343,113 @@ mod playback_tests {
         assert_eq!(volume_at(Some(Vec3::new(0.0, 0.0, 40.0))), 1.0 - f64::from(t).powf(2.0) as f32);
         assert_eq!(volume_at(Some(Vec3::new(150.0, 0.0, 0.0))), 0.0, "past the maximum");
         assert_eq!(volume_at(None), 1.0, "2D without a position");
+    }
+
+    fn positional_engine() -> AudioEngine {
+        let mut h = head();
+        h.unknown_14 = 1;
+        let body = CueBodySpec::MultiTrack(multi(vec![track(vec![], vec![sound(0.0, 0)])], vec![], 1.0));
+        let mut eng = engine_with(vec![("mod_3d", 1.0, body)], LONG, 6, h);
+        eng.set_listener(0, Listener { active: true, ..Listener::default() });
+        eng
+    }
+
+    /// A cue on an object moving along +Z towards listener 0: each frame its emitter follows the
+    /// object (FUN_006036C0) with the finite-difference velocity, and the source's Doppler factor
+    /// (FUN_0083ADE0), scaled by the group's `+0x28` and clamped (FUN_0083B120, FUN_00839AE0), raises
+    /// the frequency the kernel steps at (FUN_0083E170). A receding object lowers it; one at rest
+    /// moves only by its jitter.
+    #[test]
+    fn a_moving_object_emitter_shifts_the_doppler_scaled_frequency() {
+        let dt = 0.05f32;
+        let run_at = |speed: f32| -> (u32, u32, Holder) {
+            let mut eng = positional_engine();
+            let mut rng = Lcg::game();
+            let mut pos = Vec3::new(0.0, 0.0, 50.0);
+            let cue = eng.cue_sound_on_object(42, Some(pos), m2("mod_3d")).unwrap();
+            for _ in 0..4 {
+                pos.z -= speed * dt;
+                eng.update_object_emitters(dt, &mut rng, |o| (o == 42).then_some(pos));
+                eng.tick(dt);
+                eng.render((44100.0 * dt) as usize);
+            }
+            let v = eng.cue_instances(cue)[0].voice.expect("a voice");
+            let em = eng.emitter(eng.object_emitter(42).expect("the record lives")).unwrap();
+            let freq = eng.mixer.source_rate(v).unwrap().expect("a PCM source");
+            (freq, eng.mixer.mixing_rate(v).unwrap().unwrap(), em)
+        };
+        let listener = Listener { active: true, ..Listener::default() };
+        let mut rates = Vec::new();
+        for speed in [20.0f32, 0.0, -20.0] {
+            let (freq, rate, em) = run_at(speed);
+            assert!((em.velocity.z + speed).abs() < 0.05, "speed {speed}: velocity {:?}", em.velocity);
+            let d = crate::spatial::source_doppler(em.position, em.velocity, &listener);
+            let wd = crate::spatial::wave_doppler(d, 1.0);
+            assert_eq!(rate, (f64::from(freq as f32) * f64::from(wd)).trunc() as u32, "speed {speed}");
+            rates.push(rate);
+        }
+        assert!(rates[0] > rates[1] && rates[1] > rates[2], "closing > at rest > receding: {rates:?}");
+    }
+
+    /// The jitter comes from the game's global random state: every frame each object record takes
+    /// four draws — however many cues it holds — and nothing else draws from it.
+    #[test]
+    fn object_emitters_draw_four_per_record_from_the_global_state() {
+        let mut eng = positional_engine();
+        let mut rng = Lcg::game();
+        let (a, b) = (Vec3::new(5.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 7.0));
+        eng.cue_sound_on_object(1, Some(a), m2("mod_3d")).unwrap();
+        eng.cue_sound_on_object(1, Some(a), m2("mod_3d")).unwrap();
+        eng.cue_sound_on_object(2, Some(b), m2("mod_3d")).unwrap();
+        let mut reference = Lcg::game();
+        for _ in 0..3 {
+            eng.update_object_emitters(1.0 / 60.0, &mut rng, |o| match o {
+                1 => Some(a),
+                2 => Some(b),
+                _ => None,
+            });
+            for _ in 0..8 {
+                reference.next_unit();
+            }
+            assert_eq!(rng, reference, "two records, four draws each");
+            eng.tick(1.0 / 60.0);
+        }
+        // An object without a position is not updated and draws nothing.
+        eng.update_object_emitters(1.0 / 60.0, &mut rng, |o| (o == 2).then_some(b));
+        for _ in 0..4 {
+            reference.next_unit();
+        }
+        assert_eq!(rng, reference);
+    }
+
+    /// Cues on one object share its emitter, which starts at the object's position at rest; the
+    /// record goes once its cues have finished.
+    #[test]
+    fn cues_on_one_object_share_its_emitter() {
+        let mut eng = positional_engine();
+        let p = Vec3::new(3.0, 1.0, 2.0);
+        let c1 = eng.cue_sound_on_object(7, Some(p), m2("mod_3d")).unwrap();
+        let c2 = eng.cue_sound_on_object(7, Some(Vec3::ZERO), m2("mod_3d")).unwrap();
+        let e = eng.object_emitter(7).unwrap();
+        assert_eq!(eng.cue_emitter(c1), Some(e));
+        assert_eq!(eng.cue_emitter(c2), Some(e));
+        assert_eq!(eng.emitter(e), Some(Holder { position: p, velocity: Vec3::ZERO }), "made by the first cue");
+        eng.stop_and_flush_all_sounds();
+        assert!(eng.emitter(e).is_some(), "the record keeps its emitter until its next update");
+        let mut rng = Lcg::game();
+        eng.update_object_emitters(0.1, &mut rng, |_| Some(p));
+        assert_eq!(eng.object_emitter(7), None);
+        assert_eq!(eng.emitter(e), None);
+    }
+
+    /// Object 0 is no object: the cue plays 2D.
+    #[test]
+    fn a_cue_on_object_zero_plays_2d() {
+        let mut eng = positional_engine();
+        let c = eng.cue_sound_on_object(0, Some(Vec3::new(1.0, 2.0, 3.0)), m2("mod_3d")).unwrap();
+        assert_eq!(eng.cue_emitter(c), None);
+        assert_eq!(eng.object_emitter(0), None);
+        eng.tick(0.05);
+        assert!(!eng.cue_instances(c)[0].positional);
     }
 }
