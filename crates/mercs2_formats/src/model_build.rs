@@ -47,8 +47,12 @@ const MTRL_PREAMBLE: [u8; 104] = [
 /// texture hashes, then the pixel-shader key `0xcaefe1fe` =
 /// `pandemic_hash_m2("PgDiffSpecNormFP")`, then the float props. The three default
 /// hashes are base-resident so the material always binds; the caller patches the
-/// diffuse slot to the model's own texture. Emitting fewer than 3 slots leaves the
-/// shader's spec/normal unbound → the 0x00858DB8 null-deref crash.
+/// diffuse slot to the model's own texture. `Mtrl_Parse` reads the pixel-shader key
+/// from the word right after `tex_count` hashes. So emitting fewer than 3 hashes
+/// while `tex_count` stays 3 puts a float prop in the key slot. Setting
+/// `tex_count` below 3 without moving the key does the same with a texture hash.
+/// Either way the key is unregistered, the lookup misses, and the `+8` read of the
+/// null entry is the 0x00858DB8 crash.
 const MTRL_REC_TMPL: [u8; 128] = [
     0x80, 0x00, 0x03, 0x00, 0x61, 0x46, 0xe1, 0x68, 0xb8, 0xab, 0x68, 0x25, 0x5b, 0xb3, 0x6c, 0xd8,
     0xfe, 0xe1, 0xef, 0xca, 0xfc, 0x61, 0x5d, 0x3e, 0x54, 0x28, 0x2f, 0x15, 0x00, 0x00, 0x80, 0x3f,
