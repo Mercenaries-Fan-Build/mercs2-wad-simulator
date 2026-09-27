@@ -51,6 +51,8 @@
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
 //!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
+//! - [`shader3`], [`sm3asm`] — the PC shader stores (parse, record ids, retail-layout writer) and the
+//!   Shader Model 3 assembler/exact disassembler.
 //!
 //! **Authoring / write side**
 //! - [`model_build`] — author a static model container from scratch (no donor).
@@ -124,6 +126,7 @@ pub mod save_write;
 pub mod schema;
 pub mod scripts_block;
 pub mod shader3;
+pub mod sm3asm;
 pub mod sges;
 pub mod skeleton;
 pub mod stringdb;
