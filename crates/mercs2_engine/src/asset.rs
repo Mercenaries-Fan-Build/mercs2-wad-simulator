@@ -348,35 +348,88 @@ impl AssetSource {
     }
 }
 
-/// The always-resident gameplay / UI / ambience sound banks (`MrxSoundBootstrap.LoadBanks`) — loaded
-/// as both a `wavebank` (PCM) and a `sounddb` (cue routing) under the same asset name.
+/// The always-resident gameplay / UI / ambience sound banks (`MrxSoundBootstrap.LoadBanks`) — each
+/// ships a `wavebank` (PCM), a `soundbank` (groups + cues) and a `sounddb` (cue routing) under the same
+/// asset name. (`amb_shared` ships a wavebank only; its waves are played by other banks' groups.)
 pub const RESIDENT_SOUND_BANKS: &[&str] = &[
     "ui_hud", "ui_shell", "wpn_shared", "veh_shared", "veh_support", "ambience", "amb_birds",
     "amb_shared", "collision_shared", "destruction_shared", "fol_shared", "music",
 ];
 
-/// Extract the resident wavebank + sounddb bodies from the WAD (best-effort per bank). A bank that
-/// doesn't resolve is skipped; a partial set is still useful — every bank that loads adds audible cues.
-/// Runs on the load thread, so it hands back raw bytes the main thread feeds the engine. Decode stays
-/// in `mercs2_audio`. Relocated from `mercs2_game::world::load_resident_audio`.
-pub fn load_resident_audio(w: &mut Wad) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
-    const SOUNDDB_TYPE: u32 = 0xE527_3C14;
-    let mut wavebanks = Vec::new();
-    let mut sounddbs = Vec::new();
+/// The resident banks' table bodies, read off the load thread. A cue resolves through all three kinds:
+/// sounddb entry → soundbank cue → group → wavebank wave.
+#[derive(Clone, Debug, Default)]
+pub struct ResidentAudio {
+    /// `wavebank` bodies (decoded to PCM by the audio engine).
+    pub wavebanks: Vec<Vec<u8>>,
+    /// `soundbank` bodies (groups + cues).
+    pub soundbanks: Vec<Vec<u8>>,
+    /// Per-bank `sounddb` bodies (cue routing).
+    pub sounddbs: Vec<Vec<u8>>,
+}
+
+/// What [`ResidentAudio::install`] loaded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResidentAudioStats {
+    /// Clips that carry decoded samples.
+    pub audible_clips: usize,
+    /// Soundbank cues held resident.
+    pub soundbank_cues: usize,
+    /// Entries in the merged cue catalog.
+    pub catalog_cues: usize,
+}
+
+impl ResidentAudio {
+    /// True when no bank was found (an interior-only WAD).
+    pub fn is_empty(&self) -> bool {
+        self.wavebanks.is_empty() && self.soundbanks.is_empty() && self.sounddbs.is_empty()
+    }
+
+    /// Hold every table resident in `eng` and install the merged cue catalog. A table outside the
+    /// measured layout is an error naming which kind it was, never a partial load.
+    pub fn install(&self, eng: &mut crate::audio::AudioEngine) -> Result<ResidentAudioStats, String> {
+        let mut stats = ResidentAudioStats::default();
+        for body in &self.wavebanks {
+            stats.audible_clips += eng.load_wavebank(body).map_err(|e| format!("resident wavebank: {e}"))?;
+        }
+        for body in &self.soundbanks {
+            stats.soundbank_cues += eng.load_soundbank(body).map_err(|e| format!("resident soundbank: {e}"))?;
+        }
+        let mut catalog = crate::audio::SoundDb::default();
+        for body in &self.sounddbs {
+            let db = crate::audio::SoundDb::parse(body).map_err(|e| format!("resident sounddb: {e}"))?;
+            catalog.merge(&db);
+        }
+        stats.catalog_cues = catalog.cues.len();
+        eng.set_sounddb(catalog);
+        Ok(stats)
+    }
+}
+
+/// Extract the resident wavebank, soundbank and sounddb bodies from the WAD. A bank whose table is
+/// absent from the WAD is skipped (e.g. `amb_shared` has no soundbank or sounddb); every bank that
+/// loads adds resolvable cues. Runs on the load thread, so it hands back raw bytes the main thread
+/// feeds the engine ([`ResidentAudio::install`]). Relocated from
+/// `mercs2_game::world::load_resident_audio`.
+pub fn load_resident_audio(w: &mut Wad) -> ResidentAudio {
+    use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK};
+    let sounddb_type = crate::audio::sounddb::ASSET_TYPE_SOUNDDB;
+    let mut out = ResidentAudio::default();
     for name in RESIDENT_SOUND_BANKS {
         let nh = mercs2_formats::hash::pandemic_hash_m2(name);
-        if let Ok(c) = wad::extract_container_typed(w, nh, mercs2_formats::types::TYPE_HASH_WAVEBANK) {
-            if let Some(body) = mercs2_formats::ucfx::extract_chunk_body(&c, b"data") {
-                wavebanks.push(body);
+        for (ty, dst) in [
+            (TYPE_HASH_WAVEBANK, &mut out.wavebanks),
+            (TYPE_HASH_SOUNDBANK, &mut out.soundbanks),
+            (sounddb_type, &mut out.sounddbs),
+        ] {
+            if let Ok(c) = wad::extract_container_typed(w, nh, ty) {
+                if let Some(body) = mercs2_formats::ucfx::extract_chunk_body(&c, b"data") {
+                    dst.push(body);
+                }
             }
         }
-        // The per-bank sounddb body is a `data` chunk or the raw container (starts with the 0x1D tag).
-        if let Ok(c) = wad::extract_container_typed(w, nh, SOUNDDB_TYPE) {
-            let body = mercs2_formats::ucfx::extract_chunk_body(&c, b"data").unwrap_or(c);
-            sounddbs.push(body);
-        }
     }
-    (wavebanks, sounddbs)
+    out
 }
 
 /// The standard patch-WAD path for a base: `vz-patch.wad` alongside `vz.wad`. Kept separate so the
@@ -499,6 +552,55 @@ mod tests {
         assert!(sibling_ci(&base, "English.wad").is_some(), "exact match still works");
         assert!(sibling_ci(&base, "nope.wad").is_none(), "a genuinely absent archive stays absent");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Integration: the game's resident-audio path — `load_resident_audio` then `install` — resolves
+    /// resident cues through sounddb → soundbank cue → group → wavebank to decoded PCM. Without the
+    /// soundbanks the same catalog resolves nothing (the first hop is the soundbank).
+    #[test]
+    fn resident_audio_path_resolves_cues_through_the_soundbank() {
+        let Some(path) = wad::resolve_vz_wad(None) else {
+            return eprintln!(
+                "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+            );
+        };
+        let mut w = wad::open(&path).expect("open vz.wad");
+        let res = load_resident_audio(&mut w);
+        println!(
+            "[audio] {} wavebanks, {} soundbanks, {} sounddbs",
+            res.wavebanks.len(),
+            res.soundbanks.len(),
+            res.sounddbs.len()
+        );
+        assert_eq!(res.wavebanks.len(), 12);
+        assert_eq!(res.soundbanks.len(), 11, "every resident bank but amb_shared has a soundbank");
+        assert_eq!(res.sounddbs.len(), 11);
+
+        let resolved = |r: &ResidentAudio| {
+            let mut eng = crate::audio::AudioEngine::default();
+            let stats = r.install(&mut eng).expect("resident tables install");
+            let n = eng.sounddb.cues.iter().filter(|c| eng.resolve_wave(c).is_ok()).count();
+            (stats, n)
+        };
+        let (stats, with) = resolved(&res);
+        let (_, without) = resolved(&ResidentAudio { soundbanks: Vec::new(), ..res.clone() });
+        println!(
+            "[audio] {} catalog cues: {with} resolve to one decoded wave; {without} without soundbanks",
+            stats.catalog_cues
+        );
+        assert_eq!(stats.catalog_cues, 807);
+        assert_eq!(with, 150);
+        assert_eq!(without, 0);
+
+        // A resolved cue plays audibly through the engine's mixer.
+        let mut eng = crate::audio::AudioEngine::default();
+        res.install(&mut eng).expect("resident tables install");
+        let guid = mercs2_formats::hash::pandemic_hash_m2("ui_PDA_Open_01_st");
+        eng.cue_sound(guid, None, None).expect("cue allocates a voice");
+        for _ in 0..8 {
+            eng.tick(0.02);
+        }
+        assert!(crate::audio::mixer::rms_i16(&eng.render(4096)) > 0.0, "ui_PDA_Open_01_st is audible");
     }
 
     /// Integration: mount the real shipped stack and assert the documented order + that `base()` still
