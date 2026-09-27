@@ -250,6 +250,9 @@ struct Playback {
     child: Option<CueHandle>,
     /// The cue (and track, for a track's child) that started it.
     parent: Option<(CueHandle, Option<usize>)>,
+    /// The emitter its positional instances mix through: its own for a cue the game starts, its
+    /// parent's for a child cue (`FUN_0082e930` passes the parent's `+0x118` / `+0xC8`).
+    emitter: u32,
 }
 
 impl std::error::Error for ResolveError {}
@@ -634,10 +637,12 @@ impl AudioEngine {
         resolved: ResolvedCue,
         position: Option<Vec3>,
         params: HashMap<u32, f32>,
-        parent: Option<(CueHandle, Option<usize>)>,
+        parent: Option<(CueHandle, Option<usize>, u32)>,
     ) -> CueHandle {
         let req = self.voice_template(cue, position);
         let handle = self.new_handle();
+        let emitter = parent.map_or(handle.0, |p| p.2);
+        let parent = parent.map(|(h, t, _)| (h, t));
         let (tracks, loop_count) = match &resolved.multitrack {
             Some(m) => (m.tracks.iter().map(|t| TrackPlayback::new(t.byte_00)).collect(), m.byte_10),
             None => (Vec::new(), 0),
@@ -659,6 +664,7 @@ impl AudioEngine {
             tracks,
             child: None,
             parent,
+            emitter,
         };
         if let Some(m) = &pb.resolved.multitrack {
             let r = self.rng.next_unit();
@@ -672,21 +678,28 @@ impl AudioEngine {
 
     /// Start a kind-7 child cue (`FUN_0082e930`): `None` when the engine's start fails — the cue is
     /// not in the sound database or its soundbank is not loaded (`FUN_00834ad0` returns 0) — which
-    /// the parent treats as a finished child. The child plays at its parent's position.
+    /// the parent treats as a finished child. The child plays at its parent's position, through its
+    /// parent's emitter (`emitter`, the parent's [`Playback::emitter`]).
     ///
     /// `FUN_0082e930` calls the Pal cue start `FUN_0082e960` (Ghidra's `thunk_FUN_024b9220`: its first
     /// instruction is a SecuROM splice, which emulating the runtime dump shows to be
     /// `mov ecx, [0x01176400]`; the rest is plain `.text`) with the parent's emitter (`+0x118` /
     /// `+0xC8`, which is the parent's own start argument 3) and `0, 0` for the instance flags `+0x82` /
     /// `+0x83`. The allocation and play it does are the ones [`cue_sound`](Self::cue_sound) models.
-    fn start_child(&mut self, guid: u32, position: Option<Vec3>, parent: (CueHandle, Option<usize>)) -> Option<CueHandle> {
+    fn start_child(
+        &mut self,
+        guid: u32,
+        position: Option<Vec3>,
+        parent: (CueHandle, Option<usize>),
+        emitter: u32,
+    ) -> Option<CueHandle> {
         let cue = *self.sounddb.find_cue(guid)?;
         let resolved = match self.resolve_cue(&cue) {
             Ok(r) => r,
             Err(ResolveError::SoundbankNotResident(_)) => return None,
             Err(e) => panic!("child cue 0x{guid:08X} was checked playable when its parent started: {e}"),
         };
-        Some(self.start_playback(&cue, resolved, position, HashMap::new(), Some(parent)))
+        Some(self.start_playback(&cue, resolved, position, HashMap::new(), Some((parent.0, parent.1, emitter))))
     }
 
     /// Play an explicit sample source for a cue (tests, synthesized audio): one voice, no automation.
@@ -724,6 +737,7 @@ impl AudioEngine {
             tracks: Vec::new(),
             child: None,
             parent: None,
+            emitter: handle.0,
         });
         Ok(handle)
     }
@@ -911,7 +925,7 @@ impl AudioEngine {
             match tr.child {
                 None => {
                     if let Some(guid) = tr.automation.child_cue() {
-                        let child = self.start_child(guid, position, (pb.handle, Some(t)));
+                        let child = self.start_child(guid, position, (pb.handle, Some(t)), pb.emitter);
                         pb.tracks[t].child = child;
                         if self.finished_at_start(child) {
                             // The engine's completion callback (LAB_0083c550) ran inside the start.
@@ -929,7 +943,7 @@ impl AudioEngine {
         match pb.child {
             None => {
                 if let Some(guid) = pb.cue_automation.child_cue() {
-                    pb.child = self.start_child(guid, position, (pb.handle, None));
+                    pb.child = self.start_child(guid, position, (pb.handle, None), pb.emitter);
                     if self.finished_at_start(pb.child) {
                         // LAB_008359a0 ran inside the start: the cue finishes (its own state is set
                         // to 3 below regardless, as FUN_00835720 does).
@@ -1228,6 +1242,7 @@ impl AudioEngine {
             tracks: Vec::new(),
             child: None,
             parent: None,
+            emitter: 0,
         };
         std::mem::replace(&mut self.playbacks[i], placeholder)
     }
@@ -1332,7 +1347,7 @@ impl AudioEngine {
             return;
         }
         if let Some(guid) = pb.cue_automation.child_cue() {
-            let child = self.start_child(guid, pb.position, (pb.handle, None));
+            let child = self.start_child(guid, pb.position, (pb.handle, None), pb.emitter);
             if self.finished_at_start(child) {
                 // LAB_008359a0 ran inside the start; FUN_00835060 then sets state 3 regardless.
                 self.finish(pb);
@@ -1422,7 +1437,7 @@ impl AudioEngine {
             if tr.state == RunState::Playing {
                 match tr.automation.child_cue() {
                     Some(guid) => {
-                        let child = self.start_child(guid, pb.position, (pb.handle, Some(t)));
+                        let child = self.start_child(guid, pb.position, (pb.handle, Some(t)), pb.emitter);
                         let fired = self.finished_at_start(child);
                         let tr = &mut pb.tracks[t];
                         tr.child = child;
@@ -1521,7 +1536,7 @@ impl AudioEngine {
             loop_count: 0,
             positional: false,
             wave3d: None,
-            emitter: pb.handle.0,
+            emitter: pb.emitter,
             filtered: false,
             finished: true,
         };
@@ -1987,6 +2002,43 @@ mod playback_tests {
         }
         assert!(!eng.cue_is_playing(c));
         assert!(!eng.cue_is_playing(h), "done once its child is");
+    }
+
+    /// A child cue plays through its parent's emitter (`FUN_0082e930` hands `FUN_0082e960` the
+    /// parent's `+0x118` / `+0xC8`), not one of its own: its positional instances name the parent's.
+    #[test]
+    fn a_child_cue_plays_through_its_parents_emitter() {
+        let mut h3d = head();
+        h3d.unknown_14 = 1;
+        let child = Automation::Kind7 { start_bits: 0, cue: m2("mod_child") };
+        let parent = multi(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0);
+        let mut eng = engine_with(
+            vec![
+                ("mod_parent", 1.0, CueBodySpec::MultiTrack(parent)),
+                ("mod_child", 1.0, CueBodySpec::SingleTrack { group: 0, unknown_16: 0 }),
+            ],
+            SHORT,
+            2,
+            h3d,
+        );
+        let h = eng.cue_sound(m2("mod_parent"), Some(Vec3::new(4.0, 0.0, 0.0))).unwrap();
+        let mut started = None;
+        for _ in 0..40 {
+            run(&mut eng, 1, 0.02);
+            if let Some(&c) = eng.cue_children(h).first() {
+                started = Some(c);
+                break;
+            }
+        }
+        let c = started.expect("the child starts");
+        run(&mut eng, 1, 0.02);
+        let insts = eng.cue_instances(c);
+        assert!(!insts.is_empty(), "the child has an instance");
+        for i in insts {
+            assert!(i.positional, "the child plays positionally at its parent's position");
+            assert_eq!(i.emitter, h.0, "through its parent's emitter");
+            assert_ne!(i.emitter, c.0);
+        }
     }
 
     /// Stopping a cue starts the child cue of every track that has one (`FUN_00835720`).
