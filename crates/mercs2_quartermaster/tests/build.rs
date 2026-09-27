@@ -3483,3 +3483,248 @@ fn edit_world_builds_an_overlay_that_moves_an_entity() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// add_animation / replace_animation — the retail clip container
+// ---------------------------------------------------------------------------
+
+/// A real Havok 5.5 clip, shared with `mercs2_formats`' own tests.
+const ANIM_CLIP: &[u8] = include_bytes!("../../mercs2_formats/tests/fixtures/anim_ks750_le.bin");
+
+fn anim_trnm(count: u32) -> Vec<u8> {
+    let mut t = count.to_le_bytes().to_vec();
+    t.extend_from_slice(&0u32.to_le_bytes());
+    for k in 0..count {
+        t.extend_from_slice(&(0x2000 + k).to_le_bytes());
+    }
+    t
+}
+
+fn anim_tracks() -> u32 {
+    mercs2_formats::animgroup::read_clip_header(ANIM_CLIP)
+        .expect("fixture carries an hkaAnimation")
+        .num_transform_tracks
+}
+
+/// Read the one animation block back out of a built WAD: its ASET row and its container's chunks.
+fn read_back_animation(wad: &[u8]) -> (mercs2_formats::patch_wad::AsetEntry, u32, Vec<mercs2_formats::anim_container::Chunk>) {
+    use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION};
+    let contents = mercs2_formats::patch_wad::read_patch_wad(wad).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+    assert_eq!(block.aset_entries.len(), 1);
+    let row = block.aset_entries[0].clone();
+    assert_eq!(row.u32_1, 0xFFFF_FFFF, "no LOD rungs");
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "primary");
+    assert_eq!(row.u32_3, TYPE_ID_ANIMATION);
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1);
+    assert_eq!(entries[0].type_hash, TYPE_HASH_ANIMATION);
+    assert_eq!(entries[0].name_hash, row.asset_hash);
+    let chunks = mercs2_formats::anim_container::parse_container(&dec[20..])
+        .expect("the container is the strict retail shape");
+    (row, entries[0].name_hash, chunks)
+}
+
+/// A new clip needs nothing from retail, so it builds hermetically — into the container every
+/// retail clip uses, with the three sources verbatim and `info` = `01 00`.
+#[test]
+fn add_animation_builds_the_retail_clip_container_without_a_game() {
+    use mercs2_formats::anim_container::{build_evnt, AnimEvent};
+    let dir = scratch("add_animation");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let trnm = anim_trnm(anim_tracks());
+    let evnt = build_evnt(&[AnimEvent { time: 0.1, name: "ahj_foot_contact".into(), category: "sound".into() }])
+        .unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), &trnm).unwrap();
+    std::fs::write(dir.join("src/c.evnt"), &evnt).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_animation\n    name: qm_test_clip\n    clip: src/c.hkx\n    trnm: src/c.trnm\n    \
+         events: src/c.evnt\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("add_animation builds with no game");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let (_, hash, chunks) = read_back_animation(&on_disk);
+    assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("qm_test_clip"));
+    let tags: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.tag).collect();
+    assert_eq!(tags, [b"info", b"data", b"trnm", b"evnt"]);
+    assert_eq!(chunks[0].body, [0x01, 0x00]);
+    assert_eq!(chunks[1].body, ANIM_CLIP);
+    assert_eq!(chunks[2].body, trnm);
+    assert_eq!(chunks[3].body, evnt);
+}
+
+/// Without `events` there is no `evnt` chunk — the other retail clip shape.
+#[test]
+fn add_animation_without_events_ships_no_evnt() {
+    let dir = scratch("add_animation_plain");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(&dir, "  - kind: add_animation\n    name: qm_test_clip2\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
+    let report = build::build(&s, None, None, None, None).expect("builds");
+    let (_, _, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
+    let tags: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.tag).collect();
+    assert_eq!(tags, [b"info", b"data", b"trnm"]);
+}
+
+/// A trnm that binds a different number of tracks than the clip has is refused before lowering —
+/// M0213 blocks the build.
+#[test]
+fn add_animation_with_a_mismatched_trnm_is_blocked_by_m0213() {
+    let dir = scratch("add_animation_bad");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks() + 1)).unwrap();
+    let s = shipment(&dir, "  - kind: add_animation\n    name: qm_bad\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0213"), "{d:?}"),
+        other => panic!("expected Blocked by M0213, got {other:?}"),
+    }
+}
+
+/// A replace needs the game stack: it must check its target is a Havok clip.
+#[test]
+fn replace_animation_without_a_game_says_so() {
+    let dir = scratch("replace_animation_nogame");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(&dir, "  - kind: replace_animation\n    target: x\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
+    assert!(matches!(
+        build::build(&s, None, None, None, None),
+        Err(BuildError::GameRequired { kind: "replace_animation", .. })
+    ));
+}
+
+/// Against retail: a replace of a shipped Havok clip builds under the target's own hash, and a
+/// replace of a MANM keyframe animation is refused by kind rather than overwritten with a clip.
+#[test]
+fn replace_animation_replaces_a_clip_and_refuses_a_keyframe_animation() {
+    use mercs2_formats::anim_container::{classify, parse_container, AnimContainerKind};
+    use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION};
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let (mut clip_target, mut keyframe_target) = (None, None);
+    for h in game.asset_hashes(TYPE_ID_ANIMATION) {
+        let c = game
+            .container_for_asset(h, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION)
+            .expect("every animation row resolves to a container");
+        match classify(&parse_container(&c).expect("retail container reads")).expect("known kind") {
+            AnimContainerKind::HavokClip { .. } if clip_target.is_none() => clip_target = Some(h),
+            AnimContainerKind::Keyframe if keyframe_target.is_none() => keyframe_target = Some(h),
+            _ => {}
+        }
+        if clip_target.is_some() && keyframe_target.is_some() {
+            break;
+        }
+    }
+    let clip_target = clip_target.expect("retail ships Havok clips");
+    let keyframe_target = keyframe_target.expect("retail ships 29 MANM keyframe animations");
+
+    let dir = scratch("replace_animation");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: replace_animation\n    target: \"0x{clip_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("a clip replace builds");
+    let (_, hash, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
+    assert_eq!(hash, clip_target, "same hash");
+    assert_eq!(chunks[1].body, ANIM_CLIP);
+
+    let dir = scratch("replace_animation_manm");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: replace_animation\n    target: \"0x{keyframe_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
+    );
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(BuildError::Lower { message, .. }) => assert!(message.contains("MANM"), "{message}"),
+        other => panic!("a MANM target must be refused, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// add_model (rigid) with `textures:`
+// ---------------------------------------------------------------------------
+
+/// Against retail: a rigid `add_model` with a diffuse map ships the map as its own texture block and
+/// repoints the HOST group's material at it. Asserted in the emitted MTRL itself: the host material's
+/// diffuse slot names the new texture's hash.
+#[test]
+fn a_rigid_add_model_with_textures_repoints_the_host_material() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let donor = "oc_veh_helicopter_md500";
+    let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let donor_blk = mercs2_formats::donor::donor_block(&paths, mercs2_formats::hash::pandemic_hash_m2(donor))
+        .expect("donor block");
+    let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap()) as usize;
+    let ucfx = &donor_blk[20..20 + n];
+    let groups = mercs2_formats::texture::group_prmt_material_indices(ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(ucfx);
+    // A host whose every material samples a texture and names a diffuse.
+    let host = groups
+        .iter()
+        .position(|ms| {
+            !ms.is_empty()
+                && ms.iter().all(|&m| {
+                    mats.get(m).is_some_and(|x| {
+                        x.flags & build::MTRL_TEXTURED != 0 && x.textures.first().is_some_and(|&h| h != 0)
+                    })
+                })
+        })
+        .expect("the donor has a textured group");
+    let host_mat = groups[host][0];
+
+    let dir = scratch("add_model_textures");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    std::fs::write(dir.join("src/prop_d.png"), solid_png(64, 64)).unwrap();
+    let s = shipment(
+        &dir,
+        &format!(
+            "  - kind: add_model\n    name: qm_test_tex_prop\n    model: src/prop.glb\n    donor: {donor}\n    \
+             group: {host}\n    textures:\n      diffuse: src/prop_d.png\n"
+        ),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("a textured rigid prop builds");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let want = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop_dm");
+    let model = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop");
+
+    let mut seen_model = false;
+    let mut seen_texture = false;
+    for block in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        if entries[0].name_hash == want {
+            assert_eq!(entries[0].type_hash, mercs2_formats::types::TYPE_HASH_TEXTURE);
+            seen_texture = true;
+        }
+        if entries[0].name_hash == model {
+            let emitted = mercs2_formats::texture::parse_mtrl(&dec[20..]);
+            assert_eq!(
+                emitted[host_mat].textures[0], want,
+                "the host material's diffuse must name the new texture"
+            );
+            let emitted_groups = mercs2_formats::texture::group_prmt_material_indices(&dec[20..]);
+            assert_eq!(emitted_groups[host][0], host_mat, "the host keeps its material record");
+            seen_model = true;
+        }
+    }
+    assert!(seen_model && seen_texture, "model {seen_model}, texture {seen_texture}");
+    let log = report.log.join("\n");
+    assert!(log.contains("qm_test_tex_prop_dm"), "{log}");
+}
