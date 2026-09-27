@@ -30,7 +30,7 @@ use crate::backend::CpalSink;
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
 use crate::automation::{pitched_rate, AutomationError, AutomationOutput, AutomationState};
-use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource, SourceKey};
+use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource, SourceKey, Wave3d};
 use crate::multitrack::{Automation, MultiTrackCue};
 use crate::playback::{
     clamp01, Block, Instance, InstanceParams, InstanceWave, ListState, RunState, TrackPlayback,
@@ -39,7 +39,7 @@ use crate::music::MusicStateMachine;
 use crate::sounddb::{CueEntry, SoundDb};
 use crate::select::{self, PalRng, STATE_INIT};
 use crate::soundbank::{CueBody, GroupForm, Soundbank, SoundbankError};
-use crate::spatial::{self, ListenerSet, Listener};
+use crate::spatial::{ListenerSet, Listener};
 use crate::vo::{VoManager, VoPriority};
 use crate::voice::{VoiceId, VoicePool, VoiceRequest};
 use crate::wave::{DecodedClip, WaveError, Wavebank};
@@ -133,6 +133,8 @@ pub struct ResolvedChoice {
     /// The group's `+0x14` byte is set: with an emitter, its instances play from the emitter's own
     /// (3D) source; otherwise from the shared 2D source (`FUN_00837830`, `0x008378A9`).
     pub positional: bool,
+    /// The group's 3D parameters, which a positional instance's wave takes (`0x00837C08`).
+    pub wave3d: Wave3d,
 }
 
 /// One sound a cue fires.
@@ -227,8 +229,6 @@ struct Playback {
     resolved: ResolvedCue,
     /// Voice request template (priority, category, 3D).
     req: VoiceRequest,
-    /// Spatial left/right gains, fixed at start.
-    gains: (f32, f32),
     /// Where it was started (a child cue starts at its parent's position).
     position: Option<Vec3>,
     /// Cue-local parameter values supplied at start.
@@ -552,7 +552,13 @@ impl AudioEngine {
             })
             .collect::<Result<_, _>>()?;
         let positional = group.head.unknown_14 & 0xFF != 0;
-        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves, instance, loop_byte, positional })
+        let wave3d = Wave3d {
+            min_distance: group.head.min_distance,
+            max_distance: group.head.max_distance,
+            exponent: group.head.distance_exponent,
+            doppler_scale: group.head.doppler_scale,
+        };
+        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves, instance, loop_byte, positional, wave3d })
     }
 
     /// The resident clip at `(wavebank, index)`.
@@ -595,9 +601,11 @@ impl AudioEngine {
     /// // CONFIRM-LIVE: the exe's cue queue-post is SecuROM-morphed (`thunk_FUN_024b65e0`). This models
     /// the observable result: resolve the cue through every path, refuse what cannot be played
     /// ([`CueError`]), and start a playback ([`crate::playback`]) whose sounds fire, pick their waves
-    /// and follow their automation on each [`tick`](Self::tick). If `position` is given and the cue is
-    /// positional, 3D channel gains and a distance start delay are computed against the closest
-    /// listener at start. Cue-local curve parameters are given by [`cue_sound_with_params`].
+    /// and follow their automation on each [`tick`](Self::tick). If `position` is given, the cue's
+    /// emitter sits there and its positional instances mix through the emitter's source (speaker
+    /// gains, distance volume and Doppler against listener 0, [`crate::spatial`]); the cue API
+    /// carries no velocity, so the emitter is at rest. Cue-local curve parameters are given by
+    /// [`cue_sound_with_params`].
     ///
     /// [`cue_sound_with_params`]: Self::cue_sound_with_params
     pub fn cue_sound(&mut self, cue_id: u32, position: Option<Vec3>) -> Result<CueHandle, CueError> {
@@ -628,7 +636,7 @@ impl AudioEngine {
         params: HashMap<u32, f32>,
         parent: Option<(CueHandle, Option<usize>)>,
     ) -> CueHandle {
-        let (req, gains) = self.voice_template(cue, position);
+        let req = self.voice_template(cue, position);
         let handle = self.new_handle();
         let (tracks, loop_count) = match &resolved.multitrack {
             Some(m) => (m.tracks.iter().map(|t| TrackPlayback::new(t.byte_00)).collect(), m.byte_10),
@@ -638,7 +646,6 @@ impl AudioEngine {
             handle,
             resolved,
             req,
-            gains,
             position,
             params,
             direct: None,
@@ -690,20 +697,20 @@ impl AudioEngine {
         source: Box<dyn SampleSource>,
     ) -> Result<CueHandle, CueError> {
         let cue: CueEntry = *self.sounddb.find_cue(cue_id).ok_or(CueError::Unknown(cue_id))?;
-        let (req, gains) = self.voice_template(&cue, position);
+        let req = self.voice_template(&cue, position);
         let id = self.pool.acquire(&req).ok_or(CueError::Outranked)?;
         self.mixer.attach(id, source);
-        self.mixer.set_channel_gains(id, gains.0, gains.1);
         let handle = self.new_handle();
-        if req.positional {
-            // A positional cue's voices are mixed through its emitter's source.
+        if let Some(pos) = position {
+            // A positional cue's voices are mixed through its emitter's source. An explicit source
+            // has no group, so no 3D parameters: speaker gains apply, no distance volume or Doppler.
+            self.mixer.set_emitter(handle.0, pos, Vec3::ZERO);
             self.mixer.set_source(id, SourceKey::Emitter(handle.0));
         }
         self.playbacks.push(Playback {
             handle,
             resolved: ResolvedCue { soundbank: 0, cue_index: 0, gain: 1.0, multitrack: None, sounds: Vec::new() },
             req,
-            gains,
             position,
             params: HashMap::new(),
             direct: Some(id),
@@ -794,14 +801,12 @@ impl AudioEngine {
         h
     }
 
-    /// The voice request and spatial gains a cue's voices share.
-    /// The voice request and spatial gains a cue's positional instances share. Whether an instance is
-    /// positional is its group's (`ResolvedChoice::positional`); a wave loops by its own count, not
-    /// the voice's. No distance start delay: `FUN_008369e0` adds one only for a multi-wave group whose
-    /// `+0x44` byte is set (`0x00836ABF`), and that byte is 0 in every retail group (the soundbank
-    /// reader requires it).
-    fn voice_template(&self, cue: &CueEntry, position: Option<Vec3>) -> (VoiceRequest, (f32, f32)) {
-        let req = VoiceRequest {
+    /// The voice request a cue's voices share. Whether an instance is positional is its group's
+    /// (`ResolvedChoice::positional`); a wave loops by its own count, not the voice's. No distance
+    /// start delay: `FUN_008369e0` adds one only for a multi-wave group whose `+0x44` byte is set
+    /// (`0x00836ABF`), and that byte is 0 in every retail group (the soundbank reader requires it).
+    fn voice_template(&self, cue: &CueEntry, position: Option<Vec3>) -> VoiceRequest {
+        VoiceRequest {
             cue_guid: cue.guid,
             priority: cue.priority,
             category: cue.category,
@@ -809,20 +814,7 @@ impl AudioEngine {
             looping: false,
             positional: position.is_some(),
             start_delay: 0.0,
-        };
-        let mut gains = (1.0f32, 1.0f32);
-        if req.positional {
-            if let Some(pos) = position {
-                if let Some((idx, dist)) = self.listeners.closest(pos) {
-                    let (min_d, max_d) = self.cue_distances(cue);
-                    let atten = spatial::distance_attenuation(dist, min_d, max_d);
-                    let listener = self.listeners.get(idx).copied().unwrap_or_default();
-                    let (l, r) = spatial::stereo_pan(pos, &listener);
-                    gains = (l * atten, r * atten);
-                }
-            }
         }
-        (req, gains)
     }
 
     /// Refuse a cue this engine cannot play faithfully: a curve (kinds 5 and 6, or a kind-8 curve a
@@ -883,12 +875,6 @@ impl AudioEngine {
         }
     }
 
-    /// Min/max attenuation distances for a cue (from the cue record, or emitter defaults if zero).
-    fn cue_distances(&self, cue: &CueEntry) -> (f32, f32) {
-        let min_d = if cue.min_dist > 0.0 { cue.min_dist } else { 1.0 };
-        let max_d = if cue.max_dist > 0.0 { cue.max_dist } else { 100.0 };
-        (min_d, max_d)
-    }
 
     /// `Sound.StopSound(cue)` — release a started cue the way the cue stop `FUN_00835720` does: its
     /// voices fade out, its tracks stop looping, nothing more fires, and every track (and the cue)
@@ -1149,7 +1135,6 @@ impl AudioEngine {
             if let Some(src) = source {
                 self.mixer.attach(id, src);
             }
-            self.mixer.set_channel_gains(id, 1.0, 1.0);
         }
         true
     }
@@ -1230,7 +1215,6 @@ impl AudioEngine {
             handle: CueHandle(0),
             resolved: ResolvedCue { soundbank: 0, cue_index: 0, gain: 0.0, multitrack: None, sounds: Vec::new() },
             req: VoiceRequest::default(),
-            gains: (0.0, 0.0),
             position: None,
             params: HashMap::new(),
             direct: None,
@@ -1370,7 +1354,7 @@ impl AudioEngine {
         }
         match pb.single {
             Some(mut inst) if !inst.finished => {
-                self.update_instance(&mut inst, block, (&pb.req.clone(), pb.gains), None, dt);
+                self.update_instance(&mut inst, block, &pb.req.clone(), None, dt);
                 pb.single = Some(inst);
             }
             _ => {
@@ -1498,7 +1482,7 @@ impl AudioEngine {
                 }
             }
         }
-        let (req, gains) = (pb.req.clone(), pb.gains);
+        let req = pb.req.clone();
         let filter = Some(pb.cue_automation.filter_params());
         let mut kept = Vec::with_capacity(pb.tracks[t].sounds.instances.len());
         for mut inst in std::mem::take(&mut pb.tracks[t].sounds.instances) {
@@ -1510,7 +1494,7 @@ impl AudioEngine {
                 inst.pitch = p;
                 inst.channels = [1.0; 6];
             }
-            self.update_instance(&mut inst, block, (&req, gains), filter, dt);
+            self.update_instance(&mut inst, block, &req, filter, dt);
             kept.push(inst);
         }
         let list = &mut pb.tracks[t].sounds;
@@ -1536,6 +1520,7 @@ impl AudioEngine {
             elapsed_s: 0.0,
             loop_count: 0,
             positional: false,
+            wave3d: None,
             emitter: pb.handle.0,
             filtered: false,
             finished: true,
@@ -1564,6 +1549,13 @@ impl AudioEngine {
         let (samples, channels, clip_rate) = (clip.samples.clone(), clip.channels as usize, clip.sample_rate);
         let delay_s = pb.req.start_delay + start.delay_s;
         inst.positional = choice.positional && pb.req.positional;
+        if inst.positional {
+            // The instance's emitter source (FUN_00837830 creates it at the cue's position); the cue
+            // API carries no velocity, so it is at rest. Its wave takes the group's 3D parameters.
+            let pos = pb.position.expect("a positional cue has a position");
+            self.mixer.set_emitter(inst.emitter, pos, Vec3::ZERO);
+            inst.wave3d = Some(choice.wave3d);
+        }
         inst.loop_count = choice.loop_byte;
         // FUN_00839db0 (wave vtable +0x7C, at CreateWave): a filter when one of the cue's first C event
         // records (C = its curve count) is kind 9.
@@ -1593,13 +1585,13 @@ impl AudioEngine {
     }
 
     /// `FUN_00836c70`: multiply the instance's channel multipliers by the block's, give its voice
-    /// `base volume × block volume`, `base pitch + block pitch` and its left/right multipliers, and
+    /// `base volume × block volume`, `base pitch + block pitch` and its six channel multipliers, and
     /// mark it finished once its voice has ended — or, with no voice, once its start delay has passed.
     fn update_instance(
         &mut self,
         inst: &mut Instance,
         block: Block,
-        spatial: (&VoiceRequest, (f32, f32)),
+        req: &VoiceRequest,
         filter: Option<(f32, f32)>,
         dt: f32,
     ) {
@@ -1607,12 +1599,11 @@ impl AudioEngine {
             *c *= b;
         }
         inst.elapsed_s += dt;
-        let gains = if inst.positional { spatial.1 } else { (1.0, 1.0) };
         if inst.voice.is_none() && inst.wave.is_some() && inst.elapsed_s >= inst.delay_s {
             if inst.loop_count == 0xFF {
                 // FUN_00836c70: an instance with no wave whose group loop count is 0xFF stays in state 0
                 // and tries to create its wave again on the next update; any other count finishes it.
-                self.retry_voice(inst, spatial.0);
+                self.retry_voice(inst, req);
             } else {
                 inst.finished = true;
                 return;
@@ -1632,9 +1623,8 @@ impl AudioEngine {
             self.mixer
                 .set_source_rate(id, rate)
                 .expect("playback voices carry PCM sources built at the mixer rate");
-            // Wave vtable +0x10C for the six outputs; an emitter source's gains.
+            // Wave vtable +0x10C for the six outputs.
             self.mixer.set_output_channels(id, inst.channels);
-            self.mixer.set_channel_gains(id, gains.0, gains.1);
             // FUN_0083e5c0: the filter takes the cue's kind-9 outputs.
             if let (true, Some((a, b))) = (inst.filtered, filter) {
                 self.mixer.set_filter_params(id, a, b);
@@ -1664,6 +1654,7 @@ impl AudioEngine {
     fn wire_voice(&mut self, id: VoiceId, inst: &Instance) {
         if inst.positional {
             self.mixer.set_source(id, SourceKey::Emitter(inst.emitter));
+            self.mixer.set_wave_3d(id, inst.wave3d.expect("a positional instance has its group's 3D parameters"));
         }
         if inst.filtered {
             self.mixer.add_filter(id);
@@ -1683,6 +1674,7 @@ impl AudioEngine {
         let ch = self.mixer.config().channels;
         let mut out = vec![0i16; frames * ch];
         let cats = &self.categories;
+        self.mixer.set_listener(*self.listeners.mix_listener());
         self.mixer
             .mix(&mut self.pool, &mut out, |cat| cats.effective_gain(cat));
         self.sink.submit(&out);
@@ -1766,8 +1758,8 @@ mod playback_tests {
             min_distance: 10.0,
             max_distance: 100.0,
             unknown_20: 1.0,
-            pitch: 1.0,
-            unknown_28: 1.0,
+            distance_exponent: 1.0,
+            doppler_scale: 1.0,
         }
     }
 
@@ -1803,6 +1795,16 @@ mod playback_tests {
     /// 0.5, base pitch 2.0), group 1 plays it from a multi-wave group whose `+0x2C` loop count is 3.
     /// Each `(name, gain, body)` is a cue.
     fn engine(cues: Vec<(&str, f32, CueBodySpec)>, frames: usize, channels: usize) -> AudioEngine {
+        engine_with(cues, frames, channels, head())
+    }
+
+    /// [`engine`] with both groups given `group_head`.
+    fn engine_with(
+        cues: Vec<(&str, f32, CueBodySpec)>,
+        frames: usize,
+        channels: usize,
+        group_head: GroupHeadParams,
+    ) -> AudioEngine {
         let spec = TablesSpec {
             name: BANK.into(),
             waves: vec![WaveSpec { clip_hash: 1, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; frames] } }],
@@ -1810,13 +1812,13 @@ mod playback_tests {
                 GroupSpec {
                     sound_id: 1,
                     category: "sfx".into(),
-                    head: head(),
+                    head: group_head,
                     form: GroupFormSpec::Single { wave: 0, gain: 0.5, unknown_30: 2.0, weight: 1.0 },
                 },
                 GroupSpec {
                     sound_id: 2,
                     category: "sfx".into(),
-                    head: head(),
+                    head: group_head,
                     form: GroupFormSpec::Multi {
                         params: MultiGroupParams {
                             byte_2c: 3,
@@ -2106,5 +2108,29 @@ mod playback_tests {
             2,
         );
         assert!(matches!(eng.cue_sound(m2("mod_good"), None), Err(CueError::Child { .. })), "a refused child refuses its parent");
+    }
+
+    /// A group whose `+0x14` byte is set plays through its cue's emitter: its wave takes the group's
+    /// 3D parameters, and the mix gives it the distance volume of FUN_0083d3a0 at the emitter's
+    /// distance to listener 0 — full to `+0x18`, silent from `+0x1C`, `1 − t^exponent` between. Without
+    /// a position the same group plays 2D, at full volume.
+    #[test]
+    fn a_positional_group_takes_its_distance_volume() {
+        let mut h = head();
+        h.unknown_14 = 1;
+        h.distance_exponent = 2.0;
+        let body = || CueBodySpec::MultiTrack(multi(vec![track(vec![], vec![sound(0.0, 0)])], vec![], 1.0));
+        let volume_at = |pos: Option<Vec3>| {
+            let mut eng = engine_with(vec![("mod_3d", 1.0, body())], LONG, 6, h);
+            let cue = eng.cue_sound(m2("mod_3d"), pos).unwrap();
+            run(&mut eng, 2, 0.02);
+            let v = eng.cue_instances(cue)[0].voice.expect("a voice");
+            eng.mixer.distance_volume(v).unwrap()
+        };
+        assert_eq!(volume_at(Some(Vec3::new(5.0, 0.0, 0.0))), 1.0, "inside the minimum");
+        let t = (40.0f32 - 10.0) / (100.0 - 10.0);
+        assert_eq!(volume_at(Some(Vec3::new(0.0, 0.0, 40.0))), 1.0 - f64::from(t).powf(2.0) as f32);
+        assert_eq!(volume_at(Some(Vec3::new(150.0, 0.0, 0.0))), 0.0, "past the maximum");
+        assert_eq!(volume_at(None), 1.0, "2D without a position");
     }
 }
