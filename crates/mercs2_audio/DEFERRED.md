@@ -29,10 +29,6 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   to `[0.1, 2]` into wave `+0xA8`; and the frequency getter `FUN_0083e170` multiplies the wave's
   frequency by it before the kernel's step. 2D sources pass 1.0. The earlier `spatial::doppler_pitch`
   (a musical ratio clamped to `[0.5, 2]`) was not the engine's and is gone.
-- **Emitter velocity** `[faithful-blocker: no]` — the Doppler factor needs the emitter's velocity
-  (source holder `+0x5C`); `AudioEngine::cue_sound` takes a position only, so its emitters are at rest
-  and only listener motion (`Listener::velocity`) shifts pitch. Feeding a moving emitter's velocity
-  needs a cue API that carries it.
 
 ## Voices / mixer
 
