@@ -34,12 +34,15 @@
 //! joins the active list. A kind-7 record, when it activates, names the **child cue** the track (or,
 //! in a cue's event table, the cue) starts when it finishes (`+0x7C`, kept until the state is
 //! rebuilt). Kinds 9 and 10 evaluate the cue's kind-8 curves into the state's `+0x68` / `+0x6C` /
-//! `+0x74`, which for the event table are cue `+0x84` / `+0x88` / `+0x90`; a wave whose cue has a
-//! kind-9 event carries a biquad filter (`FUN_00839db0` creates it, `FUN_0083f2d0`) that takes its
-//! parameters from the cue object at `+0x7C` (INFERRED: that object hands on those fields). Which
-//! samples the filter runs over is decided in `MixWavesToOutput` (`0x00838860`), whose body is reached
-//! only through a SecuROM-protected pointer. Reaching kind 8, 9 or 10 is therefore an
-//! [`AutomationError::Unsupported`].
+//! `+0x74`, which for the event table are cue `+0x84` / `+0x88` / `+0x90`. A wave whose cue has a
+//! kind-9 event carries a biquad low-pass filter (`FUN_00839db0` creates it, `FUN_0083f2d0`,
+//! vtable `0x00BE2678`); every update its cutoff and resonance are set from the cue parameter object
+//! at `+0x7C` (vtable `0x00BE1E60`, whose slot `+0x04` returns `+0x08` / `+0x0C` = cue `+0x84` /
+//! `+0x88`). The wave mix `FUN_00839ae0` runs the filter in place over the buffer its source passes
+//! (`FUN_0083b120`: the source's 6-channel int32 scratch `DAT_00FC34B0`, holding every wave of that
+//! source mixed so far in the pass), before the source commits it (`FUN_0083afc0`). This crate's mixer
+//! mixes each voice straight into one accumulator, with no source buffers, so reaching kind 8, 9 or
+//! 10 is an [`AutomationError::Unsupported`].
 //!
 //! A cue or track that loops rebuilds its state at the loop point ([`AutomationState::rewind`],
 //! `FUN_0083bdb0`).
@@ -71,7 +74,7 @@ pub fn sine_table() -> &'static [f32; SINE_TABLE_LEN] {
 /// Why automation could not be evaluated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AutomationError {
-    /// A filter record (kind 8, reached through 9 or 10) was reached (see the module docs).
+    /// A filter record (kind 9 or 10, or the kind-8 curve they read) was reached (see the module docs).
     Unsupported { kind: u32 },
     /// A curve's parameter has no value (a cue-local parameter nobody set).
     ParameterUnset { param: u32 },
@@ -84,8 +87,8 @@ impl std::fmt::Display for AutomationError {
         match self {
             AutomationError::Unsupported { kind } => write!(
                 f,
-                "automation kind {kind} drives the cue's biquad filter, whose input is chosen in \
-                 MixWavesToOutput (0x00838860), reached only through a SecuROM-protected pointer; not traced"
+                "automation kind {kind} drives the cue's biquad filter, which runs in place over the \
+                 wave's source mix buffer (FUN_0083b120 -> FUN_00839ae0); this mixer has no per-source buffers"
             ),
             AutomationError::ParameterUnset { param } => {
                 write!(f, "automation curve parameter 0x{param:08X} has no value")
