@@ -565,11 +565,11 @@ fn parse_hibernation_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, 
     out
 }
 
-/// Parse the `TerrainObject` COMP into (entity_key -> hi-res terrainmesh asset hash) records. Each
-/// record is 8 bytes `{u32 entity_key, u32 terrainmesh_hash}`; the hash is a `0x7C569307`
-/// "terrainmesh" asset (`extract_container`). Join with the entity's `Transform` (same key) for the
-/// world placement — this is how the 400 hi-res terrain tiles are positioned (the c3 cell-id in the
-/// block NAME is unrelated to the tile's world position).
+/// Parse a `{u32 entity_key, u32 asset_hash}` COMP (8-byte records) — `TerrainObject` (the asset is a
+/// `0x7C569307` terrainmesh) and `ScrubObject` (a `0x600B904E` ground-cover package) both have this
+/// shape. Join with the entity's `Transform` (same key) for the world placement — this is how the 400
+/// hi-res terrain tiles are positioned (the c3 cell-id in the block NAME is unrelated to the tile's
+/// world position).
 fn parse_terrain_object_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, u32)> {
     const STRIDE: usize = 8;
     let mut out = Vec::new();
@@ -601,8 +601,59 @@ pub struct TerrainTile {
 /// COMP (`key -> terrainmesh_hash`) and join it to the `Transform` COMP (`key -> pos/quat`) by entity
 /// key within each sub-block. Coordinates stay native game space (LH, +Y up); no flips.
 pub fn load_terrain_tiles(block: &[u8]) -> Vec<TerrainTile> {
+    load_keyed_asset_placements(block, "TerrainObject")
+        .0
+        .into_iter()
+        .map(|(key, terrainmesh_hash, pos, quat)| TerrainTile {
+            key,
+            terrainmesh_hash,
+            pos,
+            quat,
+        })
+        .collect()
+}
+
+/// One ground-cover placement: its `0x600B904E` scrub asset hash and the world transform of its owning
+/// entity. The scrub's patch origins are relative to `pos` — the centre of the terrain cell whose ground
+/// it covers (`terrainmesh::TerrainCell` cell-local frame).
+#[derive(Debug, Clone)]
+pub struct ScrubPlacement {
+    pub key: u32,
+    pub scrub_hash: u32,
+    pub pos: [f32; 3],
+    pub quat: [f32; 4],
+}
+
+/// Load every `ScrubObject` placement from a decompressed UCFX block (the `{key, scrub_hash}` COMP joined
+/// to `Transform` by key within each sub-block). Fails, naming the keys, when a `ScrubObject` record has
+/// no `Transform` in its sub-block — such a scrub has no position.
+pub fn load_scrub_placements(block: &[u8]) -> Result<Vec<ScrubPlacement>, String> {
+    let (joined, orphans) = load_keyed_asset_placements(block, "ScrubObject");
+    if !orphans.is_empty() {
+        return Err(format!(
+            "ScrubObject record(s) with no Transform in their sub-block: {:08X?}",
+            orphans
+        ));
+    }
+    Ok(joined
+        .into_iter()
+        .map(|(key, scrub_hash, pos, quat)| ScrubPlacement {
+            key,
+            scrub_hash,
+            pos,
+            quat,
+        })
+        .collect())
+}
+
+/// A `{key, asset_hash}` COMP named `comp`, joined to `Transform` by key within each sub-block:
+/// `(joined (key, asset, pos, quat), keys with no Transform)`.
+type KeyedPlacements = (Vec<(u32, u32, [f32; 3], [f32; 4])>, Vec<u32>);
+
+fn load_keyed_asset_placements(block: &[u8], comp: &str) -> KeyedPlacements {
     let ucfx_positions = find_all(block, b"UCFX");
-    let mut out: Vec<TerrainTile> = Vec::new();
+    let mut out = Vec::new();
+    let mut orphans = Vec::new();
     for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
         let block_end = if si + 1 < ucfx_positions.len() {
             ucfx_positions[si + 1]
@@ -620,25 +671,20 @@ pub fn load_terrain_tiles(block: &[u8]) -> Vec<TerrainTile> {
                         xform.entry(k).or_insert((p, q));
                     }
                 }
-                Some("TerrainObject") => {
+                Some(name) if name == comp => {
                     terr.extend(parse_terrain_object_records(block, off, size));
                 }
                 _ => {}
             }
         }
-        for (key, terrainmesh_hash) in terr {
-            let Some(&(pos, quat)) = xform.get(&key) else {
-                continue;
-            };
-            out.push(TerrainTile {
-                key,
-                terrainmesh_hash,
-                pos,
-                quat,
-            });
+        for (key, asset) in terr {
+            match xform.get(&key) {
+                Some(&(pos, quat)) => out.push((key, asset, pos, quat)),
+                None => orphans.push(key),
+            }
         }
     }
-    out
+    (out, orphans)
 }
 
 /// Load every `HibernationControl` per-entity streaming directive from a decompressed UCFX block,
