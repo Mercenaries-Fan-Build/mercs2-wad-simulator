@@ -1797,7 +1797,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
             let mut a = self.audio.borrow_mut();
             let mut audible = 0usize;
             for body in &data.wavebank_bodies {
-                audible += a.load_wavebank(body);
+                audible += a
+                    .load_wavebank(body)
+                    .unwrap_or_else(|e| panic!("[audio] resident wavebank refused: {e}"));
             }
             let mut catalog = mercs2_engine::audio::SoundDb::default();
             for body in &data.sounddb_bodies {
