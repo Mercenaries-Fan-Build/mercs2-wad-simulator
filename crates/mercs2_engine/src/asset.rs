@@ -610,7 +610,7 @@ mod tests {
         let mut eng = crate::audio::AudioEngine::default();
         res.install(&mut eng).expect("resident tables install");
         let guid = mercs2_formats::hash::pandemic_hash_m2("ui_PDA_Open_01_st");
-        eng.cue_sound(guid, None, None).expect("cue allocates a voice");
+        eng.cue_sound(guid, None).expect("ui_PDA_Open_01_st starts");
         for _ in 0..8 {
             eng.tick(0.02);
         }
