@@ -924,6 +924,88 @@ fn opaque_container_block(
     .map_err(|m| BuildError::Lower { index, kind, message: m })
 }
 
+/// `add_animation` / `replace_animation`: the retail Havok clip container, from its sources.
+///
+/// The container is `mercs2_formats::anim_container::build_clip_container` — `info` / `data` /
+/// `trnm` / optional `evnt`, packed, with its CSUM — the shape all 4,232 retail clips take and that
+/// the writer reproduces byte-for-byte over every one of them. The same pairing check M0213 runs
+/// hermetically runs again here, because a build must not depend on somebody having linted first.
+///
+/// A REPLACE also reads the target out of the game stack: it must exist, and it must be a Havok
+/// clip. The 29 retail `animation` assets that are `MANM` keyframe animations cannot be expressed by
+/// these sources, and writing a clip over one would change what kind of asset it is.
+fn lower_animation(
+    root: &Path,
+    name_or_target: &str,
+    sources: AnimationSources<'_>,
+    replace_in: Option<&mut GameStack>,
+    index: usize,
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<Lowering, BuildError> {
+    use mercs2_formats::anim_container;
+    let err = |m: String| BuildError::Lower { index, kind, message: m };
+    let read = |p: &Path| {
+        std::fs::read(root.join(p)).map_err(|e| err(format!("reading {}: {e}", p.display())))
+    };
+    let hash = crate::manifest::asset_hash(name_or_target);
+    if let Some(game) = replace_in {
+        let existing = game
+            .container_for_asset(hash, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION)
+            .ok_or_else(|| {
+                err(format!(
+                    "{name_or_target:?} (0x{hash:08X}) is not an animation in the game stack — a \
+                     replace needs a shipped clip to replace"
+                ))
+            })?;
+        let chunks = anim_container::parse_container(&existing)
+            .map_err(|m| err(format!("the shipped {name_or_target:?} does not read: {m}")))?;
+        match anim_container::classify(&chunks).map_err(err)? {
+            anim_container::AnimContainerKind::HavokClip { .. } => {}
+            anim_container::AnimContainerKind::Keyframe => {
+                return Err(err(format!(
+                    "the shipped {name_or_target:?} (0x{hash:08X}) is a MANM keyframe animation, \
+                     not a Havok clip. `clip`/`trnm`/`events` describe a Havok clip, so replacing \
+                     it would change the asset's kind; no source this kind takes can express a \
+                     MANM animation."
+                )));
+            }
+        }
+    }
+    let clip_bytes = read(sources.clip)?;
+    let trnm_bytes = read(sources.trnm)?;
+    let evnt_bytes = sources.events.map(read).transpose()?;
+    let container =
+        anim_container::build_clip_container(&clip_bytes, &trnm_bytes, evnt_bytes.as_deref())
+            .map_err(err)?;
+    log.push(format!(
+        "contributions[{index}] {kind} {name_or_target} 0x{hash:08X}: clip {} B, trnm {} B, {} \
+         → container {} B",
+        clip_bytes.len(),
+        trnm_bytes.len(),
+        match &evnt_bytes {
+            Some(e) => format!("evnt {} B", e.len()),
+            None => "no evnt".to_string(),
+        },
+        container.len()
+    ));
+    Ok(Lowering::Block(opaque_container_block(
+        hash,
+        TYPE_HASH_ANIMATION,
+        TYPE_ID_ANIMATION,
+        &container,
+        index,
+        kind,
+    )?))
+}
+
+/// The three `src/` files an animation contribution names.
+struct AnimationSources<'a> {
+    clip: &'a Path,
+    trnm: &'a Path,
+    events: Option<&'a Path>,
+}
+
 /// Every `replace_lua`, ready for the linker to compile + swap in place.
 pub fn script_replacements(
     manifest: &crate::manifest::Manifest,
@@ -1684,6 +1766,185 @@ fn cluster_decimate_ext(
 /// binary crates: the skinned glTF reader in the Workshop, a second copy in `mercs2_poc`, and the
 /// bone mapper alongside them. All three are library code now, so a Shipment can finally ship a
 /// character instead of being told the format supports one in principle.
+/// The donor's UCFX container: a donor block is `[count][16-byte entry][container]`, and the entry's
+/// last word is the container's length.
+fn donor_container(donor_blk: &[u8]) -> &[u8] {
+    let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap_or([0; 4])) as usize;
+    donor_blk.get(20..20 + n).unwrap_or(&[])
+}
+
+/// A model's own maps, as the manifest names them: the model's name (the texture assets are
+/// `<name>_dm` / `_sm` / `_nm`), its `textures:` block, and the Shipment root those paths resolve in.
+struct ModelSkin<'a> {
+    name: &'a str,
+    textures: &'a crate::manifest::Textures,
+    root: &'a Path,
+}
+
+/// An author's `textures:` maps → one resident texture block each, plus the MTRL repoints that bind
+/// them. Shared by the skinned and rigid model lowerings; they differ only in WHICH materials a map
+/// replaces, which `froms(slot)` answers with the donor hashes currently at that MTRL slot (slot
+/// order `0 = diffuse, 1 = specular, 2 = normal`). `scope` names that set for the error a map with
+/// nothing to replace raises.
+fn author_texture_repoints(
+    index: usize,
+    kind: &'static str,
+    skin: ModelSkin<'_>,
+    scope: &str,
+    froms: impl Fn(usize) -> Vec<u32>,
+    log: &mut Vec<String>,
+) -> Result<(Vec<PatchBlock>, Vec<mercs2_formats::model_inject::MtrlRepoint>), BuildError> {
+    let name = skin.name;
+    let mut tex_blocks: Vec<PatchBlock> = Vec::new();
+    let mut repoints: Vec<mercs2_formats::model_inject::MtrlRepoint> = Vec::new();
+    for (slot, suffix, src, is_normal) in [
+        (0usize, "dm", &skin.textures.diffuse, false),
+        (1, "sm", &skin.textures.specular, false),
+        (2, "nm", &skin.textures.normal, true),
+    ] {
+        let Some(rel) = src else { continue };
+        // The historical naming for a model's own maps, spelled at the call site.
+        let (block, to) = build_named_texture(
+            index,
+            kind,
+            &format!("{name}_{suffix}"),
+            &skin.root.join(rel),
+            is_normal,
+        )?;
+        let slot_froms = froms(slot);
+        if slot_froms.is_empty() {
+            // Nothing to bind it to. Shipping the texture anyway would look like it worked.
+            return Err(BuildError::Lower {
+                index,
+                kind,
+                message: format!(
+                    "`textures.{}` was supplied, but the donor names no texture at MTRL slot \
+                     {slot} ({suffix}) for {scope} — there is nothing to repoint onto it.",
+                    match slot {
+                        0 => "diffuse",
+                        1 => "specular",
+                        _ => "normal",
+                    },
+                ),
+            });
+        }
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: {name}_{suffix} 0x{to:08X} replaces {} donor \
+             hash(es) at slot {slot}",
+            slot_froms.len()
+        ));
+        for from in slot_froms {
+            repoints.push(mercs2_formats::model_inject::MtrlRepoint { from, to });
+        }
+        tex_blocks.push(block);
+    }
+    Ok((tex_blocks, repoints))
+}
+
+/// The `MTRL` flags bit a rigid material must carry to sample a texture. Records without it (flags
+/// `0x0000`) are flat-shaded and ignore whatever is bound (`docs/modding/field_guide.md`, the MTRL
+/// record-count trap; the Workshop's publish path hosts only on such textured groups).
+pub const MTRL_TEXTURED: u16 = 0x0080;
+
+/// The rigid path's `textures:` → texture blocks + repoints, over the HOST group's materials.
+///
+/// Empty `textures:` returns nothing to ship: the prop wears the donor's materials.
+fn rigid_texture_repoints(
+    index: usize,
+    kind: &'static str,
+    skin: ModelSkin<'_>,
+    donor_ucfx: &[u8],
+    donor_name: &str,
+    host_group: usize,
+    log: &mut Vec<String>,
+) -> Result<(Vec<PatchBlock>, Vec<mercs2_formats::model_inject::MtrlRepoint>), BuildError> {
+    let t = skin.textures;
+    let slots: Vec<usize> = [(0usize, &t.diffuse), (1, &t.specular), (2, &t.normal)]
+        .iter()
+        .filter(|(_, p)| p.is_some())
+        .map(|(s, _)| *s)
+        .collect();
+    if slots.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let groups = mercs2_formats::texture::group_prmt_material_indices(donor_ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(donor_ucfx);
+    let froms = rigid_slot_froms(host_group, &groups, &mats, &slots).map_err(|m| {
+        BuildError::Lower {
+            index,
+            kind,
+            message: format!("donor {donor_name}: {m}"),
+        }
+    })?;
+    author_texture_repoints(
+        index,
+        kind,
+        skin,
+        &format!("host group {host_group}'s materials in donor {donor_name}"),
+        |slot| froms.get(&slot).cloned().unwrap_or_default(),
+        log,
+    )
+}
+
+/// Which donor texture hashes the rigid host group's materials name at each supplied MTRL slot.
+///
+/// `groups` is `texture::group_prmt_material_indices` (every material each PRMG group's PRMT records
+/// name) and `mats` is `texture::parse_mtrl`. A material the repoint touches — one naming a texture
+/// at a supplied slot — must carry [`MTRL_TEXTURED`]; any that does not is an error, listed. A slot
+/// no host material names maps to an empty list, which the caller refuses with the slot's name.
+fn rigid_slot_froms(
+    host_group: usize,
+    groups: &[Vec<usize>],
+    mats: &[mercs2_formats::texture::MtrlMaterial],
+    slots: &[usize],
+) -> Result<std::collections::BTreeMap<usize, Vec<u32>>, String> {
+    let host = groups.get(host_group).ok_or_else(|| {
+        format!(
+            "host group {host_group} does not exist (the donor has {} PRMG groups)",
+            groups.len()
+        )
+    })?;
+    if host.is_empty() {
+        return Err(format!("host group {host_group} binds no material (no PRMT record)"));
+    }
+    let mut out: std::collections::BTreeMap<usize, Vec<u32>> = std::collections::BTreeMap::new();
+    let mut untextured: Vec<String> = Vec::new();
+    for &m in host {
+        let mat = mats.get(m).ok_or_else(|| {
+            format!(
+                "host group {host_group} names material {m}, but MTRL holds {} records",
+                mats.len()
+            )
+        })?;
+        let touched: Vec<(usize, u32)> = slots
+            .iter()
+            .filter_map(|&s| mat.textures.get(s).copied().filter(|&h| h != 0).map(|h| (s, h)))
+            .collect();
+        if touched.is_empty() {
+            continue;
+        }
+        if mat.flags & MTRL_TEXTURED == 0 {
+            untextured.push(format!("material {m} (flags 0x{:04X})", mat.flags));
+            continue;
+        }
+        for (s, h) in touched {
+            let list = out.entry(s).or_default();
+            if !list.contains(&h) {
+                list.push(h);
+            }
+        }
+    }
+    if !untextured.is_empty() {
+        return Err(format!(
+            "host group {host_group}'s {} lack the textured flag 0x{MTRL_TEXTURED:04X}, so they \
+             are flat-shaded and would not sample the supplied map. Pick a `group:` whose \
+             materials are textured.",
+            untextured.join(", ")
+        ));
+    }
+    Ok(out)
+}
+
 fn lower_skinned(
     index: usize,
     kind: &'static str,
@@ -1867,46 +2128,15 @@ fn lower_skinned(
     // The `from` set comes from every material in the container rather than from the host groups:
     // hosts are chosen inside the lowering, after this has to run. Repointing all of them is also
     // the honest reading of one `textures:` block for one outfit, and non-hosts are neutralised.
-    let donor_ucfx = {
-        let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap_or([0; 4])) as usize;
-        donor_blk.get(20..20 + n).unwrap_or(&[])
-    };
-    let mut tex_blocks: Vec<PatchBlock> = Vec::new();
-    let mut repoints: Vec<mercs2_formats::model_inject::MtrlRepoint> = Vec::new();
-    for (slot, suffix, src, is_normal) in [
-        (0usize, "dm", &textures.diffuse, false),
-        (1, "sm", &textures.specular, false),
-        (2, "nm", &textures.normal, true),
-    ] {
-        let Some(rel) = src else { continue };
-        // The historical naming for an outfit's own maps, now spelled at the call site.
-        let (block, to) =
-            build_named_texture(index, kind, &format!("{name}_{suffix}"), &root.join(rel), is_normal)?;
-        let froms = mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot);
-        if froms.is_empty() {
-            // Nothing to bind it to. Shipping the texture anyway would look like it worked.
-            return Err(lower_err(format!(
-                "`textures.{}` was supplied, but donor {donor_name} names no texture at MTRL slot \
-                 {slot} ({}) for any material — there is nothing to repoint onto it.",
-                match slot {
-                    0 => "diffuse",
-                    1 => "specular",
-                    _ => "normal",
-                },
-                suffix
-            )));
-        }
-        log.push(format!(
-            "contributions[{index}] {kind} {name}: {}_{suffix} 0x{to:08X} replaces {} donor hash(es) \
-             at slot {slot}",
-            name,
-            froms.len()
-        ));
-        for from in froms {
-            repoints.push(mercs2_formats::model_inject::MtrlRepoint { from, to });
-        }
-        tex_blocks.push(block);
-    }
+    let donor_ucfx = donor_container(&donor_blk);
+    let (mut tex_blocks, mut repoints) = author_texture_repoints(
+        index,
+        kind,
+        ModelSkin { name, textures, root },
+        &format!("any material of donor {donor_name}"),
+        |slot| mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot),
+        log,
+    )?;
 
     // PER-MATERIAL skins from the GLB's OWN embedded textures. When the author supplies no manual
     // `textures:`, a multi-material import wears each source material on the body region its triangles
@@ -2389,13 +2619,34 @@ fn lower(
             // from the FULL `mesh` below, so the collider stays geometry-tight while the visible LOD
             // drops. A mesh that already fits is returned unchanged (`render_decim` = None).
             let (render_mesh, render_decim) = fit_render_mesh_to_u16_strip(&mesh);
+
+            // The model's OWN skin. On the rigid path the host group keeps the donor's material
+            // records (the PRMT material index is preserved), so a supplied map replaces the
+            // hashes the HOST group's materials name at that slot. A rigid material samples a
+            // texture only when its flags carry 0x0080 — a 0x0000 record is flat-shaded and ignores
+            // whatever is bound — so a repoint onto one would ship a texture nothing draws, and is
+            // refused rather than shipped.
+            let (tex_blocks, repoints) = rigid_texture_repoints(
+                index,
+                kind,
+                ModelSkin {
+                    name,
+                    textures,
+                    root,
+                },
+                donor_container(&donor_blk),
+                donor_name,
+                host_group,
+                log,
+            )?;
+
             // Flags mirror the workshop's proven call: auto-fit OFF (the mesh carries its own
             // transform), target the raw rendered group, neutralise the rest.
             let (new_block, stats) = inject_static_into_donor_block(
                 &donor_blk,
                 &render_mesh,
                 host_group,
-                &[],
+                &repoints,
                 hash,
                 false,
                 false,
@@ -2416,6 +2667,26 @@ fn lower(
                  group {host_group}: {} verts, {} tris",
                 stats.vertex_count, stats.triangle_count
             ));
+            // A repoint that matched nothing means the author's map is in the WAD and nothing
+            // wears it — the same refusal the skinned path makes.
+            let dead: Vec<String> = stats
+                .mtrl_repoints
+                .iter()
+                .filter(|(_, _, n)| *n == 0)
+                .map(|(f, t, _)| format!("0x{f:08X} -> 0x{t:08X}"))
+                .collect();
+            if !dead.is_empty() {
+                return Err(BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{} MTRL repoint(s) matched nothing in donor {donor_name}: {}. The \
+                         texture blocks would ship and nothing would reference them.",
+                        dead.len(),
+                        dead.join(", ")
+                    ),
+                });
+            }
             if let Some((rv, rt)) = render_decim {
                 log.push(format!(
                     "contributions[{index}] add_model {name} 0x{hash:08X}: render LOD decimated to \
@@ -2464,7 +2735,14 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Lowering::Block(block))
+            // As on the skinned path: the MTRL names hashes only these texture blocks resolve, so
+            // they ship as one group.
+            if tex_blocks.is_empty() {
+                return Ok(Lowering::Block(block));
+            }
+            let mut out = vec![block];
+            out.extend(tex_blocks);
+            Ok(Lowering::Blocks(out))
         }
 
         // `add_outfit` is a FIXED composition of add_model + a patch_lua on `_tOutfits`. The Data
@@ -2793,14 +3071,53 @@ fn lower(
             })?;
             lower_layer_append(game, template, name, &ents, index, kind)
         }
-        Contribution::AddAnimation { name, clip, trnm: _ } => opaque_new_asset(root, clip, name, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION, index, kind),
-        Contribution::ReplaceAnimation { target, clip, trnm: _ } => opaque_new_asset(root, clip, target, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION, index, kind),
+        // A new clip needs nothing from retail, so it lowers hermetically.
+        Contribution::AddAnimation {
+            name,
+            clip,
+            trnm,
+            events,
+        } => lower_animation(
+            root,
+            name,
+            AnimationSources {
+                clip,
+                trnm,
+                events: events.as_deref(),
+            },
+            None,
+            index,
+            kind,
+            log,
+        ),
+        // A replace reads its target out of retail to check it is a Havok clip.
+        Contribution::ReplaceAnimation {
+            target,
+            clip,
+            trnm,
+            events,
+        } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            lower_animation(
+                root,
+                target,
+                AnimationSources {
+                    clip,
+                    trnm,
+                    events: events.as_deref(),
+                },
+                Some(game),
+                index,
+                kind,
+                log,
+            )
+        }
         Contribution::AddShader { name, blob } => opaque_new_asset(root, blob, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
         Contribution::ReplaceShader { target, blob } => opaque_new_asset(root, blob, target, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
         Contribution::AddFx { name, payload } => opaque_new_asset(root, payload, name, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
         Contribution::ReplaceFx { target, payload } => opaque_new_asset(root, payload, target, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
-        Contribution::AddSchema { name, schm } => opaque_new_asset(root, schm, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
-        Contribution::AddAiSquadTemplate { name, config, type_id, type_hash } => opaque_new_asset(root, config, name, *type_hash, *type_id, index, kind),
         Contribution::ReplaceTerrainCell { target, cell } => opaque_new_asset(root, cell, target, TYPE_HASH_TERRAIN_MESH, TYPE_ID_TERRAIN_MESH, index, kind),
 
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
@@ -4947,5 +5264,62 @@ mod donor_tests {
         // Case- and space-insensitive, since it runs on author input.
         assert_eq!(auto_donor_for_wearer("  Mattias "), Some("pmc_hum_mattias"));
         assert_eq!(auto_donor_for_wearer("bulldog"), None);
+    }
+}
+
+#[cfg(test)]
+mod rigid_texture_tests {
+    use super::{rigid_slot_froms, MTRL_TEXTURED};
+    use mercs2_formats::texture::MtrlMaterial;
+
+    fn mat(flags: u16, textures: &[u32]) -> MtrlMaterial {
+        MtrlMaterial {
+            textures: textures.to_vec(),
+            flags,
+            preamble: Vec::new(),
+        }
+    }
+
+    /// The host group's materials, and only theirs, supply the hashes a map replaces — per slot,
+    /// deduplicated. Material 2 belongs to another group and must not contribute.
+    #[test]
+    fn froms_come_from_the_host_groups_materials_only() {
+        let mats = [
+            mat(MTRL_TEXTURED, &[0xA0, 0xA1, 0xA2]),
+            mat(MTRL_TEXTURED | 0x0008, &[0xB0, 0xA1, 0xB2]),
+            mat(MTRL_TEXTURED, &[0xC0, 0xC1, 0xC2]),
+        ];
+        let groups = vec![vec![2], vec![0, 1]];
+        let froms = rigid_slot_froms(1, &groups, &mats, &[0, 1]).unwrap();
+        assert_eq!(froms.get(&0), Some(&vec![0xA0, 0xB0]));
+        assert_eq!(froms.get(&1), Some(&vec![0xA1]), "a shared hash is listed once");
+        assert_eq!(froms.get(&2), None, "an unsupplied slot is not repointed");
+    }
+
+    /// A touched host material without the textured flag is flat-shaded: the map would ship and
+    /// never draw. That is a hard error naming the material, not a skipped material.
+    #[test]
+    fn an_untextured_host_material_is_a_hard_error() {
+        let mats = [mat(MTRL_TEXTURED, &[0xA0]), mat(0x0000, &[0xB0])];
+        let groups = vec![vec![0, 1]];
+        let e = rigid_slot_froms(0, &groups, &mats, &[0]).unwrap_err();
+        assert!(e.contains("material 1") && e.contains("0x0080"), "{e}");
+    }
+
+    /// An untextured material the repoint does NOT touch (nothing at the supplied slot) is fine.
+    #[test]
+    fn an_untouched_untextured_material_is_not_an_error() {
+        let mats = [mat(MTRL_TEXTURED, &[0xA0, 0xA1, 0xA2]), mat(0x0000, &[0xB0])];
+        let groups = vec![vec![0, 1]];
+        let froms = rigid_slot_froms(0, &groups, &mats, &[2]).unwrap();
+        assert_eq!(froms.get(&2), Some(&vec![0xA2]));
+    }
+
+    #[test]
+    fn a_missing_host_group_or_material_is_an_error() {
+        let mats = [mat(MTRL_TEXTURED, &[0xA0])];
+        assert!(rigid_slot_froms(3, &[vec![0]], &mats, &[0]).unwrap_err().contains("does not exist"));
+        assert!(rigid_slot_froms(0, &[vec![]], &mats, &[0]).unwrap_err().contains("no material"));
+        assert!(rigid_slot_froms(0, &[vec![5]], &mats, &[0]).unwrap_err().contains("material 5"));
     }
 }
