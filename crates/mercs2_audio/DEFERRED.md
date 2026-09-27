@@ -13,13 +13,17 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   `DAT_01176408`). cpal has no portable reverb; environmental reverb (`Sound.SetReverb*`) is accepted
   and stored but not rendered. A software reverb (per-env comb/allpass from the 26-env table) is the
   faithful-substitute upgrade.
-- **Multichannel (4/6-ch) output** `[faithful-blocker: no]` — `CreateDevice` supports 1/2/4/6 ch with
-  `WAVE_FORMAT_EXTENSIBLE`; the mixer here renders the config's channel count but the pan law and
-  listener-gain table (`DAT_00fc34b0`) are implemented for stereo. Surround needs the full per-listener
-  channel-gain matrix.
-- ~~**Sample-rate conversion**~~ **DONE** — `PcmSource::with_rate` resamples per-voice (linear interp,
-  clip rate→mixer rate) so a 22 050 Hz clip plays at correct pitch into a 44 100/48 000 Hz mix, matching
-  the per-wave pitch step of `PalSoundWaveDX8`. The IMA-ADPCM/PCM decoder now lives in `wave.rs`
+- **A positional source's speaker gains** `[faithful-blocker: no]` — the mixer renders the engine's
+  6-channel stream (`FUN_0083f760` creates it with channel mask `0x3F`) through per-source scratch
+  buffers (`DAT_00FC34B0` is that scratch, handed to every wave's mix `FUN_00839ae0`, not a gain
+  table). A 2D source's six gains are 1.0 (`FUN_0083ade0`); a positional (emitter) source's gains come
+  from `FUN_0083d090` / `FUN_0083d3a0`, which are not traced, so this crate gives an emitter source the
+  `spatial` left/right gains on channels 0 and 1 and 0 on the other four. A stereo device takes
+  channels 0 and 1 of the stream and a mono device channel 0 — a substitute for DirectSound's
+  fold-down of the 6-channel buffer, which is not modelled; a 3–5 channel device is refused.
+- ~~**Sample-rate conversion**~~ **DONE** — `PcmSource` steps through a clip at the wave kernel's
+  32.32 fixed-point step `(freq << 32) / rate`, taking the nearest (truncated) sample, as
+  `PalSoundWaveDX8`'s mix (`FUN_00839fd0`) does. The IMA-ADPCM/PCM decoder now lives in `wave.rs`
   (ported from the retail-verified tool decoder).
 - **Doppler applied to the mix** `[faithful-blocker: no]` — `spatial::doppler_pitch` is implemented and
   matches `FUN_0083ade0`; the per-voice resample step now EXISTS (`PcmSource::with_rate`), so wiring
@@ -37,23 +41,6 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   wavebank record's data offset as body-relative (it is record-relative). Over all 1,198 retail cues
   1,012 resolve with every `vz.wad` bank resident (1,019 with `English.wad`'s wavebanks too); the rest
   reach `.pws`-streamed waves.
-- **The cue filter (kind 9) needs per-source mixing** `[faithful-blocker: no]` — traced in full,
-  not played. A cue whose event table carries kind 9 gives its waves a biquad low-pass filter
-  (`FUN_00839db0` creates it at wave `+0x2C`; `FUN_0083f2d0`, vtable `0x00BE2678`). Every update the
-  wave sets its cutoff and resonance from the cue parameter object at `+0x7C` (`FUN_0083e5c0`; that
-  object's vtable `0x00BE1E60` returns cue `+0x84` / `+0x88`, the kind-9 outputs): `SetParam`
-  (`0x0083F670`) maps 1 → Nyquist and 0 → 100 Hz for the cutoff, 1 → 2.0 and 0 → 0.7071 for the
-  resonance term; `Process` (`FUN_0083f430`) recomputes `k = tan(π·cutoff/rate)`, `k²`, and the
-  coefficients, and filters int32 samples in place. Where it runs: `MixWavesToOutput`
-  (`FUN_00838850`; its SecuROM splice, emulated from the runtime dump, is only
-  `mov ecx, [0x01176404]`) hands each wave to its source, whose `FUN_0083b120` mixes it into the
-  source's 6-channel int32 scratch `DAT_00FC34B0` and then runs the filter over that whole buffer —
-  every wave of the source mixed so far this pass, as one sequence per wave channel — before
-  `FUN_0083afc0` adds the scratch into the accumulator. 2D waves share one source (`FUN_0082f110` /
-  `FUN_0082f140`). This crate's mixer mixes each voice straight into one stereo accumulator, so the
-  filter cannot be placed; the two `vz.wad` cues that carry kind 9 (`0xD8CE1427`, `0xF23B9836`) are
-  refused. Playing them needs the source-level mix path (per-source scratch, the kernel gain math of
-  `FUN_00839fd0` / `FUN_0083e970`, and the commit).
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.
