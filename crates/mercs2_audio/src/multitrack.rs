@@ -8,14 +8,15 @@
 //! entry's group (`FUN_0082e7d0`: `{soundbank, u16 group index}`).
 //!
 //! ```text
-//! cue +0x10  u8   unknown (copied to the instance at +0x15D by FUN_00834ad0)
+//! cue +0x10  u8   loop count (copied to the instance at +0x15D by FUN_00834ad0; see crate::playback)
 //!     +0x11  u8   A = event record count
 //!     +0x12  u8   T = track count
 //!     +0x13  u8   P = parameter hash count
 //!     +0x14  u8   C = cue curve record count
 //!     +0x15  u8   S = sound selection-state slots (FUN_0082e370 allocates S u32s per cue, 0xFFFFFFFF)
 //!     +0x16  u16  0
-//!     +0x18  f32  unknown        +0x1C f32 unknown        +0x20 f32 unknown
+//!     +0x18  f32  play probability (FUN_008354e0)
+//!     +0x1C  f32  loop start     +0x20 f32 loop end (FUN_00834a20 / FUN_00834a50)
 //!     +0x24  f32  unknown (FUN_00834ad0 loads it into the cue's runtime timer on each start)
 //!     +0x28  u32  event records   (= 0x44)       +0x2C u32 event offset table
 //!     +0x30  u32  track records                  +0x34 u32 track offset table
@@ -31,9 +32,9 @@
 //! **Track** (offsets relative to the track):
 //!
 //! ```text
-//! +0x00 u8  unknown (copied to the track instance at +0xD5 by FUN_0083bfc0)
+//! +0x00 u8  loop count (copied to the track instance at +0xD5 by FUN_0083bfc0)
 //! +0x01 u8  automation record count     +0x02 u8 sound count     +0x03 u8 0
-//! +0x04 f32 unknown                      +0x08 f32 unknown
+//! +0x04 f32 loop start                   +0x08 f32 loop end (FUN_0083c070)
 //! +0x0C u32 automation records (= 0x1C)  +0x10 u32 automation offset table
 //! +0x14 u32 sound records                +0x18 u32 sound offset table (the track ends after it)
 //! ```
@@ -61,9 +62,11 @@
 //! kind 5 / 6  volume / pitch curve on a parameter, and kind 8 (cue curve table only):
 //!             u32 unknown, u32 point count n, u32 parameter hash, u32 points offset (= 0x14),
 //!             n × {f32 x, f32 y}
-//! kind 4      17 words, meaning not established (FUN_0083b4a0 drops it from the active list)
-//! kind 7      u32 unknown, u32 hash (dropped like kind 4)
-//! kind 9      u32 unknown, u32 parameter hash or 0xFFFFFFFF, u32 parameter hash or 0xFFFFFFFF
+//! kind 4      f32 start, 6 × u8 jitter flags, u16 0, 6 × f32 jitter offsets, 2 × u32 not read,
+//!             6 × f32 base multipliers: the six output-channel multipliers (FUN_0083f8e0)
+//! kind 7      f32 start, u32 child cue guid (started when the track or cue finishes)
+//! kind 9      f32 start, u32 curve index or 0xFFFFFFFF, u32 curve index or 0xFFFFFFFF: evaluates
+//!             kind-8 curves into cue +0x84 / +0x88 (the cue filter's parameters, INFERRED)
 //! ```
 //!
 //! Any other kind, or a record whose size does not match its kind, is a hard error.
@@ -159,26 +162,29 @@ pub enum Automation {
         /// The `{x, y}` points (count at `+0x08`).
         points: Vec<(f32, f32)>,
     },
-    /// Kind 4: 17 words after the kind, meaning not established.
+    /// Kind 4: the six output-channel multipliers (`FUN_0083f8e0`, see [`crate::automation`]).
     Kind4 {
-        /// The words at `+0x04`..`+0x47`, bit-exact.
+        /// The words at `+0x04`..`+0x47`, bit-exact: `+0x04` activation time (`f32`), `+0x08`..`+0x0D`
+        /// one jitter flag byte per record channel, `+0x10`..`+0x24` six jitter offsets, `+0x28` and
+        /// `+0x2C` not read by the engine, `+0x30`..`+0x44` six base multipliers.
         words: [u32; 17],
     },
-    /// Kind 7.
+    /// Kind 7: the child cue a track (or, in the event table, the cue) starts when it finishes.
     Kind7 {
-        /// `+0x04`, unknown.
-        unknown_04: u32,
-        /// `+0x08` a hash.
-        hash: u32,
+        /// `+0x04` activation time, as `f32` bits.
+        start_bits: u32,
+        /// `+0x08` the child cue's guid.
+        cue: u32,
     },
-    /// Kind 9: two parameter references.
+    /// Kind 9: evaluates up to two of the cue's kind-8 curves into cue `+0x84` / `+0x88` (the cue's
+    /// filter parameters, INFERRED; see [`crate::automation`]).
     Kind9 {
-        /// `+0x04`, unknown.
-        unknown_04: u32,
-        /// `+0x08` parameter hash, or 0xFFFFFFFF for none.
-        param_a: u32,
-        /// `+0x0C` parameter hash, or 0xFFFFFFFF for none.
-        param_b: u32,
+        /// `+0x04` activation time, as `f32` bits.
+        start_bits: u32,
+        /// `+0x08` index into the cue curve table (the engine uses its low byte), or 0xFFFFFFFF.
+        curve_a: u32,
+        /// `+0x0C` index into the cue curve table (the engine uses its low byte), or 0xFFFFFFFF.
+        curve_b: u32,
     },
 }
 
@@ -215,11 +221,11 @@ pub struct Sound {
 /// One track.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Track {
-    /// `+0x00`, unknown.
+    /// `+0x00` loop count: 0 plays once, `0xFF` loops for ever (`FUN_0083c070`).
     pub byte_00: u8,
-    /// `+0x04`, unknown.
+    /// `+0x04` loop start: where the track time resumes after a loop.
     pub unknown_04: f32,
-    /// `+0x08`, unknown.
+    /// `+0x08` loop end: the track time at which it loops.
     pub unknown_08: f32,
     /// The track's automation records.
     pub automation: Vec<Automation>,
@@ -230,15 +236,15 @@ pub struct Track {
 /// A multi-track cue body (everything after the 16-byte cue head).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MultiTrackCue {
-    /// `+0x10`, unknown.
+    /// `+0x10` loop count: 0 plays once, `0xFF` loops for ever (`FUN_00835060`).
     pub byte_10: u8,
     /// `+0x15` the number of selection-state slots the cue's sounds share.
     pub sound_slots: u8,
-    /// `+0x18`, unknown.
+    /// `+0x18` play probability: the cue plays only if this is not below one draw (`FUN_008354e0`).
     pub unknown_18: f32,
-    /// `+0x1C`, unknown.
+    /// `+0x1C` loop start: where the cue time resumes after a loop.
     pub unknown_1c: f32,
-    /// `+0x20`, unknown.
+    /// `+0x20` loop end: the cue time at which it loops.
     pub unknown_20: f32,
     /// `+0x24`, unknown (loaded into the cue's runtime timer at each start).
     pub unknown_24: f32,
@@ -415,14 +421,14 @@ fn parse_automation(c: &[u8], s: usize, e: usize) -> R<Automation> {
         }
         7 => {
             words(2)?;
-            Automation::Kind7 { unknown_04: r32(c, s + 4, "+0x04")?, hash: r32(c, s + 8, "hash")? }
+            Automation::Kind7 { start_bits: r32(c, s + 4, "+0x04")?, cue: r32(c, s + 8, "child cue")? }
         }
         9 => {
             words(3)?;
             Automation::Kind9 {
-                unknown_04: r32(c, s + 4, "+0x04")?,
-                param_a: r32(c, s + 8, "parameter")?,
-                param_b: r32(c, s + 12, "parameter")?,
+                start_bits: r32(c, s + 4, "+0x04")?,
+                curve_a: r32(c, s + 8, "curve index")?,
+                curve_b: r32(c, s + 12, "curve index")?,
             }
         }
         kind => return Err(MultiTrackError::UnknownKind { offset: s, kind }),
@@ -466,16 +472,16 @@ fn write_automation(out: &mut Vec<u8>, a: &Automation) {
                 put_u32(out, *w);
             }
         }
-        Automation::Kind7 { unknown_04, hash } => {
+        Automation::Kind7 { start_bits, cue } => {
             put_u32(out, 7);
-            put_u32(out, *unknown_04);
-            put_u32(out, *hash);
+            put_u32(out, *start_bits);
+            put_u32(out, *cue);
         }
-        Automation::Kind9 { unknown_04, param_a, param_b } => {
+        Automation::Kind9 { start_bits, curve_a, curve_b } => {
             put_u32(out, 9);
-            put_u32(out, *unknown_04);
-            put_u32(out, *param_a);
-            put_u32(out, *param_b);
+            put_u32(out, *start_bits);
+            put_u32(out, *curve_a);
+            put_u32(out, *curve_b);
         }
     }
 }
@@ -749,7 +755,7 @@ mod tests {
                             period_s: 2.0,
                             depth: 0.1,
                         },
-                        Automation::Kind9 { unknown_04: 0, param_a: 0x15BA_509E, param_b: 0xFFFF_FFFF },
+                        Automation::Kind9 { start_bits: 0, curve_a: 0, curve_b: 0xFFFF_FFFF },
                     ],
                     sounds: vec![Sound {
                         slot: 1,
