@@ -30,31 +30,11 @@
 //!
 //! All arithmetic is single-precision in the order the engine evaluates it.
 
-/// The engine's sound random generator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PalRng {
-    /// The generator state (`DAT_00dfcd1c`).
-    pub state: u32,
-}
-
-const MUL: u32 = 0x0019_660D;
-const ADD: u32 = 0x3C6E_F35F;
-
-impl PalRng {
-    /// A generator seeded as the engine seeds it (the low 32 bits of `QueryPerformanceCounter` at Pal
-    /// init).
-    pub fn new(seed: u32) -> PalRng {
-        PalRng { state: seed }
-    }
-
-    /// One draw in `[0, 1)`, advancing the state twice.
-    pub fn next_unit(&mut self) -> f32 {
-        let u = self.state.wrapping_mul(MUL).wrapping_add(ADD);
-        let x = u.wrapping_mul(MUL).wrapping_add(ADD);
-        self.state = x;
-        f32::from_bits((((x & 0xFFFF_01FF) | (u >> 16)) >> 9) | 0x3F80_0000) - 1.0
-    }
-}
+/// The engine's sound random generator: the engine's one generator ([`mercs2_core::random::Lcg`])
+/// over its own state `DAT_00dfcd1c`, seeded as the engine seeds it (the low 32 bits of
+/// `QueryPerformanceCounter` at Pal init) through `PalRng::new`. The game's global random state
+/// `DAT_00DFCBAC` runs the same generator and is a different state (`mercs2_core::random`).
+pub use mercs2_core::random::Lcg as PalRng;
 
 /// The value every selection state starts at.
 pub const STATE_INIT: u32 = 0xFFFF_FFFF;
