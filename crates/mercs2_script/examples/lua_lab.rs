@@ -253,9 +253,9 @@ impl EngineHost for LabHost {
     fn ai_set_state(&mut self, guid: u64, state: &str, on: bool) -> bool {
         self.gated(&format!("Ai.SetState({guid}, \"{state}\", {on})"), guid)
     }
-    fn sound_cue(&mut self, cue: &str) -> u64 {
-        self.call(&format!("Sound.Cue(\"{cue}\")"), true, "");
-        self.printed.push(format!("Sound.Cue({cue})"));
+    fn sound_cue(&mut self, emitter: u64, cue: &str) -> u64 {
+        self.call(&format!("Sound.CueSound({emitter}, \"{cue}\")"), true, "");
+        self.printed.push(format!("Sound.CueSound({emitter}, {cue})"));
         1
     }
 }
