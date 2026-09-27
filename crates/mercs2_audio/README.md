@@ -21,8 +21,10 @@ everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving th
   follow the cue's and track's volume / pitch ramps, LFOs, parameter curves and output-channel
   multipliers; tracks and cues loop, and child cues start when they finish or are stopped.
 * **Voice pool** — allocation, priority-steal when the pool is full, and a 16-state per-instance FSM.
-* **Software mixer** — int32 accumulator → saturating clamp → interleaved int16, per-voice
-  resampling from a clip's native rate to the mixer rate.
+* **Software mixer** — the engine's per-source path: each source (the 2D sources, one per positional
+  emitter) mixes its waves into a 6-channel int32 scratch buffer with the wave kernel's integer gains
+  and 32.32 fixed-point step, runs each wave's filter over that buffer, and commits it into the
+  6-channel accumulator; the accumulator saturates to int16 for the device.
 * **3D** — up to 4 listeners, closest-listener selection, distance attenuation, stereo pan, Doppler
   pitch, and the distance-derived start delay.
 * **Categories** — per-category volume/pitch with timed fades, plus a ref-counted master duck.
@@ -92,10 +94,10 @@ facts that matter most:
   (optionally jittered by the generator) for the step it activates in; an instance multiplies its own
   multipliers by every update's, so they stay; channels 0 and 1 scale the left and right outputs.
   Kind 7 names the child cue a track (or cue) starts when it finishes, or when it is stopped. Kind 9
-  evaluates the cue's kind-8 curves into the cutoff and resonance of a biquad low-pass filter the wave
-  carries; the engine runs that filter in place over the wave's *source* mix buffer (every wave of
-  that source mixed so far in the pass), and this crate's mixer has no per-source buffers, so a cue
-  that carries kind 9 is refused (`CueError::Automation`).
+  evaluates the cue's curves into the cutoff and resonance of a biquad low-pass filter (`filter`) each
+  of the cue's waves carries (`FUN_00839db0` scans the first *curve-count* events for it); the mixer
+  runs that filter in place over the wave's *source* scratch buffer — every wave of that source
+  mixed so far in the pass — as the engine's `FUN_0083b120` does.
 * **Looping waves.** A multi-wave group's `+0x2C` loop count plays its wave `1 + count` times back
   to back (`FUN_00839e90`: at the end of the data a non-zero count wraps the read position back by
   the data length, keeping the overshoot, and counts down). `0xFF` is no special case: 256 plays. An
@@ -106,6 +108,16 @@ facts that matter most:
   (`FUN_00837830` at `0x008378A9`), and from the shared 2D mix otherwise. No distance start delay is
   added: the engine adds one only for a group whose `+0x44` byte is set, and no retail group sets it.
 * **An instance's final volume is clamped to [0, 1]** before it is mixed (`0x008373AA`).
+* **The mix path** (`MixSources` `FUN_00836610`): per source, `FUN_0083ade0` zeroes the scratch
+  (`frames × 6` int32); each wave (`FUN_00839ae0`) turns its volume into integer gains
+  `trunc(clamp(g, 0, 2) × 32768)`, advances silently when the master gain is 19 or less, and otherwise
+  mixes nearest samples at step `(freq << 32) / rate` — a mono wave into all six channels, a stereo wave
+  left into 0/2/4 and right into 1/3/5 (`FUN_0083e970` / `FUN_0083eb00`); the wave's filter then runs
+  over the scratch; `FUN_0083afc0` adds `trunc(scratch × gain + acc)` into the accumulator; `FUN_0083cbf0`
+  saturates it. The engine's stream is always six channels; a two-channel device takes channels 0 and 1
+  and a one-channel device channel 0 (standing in for DirectSound's fold-down), a device of 3–5
+  channels is refused. A positional source's gains are the left/right gains of `spatial`, not the
+  engine's speaker gains (`DEFERRED.md`).
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
@@ -223,8 +235,9 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   groups, single- and multi-track cues) → the three table bodies; the `UI_PDA_OPEN_*` presets and the
   retail category table.
 * **`voice`** — `VoicePool`: acquire, priority-steal, the 16-state `InstanceState` FSM.
-* **`mixer`** — `Mixer`: int32 accumulate → saturate int16; `SampleSource` trait, `PcmSource`
-  (with resampling), `ToneSource`.
+* **`mixer`** — `Mixer`: the per-source mix path (scratch, wave kernel, filter, commit, saturate);
+  `SampleSource` trait, `PcmSource` (the wave kernel's 32.32 step and loop wrap), `ToneSource`.
+* **`filter`** — `Biquad`: the kind-9 low-pass filter's parameters, coefficients and processing.
 * **`spatial`** — `Listener`/`ListenerSet` (max 4), `distance_attenuation`, `stereo_pan`,
   `doppler_pitch`, `start_delay_secs`.
 * **`categories`** — per-category volume/pitch fades + ref-counted master duck.
@@ -264,12 +277,15 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   the previous frame's cue volume and pitch before it evaluates the cue's own event table.
 * **Refused at start, never played partially:** a cue whose chain does not resolve
   (`CueError::Resolve` says why: a bank not resident, a streamed wave, an empty choice list, an unknown
-  selection mode, a bad index); the filter curves (kind 9); kind-4 channel multipliers on a mixer with
-  more than two outputs; a curve whose parameter is unset or lies past its last point (the engine
-  reads out of bounds there); a kind-7 child that is refused itself. Over the 1,198 retail `vz.wad`
-  cues, 1,012 resolve and **1,010 play** (66 loop a track or the cue, 277 reach a looping wave, 4
-  start a child cue); **2** (`0xD8CE1427`, `0xF23B9836`) are refused for kind 9 — named in
-  `tests/retail_banks.rs`. With `English.wad`'s wavebanks resident, 1,017 of 1,019 play.
+  selection mode, a bad index); a curve whose parameter is unset or lies past its last point (the
+  engine reads out of bounds there), or a kind-9 curve index past the curve table; a cue with more
+  curves than events (`CueError::FilterScan`: the filter scan would read past the event table); a
+  kind-7 child that is refused itself. Over the 1,198 retail `vz.wad` cues, 1,012 resolve and
+  **all 1,012 play** (66 loop a track or the cue, 278 reach a looping wave, 2 — `0xD8CE1427`,
+  `0xF23B9836` — mix audibly through the kind-9 filter, 4 start a child cue); with `English.wad`'s
+  wavebanks resident, all 1,019 play (`tests/retail_banks.rs`).
+* **Global parameters** the catalog declares start at 0.0 (`FUN_00835b80` / `0x008335A0`); one it does
+  not declare reads −1.0. `SoundDb::merge` merges categories and parameters as well as cues.
 * **The random generator is the engine's** (`select::PalRng`); the engine seeds it at startup with
   the low 32 bits of `QueryPerformanceCounter`, so `set_rng_seed` is how a host makes playback
   repeatable.
@@ -281,8 +297,8 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **The 9 retail `return 0` stubs** (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful
   no-ops here.
 * One `MusicStateMachine` models **one region**; the exe holds one per region. Streamed `.pws` voices
-  (`OpenStreamFile`/`CloseStreamFile` record intent only), the cue filter, Doppler
-  folded into the mix, and surround channel-gain matrices are tracked in `DEFERRED.md` — all tagged
+  (`OpenStreamFile`/`CloseStreamFile` record intent only), Doppler folded into the mix, and a
+  positional source's speaker gains are tracked in `DEFERRED.md` — all tagged
   `[faithful-blocker: no]`.
 * The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
   `mercs2_engine` owner's edit (see the "Binding-wiring seam" docs in `engine.rs`). Every engine body
