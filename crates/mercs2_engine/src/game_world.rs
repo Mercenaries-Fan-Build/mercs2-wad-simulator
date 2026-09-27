@@ -1040,7 +1040,7 @@ pub fn load_streaming_world_data(
         mercs2_formats::world_index::WorldIndex::build(archive, file)
     };
     progress.step("world index");
-    let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg)?;
     let base_props = props.len();
 
     // Dynamic lights: harvest LightObject COMPs (joined to their entity Transform for a world
@@ -2259,7 +2259,8 @@ mod terrain_texture_tests {
         let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
             return eprintln!("skip: terrain blocks not found");
         };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+            .expect("every TerrainObject has a Transform");
         let Some(tile) = tiles.into_iter().find(|t| {
             wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok()
         }) else {
@@ -2314,7 +2315,8 @@ mod terrain_texture_tests {
         let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
             return eprintln!("skip: terrain blocks not found");
         };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+            .expect("every TerrainObject has a Transform");
 
         // (a) Find a tile whose material set carries >=2 blendable detail diffuses beyond base0 +
         // the global 3B030C8A constant — i.e. a group layerset of len >= 4 — while AGGREGATING the
@@ -2420,7 +2422,8 @@ mod terrain_texture_tests {
         let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
             return eprintln!("skip: terrain blocks not found");
         };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+            .expect("every TerrainObject has a Transform");
         let Some(tile) = tiles
             .into_iter()
             .find(|t| wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok())
