@@ -295,7 +295,8 @@ pub struct GroupHeadParams {
 /// A multi-wave group's fields after the head (see [`crate::soundbank::MultiGroup`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MultiGroupParams {
-    /// `+0x2C`, unknown.
+    /// `+0x2C` the wave loop count (0 plays once; a cue that can reach a non-zero count is refused
+    /// by [`crate::AudioEngine::cue_sound`]).
     pub byte_2c: u8,
     /// `+0x2E` selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
     /// immediate repeat.
@@ -306,13 +307,14 @@ pub struct MultiGroupParams {
     pub unknown_30: f32,
     /// `+0x34`, unknown.
     pub unknown_34: f32,
-    /// `+0x3C`, unknown.
+    /// `+0x3C` start delay `a`: the delay is drawn in `[max(a − b, 0), b + a]`.
     pub unknown_3c: f32,
-    /// `+0x40`, unknown.
+    /// `+0x40` start delay `b`.
     pub unknown_40: f32,
     /// `+0x48`, unknown flags.
     pub word_48: u32,
-    /// `+0x4C`..`+0x63`, unknown.
+    /// `+0x4C`..`+0x63`: `[1]`/`[2]` the base volume range, `[4]`/`[5]` the base pitch range
+    /// (semitones), `[0]` and `[3]` unknown.
     pub floats_4c: [f32; 6],
     /// `+0x64`, unknown.
     pub unknown_64: f32,
@@ -325,9 +327,9 @@ pub enum GroupFormSpec {
     Single {
         /// Index into [`TablesSpec::waves`].
         wave: usize,
-        /// `+0x2C` linear gain.
+        /// `+0x2C` the sound instance's base volume.
         gain: f32,
-        /// `+0x30`, unknown.
+        /// `+0x30` the sound instance's base pitch, semitones.
         unknown_30: f32,
         /// The wave reference's weight.
         weight: f32,
@@ -853,11 +855,11 @@ mod tests {
         for want in [0u32, 1, 2, 0] {
             let h = eng.cue_sound(entry.guid, None).expect("the cue starts");
             eng.tick(0.1);
-            let first: Vec<u32> = eng.cue_instances(h).iter().map(|i| i.wave_index).collect();
+            let first: Vec<u32> = eng.cue_instances(h).iter().map(|i| i.wave.expect("a picked wave").index).collect();
             assert_eq!(first, vec![want], "only track 0's sound has started");
             eng.tick(0.1);
             eng.tick(0.1);
-            let all: Vec<u32> = eng.cue_instances(h).iter().map(|i| i.wave_index).collect();
+            let all: Vec<u32> = eng.cue_instances(h).iter().map(|i| i.wave.expect("a picked wave").index).collect();
             assert_eq!(all, vec![want, 3]);
             eng.stop_sound(h);
         }
