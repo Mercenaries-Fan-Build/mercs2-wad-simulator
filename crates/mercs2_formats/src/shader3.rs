@@ -708,6 +708,8 @@ fn align_up(n: usize) -> usize {
 
 /// Rebuilds a shader store in the retail layout. The `others` a mutation takes are every other
 /// store the engine loads alongside this one: their ids share the engine's one id table.
+/// `FUN_0084f130` always loads `shader3.bin` and `shader3Low.bin`, then either `shaderVT.bin` +
+/// `shaderVTLow.bin` (caps bit 2) or `shaderR2VB.bin` + `shaderR2VBLow.bin` (bit 3), never both.
 #[derive(Debug, Clone, Default)]
 pub struct StoreBuilder {
     entries: Vec<StoreEntry>,
