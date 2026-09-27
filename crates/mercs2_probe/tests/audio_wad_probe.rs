@@ -80,7 +80,8 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     assert!(resolvable > 0, "no cue routed to a resident decoded wave");
 
     // Play the first resolvable cue the engine starts through the real mixer path; assert it produced
-    // audible PCM. Only a cue whose looping or automation the engine refuses is passed over.
+    // audible PCM. Only a cue the engine refuses to play (a looping wave, the filter curves, channel
+    // multipliers it has no outputs for, or such a child) is passed over.
     eng.set_sounddb(catalog.clone());
     let mut started = None;
     for c in &catalog.cues {
@@ -92,7 +93,7 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
                 started = Some(c);
                 break;
             }
-            Err(CueError::Looping { .. } | CueError::Automation(_)) => {}
+            Err(CueError::Looping { .. } | CueError::Automation(_) | CueError::Channels { .. } | CueError::Child { .. }) => {}
             Err(e) => panic!("cue 0x{:08X}: {e}", c.guid),
         }
     }
