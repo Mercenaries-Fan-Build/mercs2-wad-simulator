@@ -23,7 +23,7 @@ mercs2_audio = { path = "crates/mercs2_audio", version = "1.2.3" }
 mercs2_script = { path = "crates/mercs2_script", version = "2.0.2" }
 mercs2_physics = { path = "crates/mercs2_physics", version = "1.1.1" }
 mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.1.2" }
-mercs2_destruction = { path = "crates/mercs2_destruction", version = "1.1.0" }
+mercs2_destruction = { path = "crates/mercs2_destruction", version = "1.1.1" }
 mercs2_ai = { path = "crates/mercs2_ai", version = "1.0.3" }
 mercs2_anim = { path = "crates/mercs2_anim", version = "1.1.2" }
 mercs2_water = { path = "crates/mercs2_water", version = "1.2.2" }
