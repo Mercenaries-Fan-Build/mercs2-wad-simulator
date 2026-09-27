@@ -854,36 +854,58 @@ pub fn glow_card_for_effect(
     })
 }
 
-/// Load and parse an effect from the `effects` block by name-hash
+/// Load and parse an effect by name-hash
 /// ([`parse_effect_container`](mercs2_formats::fxdict::parse_effect_container)). Feeds
 /// [`EmitterDesc::from_effect`](crate::particles::EmitterDesc::from_effect) so authored
-/// fire/smoke/steam effects drive the particle sim with real params. `Ok(None)` if the block or the
-/// effect isn't there; `Err` if it is there and does not parse.
+/// fire/smoke/steam effects drive the particle sim with real params.
+///
+/// The block comes from the effect's own ASET row (`asset_hash == name_hash`,
+/// `type_id == TYPE_ID_EFFECT`) — the WAD's index of where the asset lives — not from a block path.
+/// Picking "the first path containing `effect`" landed on `text_effect_P000_Q3` (block 3117, which
+/// sorts before `effects_P000_Q3`, block 3459), so no effect ever loaded.
+///
+/// `Ok(None)` when the WAD has no effect row for the name; `Err` when it has one but the named
+/// block does not hold the container, or the container does not parse.
 pub fn load_effect(
     w: &mut wad::Wad,
     name_hash: u32,
 ) -> Result<Option<mercs2_formats::fxdict::EffectContainer>, String> {
-    use mercs2_formats::types::TYPE_HASH_EFFECT;
-    let paths: Vec<String> = wad::block_paths(w).to_vec();
-    let Some(blk) = paths.iter().position(|p| p.to_ascii_lowercase().contains("effect")) else {
-        return Ok(None);
+    use mercs2_formats::types::{TYPE_HASH_EFFECT, TYPE_ID_EFFECT};
+    let mut blocks: Vec<u16> = {
+        let (archive, _) = wad::archive_and_file(w);
+        archive
+            .aset
+            .iter()
+            .filter(|a| a.asset_hash == name_hash && a.type_id == TYPE_ID_EFFECT)
+            .flat_map(|a| a.lod_chain())
+            .filter(|&b| b != 0xFFFF)
+            .collect()
     };
-    let dec = wad::decompress_block_index(w, blk as u16)?;
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-    let mut pos = 4 + count as usize * 16;
-    for e in &entries {
-        let end = pos + e.chunk_size as usize;
-        if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == name_hash {
-            let c = dec
-                .get(pos..end)
-                .ok_or_else(|| format!("effect 0x{name_hash:08X} runs past its block"))?;
-            return mercs2_formats::fxdict::parse_effect_container(c)
-                .map(Some)
-                .map_err(|err| format!("effect 0x{name_hash:08X}: {err}"));
-        }
-        pos = end;
+    blocks.sort_unstable();
+    blocks.dedup();
+    if blocks.is_empty() {
+        return Ok(None);
     }
-    Ok(None)
+    for &blk in &blocks {
+        let dec = wad::decompress_block_index(w, blk)?;
+        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        let mut pos = 4 + count as usize * 16;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == name_hash {
+                let c = dec
+                    .get(pos..end)
+                    .ok_or_else(|| format!("effect 0x{name_hash:08X} runs past block {blk}"))?;
+                return mercs2_formats::fxdict::parse_effect_container(c)
+                    .map(Some)
+                    .map_err(|err| format!("effect 0x{name_hash:08X}: {err}"));
+            }
+            pos = end;
+        }
+    }
+    Err(format!(
+        "the ASET row for effect 0x{name_hash:08X} names blocks {blocks:?}, and none holds the container"
+    ))
 }
 
 /// Read an environmental light-shaft effect and recover `(TRFM scale, COLR peak colour, COLR peak
