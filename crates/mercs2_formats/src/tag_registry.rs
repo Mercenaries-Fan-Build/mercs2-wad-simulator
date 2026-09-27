@@ -72,7 +72,9 @@ pub struct TagInfo {
 use Subsystem::*;
 use Verify::*;
 
-/// Every dispatched FourCC (232 entries), grouped by subsystem then status.
+/// Every dispatched FourCC: the 232 from the `cmp eax, imm32` scan plus `EFCT`, `ANIM` and `AKEY`,
+/// which the effect loader reads by position in the tree rather than by comparing the tag (235
+/// entries), grouped by subsystem then status.
 pub const TAG_REGISTRY: &[TagInfo] = &[
     // --- UcfxAsset ---
     TagInfo { fourcc: *b"AREA", handler_va: 0x0047830a, subsystem: UcfxAsset, verify: Validated, note: "container walk @0x4a4ab0; reads 4-byte 'info' header per child; no fixed array" },
@@ -112,6 +114,8 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo { fourcc: *b"flgt", handler_va: 0x00654f22, subsystem: UcfxAsset, verify: Registered, note: "" },
     TagInfo { fourcc: *b"sequ", handler_va: 0x0067bfaa, subsystem: UcfxAsset, verify: Registered, note: "" },
     TagInfo { fourcc: *b"ASTO", handler_va: 0x0067c780, subsystem: UcfxAsset, verify: Validated, note: "anim struct @FUN_0067c780 (decomp): reads u32 count then count*4 alloc (overflow-guarded). Validated: body >= 4" },
+    TagInfo { fourcc: *b"AKEY", handler_va: 0x00493150, subsystem: UcfxAsset, verify: Validated, note: "curve key, child of ANIM: 8 B {f32 time (0..100 in retail), f32 value}; read as a pair per key by FUN_00493150 (TRFM channels; PTYP curves go through the relocated handlers 0x024EEC10 / 0x024E2380). Read positionally, no FourCC compare — the VA is the reader's entry. Every retail AKEY is 8 B. Validated: body >= 8" },
+    TagInfo { fourcc: *b"ANIM", handler_va: 0x00493150, subsystem: UcfxAsset, verify: Validated, note: "ATRB curve: 4 B u32 key count = its number of AKEY children (1,880 retail curves, count always equal); FUN_00493150 reads it, allocates count x 8 and walks the AKEYs. Read positionally, no FourCC compare — the VA is the reader's entry. Validated: body >= 4" },
     TagInfo { fourcc: *b"ATRB", handler_va: 0x00492b1c, subsystem: UcfxAsset, verify: Validated, note: "effect attribute @0x492b1c: 12 B {u32 hash, u32 flags, u32|f32 value}; the hash selects the reader. Flag bit 0 = f32 value, bit 10 = owns an ANIM child (u32 key count) with AKEY children (8 B {f32 time, f32 value}); bits 7/8/9 authored. Every retail ATRB is 12 B. Validated: body >= 4" },
     TagInfo { fourcc: *b"BSHI", handler_va: 0x00478318, subsystem: UcfxAsset, verify: Validated, note: "blendshape index @FUN_00478270 (decomp): reads count*2 u16 array (count from INFO param_1[0x6a]); converter swaps u16. Validated: body % 2 == 0" },
     TagInfo { fourcc: *b"BSHP", handler_va: 0x004a4770, subsystem: UcfxAsset, verify: Registered, note: "blendshape data @FUN_004a4770 (decomp): container-walker that finds a child data chunk (0x61746164) and resolves its offset (NOT a count*0x18 array). Recognized/benign" },
@@ -120,6 +124,7 @@ pub const TAG_REGISTRY: &[TagInfo] = &[
     TagInfo { fourcc: *b"DATA", handler_va: 0x0045f187, subsystem: UcfxAsset, verify: Registered, note: "ECS entity data @0x45f187: delegates body parse to template builder 0x631c90; no self-contained body invariant. Recognized/benign (distinct from lowercase data)" },
     TagInfo { fourcc: *b"DEBR", handler_va: 0x0045f9a8, subsystem: UcfxAsset, verify: Validated, note: "ECS debris ref array @0x45f9a8: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0" },
     TagInfo { fourcc: *b"DECL", handler_va: 0x0045dbb0, subsystem: UcfxAsset, verify: Registered, note: "context-dependent: ECS-template DECL @FUN_0045dbb0 is count×0x24 ([u32 id][0x20 blob]), but DECL in other asset types (material/resident) has a different layout, so no context-blind body invariant (retail block 3185 has a 10000-byte DECL)" },
+    TagInfo { fourcc: *b"EFCT", handler_va: 0x00491920, subsystem: UcfxAsset, verify: Validated, note: "effect root: 18 B = 9 x u16 read by FUN_00491920 before its child walk — [0] emitters, [1] magic 0x0226 (skipped), [2] forces, then three (entries, words) table reservations ([3],[4] linear curves; [5],[6] 0; [7],[8] COLR/TEXT/resampled curves). Computed, 314/314 retail match. u16 fields: a u32 swap breaks it (convert_efct_header_inplace). The VA is the reader's entry. Validated: body >= 18" },
     TagInfo { fourcc: *b"EMIT", handler_va: 0x00492703, subsystem: UcfxAsset, verify: Registered, note: "emitter @0x492703: a MARKER row (no body) whose children are TRFM (+ 9 channel ATRBs) and an optional 4-byte GEOM, walked by FUN_0048cc30. Every retail EMIT is a marker. Recognized/benign" },
     TagInfo { fourcc: *b"EMTR", handler_va: 0x00492402, subsystem: UcfxAsset, verify: Validated, note: "emitter shapes @0x492402: 2 B u16 = number of GEOM children (allocates count×4 pointers, overflow-guarded); each GEOM child = u32 k + k × 13 f32. Every retail EMTR is 2 B. Validated: body >= 2" },
     TagInfo { fourcc: *b"FRCE", handler_va: 0x00491c93, subsystem: UcfxAsset, verify: Validated, note: "force @0x491c93: u32 kind hash then fixed parameters — wind 0xC9F7A9D7 / gravity 0x14BD1BBD (20 B), drag 0xED791C4B (8 B), attractor 0xC235456B (32 B), vortex 0xF4D85A49 (60 B); an unknown kind reads nothing. Children: the force's ATRBs. Validated: body >= 4" },
@@ -380,5 +385,16 @@ mod tests {
         assert!(needs_investigation(*b"PTCH").is_none()); // now validated (record align)
         assert!(needs_investigation(*b"MESH").is_none()); // registered & benign
         assert!(needs_investigation(*b"NAME").is_none()); // registered & benign
+        assert!(needs_investigation(*b"EFCT").is_none()); // validated (18 B header)
+        assert!(needs_investigation(*b"ANIM").is_none()); // validated (u32 key count)
+        assert!(needs_investigation(*b"AKEY").is_none()); // validated (8 B key)
+    }
+
+    #[test]
+    fn effect_tree_tags_are_registered_ucfx_assets() {
+        for tag in [*b"EFCT", *b"EMTR", *b"EMIT", *b"TRFM", *b"GEOM", *b"PTYP", *b"ATRB", *b"ANIM", *b"AKEY", *b"COLR", *b"TEXT", *b"FRCE"] {
+            let t = classify(tag).unwrap_or_else(|| panic!("{} missing", String::from_utf8_lossy(&tag)));
+            assert_eq!(t.subsystem, Subsystem::UcfxAsset, "{}", String::from_utf8_lossy(&tag));
+        }
     }
 }
