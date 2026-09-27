@@ -126,7 +126,19 @@ facts that matter most:
   channels 0, 1, 4, 5 and 2, and LFE is 0. A wave whose group's `+0x14` is set takes the group's 3D
   parameters: a distance volume from `+0x18` / `+0x1C` / `+0x24` (`FUN_0083d3a0`,
   `1 − t^exponent`) that scales its gains, and a Doppler factor scaled by `+0x28` that scales its
-  frequency. The cue API carries no velocity, so emitters are at rest (`DEFERRED.md`).
+  frequency.
+* **Emitters move with their objects.** `Sound.CueSound(emitter, cue)` is `cue_sound_on_object`: the
+  cue plays through the object's emitter record (one per object, its holder made at the object's
+  position, at rest, `FUN_00603B30`). Once a frame, before `tick`, the host calls
+  `update_object_emitters`, which is `FUN_006034B0` → `FUN_006036C0`: each record drops its finished
+  cues, its holder moves to the object's position plus a ±0.0002 jitter along a direction drawn from
+  **the game's global random state** (`DAT_00DFCBAC`, `mercs2_core::random`; four draws per record per
+  frame), its velocity becomes the finite difference `(new − old) / dt` (zero when `dt` is 0), and a
+  record with no cues left is freed. The engine never reads a physics velocity; this difference is
+  what the Doppler factor sees. A cue started with `cue_sound(cue, Some(position))` has its own
+  emitter, which `update_emitter` moves the same way. An object with no position leaves its emitter
+  where it is; the engine then also stops the record's cues that loop for ever (`FUN_00603D20`),
+  which is not modelled here (a `CONFIRM-LIVE` in `engine.rs`).
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
@@ -306,7 +318,7 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **The 9 retail `return 0` stubs** (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful
   no-ops here.
 * One `MusicStateMachine` models **one region**; the exe holds one per region. Streamed `.pws` voices
-  (`OpenStreamFile`/`CloseStreamFile` record intent only), emitter velocity, and the device
+  (`OpenStreamFile`/`CloseStreamFile` record intent only) and the device
   fold-down stand-in are tracked in `DEFERRED.md` — all tagged
   `[faithful-blocker: no]`.
 * The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
