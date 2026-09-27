@@ -393,11 +393,11 @@ fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     assert_eq!(vz_only.streamed.values().sum::<usize>(), 177);
     assert_eq!(vz_only.absent.values().map(Vec::len).sum::<usize>(), 9);
     assert_eq!(vz_only.resolved, 1198 - 177 - 9);
-    assert_eq!(vz_only.refused["a looping wave (group +0x2C)"], REFUSED_LOOPING_WAVE);
     assert_eq!(vz_only.refused["the filter curves (kind 9)"], REFUSED_FILTER);
-    assert_eq!(vz_only.refused.len(), 2, "no other refusal");
-    assert_eq!(vz_only.played, vz_only.resolved - REFUSED_LOOPING_WAVE.len() - REFUSED_FILTER.len());
-    assert_eq!(vz_only.played, 733);
+    assert_eq!(vz_only.refused.len(), 1, "no other refusal");
+    assert_eq!(vz_only.looping, LOOPING_WAVE, "every cue that reaches a looping wave plays");
+    assert_eq!(vz_only.played, vz_only.resolved - REFUSED_FILTER.len());
+    assert_eq!(vz_only.played, 1010);
 
     let Some(english) = english else {
         return eprintln!("SKIPPING the English.wad pass: English.wad not found beside vz.wad");
@@ -409,17 +409,17 @@ fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     assert_eq!(with_english.streamed.values().sum::<usize>(), 179);
     assert!(with_english.absent.is_empty());
     assert_eq!(with_english.resolved, 1198 - 179);
-    let mut looping: Vec<u32> = REFUSED_LOOPING_WAVE.iter().chain(&REFUSED_LOOPING_WAVE_ENGLISH).copied().collect();
+    let mut looping: Vec<u32> = LOOPING_WAVE.iter().chain(&LOOPING_WAVE_ENGLISH).copied().collect();
     looping.sort_unstable();
-    assert_eq!(with_english.refused["a looping wave (group +0x2C)"], looping);
+    assert_eq!(with_english.looping, looping);
     assert_eq!(with_english.refused["the filter curves (kind 9)"], REFUSED_FILTER);
-    assert_eq!(with_english.played, 735);
+    assert_eq!(with_english.refused.len(), 1, "no other refusal");
+    assert_eq!(with_english.played, 1017);
 }
 
-/// The `vz.wad` cues (sounddb guids) that resolve but are refused because a group they can reach
-/// loops its wave (`+0x2C` ≠ 0): the wave-level loop is read only behind the SecuROM-protected
-/// pointer at `0x0244F65C` (`FUN_00839e90` → `0x024B5EB0`), so how a wave repeats is not traced.
-const REFUSED_LOOPING_WAVE: [u32; 278] = [
+/// The `vz.wad` cues (sounddb guids) that can reach a group that loops its wave (`+0x2C` ≠ 0); the
+/// wave plays `1 + count` times (`FUN_00839e90`, see `mercs2_audio::mixer::PcmSource::with_loops`).
+const LOOPING_WAVE: [u32; 277] = [
     0x0016_FCE7, 0x00BD_27AB, 0x0585_E46D, 0x05A8_9198, 0x06C9_BEB2, 0x0745_A4F8, 0x0787_3231, 0x088B_F1D4,
     0x08DA_6515, 0x097F_1626, 0x0B8B_F9DB, 0x0CDF_A3A7, 0x0DF4_2E83, 0x10E8_4EAF, 0x113C_ACF2, 0x128D_7756,
     0x1594_8DB2, 0x1683_9356, 0x16B3_E27E, 0x174D_62D1, 0x178E_BD44, 0x1793_3A72, 0x19F9_C7B0, 0x1B2C_8599,
@@ -453,16 +453,16 @@ const REFUSED_LOOPING_WAVE: [u32; 278] = [
     0xE36B_4631, 0xE388_8734, 0xE40B_9F62, 0xE467_E3E5, 0xE587_97C5, 0xE5D5_10D8, 0xE810_4BF1, 0xE8AA_7210,
     0xE8C9_0E8D, 0xE90F_17D4, 0xE979_C660, 0xEA05_46E8, 0xEA67_7C41, 0xEA88_B1FB, 0xEB2E_2137, 0xEBBC_159D,
     0xEC33_A9B3, 0xEC48_3E3F, 0xECB8_826E, 0xECCB_2207, 0xEDD5_7EC3, 0xEE97_6688, 0xEEC3_EA85, 0xEF1D_3325,
-    0xEF54_4942, 0xF034_6812, 0xF129_A4FA, 0xF23B_9836, 0xF425_F957, 0xF7F1_5237, 0xF88C_4BFB, 0xF99A_8E4F,
-    0xFA7E_BB45, 0xFA82_AEE1, 0xFAED_86A8, 0xFC63_9562, 0xFE9E_7626, 0xFF9C_12D5,
+    0xEF54_4942, 0xF034_6812, 0xF129_A4FA, 0xF425_F957, 0xF7F1_5237, 0xF88C_4BFB, 0xF99A_8E4F, 0xFA7E_BB45,
+    0xFA82_AEE1, 0xFAED_86A8, 0xFC63_9562, 0xFE9E_7626, 0xFF9C_12D5,
 ];
 
-/// The cues that resolve only with `English.wad`'s wavebanks and are refused for the same reason.
-const REFUSED_LOOPING_WAVE_ENGLISH: [u32; 5] = [0x2417_22F2, 0x904F_C40D, 0xA156_2A38, 0xDF09_1314, 0xDF37_C1E2];
+/// The cues that resolve only with `English.wad`'s wavebanks and reach a looping wave too.
+const LOOPING_WAVE_ENGLISH: [u32; 5] = [0x2417_22F2, 0x904F_C40D, 0xA156_2A38, 0xDF09_1314, 0xDF37_C1E2];
 
-/// The cue refused because it carries a kind-9 record: the filter it drives runs over samples chosen
+/// The cues refused because they carry a kind-9 record: the filter it drives runs over samples chosen
 /// in `MixWavesToOutput` (`0x00838860`), reached only through a SecuROM-protected pointer.
-const REFUSED_FILTER: [u32; 1] = [0xD8CE_1427];
+const REFUSED_FILTER: [u32; 2] = [0xD8CE_1427, 0xF23B_9836];
 
 #[derive(Default)]
 struct Tally {
@@ -473,6 +473,8 @@ struct Tally {
     absent: BTreeMap<u32, Vec<u32>>,
     /// Refused cue guids, by reason.
     refused: BTreeMap<&'static str, Vec<u32>>,
+    /// Played cues that can reach a looping wave (a group `+0x2C` count), sorted.
+    looping: Vec<u32>,
 }
 
 fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
@@ -494,12 +496,16 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
                         multi_wave += 1;
                     }
                     let loops = r.multitrack.as_ref().is_some_and(|m| m.byte_10 != 0 || m.tracks.iter().any(|t| t.byte_00 != 0));
+                    let wave_loops = r.sounds.iter().any(|s| s.choices.iter().any(|c| c.loop_byte != 0));
                     match play_once(eng, e, &r) {
                         Ok((n, children)) => {
                             fired += n;
                             played += 1;
                             looped += usize::from(loops);
                             with_children += usize::from(children);
+                            if wave_loops {
+                                t.looping.push(e.guid);
+                            }
                         }
                         Err(err) => {
                             let key = refusal_key(&err);
@@ -518,11 +524,14 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
         }
     }
     t.played = played;
+    t.looping.sort_unstable();
     println!(
         "[{label}] {} retail cues: {} resolve ({multi_track} multi-track, {multi_wave} reaching a \
-         multi-wave group); {played} played for 2 s each ({looped} with a track or cue loop, \
-         {with_children} starting a child cue), firing {fired} sounds",
-        t.total, t.resolved
+         multi-wave group); {played} played for 2 s each ({looped} with a track or cue loop, {} \
+         reaching a looping wave, {with_children} starting a child cue), firing {fired} sounds",
+        t.total,
+        t.resolved,
+        t.looping.len()
     );
     for (key, guids) in &mut t.refused {
         guids.sort_unstable();
@@ -542,9 +551,7 @@ fn refusal_key(err: &mercs2_audio::CueError) -> &'static str {
     use mercs2_audio::automation::AutomationError;
     use mercs2_audio::CueError;
     match err {
-        CueError::Looping { .. } => "a looping wave (group +0x2C)",
         CueError::Automation(AutomationError::Unsupported { kind: 8 | 9 }) => "the filter curves (kind 9)",
-        CueError::Child { error, .. } if matches!(**error, CueError::Looping { .. }) => "a child cue that plays a looping wave",
         other => panic!("unexpected refusal: {other}"),
     }
 }
@@ -639,5 +646,56 @@ fn a_retail_fade_reaches_the_voices() {
         let gain = eng.pool.get(inst.voice.expect("a voice")).expect("voice").gain;
         println!("track ramp {from}->{to} over {duration_s}s: t={t} factor {ramp}, voice gain {gain}");
         assert_eq!(gain, inst.volume * (ramp * cue_volume));
+    }
+}
+
+/// Whether a sound instance is positional comes from its group's `+0x14` byte (`FUN_00837830`,
+/// `0x008378A9`), not from the sounddb record, which has no flag field. On retail `vz.wad`: every
+/// group's `+0x14` word is 0 or 1; a cue started at a position gives instances of a `+0x14` = 1
+/// group a positional voice and instances of a `+0x14` = 0 group a 2D one.
+#[test]
+fn group_plus_0x14_decides_whether_an_instance_is_positional() {
+    let Some(tables) = retail_tables() else { return };
+    let mut eng = AudioEngine::default();
+    eng.set_rng_seed(9);
+    let (mut set, mut clear) = (0, 0);
+    for t in of_type(tables, TYPE_HASH_WAVEBANK) {
+        eng.load_wavebank(&t.body).expect("wavebank loads");
+    }
+    for t in of_type(tables, TYPE_HASH_SOUNDBANK) {
+        eng.load_soundbank(&t.body).expect("soundbank loads");
+        for g in &Soundbank::parse(&t.body).expect("soundbank").groups {
+            match g.head.unknown_14 {
+                0 => clear += 1,
+                1 => set += 1,
+                other => panic!("group +0x14 = {other}"),
+            }
+        }
+    }
+    let mut catalog = SoundDb::default();
+    for t in of_type(tables, TYPE_HASH_SOUNDDB) {
+        catalog.merge(&SoundDb::parse(&t.body).expect("sounddb"));
+    }
+    eng.set_sounddb(catalog.clone());
+    println!("group +0x14: {set} groups set, {clear} clear");
+    assert!(set > 0 && clear > 0);
+    let single = |want: bool| {
+        catalog.cues.iter().find(|c| {
+            eng.resolve_cue(c).is_ok_and(|r| {
+                r.multitrack.is_none() && r.sounds[0].choices[0].positional == want
+            })
+        })
+    };
+    let (Some(pos_cue), Some(flat_cue)) = (single(true).copied(), single(false).copied()) else {
+        panic!("retail has single-track cues on both kinds of group")
+    };
+    let at = Some(mercs2_core::glam::Vec3::new(3.0, 0.0, 0.0));
+    for (cue, want) in [(pos_cue, true), (flat_cue, false)] {
+        let h = eng.cue_sound(cue.guid, at).expect("the cue plays");
+        eng.tick(0.02);
+        assert_eq!(eng.cue_instances(h)[0].positional, want, "cue 0x{:08X}", cue.guid);
+        let h2 = eng.cue_sound(cue.guid, None).expect("the cue plays");
+        eng.tick(0.02);
+        assert!(!eng.cue_instances(h2)[0].positional, "no position, no emitter: 2D");
     }
 }
