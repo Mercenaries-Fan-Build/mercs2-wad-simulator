@@ -18,7 +18,8 @@ everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving th
   one of the three codecs re-encodes all retail tables in `vz.wad` byte-identically.
 * **Cue playback** — a started cue advanced frame by frame as the engine advances it: sounds fire at
   their start times, pick their groups and waves, draw their base volume / pitch / start delay, and
-  follow the cue's and track's volume / pitch ramps, LFOs and parameter curves.
+  follow the cue's and track's volume / pitch ramps, LFOs, parameter curves and output-channel
+  multipliers; tracks and cues loop, and child cues start when they finish or are stopped.
 * **Voice pool** — allocation, priority-steal when the pool is full, and a 16-state per-instance FSM.
 * **Software mixer** — int32 accumulator → saturating clamp → interleaved int16, per-voice
   resampling from a clip's native rate to the mixer rate.
@@ -87,10 +88,14 @@ facts that matter most:
   ramps, 2/3 volume / pitch LFOs read from the engine's 8,192-entry sine table, 5/6 volume / pitch
   curves over a parameter. A ramp with a non-zero mode overrides the instance's base volume or pitch
   instead of scaling it. Pitch is semitones; a voice plays at `2^(p/4096) × clip rate` with
-  `p = trunc(pitch / 24 × 8192)` clamped to ±`0x2000`. Kind 4 sets six channel multipliers with a
-  random jitter, 7 starts a child cue when the track ends, 8 is a curve the kind 9/10 records evaluate
-  into three instance fields no reader of which is known — none acts on volume or pitch, so a cue
-  that carries one is refused (`CueError::Automation`).
+  `p = trunc(pitch / 24 × 8192)` clamped to ±`0x2000`. Kind 4 sets six output-channel multipliers
+  (optionally jittered by the generator) for the step it activates in; an instance multiplies its own
+  multipliers by every update's, so they stay; channels 0 and 1 scale the left and right outputs.
+  Kind 7 names the child cue a track (or cue) starts when it finishes, or when it is stopped. Kind 9
+  evaluates the cue's kind-8 curves into cue fields that (INFERRED) set a biquad filter the wave
+  carries; which
+  samples that filter runs over is decided in `MixWavesToOutput` (`0x00838860`), reached only through
+  a SecuROM-protected pointer, so a cue that carries kind 9 is refused (`CueError::Automation`).
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
@@ -195,10 +200,10 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   `find_cue_by_name`.
 * **`soundbank`** — `Soundbank`: exact parse/serialize of groups and cues.
 * **`multitrack`** — `MultiTrackCue`: tracks, timed sounds and their weighted entries, automation.
-* **`automation`** — `AutomationState::step`: ramps, LFOs and curves evaluated as the engine does;
-  `sine_table`, `pitched_rate`.
+* **`automation`** — `AutomationState::step` / `rewind`: ramps, LFOs, curves, channel multipliers
+  (`channel_multipliers`) and child cues evaluated as the engine does; `sine_table`, `pitched_rate`.
 * **`playback`** — a started cue's per-frame state: `InstanceParams::start` (base volume, pitch and
-  start delay draws), `TrackPlayback`.
+  start delay draws), `Block`, `Instance`, `SoundList` (firing, and the loop rewind), `TrackPlayback`.
 * **`duration`** — `cue_length_s`: a cue's `+0x0C` length as retail carries it.
 * **`select`** — `PalRng` and `pick`: the engine's wave / entry selection, exactly.
 * **`route`** — `route`: which cues play which waves, from the tables alone (for tools).
@@ -234,18 +239,29 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **`AudioSink` is not `Send`.** The exe runs audio on one thread (the VM and mixer share the engine
   CS) and `cpal::Stream` is `!Send` everywhere; the engine is driven from one thread to match.
 * **`cue_sound` returns a `CueHandle`, not a voice.** The playback fires one voice per sound instance
-  on `tick`, and `cue_voices` / `cue_instances` list what a cue holds; `stop_sound` / `pause_sound` act
-  on the whole cue. A multi-track cue draws once at start and plays only if its `+0x18` probability is
-  not below the draw (`FUN_008354e0`), so a started cue can fire nothing.
+  on `tick`, and `cue_voices` / `cue_instances` / `cue_children` / `cue_is_playing` report on it;
+  `pause_sound` acts on the whole cue. A multi-track cue draws once at start and plays only if its
+  `+0x18` probability is not below the draw (`FUN_008354e0`), so a started cue can fire nothing.
+* **`stop_sound` releases, as the engine's cue stop (`FUN_00835720`) does:** the voices fade, the
+  tracks stop looping, nothing more fires, every track and the cue start their kind-7 child cue (a
+  "tail"), and the cue is done once its instances and children have finished.
+  `stop_and_flush_all_sounds` drops every cue with no release.
+* **Loops.** A track or cue with a non-zero loop count wraps its time from its loop end to its loop
+  start (`0xFF` for ever), re-fires its sounds from the loop start and rewinds its automation. The
+  engine's sound rewind (`FUN_00840230`) skips sound 0 when sound 1 also starts at or after the loop
+  start; that is reproduced.
 * **Cue-level automation lags one frame**, as in the engine: the cue update (`FUN_00835060`) reads
   the previous frame's cue volume and pitch before it evaluates the cue's own event table.
 * **Refused at start, never played partially:** a cue whose chain does not resolve
   (`CueError::Resolve` says why: a bank not resident, a streamed wave, an empty choice list, an unknown
-  selection mode, a bad index); a looping cue (a group `+0x2C` loop byte, a track `+0x00` or cue
-  `+0x10` loop count — looping is not played yet, see `DEFERRED.md`); automation kinds 4, 7, 8 and 9;
-  a curve whose parameter is unset or lies past its last point (the engine reads out of bounds there).
-  Over the 1,198 retail `vz.wad` cues, 707 play; 2 are refused for kind 4, 1 for kind 9, 278 for a
-  group loop byte, 22 for a track loop and 2 for a cue loop, and the rest do not resolve.
+  selection mode, a bad index); a cue that can play a **looping wave** (a multi-wave group's `+0x2C`
+  loop count — the only code that reads the count back sits behind a SecuROM-protected pointer, see
+  `DEFERRED.md`); the filter curves (kind 9); kind-4 channel multipliers on a mixer with more than two
+  outputs; a curve whose parameter is unset or lies past its last point (the engine reads out of
+  bounds there); a kind-7 child that is refused itself. Over the 1,198 retail `vz.wad` cues, 1,012
+  resolve and **733 play** (24 of them loop a track or the cue); **278** are refused for a looping
+  wave and **1** (`0xD8CE1427`) for kind 9 — all named in `tests/retail_banks.rs`. With `English.wad`'s
+  wavebanks resident, 735 play and 283 are refused for a looping wave.
 * **The random generator is the engine's** (`select::PalRng`); the engine seeds it at startup from a
   function it imports through a SecuROM-resolved table, so `set_rng_seed` is how a host makes playback
   repeatable.
@@ -257,8 +273,8 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **The 9 retail `return 0` stubs** (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful
   no-ops here.
 * One `MusicStateMachine` models **one region**; the exe holds one per region. Streamed `.pws` voices
-  (`OpenStreamFile`/`CloseStreamFile` record intent only), looping cues, Doppler folded into the mix,
-  and surround channel-gain matrices are tracked in `DEFERRED.md` — all tagged
+  (`OpenStreamFile`/`CloseStreamFile` record intent only), looping waves and the cue filter, Doppler
+  folded into the mix, and surround channel-gain matrices are tracked in `DEFERRED.md` — all tagged
   `[faithful-blocker: no]`.
 * The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
   `mercs2_engine` owner's edit (see the "Binding-wiring seam" docs in `engine.rs`). Every engine body
