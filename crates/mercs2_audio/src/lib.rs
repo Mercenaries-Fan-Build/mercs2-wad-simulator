@@ -20,6 +20,10 @@
 //! * [`select`] — the engine's weighted wave / entry selection and its random generator.
 //! * [`route`] — which cues can play which waves, from the tables alone (for tools).
 //! * [`wave`] — the `wavebank` table + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
+//! * [`automation`] — a track's or cue's volume / pitch ramps, LFOs and parameter curves evaluated as
+//!   the engine does (`FUN_0083b4a0`), its sine table, and pitch → playback rate.
+//! * [`playback`] — a started cue's per-frame state: instance start draws, track and cue composition.
+//! * [`duration`] — a cue's `+0x0C` length (what `Sound.GetMaxDuration` returns), as retail carries it.
 //! * [`encode`] — builds a bank's wavebank + soundbank + sounddb: named PCM16 cues, or waves, groups
 //!   (single- and multi-wave) and cues (single- and multi-track) authored table by table.
 //! * [`voice`] — voice pool, priority-steal, the 16-state instance FSM (`FUN_00836c70`).
@@ -40,10 +44,13 @@
 //! [`AudioEngine::load_wavebank`] hold a bank's soundbank and decoded clips resident.
 //! [`AudioEngine::resolve_cue`] follows a cue through everything it can play — sounddb entry →
 //! soundbank cue → every track's sounds ([`multitrack`]) → every group they can pick → every wave →
-//! the resident clip — and [`AudioEngine::pick_cue`] makes the engine's own picks ([`select`]).
-//! [`AudioEngine::cue_sound`] allocates one voice per fired sound (priority-steal if the pool is
-//! full), each starting at its sound's start time, and applies 3D gains against the closest listener.
-//! [`AudioEngine::tick`] advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
+//! the resident clip. [`AudioEngine::cue_sound`] refuses what it cannot play faithfully ([`CueError`]:
+//! loops, automation kinds with no volume / pitch counterpart, unset curve parameters) and otherwise
+//! starts a playback ([`playback`]). Each [`AudioEngine::tick`] advances it the way the engine
+//! advances a cue: sounds fire at their start times, pick their groups and waves ([`select`]), draw
+//! their base volume, pitch and start delay, and follow the cue's and track's automation
+//! ([`automation`]) — one voice per sound instance (priority-steal if the pool is full), 3D gains
+//! against the closest listener. [`AudioEngine::tick`] also advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
 //! [`AudioEngine::pump`] feeds them to the device at wall-clock rate (a no-op when headless). Retail
 //! coverage: `tests/retail_banks.rs` here and `mercs2_probe/tests/audio_wad_probe.rs`.
 //!
@@ -54,18 +61,21 @@
 //! [`sounddb`] + [`wave`]) can build with `default-features = false` and avoid linking `alsa-sys`,
 //! which breaks the 32-bit cross build.
 //!
-//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, per-region music
-//! machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
+//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, looping cues,
+//! per-region music machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
+pub mod automation;
 pub mod banks;
 pub mod categories;
 pub mod components;
+pub mod duration;
 pub mod encode;
 pub mod engine;
 mod le;
 pub mod mixer;
 pub mod multitrack;
+pub mod playback;
 pub mod music;
 pub mod route;
 pub mod select;
@@ -78,7 +88,7 @@ pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};
 pub use encode::{encode_bank, BankSpec, CueSpec, EncodedBank, EncodeError, Pcm16};
-pub use engine::{AudioEngine, PickedSound, ResolveError, ResolvedCue, SOUND_LIB_VERSION};
+pub use engine::{AudioEngine, CueError, CueHandle, ResolveError, ResolvedCue, SOUND_LIB_VERSION};
 pub use mixer::{Mixer, MixerConfig, PcmSource, SampleSource, ToneSource};
 pub use music::{DeckState, MusicStateMachine};
 pub use soundbank::{Soundbank, SoundbankError};
@@ -92,6 +102,7 @@ pub use wave::{DecodedClip, WaveError, Wavebank, WavebankFile};
 mod tests {
     use super::*;
     use mercs2_core::glam::Vec3;
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
     /// Build a small synthetic sounddb: a direct-index cue plus a hashed positional cue.
     fn sample_db() -> SoundDb {
@@ -265,9 +276,10 @@ mod tests {
             let src = Box::new(ToneSource::new(440.0, 44100, 12000, 8192));
             // place the source off to the +X side at `dist`
             let pos = Vec3::new(dist, 0.0, 0.0);
-            let id = eng
-                .cue_sound_by_name("sfx_explosion", Some(pos), Some(src))
+            let handle = eng
+                .cue_sound_with_source(m2("sfx_explosion"), Some(pos), src)
                 .expect("cue allocates");
+            let id = eng.cue_voices(handle)[0];
             // advance the FSM out of start-delay/starting into Playing
             for _ in 0..8 {
                 eng.tick(0.05);
@@ -373,10 +385,12 @@ mod tests {
             assert_eq!(clip.channels, ch);
         }
 
-        let id = eng.cue_sound_by_name("mod_tone", None, None).expect("cue allocates a voice");
+        let handle = eng.cue_sound_by_name("mod_tone", None).expect("the cue starts");
+        assert!(eng.cue_voices(handle).is_empty(), "a cue's sounds fire on the next frame");
         for _ in 0..8 {
             eng.tick(0.02);
         }
+        let id = eng.cue_voices(handle)[0];
         assert!(eng.pool.get(id).unwrap().state.is_audible(), "voice reached a playing state");
         let buf = eng.render(2048);
         assert!(mixer::rms_i16(&buf) > 0.0, "the resolved clip mixed to audible PCM");
