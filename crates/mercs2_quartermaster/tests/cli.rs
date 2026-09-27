@@ -956,3 +956,57 @@ fn link_ok_plan_exits_0_and_writes_the_plan() {
     assert_eq!(placement["placements"], serde_json::json!([]));
     assert_eq!(listing(&out), ["load-plan.json", "placement.json"], "no link WAD");
 }
+
+// ---------------------------------------------------------------------------
+// `qm kinds` — the authoritative kind list
+// ---------------------------------------------------------------------------
+
+/// `qm kinds`, run with every game / notes / bundle variable removed and from an empty directory, so
+/// nothing it prints can have come from a game install or a checkout.
+fn qm_kinds(args: &[&str]) -> Output {
+    let cwd = scratch(&format!("kinds-{}", args.join("-")));
+    Command::new(env!("CARGO_BIN_EXE_qm"))
+        .arg("kinds")
+        .args(args)
+        .current_dir(&cwd)
+        .env_remove("MERCS2_GAME_DIR")
+        .env_remove("VZ_WAD")
+        .env_remove("MERCS2_NOTES")
+        .env_remove("MERCS2_WORKSHOP_DATA")
+        .output()
+        .expect("qm must run")
+}
+
+#[test]
+fn qm_kinds_prints_every_kind_one_per_line() {
+    let out = qm_kinds(&[]);
+    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "stdout only: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, mercs2_quartermaster::Contribution::ALL_KINDS);
+}
+
+#[test]
+fn qm_kinds_json_is_the_format_and_the_list() {
+    let out = qm_kinds(&["--json"]);
+    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "stdout only: {}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "format": 2,
+            "kinds": mercs2_quartermaster::Contribution::ALL_KINDS,
+        })
+    );
+}
+
+/// The removed kinds are not in the list — `qm kinds` is what a client checks a manifest against.
+#[test]
+fn qm_kinds_does_not_list_removed_kinds() {
+    let text = String::from_utf8(qm_kinds(&[]).stdout).unwrap();
+    for (removed, _) in mercs2_quartermaster::Contribution::REMOVED_KINDS {
+        assert!(!text.lines().any(|l| l == *removed), "{removed} is listed");
+    }
+}
