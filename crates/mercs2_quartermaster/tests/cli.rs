@@ -963,8 +963,10 @@ fn link_ok_plan_exits_0_and_writes_the_plan() {
 
 /// `qm kinds`, run with every game / notes / bundle variable removed and from an empty directory, so
 /// nothing it prints can have come from a game install or a checkout.
-fn qm_kinds(args: &[&str]) -> Output {
-    let cwd = scratch(&format!("kinds-{}", args.join("-")));
+fn qm_kinds(tag: &str, args: &[&str]) -> Output {
+    // Each caller names its own scratch dir: tests run in parallel, and `scratch` deletes the dir
+    // first, so two callers sharing a name would race.
+    let cwd = scratch(&format!("kinds-{tag}"));
     Command::new(env!("CARGO_BIN_EXE_qm"))
         .arg("kinds")
         .args(args)
@@ -979,7 +981,7 @@ fn qm_kinds(args: &[&str]) -> Output {
 
 #[test]
 fn qm_kinds_prints_every_kind_one_per_line() {
-    let out = qm_kinds(&[]);
+    let out = qm_kinds("lines", &[]);
     assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stderr.is_empty(), "stdout only: {}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
@@ -989,7 +991,7 @@ fn qm_kinds_prints_every_kind_one_per_line() {
 
 #[test]
 fn qm_kinds_json_is_the_format_and_the_list() {
-    let out = qm_kinds(&["--json"]);
+    let out = qm_kinds("json", &["--json"]);
     assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stderr.is_empty(), "stdout only: {}", String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("one JSON document");
@@ -1005,7 +1007,7 @@ fn qm_kinds_json_is_the_format_and_the_list() {
 /// The removed kinds are not in the list — `qm kinds` is what a client checks a manifest against.
 #[test]
 fn qm_kinds_does_not_list_removed_kinds() {
-    let text = String::from_utf8(qm_kinds(&[]).stdout).unwrap();
+    let text = String::from_utf8(qm_kinds("removed", &[]).stdout).unwrap();
     for (removed, _) in mercs2_quartermaster::Contribution::REMOVED_KINDS {
         assert!(!text.lines().any(|l| l == *removed), "{removed} is listed");
     }
