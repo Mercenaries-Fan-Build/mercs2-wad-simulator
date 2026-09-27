@@ -555,8 +555,9 @@ mod tests {
     }
 
     /// Integration: the game's resident-audio path — `load_resident_audio` then `install` — resolves
-    /// resident cues through sounddb → soundbank cue → group → wavebank to decoded PCM. Without the
-    /// soundbanks the same catalog resolves nothing (the first hop is the soundbank).
+    /// resident cues through sounddb → soundbank cue → every track's sounds → group → wavebank to
+    /// decoded PCM. Without the soundbanks the same catalog resolves nothing (the first hop is the
+    /// soundbank).
     #[test]
     fn resident_audio_path_resolves_cues_through_the_soundbank() {
         let Some(path) = wad::resolve_vz_wad(None) else {
@@ -576,21 +577,34 @@ mod tests {
         assert_eq!(res.soundbanks.len(), 11, "every resident bank but amb_shared has a soundbank");
         assert_eq!(res.sounddbs.len(), 11);
 
-        let resolved = |r: &ResidentAudio| {
+        // Every catalog cue either resolves through the full chain, or stops at a wave that streams
+        // from a .pws or a wavebank outside the resident set — never at a structural fault.
+        let tally = |r: &ResidentAudio| {
             let mut eng = crate::audio::AudioEngine::default();
             let stats = r.install(&mut eng).expect("resident tables install");
-            let n = eng.sounddb.cues.iter().filter(|c| eng.resolve_wave(c).is_ok()).count();
-            (stats, n)
+            let (mut ok, mut streamed, mut elsewhere, mut no_soundbank) = (0, 0, 0, 0);
+            for c in &eng.sounddb.cues {
+                match eng.resolve_cue(c) {
+                    Ok(_) => ok += 1,
+                    Err(crate::audio::ResolveError::Streamed { .. }) => streamed += 1,
+                    Err(crate::audio::ResolveError::WavebankNotResident(_)) => elsewhere += 1,
+                    Err(crate::audio::ResolveError::SoundbankNotResident(_)) => no_soundbank += 1,
+                    Err(e) => panic!("cue 0x{:08X}: {e}", c.guid),
+                }
+            }
+            (stats, ok, streamed, elsewhere, no_soundbank)
         };
-        let (stats, with) = resolved(&res);
-        let (_, without) = resolved(&ResidentAudio { soundbanks: Vec::new(), ..res.clone() });
+        let (stats, with, streamed, elsewhere, _) = tally(&res);
+        let (_, without, _, _, no_soundbank) = tally(&ResidentAudio { soundbanks: Vec::new(), ..res.clone() });
         println!(
-            "[audio] {} catalog cues: {with} resolve to one decoded wave; {without} without soundbanks",
+            "[audio] {} catalog cues: {with} resolve through every path; {streamed} reach a .pws-streamed \
+             wave, {elsewhere} a wavebank outside the resident set; without soundbanks {without} resolve",
             stats.catalog_cues
         );
         assert_eq!(stats.catalog_cues, 807);
-        assert_eq!(with, 150);
-        assert_eq!(without, 0);
+        assert_eq!(with + streamed + elsewhere, 807);
+        assert_eq!(with, 605);
+        assert_eq!((without, no_soundbank), (0, 807));
 
         // A resolved cue plays audibly through the engine's mixer.
         let mut eng = crate::audio::AudioEngine::default();
