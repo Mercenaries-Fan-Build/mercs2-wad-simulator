@@ -16,8 +16,12 @@
 //! * [`sounddb`] — the `'\x1d'`-tagged cue catalog (`FUN_00835b80`): 28-B header + 12-B
 //!   `{guid, soundbank hash, soundbank cue index}` entries (+ the global catalog's category tree).
 //! * [`soundbank`] — the `soundbank` table: sound groups (which wave(s) a sound plays) and cues.
+//! * [`multitrack`] — the multi-track cue body: tracks of timed sounds and their automation.
+//! * [`select`] — the engine's weighted wave / entry selection and its random generator.
+//! * [`route`] — which cues can play which waves, from the tables alone (for tools).
 //! * [`wave`] — the `wavebank` table + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
-//! * [`encode`] — builds a bank's wavebank + soundbank + sounddb from named PCM16 cues.
+//! * [`encode`] — builds a bank's wavebank + soundbank + sounddb: named PCM16 cues, or waves, groups
+//!   (single- and multi-wave) and cues (single- and multi-track) authored table by table.
 //! * [`voice`] — voice pool, priority-steal, the 16-state instance FSM (`FUN_00836c70`).
 //! * [`mixer`] — the software mixer (`FUN_00836610`): int32 accumulate → saturate int16, headless.
 //!   Per-voice resampling (clip rate → mixer rate) via [`PcmSource`].
@@ -33,13 +37,15 @@
 //!
 //! ## Cue → audible PCM (the whole path)
 //! [`AudioEngine::set_sounddb`] installs the catalog; [`AudioEngine::load_soundbank`] and
-//! [`AudioEngine::load_wavebank`] hold a bank's soundbank and decoded clips resident;
-//! [`AudioEngine::cue_sound`] resolves the cue — sounddb entry → soundbank cue → group → wavebank wave
-//! ([`AudioEngine::resolve_wave`]) — allocates a voice (priority-steal if the pool is full), binds the
-//! resolved clip, and applies 3D gains against the closest listener. [`AudioEngine::tick`] advances the
-//! FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and [`AudioEngine::pump`] feeds them to the
-//! device at wall-clock rate (a no-op when headless). Retail coverage: `tests/retail_banks.rs` here and
-//! `mercs2_probe/tests/audio_wad_probe.rs`.
+//! [`AudioEngine::load_wavebank`] hold a bank's soundbank and decoded clips resident.
+//! [`AudioEngine::resolve_cue`] follows a cue through everything it can play — sounddb entry →
+//! soundbank cue → every track's sounds ([`multitrack`]) → every group they can pick → every wave →
+//! the resident clip — and [`AudioEngine::pick_cue`] makes the engine's own picks ([`select`]).
+//! [`AudioEngine::cue_sound`] allocates one voice per fired sound (priority-steal if the pool is
+//! full), each starting at its sound's start time, and applies 3D gains against the closest listener.
+//! [`AudioEngine::tick`] advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
+//! [`AudioEngine::pump`] feeds them to the device at wall-clock rate (a no-op when headless). Retail
+//! coverage: `tests/retail_banks.rs` here and `mercs2_probe/tests/audio_wad_probe.rs`.
 //!
 //! ## Features
 //! `device` (**on by default**) links `cpal` for [`backend::CpalSink`]. No audio *behaviour* is gated
@@ -59,7 +65,10 @@ pub mod encode;
 pub mod engine;
 mod le;
 pub mod mixer;
+pub mod multitrack;
 pub mod music;
+pub mod route;
+pub mod select;
 pub mod soundbank;
 pub mod sounddb;
 pub mod spatial;
@@ -69,7 +78,7 @@ pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};
 pub use encode::{encode_bank, BankSpec, CueSpec, EncodedBank, EncodeError, Pcm16};
-pub use engine::{AudioEngine, ResolveError, SOUND_LIB_VERSION};
+pub use engine::{AudioEngine, PickedSound, ResolveError, ResolvedCue, SOUND_LIB_VERSION};
 pub use mixer::{Mixer, MixerConfig, PcmSource, SampleSource, ToneSource};
 pub use music::{DeckState, MusicStateMachine};
 pub use soundbank::{Soundbank, SoundbankError};
@@ -356,7 +365,10 @@ mod tests {
         // The name hash is all the caller supplies; the chain does the rest.
         for (name, pcm, ch) in [("mod_tone", &tone, 1u8), ("mod_other", &other, 2)] {
             let entry = *eng.sounddb.find_cue_by_name(name).expect("sounddb routes the name");
-            let clip = eng.resolve_wave(&entry).expect("chain resolves");
+            let resolved = eng.resolve_cue(&entry).expect("chain resolves");
+            let waves: Vec<_> = resolved.waves().collect();
+            assert_eq!(waves.len(), 1, "{name}: one sound, one single-wave group");
+            let clip = eng.clip(waves[0].wavebank, waves[0].index).expect("resident");
             assert_eq!(&clip.samples, pcm, "{name} resolves to its own PCM");
             assert_eq!(clip.channels, ch);
         }
@@ -375,7 +387,7 @@ mod tests {
         bare.load_wavebank(&enc.wavebank).expect("wavebank parses");
         let entry = *bare.sounddb.find_cue_by_name("mod_tone").unwrap();
         assert_eq!(
-            bare.resolve_wave(&entry),
+            bare.resolve_cue(&entry).map(|_| ()),
             Err(ResolveError::SoundbankNotResident(m2("mod_chain_bank")))
         );
     }
