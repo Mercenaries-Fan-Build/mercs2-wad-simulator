@@ -33,7 +33,8 @@
 //!   the waves mix into (the wave kernel's gains and 32.32 step, [`PcmSource`]), each wave's filter
 //!   run over it, the commit into the accumulator, then saturation to int16.
 //! * [`filter`] — the kind-9 biquad low-pass filter a wave carries (`FUN_0083f2d0`).
-//! * [`spatial`] — 4 listeners, distance attenuation, stereo pan, Doppler, start-delay.
+//! * [`spatial`] — 4 listeners; an emitter source's speaker gains, distance volume and Doppler as the
+//!   mix computes them against listener 0; start delay.
 //! * [`categories`] — per-category volume/pitch fades + ref-counted master duck.
 //! * [`music`] — the dual-deck crossfading music state machine (`FUN_0082d7a0`).
 //! * [`banks`] — the 65-slot sound/wave bank load state machine.
@@ -54,7 +55,8 @@
 //! advances a cue: sounds fire at their start times, pick their groups and waves ([`select`]), draw
 //! their base volume, pitch and start delay, follow the cue's and track's automation
 //! ([`automation`]), loop their tracks and the cue, and start child cues when they finish — one voice
-//! per sound instance (priority-steal if the pool is full), 3D gains against the closest listener.
+//! per sound instance (priority-steal if the pool is full), positional ones through their emitter's
+//! source (speaker gains, distance volume and Doppler against listener 0).
 //! [`AudioEngine::stop_sound`] releases a cue the engine's way (tail child cues start).
 //! [`AudioEngine::tick`] also advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
 //! [`AudioEngine::pump`] feeds them to the device at wall-clock rate (a no-op when headless). Retail
@@ -68,7 +70,7 @@
 //! which breaks the 32-bit cross build.
 //!
 //! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, per-region music
-//! machines, a positional source's speaker gains) are enumerated in `DEFERRED.md`.
+//! machines, emitter velocity) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
 pub mod automation;
@@ -255,51 +257,38 @@ mod tests {
         assert_eq!(m.inactive_deck().gain, 0.0);
     }
 
-    // ---- 4. 3D attenuation falls off with distance ----------------------------------------------
+    // ---- 4. a positional source takes its emitter's speaker gains ---------------------------------
 
     #[test]
-    fn attenuation_falls_off_with_distance() {
-        // Unit-level: monotonic non-increasing, full inside min, silent past max.
-        assert_eq!(spatial::distance_attenuation(0.5, 1.0, 10.0), 1.0);
-        let near = spatial::distance_attenuation(2.0, 1.0, 10.0);
-        let far = spatial::distance_attenuation(8.0, 1.0, 10.0);
-        assert!(near > far, "closer is louder ({near} > {far})");
-        assert!(far > 0.0);
-        assert_eq!(spatial::distance_attenuation(20.0, 1.0, 10.0), 0.0, "past max = silent");
-
-        // End-to-end: a positional cue at two distances must render quieter when farther, through the
-        // real voice→mixer path.
-        let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
-        // An active listener at the origin, facing +Z (Listener::default() is inactive).
-        eng.set_listener(0, Listener { active: true, ..Listener::default() });
-        eng.set_sounddb(sample_db());
-
-        let render_at = |eng: &mut AudioEngine, dist: f32| -> f32 {
-            eng.pool = VoicePool::new(8); // fresh pool
-            eng.mixer = Mixer::new(MixerConfig { sample_rate: 44100, channels: 2 });
+    fn a_positional_source_takes_its_emitters_speaker_gains() {
+        // Listener 0 at the origin with the identity basis; the source straight along +X. The speaker
+        // gains (FUN_0083d090) are then clamp01(v.x): 0.7 for front left and back left (channels 0
+        // and 4), 0 elsewhere; channel 3 (LFE) is the source constructor's 0.0.
+        let render_at = |dist: f32| -> Vec<i16> {
+            let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 6 });
+            eng.set_listener(0, Listener { active: true, ..Listener::default() });
+            eng.set_sounddb(sample_db());
             let src = Box::new(ToneSource::new(440.0, 44100, 12000, 8192));
-            // place the source off to the +X side at `dist`
-            let pos = Vec3::new(dist, 0.0, 0.0);
             let handle = eng
-                .cue_sound_with_source(m2("sfx_explosion"), Some(pos), src)
+                .cue_sound_with_source(m2("sfx_explosion"), Some(Vec3::new(dist, 0.0, 0.0)), src)
                 .expect("cue allocates");
             let id = eng.cue_voices(handle)[0];
-            // advance the FSM out of start-delay/starting into Playing
             for _ in 0..8 {
                 eng.tick(0.05);
             }
             assert!(eng.pool.get(id).unwrap().state.is_audible());
-            let buf = eng.render(2048);
-            mixer::rms_i16(&buf)
+            eng.render(2048)
         };
-
-        let close = render_at(&mut eng, 3.0);
-        let distant = render_at(&mut eng, 60.0);
-        assert!(close > 0.0, "a nearby cue produces sound ({close})");
-        assert!(
-            distant < close,
-            "a distant cue is attenuated: distant {distant} < close {close}"
-        );
+        let near = render_at(3.0);
+        let channel = |buf: &[i16], c: usize| buf.iter().skip(c).step_by(6).copied().collect::<Vec<i16>>();
+        for c in [1, 2, 3, 5] {
+            assert!(channel(&near, c).iter().all(|&s| s == 0), "channel {c} is silent");
+        }
+        assert!(mixer::rms_i16(&channel(&near, 0)) > 0.0, "front left carries the source");
+        assert_eq!(channel(&near, 0), channel(&near, 4), "back left takes the same gain");
+        // An explicit source has no group, so no 3D parameters: no distance volume (FUN_00839ae0 calls
+        // FUN_0083d3a0 only for a wave whose +0x5C is set).
+        assert_eq!(render_at(60.0), near, "no distance volume without a group");
     }
 
     // ---- 5. facade smoke: banks, categories, VO, lib version ------------------------------------
