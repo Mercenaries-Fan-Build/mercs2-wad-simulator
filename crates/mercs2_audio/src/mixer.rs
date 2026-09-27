@@ -47,6 +47,8 @@ pub struct PcmSource {
     pos: f64,
     /// Source frames advanced per output frame (`src_rate / dst_rate`).
     step: f64,
+    /// The mixer rate the step is computed against (`None` for a source built at the mixer rate).
+    dst_rate: Option<u32>,
 }
 
 impl PcmSource {
@@ -57,6 +59,7 @@ impl PcmSource {
             channels: channels.max(1),
             pos: 0.0,
             step: 1.0,
+            dst_rate: None,
         }
     }
 
@@ -72,6 +75,19 @@ impl PcmSource {
             channels: channels.max(1),
             pos: 0.0,
             step,
+            dst_rate: Some(dst_rate),
+        }
+    }
+
+    /// Play on at `src_rate` Hz (a pitch change): the step becomes `src_rate / dst_rate`. Only a source
+    /// built with [`with_rate`](Self::with_rate) knows its mixer rate.
+    pub fn set_source_rate(&mut self, src_rate: u32) -> Result<(), MixerError> {
+        match self.dst_rate {
+            Some(dst) if dst > 0 => {
+                self.step = f64::from(src_rate) / f64::from(dst);
+                Ok(())
+            }
+            _ => Err(MixerError::NoMixerRate),
         }
     }
 
@@ -168,9 +184,47 @@ impl SampleSource for ToneSource {
     }
 }
 
+/// Why a mixer voice could not be adjusted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MixerError {
+    /// No source is attached to the voice.
+    NotAttached(VoiceId),
+    /// The voice's source is not a [`PcmSource`], so it has no playback rate to change.
+    NotPcm(VoiceId),
+    /// The PCM source was built without a mixer rate ([`PcmSource::new`]).
+    NoMixerRate,
+}
+
+impl std::fmt::Display for MixerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MixerError::NotAttached(id) => write!(f, "mixer: voice {} has no source", id.0),
+            MixerError::NotPcm(id) => write!(f, "mixer: voice {}'s source is not PCM", id.0),
+            MixerError::NoMixerRate => write!(f, "mixer: the PCM source was built without a mixer rate"),
+        }
+    }
+}
+
+impl std::error::Error for MixerError {}
+
+/// A voice's source: a decoded clip, whose rate can change, or any other source.
+enum VoiceSource {
+    Pcm(PcmSource),
+    Other(Box<dyn SampleSource>),
+}
+
+impl VoiceSource {
+    fn get(&mut self) -> &mut dyn SampleSource {
+        match self {
+            VoiceSource::Pcm(p) => p,
+            VoiceSource::Other(b) => b.as_mut(),
+        }
+    }
+}
+
 /// Per-voice mixing parameters the mixer needs beyond the FSM state in [`VoicePool`].
 struct MixVoice {
-    source: Box<dyn SampleSource>,
+    source: VoiceSource,
     /// Left/right channel gains from [`crate::spatial`] (constant-power pan × distance attenuation).
     left_gain: f32,
     right_gain: f32,
@@ -227,14 +281,35 @@ impl Mixer {
 
     /// Attach a sample source to a voice (called when a cue is started).
     pub fn attach(&mut self, id: VoiceId, source: Box<dyn SampleSource>) {
-        self.voices.insert(
-            id,
-            MixVoice {
-                source,
-                left_gain: 1.0,
-                right_gain: 1.0,
-            },
-        );
+        self.voices.insert(id, MixVoice { source: VoiceSource::Other(source), left_gain: 1.0, right_gain: 1.0 });
+    }
+
+    /// Attach a decoded clip whose playback rate can later change ([`set_source_rate`](Self::set_source_rate)).
+    pub fn attach_pcm(&mut self, id: VoiceId, source: PcmSource) {
+        self.voices.insert(id, MixVoice { source: VoiceSource::Pcm(source), left_gain: 1.0, right_gain: 1.0 });
+    }
+
+    /// A PCM voice's current step (source frames per output frame).
+    pub fn source_step(&self, id: VoiceId) -> Result<f64, MixerError> {
+        match self.voices.get(&id) {
+            None => Err(MixerError::NotAttached(id)),
+            Some(MixVoice { source: VoiceSource::Pcm(p), .. }) => Ok(p.step),
+            Some(_) => Err(MixerError::NotPcm(id)),
+        }
+    }
+
+    /// Whether a voice has a source attached.
+    pub fn is_attached(&self, id: VoiceId) -> bool {
+        self.voices.contains_key(&id)
+    }
+
+    /// Change a PCM voice's playback rate to `src_rate` Hz.
+    pub fn set_source_rate(&mut self, id: VoiceId, src_rate: u32) -> Result<(), MixerError> {
+        match self.voices.get_mut(&id) {
+            None => Err(MixerError::NotAttached(id)),
+            Some(MixVoice { source: VoiceSource::Pcm(p), .. }) => p.set_source_rate(src_rate),
+            Some(_) => Err(MixerError::NotPcm(id)),
+        }
     }
 
     /// Detach a voice's source (on stop/steal/finish).
@@ -297,17 +372,17 @@ impl Mixer {
             for s in scratch.iter_mut() {
                 *s = 0;
             }
-            let mut produced = mv.source.fill(scratch, ch);
+            let mut produced = mv.source.get().fill(scratch, ch);
 
             // Loop wrap or finish signalling.
             if produced < frames {
                 if voice.looping {
-                    mv.source.reset();
+                    mv.source.get().reset();
                     // top up the remainder of the buffer from the start of the wave
                     let rem = &mut self.scratch[produced * ch..n];
-                    let more = mv.source.fill(rem, ch);
+                    let more = mv.source.get().fill(rem, ch);
                     produced += more;
-                } else if mv.source.is_finished() {
+                } else if mv.source.get().is_finished() {
                     finished.push(*id);
                 }
             }
