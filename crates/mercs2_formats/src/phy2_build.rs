@@ -1367,6 +1367,26 @@ pub fn build_phy2_multi_kind(
     meshes: &[MeshSoup],
     kind: MoppKind,
 ) -> Result<Vec<u8>, String> {
+    build_phy2_multi_hashed_kind(crate::hash::pandemic_hash_m2(asset_name), meshes, kind)
+}
+
+/// [`build_phy2_multi`] keyed by the asset's name **hash** rather than its name string.
+///
+/// Prefix word 1 is the owning asset's name hash. Most callers know the asset by name and let
+/// [`build_phy2_multi`] hash it. An asset known only by its hash — every retail terrain cell
+/// (`0x7C569307`) is registered under a bare hash with no recovered name — passes the hash here, so
+/// nothing has to invent a string that happens to hash to it. For
+/// `name_hash == pandemic_hash_m2(asset_name)` the output is byte-identical to [`build_phy2_multi`].
+pub fn build_phy2_multi_hashed(name_hash: u32, meshes: &[MeshSoup]) -> Result<Vec<u8>, String> {
+    build_phy2_multi_hashed_kind(name_hash, meshes, MoppKind::Spatial)
+}
+
+/// [`build_phy2_multi_kind`] keyed by the asset's name hash — see [`build_phy2_multi_hashed`].
+pub fn build_phy2_multi_hashed_kind(
+    name_hash: u32,
+    meshes: &[MeshSoup],
+    kind: MoppKind,
+) -> Result<Vec<u8>, String> {
     if meshes.is_empty() {
         return Err("build_phy2_multi: no meshes".into());
     }
@@ -1515,7 +1535,6 @@ pub fn build_phy2_multi_kind(
         build_multi_mesh_wrapper(&sms.pool, sms.whole_min, sms.whole_max, &per_mesh_ntris, pkend, 1);
     let total_verts: usize = sms.pool.len();
 
-    let name_hash = crate::hash::pandemic_hash_m2(asset_name);
     let mut out = Vec::with_capacity(48 + packfile.len() + wrapper.len());
     let mut prefix = [0u8; 48];
     put_u32(&mut prefix, 0, 0x39);
@@ -1617,6 +1636,21 @@ mod tests {
             }
         }
         (tris, verts)
+    }
+
+    /// The hash-keyed entry point is the name-keyed one minus the hashing: same bytes for the hash of
+    /// the same name, and prefix word 1 is exactly the hash passed in.
+    #[test]
+    fn hashed_entry_point_matches_the_named_one() {
+        let meshes = vec![grid_mesh(6), grid_mesh(4)];
+        let by_name = build_phy2_multi("hashed_vs_named", &meshes).expect("named build");
+        let hash = crate::hash::pandemic_hash_m2("hashed_vs_named");
+        let by_hash = build_phy2_multi_hashed(hash, &meshes).expect("hashed build");
+        assert_eq!(by_name, by_hash, "the same hash must produce the same body");
+
+        let other = build_phy2_multi_hashed(0xA241_BC0C, &meshes).expect("hashed build");
+        assert_eq!(u32::from_le_bytes(other[4..8].try_into().unwrap()), 0xA241_BC0C);
+        assert_eq!(other[8..], by_hash[8..], "only the name-hash word may differ");
     }
 
     #[test]

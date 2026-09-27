@@ -50,6 +50,9 @@
 //!   `info`/`data`/`trnm`/`evnt` Havok clips and `MANM`/`MINF`/`TRCK` keyframe animations.
 //! - [`terrain`], [`placement`], [`world_index`], [`world`] — low-res terrain; `layers_static`
 //!   placements; the Layer-1 world block index that feeds streaming; world spatial constants.
+//! - [`terrainmesh`] — the 400 hi-res terrain cells (`0x7C569307`): byte-exact decode/encode,
+//!   vertical displacement with normal/tangent/bounds recompute, triangle-strip codec, collision
+//!   rebuild; [`scrub`] — the ground-cover instances beside them, kept on the edited ground.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
 //!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
@@ -126,6 +129,7 @@ pub mod save;
 pub mod save_write;
 pub mod schema;
 pub mod scripts_block;
+pub mod scrub;
 pub mod shader3;
 pub mod sges;
 pub mod skeleton;
@@ -133,6 +137,7 @@ pub mod stringdb;
 pub mod tag_registry;
 pub mod tags;
 pub mod terrain;
+pub mod terrainmesh;
 pub mod texsize;
 pub mod texture;
 pub mod texture_encode;
