@@ -594,16 +594,20 @@ pub(crate) fn load_world_data(
                     continue;
                 }
                 if is_light_shaft_fx(name) {
-                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos));
+                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos)?);
                 } else if let Some(base) = classify_particle(name) {
-                    // Real authored effect params (COLR/FRCE/PTYP) if the template resolves; else the
-                    // name-heuristic base shape. Resolved here where the WAD is open, once at load.
+                    // Real authored effect params (COLR/FRCE/PTYP), one desc per emitter, if the
+                    // effect resolves; else the name-heuristic base shape. Resolved here where the WAD
+                    // is open, once at load. An effect that resolves but does not parse fails the load.
                     let hash = mercs2_formats::hash::pandemic_hash_m2(&name.replace("particle_", ""));
-                    let desc = match mercs2_engine::game_world::load_effect_template(assets.base_mut(), hash) {
-                        Some(t) => mercs2_engine::particles::EmitterDesc::from_effect_template(&t, base),
-                        None => base,
-                    };
-                    particle_fx.push((desc, p.pos));
+                    match mercs2_engine::game_world::load_effect(assets.base_mut(), hash)? {
+                        Some(effect) => {
+                            for desc in mercs2_engine::particles::EmitterDesc::from_effect(&effect, &base) {
+                                particle_fx.push((desc, p.pos));
+                            }
+                        }
+                        None => particle_fx.push((base, p.pos)),
+                    }
                 }
             }
         }
