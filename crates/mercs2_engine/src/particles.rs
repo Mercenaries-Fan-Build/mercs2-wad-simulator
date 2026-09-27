@@ -1,9 +1,9 @@
 //! CPU billboard particle system — the FX runtime (registry §7 / `docs/rendering_fx_lighting_gap.md`
 //! subsystem E).
 //!
-//! Mirrors the game's emitter model closely enough to drive the same content: a named effect
-//! template ([`EmitterDesc`], populated from the `fxdict`/effect-template parsers in
-//! `mercs2_formats::fxdict`) is *started* at a world position — the analogue of Lua's
+//! Mirrors the game's emitter model closely enough to drive the same content: an emitter template
+//! ([`EmitterDesc`], populated from a parsed effect — `mercs2_formats::fxdict::EffectContainer`) is
+//! *started* at a world position — the analogue of Lua's
 //! `ObjectState.StartEmitter` — and spawns billboard particles that live for a lifetime, integrate
 //! velocity + gravity + drag (from `FRCE`), fade colour/alpha over life (from the `COLR` gradient),
 //! and scale along a size curve. Rendering is camera-facing quads with additive or alpha blending in
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Vec3, Vec4};
 
-pub use mercs2_formats::fxdict::ColorGradient;
+pub use mercs2_formats::fxdict::Colr;
 
 /// One GPU billboard instance (matches `particles.wgsl` vertex layout: center, size, color).
 #[repr(C)]
@@ -38,9 +38,9 @@ pub enum BlendMode {
     Alpha,
 }
 
-/// A named effect template: the tunables the sim needs to spawn + evolve particles. Populate this
-/// from a parsed `mercs2_formats::fxdict::EffectTemplate` (EMIT timing, FRCE forces, COLR gradient,
-/// PTYP/POFF), or build one directly for engine-authored effects.
+/// One emitter's tunables: what the sim needs to spawn + evolve particles. Populate these from a
+/// parsed `mercs2_formats::fxdict::EffectContainer` ([`EmitterDesc::from_effect`]: FRCE forces,
+/// COLR, PTYP), or build one directly for engine-authored effects.
 #[derive(Debug, Clone)]
 pub struct EmitterDesc {
     /// Continuous spawn rate (particles/second). 0 with `burst>0` = one-shot.
@@ -63,8 +63,10 @@ pub struct EmitterDesc {
     /// Size (world units) at spawn and at death (linear curve).
     pub start_size: f32,
     pub end_size: f32,
-    /// Colour-over-life gradient (from `COLR`), sampled by normalised age.
-    pub gradient: ColorGradient,
+    /// Colour-over-life (from `COLR`), sampled by normalised age. The sim reads the four colour
+    /// bytes as RGBA — the channel order is not proven (see `fxdict::ColrKey`) — and ignores
+    /// `half_bits`.
+    pub gradient: Colr,
     /// Multiplier applied to every gradient sample (tint / HDR-ish brightness for additive).
     pub color_scale: Vec4,
     pub blend: BlendMode,
@@ -89,7 +91,7 @@ impl Default for EmitterDesc {
             drag: 0.0,
             start_size: 0.5,
             end_size: 1.5,
-            gradient: ColorGradient::default(),
+            gradient: Colr::uniform([255, 255, 255, 255], 0),
             color_scale: Vec4::ONE,
             blend: BlendMode::Alpha,
             max_particles: 256,
@@ -102,15 +104,12 @@ impl EmitterDesc {
     /// A grey smoke plume: rises, expands, fades out. Alpha-blended. Handy visible-test default and
     /// a reasonable stand-in for `global_particle_smoke_*` until real templates are wired.
     pub fn demo_smoke() -> Self {
-        let mut stops = [[0u8; 4]; mercs2_formats::fxdict::COLR_STOPS];
-        let n = stops.len();
-        for (i, s) in stops.iter_mut().enumerate() {
-            let t = i as f32 / (n - 1) as f32;
-            // Grey that lightens slightly then fades alpha to 0 over life.
+        // Grey that lightens slightly then fades alpha to 0 over life.
+        let gradient = Colr::from_fn(|t| {
             let v = (140.0 + 60.0 * t) as u8;
             let a = ((1.0 - t) * 180.0) as u8;
-            *s = [v, v, v, a];
-        }
+            ([v, v, v, a], 0)
+        });
         EmitterDesc {
             spawn_rate: 24.0,
             burst: 0,
@@ -124,7 +123,7 @@ impl EmitterDesc {
             drag: 0.6,
             start_size: 0.4,
             end_size: 2.2,
-            gradient: ColorGradient { stops },
+            gradient,
             color_scale: Vec4::ONE,
             blend: BlendMode::Alpha,
             max_particles: 300,
@@ -134,17 +133,13 @@ impl EmitterDesc {
 
     /// A fire/spark burst: fast, bright, additive, short-lived, gravity-pulled.
     pub fn demo_fire() -> Self {
-        let mut stops = [[0u8; 4]; mercs2_formats::fxdict::COLR_STOPS];
-        let n = stops.len();
-        for (i, s) in stops.iter_mut().enumerate() {
-            let t = i as f32 / (n - 1) as f32;
-            // White-hot -> orange -> dark red, alpha fading.
-            let r = 255u8;
+        // White-hot -> orange -> dark red, alpha fading.
+        let gradient = Colr::from_fn(|t| {
             let g = (220.0 * (1.0 - t)).max(30.0) as u8;
             let b = (120.0 * (1.0 - t * 2.0).max(0.0)) as u8;
             let a = ((1.0 - t) * 220.0) as u8;
-            *s = [r, g, b, a];
-        }
+            ([255, g, b, a], 0)
+        });
         EmitterDesc {
             spawn_rate: 60.0,
             burst: 0,
@@ -158,7 +153,7 @@ impl EmitterDesc {
             drag: 0.2,
             start_size: 0.6,
             end_size: 0.05,
-            gradient: ColorGradient { stops },
+            gradient,
             color_scale: Vec4::splat(1.0),
             blend: BlendMode::Additive,
             max_particles: 400,
@@ -194,50 +189,48 @@ impl EmitterDesc {
         }
     }
 
-    /// Build an [`EmitterDesc`] from a parsed [`EffectTemplate`](mercs2_formats::fxdict::EffectTemplate)
-    /// — the authored-effect → runtime wire that replaces the name-heuristic `demo_*` presets
-    /// (`docs/modernization/rendering_fx_lighting_gap.md` §E; `mercs2_game::world` flagged this as the
-    /// pending decode). Uses only the **reliably-parsed** chunks; unpinned data is left at the base
-    /// default it starts from (so a partial template degrades gracefully, never fabricates).
+    /// Build one [`EmitterDesc`] per emitter of a parsed effect — the authored-effect → runtime
+    /// wire that replaces the name-heuristic `demo_*` presets. Each starts from `base` and takes only
+    /// what the sim can use:
     ///
-    /// - `COLR` gradient → colour/alpha over life (verified chunk).
-    /// - `FRCE` forces → `Gravity`/`Wind` sum into the constant accel; `Drag` → linear damping
-    ///   (`// WILDSTAR/FRCE:` the force *kind* classification is the FRCE hypothesis; `Vortex` isn't
-    ///   modelled by the billboard sim).
-    /// - `PTYP` bit0 → additive (glow) vs alpha blend (hypothesis, per the `fxdict` note).
-    /// - `POFF` → spawn offset, applied by the caller at start (not stored on the desc).
-    /// - `EMIT` timing floats have an **unpinned** positional order → NOT decoded into
-    ///   lifetime/spawn_rate here (same honesty boundary as the weapon-stat offsets); timing stays at
-    ///   `base`'s values until a live capture pins the float order.
-    pub fn from_effect_template(t: &mercs2_formats::fxdict::EffectTemplate, base: EmitterDesc) -> Self {
+    /// - the emitter's `COLR` → colour/alpha over life;
+    /// - the effect's `FRCE` forces (shared by every emitter): `gravity`/`wind` add
+    ///   `magnitude × direction` to the constant acceleration, `drag` sets the linear damping
+    ///   (both readings INFERRED from the field names and retail values); `attractor`/`vortex` have
+    ///   no operator in the billboard sim;
+    /// - `PTYP` bit 0 → additive vs alpha blend (hypothesis carried from the earlier decode).
+    ///
+    /// Spawn rate, life, speed and size stay at `base`'s values: the attribute names are recovered
+    /// but their units are not pinned against the running game.
+    pub fn from_effect(effect: &mercs2_formats::fxdict::EffectContainer, base: &EmitterDesc) -> Vec<Self> {
         use mercs2_formats::fxdict::ForceKind;
-        let mut d = base;
-        if let Some(g) = t.gradient {
-            d.gradient = g;
-        }
         let mut accel = Vec3::ZERO;
-        let mut saw_force = false;
-        for f in &t.forces {
+        let mut drag = None;
+        for f in &effect.forces {
             match f.kind {
-                ForceKind::Gravity | ForceKind::Wind => {
-                    accel += Vec3::new(f.params[0], f.params[1], f.params[2]);
-                    saw_force = true;
+                ForceKind::Gravity { magnitude, direction } | ForceKind::Wind { magnitude, direction } => {
+                    accel += Vec3::from(direction) * magnitude;
                 }
-                ForceKind::Drag => {
-                    d.drag = f.params[0].max(0.0);
-                    saw_force = true;
-                }
-                // Vortex/Unknown: retained in the parse, but the CPU billboard sim has no operator.
-                ForceKind::Vortex | ForceKind::Unknown => {}
+                ForceKind::Drag { magnitude } => drag = Some(magnitude.max(0.0)),
+                ForceKind::Attractor { .. } | ForceKind::Vortex { .. } => {}
             }
         }
-        if saw_force && accel != Vec3::ZERO {
-            d.gravity = accel;
-        }
-        if let Some(pt) = t.ptype {
-            d.blend = if pt.bit0() { BlendMode::Additive } else { BlendMode::Alpha };
-        }
-        d
+        effect
+            .emitters
+            .iter()
+            .map(|e| {
+                let mut d = base.clone();
+                d.gradient = e.particle.colr.clone();
+                if accel != Vec3::ZERO {
+                    d.gravity = accel;
+                }
+                if let Some(k) = drag {
+                    d.drag = k;
+                }
+                d.blend = if e.particle.flags & 1 != 0 { BlendMode::Additive } else { BlendMode::Alpha };
+                d
+            })
+            .collect()
     }
 }
 
@@ -828,31 +821,53 @@ mod tests {
     }
 
     #[test]
-    fn effect_template_overrides_base_with_authored_data() {
+    fn a_parsed_effect_overrides_base_with_authored_data() {
         use mercs2_formats::fxdict::{
-            ColorGradient, EffectTemplate, Force, ForceKind, ParticleType, COLR_STOPS,
+            AttrDef, Atrb, Colr, EffectContainer, Emitter, EmitterShape, Force, ForceKind, ParticleType, Text,
+            ValueKind, FRCE_COMMON_ATTRIBUTES, FRCE_DRAG_ATTRIBUTES, PTYP_ATTRIBUTES_AFTER_COLR,
+            PTYP_ATTRIBUTES_BEFORE_COLR, TRFM_CHANNELS,
         };
-        let f = |kind, params| Force { inner_hash: 0, kind, params, param_count: 4 };
-        let t = EffectTemplate {
-            gradient: Some(ColorGradient { stops: [[255, 0, 0, 255]; COLR_STOPS] }),
+        let atrb = |d: &AttrDef| match d.kind {
+            ValueKind::F32 => Atrb::f32(d.hash, 0.0),
+            ValueKind::U32 => Atrb::u32(d.hash, 0),
+        };
+        let emitter = |flags: u32, colour: [u8; 4]| Emitter {
+            transform: [[0.0; 4]; 4],
+            channels: TRFM_CHANNELS.iter().map(atrb).collect(),
+            geom: None,
+            particle: ParticleType {
+                flags,
+                attributes: PTYP_ATTRIBUTES_BEFORE_COLR.iter().chain(PTYP_ATTRIBUTES_AFTER_COLR.iter()).map(atrb).collect(),
+                colr: Colr::uniform(colour, 0x3C00),
+                text: Text { frames: vec![1] },
+            },
+        };
+        let force = |kind: ForceKind, extra: &[AttrDef]| Force {
+            kind,
+            attributes: FRCE_COMMON_ATTRIBUTES.iter().chain(extra.iter()).map(atrb).collect(),
+        };
+        let fx = EffectContainer {
+            shapes: vec![EmitterShape { records: vec![] }],
+            emitters: vec![emitter(1, [255, 0, 0, 255]), emitter(0, [0, 0, 255, 255])],
             forces: vec![
-                f(ForceKind::Gravity, [0.0, -9.8, 0.0, 0.0]),
-                f(ForceKind::Drag, [0.5, 0.0, 0.0, 0.0]),
+                force(ForceKind::Gravity { magnitude: 9.8, direction: [0.0, -1.0, 0.0] }, &[]),
+                force(ForceKind::Drag { magnitude: 0.5 }, &FRCE_DRAG_ATTRIBUTES),
             ],
-            ptype: Some(ParticleType { flags: 0x01 }), // bit0 → additive
-            ..Default::default()
         };
-        // Base = smoke (alpha, grey). The template must override with the authored values.
-        let d = EmitterDesc::from_effect_template(&t, EmitterDesc::demo_smoke());
-        assert_eq!(d.gravity, Vec3::new(0.0, -9.8, 0.0), "FRCE Gravity → accel");
-        assert!((d.drag - 0.5).abs() < 1e-6, "FRCE Drag → damping");
-        assert_eq!(d.blend, BlendMode::Additive, "PTYP bit0 → additive");
-        assert_eq!(d.gradient.sample(0.0)[0], 1.0, "COLR red overrode the smoke grey");
-        assert_eq!(d.gradient.sample(0.0)[1], 0.0);
-        // A wholly-empty template must leave the base untouched (graceful degrade, no fabrication).
+        // Base = smoke (alpha, grey). Each emitter must take the authored values.
+        let ds = EmitterDesc::from_effect(&fx, &EmitterDesc::demo_smoke());
+        assert_eq!(ds.len(), 2, "one desc per emitter");
+        assert_eq!(ds[0].gravity, Vec3::new(0.0, -9.8, 0.0), "FRCE gravity → accel");
+        assert!((ds[0].drag - 0.5).abs() < 1e-6, "FRCE drag → damping");
+        assert_eq!(ds[0].blend, BlendMode::Additive, "PTYP bit0 → additive");
+        assert_eq!(ds[1].blend, BlendMode::Alpha);
+        assert_eq!(ds[0].gradient.sample(0.0), [1.0, 0.0, 0.0, 1.0], "COLR red overrode the smoke grey");
+        assert_eq!(ds[1].gradient.sample(0.5), [0.0, 0.0, 1.0, 1.0]);
+        // No forces: the base's gravity and drag stand.
+        let calm = EffectContainer { forces: vec![], ..fx };
         let base = EmitterDesc::demo_fire();
-        let d2 = EmitterDesc::from_effect_template(&EffectTemplate::default(), base.clone());
-        assert_eq!(d2.blend, base.blend);
-        assert_eq!(d2.gravity, base.gravity);
+        let d = &EmitterDesc::from_effect(&calm, &base)[0];
+        assert_eq!(d.gravity, base.gravity);
+        assert_eq!(d.drag, base.drag);
     }
 }
