@@ -19,8 +19,9 @@
 
 use mercs2_formats::hash::pandemic_hash_m2;
 
+use crate::multitrack::MultiTrackCue;
 use crate::soundbank::{
-    Cue, CueBody, Group, GroupForm, GroupHead, Soundbank, SoundbankError, WaveRef,
+    Cue, CueBody, Group, GroupForm, GroupHead, MultiGroup, Soundbank, SoundbankError, WaveRef,
 };
 use crate::sounddb::{CategoryEntry, CueEntry, SoundDb, SoundDbError, SOUNDDB_TAG};
 use crate::wave::{WaveData, WaveError, WaveRecord, WavebankFile, BYTES_PER_SAMPLE_PCM16};
@@ -90,7 +91,8 @@ pub struct GroupParams {
 /// The single-track cue fields the caller supplies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CueParams {
-    /// `+0x06`, unknown.
+    /// `+0x06` start limit: the engine starts the cue only while a counter in its runtime record is
+    /// below this (0 = no limit; that the counter counts live instances is inferred).
     pub byte_06: u8,
     /// `+0x08` gain.
     pub gain: f32,
@@ -179,6 +181,8 @@ pub enum EncodeError {
     EmptyName,
     /// The bank has no cues.
     NoCues,
+    /// The bank has no waves or no groups.
+    NoWavesOrGroups,
     /// Two cues hash to the same guid.
     DuplicateCue { name: String, guid: u32 },
     /// A category name does not hash to a retail category.
@@ -191,6 +195,14 @@ pub enum EncodeError {
     EmptyAudio { cue: String },
     /// A cue's sample rate is zero.
     ZeroRate { cue: String },
+    /// A group names a wave index past this bank's waves.
+    WaveOutOfRange { group: usize, wave: usize, waves: usize },
+    /// A cue names a group index past this bank's groups.
+    GroupOutOfRange { cue: String, group: usize, groups: usize },
+    /// A multi-wave group lists no waves, or a multi-track sound lists no entries.
+    EmptyChoice { what: String },
+    /// A selection mode the engine picks nothing with (it knows 0, 1 and 2).
+    SelectionMode { what: String, mode: u8 },
     /// A count does not fit its on-disk field.
     TooLarge { what: &'static str, value: usize },
     /// The wavebank serializer refused the table.
@@ -206,21 +218,32 @@ impl std::fmt::Display for EncodeError {
         match self {
             EncodeError::EmptyName => write!(f, "encode: a bank or cue name is empty"),
             EncodeError::NoCues => write!(f, "encode: the bank has no cues"),
+            EncodeError::NoWavesOrGroups => write!(f, "encode: the bank has no waves or no groups"),
             EncodeError::DuplicateCue { name, guid } => {
                 write!(f, "encode: cue {name:?} hashes to 0x{guid:08X}, which another cue already has")
             }
             EncodeError::UnknownCategory { cue, category, hash } => write!(
                 f,
-                "encode: cue {cue:?} category {category:?} (0x{hash:08X}) is not a retail category"
+                "encode: {cue} category {category:?} (0x{hash:08X}) is not a retail category"
             ),
             EncodeError::UnsupportedChannels { cue, channels } => {
-                write!(f, "encode: cue {cue:?} has {channels} channels, expected 1 or 2")
+                write!(f, "encode: {cue} has {channels} channels, expected 1 or 2")
             }
             EncodeError::PartialFrame { cue, samples, channels } => {
-                write!(f, "encode: cue {cue:?} has {samples} samples, not a multiple of {channels}")
+                write!(f, "encode: {cue} has {samples} samples, not a multiple of {channels}")
             }
-            EncodeError::EmptyAudio { cue } => write!(f, "encode: cue {cue:?} has no samples"),
-            EncodeError::ZeroRate { cue } => write!(f, "encode: cue {cue:?} has sample rate 0"),
+            EncodeError::EmptyAudio { cue } => write!(f, "encode: {cue} has no samples"),
+            EncodeError::ZeroRate { cue } => write!(f, "encode: {cue} has sample rate 0"),
+            EncodeError::WaveOutOfRange { group, wave, waves } => {
+                write!(f, "encode: group {group} names wave {wave}, past this bank's {waves} waves")
+            }
+            EncodeError::GroupOutOfRange { cue, group, groups } => {
+                write!(f, "encode: cue {cue:?} names group {group}, past this bank's {groups} groups")
+            }
+            EncodeError::EmptyChoice { what } => write!(f, "encode: {what} lists nothing to pick"),
+            EncodeError::SelectionMode { what, mode } => {
+                write!(f, "encode: {what} has selection mode {mode}; the engine knows 0, 1 and 2")
+            }
             EncodeError::TooLarge { what, value } => {
                 write!(f, "encode: {what} = {value} does not fit its on-disk field")
             }
@@ -238,102 +261,301 @@ pub fn cue_length_s(frames: u32, sample_rate: u32) -> f32 {
     (f64::from(frames) / f64::from(sample_rate)) as f32
 }
 
-/// Build the three tables for `spec` (validated; nothing serialized yet).
-pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
+// ---- the general path: waves, groups and cues authored separately -----------------------------
+
+/// One wave of a bank.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaveSpec {
+    /// The record's clip hash.
+    pub clip_hash: u32,
+    /// The audio.
+    pub pcm: Pcm16,
+}
+
+/// The fields both group forms share (see [`crate::soundbank::GroupHead`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupHeadParams {
+    /// `+0x10`, unknown.
+    pub unknown_10: f32,
+    /// `+0x14`, 0 or 1 in retail, unknown.
+    pub unknown_14: u32,
+    /// `+0x18` minimum distance.
+    pub min_distance: f32,
+    /// `+0x1C` maximum distance.
+    pub max_distance: f32,
+    /// `+0x20`, unknown.
+    pub unknown_20: f32,
+    /// `+0x24` pitch.
+    pub pitch: f32,
+    /// `+0x28`, unknown.
+    pub unknown_28: f32,
+}
+
+/// A multi-wave group's fields after the head (see [`crate::soundbank::MultiGroup`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MultiGroupParams {
+    /// `+0x2C`, unknown.
+    pub byte_2c: u8,
+    /// `+0x2E` selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
+    /// immediate repeat.
+    pub selection: u8,
+    /// `+0x2F`, unknown.
+    pub byte_2f: u8,
+    /// `+0x30`, unknown.
+    pub unknown_30: f32,
+    /// `+0x34`, unknown.
+    pub unknown_34: f32,
+    /// `+0x3C`, unknown.
+    pub unknown_3c: f32,
+    /// `+0x40`, unknown.
+    pub unknown_40: f32,
+    /// `+0x48`, unknown flags.
+    pub word_48: u32,
+    /// `+0x4C`..`+0x63`, unknown.
+    pub floats_4c: [f32; 6],
+    /// `+0x64`, unknown.
+    pub unknown_64: f32,
+}
+
+/// A group's form.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GroupFormSpec {
+    /// One wave.
+    Single {
+        /// Index into [`TablesSpec::waves`].
+        wave: usize,
+        /// `+0x2C` linear gain.
+        gain: f32,
+        /// `+0x30`, unknown.
+        unknown_30: f32,
+        /// The wave reference's weight.
+        weight: f32,
+    },
+    /// Weighted waves the engine picks among ([`crate::select`]).
+    Multi {
+        /// The multi-wave fields.
+        params: MultiGroupParams,
+        /// `(index into [`TablesSpec::waves`], weight)`.
+        waves: Vec<(usize, f32)>,
+    },
+}
+
+/// One group of a bank.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupSpec {
+    /// `+0x00` sound id (meaning unproven).
+    pub sound_id: u32,
+    /// Category name; must hash to one of [`RETAIL_CATEGORIES`].
+    pub category: String,
+    /// The shared head fields.
+    pub head: GroupHeadParams,
+    /// The form.
+    pub form: GroupFormSpec,
+}
+
+/// A cue's body.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CueBodySpec {
+    /// Plays one group of this bank.
+    SingleTrack {
+        /// Index into [`TablesSpec::groups`].
+        group: usize,
+        /// `+0x16`, unknown (0 in most retail cues).
+        unknown_16: u16,
+    },
+    /// Tracks of timed sounds. Entries naming this bank (`m2(name)`) must name one of its groups;
+    /// entries naming another bank are written as given (retail cues play other banks' groups too).
+    MultiTrack(MultiTrackCue),
+}
+
+/// One cue of a bank.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CueDef {
+    /// Cue name; its guid is `m2(name)`.
+    pub name: String,
+    /// `+0x06` start limit: the engine starts the cue only while a counter in its runtime record is
+    /// below this (0 = no limit; that the counter counts live instances is inferred).
+    pub byte_06: u8,
+    /// `+0x08` gain.
+    pub gain: f32,
+    /// `+0x0C` length in seconds. Retail stores `frames / rate` for a single-wave cue
+    /// ([`cue_length_s`]); for multi-wave and multi-track cues the rule is not established, so the
+    /// caller states it.
+    pub length_s: f32,
+    /// The body.
+    pub body: CueBodySpec,
+}
+
+/// A whole bank, authored table by table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TablesSpec {
+    /// Bank name; every table carries `m2(name)`.
+    pub name: String,
+    /// The waves, in wavebank order.
+    pub waves: Vec<WaveSpec>,
+    /// The groups, in soundbank order.
+    pub groups: Vec<GroupSpec>,
+    /// The cues, in soundbank order.
+    pub cues: Vec<CueDef>,
+}
+
+fn check_pcm(what: &str, pcm: &Pcm16) -> Result<u32, EncodeError> {
+    let ch = pcm.channels;
+    if ch != 1 && ch != 2 {
+        return Err(EncodeError::UnsupportedChannels { cue: what.to_string(), channels: ch });
+    }
+    if pcm.samples.is_empty() {
+        return Err(EncodeError::EmptyAudio { cue: what.to_string() });
+    }
+    if !pcm.samples.len().is_multiple_of(ch as usize) {
+        return Err(EncodeError::PartialFrame { cue: what.to_string(), samples: pcm.samples.len(), channels: ch });
+    }
+    if pcm.sample_rate == 0 {
+        return Err(EncodeError::ZeroRate { cue: what.to_string() });
+    }
+    let frames = pcm.samples.len() / ch as usize;
+    let bytes = pcm.samples.len() * 2;
+    if u32::try_from(bytes).is_err() {
+        return Err(EncodeError::TooLarge { what: "clip bytes", value: bytes });
+    }
+    u32::try_from(frames).map_err(|_| EncodeError::TooLarge { what: "frame count", value: frames })
+}
+
+/// Build the three tables for a bank authored table by table (validated; nothing serialized yet).
+pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
     if spec.name.is_empty() {
         return Err(EncodeError::EmptyName);
     }
     if spec.cues.is_empty() {
         return Err(EncodeError::NoCues);
     }
-    if spec.cues.len() > u16::MAX as usize {
-        return Err(EncodeError::TooLarge { what: "cue count", value: spec.cues.len() });
+    if spec.waves.is_empty() || spec.groups.is_empty() {
+        return Err(EncodeError::NoWavesOrGroups);
+    }
+    for (what, n) in [("wave count", spec.waves.len()), ("group count", spec.groups.len()), ("cue count", spec.cues.len())] {
+        if n > u16::MAX as usize {
+            return Err(EncodeError::TooLarge { what, value: n });
+        }
     }
     let bank_hash = pandemic_hash_m2(&spec.name);
 
-    let mut records = Vec::with_capacity(spec.cues.len());
-    let mut groups = Vec::with_capacity(spec.cues.len());
+    let mut records = Vec::with_capacity(spec.waves.len());
+    for (i, w) in spec.waves.iter().enumerate() {
+        let frames = check_pcm(&format!("wave {i}"), &w.pcm)?;
+        records.push(WaveRecord {
+            clip_hash: w.clip_hash,
+            channels: w.pcm.channels,
+            format: BYTES_PER_SAMPLE_PCM16,
+            sample_rate: w.pcm.sample_rate,
+            frames,
+            data: WaveData::Embedded(w.pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect()),
+        });
+    }
+
+    let wave_ref = |g: usize, wave: usize, weight: f32| -> Result<WaveRef, EncodeError> {
+        if wave >= spec.waves.len() {
+            return Err(EncodeError::WaveOutOfRange { group: g, wave, waves: spec.waves.len() });
+        }
+        Ok(WaveRef { wavebank: bank_hash, index: wave as u32, weight })
+    };
+    let mut groups = Vec::with_capacity(spec.groups.len());
+    for (g, gs) in spec.groups.iter().enumerate() {
+        let category = pandemic_hash_m2(&gs.category);
+        if !RETAIL_CATEGORIES.iter().any(|e| e.category == category) {
+            return Err(EncodeError::UnknownCategory {
+                cue: format!("group {g}"),
+                category: gs.category.clone(),
+                hash: category,
+            });
+        }
+        let h = &gs.head;
+        let form = match &gs.form {
+            GroupFormSpec::Single { wave, gain, unknown_30, weight } => GroupForm::Single {
+                gain: *gain,
+                unknown_30: *unknown_30,
+                wave: wave_ref(g, *wave, *weight)?,
+            },
+            GroupFormSpec::Multi { params: p, waves } => {
+                if waves.is_empty() {
+                    return Err(EncodeError::EmptyChoice { what: format!("group {g}") });
+                }
+                if p.selection > 2 {
+                    return Err(EncodeError::SelectionMode { what: format!("group {g}"), mode: p.selection });
+                }
+                GroupForm::Multi(MultiGroup {
+                    byte_2c: p.byte_2c,
+                    selection: p.selection,
+                    byte_2f: p.byte_2f,
+                    unknown_30: p.unknown_30,
+                    unknown_34: p.unknown_34,
+                    unknown_3c: p.unknown_3c,
+                    unknown_40: p.unknown_40,
+                    word_48: p.word_48,
+                    floats_4c: p.floats_4c,
+                    unknown_64: p.unknown_64,
+                    waves: waves.iter().map(|&(w, wt)| wave_ref(g, w, wt)).collect::<Result<_, _>>()?,
+                })
+            }
+        };
+        groups.push(Group {
+            head: GroupHead {
+                sound_id: gs.sound_id,
+                category,
+                unknown_10: h.unknown_10,
+                unknown_14: h.unknown_14,
+                min_distance: h.min_distance,
+                max_distance: h.max_distance,
+                unknown_20: h.unknown_20,
+                pitch: h.pitch,
+                unknown_28: h.unknown_28,
+            },
+            form,
+        });
+    }
+
     let mut cues = Vec::with_capacity(spec.cues.len());
-    let mut entries = Vec::with_capacity(spec.cues.len());
+    let mut entries: Vec<CueEntry> = Vec::with_capacity(spec.cues.len());
     for (i, c) in spec.cues.iter().enumerate() {
         if c.name.is_empty() {
             return Err(EncodeError::EmptyName);
         }
         let guid = pandemic_hash_m2(&c.name);
-        if entries.iter().any(|e: &CueEntry| e.guid == guid) {
+        if entries.iter().any(|e| e.guid == guid) {
             return Err(EncodeError::DuplicateCue { name: c.name.clone(), guid });
         }
-        let category = pandemic_hash_m2(&c.category);
-        if !RETAIL_CATEGORIES.iter().any(|e| e.category == category) {
-            return Err(EncodeError::UnknownCategory {
-                cue: c.name.clone(),
-                category: c.category.clone(),
-                hash: category,
-            });
-        }
-        let ch = c.pcm.channels;
-        if ch != 1 && ch != 2 {
-            return Err(EncodeError::UnsupportedChannels { cue: c.name.clone(), channels: ch });
-        }
-        if c.pcm.samples.is_empty() {
-            return Err(EncodeError::EmptyAudio { cue: c.name.clone() });
-        }
-        if c.pcm.samples.len() % ch as usize != 0 {
-            return Err(EncodeError::PartialFrame {
-                cue: c.name.clone(),
-                samples: c.pcm.samples.len(),
-                channels: ch,
-            });
-        }
-        if c.pcm.sample_rate == 0 {
-            return Err(EncodeError::ZeroRate { cue: c.name.clone() });
-        }
-        let frames_usize = c.pcm.samples.len() / ch as usize;
-        let frames = u32::try_from(frames_usize)
-            .map_err(|_| EncodeError::TooLarge { what: "frame count", value: frames_usize })?;
-        let data: Vec<u8> = c.pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        if u32::try_from(data.len()).is_err() {
-            return Err(EncodeError::TooLarge { what: "clip bytes", value: data.len() });
-        }
-
-        records.push(WaveRecord {
-            clip_hash: c.clip_hash,
-            channels: ch,
-            format: BYTES_PER_SAMPLE_PCM16,
-            sample_rate: c.pcm.sample_rate,
-            frames,
-            data: WaveData::Embedded(data),
-        });
-        let g = &c.group;
-        groups.push(Group {
-            head: GroupHead {
-                sound_id: c.sound_id,
-                category,
-                unknown_10: g.unknown_10,
-                unknown_14: g.unknown_14,
-                min_distance: g.min_distance,
-                max_distance: g.max_distance,
-                unknown_20: g.unknown_20,
-                pitch: g.pitch,
-                unknown_28: g.unknown_28,
-            },
-            form: GroupForm::Single {
-                gain: g.gain,
-                unknown_30: g.unknown_30,
-                wave: WaveRef { wavebank: bank_hash, index: i as u32, weight: g.wave_weight },
-            },
-        });
-        cues.push(Cue {
-            guid,
-            byte_06: c.cue.byte_06,
-            gain: c.cue.gain,
-            length_s: cue_length_s(frames, c.pcm.sample_rate),
-            body: CueBody::SingleTrack {
+        let group_in_range = |group: usize| -> Result<u16, EncodeError> {
+            if group >= spec.groups.len() {
+                return Err(EncodeError::GroupOutOfRange { cue: c.name.clone(), group, groups: spec.groups.len() });
+            }
+            Ok(group as u16)
+        };
+        let body = match &c.body {
+            CueBodySpec::SingleTrack { group, unknown_16 } => CueBody::SingleTrack {
                 soundbank: bank_hash,
-                group_index: i as u16,
-                unknown_16: c.cue.unknown_16,
+                group_index: group_in_range(*group)?,
+                unknown_16: *unknown_16,
             },
-        });
+            CueBodySpec::MultiTrack(m) => {
+                for (t, track) in m.tracks.iter().enumerate() {
+                    for (k, s) in track.sounds.iter().enumerate() {
+                        let what = format!("cue {:?} track {t} sound {k}", c.name);
+                        if s.entries.is_empty() {
+                            return Err(EncodeError::EmptyChoice { what });
+                        }
+                        if s.selection > 2 {
+                            return Err(EncodeError::SelectionMode { what, mode: s.selection });
+                        }
+                        for e in &s.entries {
+                            if e.soundbank == bank_hash {
+                                group_in_range(e.group_index as usize)?;
+                            }
+                        }
+                    }
+                }
+                CueBody::MultiTrack(m.clone())
+            }
+        };
+        cues.push(Cue { guid, byte_06: c.byte_06, gain: c.gain, length_s: c.length_s, body });
         entries.push(CueEntry::routed(guid, bank_hash, i as u32));
     }
     entries.sort_by_key(|e| e.guid);
@@ -349,6 +571,57 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
             params: Vec::new(),
         },
     })
+}
+
+/// Build and serialize a bank authored table by table.
+pub fn encode_general(spec: &TablesSpec) -> Result<EncodedBank, EncodeError> {
+    build_general(spec)?.to_bytes()
+}
+
+// ---- the simple path: one wave, one single-wave group and one single-track cue per cue ----------
+
+/// Build the three tables for `spec` (validated; nothing serialized yet): cue `i` becomes wave `i`,
+/// single-wave group `i` and single-track cue `i`, its length `frames / rate`.
+pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
+    if spec.cues.is_empty() {
+        return Err(EncodeError::NoCues);
+    }
+    let mut general = TablesSpec { name: spec.name.clone(), waves: Vec::new(), groups: Vec::new(), cues: Vec::new() };
+    for (i, c) in spec.cues.iter().enumerate() {
+        let frames = check_pcm(&format!("cue {:?}", c.name), &c.pcm)?;
+        let hash = pandemic_hash_m2(&c.category);
+        if !RETAIL_CATEGORIES.iter().any(|e| e.category == hash) {
+            return Err(EncodeError::UnknownCategory {
+                cue: format!("cue {:?}", c.name),
+                category: c.category.clone(),
+                hash,
+            });
+        }
+        let g = &c.group;
+        general.waves.push(WaveSpec { clip_hash: c.clip_hash, pcm: c.pcm.clone() });
+        general.groups.push(GroupSpec {
+            sound_id: c.sound_id,
+            category: c.category.clone(),
+            head: GroupHeadParams {
+                unknown_10: g.unknown_10,
+                unknown_14: g.unknown_14,
+                min_distance: g.min_distance,
+                max_distance: g.max_distance,
+                unknown_20: g.unknown_20,
+                pitch: g.pitch,
+                unknown_28: g.unknown_28,
+            },
+            form: GroupFormSpec::Single { wave: i, gain: g.gain, unknown_30: g.unknown_30, weight: g.wave_weight },
+        });
+        general.cues.push(CueDef {
+            name: c.name.clone(),
+            byte_06: c.cue.byte_06,
+            gain: c.cue.gain,
+            length_s: cue_length_s(frames, c.pcm.sample_rate),
+            body: CueBodySpec::SingleTrack { group: i, unknown_16: c.cue.unknown_16 },
+        });
+    }
+    build_general(&general)
 }
 
 impl BankTables {
@@ -463,6 +736,135 @@ mod tests {
         let mut s = spec();
         s.cues.clear();
         assert_eq!(encode_bank(&s), Err(EncodeError::NoCues));
+    }
+
+    /// A bank with a multi-wave group and a multi-track cue: it round-trips through the parsers, the
+    /// engine resolves every path of the multi-track cue to the authored PCM, and the engine's picks
+    /// follow the authored selection modes.
+    #[test]
+    fn multi_wave_groups_and_multi_track_cues_author_and_resolve() {
+        use crate::multitrack::{MultiTrackCue, Sound, SoundEntry, Track};
+        use crate::sounddb::SoundDb;
+        use crate::AudioEngine;
+
+        let bank = pandemic_hash_m2("mod_layers");
+        let head = GroupHeadParams {
+            unknown_10: 0.95,
+            unknown_14: 0,
+            min_distance: 10.0,
+            max_distance: 1000.0,
+            unknown_20: 1.0,
+            pitch: 1.0,
+            unknown_28: 1.0,
+        };
+        let multi = MultiGroupParams {
+            byte_2c: 0xFF,
+            selection: 0, // sequential: picks 0, 1, 2, 0, ...
+            byte_2f: 1,
+            unknown_30: 0.0,
+            unknown_34: 0.0,
+            unknown_3c: 0.0,
+            unknown_40: 0.0,
+            word_48: 0,
+            floats_4c: [0.5, 0.5, 0.5, 0.0, 0.0, 0.0],
+            unknown_64: 0.0,
+        };
+        let wave = |v: i16| WaveSpec { clip_hash: 0x1000 + v as u32, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![v; 64] } };
+        let spec = TablesSpec {
+            name: "mod_layers".to_string(),
+            waves: vec![wave(1), wave(2), wave(3), wave(4)],
+            groups: vec![
+                GroupSpec {
+                    sound_id: 1,
+                    category: "sfx".to_string(),
+                    head,
+                    form: GroupFormSpec::Multi { params: multi, waves: vec![(0, 0.3), (1, 0.3), (2, 0.4)] },
+                },
+                GroupSpec {
+                    sound_id: 2,
+                    category: "sfx".to_string(),
+                    head,
+                    form: GroupFormSpec::Single { wave: 3, gain: 1.0, unknown_30: 0.0, weight: 1.0 },
+                },
+            ],
+            cues: vec![CueDef {
+                name: "mod_layered_hit".to_string(),
+                byte_06: 0,
+                gain: 1.0,
+                length_s: -1.0,
+                body: CueBodySpec::MultiTrack(MultiTrackCue {
+                    byte_10: 0,
+                    sound_slots: 1,
+                    unknown_18: 1.0,
+                    unknown_1c: -1.0,
+                    unknown_20: -1.0,
+                    unknown_24: 0.0,
+                    events: vec![],
+                    curves: vec![],
+                    tracks: vec![
+                        Track {
+                            byte_00: 0,
+                            unknown_04: -1.0,
+                            unknown_08: -1.0,
+                            automation: vec![],
+                            sounds: vec![Sound {
+                                slot: 0,
+                                byte_01: 2,
+                                byte_02: 2,
+                                selection: 1,
+                                start_s: 0.0,
+                                entries: vec![SoundEntry { soundbank: bank, group_index: 0, unknown_06: 0, weight: 1.0 }],
+                            }],
+                        },
+                        Track {
+                            byte_00: 0,
+                            unknown_04: -1.0,
+                            unknown_08: -1.0,
+                            automation: vec![],
+                            sounds: vec![Sound {
+                                slot: 0,
+                                byte_01: 2,
+                                byte_02: 2,
+                                selection: 1,
+                                start_s: 0.25,
+                                entries: vec![SoundEntry { soundbank: bank, group_index: 1, unknown_06: 0, weight: 1.0 }],
+                            }],
+                        },
+                    ],
+                    params: vec![],
+                }),
+            }],
+        };
+        let tables = build_general(&spec).expect("builds");
+        let enc = tables.to_bytes().expect("encodes");
+        assert_eq!(Soundbank::parse(&enc.soundbank).expect("parses"), tables.soundbank);
+
+        let mut eng = AudioEngine::default();
+        eng.set_rng_seed(1);
+        eng.set_sounddb(SoundDb::parse(&enc.sounddb).unwrap());
+        eng.load_soundbank(&enc.soundbank).unwrap();
+        eng.load_wavebank(&enc.wavebank).unwrap();
+        let entry = *eng.sounddb.find_cue_by_name("mod_layered_hit").unwrap();
+        let resolved = eng.resolve_cue(&entry).expect("every path resolves");
+        let clips: Vec<u32> = resolved.waves().map(|w| w.clip_hash).collect();
+        assert_eq!(clips, vec![0x1001, 0x1002, 0x1003, 0x1004], "both tracks, every wave");
+
+        // Track 0's group is sequential; track 1 always plays wave 3 a quarter second in.
+        for want in [0u32, 1, 2, 0] {
+            let picked = eng.pick_cue(&entry).unwrap();
+            assert_eq!(picked.len(), 2);
+            assert_eq!(picked[0].wave.index, want);
+            assert_eq!((picked[1].wave.index, picked[1].start_s), (3, 0.25));
+        }
+
+        let mut bad = spec.clone();
+        if let GroupFormSpec::Multi { params, .. } = &mut bad.groups[0].form {
+            params.selection = 3;
+        }
+        assert!(matches!(build_general(&bad), Err(EncodeError::SelectionMode { mode: 3, .. })));
+        let mut bad = spec;
+        bad.groups[0].form = GroupFormSpec::Single { wave: 9, gain: 1.0, unknown_30: 0.0, weight: 1.0 };
+        assert!(matches!(build_general(&bad), Err(EncodeError::WaveOutOfRange { wave: 9, .. })));
     }
 
     #[test]
