@@ -319,6 +319,16 @@ impl SoundDb {
                 self.cues.push(*c);
             }
         }
+        for c in &other.categories {
+            if !self.categories.contains(c) {
+                self.categories.push(*c);
+            }
+        }
+        for p in &other.params {
+            if !self.params.contains(p) {
+                self.params.push(*p);
+            }
+        }
     }
 }
 
