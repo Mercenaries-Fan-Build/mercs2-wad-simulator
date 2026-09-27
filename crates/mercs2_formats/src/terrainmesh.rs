@@ -218,13 +218,13 @@ pub struct Phy2 {
 
 /// A descriptor-tree node: a leaf (`body`) or a container (`children`).
 #[derive(Debug, Clone)]
-enum Node {
+pub(crate) enum Node {
     Leaf([u8; 4], Vec<u8>),
     Container([u8; 4], Vec<Node>),
 }
 
 impl Node {
-    fn tag(&self) -> [u8; 4] {
+    pub(crate) fn tag(&self) -> [u8; 4] {
         match self {
             Node::Leaf(t, _) | Node::Container(t, _) => *t,
         }
@@ -241,26 +241,26 @@ fn tag_str(t: &[u8; 4]) -> String {
     String::from_utf8_lossy(t).into_owned()
 }
 
-fn u32_at(b: &[u8], o: usize) -> u32 {
+pub(crate) fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
-fn u16_at(b: &[u8], o: usize) -> u16 {
+pub(crate) fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
 }
-fn f32_at(b: &[u8], o: usize) -> f32 {
+pub(crate) fn f32_at(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
-fn vec3_at(b: &[u8], o: usize) -> [f32; 3] {
+pub(crate) fn vec3_at(b: &[u8], o: usize) -> [f32; 3] {
     [f32_at(b, o), f32_at(b, o + 4), f32_at(b, o + 8)]
 }
-fn put_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
+pub(crate) fn put_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     for c in v {
         out.extend_from_slice(&c.to_le_bytes());
     }
 }
 
 /// Parse and validate the descriptor tree. Refuses anything [`emit_tree`] would not reproduce exactly.
-fn parse_tree(c: &[u8]) -> Result<Vec<Node>, String> {
+pub(crate) fn parse_tree(c: &[u8]) -> Result<Vec<Node>, String> {
     if c.len() < HEADER + 8 || &c[0..4] != b"UCFX" {
         return Err("not a UCFX container".into());
     }
@@ -391,7 +391,7 @@ fn parse_tree(c: &[u8]) -> Result<Vec<Node>, String> {
 type FlatRow<'a> = ([u8; 4], Option<&'a [u8]>, u32, u32);
 
 /// Serialize a descriptor tree: header, rows (pre-order), packed bodies, `CSUM`.
-fn emit_tree(roots: &[Node]) -> Vec<u8> {
+pub(crate) fn emit_tree(roots: &[Node]) -> Vec<u8> {
     fn flatten<'a>(nodes: &'a [Node], rows: &mut Vec<FlatRow<'a>>) {
         let n = nodes.len();
         for (k, node) in nodes.iter().enumerate() {
@@ -445,7 +445,7 @@ fn emit_tree(roots: &[Node]) -> Vec<u8> {
 
 // ─────────────────────────────────────────────────────── typed decode ──
 
-fn expect_children(nodes: &[Node], want: &[&[u8; 4]], ctx: &str) -> Result<(), String> {
+pub(crate) fn expect_children(nodes: &[Node], want: &[&[u8; 4]], ctx: &str) -> Result<(), String> {
     let got: Vec<[u8; 4]> = nodes.iter().map(|n| n.tag()).collect();
     if got.len() != want.len() || got.iter().zip(want).any(|(g, w)| g != *w) {
         return Err(format!(
@@ -457,7 +457,7 @@ fn expect_children(nodes: &[Node], want: &[&[u8; 4]], ctx: &str) -> Result<(), S
     Ok(())
 }
 
-fn leaf<'a>(n: &'a Node, ctx: &str) -> Result<&'a [u8], String> {
+pub(crate) fn leaf<'a>(n: &'a Node, ctx: &str) -> Result<&'a [u8], String> {
     match n {
         Node::Leaf(_, b) => Ok(b),
         Node::Container(t, _) => Err(format!(
@@ -467,7 +467,7 @@ fn leaf<'a>(n: &'a Node, ctx: &str) -> Result<&'a [u8], String> {
     }
 }
 
-fn children_of<'a>(n: &'a Node, ctx: &str) -> Result<&'a [Node], String> {
+pub(crate) fn children_of<'a>(n: &'a Node, ctx: &str) -> Result<&'a [Node], String> {
     match n {
         Node::Container(_, c) => Ok(c),
         Node::Leaf(t, _) => Err(format!(
@@ -477,7 +477,7 @@ fn children_of<'a>(n: &'a Node, ctx: &str) -> Result<&'a [Node], String> {
     }
 }
 
-fn exact_len(b: &[u8], want: usize, ctx: &str) -> Result<(), String> {
+pub(crate) fn exact_len(b: &[u8], want: usize, ctx: &str) -> Result<(), String> {
     if b.len() != want {
         return Err(format!("{ctx}: {} bytes, expected {want}", b.len()));
     }
@@ -499,36 +499,61 @@ fn decl_type_size(ty: u8) -> Result<usize, String> {
     })
 }
 
+/// Decode the material record at `b[p..]`; returns it and the offset just past it.
+pub(crate) fn decode_material(b: &[u8], p: usize, ctx: &str) -> Result<(Material, usize), String> {
+    if p + MATERIAL_HEAD + 4 > b.len() {
+        return Err(format!("{ctx}: material record runs past the body"));
+    }
+    let mut params = [0f32; 25];
+    for (k, v) in params.iter_mut().enumerate() {
+        *v = f32_at(b, p + 4 + 4 * k);
+    }
+    let flags = u16_at(b, p + MATERIAL_HEAD);
+    let count = u16_at(b, p + MATERIAL_HEAD + 2) as usize;
+    let end = p + MATERIAL_HEAD + 4 + 4 * count + 8;
+    if end > b.len() {
+        return Err(format!(
+            "{ctx}: material record ({count} textures) runs past the body"
+        ));
+    }
+    let textures = (0..count)
+        .map(|k| u32_at(b, p + MATERIAL_HEAD + 4 + 4 * k))
+        .collect();
+    let t = p + MATERIAL_HEAD + 4 + 4 * count;
+    let material = Material {
+        word_0: u32_at(b, p),
+        params,
+        flags,
+        textures,
+        tail: [u32_at(b, t), u32_at(b, t + 4)],
+    };
+    Ok((material, end))
+}
+
+/// Append a material record (the inverse of [`decode_material`]).
+pub(crate) fn encode_material(mat: &Material, m: &mut Vec<u8>) -> Result<(), String> {
+    m.extend_from_slice(&mat.word_0.to_le_bytes());
+    for v in mat.params {
+        m.extend_from_slice(&v.to_le_bytes());
+    }
+    m.extend_from_slice(&mat.flags.to_le_bytes());
+    let count = u16::try_from(mat.textures.len())
+        .map_err(|_| format!("material has {} textures", mat.textures.len()))?;
+    m.extend_from_slice(&count.to_le_bytes());
+    for t in &mat.textures {
+        m.extend_from_slice(&t.to_le_bytes());
+    }
+    m.extend_from_slice(&mat.tail[0].to_le_bytes());
+    m.extend_from_slice(&mat.tail[1].to_le_bytes());
+    Ok(())
+}
+
 fn decode_mtrl(b: &[u8], material_count: usize) -> Result<Mtrl, String> {
     let mut p = 0usize;
     let mut materials = Vec::with_capacity(material_count);
     for m in 0..material_count {
-        if p + MATERIAL_HEAD + 4 > b.len() {
-            return Err(format!("MTRL: record {m} runs past the body"));
-        }
-        let mut params = [0f32; 25];
-        for (k, v) in params.iter_mut().enumerate() {
-            *v = f32_at(b, p + 4 + 4 * k);
-        }
-        let flags = u16_at(b, p + MATERIAL_HEAD);
-        let count = u16_at(b, p + MATERIAL_HEAD + 2) as usize;
-        let end = p + MATERIAL_HEAD + 4 + 4 * count + 8;
-        if end > b.len() {
-            return Err(format!(
-                "MTRL: record {m} ({count} textures) runs past the body"
-            ));
-        }
-        let textures = (0..count)
-            .map(|k| u32_at(b, p + MATERIAL_HEAD + 4 + 4 * k))
-            .collect();
-        let t = p + MATERIAL_HEAD + 4 + 4 * count;
-        materials.push(Material {
-            word_0: u32_at(b, p),
-            params,
-            flags,
-            textures,
-            tail: [u32_at(b, t), u32_at(b, t + 4)],
-        });
+        let (material, end) = decode_material(b, p, &format!("MTRL record {m}"))?;
+        materials.push(material);
         p = end;
     }
     let rest = b.len() - p;
@@ -595,13 +620,33 @@ fn decode_prmg(children: &[Node], ctx: &str) -> Result<Prmg, String> {
         .map(|i| decode_draw(prmt, i * DRAW_LEN))
         .collect();
 
-    let strm = children_of(&children[2], ctx)?;
+    let (stride, decl, vertices, indices) = decode_stream(&children[2], &children[3], ctx)?;
+    let prmg = Prmg {
+        pass_groups,
+        draws: all[..draw_count].to_vec(),
+        alt_draws: all[draw_count..].to_vec(),
+        stride,
+        decl,
+        vertices,
+        indices,
+    };
+    prmg.validate().map_err(|e| format!("{ctx}: {e}"))?;
+    Ok(prmg)
+}
+
+/// A decoded vertex stream and its index buffer: `(stride, decl, vertex bytes, indices)`.
+pub(crate) type Stream = (u32, Vec<DeclElement>, Vec<u8>, Vec<u16>);
+
+/// Decode a `STRM {info, decl, data}` + `IBUF {info, data}` pair, refusing any `info` word that
+/// disagrees with what [`stream_nodes`] would derive (so the pair re-encodes byte-for-byte).
+pub(crate) fn decode_stream(strm: &Node, ibuf: &Node, ctx: &str) -> Result<Stream, String> {
+    let strm = children_of(strm, ctx)?;
     expect_children(strm, &[b"info", b"decl", b"data"], &format!("{ctx} STRM"))?;
     let sinfo = leaf(&strm[0], ctx)?;
     exact_len(sinfo, 12, &format!("{ctx} STRM info"))?;
     let decl_bytes = leaf(&strm[1], ctx)?;
     if decl_bytes.len() < 8
-        || decl_bytes.len() % 8 != 0
+        || !decl_bytes.len().is_multiple_of(8)
         || decl_bytes[decl_bytes.len() - 8..] != DECL_END
     {
         return Err(format!(
@@ -621,46 +666,105 @@ fn decode_prmg(children: &[Node], ctx: &str) -> Result<Prmg, String> {
         .collect();
     let vertices = leaf(&strm[2], ctx)?.to_vec();
     let stride = u32_at(sinfo, 4);
+    validate_stream(stride, &decl, &vertices).map_err(|e| format!("{ctx}: {e}"))?;
+    let want = strm_info(&decl, stride, vertices.len() / stride as usize);
+    if sinfo != want {
+        return Err(format!(
+            "{ctx}: STRM info {sinfo:?} is not the derived {want:?}"
+        ));
+    }
 
-    let ibuf = children_of(&children[3], ctx)?;
+    let ibuf = children_of(ibuf, ctx)?;
     expect_children(ibuf, &[b"info", b"data"], &format!("{ctx} IBUF"))?;
     let iinfo = leaf(&ibuf[0], ctx)?;
     exact_len(iinfo, 4, &format!("{ctx} IBUF info"))?;
     let idata = leaf(&ibuf[1], ctx)?;
-    if idata.len() % 2 != 0 {
+    if !idata.len().is_multiple_of(2) {
         return Err(format!("{ctx}: IBUF data is {} bytes (odd)", idata.len()));
     }
     let indices: Vec<u16> = idata
         .chunks_exact(2)
         .map(|p| u16::from_le_bytes([p[0], p[1]]))
         .collect();
-
-    let prmg = Prmg {
-        pass_groups,
-        draws: all[..draw_count].to_vec(),
-        alt_draws: all[draw_count..].to_vec(),
-        stride,
-        decl,
-        vertices,
-        indices,
-    };
-    // Everything the encoder derives must agree with what is stored.
-    prmg.validate().map_err(|e| format!("{ctx}: {e}"))?;
-    let want_sinfo = prmg.strm_info();
-    if sinfo != want_sinfo {
-        return Err(format!(
-            "{ctx}: STRM info {:?} is not the derived {:?}",
-            sinfo, want_sinfo
-        ));
-    }
-    if u32_at(iinfo, 0) as usize != prmg.indices.len() {
+    if u32_at(iinfo, 0) as usize != indices.len() {
         return Err(format!(
             "{ctx}: IBUF info {} ≠ {} indices",
             u32_at(iinfo, 0),
-            prmg.indices.len()
+            indices.len()
         ));
     }
-    Ok(prmg)
+    Ok((stride, decl, vertices, indices))
+}
+
+/// `stride` must be the extent of the declared elements, and the vertex bytes a whole number of strides.
+pub(crate) fn validate_stream(
+    stride: u32,
+    decl: &[DeclElement],
+    vertices: &[u8],
+) -> Result<(), String> {
+    let mut span = 0usize;
+    for e in decl {
+        span = span.max(e.offset as usize + decl_type_size(e.ty)?);
+    }
+    if span as u32 != stride || stride == 0 {
+        return Err(format!("stride {stride} ≠ the decl's vertex size {span}"));
+    }
+    if !vertices.len().is_multiple_of(stride as usize) {
+        return Err(format!(
+            "{} vertex bytes is not a multiple of stride {stride}",
+            vertices.len()
+        ));
+    }
+    Ok(())
+}
+
+/// `STRM info`: `{decl rows including the terminator, stride, vertex count}`.
+fn strm_info(decl: &[DeclElement], stride: u32, vertex_count: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&(decl.len() as u32 + 1).to_le_bytes());
+    v.extend_from_slice(&stride.to_le_bytes());
+    v.extend_from_slice(&(vertex_count as u32).to_le_bytes());
+    v
+}
+
+/// The `STRM` and `IBUF` nodes for a stream (the inverse of [`decode_stream`]).
+pub(crate) fn stream_nodes(
+    stride: u32,
+    decl: &[DeclElement],
+    vertices: &[u8],
+    indices: &[u16],
+) -> [Node; 2] {
+    let mut d = Vec::with_capacity(8 * (decl.len() + 1));
+    for e in decl {
+        d.extend_from_slice(&e.stream.to_le_bytes());
+        d.extend_from_slice(&e.offset.to_le_bytes());
+        d.extend_from_slice(&[e.ty, e.method, e.usage, e.usage_index]);
+    }
+    d.extend_from_slice(&DECL_END);
+    let mut idata = Vec::with_capacity(2 * indices.len());
+    for i in indices {
+        idata.extend_from_slice(&i.to_le_bytes());
+    }
+    [
+        Node::Container(
+            *b"STRM",
+            vec![
+                Node::Leaf(
+                    *b"info",
+                    strm_info(decl, stride, vertices.len() / stride as usize),
+                ),
+                Node::Leaf(*b"decl", d),
+                Node::Leaf(*b"data", vertices.to_vec()),
+            ],
+        ),
+        Node::Container(
+            *b"IBUF",
+            vec![
+                Node::Leaf(*b"info", (indices.len() as u32).to_le_bytes().to_vec()),
+                Node::Leaf(*b"data", idata),
+            ],
+        ),
+    ]
 }
 
 impl TerrainCell {
@@ -772,19 +876,7 @@ impl TerrainCell {
 
         let mut m = Vec::new();
         for mat in &self.mtrl.materials {
-            m.extend_from_slice(&mat.word_0.to_le_bytes());
-            for v in mat.params {
-                m.extend_from_slice(&v.to_le_bytes());
-            }
-            m.extend_from_slice(&mat.flags.to_le_bytes());
-            let count = u16::try_from(mat.textures.len())
-                .map_err(|_| format!("material has {} textures", mat.textures.len()))?;
-            m.extend_from_slice(&count.to_le_bytes());
-            for t in &mat.textures {
-                m.extend_from_slice(&t.to_le_bytes());
-            }
-            m.extend_from_slice(&mat.tail[0].to_le_bytes());
-            m.extend_from_slice(&mat.tail[1].to_le_bytes());
+            encode_material(mat, &mut m)?;
         }
         for block in &self.mtrl.blocks {
             for w in block {
@@ -864,35 +956,11 @@ impl Prmg {
                 self.alt_draws.len()
             ));
         }
-        let mut span = 0usize;
-        for e in &self.decl {
-            span = span.max(e.offset as usize + decl_type_size(e.ty)?);
-        }
-        if span as u32 != self.stride || self.stride == 0 {
-            return Err(format!(
-                "stride {} ≠ the decl's vertex size {span}",
-                self.stride
-            ));
-        }
-        if !self.vertices.len().is_multiple_of(self.stride as usize) {
-            return Err(format!(
-                "{} vertex bytes is not a multiple of stride {}",
-                self.vertices.len(),
-                self.stride
-            ));
-        }
+        validate_stream(self.stride, &self.decl, &self.vertices)?;
         for usage in [USAGE_POSITION, USAGE_NORMAL] {
             self.f16x4_offset(usage)?;
         }
         Ok(())
-    }
-
-    fn strm_info(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(12);
-        v.extend_from_slice(&(self.decl.len() as u32 + 1).to_le_bytes());
-        v.extend_from_slice(&self.stride.to_le_bytes());
-        v.extend_from_slice(&(self.vertex_count() as u32).to_le_bytes());
-        v
     }
 
     fn to_node(&self) -> Node {
@@ -916,37 +984,14 @@ impl Prmg {
             prmt.extend_from_slice(&d.max_index.to_le_bytes());
             prmt.extend_from_slice(&d.field_18.to_le_bytes());
         }
-        let mut decl = Vec::with_capacity(8 * (self.decl.len() + 1));
-        for e in &self.decl {
-            decl.extend_from_slice(&e.stream.to_le_bytes());
-            decl.extend_from_slice(&e.offset.to_le_bytes());
-            decl.extend_from_slice(&[e.ty, e.method, e.usage, e.usage_index]);
-        }
-        decl.extend_from_slice(&DECL_END);
-        let mut idata = Vec::with_capacity(2 * self.indices.len());
-        for i in &self.indices {
-            idata.extend_from_slice(&i.to_le_bytes());
-        }
+        let [strm, ibuf] = stream_nodes(self.stride, &self.decl, &self.vertices, &self.indices);
         Node::Container(
             *b"PRMG",
             vec![
                 Node::Leaf(*b"INFO", info),
                 Node::Leaf(*b"PRMT", prmt),
-                Node::Container(
-                    *b"STRM",
-                    vec![
-                        Node::Leaf(*b"info", self.strm_info()),
-                        Node::Leaf(*b"decl", decl),
-                        Node::Leaf(*b"data", self.vertices.clone()),
-                    ],
-                ),
-                Node::Container(
-                    *b"IBUF",
-                    vec![
-                        Node::Leaf(*b"info", (self.indices.len() as u32).to_le_bytes().to_vec()),
-                        Node::Leaf(*b"data", idata),
-                    ],
-                ),
+                strm,
+                ibuf,
             ],
         )
     }
@@ -1612,7 +1657,7 @@ impl TerrainCell {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A patch-local ground grid, `n × n` quads of `cell` metres centred on the origin, heights from `h`,
@@ -1709,7 +1754,12 @@ mod tests {
 
     /// A 2 × 2-patch synthetic cell (200 m) with a real collider, bounds consistent with its vertices.
     fn synthetic_cell() -> TerrainCell {
-        let hgt = |x: f32, z: f32| 0.05 * x - 0.03 * z;
+        synthetic_cell_with(|x, z| 0.05 * x - 0.03 * z)
+    }
+
+    /// [`synthetic_cell`] with the ground height `hgt(x, z)` (cell-local): 2 × 2 patches spanning ±100 m,
+    /// each a 10 m ground grid plus a 40 m textured overlay at its centre.
+    pub(crate) fn synthetic_cell_with(hgt: impl Fn(f32, f32) -> f32 + Copy) -> TerrainCell {
         let mut geoms = Vec::new();
         for (px, pz) in [(-50.0, -50.0), (50.0, -50.0), (-50.0, 50.0), (50.0, 50.0)] {
             let prmg = ground(10, 10.0, |x, z| hgt(x + px, z + pz));
