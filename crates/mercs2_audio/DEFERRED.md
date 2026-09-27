@@ -37,13 +37,30 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
   wavebank record's data offset as body-relative (it is record-relative). Over all 1,198 retail cues
   1,012 resolve with every `vz.wad` bank resident (1,019 with `English.wad`'s wavebanks too); the rest
   reach `.pws`-streamed waves.
-- **Looping cues** `[faithful-blocker: no]` — a cue that loops (a group's `+0x2C` loop byte, a track's
-  `+0x00` or the cue's `+0x10` loop count; `FUN_00835060` / `FUN_0083c070` loop while the count is
-  non-zero, decrementing it unless it is `0xFF`, and `FUN_008369e0` copies the group byte to the sound
-  instance at `+0x80`) is refused at start (`CueError::Looping`), never played once as if it did not
-  loop. Over retail `vz.wad` that is 302 of the 1,012 cues that resolve. Playing them needs the
-  reader of the instance's `+0x80` byte traced (not done yet), and the track / cue restart at their
-  `+0x04`/`+0x08` and `+0x1C`/`+0x20` loop points.
+- **Looping waves** `[faithful-blocker: no]` — a multi-wave group's `+0x2C` loop count travels
+  `FUN_008369e0` → sound instance `+0x80` → `FUN_00837830` (wave vtable `+0x04`, `0x0083DAE0`) → wave
+  `+0xBC`. No code in `.text` or `Stext` reads wave `+0xBC` back; the wave's data fetch
+  `FUN_00839e90` (and `FUN_00839820`) jump through `0x0244F65C` / `0x0244FDAC` into SecuROM stubs that
+  enter the protection's dispatcher (`0x01AAFF10` → `[0x021FD554]`), resolved only at run time. So
+  whether a count of N plays the wave N or N+1 times, how `0xFF` behaves, and where a looping wave
+  restarts are not traced, and a cue that can reach such a group is refused at start
+  (`CueError::Looping`): 278 of the 1,012 `vz.wad` cues that resolve, named in
+  `tests/retail_banks.rs`. Confirm-live step (the Ess live harness, x32dbg on the retail exe): break
+  on reads of `[wave+0xBC]` (hardware read breakpoint on a wave the instance created for a
+  `+0x2C` = 1 group, e.g. a `ui_hud` looping cue) and step the fetch at `0x00839E90` across the
+  wave's end. Track and cue loops are played (`crate::playback`).
+- **The cue filter (kind 9)** `[faithful-blocker: no]` — a cue whose event table carries kind 9 gives
+  its waves a biquad filter (`FUN_00839db0` creates it at wave `+0x2C`, `FUN_0083f2d0` constructs
+  it, vtable `0x00BE2678`). Kind 9 evaluates the cue's kind-8 curves into cue `+0x84` / `+0x88`
+  (`FUN_0083b4a0`); the filter takes its parameters from the object at cue `+0x7C` through wave
+  vtable `+0x70` (`FUN_0083e5c0`) — that this object hands on `+0x84` / `+0x88` is INFERRED from
+  the offsets, its vtable is not read. The
+  filter runs in the wave mix `FUN_00839ae0` over the buffer its caller `MixWavesToOutput`
+  (`0x00838860`) passes, and that caller is reached only through `0x02455DA8`, a SecuROM-protected
+  pointer — so whether the filter sees the wave alone or the shared accumulator is not traced. One
+  `vz.wad` cue that resolves carries it (`0xD8CE1427`) and is refused. Confirm-live step: break at
+  `0x00839AE0` for that cue and compare the buffer argument with the mixer accumulator at
+  `DAT_01995D70 + 0x68`.
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.
