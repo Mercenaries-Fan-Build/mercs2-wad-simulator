@@ -30,18 +30,20 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
 - ~~**Real wave-bind on cue**~~ **DONE** — the engine resolves a cue the way the tables route it:
   `sounddb` entry `{guid, soundbank hash, soundbank cue index}` → the resident soundbank's cue → every
   sound of every track → the groups they pick → the waves → the resident decoded clip
-  (`AudioEngine::resolve_cue`), and picks among weighted groups and waves exactly as the engine does
-  (`AudioEngine::pick_cue`, `select`). The three table layouts, multi-track cues included, were measured
+  (`AudioEngine::resolve_cue`), and a started cue picks among weighted groups and waves exactly as the
+  engine does (`select`), following its volume / pitch automation (`automation`, `playback`). The three table layouts, multi-track cues included, were measured
   on all of retail `vz.wad` and re-encode byte-identically (`tests/retail_banks.rs`). Two earlier
   readings were wrong and are gone: the sounddb's third field was read as a wave index, and the
   wavebank record's data offset as body-relative (it is record-relative). Over all 1,198 retail cues
   1,012 resolve with every `vz.wad` bank resident (1,019 with `English.wad`'s wavebanks too); the rest
   reach `.pws`-streamed waves.
-- **Multi-track automation applied to voices** `[faithful-blocker: no]` — the volume / pitch ramps,
-  LFOs and parameter curves of a multi-track cue (`multitrack::Automation`, used by the track update
-  `FUN_0083b4a0`) are decoded and re-encoded but not applied to the voices `cue_sound` fires. Folding
-  them in needs the per-voice gain / pitch step that the Doppler item below also needs, plus the game
-  parameters the curves read.
+- **Looping cues** `[faithful-blocker: no]` — a cue that loops (a group's `+0x2C` loop byte, a track's
+  `+0x00` or the cue's `+0x10` loop count; `FUN_00835060` / `FUN_0083c070` loop while the count is
+  non-zero, decrementing it unless it is `0xFF`, and `FUN_008369e0` copies the group byte to the sound
+  instance at `+0x80`) is refused at start (`CueError::Looping`), never played once as if it did not
+  loop. Over retail `vz.wad` that is 302 of the 1,012 cues that resolve. Playing them needs the
+  reader of the instance's `+0x80` byte traced (not done yet), and the track / cue restart at their
+  `+0x04`/`+0x08` and `+0x1C`/`+0x20` loop points.
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.
