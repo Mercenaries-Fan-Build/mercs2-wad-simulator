@@ -334,6 +334,94 @@ fn retail_normals_follow_the_draw_winding() {
     );
 }
 
+/// The tangent convention [`TerrainCell::displace`] writes, measured against retail: per draw group,
+/// the sum of the incident triangles' `∂P/∂u`, Gram–Schmidt against the stored normal; `w` = +1 when
+/// `(n × t) · ∂P/∂v < 0`, −1 when `> 0`. Computed here independently of the module's code.
+#[test]
+fn retail_tangents_follow_texture_u() {
+    let r = retail_or_skip!();
+    let cell = hq(r);
+    let (mut errs, mut w_agree, mut w_total, mut w_undefined) =
+        (Vec::new(), 0usize, 0usize, 0usize);
+    for g in &cell.geoms {
+        for p in &g.prmgs {
+            if p.tangent(0).unwrap().is_none() {
+                continue;
+            }
+            let n = p.vertex_count();
+            let (mut du, mut dv) = (vec![[0f64; 3]; n], vec![[0f64; 3]; n]);
+            for t in p.triangles().unwrap() {
+                let [i, j, k] = t.map(|v| v as usize);
+                let pos = |v: usize| p.position(v).map(|x| x as f64);
+                let uv = |v: usize| p.texcoord(v).unwrap().unwrap().map(|x| x as f64);
+                let (e1, e2) = (
+                    [0, 1, 2].map(|a| pos(j)[a] - pos(i)[a]),
+                    [0, 1, 2].map(|a| pos(k)[a] - pos(i)[a]),
+                );
+                let (d1, d2) = (
+                    [uv(j)[0] - uv(i)[0], uv(j)[1] - uv(i)[1]],
+                    [uv(k)[0] - uv(i)[0], uv(k)[1] - uv(i)[1]],
+                );
+                let det = d1[0] * d2[1] - d2[0] * d1[1];
+                if det == 0.0 {
+                    continue;
+                }
+                for v in [i, j, k] {
+                    for a in 0..3 {
+                        du[v][a] += (e1[a] * d2[1] - e2[a] * d1[1]) / det;
+                        dv[v][a] += (e2[a] * d1[0] - e1[a] * d2[0]) / det;
+                    }
+                }
+            }
+            for i in 0..n {
+                let nn = p.normal(i).map(|x| x as f64);
+                let nl = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                let nn = nn.map(|x| x / nl);
+                let d = du[i][0] * nn[0] + du[i][1] * nn[1] + du[i][2] * nn[2];
+                let t = [0, 1, 2].map(|a| du[i][a] - d * nn[a]);
+                let tl = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+                if tl == 0.0 {
+                    continue;
+                }
+                let s = p.tangent(i).unwrap().unwrap().map(|x| x as f64);
+                let sl = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
+                let cos = (t[0] * s[0] + t[1] * s[1] + t[2] * s[2]) / (tl * sl);
+                errs.push(cos.clamp(-1.0, 1.0).acos().to_degrees());
+                let c = [
+                    nn[1] * s[2] - nn[2] * s[1],
+                    nn[2] * s[0] - nn[0] * s[2],
+                    nn[0] * s[1] - nn[1] * s[0],
+                ];
+                let side = c[0] * dv[i][0] + c[1] * dv[i][1] + c[2] * dv[i][2];
+                if side == 0.0 {
+                    w_undefined += 1;
+                    continue;
+                }
+                w_total += 1;
+                if (side < 0.0) == (s[3] > 0.0) {
+                    w_agree += 1;
+                }
+            }
+        }
+    }
+    errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = errs[errs.len() / 2];
+    let p90 = errs[errs.len() * 9 / 10];
+    eprintln!(
+        "tangents vs Gram–Schmidt(∂P/∂u): {} vertices, median {median:.2}°, p90 {p90:.2}°; \
+         handedness agrees on {w_agree}/{w_total} ({w_undefined} undefined)",
+        errs.len()
+    );
+    assert!(
+        median < 1.0,
+        "the tangent convention does not reproduce retail"
+    );
+    assert!(
+        w_agree * 100 >= w_total * 99,
+        "the handedness rule disagrees with retail on over 1%"
+    );
+}
+
 /// A cell's edge is its neighbours' edge: ground vertices on the shared line sit at the same
 /// along-edge positions with the same height, to within one f16 step (the two cells quantize the same
 /// source height independently). A few samples exist on one side only — retail T-junctions. This is why
@@ -539,7 +627,7 @@ fn rebuilt_hq_collision_parses_and_never_misses_an_edited_triangle() {
         packfile.class_counts
     );
 
-    let soups = back.collision_soups().unwrap();
+    let soups = vec![back.collision_soup().unwrap()];
     let mopps = mercs2_formats::mopp::extract_mopp_with_info(&body);
     assert_eq!(mopps.len(), soups.len());
     let (mut queries, mut candidates) = (0usize, 0usize);
@@ -555,7 +643,7 @@ fn rebuilt_hq_collision_parses_and_never_misses_an_edited_triangle() {
             let got = mercs2_formats::mopp::query_aabb(code, info, lo, hi);
             assert!(
                 got.contains(&(k as u32)),
-                "patch {patch}: the MOPP misses triangle {k}"
+                "shape {patch}: the MOPP misses triangle {k}"
             );
             queries += 1;
             candidates += got.len();
@@ -588,6 +676,34 @@ fn rebuilt_hq_collision_parses_and_never_misses_an_edited_triangle() {
         (apex[1] - ground[1] - HEIGHT).abs() <= 0.0625,
         "collider apex rose {} m",
         apex[1] - ground[1]
+    );
+}
+
+/// Every retail cell's render triangles weld into one collider under the `u16` vertex limit, and its
+/// whole-cell MOPP bakes, walks every byte and yields every key once (checked inside `rebuild_collision`).
+#[test]
+fn every_retail_cell_rebuilds_a_one_shape_collider() {
+    let r = retail_or_skip!();
+    let (mut most_tris, mut most_verts, mut biggest_body) = (0usize, 0usize, 0usize);
+    for (hash, _, bytes) in &r.cells {
+        let mut cell = TerrainCell::decode(bytes).unwrap();
+        let (tris, verts) = cell
+            .collision_soup()
+            .unwrap_or_else(|e| panic!("{hash:#010X}: {e}"));
+        most_tris = most_tris.max(tris.len());
+        most_verts = most_verts.max(verts.len());
+        cell.rebuild_collision(*hash)
+            .unwrap_or_else(|e| panic!("{hash:#010X}: {e}"));
+        biggest_body = biggest_body.max(cell.phy2.payload.len() + 48);
+        let again = TerrainCell::decode(&cell.encode().unwrap()).unwrap();
+        assert_eq!(
+            again, cell,
+            "{hash:#010X}: the rebuilt cell does not re-parse to itself"
+        );
+    }
+    eprintln!(
+        "400 one-shape colliders rebuilt; largest soup {most_tris} triangles / {most_verts} vertices; \
+         largest PHY2 {biggest_body} bytes"
     );
 }
 
