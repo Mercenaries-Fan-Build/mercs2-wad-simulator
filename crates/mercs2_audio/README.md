@@ -92,10 +92,20 @@ facts that matter most:
   (optionally jittered by the generator) for the step it activates in; an instance multiplies its own
   multipliers by every update's, so they stay; channels 0 and 1 scale the left and right outputs.
   Kind 7 names the child cue a track (or cue) starts when it finishes, or when it is stopped. Kind 9
-  evaluates the cue's kind-8 curves into cue fields that (INFERRED) set a biquad filter the wave
-  carries; which
-  samples that filter runs over is decided in `MixWavesToOutput` (`0x00838860`), reached only through
-  a SecuROM-protected pointer, so a cue that carries kind 9 is refused (`CueError::Automation`).
+  evaluates the cue's kind-8 curves into the cutoff and resonance of a biquad low-pass filter the wave
+  carries; the engine runs that filter in place over the wave's *source* mix buffer (every wave of
+  that source mixed so far in the pass), and this crate's mixer has no per-source buffers, so a cue
+  that carries kind 9 is refused (`CueError::Automation`).
+* **Looping waves.** A multi-wave group's `+0x2C` loop count plays its wave `1 + count` times back
+  to back (`FUN_00839e90`: at the end of the data a non-zero count wraps the read position back by
+  the data length, keeping the overshoot, and counts down). `0xFF` is no special case: 256 plays. An
+  instance of a `0xFF` group whose voice was refused keeps trying for one, as the engine keeps it
+  alive to create its wave again.
+* **Positional or 2D is the group's call.** The sounddb record has no flags; an instance plays
+  positionally when its group's `+0x14` byte is set and the cue was started at a position
+  (`FUN_00837830` at `0x008378A9`), and from the shared 2D mix otherwise. No distance start delay is
+  added: the engine adds one only for a group whose `+0x44` byte is set, and no retail group sets it.
+* **An instance's final volume is clamped to [0, 1]** before it is mixed (`0x008373AA`).
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
@@ -254,16 +264,14 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   the previous frame's cue volume and pitch before it evaluates the cue's own event table.
 * **Refused at start, never played partially:** a cue whose chain does not resolve
   (`CueError::Resolve` says why: a bank not resident, a streamed wave, an empty choice list, an unknown
-  selection mode, a bad index); a cue that can play a **looping wave** (a multi-wave group's `+0x2C`
-  loop count — the only code that reads the count back sits behind a SecuROM-protected pointer, see
-  `DEFERRED.md`); the filter curves (kind 9); kind-4 channel multipliers on a mixer with more than two
-  outputs; a curve whose parameter is unset or lies past its last point (the engine reads out of
-  bounds there); a kind-7 child that is refused itself. Over the 1,198 retail `vz.wad` cues, 1,012
-  resolve and **733 play** (24 of them loop a track or the cue); **278** are refused for a looping
-  wave and **1** (`0xD8CE1427`) for kind 9 — all named in `tests/retail_banks.rs`. With `English.wad`'s
-  wavebanks resident, 735 play and 283 are refused for a looping wave.
-* **The random generator is the engine's** (`select::PalRng`); the engine seeds it at startup from a
-  function it imports through a SecuROM-resolved table, so `set_rng_seed` is how a host makes playback
+  selection mode, a bad index); the filter curves (kind 9); kind-4 channel multipliers on a mixer with
+  more than two outputs; a curve whose parameter is unset or lies past its last point (the engine
+  reads out of bounds there); a kind-7 child that is refused itself. Over the 1,198 retail `vz.wad`
+  cues, 1,012 resolve and **1,010 play** (66 loop a track or the cue, 277 reach a looping wave, 4
+  start a child cue); **2** (`0xD8CE1427`, `0xF23B9836`) are refused for kind 9 — named in
+  `tests/retail_banks.rs`. With `English.wad`'s wavebanks resident, 1,017 of 1,019 play.
+* **The random generator is the engine's** (`select::PalRng`); the engine seeds it at startup with
+  the low 32 bits of `QueryPerformanceCounter`, so `set_rng_seed` is how a host makes playback
   repeatable.
 * **The game must load soundbanks too.** The chain's first hop is the soundbank; a host that loads
   only wavebanks and sounddbs resolves nothing.
@@ -273,7 +281,7 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **The 9 retail `return 0` stubs** (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful
   no-ops here.
 * One `MusicStateMachine` models **one region**; the exe holds one per region. Streamed `.pws` voices
-  (`OpenStreamFile`/`CloseStreamFile` record intent only), looping waves and the cue filter, Doppler
+  (`OpenStreamFile`/`CloseStreamFile` record intent only), the cue filter, Doppler
   folded into the mix, and surround channel-gain matrices are tracked in `DEFERRED.md` — all tagged
   `[faithful-blocker: no]`.
 * The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
