@@ -159,7 +159,17 @@ fn every_retail_table_re_encodes_byte_identically() {
                     assert_eq!(*soundbank, sb.bank_hash, "a single-track cue names its own bank");
                     single_c += 1
                 }
-                CueBody::MultiTrack(_) => multi_c += 1,
+                CueBody::MultiTrack(m) => {
+                    multi_c += 1;
+                    for sound in m.tracks.iter().flat_map(|t| t.sounds.iter()) {
+                        for entry in &sound.entries {
+                            assert!(
+                                (entry.group_index as usize) < sb.groups.len() || entry.soundbank != sb.bank_hash,
+                                "a multi-track entry into its own bank names an existing group"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -316,47 +326,88 @@ fn cue_length_is_frames_over_rate_for_every_embedded_single_wave_cue() {
     assert!(checked > 0);
 }
 
-/// Load every retail bank into one engine and resolve every per-bank sounddb entry through the
-/// corrected chain. Only the known, named gaps may stop a cue; a structural failure (a bad index or a
-/// guid that does not match) fails the test.
+/// Resolve every `vz.wad` sounddb entry through the chain — every track of a multi-track cue, every
+/// entry of every sound, every wave of every group — with every `vz.wad` bank resident, and then again
+/// with `English.wad`'s wavebanks resident too (the game mounts it as the language archive; two
+/// wavebanks `vz.wad` cues name live there). Only a wave that streams from a `.pws`, or a wavebank not
+/// resident, may stop a cue, and each such cue is named; anything else fails the test. Every resolved
+/// cue is then started once through the engine's own picks (fixed seed).
 #[test]
-fn resolve_counts_over_every_retail_cue() {
+fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     let Some(tables) = retail_tables() else { return };
+    let english = mercs2_formats::game_paths::wad_from_env("English.wad").map(|p| read_tables(&p));
+
     let mut eng = AudioEngine::default();
+    eng.set_rng_seed(0x5EED_0001);
     for t in of_type(tables, TYPE_HASH_WAVEBANK) {
         eng.load_wavebank(&t.body).expect("wavebank loads");
     }
     for t in of_type(tables, TYPE_HASH_SOUNDBANK) {
         eng.load_soundbank(&t.body).expect("soundbank loads");
     }
-    let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
-    let mut total = 0;
-    for t in of_type(tables, TYPE_HASH_SOUNDDB) {
-        let db = SoundDb::parse(&t.body).expect("sounddb");
+    let vz_only = tally(&mut eng, tables, "vz.wad banks");
+    assert_eq!(vz_only.total, 1198);
+    assert_eq!(vz_only.streamed.values().sum::<usize>(), 177);
+    assert_eq!(vz_only.absent.values().map(Vec::len).sum::<usize>(), 9);
+    assert_eq!(vz_only.resolved, 1198 - 177 - 9);
+
+    let Some(english) = english else {
+        return eprintln!("SKIPPING the English.wad pass: English.wad not found beside vz.wad");
+    };
+    for t in of_type(&english, TYPE_HASH_WAVEBANK) {
+        eng.load_wavebank(&t.body).expect("English.wad wavebank loads");
+    }
+    let with_english = tally(&mut eng, tables, "vz.wad banks + English.wad wavebanks");
+    assert_eq!(with_english.streamed.values().sum::<usize>(), 179);
+    assert!(with_english.absent.is_empty());
+    assert_eq!(with_english.resolved, 1198 - 179);
+}
+
+#[derive(Default)]
+struct Tally {
+    total: usize,
+    resolved: usize,
+    streamed: BTreeMap<u32, usize>,
+    absent: BTreeMap<u32, Vec<u32>>,
+}
+
+fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
+    let mut t = Tally::default();
+    let (mut multi_track, mut multi_wave, mut fired) = (0, 0, 0);
+    for table in of_type(tables, TYPE_HASH_SOUNDDB) {
+        let db = SoundDb::parse(&table.body).expect("sounddb");
         for e in &db.cues {
-            total += 1;
-            let key = match eng.resolve_clips(e) {
-                Ok(c) if c.len() == 1 => {
-                    assert!(eng.resolve_wave(e).is_ok());
-                    "resolved: single wave".to_string()
+            t.total += 1;
+            match eng.resolve_cue(e) {
+                Ok(r) => {
+                    t.resolved += 1;
+                    if r.sounds.iter().any(|s| s.selection.is_some()) {
+                        multi_track += 1;
+                    }
+                    if r.sounds.iter().any(|s| s.choices.iter().any(|c| c.selection.is_some())) {
+                        multi_wave += 1;
+                    }
+                    fired += eng.pick_cue(e).expect("a resolved cue picks").len();
                 }
-                Ok(c) => {
-                    assert_eq!(eng.resolve_wave(e), Err(ResolveError::WaveSelectionUnknown { waves: c.len() }));
-                    "resolved: multi-wave group, every wave resident (selection unknown)".to_string()
+                Err(ResolveError::Streamed { clip_hash }) => {
+                    let _ = clip_hash;
+                    *t.streamed.entry(e.bank_hash).or_default() += 1
                 }
-                Err(ResolveError::MultiTrackCue { .. }) => "not resolved: multi-track cue".to_string(),
-                Err(ResolveError::Streamed { .. }) => "not resolved: wave streams from a .pws".to_string(),
-                Err(ResolveError::WavebankNotResident(h)) => {
-                    format!("not resolved: wavebank 0x{h:08X} is not in vz.wad")
-                }
+                Err(ResolveError::WavebankNotResident(h)) => t.absent.entry(h).or_default().push(e.guid),
                 Err(other) => panic!("cue 0x{:08X}: structural resolve failure: {other}", e.guid),
-            };
-            *outcomes.entry(key).or_default() += 1;
+            }
         }
     }
-    println!("resolve over all {total} retail cues:");
-    for (k, v) in &outcomes {
-        println!("  {v:>5}  {k}");
+    println!(
+        "[{label}] {} retail cues: {} resolve ({multi_track} multi-track, {multi_wave} reaching a \
+         multi-wave group; one start of each fired {fired} sounds)",
+        t.total, t.resolved
+    );
+    for (bank, n) in &t.streamed {
+        println!("  not resolved, a wave streams from a .pws: {n} cues of soundbank 0x{bank:08X}");
     }
-    assert_eq!(total, 1198);
+    for (wb, cues) in &t.absent {
+        println!("  not resolved, wavebank 0x{wb:08X} is not resident: cues {cues:08X?}");
+    }
+    t
 }
