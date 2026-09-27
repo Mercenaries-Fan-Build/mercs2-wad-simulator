@@ -27,8 +27,11 @@ pub const DECL20: [u8; 32] = [
     0xff, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, // END
 ];
 
-/// Default material-preamble bytes (shader id + standard color/emissive/specular
-/// float defaults). A format constant, not a donor's identity.
+/// Default material-preamble bytes (standard color/emissive/specular float
+/// defaults). A format constant, not a donor's identity. The first word
+/// (`0x0a164785`) is NOT a shader key: `Mtrl_Parse` (`FUN_00858790`) stores it at
+/// material `+0x64` and looks nothing up with it. The pixel shader is named by the
+/// word after the texture hashes in the record head (see `MTRL_REC_TMPL`).
 const MTRL_PREAMBLE: [u8; 104] = [
     0x85, 0x47, 0x16, 0x0a, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f,
     0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f,
@@ -41,10 +44,11 @@ const MTRL_PREAMBLE: [u8; 104] = [
 
 /// A complete 128-byte MTRL material record (the standard 3-texture form the prop/
 /// building shader expects): `flag=(3<<16)|0x80`, then diffuse/specular/normal
-/// texture hashes, then the float props. The three default hashes are base-resident
-/// so the material always binds; the caller patches the diffuse slot to the model's
-/// own texture. Emitting fewer than 3 slots leaves the shader's spec/normal
-/// unbound → the 0x00858DB8 null-deref crash.
+/// texture hashes, then the pixel-shader key `0xcaefe1fe` =
+/// `pandemic_hash_m2("PgDiffSpecNormFP")`, then the float props. The three default
+/// hashes are base-resident so the material always binds; the caller patches the
+/// diffuse slot to the model's own texture. Emitting fewer than 3 slots leaves the
+/// shader's spec/normal unbound → the 0x00858DB8 null-deref crash.
 const MTRL_REC_TMPL: [u8; 128] = [
     0x80, 0x00, 0x03, 0x00, 0x61, 0x46, 0xe1, 0x68, 0xb8, 0xab, 0x68, 0x25, 0x5b, 0xb3, 0x6c, 0xd8,
     0xfe, 0xe1, 0xef, 0xca, 0xfc, 0x61, 0x5d, 0x3e, 0x54, 0x28, 0x2f, 0x15, 0x00, 0x00, 0x80, 0x3f,
@@ -69,10 +73,12 @@ const MTRL_REC_PROPS: [u8; 112] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// SKINNED material preamble (104 B): shader `0x406b230e` = the human-skin shader
-/// (the static/building shader `0x0a164785` in `MTRL_PREAMBLE` does NOT skin and
-/// null-derefs at material bind — the 0x00858DB8 crash on SetOutfit). Shared engine
-/// shader, required for any skinned model.
+/// SKINNED material preamble (104 B): the skinned float defaults. Its first word
+/// (`0x406b230e`) is NOT a shader key, exactly as in `MTRL_PREAMBLE`. The skinned
+/// material's pixel shader is named in `SKINNED_MTRL_REC`: `0x322fcd56` =
+/// `pandemic_hash_m2("PgDiffSpecReflNormAmbOccRimFP")`. The 0x00858DB8 crash at
+/// material bind is a pixel-shader key that no registration made: the lookup misses
+/// and `Mtrl_Parse` reads `+8` of a null entry.
 const SKINNED_MTRL_PREAMBLE: [u8; 104] = [
     0x0e, 0x23, 0x6b, 0x40, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f,
     0x99, 0x99, 0x99, 0x3f, 0x99, 0x99, 0x99, 0x3f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x80, 0x3f,
