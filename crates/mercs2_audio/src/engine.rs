@@ -30,7 +30,7 @@ use crate::backend::CpalSink;
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
 use crate::automation::{pitched_rate, AutomationError, AutomationOutput, AutomationState};
-use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
+use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource, SourceKey};
 use crate::multitrack::{Automation, MultiTrackCue};
 use crate::playback::{
     clamp01, Block, Instance, InstanceParams, InstanceWave, ListState, RunState, TrackPlayback,
@@ -184,11 +184,13 @@ pub enum CueError {
     Resolve(ResolveError),
     /// The cue's automation cannot be played ([`crate::automation`]).
     Automation(AutomationError),
-    /// A kind-4 record sets output channels 2–5, and this mixer renders only `channels` (it applies
-    /// channels 0 and 1 to its left and right outputs).
-    Channels {
-        /// The mixer's output channel count.
-        channels: usize,
+    /// The cue has more curves than events: `FUN_00839db0`, looking for a kind-9 event to give each
+    /// wave its filter, scans the first `curves` event slots, so it would read past the event table.
+    FilterScan {
+        /// The cue's event count.
+        events: usize,
+        /// The cue's curve count.
+        curves: usize,
     },
     /// A child cue a kind-7 record names cannot be played.
     Child {
@@ -207,9 +209,9 @@ impl std::fmt::Display for CueError {
             CueError::Unknown(id) => write!(f, "cue 0x{id:08X} is not in the sound database"),
             CueError::Resolve(e) => write!(f, "{e}"),
             CueError::Automation(e) => write!(f, "{e}"),
-            CueError::Channels { channels } => write!(
+            CueError::FilterScan { events, curves } => write!(
                 f,
-                "a kind-4 record sets output channels 2-5; this mixer renders {channels} channels and applies only 0 and 1"
+                "the cue has {curves} curves but {events} events; FUN_00839db0's filter scan would read past the event table"
             ),
             CueError::Child { cue, error } => write!(f, "child cue 0x{cue:08X}: {error}"),
             CueError::Outranked => write!(f, "the voice pool refused the voice"),
@@ -565,6 +567,11 @@ impl AudioEngine {
 
     /// Install the parsed sound database (chain: `Sound.AddPgAsset("Mercs2Globals","sounddb")`).
     pub fn set_sounddb(&mut self, db: SoundDb) {
+        // FUN_00835b80: every parameter the global catalog declares gets an entry, 0.0 until set
+        // (the entry constructor at 0x008335A0); an undeclared one reads −1.0 (FUN_0082f170).
+        for p in &db.params {
+            self.global_params.entry(*p).or_insert(0.0);
+        }
         self.sounddb = db;
     }
 
@@ -688,6 +695,10 @@ impl AudioEngine {
         self.mixer.attach(id, source);
         self.mixer.set_channel_gains(id, gains.0, gains.1);
         let handle = self.new_handle();
+        if req.positional {
+            // A positional cue's voices are mixed through its emitter's source.
+            self.mixer.set_source(id, SourceKey::Emitter(handle.0));
+        }
         self.playbacks.push(Playback {
             handle,
             resolved: ResolvedCue { soundbank: 0, cue_index: 0, gain: 1.0, multitrack: None, sounds: Vec::new() },
@@ -814,10 +825,11 @@ impl AudioEngine {
         (req, gains)
     }
 
-    /// Refuse a cue this engine cannot play faithfully: the filter curves (kinds 8 and 9), channel
-    /// multipliers the mixer has no outputs for, unset cue-local parameters, parameters past a curve,
-    /// and a child cue that is refused itself. `visited` holds the cues
-    /// already checked on this chain (a child chain may lead back to its start).
+    /// Refuse a cue this engine cannot play faithfully: a curve (kinds 5 and 6, or a kind-8 curve a
+    /// kind-9 record reads) whose parameter is unset or lies past its last point, a kind-9 curve index
+    /// past the curve table, a filter scan past the event table, and a child cue that is refused
+    /// itself. `visited` holds the cues already checked on this chain (a child chain may lead back to
+    /// its start).
     fn check_playable(
         &self,
         resolved: &ResolvedCue,
@@ -825,17 +837,25 @@ impl AudioEngine {
         visited: &mut HashSet<u32>,
     ) -> Result<(), CueError> {
         let Some(m) = &resolved.multitrack else { return Ok(()) };
+        if m.curves.len() > m.events.len() {
+            return Err(CueError::FilterScan { events: m.events.len(), curves: m.curves.len() });
+        }
         for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
             match a {
-                Automation::Kind9 { .. } => {
-                    return Err(CueError::Automation(AutomationError::Unsupported { kind: 9 }));
+                Automation::Kind9 { curve_a, curve_b, .. } => {
+                    for index in [*curve_a, *curve_b].into_iter().filter(|&i| i != u32::MAX) {
+                        let i = (index & 0xFF) as usize;
+                        let Some(Automation::Curve { param, .. }) = m.curves.get(i) else {
+                            return Err(CueError::Automation(AutomationError::CurveIndex {
+                                index: index & 0xFF,
+                                curves: m.curves.len(),
+                            }));
+                        };
+                        let value = param_value(m, params, &self.global_params, *param).map_err(CueError::Automation)?;
+                        check_curves(m, *param, value)?;
+                    }
                 }
-                Automation::Curve { kind: crate::multitrack::CurveKind::Cue, .. } => {
-                    return Err(CueError::Automation(AutomationError::Unsupported { kind: 8 }));
-                }
-                Automation::Kind4 { .. } if self.mixer.config().channels > 2 => {
-                    return Err(CueError::Channels { channels: self.mixer.config().channels });
-                }
+                Automation::Curve { kind: crate::multitrack::CurveKind::Cue, .. } => {}
                 Automation::Curve { param, .. } => {
                     let value = param_value(m, params, &self.global_params, *param).map_err(CueError::Automation)?;
                     check_curves(m, *param, value)?;
@@ -1321,7 +1341,7 @@ impl AudioEngine {
         let value = |p: u32| param_value(&m, &params, &globals, p);
         pb.cue_last = pb
             .cue_automation
-            .step(&m.events, pb.cue_time, &value, &mut self.rng)
+            .step(&m.events, &m.curves, pb.cue_time, &value, &mut self.rng)
             .expect("automation was validated when the cue started");
         let over = override_of(&pb.cue_last);
         if !self.advance_tracks(pb, &cx, dt_tracks, Drive { block, over }) || looped {
@@ -1350,7 +1370,7 @@ impl AudioEngine {
         }
         match pb.single {
             Some(mut inst) if !inst.finished => {
-                self.update_instance(&mut inst, block, (&pb.req.clone(), pb.gains), dt);
+                self.update_instance(&mut inst, block, (&pb.req.clone(), pb.gains), None, dt);
                 pb.single = Some(inst);
             }
             _ => {
@@ -1401,7 +1421,7 @@ impl AudioEngine {
         let time = pb.tracks[t].time;
         let out = pb.tracks[t]
             .automation
-            .step(&track.automation, time, &value, &mut self.rng)
+            .step(&track.automation, &m.curves, time, &value, &mut self.rng)
             .expect("automation was validated when the cue started");
         pb.tracks[t].last = out;
         let mut channels = block.channels;
@@ -1479,6 +1499,7 @@ impl AudioEngine {
             }
         }
         let (req, gains) = (pb.req.clone(), pb.gains);
+        let filter = Some(pb.cue_automation.filter_params());
         let mut kept = Vec::with_capacity(pb.tracks[t].sounds.instances.len());
         for mut inst in std::mem::take(&mut pb.tracks[t].sounds.instances) {
             if inst.finished {
@@ -1489,7 +1510,7 @@ impl AudioEngine {
                 inst.pitch = p;
                 inst.channels = [1.0; 6];
             }
-            self.update_instance(&mut inst, block, (&req, gains), dt);
+            self.update_instance(&mut inst, block, (&req, gains), filter, dt);
             kept.push(inst);
         }
         let list = &mut pb.tracks[t].sounds;
@@ -1515,6 +1536,8 @@ impl AudioEngine {
             elapsed_s: 0.0,
             loop_count: 0,
             positional: false,
+            emitter: pb.handle.0,
+            filtered: false,
             finished: true,
         };
         let sound = &pb.resolved.sounds[s];
@@ -1542,12 +1565,20 @@ impl AudioEngine {
         let delay_s = pb.req.start_delay + start.delay_s;
         inst.positional = choice.positional && pb.req.positional;
         inst.loop_count = choice.loop_byte;
+        // FUN_00839db0 (wave vtable +0x7C, at CreateWave): a filter when one of the cue's first C event
+        // records (C = its curve count) is kind 9.
+        inst.filtered = pb
+            .resolved
+            .multitrack
+            .as_ref()
+            .is_some_and(|m| m.events.iter().take(m.curves.len()).any(|e| matches!(e, Automation::Kind9 { .. })));
         let req = VoiceRequest { start_delay: delay_s, positional: inst.positional, ..pb.req.clone() };
         inst.voice = self.pool.acquire(&req);
         if let Some(id) = inst.voice {
             let src = PcmSource::with_rate(samples, channels, clip_rate, self.mixer.config().sample_rate)
                 .with_loops(u32::from(inst.loop_count));
             self.mixer.attach_pcm(id, src);
+            self.wire_voice(id, &inst);
         }
         inst.wave = Some(InstanceWave { wavebank: wave.wavebank, index: wave.index, clip_rate });
         inst.volume = start.volume;
@@ -1564,7 +1595,14 @@ impl AudioEngine {
     /// `FUN_00836c70`: multiply the instance's channel multipliers by the block's, give its voice
     /// `base volume × block volume`, `base pitch + block pitch` and its left/right multipliers, and
     /// mark it finished once its voice has ended — or, with no voice, once its start delay has passed.
-    fn update_instance(&mut self, inst: &mut Instance, block: Block, spatial: (&VoiceRequest, (f32, f32)), dt: f32) {
+    fn update_instance(
+        &mut self,
+        inst: &mut Instance,
+        block: Block,
+        spatial: (&VoiceRequest, (f32, f32)),
+        filter: Option<(f32, f32)>,
+        dt: f32,
+    ) {
         for (c, b) in inst.channels.iter_mut().zip(block.channels) {
             *c *= b;
         }
@@ -1594,12 +1632,13 @@ impl AudioEngine {
             self.mixer
                 .set_source_rate(id, rate)
                 .expect("playback voices carry PCM sources built at the mixer rate");
-            let (l, r) = if self.mixer.config().channels == 2 {
-                (gains.0 * inst.channels[0], gains.1 * inst.channels[1])
-            } else {
-                gains
-            };
-            self.mixer.set_channel_gains(id, l, r);
+            // Wave vtable +0x10C for the six outputs; an emitter source's gains.
+            self.mixer.set_output_channels(id, inst.channels);
+            self.mixer.set_channel_gains(id, gains.0, gains.1);
+            // FUN_0083e5c0: the filter takes the cue's kind-9 outputs.
+            if let (true, Some((a, b))) = (inst.filtered, filter) {
+                self.mixer.set_filter_params(id, a, b);
+            }
         }
         if !self.voice_live(id) {
             inst.finished = true;
@@ -1616,7 +1655,19 @@ impl AudioEngine {
         let src = PcmSource::with_rate(samples, channels, wave.clip_rate, self.mixer.config().sample_rate)
             .with_loops(u32::from(inst.loop_count));
         self.mixer.attach_pcm(id, src);
+        self.wire_voice(id, inst);
         inst.voice = Some(id);
+    }
+
+    /// Route a new wave through its source (its emitter's when positional, else the shared 2D one) and
+    /// give it the cue's filter when it carries one.
+    fn wire_voice(&mut self, id: VoiceId, inst: &Instance) {
+        if inst.positional {
+            self.mixer.set_source(id, SourceKey::Emitter(inst.emitter));
+        }
+        if inst.filtered {
+            self.mixer.add_filter(id);
+        }
     }
 
     /// One mixer-thread tick (`FUN_00831ee0` / `FUN_00836610`): render one 45 ms block, submit it to
@@ -1670,7 +1721,7 @@ fn override_of(out: &AutomationOutput) -> Option<(f32, f32)> {
 
 /// Refuse a value that lies past the last point of a curve over `param` in `m`.
 fn check_curves(m: &MultiTrackCue, param: u32, value: f32) -> Result<(), CueError> {
-    for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
+    for a in m.events.iter().chain(m.curves.iter()).chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
         if let Automation::Curve { param: p, points, .. } = a {
             if *p != param {
                 continue;
@@ -1848,7 +1899,7 @@ mod playback_tests {
         assert_eq!(eng.pool.get(voice).unwrap().gain, 0.5 * (ramp_v * 0.8f32.min(1.0)));
         let ramp_p = (12.0f32 - 0.0) / ((1.0 + 0.0) - 0.0) * (t - 0.0);
         let rate = pitched_rate(22050, 2.0 + ((ramp_p + 0.0) + 0.0));
-        assert_eq!(eng.mixer.source_step(voice).unwrap(), rate as f64 / 44100.0);
+        assert_eq!(eng.mixer.source_rate(voice).unwrap(), Some(rate));
     }
 
     /// The cue's event table acts one frame late, through the clamped cue volume.
@@ -1966,8 +2017,8 @@ mod playback_tests {
         assert!(!eng.cue_is_playing(h));
     }
 
-    /// A kind-4 record's output channels 0 and 1 scale the voice's left and right outputs, and stay on
-    /// the instance after the step that set them.
+    /// A kind-4 record's output channels scale the voice's six engine outputs (left and right on a
+    /// stereo device), and stay on the instance after the step that set them.
     #[test]
     fn kind4_channels_reach_left_and_right() {
         let mut words = [0u32; 17];
@@ -1988,7 +2039,10 @@ mod playback_tests {
             LONG,
             6,
         );
-        assert_eq!(eng6.cue_sound(cue, None), Err(CueError::Channels { channels: 6 }));
+        eng6.cue_sound(cue, None).unwrap();
+        eng6.tick(0.1);
+        eng6.tick(0.1);
+        assert_eq!(&eng6.render(8)[..6], &[250, 125, 500, 500, 500, 500], "(1000 × trunc(0.5 × ch × 32768)) >> 15");
     }
 
     /// A group with loop count 3 plays its wave 4 times back to back (`FUN_00839e90`), and the
@@ -2005,17 +2059,48 @@ mod playback_tests {
         assert!(eng.cue_instances(h).is_empty(), "done after four plays");
     }
 
+    fn filter_cue(curves: usize) -> MultiTrackCue {
+        let mut m = multi(
+            vec![track(vec![], vec![sound(0.0, 0)])],
+            vec![Automation::Kind9 { start_bits: 0, curve_a: 0, curve_b: u32::MAX }],
+            1.0,
+        );
+        m.curves = (0..curves)
+            .map(|_| Automation::Curve {
+                kind: crate::multitrack::CurveKind::Cue,
+                unknown_04: 0,
+                param: 0xD913_464B,
+                points: vec![(0.0, 0.4), (1.0, 0.4)],
+            })
+            .collect();
+        m
+    }
+
+    /// A cue whose first event is kind 9 gives its waves the filter, and every update hands the filter
+    /// the kind-9 outputs (curve 0 at the global parameter's −1.0 → 0.4; the second output keeps 1.0).
     #[test]
-    fn the_filter_refuses_the_cue() {
-        let filter = Automation::Kind9 { start_bits: 0, curve_a: 0, curve_b: u32::MAX };
-        let (mut eng, cue) = one_cue(vec![track(vec![filter.clone()], vec![sound(0.0, 0)])], vec![], 1.0, LONG);
-        assert_eq!(eng.cue_sound(cue, None), Err(CueError::Automation(AutomationError::Unsupported { kind: 9 })));
+    fn a_kind9_cue_filters_its_waves() {
+        let mut eng = engine(vec![("mod_filtered", 1.0, CueBodySpec::MultiTrack(filter_cue(1)))], LONG, 2);
+        let h = eng.cue_sound(m2("mod_filtered"), None).expect("kind 9 plays");
+        eng.tick(0.02);
+        let voice = eng.cue_instances(h)[0].voice.unwrap();
+        let mut want = crate::filter::Biquad::new();
+        want.set_param(0, 0.4);
+        want.set_param(1, 1.0);
+        assert_eq!(eng.mixer.filter(voice).map(|f| f.params()), Some(want.params()));
+    }
+
+    /// More curves than events would make FUN_00839db0 read past the event table; a refused child
+    /// refuses its parent.
+    #[test]
+    fn a_filter_scan_past_the_events_is_refused() {
+        let mut eng = engine(vec![("mod_scan", 1.0, CueBodySpec::MultiTrack(filter_cue(2)))], LONG, 2);
+        assert_eq!(eng.cue_sound(m2("mod_scan"), None), Err(CueError::FilterScan { events: 1, curves: 2 }));
         let child = Automation::Kind7 { start_bits: 0, cue: m2("mod_bad") };
-        let bad = multi(vec![track(vec![filter], vec![sound(0.0, 0)])], vec![], 1.0);
         let mut eng = engine(
             vec![
                 ("mod_good", 1.0, CueBodySpec::MultiTrack(multi(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0))),
-                ("mod_bad", 1.0, CueBodySpec::MultiTrack(bad)),
+                ("mod_bad", 1.0, CueBodySpec::MultiTrack(filter_cue(2))),
             ],
             LONG,
             2,
