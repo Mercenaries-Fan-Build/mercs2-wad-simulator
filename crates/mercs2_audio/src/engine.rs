@@ -19,7 +19,7 @@
 //! Every method here is named to match its Lua binding so that mapping is mechanical. The 9 retail
 //! `return 0` stubs (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful no-ops.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mercs2_core::glam::Vec3;
 use mercs2_formats::hash::pandemic_hash_m2;
@@ -29,10 +29,12 @@ use crate::backend::{AudioSink, NullSink};
 use crate::backend::CpalSink;
 use crate::banks::{BankKind, BankManager, CallbackId};
 use crate::categories::{category_id, Categories};
-use crate::automation::{pitched_rate, AutomationError, AutomationOutput};
+use crate::automation::{pitched_rate, AutomationError, AutomationOutput, AutomationState};
 use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
 use crate::multitrack::{Automation, MultiTrackCue};
-use crate::playback::{clamp01, Instance, InstanceParams, TrackPlayback};
+use crate::playback::{
+    clamp01, Block, Instance, InstanceParams, InstanceWave, ListState, RunState, TrackPlayback,
+};
 use crate::music::MusicStateMachine;
 use crate::sounddb::{CueEntry, SoundDb};
 use crate::select::{self, PalRng, STATE_INIT};
@@ -126,7 +128,7 @@ pub struct ResolvedChoice {
     pub waves: Vec<ResolvedWave>,
     /// What the group gives a sound instance at start (base volume, pitch, delay).
     pub instance: InstanceParams,
-    /// The group's `+0x2C` byte when multi-wave (non-zero on groups whose cues carry length −1).
+    /// The group's `+0x2C` wave loop count when multi-wave (0 for a single-wave group).
     pub loop_byte: u8,
 }
 
@@ -177,10 +179,33 @@ pub enum CueError {
     Unknown(u32),
     /// The chain does not resolve.
     Resolve(ResolveError),
-    /// The cue loops (a cue, track or group loop count is set); looping is not played here.
-    Looping { what: &'static str },
+    /// The cue can play a looping wave: a multi-wave group's `+0x2C` loop count is set. The wave
+    /// carries the count (`FUN_008369e0` → instance `+0x80` → `FUN_00837830` → wave `+0xBC`), and the
+    /// only code that reads it back is reached from the wave's data fetch `FUN_00839e90` through a
+    /// SecuROM-protected pointer (`0x0244F65C` → `0x024B5EB0`), so how a wave loops is not traced.
+    Looping {
+        /// The soundbank holding the group.
+        soundbank: u32,
+        /// The group's index there.
+        group: u16,
+        /// The loop count.
+        count: u8,
+    },
     /// The cue's automation cannot be played ([`crate::automation`]).
     Automation(AutomationError),
+    /// A kind-4 record sets output channels 2–5, and this mixer renders only `channels` (it applies
+    /// channels 0 and 1 to its left and right outputs).
+    Channels {
+        /// The mixer's output channel count.
+        channels: usize,
+    },
+    /// A child cue a kind-7 record names cannot be played.
+    Child {
+        /// The child cue's guid.
+        cue: u32,
+        /// Why.
+        error: Box<CueError>,
+    },
     /// The voice pool refused the voice (every voice outranks it).
     Outranked,
 }
@@ -190,8 +215,17 @@ impl std::fmt::Display for CueError {
         match self {
             CueError::Unknown(id) => write!(f, "cue 0x{id:08X} is not in the sound database"),
             CueError::Resolve(e) => write!(f, "{e}"),
-            CueError::Looping { what } => write!(f, "the cue loops ({what}); looping is not played"),
+            CueError::Looping { soundbank, group, count } => write!(
+                f,
+                "group {group} of soundbank 0x{soundbank:08X} loops its wave (+0x2C = {count}); the wave-level \
+                 loop is read only behind the SecuROM-protected pointer at 0x0244F65C (FUN_00839e90) and is not traced"
+            ),
             CueError::Automation(e) => write!(f, "{e}"),
+            CueError::Channels { channels } => write!(
+                f,
+                "a kind-4 record sets output channels 2-5; this mixer renders {channels} channels and applies only 0 and 1"
+            ),
+            CueError::Child { cue, error } => write!(f, "child cue 0x{cue:08X}: {error}"),
             CueError::Outranked => write!(f, "the voice pool refused the voice"),
         }
     }
@@ -199,7 +233,7 @@ impl std::fmt::Display for CueError {
 
 impl std::error::Error for CueError {}
 
-/// One started cue.
+/// One started cue (the engine's cue instance).
 struct Playback {
     handle: CueHandle,
     resolved: ResolvedCue,
@@ -207,20 +241,27 @@ struct Playback {
     req: VoiceRequest,
     /// Spatial left/right gains, fixed at start.
     gains: (f32, f32),
+    /// Where it was started (a child cue starts at its parent's position).
+    position: Option<Vec3>,
     /// Cue-local parameter values supplied at start.
     params: HashMap<u32, f32>,
     /// An explicit-source cue: its one voice, left alone.
     direct: Option<VoiceId>,
-    /// Single-track: whether its instance has started, and the instance.
+    /// The run state (`+0x164`).
+    state: RunState,
+    /// Single-track: the instance slot state (`+0x08`: 0 start, 1 releasing, 2 done) and instance.
+    single_state: u8,
     single: Option<Instance>,
-    started: bool,
-    /// A multi-track cue whose start draw exceeded its play probability: it plays nothing.
-    dropped: bool,
-    /// Multi-track state.
+    /// Multi-track: loop count left (`+0x15D`), time (`+0x154`), event-table automation and its
+    /// latest output (`+0x3C`..`+0x9D`), tracks, and the child cue (`+0x150`).
+    loop_count: u8,
     cue_time: f32,
-    cue_automation: crate::automation::AutomationState,
-    cue_prev: (f32, f32),
+    cue_automation: AutomationState,
+    cue_last: AutomationOutput,
     tracks: Vec<TrackPlayback>,
+    child: Option<CueHandle>,
+    /// The cue (and track, for a track's child) that started it.
+    parent: Option<(CueHandle, Option<usize>)>,
 }
 
 impl std::error::Error for ResolveError {}
@@ -579,32 +620,71 @@ impl AudioEngine {
         let cue: CueEntry = *self.sounddb.find_cue(cue_id).ok_or(CueError::Unknown(cue_id))?;
         let resolved = self.resolve_cue(&cue).map_err(CueError::Resolve)?;
         let params: HashMap<u32, f32> = params.iter().copied().collect();
-        self.check_playable(&resolved, &params)?;
-        let (req, gains) = self.voice_template(&cue, position);
+        self.check_playable(&resolved, &params, &mut HashSet::from([cue_id]))?;
+        Ok(self.start_playback(&cue, resolved, position, params, None))
+    }
+
+    /// Allocate and play a resolved, playable cue (`FUN_00834ad0` then `FUN_008354e0`). A multi-track
+    /// cue draws once and, if its `+0x18` value is below the draw, is done at once.
+    fn start_playback(
+        &mut self,
+        cue: &CueEntry,
+        resolved: ResolvedCue,
+        position: Option<Vec3>,
+        params: HashMap<u32, f32>,
+        parent: Option<(CueHandle, Option<usize>)>,
+    ) -> CueHandle {
+        let (req, gains) = self.voice_template(cue, position);
         let handle = self.new_handle();
-        let tracks = resolved.multitrack.as_ref().map(|m| vec![TrackPlayback::new(); m.tracks.len()]).unwrap_or_default();
+        let (tracks, loop_count) = match &resolved.multitrack {
+            Some(m) => (m.tracks.iter().map(|t| TrackPlayback::new(t.byte_00)).collect(), m.byte_10),
+            None => (Vec::new(), 0),
+        };
         let mut pb = Playback {
             handle,
             resolved,
             req,
             gains,
+            position,
             params,
             direct: None,
+            state: RunState::Playing,
+            single_state: 0,
             single: None,
-            started: false,
-            dropped: false,
+            loop_count,
             cue_time: 0.0,
-            cue_automation: Default::default(),
-            cue_prev: (1.0, 0.0),
+            cue_automation: AutomationState::default(),
+            cue_last: AutomationOutput::default(),
             tracks,
+            child: None,
+            parent,
         };
-        // FUN_008354e0: a multi-track cue draws once and plays only if its +0x18 value is not below.
         if let Some(m) = &pb.resolved.multitrack {
             let r = self.rng.next_unit();
-            pb.dropped = m.unknown_18 < r;
+            if m.unknown_18 < r {
+                pb.state = RunState::Done;
+            }
         }
         self.playbacks.push(pb);
-        Ok(handle)
+        handle
+    }
+
+    /// Start a kind-7 child cue (`FUN_0082e930`): `None` when the engine's start fails — the cue is
+    /// not in the sound database or its soundbank is not loaded (`FUN_00834ad0` returns 0) — which
+    /// the parent treats as a finished child. The child plays at its parent's position.
+    ///
+    /// // CONFIRM-LIVE: `FUN_0082e930` allocates through `thunk_FUN_024b9220`, SecuROM-morphed like the
+    /// `Sound.CueSound` post; this runs the same start as [`cue_sound`](Self::cue_sound) (INFERRED from
+    /// the arguments it passes: the engine, the cue hash, the parent's `+0x118` / `+0xC8`, and the
+    /// completion callback). That the parent's `+0x118` / `+0xC8` word is its position is INFERRED.
+    fn start_child(&mut self, guid: u32, position: Option<Vec3>, parent: (CueHandle, Option<usize>)) -> Option<CueHandle> {
+        let cue = *self.sounddb.find_cue(guid)?;
+        let resolved = match self.resolve_cue(&cue) {
+            Ok(r) => r,
+            Err(ResolveError::SoundbankNotResident(_)) => return None,
+            Err(e) => panic!("child cue 0x{guid:08X} was checked playable when its parent started: {e}"),
+        };
+        Some(self.start_playback(&cue, resolved, position, HashMap::new(), Some(parent)))
     }
 
     /// Play an explicit sample source for a cue (tests, synthesized audio): one voice, no automation.
@@ -625,15 +705,19 @@ impl AudioEngine {
             resolved: ResolvedCue { soundbank: 0, cue_index: 0, gain: 1.0, multitrack: None, sounds: Vec::new() },
             req,
             gains,
+            position,
             params: HashMap::new(),
             direct: Some(id),
+            state: RunState::Playing,
+            single_state: 0,
             single: None,
-            started: true,
-            dropped: false,
+            loop_count: 0,
             cue_time: 0.0,
-            cue_automation: Default::default(),
-            cue_prev: (1.0, 0.0),
+            cue_automation: AutomationState::default(),
+            cue_last: AutomationOutput::default(),
             tracks: Vec::new(),
+            child: None,
+            parent: None,
         });
         Ok(handle)
     }
@@ -643,10 +727,10 @@ impl AudioEngine {
         self.cue_sound(pandemic_hash_m2(name), position)
     }
 
-    /// The sound instances a started cue has fired, with their current base values.
+    /// The live sound instances a started cue holds, with their current base values.
     pub fn cue_instances(&self, handle: CueHandle) -> Vec<Instance> {
         let Some(pb) = self.playbacks.iter().find(|p| p.handle == handle) else { return Vec::new() };
-        pb.single.into_iter().chain(pb.tracks.iter().flat_map(|t| t.instances.iter().copied())).collect()
+        pb.single.into_iter().chain(pb.tracks.iter().flat_map(|t| t.sounds.instances.iter().copied())).collect()
     }
 
     /// The voices a started cue currently owns.
@@ -654,23 +738,55 @@ impl AudioEngine {
         let Some(pb) = self.playbacks.iter().find(|p| p.handle == handle) else { return Vec::new() };
         pb.direct
             .into_iter()
-            .chain(pb.single.map(|i| i.voice))
-            .chain(pb.tracks.iter().flat_map(|t| t.instances.iter().map(|i| i.voice)))
+            .chain(pb.single.and_then(|i| i.voice))
+            .chain(pb.tracks.iter().flat_map(|t| t.sounds.instances.iter().filter_map(|i| i.voice)))
             .collect()
+    }
+
+    /// Whether a started cue is still playing (it has not reached its done state).
+    pub fn cue_is_playing(&self, handle: CueHandle) -> bool {
+        self.playbacks.iter().any(|p| p.handle == handle && p.state != RunState::Done)
+    }
+
+    /// The child cues a started cue has running: its own (kind 7 in its event table) and its tracks'.
+    pub fn cue_children(&self, handle: CueHandle) -> Vec<CueHandle> {
+        let Some(pb) = self.playbacks.iter().find(|p| p.handle == handle) else { return Vec::new() };
+        pb.child.into_iter().chain(pb.tracks.iter().filter_map(|t| t.child)).collect()
     }
 
     /// Set a global parameter (the Pal global table the curves fall back to). Refused when a playing
     /// cue has a curve over it that the value lies past.
     pub fn set_global_param(&mut self, param: u32, value: f32) -> Result<(), CueError> {
+        let mut bodies = Vec::new();
+        let mut visited = HashSet::new();
         for pb in &self.playbacks {
             if let Some(m) = &pb.resolved.multitrack {
-                if !m.params.contains(&param) {
-                    check_curves(m, param, value)?;
-                }
+                self.with_children(m, &mut visited, &mut bodies);
+            }
+        }
+        for m in &bodies {
+            if !m.params.contains(&param) {
+                check_curves(m, param, value)?;
             }
         }
         self.global_params.insert(param, value);
         Ok(())
+    }
+
+    /// `m` and every multi-track body its kind-7 children can reach (children a playing cue may still
+    /// start read the global parameters too).
+    fn with_children(&self, m: &MultiTrackCue, visited: &mut HashSet<u32>, out: &mut Vec<MultiTrackCue>) {
+        out.push(m.clone());
+        for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
+            let Automation::Kind7 { cue, .. } = a else { continue };
+            if !visited.insert(*cue) {
+                continue;
+            }
+            let Some(entry) = self.sounddb.find_cue(*cue) else { continue };
+            if let Ok(ResolvedCue { multitrack: Some(child), .. }) = self.resolve_cue(entry) {
+                self.with_children(&child, visited, out);
+            }
+        }
     }
 
     fn new_handle(&mut self) -> CueHandle {
@@ -706,36 +822,58 @@ impl AudioEngine {
         (req, gains)
     }
 
-    /// Refuse a cue this engine cannot play faithfully: loops, automation kinds with no counterpart,
-    /// unset cue-local parameters, and parameters past a curve.
-    fn check_playable(&self, resolved: &ResolvedCue, params: &HashMap<u32, f32>) -> Result<(), CueError> {
-        if resolved.sounds.iter().any(|s| s.choices.iter().any(|c| c.loop_byte != 0)) {
-            return Err(CueError::Looping { what: "a group's +0x2C loop byte" });
+    /// Refuse a cue this engine cannot play faithfully: a looping wave, the filter curves (kinds 8
+    /// and 9), channel multipliers the mixer has no outputs for, unset cue-local parameters,
+    /// parameters past a curve, and a child cue that is refused itself. `visited` holds the cues
+    /// already checked on this chain (a child chain may lead back to its start).
+    fn check_playable(
+        &self,
+        resolved: &ResolvedCue,
+        params: &HashMap<u32, f32>,
+        visited: &mut HashSet<u32>,
+    ) -> Result<(), CueError> {
+        for c in resolved.sounds.iter().flat_map(|s| s.choices.iter()) {
+            if c.loop_byte != 0 {
+                return Err(CueError::Looping { soundbank: c.soundbank, group: c.group_index, count: c.loop_byte });
+            }
         }
         let Some(m) = &resolved.multitrack else { return Ok(()) };
-        if m.byte_10 != 0 {
-            return Err(CueError::Looping { what: "the cue's +0x10 loop count" });
-        }
-        if m.tracks.iter().any(|t| t.byte_00 != 0) {
-            return Err(CueError::Looping { what: "a track's +0x00 loop count" });
-        }
         for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
-            let kind = match a {
-                Automation::Kind4 { .. } => Some(4),
-                Automation::Kind7 { .. } => Some(7),
-                Automation::Kind9 { .. } => Some(9),
-                Automation::Curve { kind: crate::multitrack::CurveKind::Cue, .. } => Some(8),
-                _ => None,
-            };
-            if let Some(kind) = kind {
-                return Err(CueError::Automation(AutomationError::Unsupported { kind }));
-            }
-            if let Automation::Curve { param, .. } = a {
-                let value = param_value(m, params, &self.global_params, *param).map_err(CueError::Automation)?;
-                check_curves(m, *param, value)?;
+            match a {
+                Automation::Kind9 { .. } => {
+                    return Err(CueError::Automation(AutomationError::Unsupported { kind: 9 }));
+                }
+                Automation::Curve { kind: crate::multitrack::CurveKind::Cue, .. } => {
+                    return Err(CueError::Automation(AutomationError::Unsupported { kind: 8 }));
+                }
+                Automation::Kind4 { .. } if self.mixer.config().channels > 2 => {
+                    return Err(CueError::Channels { channels: self.mixer.config().channels });
+                }
+                Automation::Curve { param, .. } => {
+                    let value = param_value(m, params, &self.global_params, *param).map_err(CueError::Automation)?;
+                    check_curves(m, *param, value)?;
+                }
+                Automation::Kind7 { cue, .. } => self.check_child(*cue, visited)?,
+                _ => {}
             }
         }
         Ok(())
+    }
+
+    /// A kind-7 child is playable when the engine's start would fail (not in the sound database, or
+    /// its soundbank not loaded — the parent then treats it as finished) or when it is playable
+    /// itself, with no cue-local parameter values (nothing supplies them to a child).
+    fn check_child(&self, guid: u32, visited: &mut HashSet<u32>) -> Result<(), CueError> {
+        if !visited.insert(guid) {
+            return Ok(());
+        }
+        let Some(cue) = self.sounddb.find_cue(guid) else { return Ok(()) };
+        let refused = |error: CueError| CueError::Child { cue: guid, error: Box::new(error) };
+        match self.resolve_cue(cue) {
+            Err(ResolveError::SoundbankNotResident(_)) => Ok(()),
+            Err(e) => Err(refused(CueError::Resolve(e))),
+            Ok(r) => self.check_playable(&r, &HashMap::new(), visited).map_err(refused),
+        }
     }
 
     /// Min/max attenuation distances for a cue (from the cue record, or emitter defaults if zero).
@@ -745,12 +883,82 @@ impl AudioEngine {
         (min_d, max_d)
     }
 
-    /// `Sound.StopSound(cue)` — stop a started cue: its voices fade out and nothing more fires.
+    /// `Sound.StopSound(cue)` — release a started cue the way the cue stop `FUN_00835720` does: its
+    /// voices fade out, its tracks stop looping, nothing more fires, and every track (and the cue)
+    /// whose child cue is not running starts it, or stops the one that is. The cue is done once its
+    /// instances and children have finished.
     pub fn stop_sound(&mut self, handle: CueHandle) {
-        for id in self.cue_voices(handle) {
+        let Some(i) = self.playbacks.iter().position(|p| p.handle == handle) else { return };
+        let mut pb = self.take_playback(i);
+        self.release(&mut pb);
+        self.playbacks[i] = pb;
+    }
+
+    /// `FUN_00835720`.
+    fn release(&mut self, pb: &mut Playback) {
+        if matches!(pb.state, RunState::Done | RunState::WaitingChild) {
+            return;
+        }
+        if let Some(id) = pb.direct {
+            self.pool.stop(id, true);
+            pb.state = RunState::WaitingChild;
+            return;
+        }
+        let position = pb.position;
+        for t in 0..pb.tracks.len() {
+            // FUN_0083c470.
+            let tr = &mut pb.tracks[t];
+            tr.loop_count = 0;
+            for inst in &tr.sounds.instances {
+                if let Some(id) = inst.voice {
+                    self.pool.stop(id, true);
+                }
+            }
+            tr.sounds.state = ListState::Fired;
+            match tr.child {
+                None => {
+                    if let Some(guid) = tr.automation.child_cue() {
+                        let child = self.start_child(guid, position, (pb.handle, Some(t)));
+                        pb.tracks[t].child = child;
+                        if self.finished_at_start(child) {
+                            // The engine's completion callback (LAB_0083c550) ran inside the start.
+                            pb.tracks[t].state = RunState::Done;
+                        }
+                    }
+                }
+                Some(child) => self.release_handle(child),
+            }
+            let tr = &mut pb.tracks[t];
+            if tr.state != RunState::Done {
+                tr.state = RunState::WaitingChild;
+            }
+        }
+        match pb.child {
+            None => {
+                if let Some(guid) = pb.cue_automation.child_cue() {
+                    pb.child = self.start_child(guid, position, (pb.handle, None));
+                    if self.finished_at_start(pb.child) {
+                        // LAB_008359a0 ran inside the start: the cue finishes (its own state is set
+                        // to 3 below regardless, as FUN_00835720 does).
+                        self.finish(pb);
+                    }
+                }
+            }
+            Some(child) => self.release_handle(child),
+        }
+        if let Some(id) = pb.single.and_then(|i| i.voice) {
             self.pool.stop(id, true);
         }
-        self.playbacks.retain(|p| p.handle != handle);
+        pb.single_state = 1;
+        pb.state = RunState::WaitingChild;
+    }
+
+    fn release_handle(&mut self, handle: CueHandle) {
+        if let Some(i) = self.playbacks.iter().position(|p| p.handle == handle) {
+            let mut pb = self.take_playback(i);
+            self.release(&mut pb);
+            self.playbacks[i] = pb;
+        }
     }
 
     /// `Sound.PauseSound(cue)` — pause a started cue's voices.
@@ -762,12 +970,14 @@ impl AudioEngine {
         }
     }
 
-    /// `Sound.StopAndFlushAllSounds` — stop every voice.
+    /// `Sound.StopAndFlushAllSounds` — stop every voice and drop every started cue (no release: no
+    /// child cue starts).
     pub fn stop_and_flush_all_sounds(&mut self) {
         let ids: Vec<VoiceId> = self.pool.iter_active().map(|v| v.id).collect();
         for id in ids {
             self.pool.stop(id, false);
         }
+        self.playbacks.clear();
     }
 
     // ---- Sound.* : categories --------------------------------------------------------------------
@@ -994,112 +1204,330 @@ impl AudioEngine {
 
     // ---- cue playback (FUN_00835060 / FUN_0083c070 / FUN_0083fee0 / FUN_008369e0) ----------------
 
+    /// The cue list walk of `FUN_0082ee60`: every started cue in start order, including cues started
+    /// during the walk (a child is appended and advances in the same frame); done cues are dropped.
     fn advance_playbacks(&mut self, dt: f32) {
-        let mut pbs = std::mem::take(&mut self.playbacks);
-        for pb in &mut pbs {
-            self.advance(pb, dt);
+        let mut i = 0;
+        while i < self.playbacks.len() {
+            let mut pb = self.take_playback(i);
+            self.advance(&mut pb, dt);
+            self.playbacks[i] = pb;
+            i += 1;
         }
-        pbs.retain(|pb| !self.finished(pb));
-        self.playbacks = pbs;
+        self.playbacks.retain(|pb| pb.state != RunState::Done);
     }
 
-    /// A playback is over once everything has fired and no voice of it is left.
-    fn finished(&self, pb: &Playback) -> bool {
-        if pb.dropped {
-            return true;
-        }
-        let live = |id: VoiceId| self.pool.get(id).is_some_and(|v| !v.state.is_terminal()) && self.mixer.is_attached(id);
-        if let Some(id) = pb.direct {
-            return !live(id);
-        }
-        if pb.resolved.multitrack.is_none() {
-            return pb.started && pb.single.is_none_or(|i| !live(i.voice));
-        }
-        let sound_counts: Vec<usize> = pb
-            .resolved
-            .multitrack
-            .as_ref()
-            .map(|m| m.tracks.iter().map(|t| t.sounds.len()).collect())
-            .unwrap_or_default();
-        pb.tracks.iter().enumerate().all(|(t, tr)| {
-            tr.next_sound >= sound_counts.get(t).copied().unwrap_or(0) && tr.instances.iter().all(|i| !live(i.voice))
-        })
+    /// Take playback `i` out for mutation, leaving an inert placeholder (handle 0 is never issued).
+    fn take_playback(&mut self, i: usize) -> Playback {
+        let placeholder = Playback {
+            handle: CueHandle(0),
+            resolved: ResolvedCue { soundbank: 0, cue_index: 0, gain: 0.0, multitrack: None, sounds: Vec::new() },
+            req: VoiceRequest::default(),
+            gains: (0.0, 0.0),
+            position: None,
+            params: HashMap::new(),
+            direct: None,
+            state: RunState::Done,
+            single_state: 2,
+            single: None,
+            loop_count: 0,
+            cue_time: 0.0,
+            cue_automation: AutomationState::default(),
+            cue_last: AutomationOutput::default(),
+            tracks: Vec::new(),
+            child: None,
+            parent: None,
+        };
+        std::mem::replace(&mut self.playbacks[i], placeholder)
     }
 
+    /// Whether a child start ended with the child already finished: the start failed, or the child's
+    /// play-probability draw dropped it — either way the engine ran the parent's completion callback
+    /// inside the start.
+    fn finished_at_start(&self, child: Option<CueHandle>) -> bool {
+        child.is_none_or(|h| !self.cue_is_playing(h))
+    }
+
+    /// `FUN_00835850`: a cue finishes — its parent's completion callback runs.
+    fn finish(&mut self, pb: &Playback) {
+        if let Some(parent) = pb.parent {
+            self.child_finished(parent);
+        }
+    }
+
+    /// A child cue finished: `LAB_0083c550` (a track's child: the track is done, its child −1) or
+    /// `LAB_008359a0` (the cue's child: the cue is done and finishes).
+    fn child_finished(&mut self, (handle, track): (CueHandle, Option<usize>)) {
+        let Some(i) = self.playbacks.iter().position(|p| p.handle == handle) else { return };
+        match track {
+            Some(t) => {
+                let tr = &mut self.playbacks[i].tracks[t];
+                tr.state = RunState::Done;
+                tr.child = None;
+            }
+            None => {
+                let mut pb = self.take_playback(i);
+                pb.state = RunState::Done;
+                self.finish(&pb);
+                self.playbacks[i] = pb;
+            }
+        }
+    }
+
+    /// Whether an instance's voice has ended (its wave finished, or it was stolen).
+    fn voice_live(&self, id: VoiceId) -> bool {
+        self.pool.get(id).is_some_and(|v| !v.state.is_terminal()) && self.mixer.is_attached(id)
+    }
+
+    /// `FUN_00835060`: one frame of a started cue.
     fn advance(&mut self, pb: &mut Playback, dt: f32) {
-        if pb.direct.is_some() || pb.dropped {
+        if pb.state == RunState::Done {
+            return;
+        }
+        if let Some(id) = pb.direct {
+            if !self.voice_live(id) {
+                pb.state = RunState::Done;
+            }
             return;
         }
         let Some(m) = pb.resolved.multitrack.clone() else {
-            // Single-track: start the one instance on the first frame, then hold its parameters.
-            let volume = clamp01(pb.resolved.gain * 1.0);
-            if !pb.started {
-                pb.started = true;
-                pb.single = self.fire(pb, 0, 0, None);
-            }
-            if let Some(inst) = pb.single {
-                self.apply(inst, volume, 0.0);
-            }
+            self.advance_single(pb, dt);
             return;
         };
-        pb.started = true;
-        // 1. cue parameters from the previous frame's cue automation.
-        let cue_volume = clamp01(pb.resolved.gain * pb.cue_prev.0);
-        let cue_pitch = pb.cue_prev.1;
-        // 2. cue time and cue automation.
-        pb.cue_time += dt;
         let params = pb.params.clone();
         let globals = self.global_params.clone();
+        let cx = CueContext { m: &m, params: &params, globals: &globals };
+        // The cue block, from the previous frame's cue automation.
+        let block = Block {
+            volume: clamp01(pb.resolved.gain * pb.cue_last.volume),
+            pitch: pb.cue_last.pitch,
+            channels: pb.cue_last.channels,
+        };
+        if pb.state == RunState::WaitingChild {
+            let over = override_of(&pb.cue_last);
+            if self.advance_tracks(pb, &cx, dt, Drive { block, over }) && pb.child.is_none() {
+                pb.state = RunState::Done;
+                self.finish(pb);
+            }
+            return;
+        }
+        let looped = pb.loop_count != 0;
+        let mut dt_tracks = dt;
+        if looped && pb.cue_time + dt >= m.unknown_20 {
+            let (start, end) = (m.unknown_1c, m.unknown_20);
+            pb.cue_automation.rewind(&m.events, start);
+            let raw = Block::of(&pb.cue_last);
+            let over = override_of(&pb.cue_last);
+            let rem = end - pb.cue_time;
+            for t in 0..m.tracks.len() {
+                self.loop_restart(pb, &m, t, (start, end), rem, Drive { block: raw, over });
+            }
+            let d = (pb.cue_time + dt) - end;
+            pb.cue_time = start + d;
+            dt_tracks = d;
+            if pb.loop_count != 0xFF {
+                pb.loop_count -= 1;
+            }
+        } else {
+            pb.cue_time += dt;
+        }
         let value = |p: u32| param_value(&m, &params, &globals, p);
-        let cue_out = pb
+        pb.cue_last = pb
             .cue_automation
-            .step(&m.events, pb.cue_time, &value)
+            .step(&m.events, pb.cue_time, &value, &mut self.rng)
             .expect("automation was validated when the cue started");
-        pb.cue_prev = (cue_out.volume, cue_out.pitch);
-        let cue_override = override_of(&cue_out);
-        // 3. tracks.
-        let mut sound_base = 0usize;
-        for (t, track) in m.tracks.iter().enumerate() {
-            let tp = &mut pb.tracks[t];
-            tp.time += dt;
-            let out = tp
-                .automation
-                .step(&track.automation, tp.time, &value)
-                .expect("automation was validated when the cue started");
-            let volume = out.volume * cue_volume;
-            let pitch = out.pitch + cue_pitch;
-            let over = cue_override.or(override_of(&out));
-            let time = tp.time;
-            let mut fired = Vec::new();
-            for (k, s) in track.sounds.iter().enumerate().skip(tp.next_sound) {
-                if s.start_s <= time {
-                    fired.push(k);
-                    tp.next_sound = k + 1;
-                }
+        let over = override_of(&pb.cue_last);
+        if !self.advance_tracks(pb, &cx, dt_tracks, Drive { block, over }) || looped {
+            return;
+        }
+        if let Some(guid) = pb.cue_automation.child_cue() {
+            let child = self.start_child(guid, pb.position, (pb.handle, None));
+            if self.finished_at_start(child) {
+                // LAB_008359a0 ran inside the start; FUN_00835060 then sets state 3 regardless.
+                self.finish(pb);
             }
-            for k in fired {
-                if let Some(inst) = self.fire(pb, sound_base + k, t, over) {
-                    pb.tracks[t].instances.push(inst);
-                }
+            pb.child = child;
+            pb.state = RunState::WaitingChild;
+            return;
+        }
+        pb.state = RunState::Done;
+        self.finish(pb);
+    }
+
+    /// The single-track path of `FUN_00835060` (`FUN_0083bec0`): start the one instance, update it
+    /// with `{clamp01(cue gain), 0, 1.0 × 6}`, and be done on the update after it finishes.
+    fn advance_single(&mut self, pb: &mut Playback, dt: f32) {
+        let block = Block { volume: clamp01(pb.resolved.gain * 1.0), pitch: 0.0, channels: [1.0; 6] };
+        if pb.single_state == 0 && pb.single.is_none() {
+            pb.single = Some(self.start_instance(pb, 0, None));
+        }
+        match pb.single {
+            Some(mut inst) if !inst.finished => {
+                self.update_instance(&mut inst, block, pb.gains, dt);
+                pb.single = Some(inst);
             }
-            let tp = &mut pb.tracks[t];
-            if let Some((ov, op)) = over {
-                for inst in &mut tp.instances {
-                    inst.volume = ov;
-                    inst.pitch = op;
-                }
+            _ => {
+                pb.single = None;
+                pb.single_state = 2;
             }
-            let instances = tp.instances.clone();
-            for inst in instances {
-                self.apply(inst, volume, pitch);
-            }
-            sound_base += track.sounds.len();
+        }
+        if pb.single_state == 2 {
+            pb.state = RunState::Done;
+            self.finish(pb);
         }
     }
 
-    /// Fire sound `s` of the resolved cue: pick its entry and the entry group's wave, draw the
-    /// instance's start values, and start a voice.
-    fn fire(&mut self, pb: &Playback, s: usize, _track: usize, over: Option<(f32, f32)>) -> Option<Instance> {
+    /// Advance every track in order; whether all of them are done.
+    fn advance_tracks(&mut self, pb: &mut Playback, cx: &CueContext, dt: f32, cue: Drive) -> bool {
+        let mut all_done = true;
+        for t in 0..cx.m.tracks.len() {
+            self.advance_track(pb, cx, t, dt, cue);
+            all_done &= pb.tracks[t].state == RunState::Done;
+        }
+        all_done
+    }
+
+    /// `FUN_0083c070`: one frame of track `t`, under the cue's block and override.
+    fn advance_track(&mut self, pb: &mut Playback, cx: &CueContext, t: usize, dt: f32, cue: Drive) {
+        let (m, block, cue_over) = (cx.m, cue.block, cue.over);
+        let track = &m.tracks[t];
+        let looped = pb.tracks[t].loop_count != 0;
+        let old = pb.tracks[t].time;
+        let mut dt = dt;
+        if old + dt >= track.unknown_08 && looped {
+            let last = pb.tracks[t].last;
+            let lb = Block { volume: last.volume * block.volume, pitch: last.pitch + block.pitch, channels: block.channels };
+            let over = cue_over.or(override_of(&last));
+            let (start, end) = (track.unknown_04, track.unknown_08);
+            self.loop_restart(pb, m, t, (start, end), end - old, Drive { block: lb, over });
+            let d = (dt + old) - end;
+            let tr = &mut pb.tracks[t];
+            tr.time = start + d;
+            dt = d;
+            if tr.loop_count != 0xFF {
+                tr.loop_count -= 1;
+            }
+        } else {
+            pb.tracks[t].time = old + dt;
+        }
+        let value = |p: u32| param_value(m, cx.params, cx.globals, p);
+        let time = pb.tracks[t].time;
+        let out = pb.tracks[t]
+            .automation
+            .step(&track.automation, time, &value, &mut self.rng)
+            .expect("automation was validated when the cue started");
+        pb.tracks[t].last = out;
+        let mut channels = block.channels;
+        for (c, o) in channels.iter_mut().zip(out.channels) {
+            *c *= o;
+        }
+        let b = Block { volume: out.volume * block.volume, pitch: out.pitch + block.pitch, channels };
+        let over = cue_over.or(override_of(&out));
+        self.fire_and_update(pb, m, t, (time, dt), Drive { block: b, over });
+
+        let tr = &pb.tracks[t];
+        let sounds_done = tr.sounds.state == ListState::Done;
+        let ready = if !looped && sounds_done {
+            if tr.state == RunState::Playing {
+                match tr.automation.child_cue() {
+                    Some(guid) => {
+                        let child = self.start_child(guid, pb.position, (pb.handle, Some(t)));
+                        let fired = self.finished_at_start(child);
+                        let tr = &mut pb.tracks[t];
+                        tr.child = child;
+                        // A start that finished at once already ran LAB_0083c550 (state 2).
+                        tr.state = if fired { RunState::Done } else { RunState::WaitingChild };
+                    }
+                    None => pb.tracks[t].state = RunState::Done,
+                }
+                return;
+            }
+            tr.state == RunState::WaitingChild
+        } else {
+            if tr.state != RunState::WaitingChild {
+                return;
+            }
+            sounds_done
+        };
+        if ready && pb.tracks[t].child.is_none() {
+            pb.tracks[t].state = RunState::Done;
+        }
+    }
+
+    /// `FUN_0083c3c0`: a loop restart of track `t` — fire what starts by the loop end and update the
+    /// instances, rewind the automation and the sounds to the loop start, and mark the track playing.
+    fn loop_restart(
+        &mut self,
+        pb: &mut Playback,
+        m: &MultiTrackCue,
+        t: usize,
+        (start, end): (f32, f32),
+        dt: f32,
+        drive: Drive,
+    ) {
+        self.fire_and_update(pb, m, t, (end, dt), drive);
+        let track = &m.tracks[t];
+        let starts: Vec<f32> = track.sounds.iter().map(|s| s.start_s).collect();
+        let tr = &mut pb.tracks[t];
+        tr.automation.rewind(&track.automation, start);
+        tr.sounds.rewind(&starts, start);
+        tr.state = RunState::Playing;
+    }
+
+    /// `FUN_0083fee0`: fire track `t`'s sounds that start by `time`, then drop the instances that
+    /// finished on an earlier update and update the rest with the block (after the override block, if
+    /// any) and `dt`, and move the list state on.
+    fn fire_and_update(&mut self, pb: &mut Playback, m: &MultiTrackCue, t: usize, (time, dt): (f32, f32), drive: Drive) {
+        let (block, over) = (drive.block, drive.over);
+        let base: usize = m.tracks[..t].iter().map(|x| x.sounds.len()).sum();
+        let n = m.tracks[t].sounds.len();
+        if pb.tracks[t].sounds.state == ListState::Firing {
+            for k in pb.tracks[t].sounds.next..n {
+                if m.tracks[t].sounds[k].start_s <= time {
+                    let inst = self.start_instance(pb, base + k, over);
+                    let list = &mut pb.tracks[t].sounds;
+                    list.instances.push(inst);
+                    list.next = k + 1;
+                }
+            }
+        }
+        let gains = pb.gains;
+        let mut kept = Vec::with_capacity(pb.tracks[t].sounds.instances.len());
+        for mut inst in std::mem::take(&mut pb.tracks[t].sounds.instances) {
+            if inst.finished {
+                continue;
+            }
+            if let Some((v, p)) = over {
+                inst.volume = v;
+                inst.pitch = p;
+                inst.channels = [1.0; 6];
+            }
+            self.update_instance(&mut inst, block, gains, dt);
+            kept.push(inst);
+        }
+        let list = &mut pb.tracks[t].sounds;
+        list.instances = kept;
+        match list.state {
+            ListState::Firing if list.instances.is_empty() && list.next == n => list.state = ListState::Fired,
+            ListState::Fired if list.instances.is_empty() => list.state = ListState::Done,
+            _ => {}
+        }
+    }
+
+    /// `FUN_00840280` / `FUN_008369e0`: start an instance of sound `s` — pick its entry and the
+    /// entry group's wave, draw the base pitch, volume and start delay, and take a voice. An instance
+    /// whose pick finds nothing starts finished.
+    fn start_instance(&mut self, pb: &Playback, s: usize, over: Option<(f32, f32)>) -> Instance {
+        let mut inst = Instance {
+            voice: None,
+            wave: None,
+            volume: 1.0,
+            pitch: 0.0,
+            channels: [1.0; 6],
+            delay_s: 0.0,
+            elapsed_s: 0.0,
+            finished: true,
+        };
         let sound = &pb.resolved.sounds[s];
         let choice = match sound.selection {
             None => Some(0),
@@ -1109,7 +1537,7 @@ impl AudioEngine {
                 select::pick(mode, &weights, st, &mut self.rng)
             }
         };
-        let choice = choice.and_then(|i| sound.choices.get(i))?;
+        let Some(choice) = choice.and_then(|i| sound.choices.get(i)) else { return inst };
         let wave = match choice.selection {
             None => Some(0),
             Some(mode) => {
@@ -1118,31 +1546,61 @@ impl AudioEngine {
                 select::pick(mode, &weights, st, &mut self.rng)
             }
         };
-        let wave = *wave.and_then(|i| choice.waves.get(i))?;
+        let Some(wave) = wave.and_then(|i| choice.waves.get(i)).copied() else { return inst };
         let start = choice.instance.start(&mut self.rng);
         let clip = self.clip(wave.wavebank, wave.index).expect("resolved when the cue started");
         let (samples, channels, clip_rate) = (clip.samples.clone(), clip.channels as usize, clip.sample_rate);
-        let src = PcmSource::with_rate(samples, channels, clip_rate, self.mixer.config().sample_rate);
-        let req = VoiceRequest { start_delay: pb.req.start_delay + start.delay_s, ..pb.req.clone() };
-        let id = self.pool.acquire(&req)?;
-        self.mixer.attach_pcm(id, src);
-        self.mixer.set_channel_gains(id, pb.gains.0, pb.gains.1);
-        let (volume, pitch) = over.unwrap_or((start.volume, start.pitch));
-        Some(Instance { voice: id, volume, pitch, clip_rate, wavebank: wave.wavebank, wave_index: wave.index })
+        let delay_s = pb.req.start_delay + start.delay_s;
+        let req = VoiceRequest { start_delay: delay_s, ..pb.req.clone() };
+        inst.voice = self.pool.acquire(&req);
+        if let Some(id) = inst.voice {
+            let src = PcmSource::with_rate(samples, channels, clip_rate, self.mixer.config().sample_rate);
+            self.mixer.attach_pcm(id, src);
+        }
+        inst.wave = Some(InstanceWave { wavebank: wave.wavebank, index: wave.index, clip_rate });
+        inst.volume = start.volume;
+        inst.pitch = start.pitch;
+        inst.delay_s = delay_s;
+        inst.finished = false;
+        if let Some((v, p)) = over {
+            inst.volume = v;
+            inst.pitch = p;
+        }
+        inst
     }
 
-    /// Give an instance's voice its volume and pitched rate.
-    fn apply(&mut self, inst: Instance, volume: f32, pitch: f32) {
-        if !self.mixer.is_attached(inst.voice) {
-            return; // the voice finished or was stolen
+    /// `FUN_00836c70`: multiply the instance's channel multipliers by the block's, give its voice
+    /// `base volume × block volume`, `base pitch + block pitch` and its left/right multipliers, and
+    /// mark it finished once its voice has ended — or, with no voice, once its start delay has passed.
+    fn update_instance(&mut self, inst: &mut Instance, block: Block, gains: (f32, f32), dt: f32) {
+        for (c, b) in inst.channels.iter_mut().zip(block.channels) {
+            *c *= b;
         }
-        if let Some(v) = self.pool.get_mut(inst.voice) {
-            v.gain = inst.volume * volume;
+        inst.elapsed_s += dt;
+        let (Some(id), Some(wave)) = (inst.voice, inst.wave) else {
+            if inst.elapsed_s >= inst.delay_s {
+                inst.finished = true;
+            }
+            return;
+        };
+        if self.mixer.is_attached(id) {
+            if let Some(v) = self.pool.get_mut(id) {
+                v.gain = inst.volume * block.volume;
+            }
+            let rate = pitched_rate(wave.clip_rate, inst.pitch + block.pitch);
+            self.mixer
+                .set_source_rate(id, rate)
+                .expect("playback voices carry PCM sources built at the mixer rate");
+            let (l, r) = if self.mixer.config().channels == 2 {
+                (gains.0 * inst.channels[0], gains.1 * inst.channels[1])
+            } else {
+                gains
+            };
+            self.mixer.set_channel_gains(id, l, r);
         }
-        let rate = pitched_rate(inst.clip_rate, inst.pitch + pitch);
-        self.mixer
-            .set_source_rate(inst.voice, rate)
-            .expect("playback voices carry PCM sources built at the mixer rate");
+        if !self.voice_live(id) {
+            inst.finished = true;
+        }
     }
 
     /// One mixer-thread tick (`FUN_00831ee0` / `FUN_00836610`): render one 45 ms block, submit it to
@@ -1172,6 +1630,20 @@ fn clock_seed() -> u32 {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the system clock reads before 1970")
         .as_nanos() as u32
+}
+
+/// What a multi-track cue's frame reads: its body and its parameter values.
+struct CueContext<'a> {
+    m: &'a MultiTrackCue,
+    params: &'a HashMap<u32, f32>,
+    globals: &'a HashMap<u32, f32>,
+}
+
+/// A block and the override block (volume, pitch) that goes with it, if any.
+#[derive(Clone, Copy)]
+struct Drive {
+    block: Block,
+    over: Option<(f32, f32)>,
 }
 
 /// The override block of an automation step, when a non-zero-mode ramp is active.
@@ -1210,13 +1682,17 @@ fn param_value(
 #[cfg(test)]
 mod playback_tests {
     use super::*;
-    use crate::encode::{build_general, CueBodySpec, CueDef, GroupFormSpec, GroupHeadParams, GroupSpec, Pcm16, TablesSpec, WaveSpec};
+    use crate::encode::{
+        build_general, CueBodySpec, CueDef, GroupFormSpec, GroupHeadParams, GroupSpec, MultiGroupParams, Pcm16,
+        TablesSpec, WaveSpec,
+    };
     use crate::multitrack::{Sound, SoundEntry, Target, Track};
     use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
-    fn engine_with(tracks: Vec<Track>, events: Vec<Automation>, gain: f32) -> (AudioEngine, u32) {
-        let bank = m2("mod_auto");
-        let head = GroupHeadParams {
+    const BANK: &str = "mod_auto";
+
+    fn head() -> GroupHeadParams {
+        GroupHeadParams {
             unknown_10: 1.0,
             unknown_14: 0,
             min_distance: 10.0,
@@ -1224,7 +1700,11 @@ mod playback_tests {
             unknown_20: 1.0,
             pitch: 1.0,
             unknown_28: 1.0,
-        };
+        }
+    }
+
+    fn multi(tracks: Vec<Track>, events: Vec<Automation>, gain: f32) -> MultiTrackCue {
+        let bank = m2(BANK);
         let tracks = tracks
             .into_iter()
             .map(|mut t| {
@@ -1236,56 +1716,102 @@ mod playback_tests {
                 t
             })
             .collect();
+        let _ = gain;
+        MultiTrackCue {
+            byte_10: 0,
+            sound_slots: 1,
+            unknown_18: 1.0,
+            unknown_1c: -1.0,
+            unknown_20: -1.0,
+            unknown_24: 0.0,
+            events,
+            curves: vec![],
+            tracks,
+            params: vec![],
+        }
+    }
+
+    /// A bank `mod_auto`: wave 0 is `frames` mono samples at 22,050 Hz; group 0 plays it (base volume
+    /// 0.5, base pitch 2.0), group 1 plays it from a multi-wave group whose `+0x2C` loop count is 3.
+    /// Each `(name, gain, body)` is a cue.
+    fn engine(cues: Vec<(&str, f32, CueBodySpec)>, frames: usize, channels: usize) -> AudioEngine {
         let spec = TablesSpec {
-            name: "mod_auto".into(),
-            waves: vec![WaveSpec { clip_hash: 1, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; 22050 * 4] } }],
-            groups: vec![GroupSpec {
-                sound_id: 1,
-                category: "sfx".into(),
-                head,
-                form: GroupFormSpec::Single { wave: 0, gain: 0.5, unknown_30: 2.0, weight: 1.0 },
-            }],
-            cues: vec![CueDef {
-                name: "mod_auto_cue".into(),
-                byte_06: 0,
-                gain,
-                body: CueBodySpec::MultiTrack(MultiTrackCue {
-                    byte_10: 0,
-                    sound_slots: 1,
-                    unknown_18: 1.0,
-                    unknown_1c: -1.0,
-                    unknown_20: -1.0,
-                    unknown_24: 0.0,
-                    events,
-                    curves: vec![],
-                    tracks,
-                    params: vec![],
-                }),
-            }],
+            name: BANK.into(),
+            waves: vec![WaveSpec { clip_hash: 1, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; frames] } }],
+            groups: vec![
+                GroupSpec {
+                    sound_id: 1,
+                    category: "sfx".into(),
+                    head: head(),
+                    form: GroupFormSpec::Single { wave: 0, gain: 0.5, unknown_30: 2.0, weight: 1.0 },
+                },
+                GroupSpec {
+                    sound_id: 2,
+                    category: "sfx".into(),
+                    head: head(),
+                    form: GroupFormSpec::Multi {
+                        params: MultiGroupParams {
+                            byte_2c: 3,
+                            selection: 0,
+                            byte_2f: 0,
+                            unknown_30: 0.0,
+                            unknown_34: 0.0,
+                            unknown_3c: 0.0,
+                            unknown_40: 0.0,
+                            word_48: 0,
+                            floats_4c: [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                            unknown_64: 0.0,
+                        },
+                        waves: vec![(0, 1.0)],
+                    },
+                },
+            ],
+            cues: cues
+                .into_iter()
+                .map(|(name, gain, body)| CueDef { name: name.into(), byte_06: 0, gain, body })
+                .collect(),
         };
         let enc = build_general(&spec).unwrap().to_bytes().unwrap();
-        let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
+        let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels });
         eng.set_rng_seed(7);
         eng.set_sounddb(SoundDb::parse(&enc.sounddb).unwrap());
         eng.load_soundbank(&enc.soundbank).unwrap();
         eng.load_wavebank(&enc.wavebank).unwrap();
-        (eng, m2("mod_auto_cue"))
+        eng
     }
 
-    fn one_sound_track(automation: Vec<Automation>) -> Track {
-        Track {
-            byte_00: 0,
-            unknown_04: -1.0,
-            unknown_08: -1.0,
-            automation,
-            sounds: vec![Sound {
-                slot: 0,
-                byte_01: 2,
-                byte_02: 2,
-                selection: 1,
-                start_s: 0.0,
-                entries: vec![SoundEntry { soundbank: 0, group_index: 0, unknown_06: 0, weight: 1.0 }],
-            }],
+    fn sound(start_s: f32, group_index: u16) -> Sound {
+        Sound {
+            slot: 0,
+            byte_01: 2,
+            byte_02: 2,
+            selection: 1,
+            start_s,
+            entries: vec![SoundEntry { soundbank: 0, group_index, unknown_06: 0, weight: 1.0 }],
+        }
+    }
+
+    fn track(automation: Vec<Automation>, sounds: Vec<Sound>) -> Track {
+        Track { byte_00: 0, unknown_04: -1.0, unknown_08: -1.0, automation, sounds }
+    }
+
+    fn one_cue(tracks: Vec<Track>, events: Vec<Automation>, gain: f32, frames: usize) -> (AudioEngine, u32) {
+        let body = CueBodySpec::MultiTrack(multi(tracks, events, gain));
+        (engine(vec![("mod_auto_cue", gain, body)], frames, 2), m2("mod_auto_cue"))
+    }
+
+    const LONG: usize = 22050 * 4;
+    const SHORT: usize = 1100; // 0.05 s
+
+    fn ramp(target: Target, from: f32, to: f32) -> Automation {
+        Automation::Ramp { target, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from, to }
+    }
+
+    /// Run `n` frames of `dt`, rendering after each so finished waves end their voices.
+    fn run(eng: &mut AudioEngine, n: usize, dt: f32) {
+        for _ in 0..n {
+            eng.tick(dt);
+            eng.render((44100.0 * dt) as usize);
         }
     }
 
@@ -1293,43 +1819,178 @@ mod playback_tests {
     /// clamp01(cue gain); rate = pitched_rate(clip rate, base pitch (+0x30) + ramp).
     #[test]
     fn track_automation_drives_the_voice() {
-        let fade = Automation::Ramp { target: Target::Volume, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from: 1.0, to: 0.0 };
-        let bend = Automation::Ramp { target: Target::Pitch, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from: 0.0, to: 12.0 };
-        let (mut eng, cue) = engine_with(vec![one_sound_track(vec![fade, bend])], vec![], 0.8);
+        let tr = track(vec![ramp(Target::Volume, 1.0, 0.0), ramp(Target::Pitch, 0.0, 12.0)], vec![sound(0.0, 0)]);
+        let (mut eng, cue) = one_cue(vec![tr], vec![], 0.8, LONG);
         let h = eng.cue_sound(cue, None).unwrap();
         for _ in 0..5 {
             eng.tick(0.1);
         }
         let t = 0.1f32 + 0.1 + 0.1 + 0.1 + 0.1;
-        let inst = eng.cue_instances(h)[0];
-        let v = eng.pool.get(inst.voice).unwrap().gain;
+        let voice = eng.cue_instances(h)[0].voice.unwrap();
         let ramp_v = (0.0f32 - 1.0) / ((1.0 + 0.0) - 0.0) * (t - 0.0) + 1.0;
-        assert_eq!(v, 0.5 * (ramp_v * 0.8f32.min(1.0)));
+        assert_eq!(eng.pool.get(voice).unwrap().gain, 0.5 * (ramp_v * 0.8f32.min(1.0)));
         let ramp_p = (12.0f32 - 0.0) / ((1.0 + 0.0) - 0.0) * (t - 0.0);
         let rate = pitched_rate(22050, 2.0 + ((ramp_p + 0.0) + 0.0));
-        assert_eq!(eng.mixer.source_step(inst.voice).unwrap(), rate as f64 / 44100.0);
+        assert_eq!(eng.mixer.source_step(voice).unwrap(), rate as f64 / 44100.0);
     }
 
     /// The cue's event table acts one frame late, through the clamped cue volume.
     #[test]
     fn cue_events_lag_a_frame() {
-        let fade = Automation::Ramp { target: Target::Volume, start_s: 0.0, mode: 0, unknown_0c: 0, duration_s: 1.0, from: 0.5, to: 0.5 };
-        let (mut eng, cue) = engine_with(vec![one_sound_track(vec![])], vec![fade], 1.0);
+        let (mut eng, cue) = one_cue(vec![track(vec![], vec![sound(0.0, 0)])], vec![ramp(Target::Volume, 0.5, 0.5)], 1.0, LONG);
         let h = eng.cue_sound(cue, None).unwrap();
         eng.tick(0.1);
-        let inst = eng.cue_instances(h)[0];
-        assert_eq!(eng.pool.get(inst.voice).unwrap().gain, 0.5 * 1.0, "frame 1 still uses the start value");
+        let voice = eng.cue_instances(h)[0].voice.unwrap();
+        assert_eq!(eng.pool.get(voice).unwrap().gain, 0.5 * 1.0, "frame 1 still uses the start value");
         eng.tick(0.1);
-        assert_eq!(eng.pool.get(inst.voice).unwrap().gain, 0.5 * 0.5, "frame 2 sees frame 1's event");
+        assert_eq!(eng.pool.get(voice).unwrap().gain, 0.5 * 0.5, "frame 2 sees frame 1's event");
+    }
+
+    /// A track loop re-fires its sounds from the loop start — except sound 0 when sound 1 also starts
+    /// at or after the loop start (`FUN_00840230`) — and stops once its count runs out.
+    #[test]
+    fn a_track_loop_refires_from_the_loop_start() {
+        let mut tr = track(vec![], vec![sound(0.0, 0), sound(0.05, 0)]);
+        tr.byte_00 = 1;
+        tr.unknown_04 = 0.0;
+        tr.unknown_08 = 0.2;
+        let (mut eng, cue) = one_cue(vec![tr], vec![], 1.0, LONG);
+        let h = eng.cue_sound(cue, None).unwrap();
+        eng.tick(0.1); // t 0.1: sounds 0 and 1 fire
+        assert_eq!(eng.cue_instances(h).len(), 2);
+        eng.tick(0.1); // t 0.2 reaches the loop end: rewind to sound 1, time 0.0
+        assert_eq!(eng.cue_instances(h).len(), 2, "time 0.0: sound 1 (start 0.05) not yet");
+        eng.tick(0.1); // t 0.1: sound 1 again; sound 0 is skipped
+        assert_eq!(eng.cue_instances(h).len(), 3);
+        eng.tick(0.1);
+        eng.tick(0.1); // t 0.3: the count is spent, no second loop
+        assert_eq!(eng.cue_instances(h).len(), 3);
+    }
+
+    /// A cue loop restarts every track's sounds against the cue's loop points.
+    #[test]
+    fn a_cue_loop_restarts_its_tracks() {
+        let mut m = multi(vec![track(vec![], vec![sound(0.0, 0)])], vec![], 1.0);
+        m.byte_10 = 1;
+        m.unknown_1c = 0.0;
+        m.unknown_20 = 0.2;
+        let mut eng = engine(vec![("mod_auto_cue", 1.0, CueBodySpec::MultiTrack(m))], LONG, 2);
+        let h = eng.cue_sound(m2("mod_auto_cue"), None).unwrap();
+        eng.tick(0.1);
+        assert_eq!(eng.cue_instances(h).len(), 1);
+        eng.tick(0.1); // cue time reaches 0.2: the track's sounds rewind to 0 and fire again
+        assert_eq!(eng.cue_instances(h).len(), 2);
+        eng.tick(0.1);
+        eng.tick(0.1);
+        assert_eq!(eng.cue_instances(h).len(), 2, "one loop only");
+    }
+
+    /// A kind-7 record starts its child cue when the track's sounds are done, the track waits for it,
+    /// and the cue is done when the child is.
+    #[test]
+    fn a_track_starts_its_child_cue_when_it_finishes() {
+        let child = Automation::Kind7 { start_bits: 0, cue: m2("mod_child") };
+        let parent = multi(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0);
+        let mut eng = engine(
+            vec![
+                ("mod_parent", 1.0, CueBodySpec::MultiTrack(parent)),
+                ("mod_child", 1.0, CueBodySpec::SingleTrack { group: 0, unknown_16: 0 }),
+            ],
+            SHORT,
+            2,
+        );
+        let h = eng.cue_sound(m2("mod_parent"), None).unwrap();
+        run(&mut eng, 1, 0.02);
+        assert!(eng.cue_children(h).is_empty());
+        let mut started = None;
+        for _ in 0..40 {
+            run(&mut eng, 1, 0.02);
+            if let Some(&c) = eng.cue_children(h).first() {
+                started = Some(c);
+                break;
+            }
+        }
+        let c = started.expect("the child starts once the parent's sound has finished");
+        assert!(eng.cue_is_playing(h), "the parent waits for its child");
+        for _ in 0..40 {
+            run(&mut eng, 1, 0.02);
+        }
+        assert!(!eng.cue_is_playing(c));
+        assert!(!eng.cue_is_playing(h), "done once its child is");
+    }
+
+    /// Stopping a cue starts the child cue of every track that has one (`FUN_00835720`).
+    #[test]
+    fn stopping_a_cue_starts_its_child() {
+        let child = Automation::Kind7 { start_bits: 0, cue: m2("mod_tail") };
+        let parent = multi(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0);
+        let mut eng = engine(
+            vec![
+                ("mod_loop", 1.0, CueBodySpec::MultiTrack(parent)),
+                ("mod_tail", 1.0, CueBodySpec::SingleTrack { group: 0, unknown_16: 0 }),
+            ],
+            LONG,
+            2,
+        );
+        let h = eng.cue_sound(m2("mod_loop"), None).unwrap();
+        eng.tick(0.1);
+        assert!(eng.cue_children(h).is_empty());
+        eng.stop_sound(h);
+        assert_eq!(eng.cue_children(h).len(), 1, "the tail cue starts on release");
+    }
+
+    /// A child the engine cannot start (not in the sound database) counts as finished.
+    #[test]
+    fn an_unknown_child_counts_as_finished() {
+        let child = Automation::Kind7 { start_bits: 0, cue: 0x1234_5678 };
+        let (mut eng, cue) = one_cue(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0, SHORT);
+        let h = eng.cue_sound(cue, None).unwrap();
+        run(&mut eng, 20, 0.02);
+        assert!(!eng.cue_is_playing(h));
+    }
+
+    /// A kind-4 record's output channels 0 and 1 scale the voice's left and right outputs, and stay on
+    /// the instance after the step that set them.
+    #[test]
+    fn kind4_channels_reach_left_and_right() {
+        let mut words = [0u32; 17];
+        words[11] = 0.5f32.to_bits(); // record channel 0 → output 0
+        words[12] = 0.25f32.to_bits(); // record channel 1 → output 1
+        for w in &mut words[13..17] {
+            *w = 1.0f32.to_bits();
+        }
+        let (mut eng, cue) = one_cue(vec![track(vec![Automation::Kind4 { words }], vec![sound(0.0, 0)])], vec![], 1.0, LONG);
+        let h = eng.cue_sound(cue, None).unwrap();
+        eng.tick(0.1);
+        eng.tick(0.1);
+        assert_eq!(eng.cue_instances(h)[0].channels, [0.5, 0.25, 1.0, 1.0, 1.0, 1.0]);
+        let pcm = eng.render(64);
+        assert_eq!((pcm[0], pcm[1]), ((1000.0f32 * 0.5 * 0.5) as i16, (1000.0f32 * 0.5 * 0.25) as i16));
+        let mut eng6 = engine(
+            vec![("mod_auto_cue", 1.0, CueBodySpec::MultiTrack(multi(vec![track(vec![Automation::Kind4 { words }], vec![sound(0.0, 0)])], vec![], 1.0)))],
+            LONG,
+            6,
+        );
+        assert_eq!(eng6.cue_sound(cue, None), Err(CueError::Channels { channels: 6 }));
     }
 
     #[test]
-    fn unsupported_automation_and_loops_refuse_the_cue() {
-        let (mut eng, cue) = engine_with(vec![one_sound_track(vec![Automation::Kind7 { unknown_04: 0, hash: 1 }])], vec![], 1.0);
-        assert_eq!(eng.cue_sound(cue, None), Err(CueError::Automation(AutomationError::Unsupported { kind: 7 })));
-        let mut looping = one_sound_track(vec![]);
-        looping.byte_00 = 0xFF;
-        let (mut eng, cue) = engine_with(vec![looping], vec![], 1.0);
-        assert!(matches!(eng.cue_sound(cue, None), Err(CueError::Looping { .. })));
+    fn a_looping_wave_and_the_filter_refuse_the_cue() {
+        let (mut eng, cue) = one_cue(vec![track(vec![], vec![sound(0.0, 1)])], vec![], 1.0, LONG);
+        assert_eq!(eng.cue_sound(cue, None), Err(CueError::Looping { soundbank: m2(BANK), group: 1, count: 3 }));
+        let filter = Automation::Kind9 { start_bits: 0, curve_a: 0, curve_b: u32::MAX };
+        let (mut eng, cue) = one_cue(vec![track(vec![filter], vec![sound(0.0, 0)])], vec![], 1.0, LONG);
+        assert_eq!(eng.cue_sound(cue, None), Err(CueError::Automation(AutomationError::Unsupported { kind: 9 })));
+        let child = Automation::Kind7 { start_bits: 0, cue: m2("mod_bad") };
+        let bad = multi(vec![track(vec![], vec![sound(0.0, 1)])], vec![], 1.0);
+        let mut eng = engine(
+            vec![
+                ("mod_good", 1.0, CueBodySpec::MultiTrack(multi(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0))),
+                ("mod_bad", 1.0, CueBodySpec::MultiTrack(bad)),
+            ],
+            LONG,
+            2,
+        );
+        assert!(matches!(eng.cue_sound(m2("mod_good"), None), Err(CueError::Child { .. })), "a refused child refuses its parent");
     }
 }
