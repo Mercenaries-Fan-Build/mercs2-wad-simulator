@@ -577,6 +577,11 @@ impl Mixer {
         }
     }
 
+    /// Whether an emitter has been placed (its source exists, and has its place in the mix order).
+    pub fn has_emitter(&self, key: u32) -> bool {
+        self.emitters.iter().any(|e| e.key == key)
+    }
+
     /// Set the listener the mix reads (slot 0).
     pub fn set_listener(&mut self, listener: Listener) {
         self.listener = listener;
