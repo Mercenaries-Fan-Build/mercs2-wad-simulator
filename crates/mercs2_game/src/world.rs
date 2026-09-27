@@ -2219,6 +2219,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // mission-Lua pump below takes its own.
         {
             let mut host = self.script_host.borrow_mut();
+            // Sound emitters follow their objects before the audio tick inside `runtime.tick`, as
+            // `PgSoundPlayer::Update` runs `FUN_006034B0` before the Pal update `FUN_0082EE60`.
+            host.update_sound_emitters(ctx.time.fixed_dt);
             self.runtime.tick(&mut ctx.world.borrow_mut(), host.player_mut(), ctx.time.fixed_dt);
         }
         self.runtime.tick_population(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt, self.player.pos);
