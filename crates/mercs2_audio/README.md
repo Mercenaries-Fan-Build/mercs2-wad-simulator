@@ -59,9 +59,10 @@ soundbanks, 77 sounddbs), and `tests/retail_banks.rs` re-encodes each one byte-i
 parsed records. The full byte layouts are in the module docs of `wave`, `soundbank` and `sounddb`; the
 facts that matter most:
 
-* A cue resolves in four hops: `sounddb` entry `{guid, soundbank hash, cue index}` → that soundbank's
-  cue → the cue's group → the group's `{wavebank hash, wave index, weight}`. The sounddb's third field
-  is the **soundbank cue index**, not a wave index.
+* A cue resolves through the chain the engine follows: `sounddb` entry `{guid, soundbank hash, cue
+  index}` → that soundbank's cue → its one group (single-track) or, for every sound of every track, one
+  of the sound's weighted groups (multi-track) → one of the group's weighted `{wavebank, wave index}`
+  waves. The sounddb's third field is the **soundbank cue index**, not a wave index.
 * Every table starts with the `u32` version `0x1D` (at the wavebank's `+0` too — it is not a record
   count), then the bank hash `m2(bank name)`.
 * A wavebank record's data offset (`+0x20`) is **relative to the record's own start**. Blobs follow
@@ -69,19 +70,23 @@ facts that matter most:
   fill after the last blob is why 54 wavebanks run past their last blob. Embedded clips are PCM16
   (`+0x0C` = frames × channels × 2 on every one).
 * Soundbank groups come in two forms (single-wave, 64 bytes; multi-wave, `0x68 + 12 × waves`), cues in
-  two (single-track, 24 bytes; multi-track, whose track layout is **not decoded** and is carried
-  verbatim).
+  two (single-track, 24 bytes; multi-track: tracks of timed sounds plus volume / pitch automation —
+  `multitrack`).
+* A multi-wave group picks its wave, and a multi-track sound its entry, by a selection mode — 0
+  sequential, 1 weighted random, 2 weighted random without an immediate repeat — drawing from the
+  engine's generator. `select` reproduces both from the disassembly, generator included; the engine
+  seeds it from its clock at startup, so `AudioEngine::set_rng_seed` exists to make picks repeatable.
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
 
-Resolving every per-bank sounddb entry in `vz.wad` (1,198 cues) through that chain: **282** reach one
-decoded wave, **102** reach a multi-wave group whose waves are all decoded (how the engine picks among
-them is not established, so `resolve_wave` reports it rather than picking), **693** are multi-track
-cues, **119** play waves streamed from `music.pws`/`ambience.pws`, and **2** name a wavebank that is not
-in `vz.wad`. The earlier reading — third field as a wave index, `+0x20` body-relative — "resolved" 589
-of the 807 resident cues, but only 6 of the 350 resident single-track cues it routed landed on the
-right wave.
+Resolving every per-bank sounddb entry in `vz.wad` (1,198 cues) with every `vz.wad` bank resident:
+**1,012** resolve through every path to decoded PCM (628 of them multi-track). The rest are named, never
+guessed: **177** reach a wave streamed from `music.pws` / `ambience.pws`, and **9** reach two wavebanks
+that live in `English.wad` — with its wavebanks resident too, 7 of those resolve and 2 reach
+`vo_stream.pws`, for **1,019** resolved. The game's resident set (12 banks, 807 catalog cues) resolves
+**605**. The earlier reading — third field as a wave index, `+0x20` body-relative — named a wave after a
+cue that does not play it for 1,084 of the 1,198 cues.
 
 Retail verification (game-gated on `MERCS2_GAME_DIR`; each test prints `SKIPPING` and returns when it is
 unset): `tests/retail_banks.rs` here, and `mercs2_probe/tests/audio_wad_probe.rs` for the resident banks
@@ -131,6 +136,8 @@ Encode a bank of new sounds — each cue a named PCM16 clip plus explicit group 
 use mercs2_audio::encode::{encode_bank, BankSpec, CueSpec, Pcm16, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
+// One wave, one single-wave group and one single-track cue per cue. For multi-wave groups and
+// multi-track cues, author waves, groups and cues separately with `encode::encode_general`.
 let bank = encode_bank(&BankSpec {
     name: "mod_ui_sounds".into(),
     cues: vec![CueSpec {
@@ -165,10 +172,14 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   category tree and parameters), `find_cue` (direct-index below `0x401`, hashed GUID at/above),
   `find_cue_by_name`.
 * **`soundbank`** — `Soundbank`: exact parse/serialize of groups and cues.
+* **`multitrack`** — `MultiTrackCue`: tracks, timed sounds and their weighted entries, automation.
+* **`select`** — `PalRng` and `pick`: the engine's wave / entry selection, exactly.
+* **`route`** — `route`: which cues play which waves, from the tables alone (for tools).
 * **`wave`** — `WavebankFile` (exact parse/serialize) + PCM16/IMA-ADPCM decoders → `DecodedClip` /
   `Wavebank`.
-* **`encode`** — `encode_bank`: named PCM16 cues → the three table bodies; the `UI_PDA_OPEN_*`
-  presets and the retail category table.
+* **`encode`** — `encode_bank` (named PCM16 cues) and `encode_general` (waves, single- and multi-wave
+  groups, single- and multi-track cues) → the three table bodies; the `UI_PDA_OPEN_*` presets and the
+  retail category table.
 * **`voice`** — `VoicePool`: acquire, priority-steal, the 16-state `InstanceState` FSM.
 * **`mixer`** — `Mixer`: int32 accumulate → saturate int16; `SampleSource` trait, `PcmSource`
   (with resampling), `ToneSource`.
@@ -195,10 +206,12 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   is accepted and stored but not rendered.
 * **`AudioSink` is not `Send`.** The exe runs audio on one thread (the VM and mixer share the engine
   CS) and `cpal::Stream` is `!Send` everywhere; the engine is driven from one thread to match.
+* **`cue_sound` fires one voice per sound** the engine's picks produce (`pick_cue`), each starting at
+  its sound's start time. Multi-track **automation** (volume / pitch ramps, LFOs, parameter curves) is
+  decoded but not yet applied to those voices — see `DEFERRED.md`.
 * **A cue whose chain does not resolve still allocates a (silent) voice** — faithful to the exe
-  allocating a voice before its wave streams in. `resolve_wave` says why (`ResolveError`): bank not
-  resident, multi-track cue (layout not decoded), multi-wave group (selection not established),
-  streamed wave, or a bad index.
+  allocating a voice before its wave streams in. `resolve_cue` says why (`ResolveError`): a bank not
+  resident, a streamed wave, an empty choice list, an unknown selection mode, or a bad index.
 * **The game must load soundbanks too.** The chain's first hop is the soundbank; a host that loads
   only wavebanks and sounddbs resolves nothing.
 * **`pump()` is a no-op when headless**, so tests and dedicated servers never render into a
