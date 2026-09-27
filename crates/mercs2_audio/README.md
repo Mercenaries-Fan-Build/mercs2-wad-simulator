@@ -16,6 +16,9 @@ everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving th
   decoders live here).
 * **Bank encoding** — builds a bank's wavebank, soundbank and sounddb from named PCM16 cues; every
   one of the three codecs re-encodes all retail tables in `vz.wad` byte-identically.
+* **Cue playback** — a started cue advanced frame by frame as the engine advances it: sounds fire at
+  their start times, pick their groups and waves, draw their base volume / pitch / start delay, and
+  follow the cue's and track's volume / pitch ramps, LFOs and parameter curves.
 * **Voice pool** — allocation, priority-steal when the pool is full, and a 16-state per-instance FSM.
 * **Software mixer** — int32 accumulator → saturating clamp → interleaved int16, per-voice
   resampling from a clip's native rate to the mixer rate.
@@ -74,8 +77,20 @@ facts that matter most:
   `multitrack`).
 * A multi-wave group picks its wave, and a multi-track sound its entry, by a selection mode — 0
   sequential, 1 weighted random, 2 weighted random without an immediate repeat — drawing from the
-  engine's generator. `select` reproduces both from the disassembly, generator included; the engine
-  seeds it from its clock at startup, so `AudioEngine::set_rng_seed` exists to make picks repeatable.
+  engine's generator. `select` reproduces both from the disassembly, generator included.
+* A cue's `+0x0C` length is what `Sound.GetMaxDuration` returns and what the VO line start reads (a
+  length ≤ 0 becomes 5 s there); the engine never computes it. Retail carries −1 when anything the cue
+  plays loops, otherwise the latest end among its sounds (start + longest wave) and ramps / LFOs. That
+  rule (`duration`) reproduces 14,818 of the 14,834 cues in `vz.wad` and `English.wad` bit for bit; the
+  16 it does not are named in `tests/retail_banks.rs`. The encoder computes the length with it.
+* Multi-track automation (`automation`, the track update `FUN_0083b4a0`): kinds 0/1 are volume / pitch
+  ramps, 2/3 volume / pitch LFOs read from the engine's 8,192-entry sine table, 5/6 volume / pitch
+  curves over a parameter. A ramp with a non-zero mode overrides the instance's base volume or pitch
+  instead of scaling it. Pitch is semitones; a voice plays at `2^(p/4096) × clip rate` with
+  `p = trunc(pitch / 24 × 8192)` clamped to ±`0x2000`. Kind 4 sets six channel multipliers with a
+  random jitter, 7 starts a child cue when the track ends, 8 is a curve the kind 9/10 records evaluate
+  into three instance fields no reader of which is known — none acts on volume or pitch, so a cue
+  that carries one is refused (`CueError::Automation`).
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
@@ -94,11 +109,12 @@ mixed through the engine.
 
 ## Usage
 
-Library crate — no binaries. Cue a positional sound through the real voice → mixer path:
+Library crate — no binaries. Cue a positional sound through the real playback → voice → mixer path:
 
 ```rust
 use mercs2_audio::{AudioEngine, Listener, MixerConfig, SoundDb};
 use mercs2_core::glam::Vec3;
+use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
 let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
 
@@ -115,18 +131,23 @@ eng.set_sounddb(SoundDb::parse(&sounddb_body).expect("sounddb"));
 eng.load_soundbank(&soundbank_body).expect("soundbank");
 let audible = eng.load_wavebank(&wavebank_body).expect("wavebank"); // clips carrying samples
 
-// Cue by name: hashed to a GUID, resolved sounddb → soundbank cue → group → wave, bound to
-// the resident clip, 3D-panned against the closest listener.
-if let Some(voice) = eng.cue_sound_by_name("sfx_explosion", Some(Vec3::new(3.0, 0.0, 0.0)), None) {
-    eng.stop_sound(voice);
-}
+// Cue by name: hashed to a GUID, resolved sounddb → soundbank cue → group → wave. A cue this engine
+// cannot play faithfully (it loops, or carries automation with no volume / pitch counterpart) is an
+// error (`CueError`), never a silent partial play.
+let cue = eng.cue_sound_by_name("sfx_explosion", Some(Vec3::new(3.0, 0.0, 0.0)))?;
 
-// Per frame: advance the FSMs/fades, then keep the device ring fed at wall-clock rate.
+// A curve over a global parameter reads the value set here; one past the curve's last point is refused.
+eng.set_global_param(m2("some_param"), 0.5)?;
+
+// Per frame: fire the cue's sounds, apply its automation, advance the FSMs/fades, then keep the
+// device ring fed at wall-clock rate.
 eng.tick(dt);
 eng.pump(dt);
 
 // Or render explicitly (headless — tests, servers): interleaved int16 frames.
 let pcm: Vec<i16> = eng.render(2048);
+
+eng.stop_sound(cue);
 ```
 
 Encode a bank of new sounds — each cue a named PCM16 clip plus explicit group and cue parameters
@@ -137,7 +158,8 @@ use mercs2_audio::encode::{encode_bank, BankSpec, CueSpec, Pcm16, UI_PDA_OPEN_CU
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
 // One wave, one single-wave group and one single-track cue per cue. For multi-wave groups and
-// multi-track cues, author waves, groups and cues separately with `encode::encode_general`.
+// multi-track cues, author waves, groups and cues separately with `encode::encode_general`. Each
+// cue's +0x0C length is computed from the waves it plays, never passed in.
 let bank = encode_bank(&BankSpec {
     name: "mod_ui_sounds".into(),
     cues: vec![CueSpec {
@@ -173,6 +195,11 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   `find_cue_by_name`.
 * **`soundbank`** — `Soundbank`: exact parse/serialize of groups and cues.
 * **`multitrack`** — `MultiTrackCue`: tracks, timed sounds and their weighted entries, automation.
+* **`automation`** — `AutomationState::step`: ramps, LFOs and curves evaluated as the engine does;
+  `sine_table`, `pitched_rate`.
+* **`playback`** — a started cue's per-frame state: `InstanceParams::start` (base volume, pitch and
+  start delay draws), `TrackPlayback`.
+* **`duration`** — `cue_length_s`: a cue's `+0x0C` length as retail carries it.
 * **`select`** — `PalRng` and `pick`: the engine's wave / entry selection, exactly.
 * **`route`** — `route`: which cues play which waves, from the tables alone (for tools).
 * **`wave`** — `WavebankFile` (exact parse/serialize) + PCM16/IMA-ADPCM decoders → `DecodedClip` /
@@ -206,12 +233,22 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   is accepted and stored but not rendered.
 * **`AudioSink` is not `Send`.** The exe runs audio on one thread (the VM and mixer share the engine
   CS) and `cpal::Stream` is `!Send` everywhere; the engine is driven from one thread to match.
-* **`cue_sound` fires one voice per sound** the engine's picks produce (`pick_cue`), each starting at
-  its sound's start time. Multi-track **automation** (volume / pitch ramps, LFOs, parameter curves) is
-  decoded but not yet applied to those voices — see `DEFERRED.md`.
-* **A cue whose chain does not resolve still allocates a (silent) voice** — faithful to the exe
-  allocating a voice before its wave streams in. `resolve_cue` says why (`ResolveError`): a bank not
-  resident, a streamed wave, an empty choice list, an unknown selection mode, or a bad index.
+* **`cue_sound` returns a `CueHandle`, not a voice.** The playback fires one voice per sound instance
+  on `tick`, and `cue_voices` / `cue_instances` list what a cue holds; `stop_sound` / `pause_sound` act
+  on the whole cue. A multi-track cue draws once at start and plays only if its `+0x18` probability is
+  not below the draw (`FUN_008354e0`), so a started cue can fire nothing.
+* **Cue-level automation lags one frame**, as in the engine: the cue update (`FUN_00835060`) reads
+  the previous frame's cue volume and pitch before it evaluates the cue's own event table.
+* **Refused at start, never played partially:** a cue whose chain does not resolve
+  (`CueError::Resolve` says why: a bank not resident, a streamed wave, an empty choice list, an unknown
+  selection mode, a bad index); a looping cue (a group `+0x2C` loop byte, a track `+0x00` or cue
+  `+0x10` loop count — looping is not played yet, see `DEFERRED.md`); automation kinds 4, 7, 8 and 9;
+  a curve whose parameter is unset or lies past its last point (the engine reads out of bounds there).
+  Over the 1,198 retail `vz.wad` cues, 707 play; 2 are refused for kind 4, 1 for kind 9, 278 for a
+  group loop byte, 22 for a track loop and 2 for a cue loop, and the rest do not resolve.
+* **The random generator is the engine's** (`select::PalRng`); the engine seeds it at startup from a
+  function it imports through a SecuROM-resolved table, so `set_rng_seed` is how a host makes playback
+  repeatable.
 * **The game must load soundbanks too.** The chain's first hop is the soundbank; a host that loads
   only wavebanks and sounddbs resolves nothing.
 * **`pump()` is a no-op when headless**, so tests and dedicated servers never render into a
@@ -220,8 +257,9 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **The 9 retail `return 0` stubs** (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful
   no-ops here.
 * One `MusicStateMachine` models **one region**; the exe holds one per region. Streamed `.pws` voices
-  (`OpenStreamFile`/`CloseStreamFile` record intent only), Doppler folded into the mix, and surround
-  channel-gain matrices are tracked in `DEFERRED.md` — all tagged `[faithful-blocker: no]`.
+  (`OpenStreamFile`/`CloseStreamFile` record intent only), looping cues, Doppler folded into the mix,
+  and surround channel-gain matrices are tracked in `DEFERRED.md` — all tagged
+  `[faithful-blocker: no]`.
 * The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
   `mercs2_engine` owner's edit (see the "Binding-wiring seam" docs in `engine.rs`). Every engine body
   they need exists in this crate.
