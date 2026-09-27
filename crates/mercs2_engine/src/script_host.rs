@@ -1016,11 +1016,12 @@ impl EngineHost for GameScriptHost {
     fn sound_cue(&mut self, cue: &str) -> u64 {
         // Unknown cue (no sounddb / not found) returns 0 → Lua nil, faithful to the exe. A chain that
         // does not resolve, or a voice the pool refuses, returns 0 as it did before cue playback; a cue
-        // whose looping or automation the engine cannot play is a hard error.
+        // the engine refuses to play (a looping wave, the filter curves, channel multipliers it has no
+        // outputs for, or such a child cue) is a hard error.
         match self.audio.borrow_mut().cue_sound_by_name(cue, None) {
             Ok(h) => u64::from(h.0),
             Err(CueError::Unknown(_) | CueError::Resolve(_) | CueError::Outranked) => 0,
-            Err(e @ (CueError::Looping { .. } | CueError::Automation(_))) => {
+            Err(e @ (CueError::Looping { .. } | CueError::Automation(_) | CueError::Channels { .. } | CueError::Child { .. })) => {
                 panic!("Sound.CueSound(\"{cue}\"): {e}")
             }
         }
