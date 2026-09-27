@@ -47,7 +47,7 @@
 //! [`AudioEngine::resolve_cue`] follows a cue through everything it can play — sounddb entry →
 //! soundbank cue → every track's sounds ([`multitrack`]) → every group they can pick → every wave →
 //! the resident clip. [`AudioEngine::cue_sound`] refuses what it cannot play faithfully ([`CueError`]:
-//! a looping wave, the filter curves, unset curve parameters, a refused child cue) and otherwise
+//! the filter curves, unset curve parameters, a refused child cue) and otherwise
 //! starts a playback ([`playback`]). Each [`AudioEngine::tick`] advances it the way the engine
 //! advances a cue: sounds fire at their start times, pick their groups and waves ([`select`]), draw
 //! their base volume, pitch and start delay, follow the cue's and track's automation
@@ -65,9 +65,8 @@
 //! [`sounddb`] + [`wave`]) can build with `default-features = false` and avoid linking `alsa-sys`,
 //! which breaks the 32-bit cross build.
 //!
-//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, looping waves
-//! and the cue filter, per-region music machines, surround channel-gain matrices) are enumerated in
-//! `DEFERRED.md`.
+//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, the cue filter,
+//! per-region music machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
 pub mod automation;
@@ -109,7 +108,7 @@ mod tests {
     use mercs2_core::glam::Vec3;
     use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
-    /// Build a small synthetic sounddb: a direct-index cue plus a hashed positional cue.
+    /// Build a small synthetic sounddb: a direct-index cue plus a hashed cue.
     fn sample_db() -> SoundDb {
         let cues = vec![
             CueEntry {
@@ -118,7 +117,6 @@ mod tests {
                 cue_index: 0,
                 priority: 100,
                 category: 0,
-                flags: 0,
                 default_gain: 1.0,
                 min_dist: 0.0,
                 max_dist: 0.0,
@@ -129,7 +127,6 @@ mod tests {
                 cue_index: 3,
                 priority: 200,
                 category: 1,
-                flags: 0x2, // positional
                 default_gain: 0.75,
                 min_dist: 0.0,
                 max_dist: 0.0,
@@ -176,7 +173,6 @@ mod tests {
         let db = sample_db();
         assert_eq!(db.find_cue(0).expect("cue index 0").guid, 0x0000_0001); // direct index (< 0x401)
         let hashed = db.find_cue_by_name("sfx_explosion").expect("hashed cue resolves"); // id >= 0x401
-        assert!(hashed.is_positional());
         assert_eq!(hashed.cue_index, 3);
 
         // A non-0x1D buffer is rejected.
