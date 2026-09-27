@@ -32,35 +32,35 @@ use crate::categories::{category_id, Categories};
 use crate::mixer::{Mixer, MixerConfig, PcmSource, SampleSource};
 use crate::music::MusicStateMachine;
 use crate::sounddb::{CueEntry, SoundDb};
-use crate::soundbank::{CueBody, Group, Soundbank, SoundbankError};
+use crate::select::{self, PalRng, STATE_INIT};
+use crate::soundbank::{CueBody, GroupForm, Soundbank, SoundbankError};
 use crate::spatial::{self, ListenerSet, Listener};
 use crate::vo::{VoManager, VoPriority};
 use crate::voice::{VoiceId, VoicePool, VoiceRequest};
 use crate::wave::{DecodedClip, WaveError, Wavebank};
 
-/// Why a cue did not resolve to a resident clip ([`AudioEngine::resolve_wave`]).
+/// Why a cue did not resolve ([`AudioEngine::resolve_cue`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolveError {
-    /// The soundbank the entry (or the cue) names is not resident.
+    /// The soundbank the entry (or a cue sound) names is not resident.
     SoundbankNotResident(u32),
     /// The entry's cue index is past the soundbank's cue table.
     CueIndexOutOfRange { soundbank: u32, index: u32, cues: usize },
     /// The soundbank cue at the entry's index carries a different guid than the entry.
     GuidMismatch { entry: u32, soundbank_cue: u32 },
-    /// The cue is multi-track; that layout is not decoded, so its group is unknown.
-    MultiTrackCue { guid: u32 },
-    /// The cue's group index is past the soundbank's group table.
+    /// A group index is past the soundbank's group table.
     GroupIndexOutOfRange { soundbank: u32, index: u16, groups: usize },
+    /// A multi-track sound lists no entries, or a group lists no waves: the engine would index past
+    /// the list.
+    EmptyChoice { soundbank: u32, what: &'static str },
+    /// A selection mode the engine picks nothing with (it knows 0, 1 and 2).
+    SelectionMode { soundbank: u32, what: &'static str, mode: u8 },
     /// The wavebank a group wave names is not resident.
     WavebankNotResident(u32),
     /// A group wave's index is past the wavebank's record table.
     WaveIndexOutOfRange { wavebank: u32, index: u32, waves: usize },
     /// The wave lives in a `.pws` stream; it has no resident samples.
     Streamed { clip_hash: u32 },
-    /// The cue's group lists no waves (4 retail multi-wave groups do; no retail cue plays one).
-    EmptyGroup,
-    /// The group holds this many waves (not one); the engine's pick among them is not established.
-    WaveSelectionUnknown { waves: usize },
 }
 
 impl std::fmt::Display for ResolveError {
@@ -74,12 +74,16 @@ impl std::fmt::Display for ResolveError {
                 f,
                 "sounddb entry 0x{entry:08X} lands on soundbank cue 0x{soundbank_cue:08X}"
             ),
-            ResolveError::MultiTrackCue { guid } => {
-                write!(f, "cue 0x{guid:08X} is multi-track; that layout is not decoded")
-            }
             ResolveError::GroupIndexOutOfRange { soundbank, index, groups } => {
                 write!(f, "group index {index} is past soundbank 0x{soundbank:08X}'s {groups} groups")
             }
+            ResolveError::EmptyChoice { soundbank, what } => {
+                write!(f, "a {what} in soundbank 0x{soundbank:08X} lists nothing to pick")
+            }
+            ResolveError::SelectionMode { soundbank, what, mode } => write!(
+                f,
+                "a {what} in soundbank 0x{soundbank:08X} has selection mode {mode}; the engine picks nothing"
+            ),
             ResolveError::WavebankNotResident(h) => write!(f, "wavebank 0x{h:08X} is not resident"),
             ResolveError::WaveIndexOutOfRange { wavebank, index, waves } => {
                 write!(f, "wave index {index} is past wavebank 0x{wavebank:08X}'s {waves} waves")
@@ -87,13 +91,77 @@ impl std::fmt::Display for ResolveError {
             ResolveError::Streamed { clip_hash } => {
                 write!(f, "clip 0x{clip_hash:08X} streams from a .pws; no resident samples")
             }
-            ResolveError::EmptyGroup => write!(f, "the cue's group lists no waves"),
-            ResolveError::WaveSelectionUnknown { waves } => write!(
-                f,
-                "the group holds {waves} waves; how the engine picks one is not established"
-            ),
         }
     }
+}
+
+/// One wave a group can play.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedWave {
+    /// The wavebank.
+    pub wavebank: u32,
+    /// The record index in it.
+    pub index: u32,
+    /// The wave's selection weight in its group.
+    pub weight: f32,
+    /// The resident clip's hash.
+    pub clip_hash: u32,
+}
+
+/// One group a sound can pick.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedChoice {
+    /// The entry's selection weight (1.0 for a single-track cue's one choice).
+    pub weight: f32,
+    /// The soundbank holding the group.
+    pub soundbank: u32,
+    /// The group's index there.
+    pub group_index: u16,
+    /// The group's wave selection mode; `None` for a single-wave group.
+    pub selection: Option<u8>,
+    /// Every wave the group can play, each resident and decoded.
+    pub waves: Vec<ResolvedWave>,
+}
+
+/// One sound a cue fires.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedSound {
+    /// The track it belongs to (0 for a single-track cue).
+    pub track: usize,
+    /// When it fires, in seconds after the cue starts.
+    pub start_s: f32,
+    /// `(selection mode, state slot)` for a multi-track sound; `None` for a single-track cue's one
+    /// sound, which plays its one group.
+    pub selection: Option<(u8, u8)>,
+    /// The groups it can pick, in entry order.
+    pub choices: Vec<ResolvedChoice>,
+}
+
+/// Everything a cue can play, fully resolved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedCue {
+    /// The soundbank holding the cue.
+    pub soundbank: u32,
+    /// The cue's index there.
+    pub cue_index: u32,
+    /// Every sound of every track.
+    pub sounds: Vec<ResolvedSound>,
+}
+
+impl ResolvedCue {
+    /// Every wave the cue can reach, in track / sound / choice / wave order (duplicates kept).
+    pub fn waves(&self) -> impl Iterator<Item = &ResolvedWave> {
+        self.sounds.iter().flat_map(|s| s.choices.iter().flat_map(|c| c.waves.iter()))
+    }
+}
+
+/// One sound a cue start actually fired, after the engine's picks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickedSound {
+    /// When it fires, in seconds after the cue starts.
+    pub start_s: f32,
+    /// The picked wave.
+    pub wave: ResolvedWave,
 }
 
 impl std::error::Error for ResolveError {}
@@ -124,6 +192,12 @@ pub struct AudioEngine {
     soundbanks: HashMap<u32, Soundbank>,
     /// Resident wavebanks keyed by bank hash — the last hop (group wave → decoded clip).
     wavebanks: HashMap<u32, Wavebank>,
+    /// The sound random generator ([`crate::select`]).
+    rng: PalRng,
+    /// Per-group wave selection state, `(soundbank, group index)`, starting at `0xFFFFFFFF`.
+    group_state: HashMap<(u32, u16), u32>,
+    /// Per-cue sound selection state, `(soundbank, cue index, slot)`, starting at `0xFFFFFFFF`.
+    slot_state: HashMap<(u32, u32, u8), u32>,
     /// Device sink (headless [`NullSink`] by default).
     sink: Box<dyn AudioSink>,
     /// True once a real output device is attached ([`attach_output_device`](Self::attach_output_device));
@@ -160,6 +234,9 @@ impl AudioEngine {
             listeners: ListenerSet::default(),
             soundbanks: HashMap::new(),
             wavebanks: HashMap::new(),
+            rng: PalRng::new(clock_seed()),
+            group_state: HashMap::new(),
+            slot_state: HashMap::new(),
             sink: Box::new(NullSink {
                 sample_rate: cfg.sample_rate,
                 channels: cfg.channels,
@@ -255,6 +332,9 @@ impl AudioEngine {
     pub fn load_soundbank(&mut self, body: &[u8]) -> Result<usize, SoundbankError> {
         let bank = Soundbank::parse(body)?;
         let cues = bank.cues.len();
+        // A (re)loaded bank starts with fresh selection state, as the engine allocates it per load.
+        self.group_state.retain(|(b, _), _| *b != bank.bank_hash);
+        self.slot_state.retain(|(b, _, _), _| *b != bank.bank_hash);
         self.soundbanks.insert(bank.bank_hash, bank);
         Ok(cues)
     }
@@ -264,8 +344,16 @@ impl AudioEngine {
         self.wavebanks.values().map(|b| b.clips.len()).sum()
     }
 
-    /// The group a cue plays: `sounddb` entry → its soundbank's cue (`cue_index`) → that cue's group.
-    pub fn resolve_group(&self, cue: &CueEntry) -> Result<&Group, ResolveError> {
+    /// Reseed the sound random generator. The engine seeds it once from its tick counter, so its
+    /// picks differ every run; a fixed seed makes this engine's picks reproducible.
+    pub fn set_rng_seed(&mut self, seed: u32) {
+        self.rng = PalRng::new(seed);
+    }
+
+    /// Everything a cue can play: `sounddb` entry → its soundbank's cue → every sound of every track
+    /// (a single-track cue is one sound) → every group the sound can pick → every wave the group can
+    /// play → the resident decoded clip. Fails, naming the reason, unless every path resolves.
+    pub fn resolve_cue(&self, cue: &CueEntry) -> Result<ResolvedCue, ResolveError> {
         let bank = self
             .soundbanks
             .get(&cue.bank_hash)
@@ -278,57 +366,120 @@ impl AudioEngine {
         if sb_cue.guid != cue.guid {
             return Err(ResolveError::GuidMismatch { entry: cue.guid, soundbank_cue: sb_cue.guid });
         }
-        let (group_bank, group_index) = match &sb_cue.body {
-            CueBody::SingleTrack { soundbank, group_index, .. } => (*soundbank, *group_index),
-            CueBody::MultiTrack(_) => return Err(ResolveError::MultiTrackCue { guid: cue.guid }),
+        let sounds = match &sb_cue.body {
+            CueBody::SingleTrack { soundbank, group_index, .. } => vec![ResolvedSound {
+                track: 0,
+                start_s: 0.0,
+                selection: None,
+                choices: vec![self.resolve_choice(*soundbank, *group_index, 1.0)?],
+            }],
+            CueBody::MultiTrack(m) => {
+                let mut sounds = Vec::new();
+                for (t, track) in m.tracks.iter().enumerate() {
+                    for s in &track.sounds {
+                        if s.entries.is_empty() {
+                            return Err(ResolveError::EmptyChoice { soundbank: cue.bank_hash, what: "sound" });
+                        }
+                        if s.selection > 2 {
+                            return Err(ResolveError::SelectionMode {
+                                soundbank: cue.bank_hash,
+                                what: "sound",
+                                mode: s.selection,
+                            });
+                        }
+                        let choices = s
+                            .entries
+                            .iter()
+                            .map(|e| self.resolve_choice(e.soundbank, e.group_index, e.weight))
+                            .collect::<Result<_, _>>()?;
+                        sounds.push(ResolvedSound {
+                            track: t,
+                            start_s: s.start_s,
+                            selection: Some((s.selection, s.slot)),
+                            choices,
+                        });
+                    }
+                }
+                sounds
+            }
         };
-        let bank = self
-            .soundbanks
-            .get(&group_bank)
-            .ok_or(ResolveError::SoundbankNotResident(group_bank))?;
-        bank.groups.get(group_index as usize).ok_or(ResolveError::GroupIndexOutOfRange {
-            soundbank: group_bank,
-            index: group_index,
-            groups: bank.groups.len(),
-        })
+        Ok(ResolvedCue { soundbank: cue.bank_hash, cue_index: cue.cue_index, sounds })
     }
 
-    /// Every wave a cue's group can play, each resolved to its resident decoded clip, with its weight.
-    pub fn resolve_clips(&self, cue: &CueEntry) -> Result<Vec<(&DecodedClip, f32)>, ResolveError> {
-        let waves = self.resolve_group(cue)?.waves();
-        if waves.is_empty() {
-            return Err(ResolveError::EmptyGroup);
+    fn resolve_choice(&self, soundbank: u32, group_index: u16, weight: f32) -> Result<ResolvedChoice, ResolveError> {
+        let bank = self.soundbanks.get(&soundbank).ok_or(ResolveError::SoundbankNotResident(soundbank))?;
+        let group = bank.groups.get(group_index as usize).ok_or(ResolveError::GroupIndexOutOfRange {
+            soundbank,
+            index: group_index,
+            groups: bank.groups.len(),
+        })?;
+        let selection = match &group.form {
+            GroupForm::Single { .. } => None,
+            GroupForm::Multi(m) => {
+                if m.selection > 2 {
+                    return Err(ResolveError::SelectionMode { soundbank, what: "group", mode: m.selection });
+                }
+                Some(m.selection)
+            }
+        };
+        if group.waves().is_empty() {
+            return Err(ResolveError::EmptyChoice { soundbank, what: "group" });
         }
-        waves
+        let waves = group
+            .waves()
             .iter()
             .map(|w| {
-                let bank = self
-                    .wavebanks
-                    .get(&w.wavebank)
-                    .ok_or(ResolveError::WavebankNotResident(w.wavebank))?;
-                let clip = bank.clips.get(w.index as usize).ok_or(ResolveError::WaveIndexOutOfRange {
-                    wavebank: w.wavebank,
-                    index: w.index,
-                    waves: bank.clips.len(),
-                })?;
+                let clip = self.clip(w.wavebank, w.index)?;
                 if clip.streaming {
                     return Err(ResolveError::Streamed { clip_hash: clip.clip_hash });
                 }
-                Ok((clip, w.weight))
+                Ok(ResolvedWave { wavebank: w.wavebank, index: w.index, weight: w.weight, clip_hash: clip.clip_hash })
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves })
     }
 
-    /// The one resident clip a cue plays. The full chain — `sounddb` entry → soundbank cue → group →
-    /// wavebank wave — must resolve, and the group must hold exactly one wave: how the engine picks
-    /// among a multi-wave group's weighted waves is not established, so such a cue is an error here,
-    /// not an arbitrary pick.
-    pub fn resolve_wave(&self, cue: &CueEntry) -> Result<&DecodedClip, ResolveError> {
-        let clips = self.resolve_clips(cue)?;
-        match clips.as_slice() {
-            [(clip, _)] => Ok(*clip),
-            _ => Err(ResolveError::WaveSelectionUnknown { waves: clips.len() }),
+    /// The resident clip at `(wavebank, index)`.
+    pub fn clip(&self, wavebank: u32, index: u32) -> Result<&DecodedClip, ResolveError> {
+        let bank = self.wavebanks.get(&wavebank).ok_or(ResolveError::WavebankNotResident(wavebank))?;
+        bank.clips.get(index as usize).ok_or(ResolveError::WaveIndexOutOfRange {
+            wavebank,
+            index,
+            waves: bank.clips.len(),
+        })
+    }
+
+    /// Start a cue the way the engine does: for each sound, in track and sound order, pick an entry
+    /// (a multi-track sound's selection mode and state slot) and then a wave of that entry's group (the
+    /// group's selection mode and state), drawing from the engine's generator ([`crate::select`]).
+    /// A sound the engine would pick nothing for is left out. The engine makes each pick when its
+    /// sound fires; sounds that start together are picked in this same order.
+    pub fn pick_cue(&mut self, cue: &CueEntry) -> Result<Vec<PickedSound>, ResolveError> {
+        let resolved = self.resolve_cue(cue)?;
+        let mut picked = Vec::new();
+        for s in &resolved.sounds {
+            let choice = match s.selection {
+                None => Some(0),
+                Some((mode, slot)) => {
+                    let weights: Vec<f32> = s.choices.iter().map(|c| c.weight).collect();
+                    let st = self.slot_state.entry((resolved.soundbank, resolved.cue_index, slot)).or_insert(STATE_INIT);
+                    select::pick(mode, &weights, st, &mut self.rng)
+                }
+            };
+            let Some(choice) = choice.and_then(|i| s.choices.get(i)) else { continue };
+            let wave = match choice.selection {
+                None => Some(0),
+                Some(mode) => {
+                    let weights: Vec<f32> = choice.waves.iter().map(|w| w.weight).collect();
+                    let st = self.group_state.entry((choice.soundbank, choice.group_index)).or_insert(STATE_INIT);
+                    select::pick(mode, &weights, st, &mut self.rng)
+                }
+            };
+            if let Some(w) = wave.and_then(|i| choice.waves.get(i)) {
+                picked.push(PickedSound { start_s: s.start_s, wave: *w });
+            }
         }
+        Ok(picked)
     }
 
     /// Install the parsed sound database (chain: `Sound.AddPgAsset("Mercs2Globals","sounddb")`).
@@ -391,28 +542,40 @@ impl AudioEngine {
             }
         }
 
-        // Auto-bind the resident wave when the caller gave no explicit source, so scripted `Sound.*`
-        // cues are actually audible — resampled from the clip's native rate to the mixer rate. A cue
-        // whose chain does not resolve (see [`ResolveError`]) binds nothing and the voice is silent,
-        // as for a wave that has not streamed in yet.
-        let dst_rate = self.mixer.config().sample_rate;
-        let source = source.or_else(|| {
-            self.resolve_wave(&cue).ok().map(|clip| {
-                Box::new(PcmSource::with_rate(
-                    clip.samples.clone(),
-                    clip.channels as usize,
-                    clip.sample_rate,
-                    dst_rate,
-                )) as Box<dyn SampleSource>
-            })
-        });
-
-        let id = self.pool.acquire(&req)?;
+        // No explicit source: fire the cue's sounds the way the engine does (`pick_cue`), one voice
+        // per fired sound, each starting at its sound's start time and resampled from the clip's
+        // native rate to the mixer rate. A cue whose chain does not resolve (see [`ResolveError`]), or
+        // for which the engine picks nothing, allocates one silent voice, as for a wave that has not
+        // streamed in yet. Returns the first voice.
         if let Some(src) = source {
+            let id = self.pool.acquire(&req)?;
             self.mixer.attach(id, src);
+            self.mixer.set_channel_gains(id, gains.0, gains.1);
+            return Some(id);
         }
-        self.mixer.set_channel_gains(id, gains.0, gains.1);
-        Some(id)
+        let dst_rate = self.mixer.config().sample_rate;
+        let picked = self.pick_cue(&cue).unwrap_or_default();
+        let mut first = None;
+        for p in &picked {
+            let Ok(clip) = self.clip(p.wave.wavebank, p.wave.index) else { continue };
+            let src = Box::new(PcmSource::with_rate(
+                clip.samples.clone(),
+                clip.channels as usize,
+                clip.sample_rate,
+                dst_rate,
+            ));
+            let sound_req = VoiceRequest { start_delay: req.start_delay + p.start_s, ..req.clone() };
+            let Some(id) = self.pool.acquire(&sound_req) else { continue };
+            self.mixer.attach(id, src);
+            self.mixer.set_channel_gains(id, gains.0, gains.1);
+            first.get_or_insert(id);
+        }
+        if first.is_none() {
+            let id = self.pool.acquire(&req)?;
+            self.mixer.set_channel_gains(id, gains.0, gains.1);
+            first = Some(id);
+        }
+        first
     }
 
     /// `Sound.CueSound` by cue *name* (hashes then [`cue_sound`](Self::cue_sound)).
@@ -691,4 +854,13 @@ impl AudioEngine {
         self.sink.submit(&out);
         out
     }
+}
+
+/// The engine seeds its generator from its tick counter at init; this engine seeds from the wall
+/// clock, the same kind of per-run value. [`AudioEngine::set_rng_seed`] fixes it.
+fn clock_seed() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the system clock reads before 1970")
+        .as_nanos() as u32
 }
