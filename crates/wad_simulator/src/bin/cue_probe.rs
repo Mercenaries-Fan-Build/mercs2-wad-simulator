@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for cue in &db.cues {
                     let e = per_bank.entry(cue.bank_hash).or_insert((0, 0));
                     e.0 += 1;
-                    e.1 = e.1.max(cue.wave_index);
+                    e.1 = e.1.max(cue.cue_index);
                 }
             }
         }
@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut v: Vec<(u32, (usize, u32))> = per_bank.into_iter().collect();
     v.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
 
-    println!("\nbank_hash    cues   max_wave_index   name");
+    println!("\nbank_hash    cues    max_cue_index   name");
     for (bank, (cues, maxw)) in v.iter().take(25) {
         let name = rb.resolve(*bank).unwrap_or("");
         println!("0x{bank:08X}  {cues:>5}   {maxw:>14}   {name}");
