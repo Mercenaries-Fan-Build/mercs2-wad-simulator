@@ -13,12 +13,14 @@
 //! [`UI_PDA_OPEN_GROUP`] / [`UI_PDA_OPEN_CUE`] presets carry the retail values of one real UI cue for
 //! callers that want a UI sound configured like the game's own.
 //!
-//! The derived fields are computed as retail computes them, and are checked against retail by
-//! `tests/retail_banks.rs`: the cue length is `frames / rate` (bit-exact on every embedded single-wave
-//! retail cue), the sounddb is sorted by guid, blobs are 16-aligned.
+//! The derived fields are computed as retail carries them, and are checked against retail by
+//! `tests/retail_banks.rs`: the cue length by [`crate::duration`] (bit-exact on 14,818 of the 14,834
+//! retail cues), the sounddb sorted by guid, blobs 16-aligned. Every multi-track entry must name a
+//! group of this bank, since the length needs the waves it can play.
 
 use mercs2_formats::hash::pandemic_hash_m2;
 
+use crate::duration::{self, DurationError};
 use crate::multitrack::MultiTrackCue;
 use crate::soundbank::{
     Cue, CueBody, Group, GroupForm, GroupHead, MultiGroup, Soundbank, SoundbankError, WaveRef,
@@ -211,6 +213,8 @@ pub enum EncodeError {
     Soundbank(SoundbankError),
     /// The sounddb serializer refused the table.
     SoundDb(SoundDbError),
+    /// A cue's length could not be computed (e.g. it plays another bank's group).
+    Length { cue: String, error: DurationError },
 }
 
 impl std::fmt::Display for EncodeError {
@@ -250,16 +254,13 @@ impl std::fmt::Display for EncodeError {
             EncodeError::Wavebank(e) => write!(f, "encode: {e}"),
             EncodeError::Soundbank(e) => write!(f, "encode: {e}"),
             EncodeError::SoundDb(e) => write!(f, "encode: {e}"),
+            EncodeError::Length { cue, error } => write!(f, "encode: cue {cue:?}: {error}"),
         }
     }
 }
 
 impl std::error::Error for EncodeError {}
 
-/// The cue length retail stores for a clip: `frames / rate` seconds, rounded to `f32`.
-pub fn cue_length_s(frames: u32, sample_rate: u32) -> f32 {
-    (f64::from(frames) / f64::from(sample_rate)) as f32
-}
 
 // ---- the general path: waves, groups and cues authored separately -----------------------------
 
@@ -363,8 +364,8 @@ pub enum CueBodySpec {
         /// `+0x16`, unknown (0 in most retail cues).
         unknown_16: u16,
     },
-    /// Tracks of timed sounds. Entries naming this bank (`m2(name)`) must name one of its groups;
-    /// entries naming another bank are written as given (retail cues play other banks' groups too).
+    /// Tracks of timed sounds. Every entry must name one of this bank's groups (`m2(name)`): the
+    /// cue's length is computed from the waves they play.
     MultiTrack(MultiTrackCue),
 }
 
@@ -378,10 +379,6 @@ pub struct CueDef {
     pub byte_06: u8,
     /// `+0x08` gain.
     pub gain: f32,
-    /// `+0x0C` length in seconds. Retail stores `frames / rate` for a single-wave cue
-    /// ([`cue_length_s`]); for multi-wave and multi-track cues the rule is not established, so the
-    /// caller states it.
-    pub length_s: f32,
     /// The body.
     pub body: CueBodySpec,
 }
@@ -546,16 +543,21 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
                             return Err(EncodeError::SelectionMode { what, mode: s.selection });
                         }
                         for e in &s.entries {
-                            if e.soundbank == bank_hash {
-                                group_in_range(e.group_index as usize)?;
-                            }
+                            group_in_range(e.group_index as usize)?;
                         }
                     }
                 }
                 CueBody::MultiTrack(m.clone())
             }
         };
-        cues.push(Cue { guid, byte_06: c.byte_06, gain: c.gain, length_s: c.length_s, body });
+        // The `+0x0C` length, computed as the retail banks carry it (`crate::duration`).
+        let length_s = duration::cue_length_s(
+            &body,
+            |sb, g| (sb == bank_hash).then(|| groups.get(g as usize)).flatten(),
+            |wb, w| (wb == bank_hash).then(|| records.get(w as usize)).flatten(),
+        )
+        .map_err(|error| EncodeError::Length { cue: c.name.clone(), error })?;
+        cues.push(Cue { guid, byte_06: c.byte_06, gain: c.gain, length_s, body });
         entries.push(CueEntry::routed(guid, bank_hash, i as u32));
     }
     entries.sort_by_key(|e| e.guid);
@@ -588,7 +590,7 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
     }
     let mut general = TablesSpec { name: spec.name.clone(), waves: Vec::new(), groups: Vec::new(), cues: Vec::new() };
     for (i, c) in spec.cues.iter().enumerate() {
-        let frames = check_pcm(&format!("cue {:?}", c.name), &c.pcm)?;
+        check_pcm(&format!("cue {:?}", c.name), &c.pcm)?;
         let hash = pandemic_hash_m2(&c.category);
         if !RETAIL_CATEGORIES.iter().any(|e| e.category == hash) {
             return Err(EncodeError::UnknownCategory {
@@ -617,7 +619,6 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
             name: c.name.clone(),
             byte_06: c.cue.byte_06,
             gain: c.cue.gain,
-            length_s: cue_length_s(frames, c.pcm.sample_rate),
             body: CueBodySpec::SingleTrack { group: i, unknown_16: c.cue.unknown_16 },
         });
     }
@@ -702,8 +703,8 @@ mod tests {
             assert_eq!(tables.soundbank.cues[e.cue_index as usize].guid, e.guid);
         }
         assert!(tables.sounddb.cues.windows(2).all(|w| w[0].guid < w[1].guid));
-        // Cue length = frames / rate.
-        assert_eq!(tables.soundbank.cues[0].length_s, cue_length_s(1001, 22050));
+        // Cue length = frames / rate for a single-wave cue.
+        assert_eq!(tables.soundbank.cues[0].length_s, (1001.0f64 / 22050.0) as f32);
         // The group's wave is this bank's wave at the cue's own index.
         let g = &tables.soundbank.groups[2];
         assert_eq!(g.waves()[0].wavebank, tables.soundbank.bank_hash);
@@ -758,7 +759,7 @@ mod tests {
             unknown_28: 1.0,
         };
         let multi = MultiGroupParams {
-            byte_2c: 0xFF,
+            byte_2c: 0,
             selection: 0, // sequential: picks 0, 1, 2, 0, ...
             byte_2f: 1,
             unknown_30: 0.0,
@@ -791,7 +792,6 @@ mod tests {
                 name: "mod_layered_hit".to_string(),
                 byte_06: 0,
                 gain: 1.0,
-                length_s: -1.0,
                 body: CueBodySpec::MultiTrack(MultiTrackCue {
                     byte_10: 0,
                     sound_slots: 1,
@@ -849,12 +849,17 @@ mod tests {
         let clips: Vec<u32> = resolved.waves().map(|w| w.clip_hash).collect();
         assert_eq!(clips, vec![0x1001, 0x1002, 0x1003, 0x1004], "both tracks, every wave");
 
-        // Track 0's group is sequential; track 1 always plays wave 3 a quarter second in.
+        // Track 0's group is sequential; track 1 plays wave 3 once its track passes 0.25 s.
         for want in [0u32, 1, 2, 0] {
-            let picked = eng.pick_cue(&entry).unwrap();
-            assert_eq!(picked.len(), 2);
-            assert_eq!(picked[0].wave.index, want);
-            assert_eq!((picked[1].wave.index, picked[1].start_s), (3, 0.25));
+            let h = eng.cue_sound(entry.guid, None).expect("the cue starts");
+            eng.tick(0.1);
+            let first: Vec<u32> = eng.cue_instances(h).iter().map(|i| i.wave_index).collect();
+            assert_eq!(first, vec![want], "only track 0's sound has started");
+            eng.tick(0.1);
+            eng.tick(0.1);
+            let all: Vec<u32> = eng.cue_instances(h).iter().map(|i| i.wave_index).collect();
+            assert_eq!(all, vec![want, 3]);
+            eng.stop_sound(h);
         }
 
         let mut bad = spec.clone();
