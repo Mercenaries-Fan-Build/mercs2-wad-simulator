@@ -156,6 +156,7 @@ contributions:
     name: my_clip
     clip: src/anim/my_clip.hkx
     trnm: src/anim/my_clip.trnm
+    events: src/anim/my_clip.evnt
 
   - kind: replace_animation
     target: shipped_anim
@@ -177,16 +178,6 @@ contributions:
   - kind: replace_fx
     target: shipped_fx
     payload: src/fx/new_fx.fxdict
-
-  - kind: add_schema
-    name: my_component
-    schm: src/schema/my_component.schm
-
-  - kind: add_ai_squad_template
-    name: my_squad
-    config: src/ai/my_squad.bin
-    type_id: 100
-    type_hash: 200
 
   - kind: replace_terrain_cell
     target: shipped_cell
@@ -372,7 +363,8 @@ const JSON: &str = r#"
       "kind": "add_animation",
       "name": "my_clip",
       "clip": "src/anim/my_clip.hkx",
-      "trnm": "src/anim/my_clip.trnm"
+      "trnm": "src/anim/my_clip.trnm",
+      "events": "src/anim/my_clip.evnt"
     },
     {
       "kind": "replace_animation",
@@ -399,18 +391,6 @@ const JSON: &str = r#"
       "kind": "replace_fx",
       "target": "shipped_fx",
       "payload": "src/fx/new_fx.fxdict"
-    },
-    {
-      "kind": "add_schema",
-      "name": "my_component",
-      "schm": "src/schema/my_component.schm"
-    },
-    {
-      "kind": "add_ai_squad_template",
-      "name": "my_squad",
-      "config": "src/ai/my_squad.bin",
-      "type_id": 100,
-      "type_hash": 200
     },
     {
       "kind": "replace_terrain_cell",
@@ -607,6 +587,7 @@ kind = "add_animation"
 name = "my_clip"
 clip = "src/anim/my_clip.hkx"
 trnm = "src/anim/my_clip.trnm"
+events = "src/anim/my_clip.evnt"
 
 [[contributions]]
 kind = "replace_animation"
@@ -633,18 +614,6 @@ payload = "src/fx/my_fx.fxdict"
 kind = "replace_fx"
 target = "shipped_fx"
 payload = "src/fx/new_fx.fxdict"
-
-[[contributions]]
-kind = "add_schema"
-name = "my_component"
-schm = "src/schema/my_component.schm"
-
-[[contributions]]
-kind = "add_ai_squad_template"
-name = "my_squad"
-config = "src/ai/my_squad.bin"
-type_id = 100
-type_hash = 200
 
 [[contributions]]
 kind = "replace_terrain_cell"
@@ -715,8 +684,6 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "replace_shader",
             "add_fx",
             "replace_fx",
-            "add_schema",
-            "add_ai_squad_template",
             "replace_terrain_cell",
             "add_stringdb_keys",
             "replace_stringdb_text",
@@ -1293,5 +1260,36 @@ fn stringdb_kind_tags_are_the_documented_spellings() {
                 other => panic!("{fmt:?} `{underscored}` must not parse, got {other:?}"),
             }
         }
+    }
+}
+
+/// A removed kind fails to parse in every format with a message that says it was REMOVED — not
+/// serde's "unknown variant", which reads like a typo — and names the kind and its index.
+#[test]
+fn a_removed_kind_is_refused_by_name_in_every_format() {
+    use mercs2_quartermaster::ReadError;
+    for (kind, _) in Contribution::REMOVED_KINDS {
+        let yaml = format!(
+            "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\ncontributions:\n  \
+             - kind: patch_lua\n    target: x\n    append: src/a.lua\n  - kind: {kind}\n    name: n\n"
+        );
+        let json = format!(
+            r#"{{"format":2,"shipment":{{"name":"s","version":"1.0.0","target":"retail"}},"contributions":[{{"kind":"patch_lua","target":"x","append":"src/a.lua"}},{{"kind":"{kind}","name":"n"}}]}}"#
+        );
+        let toml = format!(
+            "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\n\
+             [[contributions]]\nkind = \"patch_lua\"\ntarget = \"x\"\nappend = \"src/a.lua\"\n\n\
+             [[contributions]]\nkind = \"{kind}\"\nname = \"n\"\n"
+        );
+        for (text, format) in [(yaml, Format::Yaml), (json, Format::Json), (toml, Format::Toml)] {
+            let err = from_str(&text, format).expect_err("a removed kind must not parse");
+            assert!(
+                matches!(err, ReadError::RemovedKind { index: 1, kind: k, .. } if k == *kind),
+                "{format:?}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains(kind) && msg.contains("removed"), "{format:?}: {msg}");
+        }
+        assert!(!Contribution::ALL_KINDS.contains(kind), "{kind} is still in ALL_KINDS");
     }
 }
