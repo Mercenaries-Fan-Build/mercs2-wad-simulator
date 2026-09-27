@@ -309,7 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (_, _, body) in load_bodies(src, TYPE_SOUNDDB)? {
             if let Ok(db) = SoundDb::parse(&body) {
                 for c in &db.cues {
-                    cues.push((c.guid, c.bank_hash, c.wave_index));
+                    cues.push((c.guid, c.bank_hash, c.cue_index));
                 }
             }
         }
