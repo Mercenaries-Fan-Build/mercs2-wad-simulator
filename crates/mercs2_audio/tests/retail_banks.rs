@@ -21,7 +21,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::sync::OnceLock;
 
-use mercs2_audio::encode::{cue_length_s, RETAIL_CATEGORIES, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
+use mercs2_audio::duration::{cue_length_s, wave_length_s};
+use mercs2_audio::encode::{RETAIL_CATEGORIES, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
 use mercs2_audio::soundbank::{CueBody, GroupForm, Soundbank};
 use mercs2_audio::sounddb::SoundDb;
 use mercs2_audio::wave::{WaveData, WavebankFile};
@@ -288,42 +289,79 @@ fn ui_pda_open_group_and_cue_values_match_the_presets() {
     assert_eq!(wave.wavebank, ui_hud);
     let rec = &wb.records[wave.index as usize];
     assert_eq!(rec.clip_hash, guid, "the clip hash is the cue guid here too");
-    assert_eq!(cue.length_s.to_bits(), cue_length_s(rec.frames, rec.sample_rate).to_bits());
+    assert_eq!(cue.length_s.to_bits(), (wave_length_s(rec).unwrap() as f32).to_bits());
     println!(
         "ui_PDA_Open_01_st: cue 57 -> group 70 -> ui_hud wave {} ({} frames @ {} Hz, {:.4} s)",
         wave.index, rec.frames, rec.sample_rate, cue.length_s
     );
 }
 
-/// The encoder's length rule, on every embedded single-wave single-track retail cue.
+/// The cue-length rule (`mercs2_audio::duration`), on every cue of `vz.wad` and `English.wad`. It
+/// reproduces every length bit for bit except these 16, whose authored values no rule over the tables yields: 9 far from any end of the cue
+/// (hand-set or stale), 6 one unit in the last place off, and one −1 on a cue with nothing looping.
+const LENGTH_EXCEPTIONS: [(u32, usize); 16] = [
+    (0x0873_D14E, 55),
+    (0x08E4_3A91, 2),
+    (0x5EE5_CB98, 4),
+    (0x7664_67E0, 0),
+    (0x874E_66BC, 5),
+    (0xAF27_F8D2, 10),
+    (0xB796_AE64, 22),
+    (0xB796_AE64, 25),
+    (0xB796_AE64, 65),
+    (0xB796_AE64, 66),
+    (0xDCCF_8AFA, 6),
+    (0xDCCF_8AFA, 7),
+    (0xDCCF_8AFA, 45),
+    (0xEB61_D6E1, 8),
+    (0xEB61_D6E1, 9),
+    (0xF217_5845, 59),
+];
+
 #[test]
-fn cue_length_is_frames_over_rate_for_every_embedded_single_wave_cue() {
+fn cue_length_rule_reproduces_every_retail_cue_but_sixteen() {
     let Some(tables) = retail_tables() else { return };
+    let Some(english) = mercs2_formats::game_paths::wad_from_env("English.wad").map(|p| read_tables(&p)) else {
+        return eprintln!("SKIPPING: English.wad not found beside vz.wad; nine vz.wad cues play its waves");
+    };
     let wavebanks: HashMap<u32, WavebankFile> = of_type(tables, TYPE_HASH_WAVEBANK)
-        .map(|t| (t.name_hash, WavebankFile::parse(&t.body).expect("wavebank")))
+        .chain(of_type(&english, TYPE_HASH_WAVEBANK))
+        .map(|t| {
+            let f = WavebankFile::parse(&t.body).expect("wavebank");
+            (f.bank_hash, f)
+        })
         .collect();
-    let mut checked = 0;
-    for t in of_type(tables, TYPE_HASH_SOUNDBANK) {
-        let sb = Soundbank::parse(&t.body).expect("soundbank");
-        for cue in &sb.cues {
-            let CueBody::SingleTrack { group_index, .. } = cue.body else { continue };
-            let GroupForm::Single { wave, .. } = sb.groups[group_index as usize].form else { continue };
-            let Some(wb) = wavebanks.get(&wave.wavebank) else { continue };
-            let rec = &wb.records[wave.index as usize];
-            if !matches!(rec.data, WaveData::Embedded(_)) {
-                continue;
+    let soundbanks: HashMap<u32, Soundbank> = of_type(tables, TYPE_HASH_SOUNDBANK)
+        .chain(of_type(&english, TYPE_HASH_SOUNDBANK))
+        .map(|t| {
+            let sb = Soundbank::parse(&t.body).expect("soundbank");
+            (sb.bank_hash, sb)
+        })
+        .collect();
+    let (mut total, mut matched) = (0, 0);
+    let mut exceptions = Vec::new();
+    for sb in soundbanks.values() {
+        for (i, cue) in sb.cues.iter().enumerate() {
+            total += 1;
+            let len = cue_length_s(
+                &cue.body,
+                |bank, g| soundbanks.get(&bank).and_then(|b| b.groups.get(g as usize)),
+                |bank, w| wavebanks.get(&bank).and_then(|b| b.records.get(w as usize)),
+            )
+            .unwrap_or_else(|e| panic!("soundbank 0x{:08X} cue {i}: {e}", sb.bank_hash));
+            if len.to_bits() == cue.length_s.to_bits() {
+                matched += 1;
+            } else {
+                exceptions.push((sb.bank_hash, i));
             }
-            assert_eq!(
-                cue.length_s.to_bits(),
-                cue_length_s(rec.frames, rec.sample_rate).to_bits(),
-                "cue 0x{:08X}",
-                cue.guid
-            );
-            checked += 1;
         }
     }
-    println!("cue length == frames / rate on all {checked} embedded single-wave single-track cues");
-    assert!(checked > 0);
+    exceptions.sort_unstable();
+    println!(
+        "cue length rule: {matched} of {total} vz.wad + English.wad cues bit for bit; exceptions {exceptions:08X?}"
+    );
+    assert_eq!(soundbanks.len(), 76 + 68, "every vz.wad and English.wad soundbank, none shadowed");
+    assert_eq!(exceptions, LENGTH_EXCEPTIONS);
 }
 
 /// Resolve every `vz.wad` sounddb entry through the chain — every track of a multi-track cue, every
@@ -345,6 +383,11 @@ fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     for t in of_type(tables, TYPE_HASH_SOUNDBANK) {
         eng.load_soundbank(&t.body).expect("soundbank loads");
     }
+    let mut catalog = SoundDb::default();
+    for t in of_type(tables, TYPE_HASH_SOUNDDB) {
+        catalog.merge(&SoundDb::parse(&t.body).expect("sounddb"));
+    }
+    eng.set_sounddb(catalog);
     let vz_only = tally(&mut eng, tables, "vz.wad banks");
     assert_eq!(vz_only.total, 1198);
     assert_eq!(vz_only.streamed.values().sum::<usize>(), 177);
@@ -373,7 +416,8 @@ struct Tally {
 
 fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
     let mut t = Tally::default();
-    let (mut multi_track, mut multi_wave, mut fired) = (0, 0, 0);
+    let (mut multi_track, mut multi_wave, mut fired, mut played) = (0, 0, 0, 0);
+    let mut refused: BTreeMap<String, usize> = BTreeMap::new();
     for table in of_type(tables, TYPE_HASH_SOUNDDB) {
         let db = SoundDb::parse(&table.body).expect("sounddb");
         for e in &db.cues {
@@ -387,7 +431,13 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
                     if r.sounds.iter().any(|s| s.choices.iter().any(|c| c.selection.is_some())) {
                         multi_wave += 1;
                     }
-                    fired += eng.pick_cue(e).expect("a resolved cue picks").len();
+                    match play_once(eng, e, &r) {
+                        Ok(n) => {
+                            fired += n;
+                            played += 1;
+                        }
+                        Err(reason) => *refused.entry(reason).or_default() += 1,
+                    }
                 }
                 Err(ResolveError::Streamed { clip_hash }) => {
                     let _ = clip_hash;
@@ -400,9 +450,12 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
     }
     println!(
         "[{label}] {} retail cues: {} resolve ({multi_track} multi-track, {multi_wave} reaching a \
-         multi-wave group; one start of each fired {fired} sounds)",
+         multi-wave group); {played} played for 2 s each, firing {fired} sounds",
         t.total, t.resolved
     );
+    for (reason, n) in &refused {
+        println!("  refused at start: {n} cues — {reason}");
+    }
     for (bank, n) in &t.streamed {
         println!("  not resolved, a wave streams from a .pws: {n} cues of soundbank 0x{bank:08X}");
     }
@@ -410,4 +463,90 @@ fn tally(eng: &mut AudioEngine, tables: &[Table], label: &str) -> Tally {
         println!("  not resolved, wavebank 0x{wb:08X} is not resident: cues {cues:08X?}");
     }
     t
+}
+
+/// Start a resolved cue with every cue-local curve parameter at its curve's first point, run it for
+/// two seconds of 1/60 s frames, and return how many sounds fired. A cue the engine cannot play here
+/// (looping, or automation with no counterpart) is refused at start; anything else failing panics.
+fn play_once(eng: &mut AudioEngine, e: &mercs2_audio::CueEntry, r: &mercs2_audio::ResolvedCue) -> Result<usize, String> {
+    use mercs2_audio::multitrack::Automation;
+    let params: Vec<(u32, f32)> = r
+        .multitrack
+        .iter()
+        .flat_map(|m| {
+            m.params.iter().filter_map(move |&p| {
+                m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())).find_map(|a| match a {
+                    Automation::Curve { param, points, .. } if *param == p => points.first().map(|pt| (p, pt.0)),
+                    _ => None,
+                })
+            })
+        })
+        .collect();
+    eng.pool = mercs2_audio::VoicePool::new(64);
+    match eng.cue_sound_with_params(e.guid, None, &params) {
+        Ok(h) => {
+            let mut fired = 0;
+            for _ in 0..120 {
+                eng.tick(1.0 / 60.0);
+                fired = fired.max(eng.cue_instances(h).len());
+            }
+            eng.stop_sound(h);
+            Ok(fired)
+        }
+        Err(err @ mercs2_audio::CueError::Looping { .. }) | Err(err @ mercs2_audio::CueError::Automation(_)) => {
+            Err(err.to_string())
+        }
+        Err(other) => panic!("cue 0x{:08X}: {other}", e.guid),
+    }
+}
+
+/// Retail `sound_resident` cue 20 (guid 0xF2937330): two tracks, each a volume ramp (the second a
+/// fade from 1 to 0 over 0.579 s). Three 0.1 s frames in, each voice's gain is its instance's base
+/// volume × the track ramp's value × clamp01(cue gain), with the ramp read from the decoded cue.
+#[test]
+fn a_retail_fade_reaches_the_voices() {
+    use mercs2_audio::multitrack::{Automation, Target};
+    let Some(tables) = retail_tables() else { return };
+    let mut eng = AudioEngine::default();
+    eng.set_rng_seed(3);
+    for t in of_type(tables, TYPE_HASH_WAVEBANK) {
+        eng.load_wavebank(&t.body).expect("wavebank loads");
+    }
+    let mut cue = None;
+    for t in of_type(tables, TYPE_HASH_SOUNDBANK) {
+        eng.load_soundbank(&t.body).expect("soundbank loads");
+        let sb = Soundbank::parse(&t.body).expect("soundbank");
+        if sb.bank_hash == 0xDCCF_8AFA {
+            cue = Some(sb.cues[20].clone());
+        }
+    }
+    for t in of_type(tables, TYPE_HASH_SOUNDDB) {
+        let db = SoundDb::parse(&t.body).expect("sounddb");
+        if db.self_hash == 0xDCCF_8AFA {
+            eng.set_sounddb(db);
+        }
+    }
+    let cue = cue.expect("sound_resident cue 20");
+    assert_eq!(cue.guid, 0xF293_7330);
+    let CueBody::MultiTrack(m) = &cue.body else { panic!("multi-track") };
+
+    let h = eng.cue_sound(cue.guid, None).expect("the cue plays");
+    for _ in 0..3 {
+        eng.tick(0.1);
+    }
+    let t = 0.1f32 + 0.1 + 0.1;
+    let cue_volume = if cue.gain > 1.0 { 1.0 } else { cue.gain.max(0.0) };
+    let instances = eng.cue_instances(h);
+    assert_eq!(instances.len(), 2, "one sound per track");
+    for (track, inst) in m.tracks.iter().zip(&instances) {
+        let Automation::Ramp { target: Target::Volume, start_s, duration_s, from, to, mode: 0, .. } = track.automation[0] else {
+            panic!("the track's first record is a plain volume ramp")
+        };
+        assert!(t > start_s, "active");
+        let ramp = (to - from) / ((duration_s + start_s) - start_s) * (t - start_s) + from;
+        let ramp = ramp.clamp(0.0, 1.0);
+        let gain = eng.pool.get(inst.voice).expect("voice").gain;
+        println!("track ramp {from}->{to} over {duration_s}s: t={t} factor {ramp}, voice gain {gain}");
+        assert_eq!(gain, inst.volume * (ramp * cue_volume));
+    }
 }
