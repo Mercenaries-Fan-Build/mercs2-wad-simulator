@@ -130,6 +130,9 @@ pub struct ResolvedChoice {
     pub instance: InstanceParams,
     /// The group's `+0x2C` wave loop count when multi-wave (0 for a single-wave group).
     pub loop_byte: u8,
+    /// The group's `+0x14` byte is set: with an emitter, its instances play from the emitter's own
+    /// (3D) source; otherwise from the shared 2D source (`FUN_00837830`, `0x008378A9`).
+    pub positional: bool,
 }
 
 /// One sound a cue fires.
@@ -179,18 +182,6 @@ pub enum CueError {
     Unknown(u32),
     /// The chain does not resolve.
     Resolve(ResolveError),
-    /// The cue can play a looping wave: a multi-wave group's `+0x2C` loop count is set. The wave
-    /// carries the count (`FUN_008369e0` → instance `+0x80` → `FUN_00837830` → wave `+0xBC`), and the
-    /// only code that reads it back is reached from the wave's data fetch `FUN_00839e90` through a
-    /// SecuROM-protected pointer (`0x0244F65C` → `0x024B5EB0`), so how a wave loops is not traced.
-    Looping {
-        /// The soundbank holding the group.
-        soundbank: u32,
-        /// The group's index there.
-        group: u16,
-        /// The loop count.
-        count: u8,
-    },
     /// The cue's automation cannot be played ([`crate::automation`]).
     Automation(AutomationError),
     /// A kind-4 record sets output channels 2–5, and this mixer renders only `channels` (it applies
@@ -215,11 +206,6 @@ impl std::fmt::Display for CueError {
         match self {
             CueError::Unknown(id) => write!(f, "cue 0x{id:08X} is not in the sound database"),
             CueError::Resolve(e) => write!(f, "{e}"),
-            CueError::Looping { soundbank, group, count } => write!(
-                f,
-                "group {group} of soundbank 0x{soundbank:08X} loops its wave (+0x2C = {count}); the wave-level \
-                 loop is read only behind the SecuROM-protected pointer at 0x0244F65C (FUN_00839e90) and is not traced"
-            ),
             CueError::Automation(e) => write!(f, "{e}"),
             CueError::Channels { channels } => write!(
                 f,
@@ -563,7 +549,8 @@ impl AudioEngine {
                 Ok(ResolvedWave { wavebank: w.wavebank, index: w.index, weight: w.weight, clip_hash: clip.clip_hash })
             })
             .collect::<Result<_, _>>()?;
-        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves, instance, loop_byte })
+        let positional = group.head.unknown_14 & 0xFF != 0;
+        Ok(ResolvedChoice { weight, soundbank, group_index, selection, waves, instance, loop_byte, positional })
     }
 
     /// The resident clip at `(wavebank, index)`.
@@ -673,10 +660,11 @@ impl AudioEngine {
     /// not in the sound database or its soundbank is not loaded (`FUN_00834ad0` returns 0) — which
     /// the parent treats as a finished child. The child plays at its parent's position.
     ///
-    /// // CONFIRM-LIVE: `FUN_0082e930` allocates through `thunk_FUN_024b9220`, SecuROM-morphed like the
-    /// `Sound.CueSound` post; this runs the same start as [`cue_sound`](Self::cue_sound) (INFERRED from
-    /// the arguments it passes: the engine, the cue hash, the parent's `+0x118` / `+0xC8`, and the
-    /// completion callback). That the parent's `+0x118` / `+0xC8` word is its position is INFERRED.
+    /// `FUN_0082e930` calls the Pal cue start `FUN_0082e960` (Ghidra's `thunk_FUN_024b9220`: its first
+    /// instruction is a SecuROM splice, which emulating the runtime dump shows to be
+    /// `mov ecx, [0x01176400]`; the rest is plain `.text`) with the parent's emitter (`+0x118` /
+    /// `+0xC8`, which is the parent's own start argument 3) and `0, 0` for the instance flags `+0x82` /
+    /// `+0x83`. The allocation and play it does are the ones [`cue_sound`](Self::cue_sound) models.
     fn start_child(&mut self, guid: u32, position: Option<Vec3>, parent: (CueHandle, Option<usize>)) -> Option<CueHandle> {
         let cue = *self.sounddb.find_cue(guid)?;
         let resolved = match self.resolve_cue(&cue) {
@@ -796,21 +784,25 @@ impl AudioEngine {
     }
 
     /// The voice request and spatial gains a cue's voices share.
+    /// The voice request and spatial gains a cue's positional instances share. Whether an instance is
+    /// positional is its group's (`ResolvedChoice::positional`); a wave loops by its own count, not
+    /// the voice's. No distance start delay: `FUN_008369e0` adds one only for a multi-wave group whose
+    /// `+0x44` byte is set (`0x00836ABF`), and that byte is 0 in every retail group (the soundbank
+    /// reader requires it).
     fn voice_template(&self, cue: &CueEntry, position: Option<Vec3>) -> (VoiceRequest, (f32, f32)) {
-        let mut req = VoiceRequest {
+        let req = VoiceRequest {
             cue_guid: cue.guid,
             priority: cue.priority,
             category: cue.category,
             gain: 1.0,
-            looping: cue.is_looping(),
-            positional: cue.is_positional() && position.is_some(),
+            looping: false,
+            positional: position.is_some(),
             start_delay: 0.0,
         };
         let mut gains = (1.0f32, 1.0f32);
         if req.positional {
             if let Some(pos) = position {
                 if let Some((idx, dist)) = self.listeners.closest(pos) {
-                    req.start_delay = spatial::start_delay_secs(dist);
                     let (min_d, max_d) = self.cue_distances(cue);
                     let atten = spatial::distance_attenuation(dist, min_d, max_d);
                     let listener = self.listeners.get(idx).copied().unwrap_or_default();
@@ -822,9 +814,9 @@ impl AudioEngine {
         (req, gains)
     }
 
-    /// Refuse a cue this engine cannot play faithfully: a looping wave, the filter curves (kinds 8
-    /// and 9), channel multipliers the mixer has no outputs for, unset cue-local parameters,
-    /// parameters past a curve, and a child cue that is refused itself. `visited` holds the cues
+    /// Refuse a cue this engine cannot play faithfully: the filter curves (kinds 8 and 9), channel
+    /// multipliers the mixer has no outputs for, unset cue-local parameters, parameters past a curve,
+    /// and a child cue that is refused itself. `visited` holds the cues
     /// already checked on this chain (a child chain may lead back to its start).
     fn check_playable(
         &self,
@@ -832,11 +824,6 @@ impl AudioEngine {
         params: &HashMap<u32, f32>,
         visited: &mut HashSet<u32>,
     ) -> Result<(), CueError> {
-        for c in resolved.sounds.iter().flat_map(|s| s.choices.iter()) {
-            if c.loop_byte != 0 {
-                return Err(CueError::Looping { soundbank: c.soundbank, group: c.group_index, count: c.loop_byte });
-            }
-        }
         let Some(m) = &resolved.multitrack else { return Ok(()) };
         for a in m.events.iter().chain(m.tracks.iter().flat_map(|t| t.automation.iter())) {
             match a {
@@ -1363,7 +1350,7 @@ impl AudioEngine {
         }
         match pb.single {
             Some(mut inst) if !inst.finished => {
-                self.update_instance(&mut inst, block, pb.gains, dt);
+                self.update_instance(&mut inst, block, (&pb.req.clone(), pb.gains), dt);
                 pb.single = Some(inst);
             }
             _ => {
@@ -1491,7 +1478,7 @@ impl AudioEngine {
                 }
             }
         }
-        let gains = pb.gains;
+        let (req, gains) = (pb.req.clone(), pb.gains);
         let mut kept = Vec::with_capacity(pb.tracks[t].sounds.instances.len());
         for mut inst in std::mem::take(&mut pb.tracks[t].sounds.instances) {
             if inst.finished {
@@ -1502,7 +1489,7 @@ impl AudioEngine {
                 inst.pitch = p;
                 inst.channels = [1.0; 6];
             }
-            self.update_instance(&mut inst, block, gains, dt);
+            self.update_instance(&mut inst, block, (&req, gains), dt);
             kept.push(inst);
         }
         let list = &mut pb.tracks[t].sounds;
@@ -1526,6 +1513,8 @@ impl AudioEngine {
             channels: [1.0; 6],
             delay_s: 0.0,
             elapsed_s: 0.0,
+            loop_count: 0,
+            positional: false,
             finished: true,
         };
         let sound = &pb.resolved.sounds[s];
@@ -1551,10 +1540,13 @@ impl AudioEngine {
         let clip = self.clip(wave.wavebank, wave.index).expect("resolved when the cue started");
         let (samples, channels, clip_rate) = (clip.samples.clone(), clip.channels as usize, clip.sample_rate);
         let delay_s = pb.req.start_delay + start.delay_s;
-        let req = VoiceRequest { start_delay: delay_s, ..pb.req.clone() };
+        inst.positional = choice.positional && pb.req.positional;
+        inst.loop_count = choice.loop_byte;
+        let req = VoiceRequest { start_delay: delay_s, positional: inst.positional, ..pb.req.clone() };
         inst.voice = self.pool.acquire(&req);
         if let Some(id) = inst.voice {
-            let src = PcmSource::with_rate(samples, channels, clip_rate, self.mixer.config().sample_rate);
+            let src = PcmSource::with_rate(samples, channels, clip_rate, self.mixer.config().sample_rate)
+                .with_loops(u32::from(inst.loop_count));
             self.mixer.attach_pcm(id, src);
         }
         inst.wave = Some(InstanceWave { wavebank: wave.wavebank, index: wave.index, clip_rate });
@@ -1572,13 +1564,24 @@ impl AudioEngine {
     /// `FUN_00836c70`: multiply the instance's channel multipliers by the block's, give its voice
     /// `base volume × block volume`, `base pitch + block pitch` and its left/right multipliers, and
     /// mark it finished once its voice has ended — or, with no voice, once its start delay has passed.
-    fn update_instance(&mut self, inst: &mut Instance, block: Block, gains: (f32, f32), dt: f32) {
+    fn update_instance(&mut self, inst: &mut Instance, block: Block, spatial: (&VoiceRequest, (f32, f32)), dt: f32) {
         for (c, b) in inst.channels.iter_mut().zip(block.channels) {
             *c *= b;
         }
         inst.elapsed_s += dt;
+        let gains = if inst.positional { spatial.1 } else { (1.0, 1.0) };
+        if inst.voice.is_none() && inst.wave.is_some() && inst.elapsed_s >= inst.delay_s {
+            if inst.loop_count == 0xFF {
+                // FUN_00836c70: an instance with no wave whose group loop count is 0xFF stays in state 0
+                // and tries to create its wave again on the next update; any other count finishes it.
+                self.retry_voice(inst, spatial.0);
+            } else {
+                inst.finished = true;
+                return;
+            }
+        }
         let (Some(id), Some(wave)) = (inst.voice, inst.wave) else {
-            if inst.elapsed_s >= inst.delay_s {
+            if inst.wave.is_none() && inst.elapsed_s >= inst.delay_s {
                 inst.finished = true;
             }
             return;
@@ -1603,6 +1606,19 @@ impl AudioEngine {
         }
     }
 
+    /// Try again to give a waveless instance its voice (the `CreateWave` retry of `FUN_00836c70`).
+    fn retry_voice(&mut self, inst: &mut Instance, req: &VoiceRequest) {
+        let Some(wave) = inst.wave else { return };
+        let req = VoiceRequest { start_delay: 0.0, positional: inst.positional, ..req.clone() };
+        let Some(id) = self.pool.acquire(&req) else { return };
+        let clip = self.clip(wave.wavebank, wave.index).expect("resolved when the cue started");
+        let (samples, channels) = (clip.samples.clone(), clip.channels as usize);
+        let src = PcmSource::with_rate(samples, channels, wave.clip_rate, self.mixer.config().sample_rate)
+            .with_loops(u32::from(inst.loop_count));
+        self.mixer.attach_pcm(id, src);
+        inst.voice = Some(id);
+    }
+
     /// One mixer-thread tick (`FUN_00831ee0` / `FUN_00836610`): render one 45 ms block, submit it to
     /// the sink, and return it. Runs headless (sink = [`NullSink`]) or to a device.
     pub fn render_tick(&mut self) -> Vec<i16> {
@@ -1623,8 +1639,9 @@ impl AudioEngine {
     }
 }
 
-/// The engine seeds its generator from its tick counter at init; this engine seeds from the wall
-/// clock, the same kind of per-run value. [`AudioEngine::set_rng_seed`] fixes it.
+/// The engine seeds its generator from the low 32 bits of `QueryPerformanceCounter` at init (see
+/// [`crate::select`]); this engine seeds from the wall clock, the same kind of per-run value (the
+/// counter's own value and frequency are the machine's). [`AudioEngine::set_rng_seed`] fixes it.
 fn clock_seed() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1974,15 +1991,27 @@ mod playback_tests {
         assert_eq!(eng6.cue_sound(cue, None), Err(CueError::Channels { channels: 6 }));
     }
 
+    /// A group with loop count 3 plays its wave 4 times back to back (`FUN_00839e90`), and the
+    /// instance lasts that long.
     #[test]
-    fn a_looping_wave_and_the_filter_refuse_the_cue() {
-        let (mut eng, cue) = one_cue(vec![track(vec![], vec![sound(0.0, 1)])], vec![], 1.0, LONG);
-        assert_eq!(eng.cue_sound(cue, None), Err(CueError::Looping { soundbank: m2(BANK), group: 1, count: 3 }));
+    fn a_looping_group_plays_its_wave_count_plus_one_times() {
+        let (mut eng, cue) = one_cue(vec![track(vec![], vec![sound(0.0, 1)])], vec![], 1.0, SHORT);
+        let h = eng.cue_sound(cue, None).unwrap();
+        run(&mut eng, 1, 0.02);
+        assert_eq!(eng.cue_instances(h)[0].loop_count, 3);
+        run(&mut eng, 8, 0.02); // 0.18 s of a 0.05 s wave played 4 times
+        assert_eq!(eng.cue_instances(h).len(), 1, "still playing inside 0.2 s");
+        run(&mut eng, 8, 0.02);
+        assert!(eng.cue_instances(h).is_empty(), "done after four plays");
+    }
+
+    #[test]
+    fn the_filter_refuses_the_cue() {
         let filter = Automation::Kind9 { start_bits: 0, curve_a: 0, curve_b: u32::MAX };
-        let (mut eng, cue) = one_cue(vec![track(vec![filter], vec![sound(0.0, 0)])], vec![], 1.0, LONG);
+        let (mut eng, cue) = one_cue(vec![track(vec![filter.clone()], vec![sound(0.0, 0)])], vec![], 1.0, LONG);
         assert_eq!(eng.cue_sound(cue, None), Err(CueError::Automation(AutomationError::Unsupported { kind: 9 })));
         let child = Automation::Kind7 { start_bits: 0, cue: m2("mod_bad") };
-        let bad = multi(vec![track(vec![], vec![sound(0.0, 1)])], vec![], 1.0);
+        let bad = multi(vec![track(vec![filter], vec![sound(0.0, 0)])], vec![], 1.0);
         let mut eng = engine(
             vec![
                 ("mod_good", 1.0, CueBodySpec::MultiTrack(multi(vec![track(vec![child], vec![sound(0.0, 0)])], vec![], 1.0))),
