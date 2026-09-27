@@ -14,7 +14,8 @@ rendering, no simulation and no I/O policy — just format code:
   (segmented deflate) and also re-compresses one. `ucfx` walks the UCFX descriptor tree inside a
   decompressed block, resolves leaf chunks and verifies the `CSUM` trailer.
 * **Asset decoders.** Model geometry and materials (`texture`, `schema`, `skeleton`), textures
-  incl. the high-mip chain (`texture`, `texsize`), low-res world terrain (`terrain`), world
+  incl. the high-mip chain (`texture`, `texsize`), low-res world terrain (`terrain`), the 400
+  hi-res terrain cells (`terrainmesh`), world
   placements (`placement`), the world block index used by the streaming engine (`world_index`),
   FX dictionaries (`fxdict`), sky/HDR parameters (`atmosphere`), destruction state machines
   (`orchestrator`), Havok 5.5 collision (`havok`) and animation clips (`anim`, `animgroup`,
@@ -138,6 +139,7 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | `world_index` | Layer-1 world block index: class, LOD tier/variant, state overlay, spatial extent of every block. |
 | `world` | World spatial constants used for validation. |
 | `terrain` | Low-resolution world terrain loader. |
+| `terrainmesh` | Hi-res terrain cells (`0x7C569307`): byte-exact decode/encode of all 400, vertical displacement with normal + bounds recompute, triangle-strip codec, collision rebuild from the render triangles. Retail gates in `tests/terrainmesh_retail.rs`. |
 | `atmosphere` | `Graphics.Atmosphere.*` sky / HDR tone-map / bloom parameter model. |
 | `fxdict` | FX cluster: `fxdict` `DICT` + effect-template key chunks. |
 | `gfx` | Scaleform GFx / SWF tag-stream parser and feature inventory. |
