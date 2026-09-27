@@ -1,0 +1,19 @@
+# The workspace's release tool. Never published — it IS the publisher.
+#
+# Replaces publish_release.sh / publish_release.ps1: those were two hand-maintained implementations
+# of the same logic PLUS a hand-maintained crate ORDER, and they drifted (the bash copy silently
+# omitted mercs2_bridge / mercs2_destruction / mercs2_quartermaster). This derives both the publish
+# order and the publishable set from `cargo metadata`, so neither can drift from the workspace.
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The dependency graph, workspace membership, versions and `publish` flags — the single source of
+# truth this tool exists to read instead of a hand-kept list.
+cargo_metadata = "0.18"
+# crates.io API (is-this-version-live / last-publish) — same queries the shell scripts made with curl.
+ureq = "2"
+serde_json = "1"
