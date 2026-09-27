@@ -13,9 +13,11 @@
 //! buffer (see [`backend`]).
 //!
 //! ## Modules
-//! * [`sounddb`] — the `'\x1d'`-tagged sound/cue catalog parser (`FUN_00835b80`). Layout CALIBRATED
-//!   against shipped blocks: 28-B header + 12-B `{guid, bank_hash, wave_index}` entries.
-//! * [`wave`] — `wavebank` record parser + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
+//! * [`sounddb`] — the `'\x1d'`-tagged cue catalog (`FUN_00835b80`): 28-B header + 12-B
+//!   `{guid, soundbank hash, soundbank cue index}` entries (+ the global catalog's category tree).
+//! * [`soundbank`] — the `soundbank` table: sound groups (which wave(s) a sound plays) and cues.
+//! * [`wave`] — the `wavebank` table + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
+//! * [`encode`] — builds a bank's wavebank + soundbank + sounddb from named PCM16 cues.
 //! * [`voice`] — voice pool, priority-steal, the 16-state instance FSM (`FUN_00836c70`).
 //! * [`mixer`] — the software mixer (`FUN_00836610`): int32 accumulate → saturate int16, headless.
 //!   Per-voice resampling (clip rate → mixer rate) via [`PcmSource`].
@@ -30,13 +32,14 @@
 //!   binding-wiring seam (see its module docs).
 //!
 //! ## Cue → audible PCM (the whole path)
-//! [`AudioEngine::set_sounddb`] installs the catalog; [`AudioEngine::load_wavebank`] decodes a
-//! `wavebank` body and holds its clips resident; [`AudioEngine::cue_sound`] resolves the cue, allocates
-//! a voice (priority-steal if the pool is full), auto-binds the resident wave it routes to, and applies
-//! 3D gains against the closest listener. [`AudioEngine::tick`] advances the FSMs/fades;
-//! [`AudioEngine::render`] mixes int16 frames, and [`AudioEngine::pump`] feeds them to the device at
-//! wall-clock rate (a no-op when headless). Verified end-to-end on retail data —
-//! `mercs2_game/tests/audio_wad_probe.rs`.
+//! [`AudioEngine::set_sounddb`] installs the catalog; [`AudioEngine::load_soundbank`] and
+//! [`AudioEngine::load_wavebank`] hold a bank's soundbank and decoded clips resident;
+//! [`AudioEngine::cue_sound`] resolves the cue — sounddb entry → soundbank cue → group → wavebank wave
+//! ([`AudioEngine::resolve_wave`]) — allocates a voice (priority-steal if the pool is full), binds the
+//! resolved clip, and applies 3D gains against the closest listener. [`AudioEngine::tick`] advances the
+//! FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and [`AudioEngine::pump`] feeds them to the
+//! device at wall-clock rate (a no-op when headless). Retail coverage: `tests/retail_banks.rs` here and
+//! `mercs2_probe/tests/audio_wad_probe.rs`.
 //!
 //! ## Features
 //! `device` (**on by default**) links `cpal` for [`backend::CpalSink`]. No audio *behaviour* is gated
@@ -52,9 +55,12 @@ pub mod backend;
 pub mod banks;
 pub mod categories;
 pub mod components;
+pub mod encode;
 pub mod engine;
+mod le;
 pub mod mixer;
 pub mod music;
+pub mod soundbank;
 pub mod sounddb;
 pub mod spatial;
 pub mod vo;
@@ -62,14 +68,16 @@ pub mod voice;
 pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};
-pub use engine::{AudioEngine, SOUND_LIB_VERSION};
+pub use encode::{encode_bank, BankSpec, CueSpec, EncodedBank, EncodeError, Pcm16};
+pub use engine::{AudioEngine, ResolveError, SOUND_LIB_VERSION};
 pub use mixer::{Mixer, MixerConfig, PcmSource, SampleSource, ToneSource};
 pub use music::{DeckState, MusicStateMachine};
-pub use sounddb::{CueEntry, SoundDb, SoundDbError, SOUNDDB_TAG};
+pub use soundbank::{Soundbank, SoundbankError};
+pub use sounddb::{CategoryEntry, CueEntry, SoundDb, SoundDbError, SOUNDDB_TAG};
 pub use spatial::{Listener, ListenerSet, MAX_LISTENERS};
 pub use vo::{VoManager, VoPriority};
 pub use voice::{InstanceState, Voice, VoiceId, VoicePool, VoiceRequest};
-pub use wave::{DecodedClip, Wavebank};
+pub use wave::{DecodedClip, WaveError, Wavebank, WavebankFile};
 
 #[cfg(test)]
 mod tests {
@@ -82,7 +90,7 @@ mod tests {
             CueEntry {
                 guid: 0x0000_0001,
                 bank_hash: 0,
-                wave_index: 0,
+                cue_index: 0,
                 priority: 100,
                 category: 0,
                 flags: 0,
@@ -93,7 +101,7 @@ mod tests {
             CueEntry {
                 guid: mercs2_formats::hash::pandemic_hash_m2("sfx_explosion"),
                 bank_hash: 0,
-                wave_index: 3,
+                cue_index: 3,
                 priority: 200,
                 category: 1,
                 flags: 0x2, // positional
@@ -135,7 +143,7 @@ mod tests {
                 CueEntry::routed(0x00AA_BB01, 0xBEEF, 3),
             ],
         );
-        let bytes = routed.to_bytes();
+        let bytes = routed.to_bytes().expect("sorted table encodes");
         assert_eq!(bytes[0], SOUNDDB_TAG, "first byte is the 0x1D node tag");
         assert_eq!(SoundDb::parse(&bytes).expect("parse synthesized block"), routed);
 
@@ -144,7 +152,7 @@ mod tests {
         assert_eq!(db.find_cue(0).expect("cue index 0").guid, 0x0000_0001); // direct index (< 0x401)
         let hashed = db.find_cue_by_name("sfx_explosion").expect("hashed cue resolves"); // id >= 0x401
         assert!(hashed.is_positional());
-        assert_eq!(hashed.wave_index, 3);
+        assert_eq!(hashed.cue_index, 3);
 
         // A non-0x1D buffer is rejected.
         let mut bad = bytes.clone();
@@ -306,50 +314,70 @@ mod tests {
         assert_eq!(eng.categories.master_volume(), 1.0, "restored when last ref released");
     }
 
-    // ---- 6. a cue binds its resident wave and mixes to audible PCM (the last-mile wire) ----------
+    // ---- 6. a synthetic bank's cue name resolves through the full chain to its PCM --------------
 
     #[test]
-    fn cue_binds_resident_wave_and_mixes_audible() {
+    fn synthetic_bank_cue_name_resolves_to_its_pcm_and_mixes_audible() {
+        use crate::encode::{encode_bank, CueSpec, Pcm16, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
+        use mercs2_formats::hash::pandemic_hash_m2 as m2;
+
+        let tone: Vec<i16> = (0..6000).map(|i| if i % 50 < 25 { 8000 } else { -8000 }).collect();
+        let other: Vec<i16> = vec![-3000; 2 * 400];
+        let spec = BankSpec {
+            name: "mod_chain_bank".to_string(),
+            cues: vec![
+                CueSpec {
+                    name: "mod_other".to_string(),
+                    category: "sfx".to_string(),
+                    sound_id: m2("mod_other"),
+                    clip_hash: m2("mod_other"),
+                    pcm: Pcm16 { channels: 2, sample_rate: 44100, samples: other.clone() },
+                    group: UI_PDA_OPEN_GROUP,
+                    cue: UI_PDA_OPEN_CUE,
+                },
+                CueSpec {
+                    name: "mod_tone".to_string(),
+                    category: "ui".to_string(),
+                    sound_id: m2("mod_tone"),
+                    clip_hash: m2("mod_tone"),
+                    pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: tone.clone() },
+                    group: UI_PDA_OPEN_GROUP,
+                    cue: UI_PDA_OPEN_CUE,
+                },
+            ],
+        };
+        let enc = encode_bank(&spec).expect("encodes");
+
         let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
-        let hash = 0x5FBA_3915u32; // >= 0x401 → resolves via the hashed FindCue path
+        eng.set_sounddb(SoundDb::parse(&enc.sounddb).expect("sounddb parses"));
+        assert_eq!(eng.load_soundbank(&enc.soundbank).expect("soundbank parses"), 2);
+        assert_eq!(eng.load_wavebank(&enc.wavebank).expect("wavebank parses"), 2);
 
-        // A resident, loud, constant mono clip under `hash` (as LoadWaveBank would leave it).
-        eng.add_wave(DecodedClip {
-            clip_hash: hash,
-            channels: 1,
-            sample_rate: 22050, // native rate ≠ mixer rate → exercises the resampler
-            samples: vec![8000i16; 6000],
-            streaming: false,
-        });
-        assert_eq!(eng.resident_wave_count(), 1);
+        // The name hash is all the caller supplies; the chain does the rest.
+        for (name, pcm, ch) in [("mod_tone", &tone, 1u8), ("mod_other", &other, 2)] {
+            let entry = *eng.sounddb.find_cue_by_name(name).expect("sounddb routes the name");
+            let clip = eng.resolve_wave(&entry).expect("chain resolves");
+            assert_eq!(&clip.samples, pcm, "{name} resolves to its own PCM");
+            assert_eq!(clip.channels, ch);
+        }
 
-        // A sounddb whose single cue's guid == the clip hash (the one-shot-SFX fallback the cue path
-        // binds on when no bank routing resolves). No explicit source is passed — the engine must
-        // auto-bind the resident wave.
-        let cue = CueEntry::routed(hash, 0, 0);
-        eng.set_sounddb(SoundDb::from_cues(SOUNDDB_TAG, vec![cue]));
-
-        let id = eng.cue_sound(hash, None, None).expect("cue allocates a voice");
-        // Advance the voice FSM out of start/ready into Playing.
+        let id = eng.cue_sound_by_name("mod_tone", None, None).expect("cue allocates a voice");
         for _ in 0..8 {
             eng.tick(0.02);
         }
         assert!(eng.pool.get(id).unwrap().state.is_audible(), "voice reached a playing state");
-
         let buf = eng.render(2048);
-        assert!(
-            mixer::rms_i16(&buf) > 0.0,
-            "a cue's resident wave produced audible PCM through the real mixer path"
-        );
+        assert!(mixer::rms_i16(&buf) > 0.0, "the resolved clip mixed to audible PCM");
 
-        // A cue whose wave is NOT resident allocates a (silent) voice but binds no source — faithful to
-        // the exe allocating a voice before its wave streams in.
-        let other = 0x1234_5678u32;
-        eng.set_sounddb(SoundDb::from_cues(
-            SOUNDDB_TAG,
-            vec![CueEntry { guid: other, ..cue }],
-        ));
-        assert!(eng.cue_sound(other, None, None).is_some(), "still allocates a voice");
+        // Without the soundbank resident the chain stops at its first hop, with the reason.
+        let mut bare = AudioEngine::default();
+        bare.set_sounddb(SoundDb::parse(&enc.sounddb).expect("sounddb parses"));
+        bare.load_wavebank(&enc.wavebank).expect("wavebank parses");
+        let entry = *bare.sounddb.find_cue_by_name("mod_tone").unwrap();
+        assert_eq!(
+            bare.resolve_wave(&entry),
+            Err(ResolveError::SoundbankNotResident(m2("mod_chain_bank")))
+        );
     }
 
     #[test]
