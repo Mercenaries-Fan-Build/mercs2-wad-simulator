@@ -6,9 +6,11 @@
 //! twice per draw by `x = x * 0x0019660D + 0x3C6EF35F`. With `u` the first new state and `x` the
 //! second, the draw is `f32::from_bits((((x & 0xFFFF01FF) | (u >> 16)) >> 9) | 0x3F800000) - 1.0`,
 //! a value in `[0, 1)`. The state is seeded once, at Pal init (`FUN_0082e6c0` at `0x0082E774`), with
-//! the low 32 bits of a 64-bit tick callback (`0x0040B360`, an import slot SecuROM resolves at run
-//! time; the mixer's PrepareMix reads the same callback as its clock). The seed therefore differs every
-//! run — [`PalRng::new`] takes it as an input.
+//! the low 32 bits of the tick callback `0x0040B360` — `KERNEL32!QueryPerformanceCounter` (its
+//! SecuROM stub, emulated from the runtime dump, runs relocated code at `0x00415A20` that calls
+//! through the IAT slot `0x00B05124` and returns the 64-bit count in `EDX:EAX`). The mixer's PrepareMix
+//! reads the same counter. The seed therefore differs every run — [`PalRng::new`] takes it as an
+//! input.
 //!
 //! **Selection state:** one `u32` per group per loaded soundbank, and `S` per multi-track cue (its
 //! `sound_slots`), all initialised to `0xFFFFFFFF` (`FUN_0082e370`, `LAB_0082e290`).
@@ -39,7 +41,8 @@ const MUL: u32 = 0x0019_660D;
 const ADD: u32 = 0x3C6E_F35F;
 
 impl PalRng {
-    /// A generator seeded as the engine seeds it (with its tick count at Pal init).
+    /// A generator seeded as the engine seeds it (the low 32 bits of `QueryPerformanceCounter` at Pal
+    /// init).
     pub fn new(seed: u32) -> PalRng {
         PalRng { state: seed }
     }
