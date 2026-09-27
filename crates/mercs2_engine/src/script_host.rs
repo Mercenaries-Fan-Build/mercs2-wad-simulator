@@ -2611,6 +2611,67 @@ mod tests {
         assert_eq!(*rng.borrow(), reference, "the jitter took four draws from the game-wide state");
     }
 
+    /// `Sound.TestCueSound(sCue)` (`FUN_005E0DB0`) takes only the cue name and plays it on the local
+    /// player's attached character (`FUN_006CD960(0)` → `FUN_006CDAF0` → `+0x20`), returning nothing;
+    /// with no character attached it starts nothing.
+    #[test]
+    fn test_cue_sound_plays_on_the_local_character() {
+        use crate::audio::encode::{encode_bank, BankSpec, CueSpec, GroupParams, Pcm16, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
+        use crate::audio::{Holder, SoundDb};
+        use mercs2_core::glam::Vec3;
+
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let world = Rc::new(RefCell::new(World::new()));
+        let guids = Rc::new(RefCell::new(GuidMap::new()));
+        host.borrow_mut().attach_world(world.clone(), guids.clone());
+        let at = Vec3::new(-4.0, 1.0, 8.0);
+        let e = world.borrow_mut().spawn((Transform::from_translation(at),));
+        let character = host.borrow().register_named_entity(e, pandemic_hash_m2("test_hero"));
+        mercs2_player::possession::attach_to_character(
+            &mut host.borrow_mut().player_mut().roster,
+            0,
+            character,
+            mercs2_player::CheatFlags::default(),
+        );
+
+        let enc = encode_bank(&BankSpec {
+            name: "mod_test".into(),
+            cues: vec![CueSpec {
+                name: "mod_test_cue".into(),
+                category: "sfx".into(),
+                sound_id: pandemic_hash_m2("mod_test_cue"),
+                clip_hash: pandemic_hash_m2("mod_test_cue"),
+                pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; 22050] },
+                group: GroupParams { unknown_14: 1, ..UI_PDA_OPEN_GROUP },
+                cue: UI_PDA_OPEN_CUE,
+            }],
+        })
+        .unwrap();
+        let audio = host.borrow().audio();
+        {
+            let mut a = audio.borrow_mut();
+            a.set_sounddb(SoundDb::parse(&enc.sounddb).unwrap());
+            a.load_soundbank(&enc.soundbank).unwrap();
+            a.load_wavebank(&enc.wavebank).unwrap();
+        }
+
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+        let returned: i64 = sh.eval(r##"return select("#", Sound.TestCueSound("mod_test_cue"))"##).unwrap();
+        assert_eq!(returned, 0, "the shim returns no value");
+        let em = audio.borrow().object_emitter(character).expect("the cue is on the local character's record");
+        assert_eq!(audio.borrow().emitter(em), Some(Holder::at(at)), "at the character's position, at rest");
+
+        // Detached: no character, nothing is started (not even 2D).
+        audio.borrow_mut().stop_and_flush_all_sounds();
+        audio.borrow_mut().update_object_emitters(0.1, &mut Lcg::game(), |_| None);
+        mercs2_player::possession::detach_from_character(&mut host.borrow_mut().player_mut().roster, 0);
+        sh.exec(r#"Sound.TestCueSound("mod_test_cue")"#, "@t").unwrap();
+        audio.borrow_mut().tick(0.1);
+        assert_eq!(audio.borrow().pool.iter_active().count(), 0, "no cue started");
+        assert_eq!(audio.borrow().object_emitter(character), None);
+    }
+
     /// The `Ai.*` order/faction/spawner surface is WIRED to real mechanisms (not no-ops): game Lua
     /// drives `crate::ai::AiWorld` (the ring), `crate::faction::FactionWorld` (the mood bridge), and the
     /// infraction-multiplier gate — asserted on the live host state the bindings forwarded into.
