@@ -33,16 +33,14 @@
 //! activates, sets them for that step only (`FUN_0083f8e0`, [`channel_multipliers`]); it never
 //! joins the active list. A kind-7 record, when it activates, names the **child cue** the track (or,
 //! in a cue's event table, the cue) starts when it finishes (`+0x7C`, kept until the state is
-//! rebuilt). Kinds 9 and 10 evaluate the cue's kind-8 curves into the state's `+0x68` / `+0x6C` /
-//! `+0x74`, which for the event table are cue `+0x84` / `+0x88` / `+0x90`. A wave whose cue has a
-//! kind-9 event carries a biquad low-pass filter (`FUN_00839db0` creates it, `FUN_0083f2d0`,
-//! vtable `0x00BE2678`); every update its cutoff and resonance are set from the cue parameter object
-//! at `+0x7C` (vtable `0x00BE1E60`, whose slot `+0x04` returns `+0x08` / `+0x0C` = cue `+0x84` /
-//! `+0x88`). The wave mix `FUN_00839ae0` runs the filter in place over the buffer its source passes
-//! (`FUN_0083b120`: the source's 6-channel int32 scratch `DAT_00FC34B0`, holding every wave of that
-//! source mixed so far in the pass), before the source commits it (`FUN_0083afc0`). This crate's mixer
-//! mixes each voice straight into one accumulator, with no source buffers, so reaching kind 8, 9 or
-//! 10 is an [`AutomationError::Unsupported`].
+//! rebuilt). A kind-9 record evaluates up to two of the cue's kind-8 curves (curve table index = the
+//! low byte of its `+0x08` / `+0x0C`, `0xFFFFFFFF` = none, `FUN_0083b250`) into the state's
+//! [`filter_params`](AutomationState::filter_params) (`+0x68` / `+0x6C`, 1.0 until then — the
+//! state's constructor at `0x008334C0`); a kind-9 record with neither index never joins the active
+//! list. For the event table those are cue `+0x84` / `+0x88`, which the cue's parameter object at
+//! `+0x7C` (vtable `0x00BE1E60`, slot `+0x04`) hands to each wave's filter
+//! ([`crate::filter::Biquad`]) on every update. A kind-8 record in an event or track table is passed
+//! over, as `FUN_0083b4a0` passes it over.
 //!
 //! A cue or track that loops rebuilds its state at the loop point ([`AutomationState::rewind`],
 //! `FUN_0083bdb0`).
@@ -74,8 +72,8 @@ pub fn sine_table() -> &'static [f32; SINE_TABLE_LEN] {
 /// Why automation could not be evaluated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AutomationError {
-    /// A filter record (kind 9 or 10, or the kind-8 curve they read) was reached (see the module docs).
-    Unsupported { kind: u32 },
+    /// A kind-9 curve index past the cue curve table, where the engine reads outside it.
+    CurveIndex { index: u32, curves: usize },
     /// A curve's parameter has no value (a cue-local parameter nobody set).
     ParameterUnset { param: u32 },
     /// The parameter lies past the curve's last point, where the engine reads memory outside it.
@@ -85,10 +83,9 @@ pub enum AutomationError {
 impl std::fmt::Display for AutomationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AutomationError::Unsupported { kind } => write!(
+            AutomationError::CurveIndex { index, curves } => write!(
                 f,
-                "automation kind {kind} drives the cue's biquad filter, which runs in place over the \
-                 wave's source mix buffer (FUN_0083b120 -> FUN_00839ae0); this mixer has no per-source buffers"
+                "a kind-9 record names curve {index} of a {curves}-curve table (the engine reads outside it)"
             ),
             AutomationError::ParameterUnset { param } => {
                 write!(f, "automation curve parameter 0x{param:08X} has no value")
@@ -146,11 +143,20 @@ pub struct AutomationState {
     override_pitch: f32,
     /// The child cue a kind-7 record named (`+0x7C`; 0 = none).
     child_cue: u32,
+    /// The kind-9 outputs (`+0x68` / `+0x6C`).
+    filter: [f32; 2],
 }
 
 impl Default for AutomationState {
     fn default() -> Self {
-        AutomationState { next: 0, active: Vec::new(), override_volume: 1.0, override_pitch: 0.0, child_cue: 0 }
+        AutomationState {
+            next: 0,
+            active: Vec::new(),
+            override_volume: 1.0,
+            override_pitch: 0.0,
+            child_cue: 0,
+            filter: [1.0, 1.0],
+        }
     }
 }
 
@@ -164,19 +170,27 @@ fn start_of(a: &Automation) -> f32 {
     }
 }
 
-fn kind_code(a: &Automation) -> u32 {
-    match a {
-        Automation::Ramp { target: Target::Volume, .. } => 0,
-        Automation::Ramp { target: Target::Pitch, .. } => 1,
-        Automation::Lfo { target: Target::Volume, .. } => 2,
-        Automation::Lfo { target: Target::Pitch, .. } => 3,
-        Automation::Curve { kind: CurveKind::Volume, .. } => 5,
-        Automation::Curve { kind: CurveKind::Pitch, .. } => 6,
-        Automation::Curve { kind: CurveKind::Cue, .. } => 8,
-        Automation::Kind4 { .. } => 4,
-        Automation::Kind7 { .. } => 7,
-        Automation::Kind9 { .. } => 9,
+/// A kind-9 record's two curve evaluations into `filter` (`FUN_0083b250` → `FUN_008349d0` /
+/// `FUN_0082f170` → `FUN_0083f7e0`); whether it evaluated anything.
+fn filter_curves(
+    filter: &mut [f32; 2],
+    indices: [u32; 2],
+    curves: &[Automation],
+    param: &dyn Fn(u32) -> Result<f32, AutomationError>,
+) -> Result<bool, AutomationError> {
+    let mut any = false;
+    for (out, index) in filter.iter_mut().zip(indices) {
+        if index == u32::MAX {
+            continue;
+        }
+        let i = (index & 0xFF) as usize;
+        let Some(Automation::Curve { param: p, points, .. }) = curves.get(i) else {
+            return Err(AutomationError::CurveIndex { index: index & 0xFF, curves: curves.len() });
+        };
+        *out = curve(points, *p, param(*p)?)?;
+        any = true;
     }
+    Ok(any)
 }
 
 /// `(to - from) / ((duration + start) - start) × (t - start)` in the engine's order.
@@ -247,6 +261,11 @@ pub(crate) fn curve(points: &[(f32, f32)], param: u32, x: f32) -> Result<f32, Au
 }
 
 impl AutomationState {
+    /// The kind-9 outputs (`+0x68`, `+0x6C`): the cue filter's two parameters.
+    pub fn filter_params(&self) -> (f32, f32) {
+        (self.filter[0], self.filter[1])
+    }
+
     /// The child cue a kind-7 record named, if one has activated.
     pub fn child_cue(&self) -> Option<u32> {
         (self.child_cue != 0).then_some(self.child_cue)
@@ -261,11 +280,13 @@ impl AutomationState {
         }
     }
 
-    /// Evaluate `records` at elapsed time `t`. `param` gives a curve parameter's value by hash; `rng`
-    /// is the engine's generator (kind-4 jitter draws from it).
+    /// Evaluate `records` at elapsed time `t`. `curves` is the cue curve table kind 9 reads; `param`
+    /// gives a curve parameter's value by hash; `rng` is the engine's generator (kind-4 jitter draws
+    /// from it).
     pub fn step(
         &mut self,
         records: &[Automation],
+        curves: &[Automation],
         t: f32,
         param: &dyn Fn(u32) -> Result<f32, AutomationError>,
         rng: &mut PalRng,
@@ -318,10 +339,15 @@ impl AutomationState {
                     match kind {
                         CurveKind::Volume => vol *= v,
                         CurveKind::Pitch => pitch += v,
-                        CurveKind::Cue => return Err(AutomationError::Unsupported { kind: 8 }),
+                        CurveKind::Cue => unreachable!("a kind-8 record never joins the active list"),
                     }
                 }
-                other => return Err(AutomationError::Unsupported { kind: kind_code(other) }),
+                Automation::Kind9 { curve_a, curve_b, .. } => {
+                    filter_curves(&mut self.filter, [*curve_a, *curve_b], curves, param)?;
+                }
+                Automation::Kind4 { .. } | Automation::Kind7 { .. } => {
+                    unreachable!("kinds 4 and 7 never join the active list")
+                }
             }
             if keep {
                 still_active.push(i);
@@ -363,6 +389,10 @@ impl AutomationState {
                         Target::Pitch => pitch += v,
                     }
                 }
+                Automation::Curve { kind: CurveKind::Cue, .. } => {
+                    self.next = i + 1;
+                    continue;
+                }
                 Automation::Curve { kind, param: p, points, .. } => {
                     let v = curve(points, *p, param(*p)?)?;
                     match kind {
@@ -371,7 +401,13 @@ impl AutomationState {
                             vol = vol.clamp(0.0, 1.0);
                         }
                         CurveKind::Pitch => pitch += v,
-                        CurveKind::Cue => return Err(AutomationError::Unsupported { kind: 8 }),
+                        CurveKind::Cue => unreachable!("matched above"),
+                    }
+                }
+                Automation::Kind9 { curve_a, curve_b, .. } => {
+                    if !filter_curves(&mut self.filter, [*curve_a, *curve_b], curves, param)? {
+                        self.next = i + 1;
+                        continue;
                     }
                 }
                 Automation::Kind4 { words } => {
@@ -384,7 +420,6 @@ impl AutomationState {
                     self.next = i + 1;
                     continue;
                 }
-                other => return Err(AutomationError::Unsupported { kind: kind_code(other) }),
             }
             self.active.push(i);
             self.next = i + 1;
@@ -447,19 +482,19 @@ mod tests {
     fn a_fade_out_ramp_activates_after_its_start_clamps_and_extrapolates() {
         let recs = [ramp(Target::Volume, 1.0, 2.0, 1.0, 0.0, 0)];
         let mut st = AutomationState::default();
-        assert_eq!(st.step(&recs, 0.5, &no_params, &mut rng()).unwrap().volume, 1.0, "not yet active");
-        assert_eq!(st.step(&recs, 2.0, &no_params, &mut rng()).unwrap().volume, 0.5, "activates at t > start");
-        assert_eq!(st.step(&recs, 5.0, &no_params, &mut rng()).unwrap().volume, 0.0, "past the end: clamped at 0");
+        assert_eq!(st.step(&recs, &[], 0.5, &no_params, &mut rng()).unwrap().volume, 1.0, "not yet active");
+        assert_eq!(st.step(&recs, &[], 2.0, &no_params, &mut rng()).unwrap().volume, 0.5, "activates at t > start");
+        assert_eq!(st.step(&recs, &[], 5.0, &no_params, &mut rng()).unwrap().volume, 0.0, "past the end: clamped at 0");
         let mut st = AutomationState::default();
-        st.step(&recs, 1.5, &no_params, &mut rng()).unwrap();
-        assert_eq!(st.step(&recs, 0.0, &no_params, &mut rng()).unwrap().volume, 1.0, "before the start: clamped at 1");
+        st.step(&recs, &[], 1.5, &no_params, &mut rng()).unwrap();
+        assert_eq!(st.step(&recs, &[], 0.0, &no_params, &mut rng()).unwrap().volume, 1.0, "before the start: clamped at 1");
     }
 
     #[test]
     fn pitch_ramps_add_and_overrides_persist() {
         let recs = [ramp(Target::Pitch, 0.0, 1.0, 0.0, 12.0, 0), ramp(Target::Pitch, 0.0, 1.0, -2.0, -2.0, 1)];
         let mut st = AutomationState::default();
-        let out = st.step(&recs, 0.5, &no_params, &mut rng()).unwrap();
+        let out = st.step(&recs, &[], 0.5, &no_params, &mut rng()).unwrap();
         assert_eq!(out.pitch, 6.0);
         assert!(out.override_active);
         assert_eq!(out.override_pitch, -2.0);
@@ -480,9 +515,9 @@ mod tests {
         let recs = [lfo];
         let mut st = AutomationState::default();
         // phase index = trunc(0.25 × 8192 + 0.5) = 2048 → sin = 1.0 → 1 + 2 = 3 semitones.
-        assert_eq!(st.step(&recs, 0.25, &no_params, &mut rng()).unwrap().pitch, 3.0);
-        assert_eq!(st.step(&recs, 1.0, &no_params, &mut rng()).unwrap().pitch, 1.0, "applies on its last step");
-        assert_eq!(st.step(&recs, 1.5, &no_params, &mut rng()).unwrap().pitch, 0.0, "then leaves");
+        assert_eq!(st.step(&recs, &[], 0.25, &no_params, &mut rng()).unwrap().pitch, 3.0);
+        assert_eq!(st.step(&recs, &[], 1.0, &no_params, &mut rng()).unwrap().pitch, 1.0, "applies on its last step");
+        assert_eq!(st.step(&recs, &[], 1.5, &no_params, &mut rng()).unwrap().pitch, 0.0, "then leaves");
     }
 
     #[test]
@@ -491,21 +526,42 @@ mod tests {
         let recs = [c];
         let mut st = AutomationState::default();
         let half = |_: u32| Ok(0.5f32);
-        assert_eq!(st.step(&recs, 0.1, &half, &mut rng()).unwrap().volume, 0.25);
+        assert_eq!(st.step(&recs, &[], 0.1, &half, &mut rng()).unwrap().volume, 0.25);
         let beyond = |_: u32| Ok(2.0f32);
         assert_eq!(
-            st.step(&recs, 0.2, &beyond, &mut rng()),
+            st.step(&recs, &[], 0.2, &beyond, &mut rng()),
             Err(AutomationError::PastLastPoint { param: 7, value: 2.0 })
         );
         let mut st = AutomationState::default();
-        assert_eq!(st.step(&recs, 0.1, &no_params, &mut rng()), Err(AutomationError::ParameterUnset { param: 7 }));
+        assert_eq!(st.step(&recs, &[], 0.1, &no_params, &mut rng()), Err(AutomationError::ParameterUnset { param: 7 }));
     }
 
+    /// Retail `0xD8CE1427`: event 0 is kind 9 on curve 0 (a global parameter, absent here → −1.0),
+    /// curve 1 none; its output 1 keeps the state's initial 1.0.
     #[test]
-    fn filter_curves_stop_playback_when_reached() {
+    fn kind9_evaluates_the_cue_curves_into_the_filter_parameters() {
+        let curves = [Automation::Curve {
+            kind: CurveKind::Cue,
+            unknown_04: 0,
+            param: 0xD913_464B,
+            points: vec![(0.0, 0.65), (0.401869, 0.65), (0.56, 0.03), (1.0, 0.018072)],
+        }];
         let recs = [Automation::Kind9 { start_bits: 0, curve_a: 0, curve_b: u32::MAX }];
+        let global = |_: u32| Ok(-1.0f32);
         let mut st = AutomationState::default();
-        assert_eq!(st.step(&recs, 0.1, &no_params, &mut rng()), Err(AutomationError::Unsupported { kind: 9 }));
+        assert_eq!(st.filter_params(), (1.0, 1.0));
+        st.step(&recs, &curves, 0.02, &global, &mut rng()).unwrap();
+        assert_eq!(st.filter_params(), (0.65, 1.0));
+        let half = |_: u32| Ok(0.48f32);
+        st.step(&recs, &curves, 0.04, &half, &mut rng()).unwrap();
+        let want = (0.03f32 - 0.65) / (0.56 - 0.401869) * (0.48 - 0.401869) + 0.65;
+        assert_eq!(st.filter_params(), (want, 1.0), "re-evaluated every step while active");
+        let bad = [Automation::Kind9 { start_bits: 0, curve_a: 3, curve_b: u32::MAX }];
+        let mut st = AutomationState::default();
+        assert_eq!(
+            st.step(&bad, &curves, 0.02, &global, &mut rng()),
+            Err(AutomationError::CurveIndex { index: 3, curves: 1 })
+        );
     }
 
     /// Retail `ambience` cue 0 (guid 0x0CA03B08), track 1: every record channel jittered.
@@ -524,7 +580,7 @@ mod tests {
         let recs = [Automation::Kind4 { words }];
         let mut st = AutomationState::default();
         let mut r = rng();
-        let out = st.step(&recs, 3.0, &no_params, &mut r).unwrap();
+        let out = st.step(&recs, &[], 3.0, &no_params, &mut r).unwrap();
         let mut expect_rng = rng();
         let off = f32::from_bits(0x3D81_3855);
         let jit = |r: &mut PalRng, base: f32| ((r.next_unit() - 0.5) * 2.0 + off + base).clamp(0.0, 1.0);
@@ -535,7 +591,7 @@ mod tests {
         let c2 = jit(&mut expect_rng, 0.5);
         assert_eq!(out.channels, [c0, c1, c3, c4, c2, 0.25], "record channels 0, 1, 3, 4, 2, 5");
         assert_eq!(r, expect_rng, "one draw per flagged channel, nothing else");
-        assert_eq!(st.step(&recs, 3.1, &no_params, &mut r).unwrap().channels, [1.0; 6], "one step only");
+        assert_eq!(st.step(&recs, &[], 3.1, &no_params, &mut r).unwrap().channels, [1.0; 6], "one step only");
     }
 
     #[test]
@@ -547,7 +603,7 @@ mod tests {
         ];
         let mut st = AutomationState::default();
         assert_eq!(st.child_cue(), None);
-        st.step(&recs, 0.6, &no_params, &mut rng()).unwrap();
+        st.step(&recs, &[], 0.6, &no_params, &mut rng()).unwrap();
         assert_eq!(st.child_cue(), Some(0xC0FFEE));
         st.rewind(&recs, 0.25);
         assert_eq!(st.next, 1, "the first record starting at or after 0.25");
