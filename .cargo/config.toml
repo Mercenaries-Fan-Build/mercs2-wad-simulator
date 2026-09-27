@@ -1,2 +1,7 @@
 # Cargo configuration for wad_simulator workspace
 # CI handles cross-compilation toolchain setup
+
+# `cargo xtask <cmd>` runs the workspace's own tools (see the `xtask` crate). `cargo xtask publish`
+# is the crates.io release tool that replaced publish_release.sh / .ps1.
+[alias]
+xtask = "run --quiet --package xtask --"
