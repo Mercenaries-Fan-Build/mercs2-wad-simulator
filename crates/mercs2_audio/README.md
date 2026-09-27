@@ -136,9 +136,11 @@ facts that matter most:
   frame), its velocity becomes the finite difference `(new − old) / dt` (zero when `dt` is 0), and a
   record with no cues left is freed. The engine never reads a physics velocity; this difference is
   what the Doppler factor sees. A cue started with `cue_sound(cue, Some(position))` has its own
-  emitter, which `update_emitter` moves the same way. An object with no position leaves its emitter
-  where it is; the engine then also stops the record's cues that loop for ever (`FUN_00603D20`),
-  which is not modelled here (a `CONFIRM-LIVE` in `engine.rs`).
+  emitter, which `update_emitter` moves the same way. An object with no position (one gone from the
+  sound object table) leaves its emitter where it is, and its record's cues that loop for ever — a
+  cue, track or group loop count of `0xFF` (`FUN_00835910`) — are stopped as `Sound.StopSound` stops
+  a cue (`FUN_00603D20(0, 0, 1)` → `FUN_00835720`); its finite cues play to their end, and the record
+  is freed once they have.
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
