@@ -202,14 +202,23 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("_GetLibVersion", lua.create_function(move |_, ()| Ok(h.borrow().sound_lib_version()))?)?;
 
-    // --- test cue variants (same `(emitter, cue)` shape, same playback path) ---
-    // TestCueSound plays 2D (object 0), as it did before `sound_cue` took an emitter. Retail's shim
-    // (`FUN_005E0DB0`) differs: it reads one argument, the cue name, and posts the CueSound message
-    // for an object it looks up itself (`FUN_006CD960(0)` → `FUN_006CDAF0`, the object's `+0x20`).
-    // That shape is not reconciled here.
+    // --- test cue variants ---
+    // `Sound.TestCueSound(sCue)` (shim `FUN_005E0DB0`) takes one argument, the cue name
+    // (`FUN_0059FA40`, hashed by `FUN_00824270` at `0x005E0DFB`), and finds the object itself: local
+    // player slot 0 (`FUN_006CD960(0)`, `0x005E0E04`: the first joined, local record's index `+0x2C`)
+    // → that player (`FUN_006CDAF0`, `0x005E0E0A`) → its attached character `+0x20` (`0x005E0E16`) —
+    // the lookup `Player.GetLocalCharacter()` with no argument makes (`0x005DE1F2`..`0x005DE21F`).
+    // With no such player, or one with no character (`0x005E0E14` / `0x005E0E1B`), it posts nothing;
+    // otherwise it posts the `CueSound` message `{0, character, 4, 0, −1.0, hash, 0}`
+    // (`0x005E0E29`..`0x005E0E54`), so the cue plays on the character's emitter. It returns no value
+    // (`xor eax, eax` at `0x005E0E5A`).
     let h = host.clone();
-    b.real("TestCueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
-        Ok(voice_opt(h.borrow_mut().sound_cue(0, &cue)))
+    b.real("TestCueSound", lua.create_function(move |_, cue: String| {
+        let character = h.borrow().player_world_ref().and_then(|w| w.roster.local()).map(|p| p.character);
+        if let Some(character) = character.filter(|&c| c != 0) {
+            h.borrow_mut().sound_cue(character, &cue);
+        }
+        Ok(())
     })?)?;
     let h = host.clone();
     b.real("TestStopSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {
