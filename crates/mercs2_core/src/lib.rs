@@ -25,6 +25,7 @@
 //! | [`object_filter`] | The `ObjectFilter.*` script query: label boolean-expression + include/exclude sets. |
 //! | [`render_state`] | The `Atmosphere` / `Bloom` / `Graphics` / `Fade` parameter state the render passes read. |
 //! | [`physics_query`] | The `PhysicsQuery` collision-query seam the sim systems compile against (no leaf→leaf edge to `mercs2_physics`). |
+//! | [`random`] | The engine's linear congruential generator and the game's global random state (`DAT_00DFCBAC`). |
 //!
 //! Name hashing is **caller-supplied** throughout: [`registry`], [`event`] and [`guidmap`] all key on
 //! a precomputed `u32` (the engine hash lives at the byte-decode boundary in `mercs2_formats`), so
@@ -60,6 +61,10 @@ pub mod streaming;
 /// / hkpCharacterProxy move).
 pub mod physics_query;
 pub use physics_query::{PhysicsQuery, RayHit};
+
+/// The engine's random generator and the game's global random state `DAT_00DFCBAC` (see
+/// `random.rs`): [`Lcg`](random::Lcg), and the seed the game-wide instance starts from.
+pub mod random;
 
 /// The `LocomotionQuery` seam (see `locomotion_query.rs`): [`PhysicsQuery`] plus the two world probes
 /// on-foot movement needs — ground height under the feet and the water column overhead. Keeps
