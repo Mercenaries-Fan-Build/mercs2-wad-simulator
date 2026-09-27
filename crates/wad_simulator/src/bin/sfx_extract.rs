@@ -99,7 +99,7 @@ fn global_cue_map(
             };
             let Ok(db) = SoundDb::parse(&body) else { continue };
             for c in &db.cues {
-                map.entry((c.bank_hash, c.wave_index)).or_insert(c.guid);
+                map.entry((c.bank_hash, c.cue_index)).or_insert(c.guid);
             }
         }
     }
@@ -323,7 +323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Ok(db) = SoundDb::parse(&body) else { continue };
             for c in &db.cues {
                 // Overwrites the global seed: a bank's own sounddb is the more specific route.
-                cue_of.insert((c.bank_hash, c.wave_index), c.guid);
+                cue_of.insert((c.bank_hash, c.cue_index), c.guid);
             }
         }
 
@@ -366,7 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             let Some(body) = parsed.containers.get(i).and_then(|c| extract_data_chunk(c)) else { continue };
-            let bank = Wavebank::parse(&body);
+            let bank = Wavebank::parse(&body)?;
             if bank.clips.is_empty() {
                 continue;
             }
