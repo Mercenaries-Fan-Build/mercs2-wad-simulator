@@ -49,6 +49,9 @@ pub struct PcmSource {
     step: f64,
     /// The mixer rate the step is computed against (`None` for a source built at the mixer rate).
     dst_rate: Option<u32>,
+    /// Wave loops left (the wave's `+0xBC`): at the end of the data a source with a non-zero count
+    /// wraps to the start and counts one down (`FUN_00839e90`); with 0 it ends.
+    loops: u32,
 }
 
 impl PcmSource {
@@ -60,6 +63,7 @@ impl PcmSource {
             pos: 0.0,
             step: 1.0,
             dst_rate: None,
+            loops: 0,
         }
     }
 
@@ -76,7 +80,19 @@ impl PcmSource {
             pos: 0.0,
             step,
             dst_rate: Some(dst_rate),
+            loops: 0,
         }
+    }
+
+    /// Play the wave `1 + loops` times back to back, as the engine plays a wave whose loop count is
+    /// `loops` (a multi-wave group's `+0x2C`, carried to the wave's `+0xBC` by `FUN_00837830`). At the
+    /// end of the data `FUN_00839e90` reads the count (wave vtable `+0x110`, `0x0099C6C0`): 0 stops
+    /// the wave; otherwise the read position drops by the data length — so playback resumes at the
+    /// start, keeping the overshoot — and, the count being positive, it is set to count − 1 (vtable
+    /// `+0x114`, `0x00839230`). `0xFF` is 255 like any other count: 256 plays.
+    pub fn with_loops(mut self, loops: u32) -> PcmSource {
+        self.loops = loops;
+        self
     }
 
     /// Play on at `src_rate` Hz (a pitch change): the step becomes `src_rate / dst_rate`. Only a source
@@ -108,6 +124,8 @@ impl PcmSource {
         let s0 = self.data[base * self.channels + c] as f64;
         let s1 = if base + 1 < frames {
             self.data[(base + 1) * self.channels + c] as f64
+        } else if self.loops > 0 {
+            self.data[c] as f64
         } else {
             s0
         };
@@ -120,7 +138,14 @@ impl SampleSource for PcmSource {
         let want = out.len() / channels;
         let frames = self.frames();
         let mut written = 0;
-        while written < want && (self.pos as usize) < frames {
+        while written < want {
+            if (self.pos as usize) >= frames {
+                if self.loops == 0 || frames == 0 {
+                    break;
+                }
+                self.pos -= frames as f64;
+                self.loops -= 1;
+            }
             for ch in 0..channels {
                 // mono→stereo duplicates; stereo→stereo passes through — with linear resampling.
                 out[written * channels + ch] = self.sample_at(self.pos, ch);
@@ -131,7 +156,7 @@ impl SampleSource for PcmSource {
         written
     }
     fn is_finished(&self) -> bool {
-        (self.pos as usize) >= self.frames()
+        (self.pos as usize) >= self.frames() && self.loops == 0
     }
     fn reset(&mut self) {
         self.pos = 0.0;
@@ -333,7 +358,7 @@ impl Mixer {
     /// **MixSources** (`FUN_00836610`): render `frames` frames of every audible voice into `out`
     /// (interleaved, `channels`-wide). Uses an int32 accumulator then saturates to int16 — exactly
     /// the exe's PrepareMix→MixWave→Commit pipeline (§3.4). Per-voice gain is
-    /// `base_gain × fade × category_gain(cat) × channel_gain`. Voices whose source runs dry are
+    /// `clamp01(base_gain × fade × category_gain(cat)) × channel_gain`. Voices whose source runs dry are
     /// finished via [`VoicePool::mark_finished`] (looping voices are rewound). Runs with **no device**.
     ///
     /// `category_gain(category_id) -> f32` supplies the [`crate::categories::Categories`] contribution;
@@ -363,7 +388,9 @@ impl Mixer {
                 _ => continue, // not playing (start-delay, paused, stopping, …) — contributes silence
             };
             let cat_gain = category_gain(voice.category as u32);
-            let base = (voice.gain * voice.fade * cat_gain).clamp(0.0, 4.0);
+            // FUN_00836c70 clamps an instance's final volume to [0, 1] before the wave's SetVolume
+            // (0x008373AA..0x008373D5, then wave vtable +0x104 at 0x008373E4).
+            let base = (voice.gain * voice.fade * cat_gain).clamp(0.0, 1.0);
             if base <= 0.0 {
                 continue;
             }
@@ -420,4 +447,52 @@ pub fn rms_i16(buf: &[i16]) -> f32 {
     }
     let sum: f64 = buf.iter().map(|&s| (s as f64) * (s as f64)).sum();
     (sum / buf.len() as f64).sqrt() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voice::VoiceRequest;
+
+    fn drain(src: &mut PcmSource, frames: usize) -> Vec<i16> {
+        let mut out = vec![0i16; frames];
+        let n = src.fill(&mut out, 1);
+        out.truncate(n);
+        out
+    }
+
+    /// A loop count of 1 plays the wave twice; the wrap drops the position by the data length, so
+    /// an overshoot carries into the repeat (`FUN_00839e90`).
+    #[test]
+    fn a_loop_count_plays_the_wave_count_plus_one_times() {
+        let mut once = PcmSource::new(vec![10, 20, 30], 1);
+        assert_eq!(drain(&mut once, 8), vec![10, 20, 30]);
+        assert!(once.is_finished());
+        let mut twice = PcmSource::new(vec![10, 20, 30], 1).with_loops(1);
+        assert_eq!(drain(&mut twice, 8), vec![10, 20, 30, 10, 20, 30]);
+        assert!(twice.is_finished());
+        // Step 2 over 3 frames: positions 0, 2, then 4 wraps to 1, then 3 ends it.
+        let mut stepped = PcmSource::with_rate(vec![10, 20, 30], 1, 2, 1).with_loops(1);
+        assert_eq!(drain(&mut stepped, 8), vec![10, 30, 20]);
+    }
+
+    /// The final volume is clamped to [0, 1] before the voice is mixed (`0x008373AA`).
+    #[test]
+    fn the_final_volume_is_clamped_to_one() {
+        let render = |gain: f32| {
+            let mut pool = VoicePool::new(4);
+            let mut mixer = Mixer::new(MixerConfig { sample_rate: 44100, channels: 1 });
+            let id = pool.acquire(&VoiceRequest::default()).unwrap();
+            pool.get_mut(id).unwrap().gain = gain;
+            mixer.attach(id, Box::new(PcmSource::new(vec![1000; 16], 1)));
+            pool.tick(0.0); // Starting → CreatingWave
+            pool.tick(0.0); // → Playing
+            let mut out = vec![0i16; 8];
+            mixer.mix(&mut pool, &mut out, |_| 1.0);
+            out[0]
+        };
+        assert_eq!(render(1.0), 1000);
+        assert_eq!(render(2.5), 1000, "clamped to 1");
+        assert_eq!(render(0.5), 500);
+    }
 }
