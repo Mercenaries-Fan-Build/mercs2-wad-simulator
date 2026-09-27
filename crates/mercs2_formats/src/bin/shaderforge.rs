@@ -10,6 +10,11 @@
 //!   disasm     <shader3.bin> <rec>        disassemble one record's SM3.0 body (recovery surface)
 //!   roles      <shader3.bin> [role]       classify every record by CTAB signature; `role` filters
 //!                                         (e.g. `roles shader3.bin fullscreen` = sky/post candidates)
+//!   asm        <in.asm> <out.sho> [--target vs_3_0|ps_3_0]
+//!                                         assemble SM3 text (the `disasm` syntax) into a blob; with
+//!                                         `--target`, refuse a source whose profile differs
+//!   store-id   <stem> [--low]             the record id a registered `<stem>.sho` is stored under:
+//!                                         pandemic_hash_m2(stem + "_3.sho"), or "_3l.sho" with --low
 //!
 //! The splice is the CTAB-driven operand redirect documented in
 //! `docs/reverse_engineer/density_render_instancing_design.md` §2.1: it moves the
@@ -17,9 +22,10 @@
 //! inputs, leaving the shared ViewProj (`viewContextData`) and all math untouched.
 
 use mercs2_formats::shader3::{
-    classify_role, disassemble, parse_ctab, splice_instanced_world, verify_splice, ShaderKind,
-    ShaderRole, Store,
+    classify_role, disassemble, parse_ctab, splice_instanced_world, store_id, verify_splice,
+    ShaderKind, ShaderRole, Store,
 };
+use mercs2_formats::sm3asm;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -32,9 +38,11 @@ fn main() -> ExitCode {
         Some("bundle") => cmd_bundle(&args),
         Some("disasm") => cmd_disasm(&args),
         Some("roles") => cmd_roles(&args),
+        Some("asm") => cmd_asm(&args),
+        Some("store-id") => cmd_store_id(&args),
         _ => {
             eprintln!(
-                "usage: shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out]"
+                "usage: shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out]\n       shaderforge asm <in.asm> <out.sho> [--target vs_3_0|ps_3_0]\n       shaderforge store-id <stem> [--low]"
             );
             return ExitCode::from(2);
         }
@@ -229,10 +237,9 @@ fn cmd_disasm(args: &[String]) -> R {
     Ok(())
 }
 
-/// Classify every record by CTAB signature (the only static identity handle: `id != FNV(name)`).
-/// With an optional `role` argument, list only matching records; else print a role histogram + the
-/// W5 sky/decal candidate buckets. NOTE: buckets are candidate classes, not proven `Pg*` names —
-/// mapping a member to its exact name is confirm-live (the `%0x1200` id→blob table).
+/// Classify every record by CTAB signature. With an optional `role` argument, list only matching
+/// records; else print a role histogram + the W5 sky/decal candidate buckets. NOTE: buckets are
+/// candidate classes, not `Pg*` names — a record's name comes from its id (see `store-id`).
 fn cmd_roles(args: &[String]) -> R {
     let store = load(args)?;
     let filter = args.get(3).map(|s| s.to_ascii_lowercase());
@@ -259,7 +266,7 @@ fn cmd_roles(args: &[String]) -> R {
         for (k, v) in &hist {
             println!("  {k:<14} {v}");
         }
-        println!("(buckets are CTAB-signature candidates, NOT proven Pg* names — id->name is confirm-live)");
+        println!("(buckets are CTAB-signature candidates, NOT Pg* names — name a record by its id: `store-id`)");
     }
     Ok(())
 }
@@ -298,5 +305,58 @@ fn cmd_splice(args: &[String]) -> R {
     } else {
         println!("  (pass an output path to write the spliced vs_3_0 blob)");
     }
+    Ok(())
+}
+
+/// Assemble SM3 text into a `.sho` blob.
+fn cmd_asm(args: &[String]) -> R {
+    let mut positional = Vec::new();
+    let mut target: Option<String> = None;
+    let mut rest = args.iter().skip(2);
+    while let Some(a) = rest.next() {
+        if a == "--target" {
+            target = Some(rest.next().ok_or("--target needs vs_3_0 or ps_3_0")?.clone());
+        } else if a.starts_with("--") {
+            return Err(format!("unknown option {a}").into());
+        } else {
+            positional.push(a);
+        }
+    }
+    let [input, output] = positional[..] else {
+        return Err("usage: shaderforge asm <in.asm> <out.sho> [--target vs_3_0|ps_3_0]".into());
+    };
+    let text = std::fs::read_to_string(input)?;
+    let blob = sm3asm::assemble(&text).map_err(|e| format!("{input}: {e}"))?;
+    let version = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    let profile = sm3asm::profile_name(version).ok_or("assembler produced an unknown version token")?;
+    if let Some(t) = &target {
+        if sm3asm::profile_version(t).is_none() {
+            return Err(format!("--target {t} is not vs_3_0 or ps_3_0").into());
+        }
+        if t != profile {
+            return Err(format!("{input} is {profile}, --target asks for {t}").into());
+        }
+    }
+    std::fs::write(output, &blob)?;
+    println!("wrote {output}: {profile}, {} bytes", blob.len());
+    Ok(())
+}
+
+/// Print the store record id of a registered `.sho` stem.
+fn cmd_store_id(args: &[String]) -> R {
+    let mut stem: Option<&String> = None;
+    let mut low = false;
+    for a in &args[2..] {
+        match a.as_str() {
+            "--low" => low = true,
+            o if o.starts_with("--") => return Err(format!("unknown option {o}").into()),
+            _ if stem.is_some() => return Err("store-id takes one stem".into()),
+            _ => stem = Some(a),
+        }
+    }
+    let stem = stem.ok_or("usage: shaderforge store-id <stem> [--low]")?;
+    let id = store_id(stem, low)?;
+    let suffix = if low { "_3l.sho" } else { "_3.sho" };
+    println!("0x{id:08x}  {stem}{suffix}  ({})", if low { "shader3Low.bin" } else { "shader3.bin" });
     Ok(())
 }

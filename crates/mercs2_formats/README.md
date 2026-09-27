@@ -103,6 +103,11 @@ cargo run -p mercs2_formats --bin gfx_golden
 
 # conform a novel rigid mesh into a real vehicle/static donor container
 cargo run -p mercs2_formats --bin inject_static -- --help
+
+# assemble SM3 text into a .sho blob, and name the store record a registered .sho lives under
+cargo run -p mercs2_formats --bin shaderforge -- asm magenta.asm magenta.sho --target ps_3_0
+cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP          # 0xc91c0187, shader3.bin
+cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP --low    # 0xa759fdb9, shader3Low.bin
 ```
 
 ## Modules
@@ -144,6 +149,8 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | `atmosphere` | `Graphics.Atmosphere.*` sky / HDR tone-map / bloom parameter model. |
 | `fxdict` | FX cluster: the resident `fxdict` (`INFO`/`DICT`) and the typed effect tree — `parse_effect_container` / `write_effect_container`, computed `EFCT`; all 314 retail effects re-encode byte for byte. |
 | `gfx` | Scaleform GFx / SWF tag-stream parser and feature inventory. |
+| `shader3` | The PC shader stores (`shader3*.bin`, `shaderVT*.bin`, `shaderR2VB*.bin`): parse, record ids (`store_id`), `StoreBuilder` (retail-layout rewrite, replace in place, append, loader-limit refusals), the `vs_3_0` instancing splice. |
+| `sm3asm` | D3D9 Shader Model 3 assembler + exact disassembler, CTAB included; `assemble(disassemble(blob)) == blob` for every retail record. |
 | `save` | PC `.profile` save parser (13,404 bytes; zlib Lua payload at `0x468`). |
 | `save_write` | The inverse: rebuild the container and stamp a correct `ProfileHash`. |
 | `patch_wad` | FFCS patch-WAD assembly — the canonical serializer for a PC `vz-patch.wad`. |
