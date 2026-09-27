@@ -600,9 +600,20 @@ pub struct TerrainTile {
 /// Load every hi-res terrain-tile placement from a decompressed UCFX block: parse the `TerrainObject`
 /// COMP (`key -> terrainmesh_hash`) and join it to the `Transform` COMP (`key -> pos/quat`) by entity
 /// key within each sub-block. Coordinates stay native game space (LH, +Y up); no flips.
-pub fn load_terrain_tiles(block: &[u8]) -> Vec<TerrainTile> {
-    load_keyed_asset_placements(block, "TerrainObject")
-        .0
+///
+/// Fails, naming the keys, when a `TerrainObject` record has no `Transform` in its sub-block. No retail
+/// record does: all 400 `TerrainObject` records across every `layers_static` / `vz_state_*` layer have
+/// one (`tests/terrainmesh_retail.rs::every_terrain_and_scrub_object_has_a_transform`). A tile without a
+/// position cannot be placed, so it is an error rather than a tile silently missing from the world.
+pub fn load_terrain_tiles(block: &[u8]) -> Result<Vec<TerrainTile>, String> {
+    let (joined, orphans) = load_keyed_asset_placements(block, "TerrainObject");
+    if !orphans.is_empty() {
+        return Err(format!(
+            "TerrainObject record(s) with no Transform in their sub-block: {:08X?}",
+            orphans
+        ));
+    }
+    Ok(joined
         .into_iter()
         .map(|(key, terrainmesh_hash, pos, quat)| TerrainTile {
             key,
@@ -610,7 +621,7 @@ pub fn load_terrain_tiles(block: &[u8]) -> Vec<TerrainTile> {
             pos,
             quat,
         })
-        .collect()
+        .collect())
 }
 
 /// One ground-cover placement: its `0x600B904E` scrub asset hash and the world transform of its owning
@@ -626,7 +637,7 @@ pub struct ScrubPlacement {
 
 /// Load every `ScrubObject` placement from a decompressed UCFX block (the `{key, scrub_hash}` COMP joined
 /// to `Transform` by key within each sub-block). Fails, naming the keys, when a `ScrubObject` record has
-/// no `Transform` in its sub-block — such a scrub has no position.
+/// no `Transform` in its sub-block — such a scrub has no position. No retail record does (1,043/1,043).
 pub fn load_scrub_placements(block: &[u8]) -> Result<Vec<ScrubPlacement>, String> {
     let (joined, orphans) = load_keyed_asset_placements(block, "ScrubObject");
     if !orphans.is_empty() {
