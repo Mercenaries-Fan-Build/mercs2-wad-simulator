@@ -139,7 +139,8 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | `world_index` | Layer-1 world block index: class, LOD tier/variant, state overlay, spatial extent of every block. |
 | `world` | World spatial constants used for validation. |
 | `terrain` | Low-resolution world terrain loader. |
-| `terrainmesh` | Hi-res terrain cells (`0x7C569307`): byte-exact decode/encode of all 400, vertical displacement with normal + bounds recompute, triangle-strip codec, collision rebuild from the render triangles. Retail gates in `tests/terrainmesh_retail.rs`. |
+| `terrainmesh` | Hi-res terrain cells (`0x7C569307`): byte-exact decode/encode of all 400, vertical displacement with normal + tangent + bounds recompute, triangle-strip codec, collision rebuild from the render triangles. Retail gates in `tests/terrainmesh_retail.rs`. |
+| `scrub` | Ground cover (`0x600B904E`): byte-exact decode/encode of all 1,026 containers; `follow_ground` keeps instances on a displaced terrain cell. Retail gates in `tests/scrub_retail.rs`. |
 | `atmosphere` | `Graphics.Atmosphere.*` sky / HDR tone-map / bloom parameter model. |
 | `fxdict` | FX cluster: `fxdict` `DICT` + effect-template key chunks. |
 | `gfx` | Scaleform GFx / SWF tag-stream parser and feature inventory. |
