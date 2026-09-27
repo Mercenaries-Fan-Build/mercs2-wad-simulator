@@ -34,7 +34,7 @@
 //!   +0x08 u32  0
 //!   +0x0C u32  form: 0 = single-wave (64 bytes), 1 = multi-wave (0x68 + 12 × waves bytes)
 //!   +0x10 f32  unknown        +0x14 u32 0 | 1          +0x18 f32 min distance   +0x1C f32 max distance
-//!   +0x20 f32  unknown        +0x24 f32 pitch          +0x28 f32 unknown
+//!   +0x20 f32  unknown        +0x24 f32 distance exponent   +0x28 f32 Doppler scale
 //! single-wave form
 //!   +0x2C f32  base volume (FUN_0083d770)   +0x30 f32 base pitch, semitones (FUN_0083d700)
 //!   +0x34 wave {wavebank hash, wave index, f32 weight}
@@ -54,9 +54,13 @@
 //!   +0x68 wave count × {wavebank hash, wave index, f32 weight}
 //! ```
 //!
-//! The names "min/max distance" and the head's "pitch" are INFERRED from the values they hold (e.g.
-//! 10/1000, 0.5–1.5), not from engine code; the base volume, base pitch, start delay and loop count
-//! are read in the engine functions named. How the engine picks a wave is in [`crate::select`].
+//! `+0x14`..`+0x2B` are the 3D parameters: when an instance plays through an emitter,
+//! `FUN_00837830` (`0x00837C08`) hands `group + 0x14` to the wave (vtable `+0x60`, `0x00838F70`), which
+//! copies the 24 bytes to its `+0x5C`. `+0x14` then gates the distance volume (`FUN_00839ae0`), which
+//! `FUN_0083d3a0` computes from `+0x18` (minimum distance), `+0x1C` (maximum distance) and `+0x24` (the
+//! exponent); `+0x28` scales the source's Doppler factor (`FUN_0083b120`, via wave `+0x70`). `+0x14` also
+//! makes the instance positional (`FUN_00837830`, `0x008378A9`). The base volume, base pitch, start
+//! delay and loop count are read in the engine functions named. How the engine picks a wave is in [`crate::select`].
 //!
 //! **Cue** — two forms, told apart by the byte at `+0x05`:
 //!
@@ -113,18 +117,19 @@ pub struct GroupHead {
     pub category: u32,
     /// `+0x10`, unknown.
     pub unknown_10: f32,
-    /// `+0x14`, 0 or 1 in every retail group, unknown meaning.
+    /// `+0x14`, 0 or 1 in every retail group: the instance is positional and the wave takes a distance
+    /// volume (module docs).
     pub unknown_14: u32,
-    /// `+0x18` minimum distance (inferred name).
+    /// `+0x18` minimum distance: full volume up to it (`FUN_0083d3a0`).
     pub min_distance: f32,
-    /// `+0x1C` maximum distance (inferred name).
+    /// `+0x1C` maximum distance: silent from it (`FUN_0083d3a0`).
     pub max_distance: f32,
     /// `+0x20`, unknown (1.0 in all but one retail group).
     pub unknown_20: f32,
-    /// `+0x24` pitch (inferred name).
-    pub pitch: f32,
-    /// `+0x28`, unknown.
-    pub unknown_28: f32,
+    /// `+0x24` the distance fall-off exponent (`FUN_0083d3a0`).
+    pub distance_exponent: f32,
+    /// `+0x28` the Doppler scale (`FUN_0083b120`).
+    pub doppler_scale: f32,
 }
 
 /// The multi-wave form's fields after the common head.
@@ -513,8 +518,8 @@ fn parse_group(b: &[u8], g: usize, i: usize) -> Result<Group, SoundbankError> {
         min_distance: rdf(b, g + 0x18, "group min distance")?,
         max_distance: rdf(b, g + 0x1C, "group max distance")?,
         unknown_20: rdf(b, g + 0x20, "group +0x20")?,
-        pitch: rdf(b, g + 0x24, "group pitch")?,
-        unknown_28: rdf(b, g + 0x28, "group +0x28")?,
+        distance_exponent: rdf(b, g + 0x24, "group distance exponent")?,
+        doppler_scale: rdf(b, g + 0x28, "group Doppler scale")?,
     };
     let form = match rd32(b, g + 0x0C, "group form")? {
         0 => GroupForm::Single {
@@ -569,8 +574,8 @@ fn write_group(out: &mut Vec<u8>, g: &Group, i: usize) -> Result<(), SoundbankEr
     put_f32(out, h.min_distance);
     put_f32(out, h.max_distance);
     put_f32(out, h.unknown_20);
-    put_f32(out, h.pitch);
-    put_f32(out, h.unknown_28);
+    put_f32(out, h.distance_exponent);
+    put_f32(out, h.doppler_scale);
     match &g.form {
         GroupForm::Single { gain, unknown_30, wave } => {
             put_f32(out, *gain);
@@ -685,8 +690,8 @@ mod tests {
             min_distance: 10.0,
             max_distance: 1000.0,
             unknown_20: 1.0,
-            pitch: 1.0,
-            unknown_28: 1.0,
+            distance_exponent: 1.0,
+            doppler_scale: 1.0,
         }
     }
 
