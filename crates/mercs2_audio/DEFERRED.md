@@ -28,18 +28,20 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
 ## Voices / mixer
 
 - ~~**Real wave-bind on cue**~~ **DONE** — the engine resolves a cue the way the tables route it:
-  `sounddb` entry `{guid, soundbank hash, soundbank cue index}` → the resident soundbank's cue → its
-  group → the group's `{wavebank, wave index}` → the resident decoded clip (`AudioEngine::resolve_wave`,
-  after `load_soundbank` + `load_wavebank`). The three table layouts were measured on all of retail
-  `vz.wad` and re-encode byte-identically (`tests/retail_banks.rs`), including the Mercs2Globals
-  catalog (category tree + parameter hashes). Two earlier readings were wrong and are gone: the
-  sounddb's third field was read as a wave index, and the wavebank record's data offset as
-  body-relative (it is record-relative); together they "resolved" 589 of 807 resident cues, only 6 of
-  them to the right wave. Over all 1,198 retail cues the chain now reaches 282 single-wave cues and 102
-  multi-wave groups with every wave decoded. What it does not resolve is a parity gap, not an
-  improvement, so it is listed with the confirm-live targets in `audio_code_map.md` §10: the
-  multi-track cue layout (693 cues, carried verbatim), and how the engine picks among a multi-wave
-  group's weighted waves (`resolve_wave` reports `WaveSelectionUnknown` rather than guessing).
+  `sounddb` entry `{guid, soundbank hash, soundbank cue index}` → the resident soundbank's cue → every
+  sound of every track → the groups they pick → the waves → the resident decoded clip
+  (`AudioEngine::resolve_cue`), and picks among weighted groups and waves exactly as the engine does
+  (`AudioEngine::pick_cue`, `select`). The three table layouts, multi-track cues included, were measured
+  on all of retail `vz.wad` and re-encode byte-identically (`tests/retail_banks.rs`). Two earlier
+  readings were wrong and are gone: the sounddb's third field was read as a wave index, and the
+  wavebank record's data offset as body-relative (it is record-relative). Over all 1,198 retail cues
+  1,012 resolve with every `vz.wad` bank resident (1,019 with `English.wad`'s wavebanks too); the rest
+  reach `.pws`-streamed waves.
+- **Multi-track automation applied to voices** `[faithful-blocker: no]` — the volume / pitch ramps,
+  LFOs and parameter curves of a multi-track cue (`multitrack::Automation`, used by the track update
+  `FUN_0083b4a0`) are decoded and re-encoded but not applied to the voices `cue_sound` fires. Folding
+  them in needs the per-voice gain / pitch step that the Doppler item below also needs, plus the game
+  parameters the curves read.
 - **`.pws` stream voices** `[faithful-blocker: no]` — `OpenStreamFile`/`CloseStreamFile` record intent;
   the streamed-wave state machine (`PalSoundWaveDX8::Update` `FUN_00839870`, stream I/O mgr
   `DAT_011763f4`) that pumps `vo_stream.pws`/`music.pws`/`ambience.pws` chunks is not built here.
