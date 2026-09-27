@@ -201,6 +201,10 @@ pub struct Instance {
     /// Whether it plays from its emitter's (3D) source: its group's `+0x14` byte is set and the cue
     /// has a position.
     pub positional: bool,
+    /// The emitter (the cue it belongs to) whose source a positional instance mixes through.
+    pub emitter: u32,
+    /// Its wave carries the cue's kind-9 filter (`FUN_00839db0`).
+    pub filtered: bool,
     /// State 2: it is dropped at its sound list's next update.
     pub finished: bool,
 }
