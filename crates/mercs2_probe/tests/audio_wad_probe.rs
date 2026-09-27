@@ -71,9 +71,9 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     }
     assert!(found_banks > 0, "no resident wavebank resolved from the WAD by name");
 
-    let resolvable = catalog.cues.iter().filter(|c| eng.resolve_wave(c).is_ok()).count();
+    let resolvable = catalog.cues.iter().filter(|c| eng.resolve_cue(c).is_ok()).count();
     println!(
-        "\nEND-TO-END: {} resident clips, {} cues, {resolvable} resolve to a decoded wave",
+        "\nEND-TO-END: {} resident clips, {} cues, {resolvable} resolve through every path to decoded PCM",
         eng.resident_wave_count(),
         catalog.cues.len()
     );
@@ -84,7 +84,7 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     let cue = catalog
         .cues
         .iter()
-        .find(|c| eng.resolve_wave(c).is_ok())
+        .find(|c| eng.resolve_cue(c).is_ok())
         .expect("a resolvable cue");
     eng.cue_sound(cue.guid, None, None).expect("cue allocates a voice");
     for _ in 0..8 {
