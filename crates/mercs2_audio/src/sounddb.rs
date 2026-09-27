@@ -48,7 +48,10 @@ pub const FINDCUE_DIRECT_MAX: u32 = 0x401;
 pub const ASSET_TYPE_SOUNDDB: u32 = 0xE527_3C14;
 
 /// A cue-routing record. The three disk fields (`guid`, `bank_hash`, `cue_index`) route a cue name to
-/// a soundbank cue; the rest are play-time parameters with defaults.
+/// a soundbank cue; the rest are play-time parameters with defaults. The on-disk record is those 12
+/// bytes and nothing else, so it carries no looping, positional or streamed flag: a sound instance is
+/// positional when its group's `+0x14` byte is set (`FUN_00837830`, `0x008378A9`), its wave loops by
+/// its group's `+0x2C` count, and a wave streams when its wavebank is a streamed one (`+0x0A`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CueEntry {
     /// Cue name-hash (`Sound.CueSound("name")` hashes the name to this).
@@ -62,8 +65,6 @@ pub struct CueEntry {
     pub priority: u8,
     /// Category id (sfx/vo/music/…). Not in the record; defaults to 0 (sfx).
     pub category: u8,
-    /// Bit flags: bit0 = looping, bit1 = 3D-positional, bit2 = streamed. Defaults to 0.
-    pub flags: u16,
     /// Default linear gain (0..1) before category/attenuation. Defaults to 1.0.
     pub default_gain: f32,
     /// 3D attenuation: full volume within `min_dist` (0 = default).
@@ -81,23 +82,10 @@ impl CueEntry {
             cue_index,
             priority: 128,
             category: 0,
-            flags: 0,
             default_gain: 1.0,
             min_dist: 0.0,
             max_dist: 0.0,
         }
-    }
-    /// bit0 — the cue loops until explicitly stopped.
-    pub fn is_looping(&self) -> bool {
-        self.flags & 0x1 != 0
-    }
-    /// bit1 — 3D-positional (attenuated/panned against the closest listener).
-    pub fn is_positional(&self) -> bool {
-        self.flags & 0x2 != 0
-    }
-    /// bit2 — streamed from a `.pws` stream file rather than a resident wave bank.
-    pub fn is_streamed(&self) -> bool {
-        self.flags & 0x4 != 0
     }
 }
 
