@@ -8,7 +8,7 @@
 //! cargo test -p mercs2_probe --test audio_wad_probe -- --nocapture
 //! ```
 
-use mercs2_engine::audio::{AudioEngine, SoundDb};
+use mercs2_engine::audio::{AudioEngine, CueError, SoundDb};
 use mercs2_engine::wad;
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK};
@@ -79,14 +79,24 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     );
     assert!(resolvable > 0, "no cue routed to a resident decoded wave");
 
-    // Play the first resolvable cue through the real mixer path; assert it produced audible PCM.
+    // Play the first resolvable cue the engine starts through the real mixer path; assert it produced
+    // audible PCM. Only a cue whose looping or automation the engine refuses is passed over.
     eng.set_sounddb(catalog.clone());
-    let cue = catalog
-        .cues
-        .iter()
-        .find(|c| eng.resolve_cue(c).is_ok())
-        .expect("a resolvable cue");
-    eng.cue_sound(cue.guid, None, None).expect("cue allocates a voice");
+    let mut started = None;
+    for c in &catalog.cues {
+        if eng.resolve_cue(c).is_err() {
+            continue;
+        }
+        match eng.cue_sound(c.guid, None) {
+            Ok(_) => {
+                started = Some(c);
+                break;
+            }
+            Err(CueError::Looping { .. } | CueError::Automation(_)) => {}
+            Err(e) => panic!("cue 0x{:08X}: {e}", c.guid),
+        }
+    }
+    let cue = started.expect("a resolvable cue the engine starts");
     for _ in 0..8 {
         eng.tick(0.02);
     }
