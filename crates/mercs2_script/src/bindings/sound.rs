@@ -140,11 +140,12 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // `"268435456"`); once `Pg.GetGuidByName` returns lightuserdata that same signature **raises**,
     // which would abort the caller's chain. Hence the explicit `(Guid, String)`.
     //
-    // The emitter is accepted and not yet placed: `AudioEngine` has no per-emitter 3D voice pool, so
-    // playback is the 2D path either way. Tracked in the burn-down.
+    // The emitter reaches the host: the shim (`FUN_005E0FF0`) posts `{object, cue hash}` and the
+    // sound player starts the cue through the object's emitter record, whose emitter follows the
+    // object every frame (`mercs2_audio::AudioEngine::cue_sound_on_object`); object 0 plays 2D.
     let h = host.clone();
-    b.real("CueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
-        Ok(voice_opt(h.borrow_mut().sound_cue(&cue)))
+    b.real("CueSound", lua.create_function(move |_, (emitter, cue): (Guid, String)| {
+        Ok(voice_opt(h.borrow_mut().sound_cue(emitter.raw(), &cue)))
     })?)?;
     // Stop/pause are addressed by `(emitter, cue)`, but the host's stop is keyed by the voice id
     // `sound_cue` minted and there is no `(emitter, cue) → voice` index yet, so a cue-addressed stop
@@ -202,9 +203,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("_GetLibVersion", lua.create_function(move |_, ()| Ok(h.borrow().sound_lib_version()))?)?;
 
     // --- test cue variants (same `(emitter, cue)` shape, same playback path) ---
+    // TestCueSound plays 2D (object 0), as it did before `sound_cue` took an emitter. Retail's shim
+    // (`FUN_005E0DB0`) differs: it reads one argument, the cue name, and posts the CueSound message
+    // for an object it looks up itself (`FUN_006CD960(0)` → `FUN_006CDAF0`, the object's `+0x20`).
+    // That shape is not reconciled here.
     let h = host.clone();
     b.real("TestCueSound", lua.create_function(move |_, (_emitter, cue): (Guid, String)| {
-        Ok(voice_opt(h.borrow_mut().sound_cue(&cue)))
+        Ok(voice_opt(h.borrow_mut().sound_cue(0, &cue)))
     })?)?;
     let h = host.clone();
     b.real("TestStopSound", lua.create_function(move |_, (emitter, _cue): (Guid, Option<String>)| {
