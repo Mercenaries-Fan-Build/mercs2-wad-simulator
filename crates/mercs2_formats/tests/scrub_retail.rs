@@ -96,7 +96,7 @@ fn retail() -> Option<&'static Retail> {
                 }
                 let dec =
                     decompress_block(&mut f, &archive.indx, i as u16).expect("decompress layer");
-                for t in load_terrain_tiles(&dec) {
+                for t in load_terrain_tiles(&dec).unwrap_or_else(|e| panic!("{path}: {e}")) {
                     r.tiles.insert(t.terrainmesh_hash, t.pos);
                 }
                 let placed = load_scrub_placements(&dec).unwrap_or_else(|e| panic!("{path}: {e}"));
