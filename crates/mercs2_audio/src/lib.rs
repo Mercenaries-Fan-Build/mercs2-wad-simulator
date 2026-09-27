@@ -35,6 +35,9 @@
 //! * [`filter`] — the kind-9 biquad low-pass filter a wave carries (`FUN_0083f2d0`).
 //! * [`spatial`] — 4 listeners; an emitter source's speaker gains, distance volume and Doppler as the
 //!   mix computes them against listener 0; start delay.
+//! * [`emitter`] — an emitter's source holder (position, velocity) and the per-frame update that
+//!   moves it with its object (`FUN_006036C0`): a jitter drawn from the game's global random state
+//!   and the finite-difference velocity the Doppler factor reads.
 //! * [`categories`] — per-category volume/pitch fades + ref-counted master duck.
 //! * [`music`] — the dual-deck crossfading music state machine (`FUN_0082d7a0`).
 //! * [`banks`] — the 65-slot sound/wave bank load state machine.
@@ -57,6 +60,9 @@
 //! ([`automation`]), loop their tracks and the cue, and start child cues when they finish — one voice
 //! per sound instance (priority-steal if the pool is full), positional ones through their emitter's
 //! source (speaker gains, distance volume and Doppler against listener 0).
+//! [`AudioEngine::cue_sound_on_object`] is `Sound.CueSound(emitter, cue)`: the cue plays through its
+//! object's emitter, which [`AudioEngine::update_object_emitters`] moves with the object every frame
+//! ([`emitter`]), so a moving object's cues are Doppler-shifted.
 //! [`AudioEngine::stop_sound`] releases a cue the engine's way (tail child cues start).
 //! [`AudioEngine::tick`] also advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
 //! [`AudioEngine::pump`] feeds them to the device at wall-clock rate (a no-op when headless). Retail
@@ -70,7 +76,7 @@
 //! which breaks the 32-bit cross build.
 //!
 //! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, per-region music
-//! machines, emitter velocity) are enumerated in `DEFERRED.md`.
+//! machines, the device fold-down) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
 pub mod automation;
@@ -79,6 +85,7 @@ pub mod categories;
 pub mod filter;
 pub mod components;
 pub mod duration;
+pub mod emitter;
 pub mod encode;
 pub mod engine;
 mod le;
@@ -97,7 +104,8 @@ pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};
 pub use encode::{encode_bank, BankSpec, CueSpec, EncodedBank, EncodeError, Pcm16};
-pub use engine::{AudioEngine, CueError, CueHandle, ResolveError, ResolvedCue, SOUND_LIB_VERSION};
+pub use emitter::Holder;
+pub use engine::{AudioEngine, CueError, CueHandle, EmitterId, ResolveError, ResolvedCue, SOUND_LIB_VERSION};
 pub use mixer::{Mixer, MixerConfig, PcmSource, SampleSource, ToneSource};
 pub use music::{DeckState, MusicStateMachine};
 pub use soundbank::{Soundbank, SoundbankError};
