@@ -29,8 +29,10 @@
 //! * [`encode`] — builds a bank's wavebank + soundbank + sounddb: named PCM16 cues, or waves, groups
 //!   (single- and multi-wave) and cues (single- and multi-track) authored table by table.
 //! * [`voice`] — voice pool, priority-steal, the 16-state instance FSM (`FUN_00836c70`).
-//! * [`mixer`] — the software mixer (`FUN_00836610`): int32 accumulate → saturate int16, headless.
-//!   Per-voice resampling (clip rate → mixer rate) via [`PcmSource`].
+//! * [`mixer`] — the software mixer (`FUN_00836610`), headless: per source a 6-channel int32 scratch
+//!   the waves mix into (the wave kernel's gains and 32.32 step, [`PcmSource`]), each wave's filter
+//!   run over it, the commit into the accumulator, then saturation to int16.
+//! * [`filter`] — the kind-9 biquad low-pass filter a wave carries (`FUN_0083f2d0`).
 //! * [`spatial`] — 4 listeners, distance attenuation, stereo pan, Doppler, start-delay.
 //! * [`categories`] — per-category volume/pitch fades + ref-counted master duck.
 //! * [`music`] — the dual-deck crossfading music state machine (`FUN_0082d7a0`).
@@ -47,7 +49,7 @@
 //! [`AudioEngine::resolve_cue`] follows a cue through everything it can play — sounddb entry →
 //! soundbank cue → every track's sounds ([`multitrack`]) → every group they can pick → every wave →
 //! the resident clip. [`AudioEngine::cue_sound`] refuses what it cannot play faithfully ([`CueError`]:
-//! the filter curves, unset curve parameters, a refused child cue) and otherwise
+//! unset curve parameters, a filter scan past the event table, a refused child cue) and otherwise
 //! starts a playback ([`playback`]). Each [`AudioEngine::tick`] advances it the way the engine
 //! advances a cue: sounds fire at their start times, pick their groups and waves ([`select`]), draw
 //! their base volume, pitch and start delay, follow the cue's and track's automation
@@ -65,13 +67,14 @@
 //! [`sounddb`] + [`wave`]) can build with `default-features = false` and avoid linking `alsa-sys`,
 //! which breaks the 32-bit cross build.
 //!
-//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, the cue filter,
-//! per-region music machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
+//! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, per-region music
+//! machines, a positional source's speaker gains) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
 pub mod automation;
 pub mod banks;
 pub mod categories;
+pub mod filter;
 pub mod components;
 pub mod duration;
 pub mod encode;
