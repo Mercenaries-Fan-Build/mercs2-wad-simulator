@@ -9,9 +9,13 @@ machine, bank loader, voice-over arbitration and 3D positional audio.
 everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving the process:
 
 * **`sounddb` parsing** — the `'\x1d'`-tagged cue catalog that routes a cue GUID to
-  `(wavebank hash, wave index)`.
+  `(soundbank hash, soundbank cue index)`.
+* **`soundbank` parsing** — a bank's sound groups (which wave(s) a sound plays, with its category,
+  distances, pitch and gain) and its cues (which group a cue plays).
 * **`wavebank` decode** — turns a `LoadWaveBank` body into resident PCM clips (PCM16 + IMA-ADPCM
   decoders live here).
+* **Bank encoding** — builds a bank's wavebank, soundbank and sounddb from named PCM16 cues; every
+  one of the three codecs re-encodes all retail tables in `vz.wad` byte-identically.
 * **Voice pool** — allocation, priority-steal when the pool is full, and a 16-state per-instance FSM.
 * **Software mixer** — int32 accumulator → saturating clamp → interleaved int16, per-voice
   resampling from a clip's native rate to the mixer rate.
@@ -50,19 +54,38 @@ sound DB / music machine / banks). Anchors the source itself cites:
 The PC build has **no hardware voice pool** — the whole Xbox `PalSoundXenonVoiceManager` family has no
 PC counterpart — so voice contention is pure software priority-steal, which is what this crate models.
 
-Two on-disk layouts here were **calibrated against shipped WAD blocks**, not guessed:
+The three bank tables were **measured on every audio table in retail `vz.wad`** (95 wavebanks, 76
+soundbanks, 77 sounddbs), and `tests/retail_banks.rs` re-encodes each one byte-identically from its
+parsed records. The full byte layouts are in the module docs of `wave`, `soundbank` and `sounddb`; the
+facts that matter most:
 
-* The `sounddb` record is a **28-byte header + 12-byte entries** `{guid, bank_hash, wave_index}`,
-  reversed from the `veh_support` block. The earlier 16-byte guess read **0 cues** from every real
-  block. There is no priority/category/gain/distance on disk — the exe reads those from the wave
-  descriptor at play time.
-* The `wavebank` clip record is 36 bytes with `data_offset` at **+32** and `data_size` at **+12**
-  (bytes). Sorting clips by +32 makes every consecutive delta equal +12 for **1174/1174** clips in
-  `vz.wad` and **1071/1071** in `English.wad`. The format byte's `0x02` is a sample **width**, not an
-  IMA codec id — embedded clips are PCM16.
+* A cue resolves in four hops: `sounddb` entry `{guid, soundbank hash, cue index}` → that soundbank's
+  cue → the cue's group → the group's `{wavebank hash, wave index, weight}`. The sounddb's third field
+  is the **soundbank cue index**, not a wave index.
+* Every table starts with the `u32` version `0x1D` (at the wavebank's `+0` too — it is not a record
+  count), then the bank hash `m2(bank name)`.
+* A wavebank record's data offset (`+0x20`) is **relative to the record's own start**. Blobs follow
+  the record table in record order, each on a 16-byte boundary, and the body ends on one — the zero
+  fill after the last blob is why 54 wavebanks run past their last blob. Embedded clips are PCM16
+  (`+0x0C` = frames × channels × 2 on every one).
+* Soundbank groups come in two forms (single-wave, 64 bytes; multi-wave, `0x68 + 12 × waves`), cues in
+  two (single-track, 24 bytes; multi-track, whose track layout is **not decoded** and is carried
+  verbatim).
+* A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
+  wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
+  `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
 
-End-to-end verification against retail data lives in `mercs2_game/tests/audio_wad_probe.rs` (226/853
-resident cues in `vz.wad` decode to PCM with RMS > 0).
+Resolving every per-bank sounddb entry in `vz.wad` (1,198 cues) through that chain: **282** reach one
+decoded wave, **102** reach a multi-wave group whose waves are all decoded (how the engine picks among
+them is not established, so `resolve_wave` reports it rather than picking), **693** are multi-track
+cues, **119** play waves streamed from `music.pws`/`ambience.pws`, and **2** name a wavebank that is not
+in `vz.wad`. The earlier reading — third field as a wave index, `+0x20` body-relative — "resolved" 589
+of the 807 resident cues, but only 6 of the 350 resident single-track cues it routed landed on the
+right wave.
+
+Retail verification (game-gated on `MERCS2_GAME_DIR`; each test prints `SKIPPING` and returns when it is
+unset): `tests/retail_banks.rs` here, and `mercs2_probe/tests/audio_wad_probe.rs` for the resident banks
+mixed through the engine.
 
 ## Usage
 
@@ -81,12 +104,14 @@ eng.attach_output_device();
 // Listener 0 at the origin (Listener::default() is inactive).
 eng.set_listener(0, Listener { active: true, ..Listener::default() });
 
-// Load the cue catalog and a wavebank body pulled from the WAD.
+// Load a bank's cue catalog, soundbank and wavebank bodies pulled from the WAD. A body outside
+// the measured layout is an error, never a partial load.
 eng.set_sounddb(SoundDb::parse(&sounddb_body).expect("sounddb"));
-let audible = eng.load_wavebank(&wavebank_body); // clips carrying decoded samples
+eng.load_soundbank(&soundbank_body).expect("soundbank");
+let audible = eng.load_wavebank(&wavebank_body).expect("wavebank"); // clips carrying samples
 
-// Cue by name: hashed to a GUID, resolved in the sounddb, bound to its resident
-// wave, 3D-panned against the closest listener.
+// Cue by name: hashed to a GUID, resolved sounddb → soundbank cue → group → wave, bound to
+// the resident clip, 3D-panned against the closest listener.
 if let Some(voice) = eng.cue_sound_by_name("sfx_explosion", Some(Vec3::new(3.0, 0.0, 0.0)), None) {
     eng.stop_sound(voice);
 }
@@ -97,6 +122,28 @@ eng.pump(dt);
 
 // Or render explicitly (headless — tests, servers): interleaved int16 frames.
 let pcm: Vec<i16> = eng.render(2048);
+```
+
+Encode a bank of new sounds — each cue a named PCM16 clip plus explicit group and cue parameters
+(fields whose meaning is not established are parameters, never invented):
+
+```rust
+use mercs2_audio::encode::{encode_bank, BankSpec, CueSpec, Pcm16, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
+use mercs2_formats::hash::pandemic_hash_m2 as m2;
+
+let bank = encode_bank(&BankSpec {
+    name: "mod_ui_sounds".into(),
+    cues: vec![CueSpec {
+        name: "mod_click".into(),
+        category: "ui".into(), // must be one of the retail Mercs2Globals categories
+        sound_id: m2("mod_click"),
+        clip_hash: m2("mod_click"),
+        pcm: Pcm16 { channels: 1, sample_rate: 44100, samples },
+        group: UI_PDA_OPEN_GROUP, // retail ui_PDA_Open_01_st's group values
+        cue: UI_PDA_OPEN_CUE,
+    }],
+})?;
+// bank.wavebank / bank.soundbank / bank.sounddb: the three `data` bodies, all under bank.bank_hash.
 ```
 
 Music and categories go through the same facade:
@@ -114,9 +161,14 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 
 ## Modules
 
-* **`sounddb`** — the `'\x1d'`-tagged cue catalog: parse/serialize, `find_cue` (direct-index below
-  `0x401`, hashed GUID at/above), `find_cue_by_name`.
-* **`wave`** — `wavebank` record parser + PCM16/IMA-ADPCM decoders → `DecodedClip` / `Wavebank`.
+* **`sounddb`** — the `'\x1d'`-tagged cue catalog: exact parse/serialize (cue entries, the global
+  category tree and parameters), `find_cue` (direct-index below `0x401`, hashed GUID at/above),
+  `find_cue_by_name`.
+* **`soundbank`** — `Soundbank`: exact parse/serialize of groups and cues.
+* **`wave`** — `WavebankFile` (exact parse/serialize) + PCM16/IMA-ADPCM decoders → `DecodedClip` /
+  `Wavebank`.
+* **`encode`** — `encode_bank`: named PCM16 cues → the three table bodies; the `UI_PDA_OPEN_*`
+  presets and the retail category table.
 * **`voice`** — `VoicePool`: acquire, priority-steal, the 16-state `InstanceState` FSM.
 * **`mixer`** — `Mixer`: int32 accumulate → saturate int16; `SampleSource` trait, `PcmSource`
   (with resampling), `ToneSource`.
@@ -136,15 +188,19 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   behind a build flag. It is optional at *link* time only because `cpal` pulls `alsa-sys`, which
   needs a full i386 multiarch sysroot to cross-compile; the headless WAD CLIs (`wad_simulator`'s
   `vo_extract` / `cue_probe` / `wavebank_layout_probe`) use only the decode side (`sounddb`, `wave`)
-  and build with `default-features = false`.
+  and build with `default-features = false`. The codecs and the encoder need no device either.
 * **`CpalSink` is a faithful substitute, not a reimplementation.** The mixer reproduces the exe's
   *software* mix exactly; cpal only stands in for the DirectSound secondary buffer that the finished
   int16 frames are streamed into. **EAX 2–5 hardware reverb has no portable analog** — `Sound.SetReverb*`
   is accepted and stored but not rendered.
 * **`AudioSink` is not `Send`.** The exe runs audio on one thread (the VM and mixer share the engine
   CS) and `cpal::Stream` is `!Send` everywhere; the engine is driven from one thread to match.
-* **A cue whose wave is not resident still allocates a (silent) voice** — faithful to the exe
-  allocating a voice before its wave streams in.
+* **A cue whose chain does not resolve still allocates a (silent) voice** — faithful to the exe
+  allocating a voice before its wave streams in. `resolve_wave` says why (`ResolveError`): bank not
+  resident, multi-track cue (layout not decoded), multi-wave group (selection not established),
+  streamed wave, or a bad index.
+* **The game must load soundbanks too.** The chain's first hop is the soundbank; a host that loads
+  only wavebanks and sounddbs resolves nothing.
 * **`pump()` is a no-op when headless**, so tests and dedicated servers never render into a
   discarding sink. Use `render(frames)` to pull PCM explicitly. A stall is capped at 250 ms of
   catch-up so a hitch cannot burst-render a huge block.
