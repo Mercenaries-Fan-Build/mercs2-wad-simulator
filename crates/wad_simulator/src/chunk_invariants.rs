@@ -16,7 +16,11 @@
 //!       - INST @0x4a4e51 : record 0x18 (24)   [count @esi+0x28 → buf @esi+0x2c]
 //!       - PTMS @0x4a4e78 : record 0x08 ( 8)   [count @esi+0x30 → buf @esi+0x34]
 //!   * POFF @0x4a9cf2 reads a fixed 0xC (Vec3) offset into @esi+0x30.
-//!   * PTYP @0x491ba9 reads a single flags byte (bit0→+0x205, bit1→+0x206).
+//!   * PTYP @0x491ba9 reads a u32 flags word (bit0→+0x205, bit1→+0x206).
+//!   * COLR @0x4930e5 copies exactly 800 bytes (100 × 8-byte keys) into the effect stream table.
+//!   * EFCT (9 × u16, FUN_00491920), ANIM (u32 key count) and AKEY (f32 time, f32 value;
+//!     both FUN_00493150) — the effect tree, measured over all 314 retail effects
+//!     (`tests/effect_chunk_invariants.rs`).
 //!
 //!   * PHY2 (@0x4a845f) is a u32 header prefix + an embedded Havok 5.5 packfile
 //!     (magic located by *search*, not at offset 0) + a trailing wrapper. We do
@@ -76,7 +80,7 @@ pub fn validate_chunk_invariants(container: &[u8], label: &str) -> ChunkInvarian
             b"INST" => record_aligned(&mut r, label, "INST", body.len(), 0x18),
             b"PTMS" => record_aligned(&mut r, label, "PTMS", body.len(), 0x08),
             b"POFF" => min_size(&mut r, label, "POFF", body.len(), 0x0c, "Vec3 offset"),
-            b"PTYP" => min_size(&mut r, label, "PTYP", body.len(), 1, "flags byte"),
+            b"PTYP" => min_size(&mut r, label, "PTYP", body.len(), 4, "u32 flags word @0x491ba9"),
             // Mesh/anim tail, confirmed in all_functions_decomp.txt.
             b"BSHI" => record_aligned(&mut r, label, "BSHI", body.len(), 2),
             b"ASTO" => min_size(&mut r, label, "ASTO", body.len(), 4, "u32 count @FUN_0067c780"),
@@ -91,9 +95,13 @@ pub fn validate_chunk_invariants(container: &[u8], label: &str) -> ChunkInvarian
             // body is an over-read/truncation signal, not a heap overflow — advisory.
             b"NODE" => min_size(&mut r, label, "NODE", body.len(), 8, "u32 hash + u32 child-count @0x4cf48b"),
             b"TRFM" => min_size(&mut r, label, "TRFM", body.len(), 64, "4x4 transform matrix @0x48cd09"),
-            b"COLR" => min_size(&mut r, label, "COLR", body.len(), 0xc8, "200-byte colour palette @0x4930e5"),
+            b"COLR" => min_size(&mut r, label, "COLR", body.len(), 800, "100 x 8-byte colour keys, 800 bytes copied @0x4930e5"),
             b"EMTR" => min_size(&mut r, label, "EMTR", body.len(), 2, "u16 emitter count @0x492402"),
             b"ATRB" => min_size(&mut r, label, "ATRB", body.len(), 4, "inner-hash sub-dispatch @0x492b1c"),
+            // Effect tree (docs/effect_container_format.md; 314/314 retail effects).
+            b"EFCT" => min_size(&mut r, label, "EFCT", body.len(), 18, "9 x u16 effect header @FUN_00491920"),
+            b"ANIM" => min_size(&mut r, label, "ANIM", body.len(), 4, "u32 curve key count @FUN_00493150"),
+            b"AKEY" => min_size(&mut r, label, "AKEY", body.len(), 8, "f32 time + f32 value @FUN_00493150"),
             b"FRCE" => min_size(&mut r, label, "FRCE", body.len(), 4, "inner-hash sub-dispatch @0x491c93"),
             b"TEXT" => min_size(&mut r, label, "TEXT", body.len(), 4, "leading u32 @0x492fab"),
             // ECS entity-template ref arrays (0x45f4xx–0x45f9xx): count×4 u32 refs,
@@ -220,11 +228,14 @@ mod tests {
         for (tag, ok, bad) in [
             (b"NODE", 8usize, 7usize),
             (b"TRFM", 64, 63),
-            (b"COLR", 0xc8, 0xc7),
+            (b"COLR", 800, 799),
             (b"EMTR", 2, 1),
             (b"ATRB", 4, 3),
             (b"FRCE", 4, 3),
             (b"TEXT", 4, 3),
+            (b"EFCT", 18, 17),
+            (b"ANIM", 4, 3),
+            (b"AKEY", 8, 7),
         ] {
             assert_eq!(
                 validate_chunk_invariants(&ucfx_with(tag, &vec![0u8; ok]), "t").violations,
@@ -245,8 +256,13 @@ mod tests {
     fn poff_ptyp_min_size() {
         assert_eq!(validate_chunk_invariants(&ucfx_with(b"POFF", &vec![0u8; 12]), "t").violations, 0);
         assert_eq!(validate_chunk_invariants(&ucfx_with(b"POFF", &vec![0u8; 8]), "t").violations, 1);
-        assert_eq!(validate_chunk_invariants(&ucfx_with(b"PTYP", &[0u8]), "t").violations, 0);
+        assert_eq!(validate_chunk_invariants(&ucfx_with(b"PTYP", &[0u8; 4]), "t").violations, 0);
+        // A 1-byte PTYP (the old minimum) is short: the loader reads a u32.
+        assert_eq!(validate_chunk_invariants(&ucfx_with(b"PTYP", &[0u8; 3]), "t").violations, 1);
+        assert_eq!(validate_chunk_invariants(&ucfx_with(b"PTYP", &[0u8]), "t").violations, 1);
         assert_eq!(validate_chunk_invariants(&ucfx_with(b"PTYP", &[]), "t").violations, 1);
+        // A 200-byte COLR (the old minimum) is short: the loader copies 800 bytes.
+        assert_eq!(validate_chunk_invariants(&ucfx_with(b"COLR", &[0u8; 0xc8]), "t").violations, 1);
     }
 
 }

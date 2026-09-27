@@ -1451,7 +1451,7 @@ fn convert_generic_bodies(
                             swap_u32_array(&mut data_area[body_local_start + 1..body_local_end]);
                         }
                     }
-                    ChunkTag::Unknown(b) if b == *b"EFCT" => {
+                    ChunkTag::Efct => {
                         // EFCT effect header: array of u16 fields (magic @ +2,
                         // count @ +14). A u32-word swap transposes each pair of
                         // u16s, moving 0x0226 to +0 and zeroing the +14
@@ -3914,7 +3914,7 @@ fn walk_container_tags(container: &[u8], entry_idx: usize) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::{
-        convert_block, convert_cfx_inplace, convert_chdr_body_inplace, convert_decl,
+        convert_block, convert_cfx_inplace, convert_container, convert_chdr_body_inplace, convert_decl,
         convert_efct_header_inplace, convert_hibernation_data_inplace, convert_info_body_inplace,
         convert_keyed_group_records_inplace, convert_mtrl,
         fix_embedded_havok_layoutrules, is_ecs_name_identifier,
@@ -4180,6 +4180,33 @@ mod tests {
             [0xff, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00],
             "empty Xbox decl must map to retail's bare PC D3DDECL_END"
         );
+    }
+
+    /// The dispatch, not just the helper: an `EFCT` row in a BE container must reach the u16
+    /// header swap. `EFCT` became a named `ChunkTag` (it used to arrive as `Unknown`); an arm that
+    /// still matched `Unknown(b"EFCT")` would drop it into the generic u32 sweep.
+    #[test]
+    fn an_efct_row_is_converted_by_the_u16_header_swap() {
+        let be_body: [u8; 18] = [
+            0x00, 0x02, 0x02, 0x26, 0x00, 0x00, 0x00, 0x02, 0x00, 0x0c, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x04, 0x03, 0x20,
+        ];
+        let mut c = Vec::new();
+        c.extend_from_slice(b"XFCU");
+        for v in [40u32, 0, 0, 1] {
+            c.extend_from_slice(&v.to_be_bytes());
+        }
+        c.extend_from_slice(b"TCFE"); // "EFCT", byte-reversed as on Xbox
+        for v in [0u32, 18, 0, 0] {
+            c.extend_from_slice(&v.to_be_bytes());
+        }
+        c.extend_from_slice(&be_body);
+        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None).expect("convert");
+        assert_eq!(&out[20..24], b"EFCT");
+        let mut want = be_body;
+        convert_efct_header_inplace(&mut want);
+        assert_eq!(&out[40..58], &want, "EFCT body must take the u16 header swap");
+        assert_eq!(u16::from_le_bytes([out[42], out[43]]), 0x0226);
     }
 
     #[test]

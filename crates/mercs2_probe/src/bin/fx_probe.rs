@@ -1,51 +1,19 @@
 //! Dev bin: list every `global_particle_*` FX placement in the PMC interior state block (667),
-//! then reverse the effect template for each distinct effect name (extract its UCFX container from
-//! the effects block + dump the EFCT/EMTR/EMIT/COLR/FRCE/PTYP/POFF/TRFM/TEXT chunks). This pins what
-//! the interior loader classifies + which effects are skipped as "unsupported" (godray / lightshaft).
+//! then dump the effect for each distinct effect name (extract its UCFX container from the effects
+//! block and print the typed tree `mercs2_formats::fxdict::parse_effect_container` reads: shapes,
+//! emitters with their TRFM channels / PTYP attributes / COLR / TEXT, forces). This pins what the
+//! interior loader classifies + which effects are skipped as "unsupported" (godray / lightshaft).
 //!   cargo run -p mercs2_probe --bin fx_probe
 
 use mercs2_engine::wad;
 use mercs2_engine::worldutil::PMC_INTERIOR_STATE_BLOCK;
-use mercs2_formats::fxdict::EffectTemplate;
+use mercs2_formats::fxdict::{attribute_name, parse_effect_container, Atrb, AtrbValue};
 use mercs2_formats::hash::{pandemic_hash, pandemic_hash_m2};
 use mercs2_formats::placement::load_placements;
 use mercs2_formats::types::TYPE_HASH_EFFECT;
 
 fn ru32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-fn rf32(b: &[u8], o: usize) -> f32 {
-    f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-
-/// Walk a UCFX container's descriptor rows -> (tag, body) pairs.
-fn ucfx_chunks(c: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
-    let mut out = Vec::new();
-    if c.len() < 20 || &c[0..4] != b"UCFX" {
-        return out;
-    }
-    let dao = ru32(c, 4) as usize;
-    let n = ru32(c, 16) as usize;
-    for i in 0..n {
-        let row = 20 + i * 20;
-        if row + 20 > c.len() {
-            break;
-        }
-        let mut tag = [0u8; 4];
-        tag.copy_from_slice(&c[row..row + 4]);
-        let u0 = ru32(c, row + 4);
-        if u0 == 0xFFFF_FFFF {
-            out.push((tag, Vec::new())); // container sentinel
-            continue;
-        }
-        let size = ru32(c, row + 8) as usize;
-        let start = if dao > 0 { dao + u0 as usize } else { 8 + u0 as usize };
-        let end = start + size;
-        if end <= c.len() {
-            out.push((tag, c[start..end].to_vec()));
-        }
-    }
-    out
 }
 
 fn dump_effect(w: &mut wad::Wad, name: &str) {
@@ -73,59 +41,7 @@ fn dump_effect(w: &mut wad::Wad, name: &str) {
         }
         return;
     };
-    let chunks = ucfx_chunks(&c);
-    println!("  {} chunks: {:?}", chunks.len(),
-        chunks.iter().map(|(t, b)| format!("{}({}B)", String::from_utf8_lossy(t), b.len())).collect::<Vec<_>>());
-    // Raw dumps of the interesting chunks.
-    for (tag, body) in &chunks {
-        match tag {
-            b"EMIT" => {
-                let f: Vec<f32> = (0..body.len() / 4).map(|i| rf32(body, i * 4)).collect();
-                println!("    EMIT floats: {f:?}");
-            }
-            b"POFF" => println!("    POFF: [{:.3},{:.3},{:.3}]", rf32(body, 0), rf32(body, 4), rf32(body, 8)),
-            b"TRFM" if body.len() >= 64 => {
-                for r in 0..4 {
-                    println!("    TRFM[{r}]: [{:8.3},{:8.3},{:8.3},{:8.3}]",
-                        rf32(body, (r * 4) * 4), rf32(body, (r * 4 + 1) * 4),
-                        rf32(body, (r * 4 + 2) * 4), rf32(body, (r * 4 + 3) * 4));
-                }
-            }
-            b"PTYP" => println!("    PTYP flags: 0x{:02X}", body.first().copied().unwrap_or(0)),
-            b"FRCE" => {
-                let ih = if body.len() >= 4 { ru32(body, 0) } else { 0 };
-                let ps: Vec<f32> = (0..(body.len().saturating_sub(4)) / 4).map(|i| rf32(body, 4 + i * 4)).collect();
-                println!("    FRCE inner=0x{ih:08X} ('{}') params={ps:?}", String::from_utf8_lossy(&ih.to_le_bytes()));
-            }
-            b"TEXT" => {
-                let refs: Vec<String> = (0..body.len() / 4).map(|i| format!("0x{:08X}", ru32(body, i * 4))).collect();
-                println!("    TEXT words: {refs:?}");
-            }
-            b"EMTR" => {
-                let refs: Vec<String> = if body.len() >= 2 {
-                    let cnt = u16::from_le_bytes([body[0], body[1]]) as usize;
-                    (0..cnt.min((body.len() - 2) / 4)).map(|i| format!("0x{:08X}", ru32(body, 2 + i * 4))).collect()
-                } else { Vec::new() };
-                println!("    EMTR refs: {refs:?}");
-            }
-            b"COLR" if body.len() >= 200 => {
-                // Dump 8 evenly-spaced RGBA stops.
-                let g = mercs2_formats::fxdict::parse_colr(body).unwrap();
-                let s: Vec<String> = (0..8).map(|k| {
-                    let c = g.sample(k as f32 / 7.0);
-                    format!("[{:.2},{:.2},{:.2},{:.2}]", c[0], c[1], c[2], c[3])
-                }).collect();
-                println!("    COLR stops(8): {s:?}");
-            }
-            _ => {}
-        }
-    }
-    // Also dump the structured EffectTemplate view.
-    let refs: Vec<(&[u8; 4], &[u8])> = chunks.iter().map(|(t, b)| (t, b.as_slice())).collect();
-    let tmpl = EffectTemplate::from_chunks(refs.into_iter());
-    println!("  parsed: header={:?} emitters={} forces={} ptype={:?} offset={:?} has_colr={} has_trfm={}",
-        tmpl.header, tmpl.emitters.refs.len(), tmpl.forces.len(), tmpl.ptype,
-        tmpl.offset, tmpl.gradient.is_some(), tmpl.transform.is_some());
+    dump_typed(&c, name);
 }
 
 fn main() {
@@ -223,7 +139,7 @@ fn main() {
                     if e.name_hash == *h2 || e.name_hash == *h1 {
                         println!("  >>> MATCH {name}: name_hash=0x{:08X} at blk {blk} ({} bytes)", e.name_hash, e.chunk_size);
                         if end <= dec.len() {
-                            dump_container_chunks(&dec[pos..end], name);
+                            dump_typed(&dec[pos..end], name);
                         }
                     }
                 }
@@ -241,7 +157,8 @@ fn main() {
         let raw = p.name.as_deref().unwrap_or("");
         let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
         if name.contains("godray") {
-            let g = mercs2_engine::game_world::glow_card_for_effect(&mut w, name, p.pos);
+            let g = mercs2_engine::game_world::glow_card_for_effect(&mut w, name, p.pos)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
             println!("  {name}: pos {:.1?} size {:.2} color {:.3?}", g.pos, g.size, g.color);
         }
     }
@@ -312,97 +229,61 @@ fn probe_texture(w: &mut wad::Wad, hash: u32) {
     }
 }
 
-/// Reverse an ATRB parameter name-hash by brute-forcing a candidate word list (fxdict namespace).
-fn name_atrb(nh: u32) -> String {
-    let words = [
-        "red","green","blue","alpha","color","colour","intensity","brightness","scale","size",
-        "width","height","length","depth","radius","radiusinner","radiusouter","innerradius",
-        "outerradius","angle","cone","fadein","fadeout","fade","opacity","glow","emissive",
-        "rotation","rotate","spin","speed","rate","lifetime","life","count","number","offset",
-        "offsetx","offsety","offsetz","posx","posy","posz","scalex","scaley","scalez","tint",
-        "texture","tex","uv","uvscale","scroll","pulse","flicker","frequency","amplitude","phase",
-        "distance","near","far","start","end","top","bottom","taper","falloff","softness","edge",
-        "additive","blend","enabled","visible","gamma","exposure","hdr","bloom","raylength",
-        "shaftlength","shaftwidth","godray","lightshaft","light","sun","ambient","diffuse","specular",
-        "attenuation","range","power","strength","factor","multiplier","min","max","base","value",
-    ];
-    for w in words {
-        if pandemic_hash_m2(w) == nh || pandemic_hash(w) == nh {
-            return format!(" ('{w}')");
-        }
-    }
-    String::new()
+fn atrb_line(a: &Atrb) -> String {
+    let name = attribute_name(a.hash).map(|n| format!(" ({n})")).unwrap_or_default();
+    let value = match a.value {
+        AtrbValue::F32(v) => format!("{v}"),
+        AtrbValue::U32(v) => format!("0x{v:08X}"),
+    };
+    let curve = match &a.curve {
+        None => String::new(),
+        Some(keys) => format!(" curve {:?}", keys.iter().map(|k| (k.time, k.value)).collect::<Vec<_>>()),
+    };
+    format!("0x{:08X}{name} flags=0x{:03X} = {value}{curve}", a.hash, a.flags)
 }
 
-fn dump_container_chunks(c: &[u8], name: &str) {
-    println!("  --- chunks for {name} ---");
-    let chunks = ucfx_chunks(c);
-    println!("  {} chunks: {:?}", chunks.len(),
-        chunks.iter().map(|(t, b)| format!("{}({}B)", String::from_utf8_lossy(t), b.len())).collect::<Vec<_>>());
-    for (tag, body) in &chunks {
-        match tag {
-            b"EMIT" => { let f: Vec<f32> = (0..body.len()/4).map(|i| rf32(body, i*4)).collect(); println!("    EMIT: {f:?}"); }
-            b"POFF" if body.len() >= 12 => println!("    POFF: [{:.3},{:.3},{:.3}]", rf32(body,0), rf32(body,4), rf32(body,8)),
-            b"TRFM" if body.len() >= 64 => for r in 0..4 {
-                println!("    TRFM[{r}]: [{:8.3},{:8.3},{:8.3},{:8.3}]",
-                    rf32(body,(r*4)*4), rf32(body,(r*4+1)*4), rf32(body,(r*4+2)*4), rf32(body,(r*4+3)*4)); },
-            b"PTYP" => println!("    PTYP: 0x{:02X}", body.first().copied().unwrap_or(0)),
-            b"FRCE" => { let ih = if body.len()>=4 {ru32(body,0)} else {0};
-                let ps: Vec<f32> = (0..(body.len().saturating_sub(4))/4).map(|i| rf32(body,4+i*4)).collect();
-                println!("    FRCE: inner=0x{ih:08X} ('{}') params={ps:?}", String::from_utf8_lossy(&ih.to_le_bytes())); }
-            b"TEXT" => { let refs: Vec<String> = (0..body.len()/4).map(|i| format!("0x{:08X}", ru32(body,i*4))).collect();
-                println!("    TEXT: {refs:?}"); }
-            b"EMTR" => { let refs: Vec<String> = if body.len()>=2 {
-                    let cnt = u16::from_le_bytes([body[0],body[1]]) as usize;
-                    (0..cnt.min((body.len()-2)/4)).map(|i| format!("0x{:08X}", ru32(body,2+i*4))).collect() } else { Vec::new() };
-                println!("    EMTR: {refs:?}"); }
-            b"COLR" => {
-                let nz: Vec<usize> = (0..body.len()).filter(|&i| body[i] != 0).collect();
-                println!("    COLR {}B: {} nonzero bytes, first nz @ {:?}, last nz @ {:?}",
-                    body.len(), nz.len(), nz.first(), nz.last());
-                // Dump 32-byte windows around the nonzero region.
-                if let (Some(&f), Some(&l)) = (nz.first(), nz.last()) {
-                    let a = f.saturating_sub(4);
-                    let b = (l + 4).min(body.len());
-                    for row in (a..b).step_by(16) {
-                        let end = (row + 16).min(body.len());
-                        println!("      @{row:4}: {:02X?}", &body[row..end]);
-                    }
-                }
-            }
-            b"ATRB" if body.len() >= 12 => {
-                let nh = ru32(body, 0);
-                let ty = ru32(body, 4);
-                let vf = rf32(body, 8);
-                let vi = ru32(body, 8);
-                println!("    ATRB name=0x{nh:08X}{} ty={ty} val_f={vf:.4} val_hex=0x{vi:08X}", name_atrb(nh));
-            }
-            b"GEOM" if body.len() > 64 => {
-                let vcount = ru32(body, 0) as usize;
-                let stride = (body.len() - 4) / vcount.max(1);
-                let nf = stride / 4;
-                println!("    GEOM {}B: vcount={vcount} stride={stride}B ({nf} f32/vert)", body.len());
-                // Try pos = first 3 f32 per stride; report bbox.
-                let mut mn = [f32::MAX; 3];
-                let mut mx = [f32::MIN; 3];
-                for v in 0..vcount {
-                    let o = 4 + v * stride;
-                    if o + 12 > body.len() { break; }
-                    for c in 0..3 {
-                        let val = rf32(body, o + c * 4);
-                        mn[c] = mn[c].min(val); mx[c] = mx[c].max(val);
-                    }
-                }
-                println!("      pos bbox min={mn:.3?} max={mx:.3?} size={:.3?}",
-                    [mx[0]-mn[0], mx[1]-mn[1], mx[2]-mn[2]]);
-                // First 2 verts, all floats.
-                for v in 0..vcount.min(2) {
-                    let o = 4 + v * stride;
-                    let f: Vec<f32> = (0..nf).map(|i| rf32(body, o + i*4)).collect();
-                    println!("      v{v}: {f:.3?}");
-                }
-            }
-            _ => { println!("    {} ({}B) head={:02X?}", String::from_utf8_lossy(tag), body.len(), &body[..body.len().min(24)]); }
+/// Print an effect container as the typed tree. A container that does not parse is reported, not
+/// half-printed.
+fn dump_typed(c: &[u8], name: &str) {
+    println!("  --- {name}: {} bytes ---", c.len());
+    let fx = match parse_effect_container(c) {
+        Ok(fx) => fx,
+        Err(e) => {
+            println!("  PARSE FAILED: {e}");
+            return;
+        }
+    };
+    match fx.efct_words() {
+        Ok(w) => println!("  EFCT {w:?}"),
+        Err(e) => println!("  EFCT: {e}"),
+    }
+    for (i, s) in fx.shapes.iter().enumerate() {
+        println!("  shape {i}: {} records", s.records.len());
+    }
+    for (i, e) in fx.emitters.iter().enumerate() {
+        println!("  emitter {i}: geom {:?} PTYP flags 0x{:X}", e.geom, e.particle.flags);
+        for (r, row) in e.transform.iter().enumerate() {
+            println!("    TRFM[{r}]: {row:8.3?}");
+        }
+        for a in &e.channels {
+            println!("    channel {}", atrb_line(a));
+        }
+        for a in &e.particle.attributes {
+            println!("    attr {}", atrb_line(a));
+        }
+        let colr: Vec<String> = (0..8)
+            .map(|k| {
+                let key = e.particle.colr.keys[k * 99 / 7];
+                format!("{:02X?}/{:04X}", key.colour, key.half_bits)
+            })
+            .collect();
+        println!("    COLR (8 of 100 keys): {colr:?}");
+        println!("    TEXT frames: {:08X?}", e.particle.text.frames);
+    }
+    for (i, f) in fx.forces.iter().enumerate() {
+        println!("  force {i}: {:?}", f.kind);
+        for a in &f.attributes {
+            println!("    attr {}", atrb_line(a));
         }
     }
 }

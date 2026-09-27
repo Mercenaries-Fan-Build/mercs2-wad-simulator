@@ -374,9 +374,377 @@ pub fn build_wrapped_block(name_hash: u32, type_hash: u32, payload: &[u8]) -> Ve
     block
 }
 
+// ------------------------------------------------------------------------------------------------
+// The UCFX descriptor TREE.
+// ------------------------------------------------------------------------------------------------
+//
+// A UCFX container is a pre-order flattening of a tree:
+//
+// ```text
+// "UCFX" | data_area_off = 20 + 20·n | 0 | 0 | n
+// n × row { tag, rel_off, size, x2, x3 }
+// <bodies, contiguous in row order, no padding>
+// "CSUM" | crc32_mercs2(everything above)
+// ```
+//
+// * `x3` is the row's DESCENDANT count. The loader steps from a row to its next sibling with
+//   `idx + x3 + 1` (effect loader, `mercs2_unpacked.exe` decomp around the EFCT child walk), so a
+//   row's children are the rows `idx+1 ..= idx+x3`, walked the same way.
+// * `x2` is the REVERSE sibling ordinal: the number of siblings that follow the row at its own
+//   level (the last child has `x2 = 0`). Measured over every destruction family
+//   (`tests/state_machine_roundtrip_survey.rs`) and every retail effect (`tests/effect_retail_roundtrip.rs`).
+// * A MARKER row (a pure grouping node) has `rel_off = 0xFFFFFFFF` and `size = 0`.
+// * `rel_off` is relative to `data_area_off`. Bodies follow row order with no gaps.
+//
+// Both halves are strict: [`parse_ucfx_tree`] rejects anything [`write_ucfx_tree`] would not
+// reproduce byte-for-byte, naming the row and the rule it breaks, so a successful parse is a
+// guarantee that re-writing is lossless.
+
+/// `rel_off` of a marker row.
+pub const UCFX_MARKER_OFFSET: u32 = 0xFFFF_FFFF;
+/// Header bytes before the descriptor rows.
+pub const UCFX_HEADER_BYTES: usize = 20;
+/// Bytes per descriptor row.
+pub const UCFX_ROW_BYTES: usize = 20;
+/// Bytes in the `CSUM` trailer.
+pub const UCFX_CSUM_BYTES: usize = 8;
+
+/// One node of a UCFX descriptor tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UcfxNode {
+    pub tag: [u8; 4],
+    /// `None` for a marker row (`rel_off = 0xFFFFFFFF`, `size = 0`); `Some` for a row that owns
+    /// bytes in the data area (which may be empty).
+    pub body: Option<Vec<u8>>,
+    pub children: Vec<UcfxNode>,
+}
+
+impl UcfxNode {
+    /// A node that owns a body.
+    pub fn leaf(tag: [u8; 4], body: Vec<u8>) -> Self {
+        UcfxNode { tag, body: Some(body), children: Vec::new() }
+    }
+    /// A node that owns a body and has children.
+    pub fn with_children(tag: [u8; 4], body: Vec<u8>, children: Vec<UcfxNode>) -> Self {
+        UcfxNode { tag, body: Some(body), children }
+    }
+    /// A marker (grouping) node.
+    pub fn marker(tag: [u8; 4], children: Vec<UcfxNode>) -> Self {
+        UcfxNode { tag, body: None, children }
+    }
+    /// This node plus every descendant.
+    pub fn row_count(&self) -> usize {
+        1 + self.children.iter().map(UcfxNode::row_count).sum::<usize>()
+    }
+    /// The tag as text, for messages.
+    pub fn tag_str(&self) -> String {
+        String::from_utf8_lossy(&self.tag).into_owned()
+    }
+}
+
+/// One descriptor row exactly as stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UcfxRow {
+    pub tag: [u8; 4],
+    pub rel_off: u32,
+    pub size: u32,
+    /// Reverse sibling ordinal.
+    pub x2: u32,
+    /// Descendant count.
+    pub x3: u32,
+}
+
+/// Read the descriptor rows of a UCFX container without interpreting them.
+pub fn read_ucfx_rows(container: &[u8]) -> Result<Vec<UcfxRow>, String> {
+    if container.len() < UCFX_HEADER_BYTES {
+        return Err(format!("UCFX container too small ({} bytes)", container.len()));
+    }
+    if &container[0..4] != b"UCFX" {
+        return Err(format!("bad UCFX magic {:02X?}", &container[0..4]));
+    }
+    let n = read_u32_le(container, 16) as usize;
+    let rows_end = n
+        .checked_mul(UCFX_ROW_BYTES)
+        .and_then(|b| b.checked_add(UCFX_HEADER_BYTES))
+        .ok_or_else(|| format!("UCFX row count {n} overflows"))?;
+    if rows_end > container.len() {
+        return Err(format!(
+            "UCFX declares {n} rows ({rows_end} bytes) but the container is {} bytes",
+            container.len()
+        ));
+    }
+    Ok((0..n)
+        .map(|i| {
+            let o = UCFX_HEADER_BYTES + i * UCFX_ROW_BYTES;
+            UcfxRow {
+                tag: [container[o], container[o + 1], container[o + 2], container[o + 3]],
+                rel_off: read_u32_le(container, o + 4),
+                size: read_u32_le(container, o + 8),
+                x2: read_u32_le(container, o + 12),
+                x3: read_u32_le(container, o + 16),
+            }
+        })
+        .collect())
+}
+
+/// Parse a UCFX container into its descriptor forest (the top-level rows and their subtrees).
+///
+/// Strict: the header words, `data_area_off`, every `x2`/`x3`, marker rows, body contiguity and the
+/// `CSUM` trailer must all be exactly what [`write_ucfx_tree`] produces. Anything else is an error
+/// naming the row and the rule, never a best-effort tree.
+pub fn parse_ucfx_tree(container: &[u8]) -> Result<Vec<UcfxNode>, String> {
+    let rows = read_ucfx_rows(container)?;
+    let n = rows.len();
+    let dao = read_u32_le(container, 4) as usize;
+    let expect_dao = UCFX_HEADER_BYTES + n * UCFX_ROW_BYTES;
+    if dao != expect_dao {
+        return Err(format!("UCFX data_area_off {dao} != 20 + 20·{n} = {expect_dao}"));
+    }
+    for (o, name) in [(8usize, "+8"), (12, "+12")] {
+        let w = read_u32_le(container, o);
+        if w != 0 {
+            return Err(format!("UCFX header word {name} is 0x{w:08X}, not 0"));
+        }
+    }
+    if container.len() < dao + UCFX_CSUM_BYTES {
+        return Err(format!("UCFX container {} bytes has no room for a CSUM trailer", container.len()));
+    }
+    let csum_at = container.len() - UCFX_CSUM_BYTES;
+    if &container[csum_at..csum_at + 4] != b"CSUM" {
+        return Err("UCFX container does not end in a CSUM trailer".into());
+    }
+    let stored = read_u32_le(container, csum_at + 4);
+    let actual = crc32_mercs2(&container[..csum_at]);
+    if stored != actual {
+        return Err(format!("UCFX CSUM 0x{stored:08X} != computed 0x{actual:08X}"));
+    }
+    let data = &container[dao..csum_at];
+
+    let mut cursor = 0usize; // next expected body offset (contiguity)
+    let mut idx = 0usize;
+    let mut roots = Vec::new();
+    let top = count_siblings(&rows, 0, n)?;
+    while idx < n {
+        let node = parse_node(&rows, data, &mut idx, top - 1 - roots.len(), &mut cursor)?;
+        roots.push(node);
+    }
+    if cursor != data.len() {
+        return Err(format!(
+            "UCFX data area is {} bytes but the bodies cover {cursor} (trailing bytes)",
+            data.len()
+        ));
+    }
+    Ok(roots)
+}
+
+/// Number of sibling rows in `[start, end)`, walked `idx + x3 + 1`.
+fn count_siblings(rows: &[UcfxRow], start: usize, end: usize) -> Result<usize, String> {
+    let mut i = start;
+    let mut k = 0usize;
+    while i < end {
+        let step = rows[i].x3 as usize + 1;
+        if i + step > end {
+            return Err(format!(
+                "UCFX row {i} '{}' claims {} descendants, past its parent's end (row {end})",
+                String::from_utf8_lossy(&rows[i].tag),
+                rows[i].x3
+            ));
+        }
+        i += step;
+        k += 1;
+    }
+    Ok(k)
+}
+
+fn parse_node(
+    rows: &[UcfxRow],
+    data: &[u8],
+    idx: &mut usize,
+    expect_x2: usize,
+    cursor: &mut usize,
+) -> Result<UcfxNode, String> {
+    let i = *idx;
+    let r = rows[i];
+    let tag_s = String::from_utf8_lossy(&r.tag).into_owned();
+    if r.x2 as usize != expect_x2 {
+        return Err(format!(
+            "UCFX row {i} '{tag_s}' x2 = {} but {expect_x2} siblings follow it",
+            r.x2
+        ));
+    }
+    let body = if r.rel_off == UCFX_MARKER_OFFSET {
+        if r.size != 0 {
+            return Err(format!("UCFX marker row {i} '{tag_s}' has size {} (must be 0)", r.size));
+        }
+        None
+    } else {
+        let off = r.rel_off as usize;
+        let size = r.size as usize;
+        if off != *cursor {
+            return Err(format!(
+                "UCFX row {i} '{tag_s}' body at +{off}, but the previous body ended at +{} \
+                 (bodies must be contiguous in row order)",
+                *cursor
+            ));
+        }
+        let end = off
+            .checked_add(size)
+            .filter(|&e| e <= data.len())
+            .ok_or_else(|| {
+                format!("UCFX row {i} '{tag_s}' body +{off}..+{size} exceeds data area {}", data.len())
+            })?;
+        *cursor = end;
+        Some(data[off..end].to_vec())
+    };
+    let end = i + 1 + r.x3 as usize;
+    let kids = count_siblings(rows, i + 1, end)?;
+    *idx = i + 1;
+    let mut children = Vec::with_capacity(kids);
+    while *idx < end {
+        let c = parse_node(rows, data, idx, kids - 1 - children.len(), cursor)?;
+        children.push(c);
+    }
+    Ok(UcfxNode { tag: r.tag, body, children })
+}
+
+/// Write a descriptor forest as a UCFX container: pre-order rows with computed `x2`/`x3`, marker
+/// rows for body-less nodes, bodies contiguous in row order, `CSUM` trailer.
+pub fn write_ucfx_tree(roots: &[UcfxNode]) -> Vec<u8> {
+    let n: usize = roots.iter().map(UcfxNode::row_count).sum();
+    let dao = UCFX_HEADER_BYTES + n * UCFX_ROW_BYTES;
+    let mut rows = Vec::with_capacity(n * UCFX_ROW_BYTES);
+    let mut data = Vec::new();
+    emit_level(roots, &mut rows, &mut data);
+
+    let mut c = Vec::with_capacity(dao + data.len() + UCFX_CSUM_BYTES);
+    c.extend_from_slice(b"UCFX");
+    for v in [dao as u32, 0, 0, n as u32] {
+        c.extend_from_slice(&v.to_le_bytes());
+    }
+    c.extend_from_slice(&rows);
+    c.extend_from_slice(&data);
+    let sum = crc32_mercs2(&c);
+    c.extend_from_slice(b"CSUM");
+    c.extend_from_slice(&sum.to_le_bytes());
+    c
+}
+
+fn emit_level(level: &[UcfxNode], rows: &mut Vec<u8>, data: &mut Vec<u8>) {
+    for (k, node) in level.iter().enumerate() {
+        let x2 = (level.len() - 1 - k) as u32;
+        let x3 = (node.row_count() - 1) as u32;
+        let (rel_off, size) = match &node.body {
+            None => (UCFX_MARKER_OFFSET, 0u32),
+            Some(b) => {
+                let off = data.len() as u32;
+                data.extend_from_slice(b);
+                (off, b.len() as u32)
+            }
+        };
+        rows.extend_from_slice(&node.tag);
+        for v in [rel_off, size, x2, x3] {
+            rows.extend_from_slice(&v.to_le_bytes());
+        }
+        emit_level(&node.children, rows, data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tree_sample() -> Vec<UcfxNode> {
+        vec![UcfxNode::with_children(
+            *b"ROOT",
+            vec![1, 2, 3],
+            vec![
+                UcfxNode::leaf(*b"LEAF", vec![4]),
+                UcfxNode::marker(
+                    *b"MARK",
+                    vec![UcfxNode::leaf(*b"AAAA", vec![5, 6]), UcfxNode::leaf(*b"BBBB", vec![])],
+                ),
+                UcfxNode::leaf(*b"LAST", vec![7, 8, 9, 10, 11]),
+            ],
+        )]
+    }
+
+    #[test]
+    fn tree_rows_carry_reverse_ordinals_descendant_counts_and_markers() {
+        let c = write_ucfx_tree(&tree_sample());
+        let rows = read_ucfx_rows(&c).unwrap();
+        let got: Vec<(&[u8; 4], u32, u32, u32, u32)> =
+            rows.iter().map(|r| (&r.tag, r.rel_off, r.size, r.x2, r.x3)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (b"ROOT", 0, 3, 0, 5),
+                (b"LEAF", 3, 1, 2, 0),
+                (b"MARK", UCFX_MARKER_OFFSET, 0, 1, 2),
+                (b"AAAA", 4, 2, 1, 0),
+                (b"BBBB", 6, 0, 0, 0),
+                (b"LAST", 6, 5, 0, 0),
+            ]
+        );
+        assert_eq!(read_u32_le(&c, 4) as usize, 20 + 20 * 6);
+        assert_eq!(read_u32_le(&c, 8), 0);
+        assert_eq!(read_u32_le(&c, 12), 0);
+        // Bodies are contiguous: 3 + 1 + 2 + 0 + 5 = 11 bytes, then the 8-byte CSUM.
+        assert_eq!(c.len(), 20 + 20 * 6 + 11 + 8);
+        assert!(verify_ucfx_container(&c, "tree", 0).is_none());
+    }
+
+    #[test]
+    fn tree_round_trips() {
+        let t = tree_sample();
+        let c = write_ucfx_tree(&t);
+        assert_eq!(parse_ucfx_tree(&c).unwrap(), t);
+        assert_eq!(write_ucfx_tree(&parse_ucfx_tree(&c).unwrap()), c);
+    }
+
+    #[test]
+    fn a_forest_of_top_level_rows_round_trips() {
+        let t = vec![UcfxNode::leaf(*b"INFO", vec![1, 0, 0, 0]), UcfxNode::leaf(*b"DICT", vec![9; 20])];
+        let c = write_ucfx_tree(&t);
+        let rows = read_ucfx_rows(&c).unwrap();
+        assert_eq!((rows[0].x2, rows[0].x3, rows[1].x2, rows[1].x3), (1, 0, 0, 0));
+        assert_eq!(parse_ucfx_tree(&c).unwrap(), t);
+    }
+
+    fn reseal(c: &mut Vec<u8>) {
+        let at = c.len() - 8;
+        let sum = crc32_mercs2(&c[..at]);
+        c[at + 4..].copy_from_slice(&sum.to_le_bytes());
+    }
+
+    #[test]
+    fn parse_rejects_what_the_writer_would_not_produce() {
+        let good = write_ucfx_tree(&tree_sample());
+        // Wrong x2 on LEAF (row 1, +12).
+        let mut c = good.clone();
+        c[20 + 20 + 12] = 0;
+        reseal(&mut c);
+        assert!(parse_ucfx_tree(&c).unwrap_err().contains("x2"));
+        // A gap between bodies: LAST (row 5) moved one byte on.
+        let mut c = good.clone();
+        c[20 + 5 * 20 + 4] = 7;
+        reseal(&mut c);
+        assert!(parse_ucfx_tree(&c).unwrap_err().contains("contiguous"));
+        // A marker with a size.
+        let mut c = good.clone();
+        c[20 + 2 * 20 + 8] = 1;
+        reseal(&mut c);
+        assert!(parse_ucfx_tree(&c).unwrap_err().contains("marker"));
+        // A descendant count running past the parent.
+        let mut c = good.clone();
+        c[20 + 2 * 20 + 16] = 9;
+        reseal(&mut c);
+        assert!(parse_ucfx_tree(&c).is_err());
+        // A bad checksum.
+        let mut c = good.clone();
+        let last = c.len() - 1;
+        c[last] ^= 1;
+        assert!(parse_ucfx_tree(&c).unwrap_err().contains("CSUM"));
+    }
 
     fn entry(name_hash: u32, type_hash: u32) -> BlockTableEntry {
         BlockTableEntry { name_hash, type_hash, field_c: 0, chunk_size: 0 }

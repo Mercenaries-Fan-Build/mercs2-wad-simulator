@@ -110,7 +110,7 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | --- | --- |
 | `ffcs` | FFCS WAD header + `INDX` / `ASET` / `PTHS` tables; `load_ffcs_archive`. |
 | `sges` | `sges` segmented-deflate block decompression/compression; whole-block and head-only reads. |
-| `ucfx` | UCFX descriptor-tree walk, chunk-body extraction, container `CSUM` verification. |
+| `ucfx` | UCFX descriptor-tree walk, chunk-body extraction, container `CSUM` verification; the strict tree reader/writer `parse_ucfx_tree` / `write_ucfx_tree` (computed `x2`/`x3`, marker rows, contiguous bodies). |
 | `chunk_validate` | Validators for the documented UCFX chunk layouts (retail PC). |
 | `tags` | `ChunkTag` enum for every known UCFX descriptor tag. |
 | `tag_registry` | Every FourCC the engine dispatches on (232), with dispatch address, subsystem and verification status. |
@@ -139,7 +139,7 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | `world` | World spatial constants used for validation. |
 | `terrain` | Low-resolution world terrain loader. |
 | `atmosphere` | `Graphics.Atmosphere.*` sky / HDR tone-map / bloom parameter model. |
-| `fxdict` | FX cluster: `fxdict` `DICT` + effect-template key chunks. |
+| `fxdict` | FX cluster: the resident `fxdict` (`INFO`/`DICT`) and the typed effect tree — `parse_effect_container` / `write_effect_container`, computed `EFCT`; all 314 retail effects re-encode byte for byte. |
 | `gfx` | Scaleform GFx / SWF tag-stream parser and feature inventory. |
 | `save` | PC `.profile` save parser (13,404 bytes; zlib Lua payload at `0x468`). |
 | `save_write` | The inverse: rebuild the container and stamp a correct `ProfileHash`. |
