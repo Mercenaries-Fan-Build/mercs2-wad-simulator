@@ -1799,7 +1799,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 .resident_audio
                 .install(&mut a)
                 .unwrap_or_else(|e| panic!("[audio] {e}"));
-            let resolvable = a.sounddb.cues.iter().filter(|c| a.resolve_wave(c).is_ok()).count();
+            let resolvable = a.sounddb.cues.iter().filter(|c| a.resolve_cue(c).is_ok()).count();
             println!(
                 "[audio] resident: {} clips ({} audible), {} soundbank cues, {} cues in catalog ({resolvable} resolve to a wave)",
                 a.resident_wave_count(),
