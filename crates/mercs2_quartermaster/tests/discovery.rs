@@ -339,3 +339,83 @@ contributions:
         SourceIssue::EscapesRoot { index: 2, .. }
     ));
 }
+
+// ---------------------------------------------------------------------------
+// add_shop_item behaviour.script — a source like any other
+// ---------------------------------------------------------------------------
+
+fn novel_shop_item(script: &str) -> String {
+    format!(
+        "\
+format: 2
+shipment: {{ name: s, version: 1.0.0, target: retail }}
+contributions:
+  - kind: add_shop_item
+    id: my_strike
+    name: My Strike
+    icon: strike
+    shops: [pmc]
+    type: airstrike
+    behaviour:
+      module: mymodstrike
+      script: {script}
+"
+    )
+}
+
+/// A novel behaviour's Lua is read and compiled into the Shipment, so it is collected with its field
+/// name like every other `src/` path.
+#[test]
+fn a_shop_behaviour_script_is_collected() {
+    let m = mercs2_quartermaster::from_str(&novel_shop_item("src/lua/mymodstrike.lua"), Format::Yaml)
+        .unwrap();
+    let refs = discover::source_refs(&m);
+    let fields: Vec<_> = refs.iter().map(|r| (r.index, r.kind, r.field)).collect();
+    assert_eq!(fields, vec![(0, "add_shop_item", "behaviour.script")]);
+    assert_eq!(refs[0].path, Path::new("src/lua/mymodstrike.lua"));
+}
+
+/// A shop item that references a resident module ships no file, so it has no source.
+#[test]
+fn a_shop_item_without_a_script_has_no_source() {
+    let text = novel_shop_item("x").replace("      script: x\n", "");
+    let m = mercs2_quartermaster::from_str(&text, Format::Yaml).unwrap();
+    assert!(discover::source_refs(&m).is_empty());
+}
+
+/// Through `qm lint`: a missing script is M0110, and one that climbs out of the Shipment is M0111.
+#[test]
+fn a_shop_behaviour_script_gets_the_source_rules() {
+    use mercs2_quartermaster::lint;
+    let dir = scratch("shop_script");
+    let m = mercs2_quartermaster::from_str(&novel_shop_item("src/lua/missing.lua"), Format::Yaml)
+        .unwrap();
+    let codes: Vec<&str> = lint::lint(&m, Some(&dir), None).iter().map(|d| d.rule.code).collect();
+    assert_eq!(codes, vec!["M0110"]);
+
+    let m = mercs2_quartermaster::from_str(&novel_shop_item("../x.lua"), Format::Yaml).unwrap();
+    let codes: Vec<&str> = lint::lint(&m, Some(&dir), None).iter().map(|d| d.rule.code).collect();
+    assert_eq!(codes, vec!["M0111"]);
+}
+
+/// An animation's optional `events` file is a source too, collected only when given.
+#[test]
+fn animation_sources_include_events_only_when_given() {
+    let base = "\
+format: 2
+shipment: { name: s, version: 1.0.0, target: retail }
+contributions:
+  - kind: add_animation
+    name: c
+    clip: src/c.hkx
+    trnm: src/c.trnm
+";
+    let m = mercs2_quartermaster::from_str(base, Format::Yaml).unwrap();
+    let fields: Vec<_> = discover::source_refs(&m).iter().map(|r| r.field).collect();
+    assert_eq!(fields, vec!["clip", "trnm"]);
+
+    let with = format!("{base}    events: src/c.evnt\n");
+    let m = mercs2_quartermaster::from_str(&with, Format::Yaml).unwrap();
+    let fields: Vec<_> = discover::source_refs(&m).iter().map(|r| r.field).collect();
+    assert_eq!(fields, vec!["clip", "trnm", "events"]);
+}
