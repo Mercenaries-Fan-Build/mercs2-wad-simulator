@@ -11,7 +11,8 @@ everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving th
 * **`sounddb` parsing** — the `'\x1d'`-tagged cue catalog that routes a cue GUID to
   `(soundbank hash, soundbank cue index)`.
 * **`soundbank` parsing** — a bank's sound groups (which wave(s) a sound plays, with its category,
-  distances, pitch and gain) and its cues (which group a cue plays).
+  3D parameters — distances, fall-off exponent, Doppler scale — and base volume and pitch) and its
+  cues (which group a cue plays).
 * **`wavebank` decode** — turns a `LoadWaveBank` body into resident PCM clips (PCM16 + IMA-ADPCM
   decoders live here).
 * **Bank encoding** — builds a bank's wavebank, soundbank and sounddb from named PCM16 cues; every
@@ -25,8 +26,9 @@ everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving th
   emitter) mixes its waves into a 6-channel int32 scratch buffer with the wave kernel's integer gains
   and 32.32 fixed-point step, runs each wave's filter over that buffer, and commits it into the
   6-channel accumulator; the accumulator saturates to int16 for the device.
-* **3D** — up to 4 listeners, closest-listener selection, distance attenuation, stereo pan, Doppler
-  pitch, and the distance-derived start delay.
+* **3D** — the engine's emitter sources: five speaker gains against listener 0, the group's distance
+  volume, and Doppler (source factor × the group's Doppler scale, on the wave's frequency); up to 4
+  listeners with closest-listener selection; the distance-derived start delay.
 * **Categories** — per-category volume/pitch with timed fades, plus a ref-counted master duck.
 * **Music** — a dual-deck crossfading state machine (states, transitions, bound cues).
 * **Banks** — the 65-slot sound/wave bank load state machine with completion callbacks.
@@ -52,7 +54,7 @@ sound DB / music machine / banks). Anchors the source itself cites:
 | `sounddb` parser | `FUN_00835b80`; `FindCue` direct-index threshold `FUN_00835a70` |
 | Voice steal | `FUN_00837830` GetLowestPrioritySound / `FUN_00837c50` StealWave |
 | Instance FSM | `FUN_00836c70` (state byte at `+0x88`), Pg-level `FUN_006036c0` |
-| Listeners / 3D | `FUN_00836280` GetClosestListener, `FUN_0083ade0` CalculateVolume |
+| Listeners / 3D | `FUN_00836280` GetClosestListener; `FUN_0083ade0` source prepare (Doppler), `FUN_0083d090` speaker gains, `FUN_0083d3a0` distance volume |
 | Music FSM | `FUN_0082d7a0` Transition (dual deck, states 5/4/2) |
 | Banks | `FUN_00601dd0` UpdateLoads (`0x41` slots) |
 | Categories | `FUN_00607960` (double-buffered pending list, ≤10 applies/frame) |
@@ -116,8 +118,15 @@ facts that matter most:
   over the scratch; `FUN_0083afc0` adds `trunc(scratch × gain + acc)` into the accumulator; `FUN_0083cbf0`
   saturates it. The engine's stream is always six channels; a two-channel device takes channels 0 and 1
   and a one-channel device channel 0 (standing in for DirectSound's fold-down), a device of 3–5
-  channels is refused. A positional source's gains are the left/right gains of `spatial`, not the
-  engine's speaker gains (`DEFERRED.md`).
+  channels is refused.
+* **Emitter (3D) sources** mix against **listener 0 only** (`0x019C61C0`), not the closest listener.
+  `FUN_0083d090` gives the source five speaker gains: the horizontal direction to the source against
+  the listener's basis-transformed speaker directions (±0.7, 0, ±0.7 and centre), each
+  `clamp01(clamp01(dot) + proximity)` with proximity `1 − dist / 1.0` inside one metre; they feed
+  channels 0, 1, 4, 5 and 2, and LFE is 0. A wave whose group's `+0x14` is set takes the group's 3D
+  parameters: a distance volume from `+0x18` / `+0x1C` / `+0x24` (`FUN_0083d3a0`,
+  `1 − t^exponent`) that scales its gains, and a Doppler factor scaled by `+0x28` that scales its
+  frequency. The cue API carries no velocity, so emitters are at rest (`DEFERRED.md`).
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
   wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
@@ -149,7 +158,7 @@ let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
 // (NullSink) if there is no device — never a hard failure.
 eng.attach_output_device();
 
-// Listener 0 at the origin (Listener::default() is inactive).
+// Listener 0 at the origin (Listener::default() is inactive); the mix reads slot 0.
 eng.set_listener(0, Listener { active: true, ..Listener::default() });
 
 // Load a bank's cue catalog, soundbank and wavebank bodies pulled from the WAD. A body outside
@@ -238,8 +247,8 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **`mixer`** — `Mixer`: the per-source mix path (scratch, wave kernel, filter, commit, saturate);
   `SampleSource` trait, `PcmSource` (the wave kernel's 32.32 step and loop wrap), `ToneSource`.
 * **`filter`** — `Biquad`: the kind-9 low-pass filter's parameters, coefficients and processing.
-* **`spatial`** — `Listener`/`ListenerSet` (max 4), `distance_attenuation`, `stereo_pan`,
-  `doppler_pitch`, `start_delay_secs`.
+* **`spatial`** — `Listener`/`ListenerSet` (max 4); `speaker_gains`, `source_doppler`,
+  `wave_doppler`, `listener_distance`, `distance_volume` as the mix computes them; `start_delay_secs`.
 * **`categories`** — per-category volume/pitch fades + ref-counted master duck.
 * **`music`** — `MusicStateMachine`: dual-deck crossfading, states/transitions/bound cues.
 * **`banks`** — `BankManager`: the 65-slot bank load state machine with completion callbacks.
@@ -297,8 +306,8 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **The 9 retail `return 0` stubs** (`SetSourceEnterMusic`, `AddFadeCategory`, …) stay faithful
   no-ops here.
 * One `MusicStateMachine` models **one region**; the exe holds one per region. Streamed `.pws` voices
-  (`OpenStreamFile`/`CloseStreamFile` record intent only), Doppler folded into the mix, and a
-  positional source's speaker gains are tracked in `DEFERRED.md` — all tagged
+  (`OpenStreamFile`/`CloseStreamFile` record intent only), emitter velocity, and the device
+  fold-down stand-in are tracked in `DEFERRED.md` — all tagged
   `[faithful-blocker: no]`.
 * The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
   `mercs2_engine` owner's edit (see the "Binding-wiring seam" docs in `engine.rs`). Every engine body
