@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use mercs2_formats::ffcs::load_ffcs_archive;
-use mercs2_formats::placement::{load_placements, load_terrain_tiles};
+use mercs2_formats::placement::{
+    comp_inventory, load_placements, load_scrub_placements, load_terrain_tiles,
+};
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::terrainmesh::{destrip, sphere_of, stripify, TerrainCell, TYPE_HASH};
 use mercs2_formats::types::TYPE_ID_TERRAIN_MESH;
@@ -124,7 +126,7 @@ fn hq(r: &Retail) -> TerrainCell {
 fn cell_centres(r: &Retail) -> HashMap<u32, [f32; 3]> {
     let mut out = HashMap::new();
     for (_, block) in &r.layers {
-        for t in load_terrain_tiles(block) {
+        for t in load_terrain_tiles(block).unwrap() {
             assert_eq!(
                 t.quat,
                 [0.0, 0.0, 0.0, 1.0],
@@ -135,6 +137,43 @@ fn cell_centres(r: &Retail) -> HashMap<u32, [f32; 3]> {
         }
     }
     out
+}
+
+/// Every `TerrainObject` and `ScrubObject` record in every placement layer has a `Transform` in its
+/// sub-block: the loaders join all of them (they fail on one that has none), and the joined count equals
+/// the raw record count read straight from the COMP data spans.
+#[test]
+fn every_terrain_and_scrub_object_has_a_transform() {
+    let r = retail_or_skip!();
+    let (mut raw_terrain, mut raw_scrub, mut tiles, mut scrubs) = (0usize, 0usize, 0usize, 0usize);
+    for (path, block) in &r.layers {
+        for c in comp_inventory(block) {
+            let n = c.data_size.unwrap_or(0);
+            match c.info_name.as_deref() {
+                Some("TerrainObject") => {
+                    assert_eq!(n % 8, 0, "{path}: TerrainObject data is not 8-byte records");
+                    raw_terrain += n / 8;
+                }
+                Some("ScrubObject") => {
+                    assert_eq!(n % 8, 0, "{path}: ScrubObject data is not 8-byte records");
+                    raw_scrub += n / 8;
+                }
+                _ => {}
+            }
+        }
+        tiles += load_terrain_tiles(block)
+            .unwrap_or_else(|e| panic!("{path}: {e}"))
+            .len();
+        scrubs += load_scrub_placements(block)
+            .unwrap_or_else(|e| panic!("{path}: {e}"))
+            .len();
+    }
+    eprintln!(
+        "{} placement layers: TerrainObject {tiles}/{raw_terrain} joined, ScrubObject {scrubs}/{raw_scrub} joined",
+        r.layers.len()
+    );
+    assert_eq!((tiles, raw_terrain), (400, 400));
+    assert_eq!(scrubs, raw_scrub);
 }
 
 #[test]
