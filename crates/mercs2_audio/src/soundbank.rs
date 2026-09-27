@@ -36,22 +36,27 @@
 //!   +0x10 f32  unknown        +0x14 u32 0 | 1          +0x18 f32 min distance   +0x1C f32 max distance
 //!   +0x20 f32  unknown        +0x24 f32 pitch          +0x28 f32 unknown
 //! single-wave form
-//!   +0x2C f32  linear gain    +0x30 f32 unknown        +0x34 wave {wavebank hash, wave index, f32 weight}
+//!   +0x2C f32  base volume (FUN_0083d770)   +0x30 f32 base pitch, semitones (FUN_0083d700)
+//!   +0x34 wave {wavebank hash, wave index, f32 weight}
 //! multi-wave form
-//!   +0x2C u8   unknown (copied to the sound instance at +0x80 by FUN_008369e0)
+//!   +0x2C u8   wave loop count (copied to the sound instance at +0x80 by FUN_008369e0, and on to
+//!              the wave; see crate::engine::CueError::Looping)
 //!   +0x2D u8   wave count
 //!   +0x2E u8   selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
 //!              immediate repeat (FUN_0083d410); any other value plays nothing
 //!   +0x2F u8   unknown
 //!   +0x30 f32, +0x34 f32 unknown   +0x38 u32 0x2C (the wave list is read at group + this + 0x3C)
-//!   +0x3C f32, +0x40 f32 unknown   +0x44 u32 0 (its low byte, when set, adds a distance delay)
-//!   +0x48 u32  unknown flags   +0x4C 6 × f32 unknown   +0x64 f32 unknown
+//!   +0x3C f32 a, +0x40 f32 b: start delay drawn in [max(a − b, 0), b + a] (FUN_0083d7e0)
+//!   +0x44 u32 0 (its low byte, when set, adds a distance delay)
+//!   +0x48 u32  unknown flags   +0x4C f32 unknown
+//!   +0x50 f32, +0x54 f32 base volume range (FUN_0083d770)   +0x58 f32 unknown
+//!   +0x5C f32, +0x60 f32 base pitch range, semitones (FUN_0083d700)   +0x64 f32 unknown
 //!   +0x68 wave count × {wavebank hash, wave index, f32 weight}
 //! ```
 //!
-//! The names "min/max distance", "pitch" and "linear gain" are INFERRED from the values they hold
-//! (e.g. 10/1000, 0.5–1.5, dB-shaped gains), not from engine code. How the engine picks a wave is
-//! in [`crate::select`].
+//! The names "min/max distance" and the head's "pitch" are INFERRED from the values they hold (e.g.
+//! 10/1000, 0.5–1.5), not from engine code; the base volume, base pitch, start delay and loop count
+//! are read in the engine functions named. How the engine picks a wave is in [`crate::select`].
 //!
 //! **Cue** — two forms, told apart by the byte at `+0x05`:
 //!
@@ -125,7 +130,7 @@ pub struct GroupHead {
 /// The multi-wave form's fields after the common head.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MultiGroup {
-    /// `+0x2C` byte 0, unknown.
+    /// `+0x2C` the wave loop count (0 plays once).
     pub byte_2c: u8,
     /// `+0x2E` selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
     /// immediate repeat ([`crate::select`]).
@@ -136,13 +141,14 @@ pub struct MultiGroup {
     pub unknown_30: f32,
     /// `+0x34`, unknown.
     pub unknown_34: f32,
-    /// `+0x3C`, unknown.
+    /// `+0x3C` start delay `a`: the delay is drawn in `[max(a − b, 0), b + a]` (`FUN_0083d7e0`).
     pub unknown_3c: f32,
-    /// `+0x40`, unknown.
+    /// `+0x40` start delay `b`.
     pub unknown_40: f32,
     /// `+0x48`, unknown flag bytes.
     pub word_48: u32,
-    /// `+0x4C`..`+0x63`, unknown.
+    /// `+0x4C`..`+0x63`: `[0]` unknown, `[1]`/`[2]` the base volume range (`FUN_0083d770`), `[3]`
+    /// unknown, `[4]`/`[5]` the base pitch range in semitones (`FUN_0083d700`).
     pub floats_4c: [f32; 6],
     /// `+0x64`, unknown.
     pub unknown_64: f32,
@@ -155,9 +161,9 @@ pub struct MultiGroup {
 pub enum GroupForm {
     /// Form 0: exactly one wave.
     Single {
-        /// `+0x2C` linear gain (inferred name).
+        /// `+0x2C` the sound instance's base volume (`FUN_0083d770`).
         gain: f32,
-        /// `+0x30`, unknown.
+        /// `+0x30` the sound instance's base pitch in semitones (`FUN_0083d700`).
         unknown_30: f32,
         /// `+0x34` the wave.
         wave: WaveRef,
