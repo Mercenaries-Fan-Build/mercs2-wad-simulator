@@ -54,10 +54,11 @@
 //!
 //! # Editing
 //!
-//! [`TerrainCell::displace`] moves `POSITION.y` only and rewrites the normals of the vertices whose
-//! incident triangles moved. Vertices on the cell edge are shared with the neighbouring cell's mesh, so
-//! a displacement that would move one is refused rather than opening a crack.
-//! [`TerrainCell::rebuild_collision`] regenerates `PHY2` from the (edited) render triangles.
+//! [`TerrainCell::displace`] moves `POSITION.y` only and rewrites the normals and tangents of the
+//! vertices whose incident triangles moved. Vertices on the cell edge are shared with the neighbouring
+//! cell's mesh, so a displacement that would move one is refused rather than opening a crack.
+//! [`TerrainCell::rebuild_collision`] regenerates `PHY2` from the (edited) render triangles as one
+//! `WpMeshShape16` + MOPP for the whole cell, the shape count every retail cell has.
 
 use std::collections::HashMap;
 
@@ -77,6 +78,9 @@ const DECL_END: [u8; 8] = [0xFF, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00];
 const DECLTYPE_FLOAT16_4: u8 = 16;
 const USAGE_POSITION: u8 = 0;
 const USAGE_NORMAL: u8 = 3;
+const USAGE_TEXCOORD: u8 = 5;
+const USAGE_TANGENT: u8 = 6;
+const DECLTYPE_FLOAT16_2: u8 = 15;
 
 const ROOT_INFO_LEN: usize = 32;
 const GEOM_INFO_LEN: usize = 44;
@@ -954,20 +958,51 @@ impl Prmg {
 
     /// Byte offset of the single `FLOAT16_4` element with `usage`.
     fn f16x4_offset(&self, usage: u8) -> Result<usize, String> {
+        self.optional_offset(usage, DECLTYPE_FLOAT16_4)?
+            .ok_or_else(|| format!("decl has no usage-{usage} element"))
+    }
+
+    /// Byte offset of the usage-`usage` element (usage index 0), `None` when the decl has none. Fails
+    /// when it is present with another type, on another stream, or more than once.
+    fn optional_offset(&self, usage: u8, ty: u8) -> Result<Option<usize>, String> {
         let hits: Vec<&DeclElement> = self
             .decl
             .iter()
             .filter(|e| e.usage == usage && e.usage_index == 0)
             .collect();
         match hits.as_slice() {
-            [e] if e.ty == DECLTYPE_FLOAT16_4 && e.stream == 0 => Ok(e.offset as usize),
+            [e] if e.ty == ty && e.stream == 0 => Ok(Some(e.offset as usize)),
             [e] => Err(format!(
-                "usage {usage} is decl type {} on stream {}, expected FLOAT16_4 on stream 0",
+                "usage {usage} is decl type {} on stream {}, expected type {ty} on stream 0",
                 e.ty, e.stream
             )),
-            [] => Err(format!("decl has no usage-{usage} element")),
+            [] => Ok(None),
             _ => Err(format!("decl has {} usage-{usage} elements", hits.len())),
         }
+    }
+
+    /// Stored tangent of vertex `i` as `[x, y, z, w]` (`w` = ±1 handedness), `None` when the decl has
+    /// no TANGENT.
+    pub fn tangent(&self, i: usize) -> Result<Option<[f32; 4]>, String> {
+        Ok(self
+            .optional_offset(USAGE_TANGENT, DECLTYPE_FLOAT16_4)?
+            .map(|off| {
+                let o = i * self.stride as usize + off;
+                [0, 1, 2, 3].map(|k| read_f16_le(&self.vertices, o + 2 * k))
+            }))
+    }
+
+    /// Texture coordinate of vertex `i`, `None` when the decl has no TEXCOORD.
+    pub fn texcoord(&self, i: usize) -> Result<Option<[f32; 2]>, String> {
+        Ok(self
+            .optional_offset(USAGE_TEXCOORD, DECLTYPE_FLOAT16_2)?
+            .map(|off| {
+                let o = i * self.stride as usize + off;
+                [
+                    read_f16_le(&self.vertices, o),
+                    read_f16_le(&self.vertices, o + 2),
+                ]
+            }))
     }
 
     /// Patch-local position of vertex `i`.
@@ -1130,6 +1165,8 @@ pub struct Displacement {
     pub moved_vertices: usize,
     /// Vertices whose stored normal was recomputed.
     pub renormalized_vertices: usize,
+    /// Vertices whose stored tangent was recomputed (groups whose decl carries one).
+    pub retangented_vertices: usize,
     /// Indices of the `GEOM`s whose bounds were recomputed.
     pub edited_geoms: Vec<usize>,
 }
@@ -1163,22 +1200,30 @@ impl TerrainCell {
         Ok((lo, hi))
     }
 
-    /// Move every vertex vertically by `dy(x, z)` (cell-local metres), recompute the normals the move
-    /// affects, and recompute the bounds of every patch that changed and of the cell.
+    /// Move every vertex vertically by `dy(x, z)` (cell-local metres), recompute the normals and tangents
+    /// the move affects, and recompute the bounds of every patch that changed and of the cell.
     ///
-    /// * Only `POSITION.y` and the NORMAL's xyz halves are written; x, z, colours, texcoords, tangents and
-    ///   the normal's w half are untouched. Every draw group moves, so overlays stay on the ground.
+    /// * Only `POSITION.y`, the NORMAL's xyz halves and the TANGENT are written; x, z, colours,
+    ///   texcoords and the normal's w half are untouched. Every draw group moves, so overlays stay on
+    ///   the ground.
     /// * A vertex "moves" when its stored f16 changes; a `dy` below the f16 step leaves it in place.
     /// * Normals are recomputed, per draw group, for the vertices of every triangle that has a moved
     ///   corner: the area-weighted sum of its incident triangles' face normals, `(b−a)×(c−a)` in draw
     ///   winding. That is the convention the retail normals follow: on cell `0xA241BC0C`'s ground it
     ///   reproduces them to a median of 0.96° (90th percentile 6.1°; the retail normals are not an exact
     ///   function of the stored triangles — inferred: they were baked from finer source geometry).
+    /// * Tangents are recomputed for the same vertices in every group whose decl carries one: the sum of
+    ///   the incident triangles' `∂P/∂u`, made orthogonal to the new normal (Gram–Schmidt) and
+    ///   normalized; `w` = +1 when `(n × t) · ∂P/∂v < 0`, −1 when `> 0`. On cell `0xA241BC0C` that
+    ///   reproduces the retail tangents to a median of 0.33° (90th percentile 0.92°) and `w` on 14,484 of
+    ///   the 14,520 vertices where it is defined. Where `(n × t) · ∂P/∂v` is exactly 0 (2 retail vertices
+    ///   there) the handedness is not defined by the geometry and the stored `w` is kept.
     /// * Cell-edge vertices are never written: a `dy` that would move one is an error, and their normals
-    ///   are kept, so the seam with the neighbouring cell stays closed.
+    ///   and tangents are kept, so the seam with the neighbouring cell stays closed.
     ///
     /// Fails — leaving `self` unchanged — on a non-finite `dy`, a height outside the f16 range, a moved
-    /// cell-edge vertex, or a recomputed normal with no area behind it.
+    /// cell-edge vertex, a recomputed normal with no area behind it, a tangent group without texture
+    /// coordinates, or a tangent with no u gradient left after orthogonalization.
     pub fn displace<F: Fn(f32, f32) -> f32>(&mut self, dy: F) -> Result<Displacement, String> {
         let mut next = self.clone();
         let report = next.displace_in_place(&dy)?;
@@ -1275,6 +1320,11 @@ impl TerrainCell {
                         }
                     }
                 }
+                let tangent_off = prmg.optional_offset(USAGE_TANGENT, DECLTYPE_FLOAT16_4)?;
+                let frames = match tangent_off {
+                    Some(_) => Some(uv_gradients(prmg, &tris, &affected, &pos, g, p)?),
+                    None => None,
+                };
                 let verts = &mut self.geoms[g].prmgs[p].vertices;
                 for i in (0..n).filter(|&i| affected[i]) {
                     let s = acc[i];
@@ -1284,12 +1334,41 @@ impl TerrainCell {
                             "GEOM[{g}] PRMG[{p}] vertex {i}: its incident triangles have no area, so it has no normal"
                         ));
                     }
+                    let nrm = [s[0] / len, s[1] / len, s[2] / len];
                     let o = i * stride + nrm_off;
                     for k in 0..3 {
-                        verts[o + 2 * k..o + 2 * k + 2]
-                            .copy_from_slice(&f16_le((s[k] / len) as f32));
+                        verts[o + 2 * k..o + 2 * k + 2].copy_from_slice(&f16_le(nrm[k] as f32));
                     }
                     report.renormalized_vertices += 1;
+
+                    let (Some(toff), Some((du, dv))) = (tangent_off, frames.as_ref()) else {
+                        continue;
+                    };
+                    let (su, sv) = (du[i], dv[i]);
+                    let d = su[0] * nrm[0] + su[1] * nrm[1] + su[2] * nrm[2];
+                    let t = [su[0] - d * nrm[0], su[1] - d * nrm[1], su[2] - d * nrm[2]];
+                    let tl = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+                    if tl.is_nan() || tl <= 0.0 {
+                        return Err(format!(
+                            "GEOM[{g}] PRMG[{p}] vertex {i}: no texture-u gradient off the normal, so it has no tangent"
+                        ));
+                    }
+                    let t = [t[0] / tl, t[1] / tl, t[2] / tl];
+                    let bxn = [
+                        nrm[1] * t[2] - nrm[2] * t[1],
+                        nrm[2] * t[0] - nrm[0] * t[2],
+                        nrm[0] * t[1] - nrm[1] * t[0],
+                    ];
+                    let side = bxn[0] * sv[0] + bxn[1] * sv[1] + bxn[2] * sv[2];
+                    let o = i * stride + toff;
+                    for k in 0..3 {
+                        verts[o + 2 * k..o + 2 * k + 2].copy_from_slice(&f16_le(t[k] as f32));
+                    }
+                    if side != 0.0 {
+                        let w: f32 = if side < 0.0 { 1.0 } else { -1.0 };
+                        verts[o + 6..o + 8].copy_from_slice(&f16_le(w));
+                    }
+                    report.retangented_vertices += 1;
                 }
             }
             if geom_moved {
@@ -1338,6 +1417,54 @@ impl TerrainCell {
     }
 }
 
+/// Per-vertex `(∂P/∂u, ∂P/∂v)` sums.
+type UvGradients = (Vec<[f64; 3]>, Vec<[f64; 3]>);
+
+/// Per-vertex sums of the incident triangles' texture gradients `(∂P/∂u, ∂P/∂v)`, over the triangles
+/// touching an `affected` vertex. A triangle whose texture mapping is degenerate (zero UV area) adds
+/// nothing.
+fn uv_gradients(
+    prmg: &Prmg,
+    tris: &[[u16; 3]],
+    affected: &[bool],
+    pos: &[[f64; 3]],
+    g: usize,
+    p: usize,
+) -> Result<UvGradients, String> {
+    let n = prmg.vertex_count();
+    let mut uv = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = prmg.texcoord(i)?.ok_or_else(|| {
+            format!("GEOM[{g}] PRMG[{p}]: the decl has a TANGENT but no TEXCOORD to derive it from")
+        })?;
+        uv.push([t[0] as f64, t[1] as f64]);
+    }
+    let (mut du, mut dv) = (vec![[0f64; 3]; n], vec![[0f64; 3]; n]);
+    for t in tris {
+        if !t.iter().any(|&v| affected[v as usize]) {
+            continue;
+        }
+        let [i, j, k] = t.map(|v| v as usize);
+        let e1 = [0, 1, 2].map(|a| pos[j][a] - pos[i][a]);
+        let e2 = [0, 1, 2].map(|a| pos[k][a] - pos[i][a]);
+        let d1 = [uv[j][0] - uv[i][0], uv[j][1] - uv[i][1]];
+        let d2 = [uv[k][0] - uv[i][0], uv[k][1] - uv[i][1]];
+        let det = d1[0] * d2[1] - d2[0] * d1[1];
+        if det == 0.0 {
+            continue;
+        }
+        let tu = [0, 1, 2].map(|a| (e1[a] * d2[1] - e2[a] * d1[1]) / det);
+        let tv = [0, 1, 2].map(|a| (e2[a] * d1[0] - e1[a] * d2[0]) / det);
+        for v in [i, j, k] {
+            for a in 0..3 {
+                du[v][a] += tu[a];
+                dv[v][a] += tv[a];
+            }
+        }
+    }
+    Ok((du, dv))
+}
+
 /// A box's bounding sphere as the retail `GEOM INFO` stores it: the centre, and the half-diagonal.
 pub fn sphere_of(b: &Aabb) -> ([f32; 3], f32) {
     let c = [0, 1, 2].map(|k| (b.min[k] + b.max[k]) * 0.5);
@@ -1348,19 +1475,20 @@ pub fn sphere_of(b: &Aabb) -> ([f32; 3], f32) {
 // ───────────────────────────────────────────────────────── collision ──
 
 impl TerrainCell {
-    /// The render triangles as collision soups, one per patch, in cell-local metres (the frame the retail
-    /// collider uses: its vertices span ±200 m).
+    /// The render triangles as ONE collision soup in cell-local metres — the frame and the shape count
+    /// of every retail collider (one `WpMeshShape16` per cell, 400/400; vertices spanning ±200 m).
     ///
-    /// Each patch's draw groups are merged: vertices with identical cell-local positions are welded,
-    /// triangles that cover the same three welded vertices are kept once, and triangles whose corners
-    /// weld together (zero area, nothing to collide with) are dropped. Winding follows the draw.
-    pub fn collision_soups(&self) -> Result<Vec<MeshSoup>, String> {
-        let mut soups = Vec::with_capacity(self.geoms.len());
+    /// Every draw group of every patch is merged: vertices with identical cell-local positions are
+    /// welded (so patch seams share vertices), triangles covering the same three welded vertices are kept
+    /// once, and triangles whose corners weld together (zero area) are dropped. Winding follows the draw.
+    /// Fails when the welded soup needs more than 65,536 vertices (the `u16` index limit of
+    /// `WpMeshShape16`).
+    pub fn collision_soup(&self) -> Result<MeshSoup, String> {
+        let mut ids: HashMap<[u32; 3], u32> = HashMap::new();
+        let mut verts: Vec<[f32; 3]> = Vec::new();
+        let mut seen: HashMap<[u32; 3], ()> = HashMap::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
         for (g, geom) in self.geoms.iter().enumerate() {
-            let mut ids: HashMap<[u32; 3], u32> = HashMap::new();
-            let mut verts: Vec<[f32; 3]> = Vec::new();
-            let mut seen: HashMap<[u32; 3], ()> = HashMap::new();
-            let mut tris: Vec<[u32; 3]> = Vec::new();
             for (p, prmg) in geom.prmgs.iter().enumerate() {
                 let remap: Vec<u32> = (0..prmg.vertex_count())
                     .map(|i| {
@@ -1383,22 +1511,28 @@ impl TerrainCell {
                     }
                 }
             }
-            if tris.is_empty() {
-                return Err(format!("GEOM[{g}] renders no triangles to collide with"));
-            }
-            soups.push((tris, verts));
         }
-        Ok(soups)
+        if tris.is_empty() {
+            return Err("the cell renders no triangles to collide with".into());
+        }
+        if verts.len() > 65_536 {
+            return Err(format!(
+                "the cell's collision soup has {} welded vertices; WpMeshShape16 indexes at most 65,536",
+                verts.len()
+            ));
+        }
+        Ok((tris, verts))
     }
 
     /// Replace `PHY2` with a collider built from the current render triangles
-    /// ([`Self::collision_soups`]) — one `WpMeshShape16` + MOPP per patch, via
-    /// [`crate::phy2_build::build_phy2_multi_hashed`] keyed by `cell_hash`.
+    /// ([`Self::collision_soup`]) — one `WpMeshShape16` + MOPP for the whole cell, as retail has, via
+    /// [`crate::phy2_build::build_phy2_multi_hashed`] keyed by `cell_hash`. The MOPP of a whole cell is
+    /// past 64 KiB, which [`crate::mopp::encode`] reaches through JUMP24 trampolines.
     ///
     /// The prefix's word 2 is carried from the cell's own `PHY2` (see [`Phy2`]); every other prefix word
     /// is the builder's and must equal the retail form `[0x39, hash, _, 1, 1, 0, 0, verts, size, 0, 0, 0]`.
-    /// Each baked MOPP is walked before it is accepted and must yield every one of its patch's triangle
-    /// keys exactly once. Fails if `cell_hash` is not the hash the cell's `PHY2` already carries.
+    /// The baked MOPP is walked before it is accepted and must yield every triangle key exactly once and
+    /// reach every byte. Fails if `cell_hash` is not the hash the cell's `PHY2` already carries.
     pub fn rebuild_collision(&mut self, cell_hash: u32) -> Result<(), String> {
         if self.phy2.prefix[1] != cell_hash {
             return Err(format!(
@@ -1406,42 +1540,45 @@ impl TerrainCell {
                 self.phy2.prefix[1]
             ));
         }
-        let soups = self.collision_soups()?;
-        let body = build_phy2_multi_hashed(cell_hash, &soups)?;
+        let soup = self.collision_soup()?;
+        let ntris = soup.0.len();
+        let body = build_phy2_multi_hashed(cell_hash, std::slice::from_ref(&soup))?;
         let packfile = crate::havok::parse_phy2_body(&body)?;
         let meshes = packfile
             .shapes
             .iter()
             .filter(|s| matches!(s, crate::havok::Shape::Mesh(_)))
             .count();
-        if meshes != soups.len() {
+        if meshes != 1 {
             return Err(format!(
-                "rebuilt PHY2 re-parses to {meshes} meshes, built {}",
-                soups.len()
+                "rebuilt PHY2 re-parses to {meshes} meshes, built 1"
             ));
         }
         let mopps = crate::mopp::extract_mopp_buffers(&body);
-        if mopps.len() != soups.len() {
+        let [code] = mopps.as_slice() else {
             return Err(format!(
-                "rebuilt PHY2 carries {} MOPPs for {} meshes",
-                mopps.len(),
-                soups.len()
+                "rebuilt PHY2 carries {} MOPPs for 1 mesh",
+                mopps.len()
+            ));
+        };
+        let walk = crate::mopp::decode(code);
+        if let Some(e) = walk.error {
+            return Err(format!("baked MOPP does not walk: {e}"));
+        }
+        if walk.consumed != code.len() {
+            return Err(format!(
+                "baked MOPP walk reaches {} of its {} bytes",
+                walk.consumed,
+                code.len()
             ));
         }
-        for (i, (code, (tris, _))) in mopps.iter().zip(&soups).enumerate() {
-            let walk = crate::mopp::decode(code);
-            if let Some(e) = walk.error {
-                return Err(format!("patch {i}: baked MOPP does not walk: {e}"));
-            }
-            let mut keys = walk.keys;
-            keys.sort_unstable();
-            if keys.len() != tris.len() || keys.iter().enumerate().any(|(k, &v)| v != k as u32) {
-                return Err(format!(
-                    "patch {i}: baked MOPP yields {} keys, not each of 0..{} once",
-                    keys.len(),
-                    tris.len()
-                ));
-            }
+        let mut keys = walk.keys;
+        keys.sort_unstable();
+        if keys.len() != ntris || keys.iter().enumerate().any(|(k, &v)| v != k as u32) {
+            return Err(format!(
+                "baked MOPP yields {} keys, not each of 0..{ntris} once",
+                keys.len()
+            ));
         }
         let mut prefix = [0u32; PHY2_PREFIX_WORDS];
         for (k, w) in prefix.iter_mut().enumerate() {
@@ -1479,35 +1616,35 @@ mod tests {
     use super::*;
 
     /// A patch-local ground grid, `n × n` quads of `cell` metres centred on the origin, heights from `h`,
-    /// drawn as one strip per row pair with the retail 20-byte `POSITION·D3DCOLOR·NORMAL` decl.
+    /// drawn as one strip with the retail 20-byte `POSITION·D3DCOLOR·NORMAL` decl.
     fn ground(n: u16, cell: f32, h: impl Fn(f32, f32) -> f32) -> Prmg {
+        grid(n, cell, h, false)
+    }
+
+    /// The same grid with the retail 28-byte `POSITION·TEXCOORD·NORMAL·TANGENT` decl, `uv = (x, z) / 10`,
+    /// tangent `(1, 0, 0, 1)`.
+    fn overlay(n: u16, cell: f32, h: impl Fn(f32, f32) -> f32) -> Prmg {
+        grid(n, cell, h, true)
+    }
+
+    fn grid(n: u16, cell: f32, h: impl Fn(f32, f32) -> f32, tangent: bool) -> Prmg {
+        let el = |offset: u16, ty: u8, usage: u8| DeclElement {
+            stream: 0,
+            offset,
+            ty,
+            method: 0,
+            usage,
+            usage_index: 0,
+        };
+        let (decl, stride) = if tangent {
+            (
+                vec![el(0, 16, 0), el(8, 15, 5), el(12, 16, 3), el(20, 16, 6)],
+                28,
+            )
+        } else {
+            (vec![el(0, 16, 0), el(8, 4, 10), el(12, 16, 3)], 20)
+        };
         let half = n as f32 * cell / 2.0;
-        let decl = vec![
-            DeclElement {
-                stream: 0,
-                offset: 0,
-                ty: 16,
-                method: 0,
-                usage: 0,
-                usage_index: 0,
-            },
-            DeclElement {
-                stream: 0,
-                offset: 8,
-                ty: 4,
-                method: 0,
-                usage: 10,
-                usage_index: 0,
-            },
-            DeclElement {
-                stream: 0,
-                offset: 12,
-                ty: 16,
-                method: 0,
-                usage: 3,
-                usage_index: 0,
-            },
-        ];
         let mut vertices = Vec::new();
         for z in 0..=n {
             for x in 0..=n {
@@ -1515,9 +1652,20 @@ mod tests {
                 for c in [px, h(px, pz), pz, 1.0] {
                     vertices.extend_from_slice(&f16_le(c));
                 }
-                vertices.extend_from_slice(&[0x80, 0x40, 0x20, 0xFF]);
+                if tangent {
+                    for c in [px / 10.0, pz / 10.0] {
+                        vertices.extend_from_slice(&f16_le(c));
+                    }
+                } else {
+                    vertices.extend_from_slice(&[0x80, 0x40, 0x20, 0xFF]);
+                }
                 for c in [0.0, 1.0, 0.0, 1.0] {
                     vertices.extend_from_slice(&f16_le(c));
+                }
+                if tangent {
+                    for c in [1.0, 0.0, 0.0, 1.0] {
+                        vertices.extend_from_slice(&f16_le(c));
+                    }
                 }
             }
         }
@@ -1552,7 +1700,7 @@ mod tests {
             pass_groups: [group(0, 1), group(1, 0), group(2, 0)],
             draws: vec![draw],
             alt_draws: vec![draw; 3],
-            stride: 20,
+            stride,
             decl,
             vertices,
             indices,
@@ -1565,6 +1713,8 @@ mod tests {
         let mut geoms = Vec::new();
         for (px, pz) in [(-50.0, -50.0), (50.0, -50.0), (-50.0, 50.0), (50.0, 50.0)] {
             let prmg = ground(10, 10.0, |x, z| hgt(x + px, z + pz));
+            // A 40 m road-like overlay on the ground, carrying texcoords and tangents.
+            let road = overlay(8, 5.0, |x, z| hgt(x + px, z + pz));
             let mut aabb = Aabb {
                 min: [-50.0, f32::INFINITY, -50.0],
                 max: [50.0, f32::NEG_INFINITY, 50.0],
@@ -1580,7 +1730,7 @@ mod tests {
                 sphere_radius,
                 aabb,
                 poff: [px, 0.0, pz],
-                prmgs: vec![prmg],
+                prmgs: vec![prmg, road],
             });
         }
         let material = Material {
@@ -1606,7 +1756,7 @@ mod tests {
             },
         };
         cell.recompute_root_bounds();
-        let body = build_phy2_multi_hashed(0x1234_5678, &cell.collision_soups().unwrap()).unwrap();
+        let body = build_phy2_multi_hashed(0x1234_5678, &[cell.collision_soup().unwrap()]).unwrap();
         let mut prefix = [0u32; PHY2_PREFIX_WORDS];
         for (k, w) in prefix.iter_mut().enumerate() {
             *w = u32_at(&body, 4 * k);
@@ -1675,23 +1825,25 @@ mod tests {
     }
 
     #[test]
-    fn displacement_touches_only_position_y_and_normals() {
+    fn displacement_touches_only_position_y_normals_and_tangents() {
         let cell = synthetic_cell();
         let mut edited = cell.clone();
         let bump =
             |x: f32, z: f32| 8.0 * (1.0 - ((x - 10.0).abs().max((z + 5.0).abs()) / 30.0)).max(0.0);
         let r = edited.displace(bump).unwrap();
-        assert!(r.moved_vertices > 0 && r.renormalized_vertices > 0);
+        assert!(r.moved_vertices > 0 && r.renormalized_vertices > 0 && r.retangented_vertices > 0);
         for (g, (a, b)) in cell.geoms.iter().zip(&edited.geoms).enumerate() {
             for (pa, pb) in a.prmgs.iter().zip(&b.prmgs) {
                 assert_eq!(
                     (&pa.decl, &pa.indices, &pa.draws, &pa.alt_draws),
                     (&pb.decl, &pb.indices, &pb.draws, &pb.alt_draws)
                 );
+                let s = pa.stride as usize;
                 for i in 0..pa.vertex_count() {
-                    for byte in 0..20 {
-                        let (x, y) = (pa.vertices[i * 20 + byte], pb.vertices[i * 20 + byte]);
-                        let allowed = matches!(byte, 2 | 3 | 12..=17);
+                    for byte in 0..s {
+                        let (x, y) = (pa.vertices[i * s + byte], pb.vertices[i * s + byte]);
+                        // POSITION.y, NORMAL.xyz, and (overlay) TANGENT.xyzw.
+                        let allowed = matches!(byte, 2 | 3 | 12..=17) || (s == 28 && byte >= 20);
                         assert!(
                             x == y || allowed,
                             "GEOM[{g}] vertex {i} byte {byte} changed"
@@ -1705,6 +1857,37 @@ mod tests {
         }
         assert_eq!(cell.mtrl, edited.mtrl);
         assert_eq!(cell.phy2, edited.phy2);
+    }
+
+    /// A recomputed tangent is a unit vector on the new surface, along the texture-u direction; with
+    /// `uv = (x, z) / 10` and the retail convention that gives `w = +1`.
+    #[test]
+    fn recomputed_tangents_follow_texture_u_on_the_displaced_surface() {
+        // A bump centred on the road of the patch at (50, -50).
+        let mut cell = synthetic_cell();
+        let r = cell
+            .displace(|x, z| 6.0 * (1.0 - ((x - 50.0).abs().max((z + 50.0).abs()) / 15.0)).max(0.0))
+            .unwrap();
+        assert!(r.retangented_vertices > 0);
+        let mut checked = 0;
+        for geom in &cell.geoms {
+            let road = &geom.prmgs[1];
+            for i in 0..road.vertex_count() {
+                let t = road.tangent(i).unwrap().unwrap();
+                if t[..3] == [1.0, 0.0, 0.0] {
+                    continue; // not re-derived
+                }
+                let n = road.normal(i);
+                let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+                let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+                assert!((len - 1.0).abs() < 2e-3, "tangent length {len}");
+                assert!(dot.abs() < 5e-3, "tangent not on the surface (t·n = {dot})");
+                assert!(t[0] > 0.5, "tangent {t:?} does not run along +u (+x)");
+                assert_eq!(t[3], 1.0, "handedness");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]
@@ -1750,7 +1933,7 @@ mod tests {
             .collect();
         crate::havok::parse_phy2_body(&body).unwrap();
         assert_eq!(back.phy2.prefix[2], 2, "word 2 is carried from the cell");
-        let soups = back.collision_soups().unwrap();
+        let soups = vec![back.collision_soup().unwrap()];
         let mopps = crate::mopp::extract_mopp_with_info(&body);
         assert_eq!(mopps.len(), soups.len());
         for ((code, info), (tris, verts)) in mopps.iter().zip(&soups) {
