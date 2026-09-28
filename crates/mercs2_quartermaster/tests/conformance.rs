@@ -67,9 +67,68 @@ contributions:
     normal_map: false
 
   - kind: add_sound
-    name: amb_myjungle
-    bank: src/audio/myjungle.bnk
-    sound: soundbank
+    bank: my_jungle
+    category: ambience
+    cues:
+      - name: my_jungle_birds
+        wave: src/audio/birds.wav
+        group_gain_db: -4.0
+        cue_gain_db: -6.0
+        pitch_semitones: 0.0
+        positional: false
+        min_distance: 10.0
+        max_distance: 1000.0
+        distance_exponent: 1.0
+        doppler_scale: 1.0
+        start_limit: 0
+        sound_id: 0x0
+        priority: 0.95
+        group_20: 1.0
+        cue_16: 0
+        clip_hash: 0x0
+
+  - kind: replace_sound_bank
+    bank: vo_mattias
+    language: english
+    category: vo
+    cues:
+      - name: my_mattias_line
+        wave: src/audio/line.wav
+        group_gain_db: -4.0
+        cue_gain_db: -6.0
+        pitch_semitones: 0.0
+        positional: false
+        min_distance: 10.0
+        max_distance: 1000.0
+        distance_exponent: 1.0
+        doppler_scale: 1.0
+        start_limit: 0
+        sound_id: 0x0
+        priority: 0.95
+        group_20: 1.0
+        cue_16: 0
+        clip_hash: 0x0
+
+  - kind: replace_sound_cue
+    bank: ui_hud
+    category: ui
+    cue:
+      name: ui_PDA_Open_01_st
+      wave: src/audio/pda.wav
+      group_gain_db: -4.0
+      cue_gain_db: -6.0
+      pitch_semitones: 0.0
+      positional: false
+      min_distance: 10.0
+      max_distance: 1000.0
+      distance_exponent: 1.0
+      doppler_scale: 1.0
+      start_limit: 0
+      sound_id: 0x0
+      priority: 0.95
+      group_20: 1.0
+      cue_16: 0
+      clip_hash: 0x0
 
   - kind: edit_state_machine
     target: al_veh_boat_destroyer
@@ -259,9 +318,22 @@ const JSON: &str = r#"
     },
     {
       "kind": "add_sound",
-      "name": "amb_myjungle",
-      "bank": "src/audio/myjungle.bnk",
-      "sound": "soundbank"
+      "bank": "my_jungle",
+      "category": "ambience",
+      "cues": [{ "name": "my_jungle_birds", "wave": "src/audio/birds.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }]
+    },
+    {
+      "kind": "replace_sound_bank",
+      "bank": "vo_mattias",
+      "language": "english",
+      "category": "vo",
+      "cues": [{ "name": "my_mattias_line", "wave": "src/audio/line.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }]
+    },
+    {
+      "kind": "replace_sound_cue",
+      "bank": "ui_hud",
+      "category": "ui",
+      "cue": { "name": "ui_PDA_Open_01_st", "wave": "src/audio/pda.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }
     },
     {
       "kind": "edit_state_machine",
@@ -482,9 +554,22 @@ normal_map = false
 
 [[contributions]]
 kind = "add_sound"
-name = "amb_myjungle"
-bank = "src/audio/myjungle.bnk"
-sound = "soundbank"
+bank = "my_jungle"
+category = "ambience"
+cues = [{ name = "my_jungle_birds", wave = "src/audio/birds.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }]
+
+[[contributions]]
+kind = "replace_sound_bank"
+bank = "vo_mattias"
+language = "english"
+category = "vo"
+cues = [{ name = "my_mattias_line", wave = "src/audio/line.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }]
+
+[[contributions]]
+kind = "replace_sound_cue"
+bank = "ui_hud"
+category = "ui"
+cue = { name = "ui_PDA_Open_01_st", wave = "src/audio/pda.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }
 
 [[contributions]]
 kind = "edit_state_machine"
@@ -661,6 +746,8 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_model",
             "add_texture",
             "add_sound",
+            "replace_sound_bank",
+            "replace_sound_cue",
             "edit_state_machine",
             "edit_world",
             "activate_layer",
