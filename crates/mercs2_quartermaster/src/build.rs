@@ -458,16 +458,15 @@ enum Lowering {
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
     Blocks(Vec<PatchBlock>),
-    /// A NEW base WAD placed in `data/`, plus the stringdb block that belongs in the Shipment overlay.
-    /// `add_language` is the only producer. The base WAD is opened by name (the mount-check target);
-    /// the `overlay` blocks ride the always-mounted Shipment overlay, because the engine resolves a
-    /// language's stringdb from the MOUNTED registry — every retail language stringdb lives in
-    /// shell.wad/vz.wad, never in the on-demand `.\Data\<lang>.wad`.
+    /// A NEW base WAD placed in `data/`: `add_language` is the only producer. The engine mounts
+    /// `.\Data\<language>.wad` in its language slot, above the level WAD (`FUN_004BFE20`), so its
+    /// string table, fonts and voice-over tables resolve from there. `stream_copy` is the voice
+    /// stream the language plays from, as `(from, to)` under the game folder.
     LanguageWad {
         language: String,
         display: String,
         blocks: Vec<PatchBlock>,
-        overlay: Vec<PatchBlock>,
+        stream_copy: (String, String),
     },
     /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
     /// next to the digest it records for them.
@@ -3861,17 +3860,10 @@ fn lower(
         | Contribution::AddStringDbKeys { .. }
         | Contribution::ReplaceStringDbText { .. } => Ok(Lowering::Nothing),
 
-        // A NEW language. Forks the base string table out of the stack (like edit_stringdb reads a
-        // table), applies the translation, and RE-KEYS the container under the new language's own hash
-        // so the engine resolves it as `<name>`'s table.
-        //
-        // ⚠ The stringdb is emitted into the ALWAYS-MOUNTED Shipment overlay, NOT the base
-        // `.\Data\<name>.wad`. The engine requests `(pandemic_hash_m2("<name>"), stringdb)` from the
-        // MOUNTED registry — every retail language stringdb lives in shell.wad/vz.wad, and
-        // `English.wad` (the `.\Data\English.wad`) carries none. A stringdb in an on-demand base WAD
-        // opened by name never registers there, so the menu falls back to raw `[0x…]` keys. The base
-        // WAD is still emitted (a missing `.\Data\<name>.wad` is a hard exit(1)) — it just carries no
-        // stringdb the engine reads.
+        // A NEW language: `data/<name>.wad` carries its string table (the base table forked, the
+        // translation applied, re-keyed to `m2(name)`), its fonts and atlases (forked from the
+        // base's, `language::fork_fonts`) and English's voice-over tables re-keyed to
+        // `<bank>.<name>` (`language::fork_vo_tables`). The voice stream is copied at deploy.
         Contribution::AddLanguage {
             name,
             display,
@@ -3925,50 +3917,51 @@ fn lower(
             }
             let edited = mercs2_formats::stringdb::edit_container(&container, &edits)
                 .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-
-            // Re-key the forked container under the NEW language's hash so the engine resolves it as
-            // `<name>`'s table, not `base`'s. Same single-entry stringdb block shape edit_stringdb
-            // emits — INFO/KEYS/STRS spliced straight in, PRIMARY, sentinel LOD (a string table has no
-            // LOD chain, so anything but the sentinel would dangle, M0001).
             let hash = crate::manifest::asset_hash(name);
+            let fail = |message: String| BuildError::Lower { index, kind, message };
+
+            let mut assets = vec![crate::language::Asset {
+                name_hash: hash,
+                type_hash: TYPE_HASH_STRINGDB,
+                type_id: TYPE_ID_STRINGDB,
+                container: edited,
+            }];
+            let fonts = crate::language::fork_fonts(game, base_name, name).map_err(fail)?;
+            assets.extend(fonts);
+            let main = crate::language::assets_block(format!("blocks\\{name}\\{name}.block"), &assets)
+                .map_err(fail)?;
+
+            // English's voice-over tables, one block per re-keyed entry name.
+            let vo = crate::language::fork_vo_tables(game, name).map_err(fail)?;
+            let mut by_name: std::collections::BTreeMap<u32, Vec<crate::language::Asset>> =
+                std::collections::BTreeMap::new();
+            for a in vo {
+                by_name.entry(a.name_hash).or_default().push(a);
+            }
+            let mut blocks = vec![main];
+            let vo_tables: usize = by_name.values().map(Vec::len).sum();
+            for (entry, tables) in &by_name {
+                blocks.push(
+                    crate::language::assets_block(format!("blocks\\{name}\\vo_{entry:08x}.block"), tables)
+                        .map_err(fail)?,
+                );
+            }
             log.push(format!(
                 "contributions[{index}] add_language {name} 0x{hash:08X} ← fork {base_name} \
-                 0x{base_hash:08X}: {} key(s) translated, container {} -> {} bytes → .\\Data\\{name}.wad",
+                 0x{base_hash:08X}: {} key(s) translated, fonts and atlases {}_18/_20, {vo_tables} \
+                 voice-over table(s) under {} name(s) → .\\Data\\{name}.wad",
                 edits.len(),
-                container.len(),
-                edited.len()
+                name,
+                by_name.len(),
             ));
-            let mut block_data = Vec::new();
-            block_data.extend_from_slice(&1u32.to_le_bytes());
-            block_data.extend_from_slice(&hash.to_le_bytes());
-            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
-            block_data.extend_from_slice(&0u32.to_le_bytes());
-            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
-            block_data.extend_from_slice(&edited);
-            // Base `.\Data\<name>.wad`: exists only to satisfy the mount check. It carries the same
-            // stringdb bytes (harmless, and keeps the base a valid non-empty WAD), but the engine
-            // never reads a stringdb from here — see the note above.
-            let base_block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\{name}\\{name}_stringdb.block"),
-                vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB)],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            // The stringdb the engine actually resolves — in the always-mounted Shipment overlay, in
-            // the same single-entry `blocks\VZ\mod_<hash>.block` shape edit_stringdb uses.
-            let overlay_block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB)],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::LanguageWad {
                 language: name.clone(),
                 display: display.clone(),
-                blocks: vec![base_block],
-                overlay: vec![overlay_block],
+                blocks,
+                stream_copy: (
+                    crate::language::VO_STREAM_FROM.to_string(),
+                    crate::language::vo_stream_to(name),
+                ),
             })
         }
     }
@@ -4229,7 +4222,7 @@ pub fn build(
 
     let mut blocks = Vec::new();
     let mut files = Vec::new();
-    let mut lang_wads: Vec<(String, String, Vec<PatchBlock>)> = Vec::new();
+    let mut lang_wads: Vec<(String, String, Vec<PatchBlock>, (String, String))> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match lower(
             index,
@@ -4247,13 +4240,8 @@ pub fn build(
                 language,
                 display,
                 blocks: bs,
-                overlay,
-            } => {
-                // The stringdb goes into the always-mounted Shipment overlay (vz-patch); the base WAD
-                // is emitted separately below, opened by name only to satisfy the mount check.
-                blocks.extend(overlay);
-                lang_wads.push((language, display, bs));
-            }
+                stream_copy,
+            } => lang_wads.push((language, display, bs, stream_copy)),
             Lowering::File {
                 name,
                 relative,
@@ -4488,7 +4476,7 @@ pub fn build(
     // because the engine opens it by name. Assembled with the same machinery, self-checked before it
     // reaches disk, and recorded as a `Destination::DataWad` so deploy places it in `data/` — the one
     // place a Shipment writes a WAD, earned only by the collision-checked name (`language_name_refusal`).
-    for (language, display, lang_blocks) in lang_wads {
+    for (language, display, lang_blocks, (from, to)) in lang_wads {
         let wad =
             build_patch_wad_multi(&lang_blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
                 BuildError::Lower {
@@ -4525,6 +4513,26 @@ pub fn build(
             bytes: wad.len(),
             sha256: digest,
             destination: Destination::DataWad { relative, display },
+        });
+
+        // The voice stream the language plays its voice-over from: a copy of English's, made at
+        // deploy. Its record carries the digest of the source as read here.
+        let vz = game
+            .as_deref()
+            .and_then(|g| g.paths().first().map(|p| p.to_path_buf()))
+            .ok_or(BuildError::GameRequired { index: 0, kind: "add_language" })?;
+        let game_root = crate::compat::game_root_of(&vz)
+            .map_err(|message| BuildError::Compat(crate::compat::CompatError::GameRoot { message }))?;
+        let source = game_root.join(&from);
+        let (bytes, sha256) = sha256_file(&source)?;
+        log.push(format!(
+            "{to} ← copy of {from} at deploy: {bytes} bytes, sha256 {sha256}"
+        ));
+        placements.push(Placement {
+            name: to.rsplit('/').next().unwrap_or(&to).to_string(),
+            bytes,
+            sha256,
+            destination: Destination::StreamCopy { from, to },
         });
     }
 
@@ -4614,6 +4622,25 @@ pub fn build(
         placements,
         log,
     })
+}
+
+/// The size and sha256 of the file at `path`, read in chunks.
+fn sha256_file(path: &Path) -> Result<(usize, String), BuildError> {
+    use std::io::Read;
+    let io = |e: std::io::Error| BuildError::Io { path: path.to_path_buf(), message: e.to_string() };
+    let mut f = std::fs::File::open(path).map_err(io)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0usize;
+    loop {
+        let n = f.read(&mut buf).map_err(io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n;
+    }
+    Ok((total, hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()))
 }
 
 /// Assemble `blocks` as a patch WAD at `relative` under `out_dir`, self-check it before it reaches
