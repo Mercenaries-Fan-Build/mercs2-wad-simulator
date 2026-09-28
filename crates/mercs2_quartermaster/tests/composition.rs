@@ -6,6 +6,7 @@
 //! not something we need the WADs to re-derive.
 
 use mercs2_quartermaster::blast::{self, Access, Claim, MergeClass};
+use mercs2_quartermaster::link::Level;
 use mercs2_quartermaster::{from_str, Format, Manifest};
 
 fn parse(yaml: &str) -> Manifest {
@@ -88,7 +89,7 @@ fn the_wardrobe_script_is_mergeable_not_exclusive() {
     let m = outfit("s", "a", "mattias", "X");
     let script_claim = blast::claims(&m)
         .into_iter()
-        .find(|r| matches!(&r.claim, Claim::Script { name } if name == "wifpmcinterior"))
+        .find(|r| matches!(&r.claim, Claim::Script { name, level: Level::Vz } if name == "wifpmcinterior"))
         .expect("add_outfit must claim the wardrobe script");
     assert_eq!(script_claim.class, MergeClass::OrderedList);
 }
@@ -633,7 +634,7 @@ fn exclusive_conflict(a: &Manifest, b: &Manifest) -> blast::Conflict {
 fn two_replace_lua_conflict() {
     let c = "  - kind: replace_lua\n    target: wifpmcgarage\n    source: src/g.lua\n";
     let found = exclusive_conflict(&one("mod-a", c), &one("mod-b", c));
-    assert_eq!(found.claim, Claim::Script { name: "wifpmcgarage".into() });
+    assert_eq!(found.claim, Claim::Script { name: "wifpmcgarage".into(), level: Level::Vz });
 }
 
 /// Decided: an append beside a wholesale replacement of the same script is a hard conflict — the
@@ -785,8 +786,82 @@ fn replace_cue(shipment: &str, bank: &str, language: Option<&str>, cue: &str) ->
 }
 
 fn add_cue(shipment: &str, bank: &str, cue: &str) -> Manifest {
+    add_cue_in(shipment, bank, cue, "[gameplay]")
+}
+
+fn add_cue_in(shipment: &str, bank: &str, cue: &str, load_in: &str) -> Manifest {
     let f = cue_yaml("        ", cue);
-    sound(shipment, &format!("  - kind: add_sound\n    bank: {bank}\n    category: ui\n    cues:\n      - {}", &f[8..]))
+    sound(
+        shipment,
+        &format!("  - kind: add_sound\n    bank: {bank}\n    category: ui\n    load_in: {load_in}\n    cues:\n      - {}", &f[8..]),
+    )
+}
+
+/// The script claims of `m`, as `(name, level, class)`.
+fn script_claims(m: &Manifest) -> Vec<(String, Level, MergeClass)> {
+    blast::claims(m)
+        .into_iter()
+        .filter_map(|r| match r.claim {
+            Claim::Script { name, level } => Some((name, level, r.class)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A sound kind claims the scripts of each session's loader, `Additive`: gameplay's trampoline
+/// hosts in `vz.wad`, the front end's loader and host in `shell.wad`. An override claims the
+/// sessions retail loads its bank in: `ui_hud` both, `ui_shell` the front end, a `vo_*` bank
+/// gameplay.
+#[test]
+fn sound_kinds_claim_their_loaders_scripts() {
+    let gameplay = vec![
+        ("wifpmcinterior".to_string(), Level::Vz, MergeClass::OrderedList),
+        ("mrxsoundbootstrap".to_string(), Level::Vz, MergeClass::OrderedList),
+    ];
+    let front = vec![
+        ("qm_shell_modloader".to_string(), Level::Shell, MergeClass::OrderedList),
+        ("mrxsound".to_string(), Level::Shell, MergeClass::OrderedList),
+    ];
+    let both: Vec<_> = gameplay.iter().chain(&front).cloned().collect();
+    assert_eq!(script_claims(&add_cue_in("a", "b", "c", "[gameplay]")), gameplay);
+    assert_eq!(script_claims(&add_cue_in("a", "b", "c", "[front_end]")), front);
+    assert_eq!(script_claims(&add_cue_in("a", "b", "c", "[gameplay, front_end]")), both);
+    assert_eq!(script_claims(&replace_cue("a", "ui_hud", None, "x")), both);
+    assert_eq!(script_claims(&replace_cue("a", "ui_shell", None, "x")), front);
+    assert_eq!(script_claims(&replace_cue("a", "vo_mattias", Some("english"), "x")), gameplay);
+    // Two sound Shipments share the loaders.
+    let a = replace_cue("a", "ui_hud", None, "one");
+    let b = add_cue_in("b", "bank_b", "two", "[gameplay, front_end]");
+    assert!(blast::conflicts(&[("a", &a), ("b", &b)]).is_empty());
+    // The front end's `mrxsound` is not gameplay's.
+    assert_ne!(
+        Claim::Script { name: "mrxsound".into(), level: Level::Shell },
+        Claim::Script { name: "mrxsound".into(), level: Level::Vz }
+    );
+}
+
+/// `replace_lua wifpmcinterior` beside a sound override that gameplay loads is a conflict: the
+/// replacement removes the trampoline host the loader is reached through. Beside a front-end-only
+/// override it is not.
+#[test]
+fn replace_lua_of_the_loader_host_conflicts_with_a_gameplay_sound_override() {
+    let replace = one("mod-a", "  - kind: replace_lua\n    target: wifpmcinterior\n    source: src/w.lua\n");
+    let found = exclusive_conflict(&replace, &replace_cue("mod-b", "ui_hud", None, "ui_PDA_Accept"));
+    assert_eq!(found.claim, Claim::Script { name: "wifpmcinterior".into(), level: Level::Vz });
+    assert!(blast::conflicts(&[("mod-a", &replace), ("mod-b", &replace_cue("mod-b", "ui_shell", None, "x"))]).is_empty());
+    // One Shipment doing both is a self-conflict.
+    let both = one(
+        "mod-a",
+        &format!(
+            "  - kind: replace_lua\n    target: wifpmcinterior\n    source: src/w.lua\n  - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}",
+            cue_yaml("      ", "ui_PDA_Accept")
+        ),
+    );
+    assert!(
+        blast::self_conflicts(&both).iter().any(|c| c.claim == Claim::Script { name: "wifpmcinterior".into(), level: Level::Vz }),
+        "{:?}",
+        blast::self_conflicts(&both)
+    );
 }
 
 /// Two Shipments overriding different cues of one bank compose — the link merges them — while one
