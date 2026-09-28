@@ -19,7 +19,8 @@ That had two failure modes, both bad:
 
 A test that can only run on one computer is not a test. At 13,404 bytes each the whole set is 128 KiB,
 so vendoring costs nothing and makes every claim about the format continuously checked. (This is not
-an option for `vz.wad`, at 2.5 GiB — WAD-dependent tests still skip when it is absent.)
+an option for `vz.wad`, at 2.5 GiB — WAD-dependent tests are instead built only by the `retail`
+feature and run with `cargo xtask retail-test`, failing when `.mercs2-local.toml` names no `vz.wad`.)
 
 ## The set
 
