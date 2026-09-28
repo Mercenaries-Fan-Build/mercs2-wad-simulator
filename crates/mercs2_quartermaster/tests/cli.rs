@@ -8,47 +8,19 @@
 //! Three codes, and 1 vs 2 is the one that matters in CI: "this Shipment is wrong" has to be
 //! distinguishable from "this runner has no game install", or a misconfigured runner reads as a
 //! failing mod.
+//!
+//! The tests that need the retail game stack (`qm build`, `qm link`) are game-gated and live in
+//! `cli_retail.rs`.
 
+mod common {
+    pub mod cli;
+}
+
+use common::cli::{code, fixture, link, qm, read_json, scratch, shipment, EXIT_FINDINGS};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const EXIT_FINDINGS: i32 = 1;
 const EXIT_UNUSABLE: i32 = 2;
-
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("qm-cli-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    dir
-}
-
-/// Write a manifest with the given contributions block.
-fn shipment(dir: &Path, contributions: &str) -> PathBuf {
-    std::fs::write(
-        dir.join("manifest.yaml"),
-        format!(
-            "format: 2
-shipment: {{ name: cli-test, version: 1.0.0, target: retail }}
-contributions:
-{contributions}"
-        ),
-    )
-    .unwrap();
-    dir.to_path_buf()
-}
-
-fn qm(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_qm"))
-        .args(args)
-        .output()
-        .expect("qm must run")
-}
-
-fn code(out: &Output) -> i32 {
-    out.status
-        .code()
-        .expect("qm must exit normally, not by signal")
-}
 
 // ---------------------------------------------------------------------------
 // The gate
@@ -230,87 +202,6 @@ fn every_listed_rule_carries_its_doc() {
 }
 
 // ---------------------------------------------------------------------------
-// The real build, through the CLI
-// ---------------------------------------------------------------------------
-
-fn solid_png(width: u32, height: u32) -> Vec<u8> {
-    let mut out = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().unwrap();
-        writer
-            .write_image_data(&vec![0x80u8; (width * height * 4) as usize])
-            .unwrap();
-    }
-    out
-}
-
-/// `qm build` produces a real overlay WAD against the retail stack.
-///
-/// Runs when a PC `vz.wad` is discoverable and SKIPS loudly otherwise, matching `tests/build.rs`.
-/// The skip is detected from the CLI's own exit code rather than by re-implementing discovery here,
-/// which also checks that the no-game path stays distinguishable.
-#[test]
-fn build_emits_a_wad_and_its_digest() {
-    // Dimensions must match the target: a replacement is same-hash and fully resident, so a
-    // mismatch is a legitimate hard error rather than something to paper over.
-    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
-    let Some((w, h)) = target_dimensions(hash) else {
-        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
-        return;
-    };
-
-    let dir = scratch("realbuild");
-    std::fs::write(dir.join("src/t.png"), solid_png(w, h)).unwrap();
-    let s = shipment(
-        &dir,
-        "  - kind: replace_texture
-    target: al_hum_boss_ub
-    image: src/t.png
-",
-    );
-    let out_dir = dir.join("out");
-    let out = qm(&[
-        "build",
-        s.to_str().unwrap(),
-        "--out",
-        out_dir.to_str().unwrap(),
-    ]);
-    assert_eq!(
-        code(&out),
-        0,
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let wad = out_dir.join("cli-test.wad");
-    assert!(wad.is_file(), "the WAD must be on disk");
-
-    // Verified BY HASH: the recorded digest must be the digest of what was written.
-    let recorded = std::fs::read_to_string(out_dir.join("cli-test.wad.sha256")).unwrap();
-    let actual = mercs2_quartermaster::sha256_hex(&std::fs::read(&wad).unwrap());
-    assert!(
-        recorded.starts_with(&actual),
-        "recorded {recorded:?} does not match the file's {actual}"
-    );
-
-    // The placement record is what makes a deploy reversible.
-    assert!(out_dir.join("placement.json").is_file());
-    assert!(out_dir.join("build.log").is_file());
-}
-
-/// The target's real dimensions, or None when there is no discoverable game.
-fn target_dimensions(hash: u32) -> Option<(u32, u32)> {
-    let found = mercs2_quartermaster::game::discover()?;
-    let mut stack = mercs2_quartermaster::GameStack::open(&[found.path]).ok()?;
-    let tex = stack.texture(hash)?;
-    Some((tex.width, tex.height))
-}
-
-// ---------------------------------------------------------------------------
 // Data resolution — no build-machine paths
 // ---------------------------------------------------------------------------
 
@@ -351,18 +242,10 @@ fn the_name_table_is_found_by_walking_up_not_by_a_compiled_in_path() {
 // `qm preflight` — exit codes and the plan file
 // ---------------------------------------------------------------------------
 
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/load_plan")
-}
-
 fn preflight(args: &[&str], out: &Path) -> Output {
     let mut all = vec!["preflight", "--out", out.to_str().unwrap()];
     all.extend_from_slice(args);
     qm(&all)
-}
-
-fn fixture(rel: &str) -> String {
-    fixtures().join(rel).to_string_lossy().into_owned()
 }
 
 /// Exit 0: an ok plan is written.
@@ -484,10 +367,6 @@ fn preflight_names_the_item_and_code_not_the_path() {
 // ---------------------------------------------------------------------------
 // lint --report: lint-report.json
 // ---------------------------------------------------------------------------
-
-fn read_json(path: &Path) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
 
 /// The version `qm --version` prints, without the `qm ` prefix.
 fn running_qm() -> String {
@@ -734,28 +613,6 @@ fn compile_lua_non_utf8_exit_2() {
 }
 
 // ---------------------------------------------------------------------------
-// qm build's default output
-// ---------------------------------------------------------------------------
-
-/// With no `--out`, `qm build` writes under `<shipment>/_build`. `qm build` needs a game stack, so
-/// this runs when one is discoverable and SKIPS loudly otherwise, like `build_emits_a_wad_and_its_digest`.
-#[test]
-fn build_default_out_is_root_underscore_build() {
-    if mercs2_quartermaster::game::discover().is_none() {
-        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
-        return;
-    }
-    let dir = scratch("default-out");
-    std::fs::write(dir.join("src/cli-test.ini"), b"[x]\n").unwrap();
-    let s = shipment(&dir, "  - kind: place_file\n    file: src/cli-test.ini\n    dest: scripts\n");
-    let out = qm(&["build", s.to_str().unwrap()]);
-    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(dir.join("_build/placement.json").is_file());
-    assert!(dir.join("_build/scripts/cli-test.ini").is_file());
-    assert!(!dir.join("build").exists(), "the old default is not written");
-}
-
-// ---------------------------------------------------------------------------
 // manifest-info: a Shipment's name and version, for choosing its release before a full lint
 // ---------------------------------------------------------------------------
 
@@ -834,22 +691,6 @@ fn manifest_info_failures_exit_2_with_empty_stdout() {
 // `qm link` — exit codes and the plan file
 // ---------------------------------------------------------------------------
 
-fn link(args: &[&str], out: &Path) -> Output {
-    let mut all = vec!["link", "--out", out.to_str().unwrap()];
-    all.extend_from_slice(args);
-    qm(&all)
-}
-
-/// The names in a directory, sorted.
-fn listing(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort_unstable();
-    names
-}
-
 /// Exit 2: a usage error or a request that cannot be read. Nothing was checked, no plan is written,
 /// and a stale plan from an earlier run is removed. Hermetic: the request is read before the game
 /// stack is resolved, so every case fails on the request and not on a missing game.
@@ -896,65 +737,6 @@ fn link_without_out_exits_2() {
     let o = qm(&["link", &fixture("shipments/m2-sdk")]);
     assert_eq!(code(&o), EXIT_UNUSABLE, "stderr: {}", String::from_utf8_lossy(&o.stderr));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--out"));
-}
-
-/// Exit 1: the set's load plan is not ok (`dup-runtime` and `m2-sdk` both ship `m2-sdk.dll`:
-/// M0162 and M0207). The plan is written and is the explanation; nothing else is — no link WAD, no
-/// placement record.
-///
-/// `qm link` opens the game stack before it plans, so this runs when a PC `vz.wad` is discoverable
-/// and SKIPS loudly otherwise, like `build_default_out_is_root_underscore_build`. The corpus only
-/// has to be a directory: a plan that is not ok never reaches the linker.
-#[test]
-fn link_plan_not_ok_exits_1_writes_the_plan_and_links_nothing() {
-    if mercs2_quartermaster::game::discover().is_none() {
-        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
-        return;
-    }
-    let dir = scratch("ln-not-ok");
-    let out = dir.join("out");
-    let o = link(
-        &[
-            "--request",
-            &fixture("request.dup-runtime.json"),
-            "--corpus",
-            dir.join("src").to_str().unwrap(),
-        ],
-        &out,
-    );
-    let stderr = String::from_utf8_lossy(&o.stderr);
-    assert_eq!(code(&o), EXIT_FINDINGS, "stderr: {stderr}");
-    assert!(stderr.contains("M0207"), "{stderr}");
-    let plan = read_json(&out.join("load-plan.json"));
-    assert_eq!(plan["ok"], false);
-    assert_eq!(plan["producer"], "link");
-    assert_eq!(listing(&out), ["load-plan.json"], "only the plan is written");
-}
-
-/// Exit 0: an ok plan. `m2-sdk` touches no script and no string table, so there is nothing to link:
-/// the plan and an empty placement record are written, and no link WAD.
-///
-/// Needs a game stack for the same reason as the exit-1 case, and SKIPS loudly without one.
-#[test]
-fn link_ok_plan_exits_0_and_writes_the_plan() {
-    if mercs2_quartermaster::game::discover().is_none() {
-        eprintln!("SKIP: no PC vz.wad discoverable — run scripts/find-vz-wad.sh --write");
-        return;
-    }
-    let dir = scratch("ln-ok");
-    let out = dir.join("out");
-    let o = link(
-        &[&fixture("shipments/m2-sdk"), "--corpus", dir.join("src").to_str().unwrap()],
-        &out,
-    );
-    assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
-    assert!(String::from_utf8_lossy(&o.stdout).contains("nothing to link"));
-    let plan = read_json(&out.join("load-plan.json"));
-    assert_eq!(plan["ok"], true);
-    assert_eq!(plan["producer"], "link");
-    let placement = read_json(&out.join("placement.json"));
-    assert_eq!(placement["placements"], serde_json::json!([]));
-    assert_eq!(listing(&out), ["load-plan.json", "placement.json"], "no link WAD");
 }
 
 // ---------------------------------------------------------------------------
