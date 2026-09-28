@@ -28,10 +28,12 @@ fn a_placement_block() -> Vec<u8> {
     for (idx, path) in archive.paths.iter().enumerate() {
         let p = path.to_lowercase();
         if p.contains("layers_static") || p.contains("vz_state") {
-            if let Ok(dec) = decompress_block(&mut file, &archive.indx, idx as u16) {
-                if load_placements(&dec).map(|v| !v.is_empty()).unwrap_or(false) {
-                    return dec;
-                }
+            let dec = decompress_block(&mut file, &archive.indx, idx as u16)
+                .unwrap_or_else(|e| panic!("decompress block {idx} ({path}): {e}"));
+            // `load_placements` errs only when a layer has no UCFX sub-block or no Transform
+            // record, i.e. when nothing is placed in it.
+            if load_placements(&dec).map(|v| !v.is_empty()).unwrap_or(false) {
+                return dec;
             }
         }
     }
