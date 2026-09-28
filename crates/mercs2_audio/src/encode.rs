@@ -17,6 +17,11 @@
 //! `tests/retail_banks.rs`: the cue length by [`crate::duration`] (bit-exact on 14,818 of the 14,834
 //! retail cues), the sounddb sorted by guid, blobs 16-aligned. Every multi-track entry must name a
 //! group of this bank, since the length needs the waves it can play.
+//!
+//! [`retarget_cue`] rewrites one cue of an existing (parsed) soundbank to play a new single-wave
+//! group appended after the bank's groups, whose wave lives in the caller's wavebank; the cue keeps
+//! its index, so the bank's own sounddb still routes to it, and every other cue and group is left
+//! byte-identical. [`RETAIL_CATEGORY_NAMES`] lists the category names cracked so far.
 
 use mercs2_formats::hash::pandemic_hash_m2;
 
@@ -51,6 +56,25 @@ pub const RETAIL_CATEGORIES: [CategoryEntry; 19] = [
     CategoryEntry { category: 0xDB32_F53E, parent: 0xEC8F_FB27 }, // Non_Action_Hijack → non_ui
     CategoryEntry { category: 0xEC8F_FB27, parent: 0x7674_95E2 }, // non_ui → sfx
     CategoryEntry { category: 0xFA0B_8DBC, parent: 0xD221_DBE8 }, // chatter → vo
+];
+
+/// The names of the [`RETAIL_CATEGORIES`] whose hash has been matched to a string — 14 of the 19.
+/// The other five are known only by hash.
+pub const RETAIL_CATEGORY_NAMES: [&str; 14] = [
+    "ambience",
+    "chatter",
+    "collision",
+    "explosion",
+    "foley",
+    "music",
+    "Non_Action_Hijack",
+    "non_ui",
+    "sfx",
+    "source",
+    "ui",
+    "vehicle",
+    "vo",
+    "weapon",
 ];
 
 /// Interleaved little-endian PCM16 audio.
@@ -199,6 +223,8 @@ pub enum EncodeError {
     ZeroRate { cue: String },
     /// A group names a wave index past this bank's waves.
     WaveOutOfRange { group: usize, wave: usize, waves: usize },
+    /// The bank has no cue with this guid.
+    CueMissing { name: String, guid: u32, bank: u32 },
     /// A cue names a group index past this bank's groups.
     GroupOutOfRange { cue: String, group: usize, groups: usize },
     /// A multi-wave group lists no waves, or a multi-track sound lists no entries.
@@ -240,6 +266,9 @@ impl std::fmt::Display for EncodeError {
             EncodeError::ZeroRate { cue } => write!(f, "encode: {cue} has sample rate 0"),
             EncodeError::WaveOutOfRange { group, wave, waves } => {
                 write!(f, "encode: group {group} names wave {wave}, past this bank's {waves} waves")
+            }
+            EncodeError::CueMissing { name, guid, bank } => {
+                write!(f, "encode: soundbank 0x{bank:08X} has no cue {name:?} (0x{guid:08X})")
             }
             EncodeError::GroupOutOfRange { cue, group, groups } => {
                 write!(f, "encode: cue {cue:?} names group {group}, past this bank's {groups} groups")
@@ -438,18 +467,12 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
     }
     let bank_hash = pandemic_hash_m2(&spec.name);
 
-    let mut records = Vec::with_capacity(spec.waves.len());
-    for (i, w) in spec.waves.iter().enumerate() {
-        let frames = check_pcm(&format!("wave {i}"), &w.pcm)?;
-        records.push(WaveRecord {
-            clip_hash: w.clip_hash,
-            channels: w.pcm.channels,
-            format: BYTES_PER_SAMPLE_PCM16,
-            sample_rate: w.pcm.sample_rate,
-            frames,
-            data: WaveData::Embedded(w.pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect()),
-        });
-    }
+    let records = spec
+        .waves
+        .iter()
+        .enumerate()
+        .map(|(i, w)| wave_record(&format!("wave {i}"), w.clip_hash, &w.pcm))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let wave_ref = |g: usize, wave: usize, weight: f32| -> Result<WaveRef, EncodeError> {
         if wave >= spec.waves.len() {
@@ -642,6 +665,98 @@ impl BankTables {
 /// Build and serialize the three tables for `spec`.
 pub fn encode_bank(spec: &BankSpec) -> Result<EncodedBank, EncodeError> {
     build_tables(spec)?.to_bytes()
+}
+
+// ---- rewriting one cue of an existing bank ------------------------------------------------------
+
+/// The embedded wave record for `pcm` (format 2, `frames = samples / channels`), checked as
+/// [`build_general`] checks its waves.
+pub fn wave_record(what: &str, clip_hash: u32, pcm: &Pcm16) -> Result<WaveRecord, EncodeError> {
+    let frames = check_pcm(what, pcm)?;
+    Ok(WaveRecord {
+        clip_hash,
+        channels: pcm.channels,
+        format: BYTES_PER_SAMPLE_PCM16,
+        sample_rate: pcm.sample_rate,
+        frames,
+        data: WaveData::Embedded(pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect()),
+    })
+}
+
+/// What [`retarget_cue`] changed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Retargeted {
+    /// The rewritten cue's index — unchanged, so the bank's own sounddb still routes to it.
+    pub cue_index: usize,
+    /// The appended group's index.
+    pub group_index: usize,
+    /// The wave the group plays, for the caller to place at `wave_index` of its wavebank.
+    pub record: WaveRecord,
+}
+
+/// Rewrite cue `m2(spec.name)` of `bank` to play a new single-wave group, and nothing else.
+///
+/// The group is appended after the bank's last group — so every existing group keeps its index and
+/// bytes — with `spec`'s category, sound id and group fields, and one wave `{wavebank, wave_index,
+/// spec.group.wave_weight}` in another bank's wavebank (the caller's). The cue keeps its guid and
+/// its index and becomes single-track on that group, with `spec`'s cue fields and a length computed
+/// from the new wave ([`crate::duration`]). Every other cue is left as parsed.
+pub fn retarget_cue(
+    bank: &mut Soundbank,
+    spec: &CueSpec,
+    wavebank: u32,
+    wave_index: u32,
+) -> Result<Retargeted, EncodeError> {
+    if spec.name.is_empty() {
+        return Err(EncodeError::EmptyName);
+    }
+    let guid = pandemic_hash_m2(&spec.name);
+    let cue_index = bank
+        .cues
+        .iter()
+        .position(|c| c.guid == guid)
+        .ok_or(EncodeError::CueMissing { name: spec.name.clone(), guid, bank: bank.bank_hash })?;
+    let category = pandemic_hash_m2(&spec.category);
+    if !RETAIL_CATEGORIES.iter().any(|e| e.category == category) {
+        return Err(EncodeError::UnknownCategory {
+            cue: format!("cue {:?}", spec.name),
+            category: spec.category.clone(),
+            hash: category,
+        });
+    }
+    let record = wave_record(&format!("cue {:?}", spec.name), spec.clip_hash, &spec.pcm)?;
+    let group_index = bank.groups.len();
+    let group_u16 =
+        u16::try_from(group_index).map_err(|_| EncodeError::TooLarge { what: "group count", value: group_index + 1 })?;
+    let g = &spec.group;
+    let group = Group {
+        head: GroupHead {
+            sound_id: spec.sound_id,
+            category,
+            unknown_10: g.unknown_10,
+            unknown_14: g.unknown_14,
+            min_distance: g.min_distance,
+            max_distance: g.max_distance,
+            unknown_20: g.unknown_20,
+            distance_exponent: g.distance_exponent,
+            doppler_scale: g.doppler_scale,
+        },
+        form: GroupForm::Single {
+            gain: g.gain,
+            unknown_30: g.unknown_30,
+            wave: WaveRef { wavebank, index: wave_index, weight: g.wave_weight },
+        },
+    };
+    let body = CueBody::SingleTrack { soundbank: bank.bank_hash, group_index: group_u16, unknown_16: spec.cue.unknown_16 };
+    let length_s = duration::cue_length_s(
+        &body,
+        |sb, gi| (sb == bank.bank_hash && gi == group_u16).then_some(&group),
+        |wb, w| (wb == wavebank && w == wave_index).then_some(&record),
+    )
+    .map_err(|error| EncodeError::Length { cue: spec.name.clone(), error })?;
+    bank.groups.push(group);
+    bank.cues[cue_index] = Cue { guid, byte_06: spec.cue.byte_06, gain: spec.cue.gain, length_s, body };
+    Ok(Retargeted { cue_index, group_index, record })
 }
 
 #[cfg(test)]
@@ -874,12 +989,117 @@ mod tests {
         assert!(matches!(build_general(&bad), Err(EncodeError::WaveOutOfRange { wave: 9, .. })));
     }
 
+    /// The byte range of cue `i` in a serialized soundbank.
+    fn cue_bytes(body: &[u8], i: usize) -> &[u8] {
+        let rd = |o: usize| u32::from_le_bytes(body[o..o + 4].try_into().unwrap()) as usize;
+        let (sec, table, q) = (rd(0x18), rd(0x1C), u16::from_le_bytes([body[0x0A], body[0x0B]]) as usize);
+        let start = sec + rd(table + 4 * i);
+        let end = if i + 1 < q { sec + rd(table + 4 * (i + 1)) } else { table };
+        &body[start..end]
+    }
+
+    /// The byte range of group `g` in a serialized soundbank.
+    fn group_bytes(body: &[u8], g: usize) -> &[u8] {
+        let rd = |o: usize| u32::from_le_bytes(body[o..o + 4].try_into().unwrap()) as usize;
+        let (table, n) = (rd(0x14), u16::from_le_bytes([body[0x08], body[0x09]]) as usize);
+        let start = 0x20 + rd(table + 4 * g);
+        let end = if g + 1 < n { 0x20 + rd(table + 4 * (g + 1)) } else { table };
+        &body[start..end]
+    }
+
+    /// Retargeting two cues of a bank, one after the other (as the linker does for two Shipments'
+    /// overrides of one bank): each keeps its index, plays a new group appended after the others,
+    /// whose wave is the caller's; every other cue and group is byte-identical; the bank's own
+    /// sounddb still routes every cue; and the engine plays the new wave.
+    #[test]
+    fn retargeting_a_cue_changes_that_cue_and_appends_one_group() {
+        use crate::sounddb::SoundDb;
+        use crate::AudioEngine;
+
+        let original = encode_bank(&spec()).expect("encodes");
+        let mut bank = Soundbank::parse(&original.soundbank).unwrap();
+        let groups_before = bank.groups.len();
+
+        let mods = pandemic_hash_m2("qm_mymod_mod_ui_sounds");
+        let mut new_cue = cue("mod_whoosh", 1, vec![-7; 441]);
+        new_cue.cue.gain = 0.25;
+        new_cue.group.min_distance = 3.0;
+        let a = retarget_cue(&mut bank, &new_cue, mods, 0).expect("retargets");
+        assert_eq!(a.cue_index, 1, "the cue keeps its index");
+        assert_eq!(a.group_index, groups_before, "the group is appended");
+        let second = cue("mod_beep", 2, vec![9; 200]);
+        let b = retarget_cue(&mut bank, &second, mods, 1).expect("retargets a second cue");
+        assert_eq!((b.cue_index, b.group_index), (2, groups_before + 1));
+
+        let rewritten = bank.to_bytes().unwrap();
+        let before = &original.soundbank;
+        assert_eq!(cue_bytes(&rewritten, 0), cue_bytes(before, 0), "an untouched cue is byte-identical");
+        for g in 0..groups_before {
+            assert_eq!(group_bytes(&rewritten, g), group_bytes(before, g), "group {g} is byte-identical");
+        }
+        let parsed = Soundbank::parse(&rewritten).unwrap();
+        assert_eq!(parsed, bank);
+        let c = &parsed.cues[1];
+        assert_eq!(c.gain, 0.25);
+        assert_eq!(c.length_s, (441f64 / 22050.0) as f32);
+        assert_eq!(
+            c.body,
+            CueBody::SingleTrack { soundbank: bank.bank_hash, group_index: groups_before as u16, unknown_16: 0 }
+        );
+        let g = &parsed.groups[groups_before];
+        assert_eq!(g.waves(), &[WaveRef { wavebank: mods, index: 0, weight: 1.0 }]);
+        assert_eq!(g.head.min_distance, 3.0);
+
+        // The retail sounddb is unchanged and still routes to the rewritten cue; the engine plays the
+        // author's wave from the author's wavebank.
+        let wavebank = WavebankFile { bank_hash: mods, stream_name: None, records: vec![a.record, b.record] };
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&original.sounddb).unwrap());
+        eng.load_soundbank(&rewritten).unwrap();
+        eng.load_wavebank(&original.wavebank).unwrap();
+        eng.load_wavebank(&wavebank.to_bytes().unwrap()).unwrap();
+        let entry = *eng.sounddb.find_cue_by_name("mod_whoosh").unwrap();
+        let resolved = eng.resolve_cue(&entry).expect("resolves");
+        let waves: Vec<(u32, u32)> = resolved.waves().map(|w| (w.wavebank, w.index)).collect();
+        assert_eq!(waves, vec![(mods, 0)]);
+    }
+
+    #[test]
+    fn retargeting_refuses_what_it_cannot_do() {
+        let enc = encode_bank(&spec()).unwrap();
+        let mut bank = Soundbank::parse(&enc.soundbank).unwrap();
+        let untouched = bank.clone();
+        assert!(matches!(
+            retarget_cue(&mut bank, &cue("not_in_bank", 1, vec![1; 4]), 1, 0),
+            Err(EncodeError::CueMissing { .. })
+        ));
+        let mut bad = cue("mod_click", 1, vec![1; 4]);
+        bad.category = "nope".into();
+        assert!(matches!(retarget_cue(&mut bank, &bad, 1, 0), Err(EncodeError::UnknownCategory { .. })));
+        assert!(matches!(
+            retarget_cue(&mut bank, &cue("mod_click", 2, vec![1; 3]), 1, 0),
+            Err(EncodeError::PartialFrame { .. })
+        ));
+        assert_eq!(bank, untouched, "a refused retarget changes nothing");
+    }
+
     #[test]
     fn retail_categories_are_sorted_like_the_table_they_came_from() {
         assert!(RETAIL_CATEGORIES.windows(2).all(|w| w[0].category < w[1].category));
         for name in ["ui", "sfx", "vo", "music", "vehicle", "weapon", "collision", "ambience"] {
             let h = pandemic_hash_m2(name);
             assert!(RETAIL_CATEGORIES.iter().any(|c| c.category == h), "{name}");
+        }
+    }
+
+    /// Every named category hashes into the retail tree, and no two names name one category.
+    #[test]
+    fn every_category_name_hashes_into_the_retail_tree() {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in RETAIL_CATEGORY_NAMES {
+            let h = pandemic_hash_m2(name);
+            assert!(RETAIL_CATEGORIES.iter().any(|c| c.category == h), "{name} = 0x{h:08X}");
+            assert!(seen.insert(h), "{name} names a category another name already names");
         }
     }
 }
