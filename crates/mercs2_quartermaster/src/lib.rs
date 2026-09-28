@@ -25,6 +25,7 @@ pub mod build;
 pub mod compat;
 pub mod discover;
 pub mod game;
+pub mod language;
 pub mod link;
 pub mod lint;
 pub mod manifest;
