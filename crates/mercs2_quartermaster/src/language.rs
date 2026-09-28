@@ -85,15 +85,9 @@ fn carried(
     Ok(found)
 }
 
-/// The `shell.wad` beside the stack's `vz.wad`, opened on its own.
-pub fn open_shell(game: &GameStack) -> Result<GameStack, String> {
-    let vz = game.paths().first().map(|p| p.to_path_buf()).ok_or("the game stack is empty")?;
-    GameStack::open(&[sibling_wad(&vz, "shell.wad")?]).map_err(|e| e.to_string())
-}
-
 /// Each font or atlas of `base` that no carrier has (M0219); empty when all four are there.
 pub fn font_problems(game: &mut GameStack, base: &str) -> Result<Vec<String>, String> {
-    let mut shell = open_shell(game)?;
+    let mut shell = game.open_sibling("shell.wad")?;
     let mut out = Vec::new();
     for (font, atlas) in font_names(base) {
         for (name, type_hash, type_id, what) in [
@@ -133,7 +127,7 @@ pub fn repoint_font(container: &[u8], from: u32, to: u32) -> Result<Vec<u8>, Str
 
 /// The fonts and atlases of `name`, forked from `base`'s.
 pub fn fork_fonts(game: &mut GameStack, base: &str, name: &str) -> Result<Vec<Asset>, String> {
-    let mut shell = open_shell(game)?;
+    let mut shell = game.open_sibling("shell.wad")?;
     let mut out = Vec::new();
     for ((base_font, base_atlas), (font, atlas)) in font_names(base).into_iter().zip(font_names(name)) {
         let font_c = carried(game, &mut shell, m2(&base_font), TYPE_HASH_FONT, TYPE_ID_FONT, "font")?
