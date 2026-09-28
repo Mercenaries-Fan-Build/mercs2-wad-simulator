@@ -903,205 +903,192 @@ mod tests {
         assert!((head.radius - 0.1700).abs() < 5e-4, "head radius {}", head.radius);
     }
 
-    /// Live decode of a real BUILDING `WpMeshShape16` from retail `vz.wad`. Block 767 carries a small
-    /// building collider (~396 tris, ~25 m XZ span, verified by the meshshape probe). Confirms the port:
-    /// non-empty index triples, dequantized verts within a sane building-scale bbox, and — the property
-    /// the quantized-pool scan exists to guarantee — the vast majority of triangles have all edges < 40 m.
-    /// SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn building_wpmesh16_decodes_live_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("skip: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
+    /// Game-gated live decodes: built by the `retail` feature, reads the `vz.wad` named by the
+    /// repo-root `.mercs2-local.toml`, and fails if it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-        // Every Havok packfile in the block; keep the decoded WpMeshShape16 meshes.
-        let meshes: Vec<MeshShape> = find_packfiles(&dec)
-            .into_iter()
-            .flat_map(|(_off, pf)| pf.shapes.into_iter())
-            .filter_map(|s| match s {
-                Shape::Mesh(m) => Some(m),
-                _ => None,
-            })
-            .collect();
-        assert!(!meshes.is_empty(), "block 767 must carry at least one WpMeshShape16");
-
-        // A BUILDING-scale mesh: non-empty, small XZ span, well-formed triangles.
-        let bldg = meshes
-            .iter()
-            .find(|m| !m.indices.is_empty() && m.xz_span().iter().all(|&s| s < 300.0))
-            .expect("a decoded building-scale mesh in block 767");
-        assert!(bldg.indices.len() > 0, "building mesh has triangles: {}", bldg.indices.len());
-        assert!(!bldg.vertices.is_empty(), "building mesh has vertices");
-
-        // Verts finite and within a plausible model/world bbox; indices in range.
-        let nv = bldg.vertices.len();
-        for v in &bldg.vertices {
-            assert!(v.iter().all(|c| c.is_finite()), "non-finite vertex {v:?}");
-            assert!(v.iter().all(|c| c.abs() < 100_000.0), "implausibly far vertex {v:?}");
+        /// The retail `vz.wad`, opened, with its FFCS tables.
+        fn open_vz_wad() -> (std::fs::File, crate::ffcs::FfcsArchive) {
+            let path = crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().expect("stat vz.wad").len();
+            let arch = crate::ffcs::load_ffcs_archive(&mut f, size).expect("ffcs archive");
+            (f, arch)
         }
-        for t in &bldg.indices {
-            assert!(t.iter().all(|&i| (i as usize) < nv), "index out of range {t:?} (nv={nv})");
-        }
-        // The dequantization is correct when nearly every triangle has sane (<40 m) edges.
-        let edge = |p: [f32; 3], q: [f32; 3]| {
-            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
-        };
-        let sane = bldg
-            .indices
-            .iter()
-            .filter(|t| {
-                let (a, b, c) = (bldg.vertices[t[0] as usize], bldg.vertices[t[1] as usize], bldg.vertices[t[2] as usize]);
-                edge(a, b) < 40.0 && edge(b, c) < 40.0 && edge(a, c) < 40.0
-            })
-            .count();
-        let frac = sane as f64 / bldg.indices.len() as f64;
-        assert!(frac > 0.9, "only {frac:.3} of building-mesh tris well-formed (pool base mis-scanned?)");
-        eprintln!(
-            "block 767 building WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge tris",
-            bldg.indices.len(), nv, bldg.xz_span(), frac * 100.0
-        );
-    }
 
-    /// Live decode of a PREVIOUSLY-FAILING `WpMeshShape16` from retail `vz.wad`, exercising the guarded
-    /// whole-slice FALLBACK. Block 826 container `0xF589CA67` carries a terrain-scale cell mesh (~4.5k verts)
-    /// whose vertex pool sits at the very end of the PHY2 chunk with a large first triangle — the wrapper
-    /// scan's `tris[0]`/6-probe gate skipped its correct base, so the old decoder returned an EMPTY mesh and
-    /// the whole cell lost its authored collision. It must now decode: non-empty, finite, every vertex within
-    /// the quantization range `[min, min + scale*65535]`, and the vast majority of triangles well-formed
-    /// (< 40 m edges). SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn recovered_terrain_wpmesh16_decodes_live_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("skip: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let dec = decompress_block(&mut f, &arch.indx, 826).expect("decompress block 826");
+        /// Live decode of a real BUILDING `WpMeshShape16` from retail `vz.wad`. Block 767 carries a small
+        /// building collider (~396 tris, ~25 m XZ span, verified by the meshshape probe). Confirms the port:
+        /// non-empty index triples, dequantized verts within a sane building-scale bbox, and — the property
+        /// the quantized-pool scan exists to guarantee — the vast majority of triangles have all edges < 40 m.
+        /// Fails when `vz.wad` is absent.
+        #[test]
+        fn building_wpmesh16_decodes_live_from_vz_wad_if_present() {
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
 
-        // Walk to container 0xF589CA67 exactly as the streaming loader does.
-        let (count, entries) = parse_block_entry_table(&dec);
-        let mut pos = 4 + count as usize * 16;
-        let mut body: Option<Vec<u8>> = None;
-        for e in &entries {
-            let end = pos + e.chunk_size as usize;
-            if end > dec.len() {
-                break;
+            // Every Havok packfile in the block; keep the decoded WpMeshShape16 meshes.
+            let meshes: Vec<MeshShape> = find_packfiles(&dec)
+                .into_iter()
+                .flat_map(|(_off, pf)| pf.shapes.into_iter())
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) => Some(m),
+                    _ => None,
+                })
+                .collect();
+            assert!(!meshes.is_empty(), "block 767 must carry at least one WpMeshShape16");
+
+            // A BUILDING-scale mesh: non-empty, small XZ span, well-formed triangles.
+            let bldg = meshes
+                .iter()
+                .find(|m| !m.indices.is_empty() && m.xz_span().iter().all(|&s| s < 300.0))
+                .expect("a decoded building-scale mesh in block 767");
+            assert!(bldg.indices.len() > 0, "building mesh has triangles: {}", bldg.indices.len());
+            assert!(!bldg.vertices.is_empty(), "building mesh has vertices");
+
+            // Verts finite and within a plausible model/world bbox; indices in range.
+            let nv = bldg.vertices.len();
+            for v in &bldg.vertices {
+                assert!(v.iter().all(|c| c.is_finite()), "non-finite vertex {v:?}");
+                assert!(v.iter().all(|c| c.abs() < 100_000.0), "implausibly far vertex {v:?}");
             }
-            if e.name_hash == 0xF589_CA67 {
-                body = extract_chunk_body(&dec[pos..end], b"PHY2");
-                break;
+            for t in &bldg.indices {
+                assert!(t.iter().all(|&i| (i as usize) < nv), "index out of range {t:?} (nv={nv})");
             }
-            pos = end;
+            // The dequantization is correct when nearly every triangle has sane (<40 m) edges.
+            let edge = |p: [f32; 3], q: [f32; 3]| {
+                ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+            };
+            let sane = bldg
+                .indices
+                .iter()
+                .filter(|t| {
+                    let (a, b, c) = (bldg.vertices[t[0] as usize], bldg.vertices[t[1] as usize], bldg.vertices[t[2] as usize]);
+                    edge(a, b) < 40.0 && edge(b, c) < 40.0 && edge(a, c) < 40.0
+                })
+                .count();
+            let frac = sane as f64 / bldg.indices.len() as f64;
+            assert!(frac > 0.9, "only {frac:.3} of building-mesh tris well-formed (pool base mis-scanned?)");
+            eprintln!(
+                "block 767 building WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge tris",
+                bldg.indices.len(), nv, bldg.xz_span(), frac * 100.0
+            );
         }
-        let body = body.expect("block 826 container 0xF589CA67 carries a PHY2 chunk");
 
-        // Recover this mesh object's own quantization block (min/scale @ obj+48/+64) for the range check.
-        let off = find_sub(&body, &HAVOK_MAGIC).expect("embedded Havok packfile");
-        let pk = &body[off..];
-        let raw = parse_packfile_raw(pk).expect("parse packfile");
-        let (mut min, mut scale) = ([0.0f32; 3], [0.0f32; 3]);
-        for (src, cname) in &raw.vfixups {
-            if cname == "WpMeshShape16" {
-                let sp0 = raw.data_pk + src + 48;
-                min = [f32_le(pk, sp0), f32_le(pk, sp0 + 4), f32_le(pk, sp0 + 8)];
-                scale = [f32_le(pk, sp0 + 16), f32_le(pk, sp0 + 20), f32_le(pk, sp0 + 24)];
-                break;
+        /// Live decode of a PREVIOUSLY-FAILING `WpMeshShape16` from retail `vz.wad`, exercising the guarded
+        /// whole-slice FALLBACK. Block 826 container `0xF589CA67` carries a terrain-scale cell mesh (~4.5k verts)
+        /// whose vertex pool sits at the very end of the PHY2 chunk with a large first triangle — the wrapper
+        /// scan's `tris[0]`/6-probe gate skipped its correct base, so the old decoder returned an EMPTY mesh and
+        /// the whole cell lost its authored collision. It must now decode: non-empty, finite, every vertex within
+        /// the quantization range `[min, min + scale*65535]`, and the vast majority of triangles well-formed
+        /// (< 40 m edges). Fails when `vz.wad` is absent.
+        #[test]
+        fn recovered_terrain_wpmesh16_decodes_live_from_vz_wad_if_present() {
+            use crate::sges::decompress_block;
+            use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 826).expect("decompress block 826");
+
+            // Walk to container 0xF589CA67 exactly as the streaming loader does.
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut pos = 4 + count as usize * 16;
+            let mut body: Option<Vec<u8>> = None;
+            for e in &entries {
+                let end = pos + e.chunk_size as usize;
+                if end > dec.len() {
+                    break;
+                }
+                if e.name_hash == 0xF589_CA67 {
+                    body = extract_chunk_body(&dec[pos..end], b"PHY2");
+                    break;
+                }
+                pos = end;
             }
-        }
+            let body = body.expect("block 826 container 0xF589CA67 carries a PHY2 chunk");
 
-        // Decode and grab the terrain-scale mesh (the big one this test is about).
-        let pf = parse_phy2_body(&body).expect("parse PHY2");
-        let mesh = pf
-            .shapes
-            .iter()
-            .filter_map(|s| match s {
-                Shape::Mesh(m) if m.vertices.len() > 3000 => Some(m),
-                _ => None,
-            })
-            .max_by_key(|m| m.vertices.len())
-            .expect("block 826 must now decode its terrain-scale WpMeshShape16 (was empty → collision lost)");
-        assert!(!mesh.indices.is_empty(), "recovered mesh has triangles");
-        assert!(!mesh.vertices.is_empty(), "recovered mesh has vertices");
-
-        // Every vertex lies within the quantization range [min, min + scale*65535], per-axis.
-        let hi = [
-            min[0] + scale[0] * 65535.0,
-            min[1] + scale[1] * 65535.0,
-            min[2] + scale[2] * 65535.0,
-        ];
-        for v in &mesh.vertices {
-            for k in 0..3 {
-                assert!(v[k].is_finite(), "non-finite vertex {v:?}");
-                assert!(
-                    v[k] >= min[k] - 1e-3 && v[k] <= hi[k] + 1e-3,
-                    "vertex axis {k} = {} out of quant range [{}, {}]",
-                    v[k],
-                    min[k],
-                    hi[k]
-                );
+            // Recover this mesh object's own quantization block (min/scale @ obj+48/+64) for the range check.
+            let off = find_sub(&body, &HAVOK_MAGIC).expect("embedded Havok packfile");
+            let pk = &body[off..];
+            let raw = parse_packfile_raw(pk).expect("parse packfile");
+            let (mut min, mut scale) = ([0.0f32; 3], [0.0f32; 3]);
+            for (src, cname) in &raw.vfixups {
+                if cname == "WpMeshShape16" {
+                    let sp0 = raw.data_pk + src + 48;
+                    min = [f32_le(pk, sp0), f32_le(pk, sp0 + 4), f32_le(pk, sp0 + 8)];
+                    scale = [f32_le(pk, sp0 + 16), f32_le(pk, sp0 + 20), f32_le(pk, sp0 + 24)];
+                    break;
+                }
             }
-        }
-        // Dequantization correct → nearly every triangle well-formed (< 40 m edges).
-        let nv = mesh.vertices.len();
-        for t in &mesh.indices {
-            assert!(t.iter().all(|&i| (i as usize) < nv), "index out of range {t:?}");
-        }
-        let edge = |p: [f32; 3], q: [f32; 3]| {
-            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
-        };
-        let sane = mesh
-            .indices
-            .iter()
-            .filter(|t| {
-                let (a, b, c) = (mesh.vertices[t[0] as usize], mesh.vertices[t[1] as usize], mesh.vertices[t[2] as usize]);
-                edge(a, b) < 40.0 && edge(b, c) < 40.0 && edge(a, c) < 40.0
-            })
-            .count();
-        let frac = sane as f64 / mesh.indices.len() as f64;
-        assert!(frac > 0.9, "only {frac:.3} of recovered terrain-mesh tris well-formed");
-        eprintln!(
-            "block 826 recovered WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge",
-            mesh.indices.len(), nv, mesh.xz_span(), frac * 100.0
-        );
-    }
 
-    /// Live re-decode from the retail WAD: block 3185 yields exactly 11 ragdoll capsules matching the
-    /// fixture. SKIPS (stays green) when `vz.wad` is absent — same pattern as the anim live test.
-    #[test]
-    fn ragdoll_capsules_live_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("skip: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let dec = decompress_block(&mut f, &arch.indx, 3185).expect("decompress block 3185");
-        let caps = human_ragdoll_capsules(&dec);
-        assert_eq!(caps.len(), 11, "block 3185 must carry the 11-body human ragdoll");
-        assert!(caps.iter().any(|c| (c.radius - 0.1700).abs() < 5e-4), "head capsule present");
+            // Decode and grab the terrain-scale mesh (the big one this test is about).
+            let pf = parse_phy2_body(&body).expect("parse PHY2");
+            let mesh = pf
+                .shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) if m.vertices.len() > 3000 => Some(m),
+                    _ => None,
+                })
+                .max_by_key(|m| m.vertices.len())
+                .expect("block 826 must now decode its terrain-scale WpMeshShape16 (was empty → collision lost)");
+            assert!(!mesh.indices.is_empty(), "recovered mesh has triangles");
+            assert!(!mesh.vertices.is_empty(), "recovered mesh has vertices");
+
+            // Every vertex lies within the quantization range [min, min + scale*65535], per-axis.
+            let hi = [
+                min[0] + scale[0] * 65535.0,
+                min[1] + scale[1] * 65535.0,
+                min[2] + scale[2] * 65535.0,
+            ];
+            for v in &mesh.vertices {
+                for k in 0..3 {
+                    assert!(v[k].is_finite(), "non-finite vertex {v:?}");
+                    assert!(
+                        v[k] >= min[k] - 1e-3 && v[k] <= hi[k] + 1e-3,
+                        "vertex axis {k} = {} out of quant range [{}, {}]",
+                        v[k],
+                        min[k],
+                        hi[k]
+                    );
+                }
+            }
+            // Dequantization correct → nearly every triangle well-formed (< 40 m edges).
+            let nv = mesh.vertices.len();
+            for t in &mesh.indices {
+                assert!(t.iter().all(|&i| (i as usize) < nv), "index out of range {t:?}");
+            }
+            let edge = |p: [f32; 3], q: [f32; 3]| {
+                ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+            };
+            let sane = mesh
+                .indices
+                .iter()
+                .filter(|t| {
+                    let (a, b, c) = (mesh.vertices[t[0] as usize], mesh.vertices[t[1] as usize], mesh.vertices[t[2] as usize]);
+                    edge(a, b) < 40.0 && edge(b, c) < 40.0 && edge(a, c) < 40.0
+                })
+                .count();
+            let frac = sane as f64 / mesh.indices.len() as f64;
+            assert!(frac > 0.9, "only {frac:.3} of recovered terrain-mesh tris well-formed");
+            eprintln!(
+                "block 826 recovered WpMeshShape16: {} tris {} verts, XZ span {:?}, {:.1}% sane-edge",
+                mesh.indices.len(), nv, mesh.xz_span(), frac * 100.0
+            );
+        }
+
+        /// Live re-decode from the retail WAD: block 3185 yields exactly 11 ragdoll capsules matching the
+        /// fixture. Fails when `vz.wad` is absent.
+        #[test]
+        fn ragdoll_capsules_live_from_vz_wad_if_present() {
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 3185).expect("decompress block 3185");
+            let caps = human_ragdoll_capsules(&dec);
+            assert_eq!(caps.len(), 11, "block 3185 must carry the 11-body human ragdoll");
+            assert!(caps.iter().any(|c| (c.radius - 0.1700).abs() < 5e-4), "head capsule present");
+        }
     }
 }
