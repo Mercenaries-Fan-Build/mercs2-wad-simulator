@@ -1904,7 +1904,8 @@ fn a_rigid_add_model_with_textures_repoints_the_host_material() {
     let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap()) as usize;
     let ucfx = &donor_blk[20..20 + n];
     let groups = mercs2_formats::texture::group_prmt_material_indices(ucfx);
-    let mats = mercs2_formats::texture::parse_mtrl(ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(ucfx, mercs2_formats::texture::MtrlSource::Model)
+        .expect("parse the donor MTRL");
     // A host whose every material samples a texture and names a diffuse.
     let host = groups
         .iter()
@@ -1946,7 +1947,8 @@ fn a_rigid_add_model_with_textures_repoints_the_host_material() {
             seen_texture = true;
         }
         if entries[0].name_hash == model {
-            let emitted = mercs2_formats::texture::parse_mtrl(&dec[20..]);
+            let emitted = mercs2_formats::texture::parse_mtrl(&dec[20..], mercs2_formats::texture::MtrlSource::Model)
+                .expect("parse the emitted MTRL");
             assert_eq!(
                 emitted[host_mat].textures[0], want,
                 "the host material's diffuse must name the new texture"
