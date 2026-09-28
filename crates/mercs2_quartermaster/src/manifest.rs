@@ -443,6 +443,38 @@ impl Language {
     }
 }
 
+/// A session of the game that loads sound banks from Lua, and so a place a mod loader loads a bank.
+///
+/// Each session is one level WAD's Lua VM (the VM is closed and recreated on every level swap,
+/// `scripting_host_binding_code_map.md`):
+///
+/// * `gameplay` — the `vz` level. Retail loads its banks in `MrxSoundBootstrap.LoadBanks`
+///   (`resident/mrxsoundbootstrap.lua:192-246`) and unloads them in `ExitGame` (`:188-190`); the
+///   mod loader loads in `wifpmcinterior._OnEnter` and unloads after `ExitGame`. Its blocks ship in
+///   the Shipment overlay.
+/// * `front_end` — the `shell` level (the main menu). Retail loads its banks in
+///   `MrxSound.EnterShellState` (`shell/mrxsound.lua:5-15`) and unloads them in `ExitShellState`
+///   (`:17-27`); the front-end loader runs after each. Its blocks ship in the shell patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadSession {
+    Gameplay,
+    FrontEnd,
+}
+
+impl LoadSession {
+    /// Both sessions, in this order.
+    pub const ALL: [LoadSession; 2] = [LoadSession::Gameplay, LoadSession::FrontEnd];
+
+    /// The manifest spelling.
+    pub const fn token(self) -> &'static str {
+        match self {
+            LoadSession::Gameplay => "gameplay",
+            LoadSession::FrontEnd => "front_end",
+        }
+    }
+}
+
 /// One cue of an authored sound bank: a PCM16 WAV played by one single-wave group through one
 /// single-track cue — the shape of retail `ui_PDA_Open_01_st` (`audio_code_map.md` §11.6). Every
 /// field is a field of that group or cue, named for what the engine does with it, at the offset it
@@ -757,8 +789,8 @@ pub enum Contribution {
     /// Data + Script. A new sound bank: its soundbank, sounddb and wavebank, encoded from the
     /// authored cues (`mercs2_audio::encode`) and shipped as one block of three entries under
     /// `pandemic_hash_m2(bank)`, the shape of every retail bank (`audio_code_map.md` §11.1). The mod
-    /// loader loads it (`MrxSoundBanks.LoadWaveBank` / `LoadSoundBank`), since a cue plays only
-    /// once its bank is loaded.
+    /// loader of each session in `load_in` loads it (`MrxSoundBanks.LoadWaveBank` /
+    /// `LoadSoundBank`), since a cue plays only once its bank is loaded.
     AddSound {
         /// The bank name: the entry name hash of all three tables and the name the loader loads.
         bank: String,
@@ -767,6 +799,9 @@ pub enum Contribution {
         category: String,
         /// The cues, in bank order.
         cues: Vec<SoundCue>,
+        /// The sessions whose loader loads the bank: at least one, each at most once
+        /// ([`LoadSession`]). The bank's block ships to each listed session's WAD.
+        load_in: Vec<LoadSession>,
     },
     /// Data, SAME-HASH. Replace a bank the game ships: its soundbank and sounddb are encoded from
     /// the authored cues and shipped under the bank's own entry name, which the game's own load of
