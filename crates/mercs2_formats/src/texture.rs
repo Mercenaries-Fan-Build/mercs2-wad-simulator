@@ -9,9 +9,11 @@
 //!
 //! * **MTRL chunk** — a packed array of material records. Each record is
 //!   `104 B float preamble | u16 flags @104 | u16 tex_count @106 |
-//!   tex_count×u32 hashes @108`, inter-record stride `116 + tex_count*4`. Slot
-//!   order is diffuse(0), specular(1), normal(2). Cap 10. (Decompile-verified
-//!   `Mtrl_Parse` = `FUN_00858790`; `material_shader_spec.md` §1a.)
+//!   tex_count×u32 hashes @108 | u32 pixel-shader key | u32`, stride
+//!   `116 + tex_count*4`. Slot order is diffuse(0), specular(1), normal(2), at
+//!   most 10. The record count comes from the loader's own source
+//!   ([`MtrlSource`]). (`Mtrl_Parse` = `FUN_00858790`;
+//!   `material_shader_spec.md` §1a.)
 //! * **PRMG groups → material index** — each `PRMG` drawing group carries a
 //!   `PRMT` leaf of **16-byte records** `{u32 material_index @0, u32 @4,
 //!   u32 @8, u32 @12}`. The first word is the index into the MTRL material array.
@@ -78,6 +80,10 @@ pub struct MtrlMaterial {
     /// The 104-byte float preamble before the flags — material properties (tint / blend / alpha /
     /// specular params). 26 floats; not yet interpreted, but no longer discarded.
     pub preamble: Vec<f32>,
+    /// The pixel-shader key after the texture hashes: `pandemic_hash_m2` of a registered pixel
+    /// shader name. `Mtrl_Parse` looks it up in the pixel-shader registry and stores the found
+    /// index at material `+0x182`.
+    pub shader_key: u32,
 }
 
 impl MtrlMaterial {
@@ -169,14 +175,86 @@ impl<'a> UcfxView<'a> {
 // MTRL
 // ---------------------------------------------------------------------------
 
-/// Parse every MTRL material record in a model container.
+/// Which asset loader reads a container's `MTRL` leaf. Each loader takes its material count from
+/// its own source, so the walker is told which one it is reading for.
 ///
-/// Walks the packed material array in each `MTRL` leaf: `[u16 flags @104]
-/// [u16 tex_count @106]`, then `tex_count × u32` hashes @108, inter-record
-/// stride `116 + tex_count*4`. `tex_count` (1..=10, high byte 0) is the reliable
-/// record-boundary signature; on an out-of-range count the walk stops (rather
-/// than mis-reading float props as hashes).
-/// Every distinct texture hash sitting at `slot` across all of a container's materials.
+/// Every loader parses one record with `Mtrl_Parse` (`FUN_00858790`): a 104-byte preamble, `u16
+/// flags @104`, `u16 tex_count @106`, `tex_count × u32` texture hashes, the `u32` pixel-shader key,
+/// then one more `u32` (stored at material `+0x7c`). The record is `116 + 4·tex_count` bytes.
+/// `Mtrl_Parse` copies the hashes into a 10-slot array at material `+0x144`, so a `tex_count`
+/// above 10 writes past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtrlSource {
+    /// A `model` container (`0x5B724250`). The count is `u32 @0x24` of the top-level 72-byte `INFO`,
+    /// and the records fill the leaf exactly. The model loader's material loop (`0x00414b61`) runs
+    /// to the count at model object `+0x44`; every one of the 3,007 retail model `MTRL` leaves
+    /// parses exactly with the `INFO @0x24` word.
+    Model,
+    /// A `terrainmesh` container (`0x7C569307`). `FUN_004a8f30` copies the top-level 32-byte `INFO`
+    /// and takes the count from `u32 @0x18`. After the records, the leaf holds `count × 4` blocks
+    /// of 16 floats (`count × 256` bytes).
+    TerrainMesh,
+    /// A `font` container (`0x99E77ACE`). `FUN_004ac8e0` copies the top-level 16-byte `INFO` and
+    /// takes the count from `u32 @0`. The records fill the leaf exactly.
+    Font,
+    /// A `lowresterrain` container (`0x1602815C`). Each `MTRL` leaf holds exactly one record.
+    LowResTerrain,
+    /// A `scrub` container (`0x600B904E`). Each `SCRB` node's `MTRL` leaf holds exactly one record,
+    /// read by `FUN_004a5230` with a single `Mtrl_Parse`.
+    Scrub,
+}
+
+/// Why a container's `MTRL` data does not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MtrlError {
+    /// The bytes are not a UCFX container, or its descriptor rows do not fit.
+    NotUcfx,
+    /// A descriptor row's body lies outside the container.
+    RowOutOfBounds { row: usize },
+    /// The loader's count source is missing or shorter than the count word.
+    CountSource { source: MtrlSource, detail: String },
+    /// More than one `MTRL` leaf sits where the loader reads one.
+    MultipleMtrl { source: MtrlSource, count: usize },
+    /// A record's `tex_count` exceeds the 10 texture slots `Mtrl_Parse` fills.
+    TexCount { material: usize, tex_count: usize },
+    /// The leaf ends inside record `material`.
+    Truncated { material: usize, needed: usize, len: usize },
+    /// The leaf length is not what the count and the loader's layout give.
+    Length { source: MtrlSource, count: usize, expected: usize, actual: usize },
+}
+
+impl std::fmt::Display for MtrlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MtrlError::NotUcfx => write!(f, "not a UCFX container with in-bounds descriptor rows"),
+            MtrlError::RowOutOfBounds { row } => {
+                write!(f, "UCFX descriptor row {row} names a body outside the container")
+            }
+            MtrlError::CountSource { source, detail } => {
+                write!(f, "{source:?} material count source: {detail}")
+            }
+            MtrlError::MultipleMtrl { source, count } => {
+                write!(f, "{source:?} container has {count} MTRL leaves where its loader reads one")
+            }
+            MtrlError::TexCount { material, tex_count } => write!(
+                f,
+                "MTRL record {material} has tex_count {tex_count}; Mtrl_Parse fills 10 texture slots"
+            ),
+            MtrlError::Truncated { material, needed, len } => write!(
+                f,
+                "MTRL record {material} needs {needed} bytes but the leaf is {len} bytes"
+            ),
+            MtrlError::Length { source, count, expected, actual } => write!(
+                f,
+                "{source:?} MTRL leaf is {actual} bytes; {count} records and the loader's layout give {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MtrlError {}
+
+/// Every distinct texture hash sitting at `slot` across all of a model container's materials.
 ///
 /// This is the `from` set for repointing a whole model onto one skin: [`MtrlRepoint`] is a
 /// value-scan over the MTRL blob, so replacing each distinct hash at slot 0 with one new hash makes
@@ -191,59 +269,159 @@ impl<'a> UcfxView<'a> {
 ///
 /// Slot order is `0 = diffuse, 1 = SPECULAR, 2 = NORMAL` (see [`MtrlMaterial::specular`]) — not the
 /// intuitive d/n/s.
-pub fn material_slot_hashes(container: &[u8], slot: usize) -> Vec<u32> {
+pub fn material_slot_hashes(container: &[u8], slot: usize) -> Result<Vec<u32>, MtrlError> {
     let mut out: Vec<u32> = Vec::new();
-    for m in parse_mtrl(container) {
+    for m in parse_mtrl(container, MtrlSource::Model)? {
         if let Some(&h) = m.textures.get(slot) {
             if h != 0 && !out.contains(&h) {
                 out.push(h);
             }
         }
     }
-    out
+    Ok(out)
 }
 
-pub fn parse_mtrl(container: &[u8]) -> Vec<MtrlMaterial> {
-    let mut out = Vec::new();
-    let Some(v) = UcfxView::new(container) else {
-        return out;
+/// The descendant count stored in descriptor row `i`.
+fn row_descendants(v: &UcfxView<'_>, i: usize) -> usize {
+    read_u32_le(v.buf, 20 + i * 20 + 16) as usize
+}
+
+/// The direct children of row `parent` (`None` = the top level), as row indices.
+fn row_children(v: &UcfxView<'_>, parent: Option<usize>) -> Vec<usize> {
+    let (mut i, end) = match parent {
+        None => (0, v.n_desc),
+        Some(p) => (p + 1, (p + 1 + row_descendants(v, p)).min(v.n_desc)),
     };
-    for i in 0..v.n_desc {
-        if v.tag(i) != b"MTRL" {
-            continue;
-        }
-        let Some((s, e)) = v.resolve(i) else { continue };
-        parse_mtrl_body(&container[s..e], &mut out);
+    let mut out = Vec::new();
+    while i < end {
+        out.push(i);
+        i += 1 + row_descendants(v, i);
     }
     out
 }
 
-/// Parse a single MTRL chunk body (packed material-record array) into `out`.
-fn parse_mtrl_body(body: &[u8], out: &mut Vec<MtrlMaterial>) {
-    let mut p = 0usize;
-    while p + 108 <= body.len() {
-        let tex_count = read_u16_le(body, p + 106) as usize;
-        // Record-boundary signature: 1..=10, high byte 0. Anything else means we
-        // have walked off the packed array (a rare trailing-float tail); stop.
-        if tex_count == 0 || tex_count > 10 {
-            break;
-        }
-        let hashes_end = p + 108 + tex_count * 4;
-        if hashes_end > body.len() {
-            break;
-        }
-        let mut textures = Vec::with_capacity(tex_count);
-        for k in 0..tex_count {
-            textures.push(read_u32_le(body, p + 108 + k * 4));
-        }
-        let flags = read_u16_le(body, p + 104);
-        let preamble: Vec<f32> = (0..26).map(|k| read_f32_le(body, p + k * 4)).collect();
-        out.push(MtrlMaterial {
-            textures,
-            flags,
-            preamble,
+fn row_body<'a>(v: &UcfxView<'a>, i: usize) -> Result<&'a [u8], MtrlError> {
+    let (s, e) = v.resolve(i).ok_or(MtrlError::RowOutOfBounds { row: i })?;
+    Ok(&v.buf[s..e])
+}
+
+/// The `MTRL` leaves among `rows`.
+fn mtrl_rows(v: &UcfxView<'_>, rows: &[usize]) -> Vec<usize> {
+    rows.iter().copied().filter(|&i| v.tag(i) == b"MTRL" && !v.is_marker(i)).collect()
+}
+
+/// The count word at `offset` of the one `INFO` leaf among `rows`, whose length must be `len`.
+fn info_count(
+    v: &UcfxView<'_>,
+    rows: &[usize],
+    source: MtrlSource,
+    len: usize,
+    offset: usize,
+) -> Result<usize, MtrlError> {
+    let infos: Vec<usize> =
+        rows.iter().copied().filter(|&i| v.tag(i) == b"INFO" && !v.is_marker(i)).collect();
+    let [info] = infos[..] else {
+        return Err(MtrlError::CountSource {
+            source,
+            detail: format!("{} INFO leaves beside the MTRL leaf; the loader reads one", infos.len()),
         });
-        p += 116 + tex_count * 4;
+    };
+    let body = row_body(v, info)?;
+    if body.len() != len {
+        return Err(MtrlError::CountSource {
+            source,
+            detail: format!("INFO is {} bytes; the loader reads {len}", body.len()),
+        });
+    }
+    Ok(read_u32_le(body, offset) as usize)
+}
+
+/// Parse exactly `count` records from the front of `body`; returns them and the bytes consumed.
+fn parse_records(body: &[u8], count: usize) -> Result<(Vec<MtrlMaterial>, usize), MtrlError> {
+    let mut out = Vec::with_capacity(count);
+    let mut p = 0usize;
+    for material in 0..count {
+        if p + 108 > body.len() {
+            return Err(MtrlError::Truncated { material, needed: p + 108, len: body.len() });
+        }
+        let tex_count = read_u16_le(body, p + 106) as usize;
+        if tex_count > 10 {
+            return Err(MtrlError::TexCount { material, tex_count });
+        }
+        let end = p + 116 + tex_count * 4;
+        if end > body.len() {
+            return Err(MtrlError::Truncated { material, needed: end, len: body.len() });
+        }
+        out.push(MtrlMaterial {
+            textures: (0..tex_count).map(|k| read_u32_le(body, p + 108 + k * 4)).collect(),
+            flags: read_u16_le(body, p + 104),
+            preamble: (0..26).map(|k| read_f32_le(body, p + k * 4)).collect(),
+            shader_key: read_u32_le(body, p + 108 + tex_count * 4),
+        });
+        p = end;
+    }
+    Ok((out, p))
+}
+
+/// Parse one `MTRL` leaf of `count` records plus `tail_per_material` bytes per material, which must
+/// fill the leaf exactly.
+fn parse_leaf(
+    body: &[u8],
+    source: MtrlSource,
+    count: usize,
+    tail_per_material: usize,
+) -> Result<Vec<MtrlMaterial>, MtrlError> {
+    let (records, used) = parse_records(body, count)?;
+    let expected = used + count * tail_per_material;
+    if expected != body.len() {
+        return Err(MtrlError::Length { source, count, expected, actual: body.len() });
+    }
+    Ok(records)
+}
+
+/// Parse every MTRL material record in a container, the way the loader for `source` reads them.
+///
+/// The material count comes from the loader's own source (see [`MtrlSource`]), and the records
+/// plus the loader's trailing data must fill the leaf exactly. A container with no `MTRL` leaf
+/// has no materials. Any other shape is an [`MtrlError`].
+pub fn parse_mtrl(container: &[u8], source: MtrlSource) -> Result<Vec<MtrlMaterial>, MtrlError> {
+    let v = UcfxView::new(container).ok_or(MtrlError::NotUcfx)?;
+    let top = row_children(&v, None);
+    match source {
+        MtrlSource::Model | MtrlSource::TerrainMesh | MtrlSource::Font => {
+            let leaves = mtrl_rows(&v, &top);
+            let leaf = match leaves[..] {
+                [] => return Ok(Vec::new()),
+                [leaf] => leaf,
+                _ => return Err(MtrlError::MultipleMtrl { source, count: leaves.len() }),
+            };
+            let (count, tail) = match source {
+                MtrlSource::Model => (info_count(&v, &top, source, 72, 0x24)?, 0),
+                MtrlSource::TerrainMesh => (info_count(&v, &top, source, 32, 0x18)?, 256),
+                _ => (info_count(&v, &top, source, 16, 0)?, 0),
+            };
+            parse_leaf(row_body(&v, leaf)?, source, count, tail)
+        }
+        MtrlSource::LowResTerrain => {
+            let mut out = Vec::new();
+            for leaf in mtrl_rows(&v, &top) {
+                out.extend(parse_leaf(row_body(&v, leaf)?, source, 1, 0)?);
+            }
+            Ok(out)
+        }
+        MtrlSource::Scrub => {
+            let mut out = Vec::new();
+            for scrb in top.iter().copied().filter(|&i| v.tag(i) == b"SCRB") {
+                let leaves = mtrl_rows(&v, &row_children(&v, Some(scrb)));
+                if leaves.len() > 1 {
+                    return Err(MtrlError::MultipleMtrl { source, count: leaves.len() });
+                }
+                for leaf in leaves {
+                    out.extend(parse_leaf(row_body(&v, leaf)?, source, 1, 0)?);
+                }
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -346,9 +524,9 @@ pub fn terrain_group_material_index(container: &[u8]) -> Vec<usize> {
 /// Per PRMG drawing group, the ordered terrain DETAIL-LAYER texture hashes (≤~4) the group blends:
 /// its material (via [`terrain_group_material_index`]) minus the `A3CD72A7` layer markers. The
 /// per-vertex COLOR weights blend these layers. Empty vec = group has no valid material.
-pub fn terrain_group_layers(container: &[u8]) -> Vec<Vec<u32>> {
-    let mats = parse_mtrl(container);
-    terrain_group_material_index(container)
+pub fn terrain_group_layers(container: &[u8]) -> Result<Vec<Vec<u32>>, MtrlError> {
+    let mats = parse_mtrl(container, MtrlSource::TerrainMesh)?;
+    Ok(terrain_group_material_index(container)
         .into_iter()
         .map(|mi| {
             mats.get(mi)
@@ -361,7 +539,7 @@ pub fn terrain_group_layers(container: &[u8]) -> Vec<Vec<u32>> {
                 })
                 .unwrap_or_default()
         })
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -850,46 +1028,215 @@ pub fn extract_texture_name(
 mod tests {
     use super::*;
 
-    /// Build a minimal MTRL leaf body with `count` records of the given tex_counts.
-    fn make_mtrl_body(records: &[&[u32]]) -> Vec<u8> {
+    use crate::ucfx::{write_ucfx_tree, UcfxNode};
+
+    /// An MTRL leaf body: one record per entry of `(texture hashes, pixel-shader key)`.
+    fn make_mtrl_body(records: &[(&[u32], u32)]) -> Vec<u8> {
         let mut body = Vec::new();
-        for hashes in records {
-            let tc = hashes.len();
-            body.extend_from_slice(&[0u8; 104]); // preamble
-            body.extend_from_slice(&0x0080u16.to_le_bytes()); // flags
-            body.extend_from_slice(&(tc as u16).to_le_bytes()); // tex_count
+        for (hashes, key) in records {
+            body.extend_from_slice(&[0u8; 104]);
+            body.extend_from_slice(&0x0080u16.to_le_bytes());
+            body.extend_from_slice(&(hashes.len() as u16).to_le_bytes());
             for &h in *hashes {
                 body.extend_from_slice(&h.to_le_bytes());
             }
-            body.extend_from_slice(&[0u8; 8]); // trailing (116 + tc*4 stride)
+            body.extend_from_slice(&key.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
         }
         body
     }
 
-    #[test]
-    fn parse_mtrl_body_multi_record() {
-        let body = make_mtrl_body(&[
-            &[0x11111111, 0x22222222, 0x33333333],
-            &[0xAAAAAAAA],
-            &[0xDEADBEEF, 0xCAFEBABE, 0x0BADF00D],
-        ]);
-        let mut out = Vec::new();
-        parse_mtrl_body(&body, &mut out);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].textures, vec![0x11111111, 0x22222222, 0x33333333]);
-        assert_eq!(out[0].diffuse(), Some(0x11111111));
-        assert_eq!(out[1].textures, vec![0xAAAAAAAA]);
-        assert_eq!(out[2].textures, vec![0xDEADBEEF, 0xCAFEBABE, 0x0BADF00D]);
+    /// An `INFO` body of `len` bytes holding `count` at `offset`.
+    fn info(len: usize, offset: usize, count: u32) -> Vec<u8> {
+        let mut b = vec![0u8; len];
+        b[offset..offset + 4].copy_from_slice(&count.to_le_bytes());
+        b
+    }
+
+    fn container(nodes: Vec<UcfxNode>) -> Vec<u8> {
+        write_ucfx_tree(&nodes)
     }
 
     #[test]
-    fn parse_mtrl_body_stops_on_bad_count() {
-        // A record followed by a bogus tex_count (0) halts the walk cleanly.
-        let mut body = make_mtrl_body(&[&[0x12345678, 0x9ABCDEF0, 0x0F0F0F0F]]);
-        body.extend_from_slice(&[0u8; 108]); // all-zero -> tex_count 0 -> stop
-        let mut out = Vec::new();
-        parse_mtrl_body(&body, &mut out);
-        assert_eq!(out.len(), 1);
+    fn model_count_comes_from_info_0x24_and_fills_the_leaf() {
+        let body = make_mtrl_body(&[
+            (&[0x11111111, 0x22222222, 0x33333333], 0xCAEFE1FE),
+            (&[0xAAAAAAAA], 0x322FCD56),
+        ]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 2)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        let mats = parse_mtrl(&c, MtrlSource::Model).unwrap();
+        assert_eq!(mats.len(), 2);
+        assert_eq!(mats[0].textures, vec![0x11111111, 0x22222222, 0x33333333]);
+        assert_eq!(mats[0].shader_key, 0xCAEFE1FE);
+        assert_eq!(mats[1].textures, vec![0xAAAAAAAA]);
+        assert_eq!(mats[1].shader_key, 0x322FCD56);
+    }
+
+    #[test]
+    fn model_leaf_longer_than_the_count_is_a_length_error() {
+        let body = make_mtrl_body(&[(&[1], 5), (&[2], 6)]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 1)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::Model),
+            Err(MtrlError::Length { count: 1, expected: 120, actual: 240, .. })
+        ));
+    }
+
+    #[test]
+    fn model_leaf_shorter_than_the_count_is_truncated() {
+        let body = make_mtrl_body(&[(&[1], 5)]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 2)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::Model),
+            Err(MtrlError::Truncated { material: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn tex_count_above_ten_is_refused() {
+        let hashes = [7u32; 11];
+        let body = make_mtrl_body(&[(&hashes, 5)]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 1)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::Model),
+            Err(MtrlError::TexCount { material: 0, tex_count: 11 })
+        ));
+    }
+
+    #[test]
+    fn zero_textures_parse_to_the_key_after_the_counts() {
+        let body = make_mtrl_body(&[(&[], 0x1234)]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 1)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        let mats = parse_mtrl(&c, MtrlSource::Model).unwrap();
+        assert!(mats[0].textures.is_empty());
+        assert_eq!(mats[0].shader_key, 0x1234);
+    }
+
+    #[test]
+    fn info_of_the_wrong_length_is_a_count_source_error() {
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(32, 0x18, 1)),
+            UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5)])),
+        ]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::Model),
+            Err(MtrlError::CountSource { source: MtrlSource::Model, .. })
+        ));
+    }
+
+    #[test]
+    fn a_missing_info_is_a_count_source_error() {
+        let c = container(vec![UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5)]))]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::Model),
+            Err(MtrlError::CountSource { .. })
+        ));
+    }
+
+    #[test]
+    fn two_model_mtrl_leaves_are_refused() {
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 1)),
+            UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5)])),
+            UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5)])),
+        ]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::Model),
+            Err(MtrlError::MultipleMtrl { count: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn a_container_without_mtrl_has_no_materials() {
+        let c = container(vec![UcfxNode::leaf(*b"INFO", info(72, 0x24, 0))]);
+        assert_eq!(parse_mtrl(&c, MtrlSource::Model).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn non_ucfx_bytes_are_refused() {
+        assert_eq!(parse_mtrl(b"not a container", MtrlSource::Model), Err(MtrlError::NotUcfx));
+    }
+
+    #[test]
+    fn terrain_mesh_count_is_info_0x18_with_a_256_byte_tail_per_material() {
+        let mut body = make_mtrl_body(&[(&[1, 2], 5), (&[3], 6)]);
+        body.extend_from_slice(&[0u8; 2 * 256]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(32, 0x18, 2)),
+            UcfxNode::leaf(*b"MTRL", body.clone()),
+        ]);
+        assert_eq!(parse_mtrl(&c, MtrlSource::TerrainMesh).unwrap().len(), 2);
+        body.truncate(body.len() - 4);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(32, 0x18, 2)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        assert!(matches!(parse_mtrl(&c, MtrlSource::TerrainMesh), Err(MtrlError::Length { .. })));
+    }
+
+    #[test]
+    fn font_count_is_info_word_0() {
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(16, 0, 2)),
+            UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5), (&[2], 6)])),
+        ]);
+        assert_eq!(parse_mtrl(&c, MtrlSource::Font).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn low_res_terrain_leaves_hold_one_record_each() {
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(4, 0, 1)),
+            UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5)])),
+        ]);
+        assert_eq!(parse_mtrl(&c, MtrlSource::LowResTerrain).unwrap().len(), 1);
+        let c = container(vec![UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], 5), (&[2], 6)]))]);
+        assert!(matches!(
+            parse_mtrl(&c, MtrlSource::LowResTerrain),
+            Err(MtrlError::Length { count: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn scrub_reads_one_record_under_each_scrb() {
+        let scrb = |key: u32| {
+            UcfxNode::marker(
+                *b"SCRB",
+                vec![
+                    UcfxNode::leaf(*b"INFO", vec![0u8; 20]),
+                    UcfxNode::leaf(*b"MTRL", make_mtrl_body(&[(&[1], key)])),
+                ],
+            )
+        };
+        let c = container(vec![scrb(10), scrb(11)]);
+        let mats = parse_mtrl(&c, MtrlSource::Scrub).unwrap();
+        assert_eq!(mats.iter().map(|m| m.shader_key).collect::<Vec<_>>(), vec![10, 11]);
+    }
+
+    #[test]
+    fn material_slot_hashes_collects_distinct_nonzero_hashes() {
+        let body = make_mtrl_body(&[(&[1, 9], 5), (&[1, 0], 5), (&[2, 9], 5)]);
+        let c = container(vec![
+            UcfxNode::leaf(*b"INFO", info(72, 0x24, 3)),
+            UcfxNode::leaf(*b"MTRL", body),
+        ]);
+        assert_eq!(material_slot_hashes(&c, 0).unwrap(), vec![1, 2]);
+        assert_eq!(material_slot_hashes(&c, 1).unwrap(), vec![9]);
     }
 
     #[test]
