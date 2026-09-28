@@ -49,6 +49,10 @@ name = "effect_retail_roundtrip"
 required-features = ["retail"]
 
 [[test]]
+name = "mtrl_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "novel_asset_shape_survey"
 required-features = ["retail"]
 
