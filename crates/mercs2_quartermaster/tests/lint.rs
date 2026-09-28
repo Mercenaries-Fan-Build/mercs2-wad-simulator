@@ -1354,15 +1354,22 @@ fn cue_fields(indent: &str, name: &str, wave: &str) -> String {
     .collect()
 }
 
-/// An `add_sound` bank with one cue per name, all of category `category`.
+/// An `add_sound` bank with one cue per name, all of category `category`, loaded in gameplay.
 fn add_sound(bank: &str, category: &str, cues: &[&str]) -> Manifest {
+    add_sound_in(bank, category, cues, "[gameplay]")
+}
+
+/// An `add_sound` bank as [`add_sound`], with `load_in` as written.
+fn add_sound_in(bank: &str, category: &str, cues: &[&str], load_in: &str) -> Manifest {
     let mut list = String::new();
     for c in cues {
         let f = cue_fields("        ", c, "src/a.wav");
         list.push_str(&format!("      - {}", &f[8..]));
     }
     let cues = if cues.is_empty() { "    cues: []\n".to_string() } else { format!("    cues:\n{list}") };
-    shipment_with(&format!("  - kind: add_sound\n    bank: {bank}\n    category: {category}\n{cues}"))
+    shipment_with(&format!(
+        "  - kind: add_sound\n    bank: {bank}\n    category: {category}\n    load_in: {load_in}\n{cues}"
+    ))
 }
 
 /// A `replace_sound_cue` of `bank`, with `language` when given.
@@ -1448,10 +1455,36 @@ fn m0217_fires_when_the_language_does_not_match_the_bank() {
     assert!(!codes(&lint::lint(&replace_cue("vo_mattias", Some("french")), None, None)).contains(&"M0217"));
 }
 
+/// M0221: an `add_sound` whose `load_in` is empty or lists a session twice; each session alone
+/// and both together are quiet. A `load_in` that is absent, or names no session, does not parse.
+#[test]
+fn m0221_fires_on_an_empty_or_repeated_load_in() {
+    let fires = |load_in: &str| codes(&lint::lint(&add_sound_in("mod_sounds", "ui", &["mod_click"], load_in), None, None)).contains(&"M0221");
+    assert!(fires("[]"));
+    assert!(fires("[gameplay, gameplay]"));
+    assert!(fires("[front_end, gameplay, front_end]"));
+    for quiet in ["[gameplay]", "[front_end]", "[gameplay, front_end]", "[front_end, gameplay]"] {
+        assert!(!fires(quiet), "{quiet}");
+    }
+    let d = lint::lint(&add_sound_in("mod_sounds", "ui", &["mod_click"], "[]"), None, None);
+    assert!(lint::blocks_build(&d), "{d:?}");
+    let parse = |text: &str| {
+        mercs2_quartermaster::from_str(
+            &format!(
+                "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\ncontributions:\n  - kind: add_sound\n    bank: b\n    category: ui\n{text}    cues: []\n"
+            ),
+            mercs2_quartermaster::Format::Yaml,
+        )
+    };
+    assert!(parse("").is_err(), "load_in is required");
+    assert!(parse("    load_in: [menu]\n").is_err(), "a session the format does not name");
+    assert!(parse("    load_in: [front_end]\n").is_ok());
+}
+
 /// The sound rules are registered with their doc anchors; the game-gated ones in GAME_RULES.
 #[test]
 fn the_sound_rules_are_registered() {
-    for code in ["M0214", "M0215", "M0216", "M0217"] {
+    for code in ["M0214", "M0215", "M0216", "M0217", "M0221"] {
         let r = lint::RULES.iter().find(|r| r.code == code).unwrap_or_else(|| panic!("{code}"));
         assert_eq!(r.doc, format!("docs/modding/manifest_format.md#{}", code.to_lowercase()));
     }
