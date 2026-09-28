@@ -487,6 +487,36 @@ pub fn game_cue_guids(game: &mut GameStack) -> Result<BTreeSet<u32>, String> {
     Ok(guids)
 }
 
+/// Every cue guid the game routes in any language it has installed: the sounddbs of `game`, and of
+/// each language WAD (`<token>.wad`, [`Language::ALL`]) in `vz.wad`'s folder that `game` does not
+/// hold. Retail Lua loads the `vo_*` banks of the running language at boot
+/// (`mrxsoundbootstrap.lua:219-245`), before the mod loader runs, so their cues answer first too.
+pub fn installed_cue_guids(game: &mut GameStack) -> Result<BTreeSet<u32>, String> {
+    let mut guids = game_cue_guids(game)?;
+    let vz = game.paths().first().map(|p| p.to_path_buf()).ok_or("the game stack is empty")?;
+    let open: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let dir = vz.parent().ok_or_else(|| format!("{} has no parent folder", vz.display()))?;
+    let mut files = Vec::new();
+    for e in std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))? {
+        files.push(e.map_err(|e| format!("reading {}: {e}", dir.display()))?.path());
+    }
+    for language in Language::ALL {
+        let file = format!("{}.wad", language.token());
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&file)))
+        else {
+            continue;
+        };
+        if open.contains(path) {
+            continue;
+        }
+        let mut stack = GameStack::open(std::slice::from_ref(path)).map_err(|e| e.to_string())?;
+        guids.extend(game_cue_guids(&mut stack)?);
+    }
+    Ok(guids)
+}
+
 /// For each `replace_sound_bank` / `replace_sound_cue` of `manifest`, why its target is not in the
 /// game: the bank is in no carrier (`game`, which holds the declared languages' WADs, and
 /// `shell.wad` beside it), or the cue is not in the bank. A cue the same Shipment's
