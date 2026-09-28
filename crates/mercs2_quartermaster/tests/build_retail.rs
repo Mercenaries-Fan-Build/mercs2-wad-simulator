@@ -2277,6 +2277,304 @@ mod sound {
         assert_eq!(vz.difference(&named).count(), 64);
     }
 
+    /// The soundbanks `vz.wad` carries that no retail load site names: the banks the engine loads
+    /// (`sound::BankLoader::Engine`).
+    fn engine_banks(vz: &mut GameStack) -> BTreeSet<u32> {
+        use mercs2_quartermaster::sound::{BankLoader, FRONT_END_SOUNDBANK_LOADS, GAMEPLAY_SOUNDBANK_LOADS};
+        let lua: BTreeSet<u32> = FRONT_END_SOUNDBANK_LOADS.iter().chain(GAMEPLAY_SOUNDBANK_LOADS).map(|n| m2(n)).collect();
+        let engine: BTreeSet<u32> = vz.asset_hashes(TYPE_ID_SOUNDBANK).into_iter().filter(|h| !lua.contains(h)).collect();
+        assert_eq!(
+            mercs2_quartermaster::sound::bank_loader("wpn_grapplegun", &mercs2_quartermaster::sound::RETAIL_LUA_LOAD_SITES),
+            BankLoader::Engine
+        );
+        assert!(engine.contains(&m2("wpn_grapplegun")));
+        engine
+    }
+
+    /// The `SoundEffect` component (`0xB40954F5`) of every world-entity container of `vz.wad`,
+    /// decoded as `[u32 n][n entity keys][payload]` groups: the payloads, and the group and key
+    /// counts. The layout MUST consume the data exactly.
+    fn sound_effect_payloads(vz: &mut GameStack) -> (Vec<Vec<u32>>, usize, usize, usize) {
+        use mercs2_formats::types::{TYPE_HASH_WORLD_ENTITY_DATA, TYPE_ID_WORLD_ENTITY_DATA};
+        let (mut payloads, mut groups, mut keys, mut words_total) = (Vec::new(), 0, 0, 0);
+        let mut components = 0;
+        for h in vz.asset_hashes(TYPE_ID_WORLD_ENTITY_DATA) {
+            let container = vz
+                .container_for_asset(h, TYPE_HASH_WORLD_ENTITY_DATA, TYPE_ID_WORLD_ENTITY_DATA)
+                .unwrap_or_else(|| panic!("world-entity container 0x{h:08X} does not read"));
+            for g in mercs2_formats::schema::parse_comp_groups(&container) {
+                if g.type_hash != Some(m2("SoundEffect")) {
+                    continue;
+                }
+                components += 1;
+                let schema = g.schema().expect("SoundEffect has a schema");
+                assert_eq!(schema.payload_stride, 0x1C, "seven words");
+                let bank = schema.fields.iter().find(|f| f.name_hash == 0x14A6_7FA6).expect("the bank field");
+                assert_eq!(bank.byte_offset, 0x10, "the bank is payload word 4");
+                let cue = schema.fields.iter().find(|f| f.name_hash == 0x2EB6_2242).expect("the cue field");
+                assert_eq!(cue.byte_offset, 0, "the cue hash is payload word 0");
+                let data = g.data.expect("SoundEffect data");
+                let w: Vec<u32> = data.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+                assert_eq!(data.len() % 4, 0);
+                let mut i = 0;
+                while i < w.len() {
+                    let n = w[i] as usize;
+                    assert!(n > 0 && i + 1 + n + 7 <= w.len(), "a group of {n} keys at word {i} of {}", w.len());
+                    payloads.push(w[i + 1 + n..i + 1 + n + 7].to_vec());
+                    groups += 1;
+                    keys += n;
+                    i += 1 + n + 7;
+                }
+                assert_eq!(i, w.len(), "the groups consume the data exactly");
+                words_total += w.len();
+            }
+        }
+        assert_eq!(components, 1, "one world-entity container carries SoundEffect");
+        (payloads, groups, keys, words_total)
+    }
+
+    /// ★ Census of the banks `SoundEffect` names: its data is 1,080 groups over 2,754 entity keys in
+    /// 11,394 words, and payload word 4 names 63 of the 64 banks the engine loads — every one but
+    /// `wpn_grapplegun` — and no bank retail Lua loads; three payloads' word 4 is no soundbank. Each of the 64 has one soundbank, sounddb and
+    /// wavebank row, all three naming one block, and every one of their wavebanks embeds its waves.
+    #[test]
+    fn sound_effect_names_the_engine_loaded_banks() {
+        let mut vz = GameStack::open(&[vz_wad()]).unwrap();
+        let engine = engine_banks(&mut vz);
+        assert_eq!(engine.len(), 64);
+        let (payloads, groups, keys, words) = sound_effect_payloads(&mut vz);
+        assert_eq!((groups, keys, words), (1080, 2754, 11394));
+        let soundbanks: BTreeSet<u32> = vz.asset_hashes(TYPE_ID_SOUNDBANK).into_iter().collect();
+        let named: BTreeSet<u32> = payloads.iter().map(|p| p[4]).filter(|b| soundbanks.contains(b)).collect();
+        let others: BTreeSet<u32> = payloads.iter().map(|p| p[4]).filter(|b| *b != 0 && !soundbanks.contains(b)).collect();
+        eprintln!("SoundEffect names {} soundbanks; {} other non-zero bank words", named.len(), others.len());
+        // Three payloads carry a bank word no soundbank of vz.wad has: one is the hash of the cue name
+        // `wpn_heavyatmissile_fire` (the AT Missile templates), the other two name nothing known.
+        assert_eq!(others, BTreeSet::from([0x07ED_495F, m2("wpn_heavyatmissile_fire"), 0xF3B8_1041]));
+        assert_eq!(named.len(), 63);
+        assert!(named.is_subset(&engine), "no Lua-loaded bank is named: {:08X?}", named.difference(&engine).collect::<Vec<_>>());
+        assert_eq!(engine.difference(&named).copied().collect::<Vec<_>>(), vec![m2("wpn_grapplegun")]);
+
+        for bank in &engine {
+            let refs: Vec<(u32, u32)> = [TYPE_ID_SOUNDBANK, TYPE_ID_SOUNDDB, TYPE_ID_WAVEBANK]
+                .iter()
+                .map(|t| {
+                    let rows = vz.aset_rows(*bank, *t);
+                    assert_eq!(rows.len(), 1, "0x{bank:08X} type {t}: one row");
+                    (rows[0].0, rows[0].1)
+                })
+                .collect();
+            assert!(refs.windows(2).all(|w| w[0] == w[1]), "0x{bank:08X}: the three rows name one block: {refs:08X?}");
+            let wb = WavebankFile::parse(&table(&mut vz, *bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+            assert_eq!((wb.bank_hash, wb.stream_name.as_deref()), (*bank, None), "0x{bank:08X} embeds its waves");
+        }
+    }
+
+    /// ★ Census of the waves the engine-loaded banks' wavebanks give to other banks, over every group
+    /// of every soundbank in `vz.wad`, `shell.wad` and `English.wad`: `veh_largedieselold` and
+    /// `veh_largedieselnew` play waves of `veh_largegasold`'s wavebank, and no other soundbank plays
+    /// a wave of another bank's of the 64. So the retail waves of an engine-loaded bank stay at
+    /// their indices when an override appends its own.
+    #[test]
+    fn no_other_soundbank_plays_an_engine_loaded_banks_waves() {
+        let mut vz = GameStack::open(&[vz_wad()]).unwrap();
+        let engine = engine_banks(&mut vz);
+        let mut foreign: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for stack in [&mut vz, &mut shell_wad(), &mut english_wad()] {
+            for h in stack.asset_hashes(TYPE_ID_SOUNDBANK) {
+                let sb = Soundbank::parse(&table(stack, h, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+                for g in &sb.groups {
+                    for w in g.waves() {
+                        if engine.contains(&w.wavebank) && w.wavebank != sb.bank_hash {
+                            foreign.insert((sb.bank_hash, w.wavebank));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("groups of other soundbanks playing an engine-loaded bank's waves: {foreign:08X?}");
+        let gas_old = m2("veh_largegasold");
+        assert_eq!(foreign, BTreeSet::from([(m2("veh_largedieselold"), gas_old), (m2("veh_largedieselnew"), gas_old)]));
+    }
+
+    /// The cues `db` routes that `eng` resolves, but `except`.
+    fn resolving_cues(eng: &AudioEngine, db: &SoundDb, except: u32) -> Vec<mercs2_audio::CueEntry> {
+        db.cues.iter().filter(|c| c.guid != except && eng.resolve_cue(c).is_ok()).copied().collect()
+    }
+
+    /// ★ `replace_sound_cue` on `wpn_shotgun`, a bank the engine loads: the overlay carries one block
+    /// under `m2("wpn_shotgun")` with its soundbank, sounddb and wavebank; every retail wave is at its
+    /// own index, the WAV's appended; no loader is linked and no override wavebank ships. An engine
+    /// holding every table of `vz.wad` with the shipped three in place of the game's resolves the
+    /// cue to the WAV and every other cue of the bank as the game's tables do, and M0218 does not
+    /// fire.
+    #[test]
+    fn replace_sound_cue_on_an_engine_loaded_bank_ships_the_retail_named_tables() {
+        let dir = scratch("rsc_wpn_shotgun");
+        let samples: Vec<i16> = (0..1800).map(|i| (i * 13 - 9000) as i16).collect();
+        let cue = "wpn_shotgun_fire";
+        let s = cue_override(&dir, "shotgun-sound", "wpn_shotgun", None, cue, &samples);
+        let mut game = stack_for(&[&s]);
+        assert!(!lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0218"));
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+
+        let bank = m2("wpn_shotgun");
+        let retail_sb_body = table(&mut game, bank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK);
+        let retail_db_body = table(&mut game, bank, SOUNDDB_HASH, TYPE_ID_SOUNDDB);
+        let retail_wb_body = table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK);
+        let retail_sb = Soundbank::parse(&retail_sb_body).unwrap();
+        let retail_wb = WavebankFile::parse(&retail_wb_body).unwrap();
+        let cue_index = retail_sb.cues.iter().position(|c| c.guid == m2(cue)).expect("the cue is in wpn_shotgun");
+
+        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch), "no shell patch");
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let ob = blocks_of(&out, overlay);
+        let tables = tables_of(block_at(&ob, bank));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(bank, TYPE_HASH_SOUNDBANK), (bank, SOUNDDB_HASH), (bank, TYPE_HASH_WAVEBANK)]);
+        assert!(!ob.iter().any(|b| b.path_string == format!("blocks\\VZ\\mod_{:08x}.block", m2("qm_shotgun-sound_wpn_shotgun"))));
+        let forked = Soundbank::parse(&tables[0].2).unwrap();
+        assert_only_cue_changed(&retail_sb, &forked, &[cue_index]);
+        assert_eq!(tables[1].2, retail_db_body, "the game's sounddb");
+        let wb = WavebankFile::parse(&tables[2].2).unwrap();
+        assert_eq!(wb.bank_hash, bank);
+        assert_eq!(wb.records.len(), retail_wb.records.len() + 1);
+        assert_eq!(&wb.records[..retail_wb.records.len()], &retail_wb.records[..], "every retail wave at its own index");
+        let log = report.log.join("\n");
+        assert!(!log.contains("linked qm_modloader"), "no loader: {log}");
+
+        // Every table of vz.wad, and the same with wpn_shotgun's three replaced by the shipped ones.
+        let all = audio_tables(&mut GameStack::open(&[vz_wad()]).unwrap());
+        let mut with_override: Vec<(u32, u32, Vec<u8>)> = all.iter().filter(|t| t.0 != bank).cloned().collect();
+        with_override.extend(tables.iter().cloned());
+        let retail = engine_of(&all);
+        let shipped = engine_of(&with_override);
+
+        let entry = *shipped.sounddb.find_cue_by_name(cue).expect("routes");
+        assert_eq!(entry.cue_index as usize, cue_index);
+        let resolved = shipped.resolve_cue(&entry).expect("resolves");
+        let w: Vec<_> = resolved.waves().collect();
+        assert_eq!((w.len(), w[0].wavebank, w[0].index as usize), (1, bank, retail_wb.records.len()));
+        assert_eq!(shipped.clip(bank, w[0].index).unwrap().samples, samples);
+
+        let untouched: Vec<_> = resolving_cues(&retail, &retail.sounddb, m2(cue)).into_iter().filter(|c| c.bank_hash == bank).collect();
+        assert!(!untouched.is_empty(), "wpn_shotgun has another cue that resolves");
+        for c in &untouched {
+            let a = shipped.resolve_cue(c).unwrap_or_else(|e| panic!("cue 0x{:08X}: {e:?}", c.guid));
+            assert_eq!(a, retail.resolve_cue(c).unwrap(), "cue 0x{:08X} resolves as retail", c.guid);
+            for w in a.waves() {
+                assert_eq!(shipped.clip(w.wavebank, w.index).unwrap(), retail.clip(w.wavebank, w.index).unwrap());
+            }
+        }
+    }
+
+    /// ★ Two Shipments overriding different cues of `wpn_smg`, a bank the engine loads: `qm link`
+    /// merges them into one link-owned block at the path the plan promises, with the game's
+    /// sounddb, the retail waves at their own indices and each Shipment's wave after them in load
+    /// order, each cue playing its own; and each Shipment's own build ships its copy at that path.
+    #[test]
+    fn the_link_merges_engine_loaded_bank_overrides_in_load_order() {
+        let root = scratch("rsc_link_wpn_smg");
+        let mut game = GameStack::open(&[vz_wad()]).unwrap();
+        let bank = m2("wpn_smg");
+        let retail_sb = Soundbank::parse(&table(&mut game, bank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let retail_db = table(&mut game, bank, SOUNDDB_HASH, TYPE_ID_SOUNDDB);
+        let retail_wb = WavebankFile::parse(&table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+        let (a_cue, b_cue) = ("wpn_smg_reload", "wpn_smg_fire");
+        let index_of = |name: &str| retail_sb.cues.iter().position(|c| c.guid == m2(name)).unwrap_or_else(|| panic!("{name}"));
+
+        let a = cue_override(&root.join("a"), "zz-smg-reload", "wpn_smg", None, a_cue, &[11; 90]);
+        let b = cue_override(&root.join("b"), "aa-smg-fire", "wpn_smg", None, b_cue, &[22; 70]);
+        let path = format!("blocks\\VZ\\mod_{bank:08x}.block");
+        for s in [&a, &b] {
+            let out = root.join(format!("build_{}", s.manifest.shipment.name));
+            let report = build::build(s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+            let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+            assert!(blocks_of(&out, overlay).iter().any(|b| b.path_string == path), "the Shipment's own copy");
+        }
+        let ids: Vec<String> = vec!["arg:1".into(), "arg:2".into()];
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &b }];
+        let out = root.join("link");
+        let report = build::link_installed(&inputs, &mut game, &corpus(), &out).expect("links");
+        eprintln!("{}", report.log.join("\n"));
+        assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
+        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch));
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("link overlay");
+        let tables = tables_of(block_at(&blocks_of(&out, overlay), bank));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(bank, TYPE_HASH_SOUNDBANK), (bank, SOUNDDB_HASH), (bank, TYPE_HASH_WAVEBANK)]);
+        assert_eq!(tables[1].2, retail_db);
+        let merged = Soundbank::parse(&tables[0].2).unwrap();
+        let mut changed = [index_of(a_cue), index_of(b_cue)];
+        changed.sort();
+        assert_only_cue_changed(&retail_sb, &merged, &changed);
+        let wb = WavebankFile::parse(&tables[2].2).unwrap();
+        let n = retail_wb.records.len();
+        assert_eq!(&wb.records[..n], &retail_wb.records[..]);
+        assert_eq!(wb.records.len(), n + 2);
+        let wave_of = |index: usize| {
+            let CueBody::SingleTrack { group_index, .. } = merged.cues[index].body else { panic!("single-track") };
+            let GroupForm::Single { wave, .. } = &merged.groups[group_index as usize].form else { panic!("single-wave") };
+            (wave.wavebank, wave.index as usize)
+        };
+        assert_eq!(wave_of(index_of(a_cue)), (bank, n), "the first Shipment in load order");
+        assert_eq!(wave_of(index_of(b_cue)), (bank, n + 1), "then the second");
+        let mut eng = AudioEngine::default();
+        eng.load_wavebank(&tables[2].2).unwrap();
+        assert_eq!(eng.clip(bank, n as u32).unwrap().samples, vec![11; 90]);
+        assert_eq!(eng.clip(bank, (n + 1) as u32).unwrap().samples, vec![22; 70]);
+    }
+
+    /// ★ `replace_sound_bank` on `wpn_grapplegun`, a bank the engine loads: one block under its retail
+    /// name with the replacement's soundbank and sounddb and the retail wavebank with the
+    /// replacement's waves appended; each declared cue routes to its WAV.
+    #[test]
+    fn replace_sound_bank_on_an_engine_loaded_bank_keeps_the_retail_waves() {
+        let dir = scratch("rsb_wpn_grapplegun");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lines = [("qm_grapple_fire", 700i16), ("qm_grapple_reel", -900)];
+        let mut cues = String::new();
+        for (i, (name, v)) in lines.iter().enumerate() {
+            std::fs::write(dir.join(format!("src/{name}.wav")), pcm16_wav(1, 22050, &[*v; 300])).unwrap();
+            cues.push_str(&sound_cue_yaml(name, &format!("src/{name}.wav"), i as u32, i as u32));
+        }
+        let s = named_shipment(
+            &dir,
+            "grapple-sounds",
+            &format!("  - kind: replace_sound_bank\n    bank: wpn_grapplegun\n    category: ui\n    cues:\n{cues}"),
+        );
+        let mut game = stack_for(&[&s]);
+        assert!(!lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0218"));
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+        let bank = m2("wpn_grapplegun");
+        let retail_wb = WavebankFile::parse(&table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let tables = tables_of(block_at(&blocks_of(&out, overlay), bank));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(bank, TYPE_HASH_SOUNDBANK), (bank, SOUNDDB_HASH), (bank, TYPE_HASH_WAVEBANK)]);
+        let wb = WavebankFile::parse(&tables[2].2).unwrap();
+        let n = retail_wb.records.len();
+        assert_eq!(&wb.records[..n], &retail_wb.records[..], "every retail wave at its own index");
+        assert_eq!(wb.records.len(), n + lines.len());
+        assert!(!report.log.join("\n").contains("linked qm_modloader"));
+
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&tables[1].2).unwrap());
+        eng.load_soundbank(&tables[0].2).unwrap();
+        eng.load_wavebank(&tables[2].2).unwrap();
+        for (i, (name, v)) in lines.iter().enumerate() {
+            let e = *eng.sounddb.find_cue_by_name(name).expect("routes");
+            let resolved = eng.resolve_cue(&e).expect("resolves");
+            let w = resolved.waves().next().expect("a wave");
+            assert_eq!((w.wavebank, w.index as usize), (bank, n + i));
+            assert_eq!(eng.clip(w.wavebank, w.index).unwrap().samples, vec![*v; 300], "{name}");
+        }
+    }
+
     /// ★ Census: the front end's PDA cues. `ui_PDA_Accept`, `ui_PDA_Cancel` and `ui_PDA_Scroll` are each
     /// routed by exactly one of `shell.wad`'s sounddbs, and that bank is `ui_hud`.
     #[test]
