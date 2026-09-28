@@ -69,6 +69,7 @@ contributions:
   - kind: add_sound
     bank: my_jungle
     category: ambience
+    load_in: [gameplay, front_end]
     cues:
       - name: my_jungle_birds
         wave: src/audio/birds.wav
@@ -320,6 +321,7 @@ const JSON: &str = r#"
       "kind": "add_sound",
       "bank": "my_jungle",
       "category": "ambience",
+      "load_in": ["gameplay", "front_end"],
       "cues": [{ "name": "my_jungle_birds", "wave": "src/audio/birds.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }]
     },
     {
@@ -556,6 +558,7 @@ normal_map = false
 kind = "add_sound"
 bank = "my_jungle"
 category = "ambience"
+load_in = ["gameplay", "front_end"]
 cues = [{ name = "my_jungle_birds", wave = "src/audio/birds.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }]
 
 [[contributions]]
