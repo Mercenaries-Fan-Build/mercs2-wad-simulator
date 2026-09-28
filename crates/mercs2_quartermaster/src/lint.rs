@@ -438,8 +438,10 @@ pub const M0236_PRMG_VS_UNREGISTERED: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0236",
 };
 
-/// Needs the game stack. A shader's `CTAB` names a constant its family's binder never resolves, so
-/// the engine never sets it.
+/// Needs the game stack. A shader's `CTAB` names a constant its family's binder does not resolve.
+/// The engine sets a shader's constants through the handles its binder resolves; a constant outside
+/// that list is set only by code that addresses it directly, which a new shader has none of. A
+/// `replace_shader` may keep the constants its retail record declares.
 pub const M0237_SHADER_CONSTANT_UNBOUND: Rule = Rule {
     code: "M0237",
     title: "a shader constant its family never binds",
@@ -2160,16 +2162,32 @@ pub fn shader_game_checks(
                     continue;
                 }
                 for e in edits.iter().filter(|e| e.index == index) {
+                    // A constant the replaced record already declares is set the way retail sets it:
+                    // three retail shaders declare one their family's binder does not resolve
+                    // (PgColorFPConst `color`, PgLtiDebugZPassFP `depthRange`, PgLtiTerrainShadowVP
+                    // `PositionOffset`).
+                    let store = &originals.stores[&e.file];
+                    let retail: Vec<String> = store
+                        .records
+                        .iter()
+                        .find(|r| r.id == e.id())
+                        .and_then(|r| shader::bytecode(store.blob(r)).ok())
+                        .map(|b| b.constants)
+                        .unwrap_or_default();
                     for fam in &fams {
                         let info = shader::families().iter().find(|f| f.name == *fam).expect("a registered family");
-                        let unbound = shader::unbound_constants(info, &e.code);
+                        let unbound: Vec<String> = shader::unbound_constants(info, &e.code)
+                            .into_iter()
+                            .filter(|c| !retail.contains(c))
+                            .collect();
                         if !unbound.is_empty() {
                             out.push(diag(
                                 M0237_SHADER_CONSTANT_UNBOUND,
                                 Severity::Error,
                                 format!(
                                     "{target} ({}) names constant(s) {unbound:?} that family {fam}'s \
-                                     binder never resolves, so the engine never sets them",
+                                     binder does not resolve and the retail record does not declare, so \
+                                     nothing sets them",
                                     e.file.file_name()
                                 ),
                                 index,
@@ -2187,7 +2205,8 @@ pub fn shader_game_checks(
                             Severity::Error,
                             format!(
                                 "stem {} ({}) names constant(s) {unbound:?} that family {}'s binder \
-                                 never resolves, so the engine never sets them",
+                                 does not resolve; the engine sets a new shader's constants only \
+                                 through its family's binder, so nothing sets them",
                                 e.stem,
                                 e.file.file_name(),
                                 family.name()
