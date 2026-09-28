@@ -210,8 +210,8 @@ fn archives() -> [(&'static str, &'static Archive); 3] {
     [("vz.wad", vz()), ("English.wad", english()), ("shell.wad", shell())]
 }
 
-/// Group `+0x00` against the guids of the cues that play the group. `FUN_008369e0` is the one reader
-/// found (the language gate below); the value is not the playing cue's guid in most groups.
+/// Group `+0x00` against the guids of the cues that play the group. `FUN_008369e0` is the one known
+/// reader (the language gate below); the value is not the playing cue's guid in most groups.
 #[test]
 fn group_sound_id_against_the_playing_cue_guids() {
     // (archive, sound id equals a playing cue's guid, differs from every playing cue's guid, no cue
@@ -321,7 +321,7 @@ fn group_priority_values() {
     }
 }
 
-/// Group `+0x20`: 1.0 in every group but one. No engine reader was found: the only copy is into the
+/// Group `+0x20`: 1.0 in every group but one. No engine reader is known: the only copy is into the
 /// wave (`0x00838F70`, wave `+0x68`), whose getter (wave vtable `+0x44`, `0x00838F30`) has no call site.
 #[test]
 fn group_word_20_values() {
@@ -396,7 +396,7 @@ fn cue_start_limit_values() {
 }
 
 /// Single-track cue `+0x16`: 0, or one non-zero value shared by every single-track cue in the bank
-/// that carries it. No engine reader was found: the cue's `{soundbank, group}` reference is read
+/// that carries it. No engine reader is known: the cue's `{soundbank, group}` reference is read
 /// only at `+0x00` and `+0x04` (`FUN_0082e7d0`, `FUN_0083d410`).
 #[test]
 fn single_track_cue_word_16_values() {
