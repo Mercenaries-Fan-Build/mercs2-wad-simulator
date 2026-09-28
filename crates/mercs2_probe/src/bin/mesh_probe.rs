@@ -89,7 +89,7 @@ fn main() {
     // 4. Per draw group: state_mask + material slot0 texture NAME, so we see which state the props need.
     let meshes = mercs2_formats::model_cubeize::read_model_meshes(&c).unwrap_or_default();
     let group_mat = mercs2_formats::texture::group_material_indices(&c);
-    let mats = mercs2_formats::texture::parse_mtrl(&c);
+    let mats = mercs2_formats::texture::parse_mtrl(&c, mercs2_formats::texture::MtrlSource::Model).expect("parse the model MTRL");
 
     // MULTI-MATERIAL groups: a PRMG can carry several PRMT records, each a sub-strip with its OWN
     // material. group_material_indices() keeps only the FIRST — so a floor sub-strip sharing a group
