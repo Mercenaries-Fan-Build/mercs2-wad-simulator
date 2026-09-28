@@ -1556,9 +1556,8 @@ mod tests {
             let mut total_keys = 0usize;
             let mut contiguous = 0usize; // buffers whose keys are a single perfect [0..N-1] run
             for &blk in &[767u16, 826, 3185] {
-                let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) else {
-                    continue;
-                };
+                let dec = decompress_block(&mut f, &arch.indx, blk)
+                    .unwrap_or_else(|e| panic!("decompress block {blk}: {e}"));
                 let buffers = extract_mopp_buffers(&dec);
                 for (i, code) in buffers.iter().enumerate() {
                     let d = decode(code);
@@ -1706,9 +1705,8 @@ mod tests {
             let inf = f32::INFINITY;
             let mut checked = 0usize;
             for &blk in &[767u16, 826, 3185] {
-                let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) else {
-                    continue;
-                };
+                let dec = decompress_block(&mut f, &arch.indx, blk)
+                    .unwrap_or_else(|e| panic!("decompress block {blk}: {e}"));
                 for (code, info) in extract_mopp_with_info(&dec) {
                     let mut want = decode(&code).keys;
                     want.sort_unstable();
@@ -1742,13 +1740,14 @@ mod tests {
             let mut mopps = 0usize;
             let mut leaves_tested = 0usize;
             for &blk in &[767u16, 826, 3185] {
-                let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) else {
-                    continue;
-                };
-                for (code, info) in extract_mopp_with_info(&dec) {
-                    if !info.scale.is_finite() || info.scale == 0.0 {
-                        continue;
-                    }
+                let dec = decompress_block(&mut f, &arch.indx, blk)
+                    .unwrap_or_else(|e| panic!("decompress block {blk}: {e}"));
+                for (mi, (code, info)) in extract_mopp_with_info(&dec).into_iter().enumerate() {
+                    assert!(
+                        info.scale.is_finite() && info.scale != 0.0,
+                        "block {blk} mopp[{mi}]: m_info scale {} is not a usable quantization scale",
+                        info.scale
+                    );
                     let boxes = leaf_boxes(&code, &info, ROOT_SHIFT);
                     let mut this_mopp_tested = 0usize;
                     for (key, blo, bhi) in &boxes {
