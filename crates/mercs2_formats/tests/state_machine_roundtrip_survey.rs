@@ -197,21 +197,18 @@ fn can_the_destruction_state_machine_be_written() {
     let mut c = Census::default();
 
     for bi in blocks {
-        let Ok(dec) = decompress_block(&mut file, &archive.indx, bi) else {
-            continue;
-        };
+        let dec = decompress_block(&mut file, &archive.indx, bi)
+            .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
         let (_n, entries) = parse_block_entry_table(&dec);
         // Containers follow the 4 + 16*count entry table, each `chunk_size` long.
         let mut pos = 4 + entries.len() * 16;
         for (ei, e) in entries.iter().enumerate() {
-            let end = (pos + e.chunk_size as usize).min(dec.len());
-            if pos >= end {
-                break;
-            }
+            let end = pos + e.chunk_size as usize;
+            let label = format!("blk{bi}/entry{ei}/0x{:08X}", e.name_hash);
+            assert!(end <= dec.len(), "{label}: runs past the {}-byte block", dec.len());
             let container = &dec[pos..end];
             pos = end;
             c.containers_scanned += 1;
-            let label = format!("blk{bi}/entry{ei}/0x{:08X}", e.name_hash);
             survey_container(container, &label, &mut c);
         }
     }
@@ -346,9 +343,8 @@ fn survey_container(container: &[u8], label: &str, c: &mut Census) {
     }
 
     // ── (3) MODEL FIDELITY ──
-    let Some(sm) = parse_state_machine(container) else {
-        return;
-    };
+    let sm = parse_state_machine(container)
+        .unwrap_or_else(|| panic!("{label}: carries a destruction family that parse_state_machine rejects"));
     c.parse_ok += 1;
 
     let leaf_bytes = |r: &Row| -> &[u8] {
