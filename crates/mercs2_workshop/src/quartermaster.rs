@@ -4085,7 +4085,7 @@ mod tests {
         assert!(build_stack_paths(&stack, &french).unwrap_err().contains("french"));
     }
 
-    /// Every kind a domain offers under "Add to Shipment" has a stub, or its button does nothing.
+    /// Every kind a domain offers under "Add to Shipment" has a stub for its button to add.
     #[test]
     fn every_domain_kind_has_a_stub() {
         for d in crate::domain::Domain::ALL {
