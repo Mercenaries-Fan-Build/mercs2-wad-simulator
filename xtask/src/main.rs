@@ -18,6 +18,10 @@
 //!
 //! Prereqs: `cargo login` (or `CARGO_REGISTRY_TOKEN`). `--dry-run` prints the plan and publishes
 //! nothing.
+//!
+//! `cargo xtask retail-test [nextest args…]` — run every game-gated test in the workspace against the
+//! retail `vz.wad` named by the repo-root `.mercs2-local.toml` (write it with
+//! `scripts/find-vz-wad.sh --write`). See [`retail_test`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, ExitCode};
@@ -30,12 +34,84 @@ const BACKOFF: Duration = Duration::from_secs(600);
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dry = args.iter().any(|a| a == "--dry-run");
-    match args.iter().find(|a| !a.starts_with("--")).map(String::as_str) {
-        Some("publish") => publish(dry),
+    match args.first().map(String::as_str) {
+        Some("publish") => publish(args.iter().any(|a| a == "--dry-run")),
+        Some("retail-test") => retail_test(&args[1..]),
         _ => {
             eprintln!("usage: cargo xtask publish [--dry-run]");
+            eprintln!("       cargo xtask retail-test [extra cargo-nextest args]");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// The cargo feature that builds a crate's game-gated tests.
+const RETAIL_FEATURE: &str = "retail";
+
+/// Run every game-gated test across the workspace, and nothing else.
+///
+/// Game-gated tests read the retail `vz.wad`, which cannot be committed, so the hermetic run
+/// (`cargo nextest run --workspace`, what CI does) never builds them: they sit behind each crate's
+/// `retail` feature, in one of two shapes:
+///
+/// * an integration test target declared `required-features = ["retail"]` — selected here by its
+///   nextest binary id, read from `cargo metadata`;
+/// * a `#[cfg(test)]` unit test that needs the crate's private items, kept in src/ inside a module
+///   named `retail` gated `#[cfg(feature = "retail")]` — selected here by the `::retail::` path
+///   segment in its test name.
+///
+/// Both lists come from the workspace itself, so a crate that gains a `retail` feature or a retail
+/// target is picked up with no edit here. Each test finds the game only through the repo-root
+/// `.mercs2-local.toml` (`mercs2_formats::game_paths::local_config_vz_wad`) and fails when that file,
+/// its `vz_wad` key, or the file it names is missing. Nothing is skipped.
+fn retail_test(extra: &[String]) -> ExitCode {
+    let meta = match cargo_metadata::MetadataCommand::new().no_deps().exec() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("cargo metadata failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let packages: Vec<&cargo_metadata::Package> = meta
+        .workspace_packages()
+        .into_iter()
+        .filter(|p| p.features.contains_key(RETAIL_FEATURE))
+        .collect();
+    if packages.is_empty() {
+        eprintln!("no workspace crate declares a `{RETAIL_FEATURE}` feature, so there is nothing to run");
+        return ExitCode::FAILURE;
+    }
+
+    // `(^|::)retail::` catches the unit-test modules; each retail integration target is named exactly.
+    let mut filter = String::from("test(/(^|::)retail::/)");
+    let mut cmd = Command::new("cargo");
+    cmd.args(["nextest", "run", "--no-fail-fast"]);
+    let mut features = Vec::new();
+    for p in &packages {
+        cmd.args(["-p", p.name.as_str()]);
+        features.push(format!("{}/{RETAIL_FEATURE}", p.name));
+        for t in &p.targets {
+            let is_test = t.kind.iter().any(|k| k == "test");
+            if is_test && t.required_features.iter().any(|f| f == RETAIL_FEATURE) {
+                filter.push_str(&format!(" | binary_id({}::{})", p.name, t.name));
+            }
+        }
+    }
+    cmd.args(["--features", &features.join(",")]);
+    cmd.args(["-E", &filter]);
+    cmd.args(extra);
+
+    println!("retail-test: {} crate(s): {}", packages.len(), features.join(" "));
+    println!("retail-test: filter {filter}");
+    match cmd.status() {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) => {
+            eprintln!("retail-test: cargo nextest exited with {s}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("retail-test: could not run `cargo nextest` ({e}); install it with `cargo install cargo-nextest --locked`");
+            ExitCode::FAILURE
         }
     }
 }
