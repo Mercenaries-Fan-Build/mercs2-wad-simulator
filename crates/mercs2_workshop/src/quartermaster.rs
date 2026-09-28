@@ -1013,12 +1013,13 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             image: PathBuf::from("src/texture.png"),
             normal_map: false,
         },
-        // The category and the cues are the author's: an empty category fails M0216 and an empty
-        // cue list fails M0215 until they are chosen.
+        // The category, the cues and the sessions are the author's: an empty category fails M0216,
+        // an empty cue list M0215 and an empty `load_in` M0221 until they are chosen.
         "add_sound" => Contribution::AddSound {
             bank: name,
             category: String::new(),
             cues: Vec::new(),
+            load_in: Vec::new(),
         },
         // The bank names a bank the game ships, so it starts empty (M0215) until it is entered.
         "replace_sound_bank" => Contribution::ReplaceSoundBank {
@@ -1800,6 +1801,69 @@ fn sound_category_row(ui: &mut egui::Ui, category: &mut String, what: &str) -> b
     changed
 }
 
+/// The preview's `Script` rows for a bank that loads in `sessions`: each session's loader and the
+/// scripts it lives in, as `blast::loader_scripts` claims them.
+fn sound_loader_rows(
+    sessions: &std::collections::BTreeSet<mercs2_quartermaster::manifest::LoadSession>,
+    what: &str,
+) -> Vec<(String, String)> {
+    use mercs2_quartermaster::manifest::LoadSession;
+    if sessions.is_empty() {
+        return vec![("Script".to_string(), format!("no session loads {what}"))];
+    }
+    sessions
+        .iter()
+        .map(|s| {
+            let text = match s {
+                LoadSession::Gameplay => format!(
+                    "gameplay: qm_modloader loads {what}; trampolines in wifpmcinterior and mrxsoundbootstrap"
+                ),
+                LoadSession::FrontEnd => format!(
+                    "front end: qm_shell_modloader loads {what}; a trampoline in shell.wad's mrxsound"
+                ),
+            };
+            ("Script".to_string(), text)
+        })
+        .collect()
+}
+
+/// The sessions an `add_sound` bank loads in: one pill per session, on or off, in manifest order
+/// (`LoadSession::ALL`). None on is M0221.
+fn sound_load_in_row(ui: &mut egui::Ui, load_in: &mut Vec<mercs2_quartermaster::manifest::LoadSession>) -> bool {
+    use mercs2_quartermaster::manifest::LoadSession;
+    let mut commit = false;
+    ui.horizontal(|ui| {
+        let lw = theme::field_label_w(ui.available_width());
+        ui.add_sized([lw, 18.0], egui::Label::new("Load in"));
+        for session in LoadSession::ALL {
+            let on = load_in.contains(&session);
+            if theme::pill(ui, session.token(), on).clicked() {
+                if on {
+                    load_in.retain(|s| *s != session);
+                } else {
+                    load_in.push(session);
+                    load_in.sort();
+                }
+                commit = true;
+            }
+        }
+    });
+    if load_in.is_empty() {
+        theme::field_note(
+            ui,
+            theme::FieldState::Bad,
+            "M0221 \u{2014} pick where the bank loads: gameplay (the overlay) or the front end (the shell patch)",
+        );
+    } else {
+        theme::field_note(
+            ui,
+            theme::FieldState::Neutral,
+            "each session's mod loader loads the bank; its block ships to that session's WAD",
+        );
+    }
+    commit
+}
+
 /// The bank a sound override targets, and the language of a `vo_*` bank's copy. The language row
 /// is shown for a bank that starts with `vo_` (`sound::is_vo_bank`, the rule retail Lua localizes
 /// by); committing a bank that does not clears the language.
@@ -2178,7 +2242,7 @@ fn contribution_form(
                 },
             );
         }
-        Contribution::AddSound { bank, category, cues } => {
+        Contribution::AddSound { bank, category, cues, load_in } => {
             commit |= text_row(ui, "Bank", bank, "my_sounds", true);
             if mercs2_quartermaster::sound::is_vo_bank(bank) {
                 theme::field_note(
@@ -2199,6 +2263,7 @@ fn contribution_form(
                 );
             }
             commit |= sound_category_row(ui, category, "the category every cue's group is in");
+            commit |= sound_load_in_row(ui, load_in);
             commit |= sound_cue_list(ui, cues, root);
         }
         Contribution::ReplaceSoundBank { bank, language, category, cues } => {
@@ -2971,12 +3036,11 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::AddTexture { name, .. } => {
             vec![("Writes".to_string(), format!("texture {name}  (new hash)"))]
         }
-        // The same claims `blast::claims` makes: the bank's entry, and each cue's guid.
-        Contribution::AddSound { bank, cues, .. } => {
-            let mut rows = vec![
-                ("Writes".to_string(), format!("sound bank {bank}  (new hash)")),
-                ("Script".to_string(), "the mod loader loads the bank".to_string()),
-            ];
+        // The same claims `blast::claims` makes: the bank's entry, each cue's guid, and the loader
+        // scripts of each session it loads in.
+        Contribution::AddSound { bank, cues, load_in, .. } => {
+            let mut rows = vec![("Writes".to_string(), format!("sound bank {bank}  (new hash)"))];
+            rows.extend(sound_loader_rows(&load_in.iter().copied().collect(), "the bank"));
             rows.extend(cues.iter().map(|c| {
                 ("Writes".to_string(), format!("sound cue {}  (new guid)", c.name))
             }));
@@ -2988,26 +3052,25 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         }
         Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
             let entry = mercs2_quartermaster::sound::entry_name(bank, *language);
-            let mut rows = vec![
-                ("Writes".to_string(), format!("sound bank {entry}  \u{2014} EXCLUSIVE")),
-                ("Script".to_string(), "the mod loader loads its wavebank".to_string()),
-            ];
+            let mut rows = vec![("Writes".to_string(), format!("sound bank {entry}  \u{2014} EXCLUSIVE"))];
+            rows.extend(sound_loader_rows(&mercs2_quartermaster::sound::retail_sessions(bank, *language), "its wavebank"));
             rows.extend(cues.iter().map(|c| {
                 ("Writes".to_string(), format!("sound cue {}  \u{2014} EXCLUSIVE", c.name))
             }));
             rows
         }
-        Contribution::ReplaceSoundCue { bank, language, cue, .. } => vec![
-            (
+        Contribution::ReplaceSoundCue { bank, language, cue, .. } => {
+            let mut rows = vec![(
                 "Writes".to_string(),
                 format!(
                     "sound cue {} in {}  \u{2014} EXCLUSIVE",
                     cue.name,
                     mercs2_quartermaster::sound::entry_name(bank, *language)
                 ),
-            ),
-            ("Script".to_string(), "the mod loader loads its wavebank".to_string()),
-        ],
+            )];
+            rows.extend(sound_loader_rows(&mercs2_quartermaster::sound::retail_sessions(bank, *language), "its wavebank"));
+            rows
+        }
         Contribution::ReplaceTexture { target, .. } => vec![
             ("Writes".to_string(), format!("texture {target}")),
             (
@@ -4014,7 +4077,44 @@ mod tests {
             let codes: Vec<&str> = p.findings_for(0).map(|d| d.rule.code).collect();
             assert!(codes.contains(&"M0216"), "{kind}: the unchosen category is not reported: {codes:?}");
             assert!(codes.contains(&"M0215"), "{kind}: the missing name or cues are not reported: {codes:?}");
+            assert_eq!(codes.contains(&"M0221"), kind == "add_sound", "{kind}: the unchosen load_in: {codes:?}");
         }
+    }
+
+    /// The preview names each session's loader for a sound kind: an `add_sound` its `load_in`, an
+    /// override the sessions retail Lua loads its bank in (`ui_shell`: the front end only; `ui_hud`:
+    /// both).
+    #[test]
+    fn sound_previews_name_each_sessions_loader() {
+        use mercs2_quartermaster::manifest::LoadSession;
+        let scripts = |c: &Contribution| -> Vec<String> {
+            blast_rows(c).into_iter().filter(|(k, _)| k == "Script").map(|(_, v)| v).collect()
+        };
+        let Contribution::AddSound { bank, category, cues, .. } = stub("add_sound", 1).unwrap() else {
+            panic!("the add_sound stub")
+        };
+        let added = |load_in: Vec<LoadSession>| Contribution::AddSound {
+            bank: bank.clone(),
+            category: category.clone(),
+            cues: cues.clone(),
+            load_in,
+        };
+        let front = scripts(&added(vec![LoadSession::FrontEnd]));
+        assert_eq!(front.len(), 1);
+        assert!(front[0].starts_with("front end: qm_shell_modloader"), "{front:?}");
+        assert_eq!(scripts(&added(LoadSession::ALL.to_vec())).len(), 2);
+        assert_eq!(scripts(&added(Vec::new())), vec!["no session loads the bank".to_string()]);
+
+        let cue = |bank: &str| {
+            let Contribution::ReplaceSoundCue { category, cue, .. } = stub("replace_sound_cue", 1).unwrap() else {
+                panic!("the replace_sound_cue stub")
+            };
+            Contribution::ReplaceSoundCue { bank: bank.into(), language: None, category, cue }
+        };
+        let shell = scripts(&cue("ui_shell"));
+        assert_eq!(shell.len(), 1, "{shell:?}");
+        assert!(shell[0].starts_with("front end:"), "{shell:?}");
+        assert_eq!(scripts(&cue("ui_hud")).len(), 2);
     }
 
     /// A whole-number field takes decimal or `0x` hex and refuses a value its type cannot hold.
