@@ -38,7 +38,8 @@ pub fn wad_under(path: &Path, name: &str) -> Option<PathBuf> {
 /// Resolve a WAD by filename from whichever of [`GAME_DIR_VARS`] is set.
 ///
 /// Each variable may hold the install root, its `data` folder, or a WAD file directly — see
-/// [`wad_under`]. Returns `None` when nothing is set or nothing exists; callers skip rather than fail.
+/// [`wad_under`]. Returns `None` when nothing is set or nothing exists. Tools use this; game-gated
+/// tests never do — they read [`LOCAL_CONFIG`] through [`local_config_vz_wad`].
 pub fn wad_from_env(name: &str) -> Option<PathBuf> {
     GAME_DIR_VARS
         .iter()
@@ -54,39 +55,77 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 
 /// Machine-local, git-ignored config naming the install, written by `scripts/find-vz-wad.sh`.
 ///
-/// A **dev-checkout fallback only**, and deliberately lower priority than the environment: Modkit
-/// manages the install and hands paths to the tools it launches, so a per-tool config competing with
-/// that is how a fleet of tools ends up disagreeing about where the game is. It exists so tests run
-/// on a checkout without ceremony.
+/// For tools it is a **dev-checkout fallback only**, and deliberately lower priority than the
+/// environment: Modkit manages the install and hands paths to the tools it launches, so a per-tool
+/// config competing with that is how a fleet of tools ends up disagreeing about where the game is.
+///
+/// For game-gated tests it is the **only** source — see [`local_config_vz_wad`].
 pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
+
+/// Every [`LOCAL_CONFIG`] from `start` upward, nearest first, each with its text.
+fn local_configs(start: &Path) -> impl Iterator<Item = (PathBuf, String)> + '_ {
+    start.ancestors().filter_map(|d| {
+        let file = d.join(LOCAL_CONFIG);
+        std::fs::read_to_string(&file).ok().map(|text| (file, text))
+    })
+}
+
+/// The `vz_wad = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
+fn vz_wad_value(text: &str) -> Option<PathBuf> {
+    text.lines()
+        .find(|l| l.trim_start().starts_with("vz_wad"))
+        .and_then(|l| l.split('=').nth(1))
+        .map(|raw| PathBuf::from(raw.trim().trim_matches('"')))
+}
 
 /// `vz_wad = "…"` from the nearest [`LOCAL_CONFIG`], searching upward from `start`.
 pub fn wad_from_local_config(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
-    while let Some(d) = dir {
-        if let Ok(text) = std::fs::read_to_string(d.join(LOCAL_CONFIG)) {
-            if let Some(raw) = text
-                .lines()
-                .find(|l| l.trim_start().starts_with("vz_wad"))
-                .and_then(|l| l.split('=').nth(1))
-            {
-                let p = PathBuf::from(raw.trim().trim_matches('"'));
-                if p.is_file() {
-                    return Some(p);
-                }
-            }
-        }
-        dir = d.parent();
+    local_configs(start)
+        .filter_map(|(_, text)| vz_wad_value(&text))
+        .find(|p| p.is_file())
+}
+
+/// The base archive for a **game-gated test**: the nearest [`LOCAL_CONFIG`] above `start`, and
+/// nothing else.
+///
+/// Tests pass `env!("CARGO_MANIFEST_DIR")` and panic with the error. There is no environment route
+/// and no fallback: a game-gated test either reads the archive this file names or fails, so a
+/// missing install can never turn into a green run that asserted nothing. The nearest file wins; a
+/// broken one is reported, not stepped over for one further up.
+///
+/// The error says which of the three things is wrong: no file, no `vz_wad` key, or a path that is
+/// not a file.
+pub fn local_config_vz_wad(start: &Path) -> Result<PathBuf, String> {
+    const FIX: &str = "run `scripts/find-vz-wad.sh --write` at the repository root, or write \
+                       `vz_wad = \"/path/to/vz.wad\"` into it by hand";
+    let Some((file, text)) = local_configs(start).next() else {
+        return Err(format!(
+            "game-gated test: no {LOCAL_CONFIG} found in {} or any folder above it; {FIX}",
+            start.display()
+        ));
+    };
+    let Some(wad) = vz_wad_value(&text) else {
+        return Err(format!(
+            "game-gated test: {} has no `vz_wad` key; {FIX}",
+            file.display()
+        ));
+    };
+    if !wad.is_file() {
+        return Err(format!(
+            "game-gated test: {} names vz_wad = {}, which is not a file; {FIX}",
+            file.display(),
+            wad.display()
+        ));
     }
-    None
+    Ok(wad)
 }
 
 /// The base archive: environment first, then the dev-checkout config.
 ///
-/// This is the resolution a **test** wants — enough to run on a developer's machine without setup,
-/// and `None` on CI so it skips rather than fails. Hosts that also need co-location and the registry
-/// use `mercs2_quartermaster::game::discover`, which layers those on top and reports where the
-/// answer came from.
+/// For **tools** run from a checkout (the probe binaries). Game-gated tests do not use this; they use
+/// [`local_config_vz_wad`], which has no environment route and fails instead of returning `None`.
+/// Hosts that also need co-location and the registry use `mercs2_quartermaster::game::discover`,
+/// which layers those on top and reports where the answer came from.
 pub fn vz_wad(start: &Path) -> Option<PathBuf> {
     vz_wad_from_env().or_else(|| wad_from_local_config(start))
 }
@@ -191,6 +230,40 @@ mod tests {
         assert_eq!(probe(root.join("data")), Some(want.clone()), "data folder");
         assert_eq!(probe(want.clone()), Some(want), "the file itself");
         assert_eq!(probe(root.join("absent")), None, "no archive under it");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The strict test resolver distinguishes its three failures, names the file and the script
+    /// that writes it, and returns the path when all three hold.
+    #[test]
+    fn local_config_vz_wad_reports_each_failure() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_vz_wad");
+        std::fs::remove_dir_all(&root).ok();
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        // No file anywhere above `deep`: the temp dir sits outside any checkout.
+        let e = local_config_vz_wad(&deep).unwrap_err();
+        assert!(e.contains("no .mercs2-local.toml found"), "{e}");
+        assert!(e.contains("scripts/find-vz-wad.sh --write"), "{e}");
+
+        let config = root.join(LOCAL_CONFIG);
+        std::fs::write(&config, "# nothing here\n").unwrap();
+        let e = local_config_vz_wad(&deep).unwrap_err();
+        assert!(e.contains("has no `vz_wad` key"), "{e}");
+        assert!(e.contains(&config.display().to_string()), "{e}");
+
+        let absent = root.join("absent.wad");
+        std::fs::write(&config, format!("vz_wad = \"{}\"\n", absent.display())).unwrap();
+        let e = local_config_vz_wad(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
+        assert!(e.contains(&absent.display().to_string()), "{e}");
+
+        let wad = root.join("vz.wad");
+        std::fs::write(&wad, b"x").unwrap();
+        std::fs::write(&config, format!("vz_wad = \"{}\"\n", wad.display())).unwrap();
+        assert_eq!(local_config_vz_wad(&deep), Ok(wad));
 
         std::fs::remove_dir_all(&root).ok();
     }
