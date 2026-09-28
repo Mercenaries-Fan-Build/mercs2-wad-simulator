@@ -1960,3 +1960,456 @@ fn a_rigid_add_model_with_textures_repoints_the_host_material() {
     let log = report.log.join("\n");
     assert!(log.contains("qm_test_tex_prop_dm"), "{log}");
 }
+
+// ---------------------------------------------------------------------------
+// Sound banks and add_language
+// ---------------------------------------------------------------------------
+
+/// The sound kinds and `add_language` against the game. The stack is `vz.wad` plus the language
+/// WADs a manifest declares, beside it (`compat::game_stack_paths`); `shell.wad` and `English.wad`
+/// are read from the same folder.
+mod sound {
+    use super::common::build::{named_shipment, pcm16_wav, scratch, sound_cue_fields, sound_cue_yaml};
+    use mercs2_audio::soundbank::{CueBody, GroupForm, Soundbank};
+    use mercs2_audio::sounddb::SoundDb;
+    use mercs2_audio::AudioEngine;
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    use mercs2_formats::patch_wad::{read_patch_wad, PatchBlock};
+    use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK, TYPE_ID_SOUNDBANK};
+    use mercs2_formats::ucfx::{extract_data_chunk, walk_decompressed_block};
+    use mercs2_quartermaster::build::{self, Destination};
+    use mercs2_quartermaster::compat::PlanInput;
+    use mercs2_quartermaster::discover::LoadedShipment;
+    use mercs2_quartermaster::{lint, GameStack};
+    use std::path::{Path, PathBuf};
+
+    const SOUNDDB_HASH: u32 = 0xE527_3C14;
+
+    fn vz_wad() -> PathBuf {
+        mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The stack a build of `shipments` reads: `vz.wad` plus their declared languages' WADs.
+    fn stack_for(shipments: &[&LoadedShipment]) -> GameStack {
+        let paths = mercs2_quartermaster::compat::game_stack_paths(&vz_wad(), shipments.iter().map(|s| &s.manifest))
+            .unwrap_or_else(|e| panic!("{e}"));
+        GameStack::open(&paths).unwrap_or_else(|e| panic!("could not open {paths:?}: {e}"))
+    }
+
+    /// The vendored Lua corpus the mod loader links against. Panics when it is missing.
+    fn corpus() -> PathBuf {
+        let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
+        while let Some(d) = dir {
+            let c = d.join("crates/mercs2_script/corpus/mercs2-luacd/src");
+            if c.is_dir() {
+                return c;
+            }
+            dir = d.parent();
+        }
+        panic!("the vendored Lua corpus crates/mercs2_script/corpus/mercs2-luacd/src is missing")
+    }
+
+    /// A retail table body, `(entry hash, type)`, from `stack`.
+    fn table(stack: &mut GameStack, entry: u32, type_hash: u32, type_id: u32) -> Vec<u8> {
+        let c = stack
+            .container_for_asset(entry, type_hash, type_id)
+            .unwrap_or_else(|| panic!("0x{entry:08X} / 0x{type_hash:08X} is not in the stack"));
+        extract_data_chunk(&c).expect("data leaf")
+    }
+
+    /// Every `(name hash, type hash, container)` of `block`.
+    fn entries_of(block: &PatchBlock) -> Vec<(u32, u32, Vec<u8>)> {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (parsed, issues) = walk_decompressed_block(&dec, &block.path_string);
+        assert!(issues.is_empty(), "{:?}", issues.iter().map(|i| &i.detail).collect::<Vec<_>>());
+        parsed.entries.iter().zip(parsed.containers).map(|(e, c)| (e.name_hash, e.type_hash, c)).collect()
+    }
+
+    /// Every `(name hash, type hash, data body)` of a block of bank tables.
+    fn tables_of(block: &PatchBlock) -> Vec<(u32, u32, Vec<u8>)> {
+        entries_of(block)
+            .into_iter()
+            .map(|(n, t, c)| (n, t, extract_data_chunk(&c).expect("data leaf")))
+            .collect()
+    }
+
+    /// The blocks of the WAD a placement names.
+    fn blocks_of(out: &Path, placement: &build::Placement) -> Vec<PatchBlock> {
+        let path = match &placement.destination {
+            Destination::LanguagePatch { relative, .. } | Destination::DataWad { relative, .. } => out.join(relative),
+            _ => out.join(&placement.name),
+        };
+        read_patch_wad(&std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+            .expect("re-read the WAD")
+            .blocks
+    }
+
+    fn block_at(blocks: &[PatchBlock], hash: u32) -> &PatchBlock {
+        let path = format!("blocks\\VZ\\mod_{hash:08x}.block");
+        blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no block {path}"))
+    }
+
+    /// A one-cue `replace_sound_cue` Shipment named `name` replacing `cue` of `bank`.
+    fn cue_override(dir: &Path, name: &str, bank: &str, language: Option<&str>, cue: &str, samples: &[i16]) -> LoadedShipment {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/new.wav"), pcm16_wav(1, 22050, samples)).unwrap();
+        let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+        named_shipment(
+            dir,
+            name,
+            &format!(
+                "  - kind: replace_sound_cue\n    bank: {bank}\n{language}    category: ui\n    cue:\n{}",
+                sound_cue_fields("      ", cue, "src/new.wav", 7, 8)
+            ),
+        )
+    }
+
+    /// Everything but `changed` of `forked` is `retail`'s: the same groups at the same indices, one
+    /// group appended, and every other cue unchanged.
+    fn assert_only_cue_changed(retail: &Soundbank, forked: &Soundbank, changed: &[usize]) {
+        assert_eq!(forked.bank_hash, retail.bank_hash);
+        assert_eq!(forked.groups.len(), retail.groups.len() + changed.len());
+        assert_eq!(&forked.groups[..retail.groups.len()], &retail.groups[..], "the game's groups stay as they are");
+        assert_eq!(forked.cues.len(), retail.cues.len());
+        for (i, (a, b)) in retail.cues.iter().zip(&forked.cues).enumerate() {
+            if changed.contains(&i) {
+                assert_eq!(a.guid, b.guid, "cue {i} keeps its guid");
+                assert_ne!(a, b, "cue {i} is rewritten");
+            } else {
+                assert_eq!(a, b, "cue {i} stays as it is");
+            }
+        }
+    }
+
+    /// ★ `replace_sound_cue` on `ui_hud`, which `vz.wad` and `shell.wad` both carry: the Shipment ships
+    /// the forked soundbank to the overlay and to the shell patch, and its override wavebank to the
+    /// overlay; only `ui_PDA_Open_01_st` changes; the game's own sounddb routes the cue to a group that
+    /// plays the WAV; and the mod loader loads the wavebank.
+    #[test]
+    fn replace_sound_cue_forks_a_vz_and_shell_bank() {
+        let dir = scratch("rsc_ui_hud");
+        let samples: Vec<i16> = (0..3000).map(|i| (i * 11) as i16).collect();
+        let s = cue_override(&dir, "pda-sound", "ui_hud", None, "ui_PDA_Open_01_st", &samples);
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+
+        let bank = m2("ui_hud");
+        let wavebank = m2("qm_pda-sound_ui_hud");
+        let retail_sb = Soundbank::parse(&table(&mut game, bank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let cue_index = retail_sb.cues.iter().position(|c| c.guid == m2("ui_PDA_Open_01_st")).expect("the cue is in ui_hud");
+
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        let ob = blocks_of(&out, overlay);
+        let sb_tables = tables_of(block_at(&ob, bank));
+        assert_eq!(sb_tables.len(), 1, "the soundbank alone: the game's sounddb still routes the cue");
+        assert_eq!((sb_tables[0].0, sb_tables[0].1), (bank, TYPE_HASH_SOUNDBANK));
+        let forked = Soundbank::parse(&sb_tables[0].2).unwrap();
+        assert_only_cue_changed(&retail_sb, &forked, &[cue_index]);
+        let shell_tables = tables_of(block_at(&blocks_of(&out, shell), bank));
+        assert_eq!(shell_tables, sb_tables, "shell.wad's ui_hud is vz.wad's, so the fork is the same");
+
+        let wb_tables = tables_of(block_at(&ob, wavebank));
+        assert_eq!((wb_tables[0].0, wb_tables[0].1), (wavebank, TYPE_HASH_WAVEBANK));
+
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&table(&mut game, bank, SOUNDDB_HASH, 13)).unwrap());
+        eng.load_soundbank(&sb_tables[0].2).unwrap();
+        eng.load_wavebank(&wb_tables[0].2).unwrap();
+        let entry = *eng.sounddb.find_cue_by_name("ui_PDA_Open_01_st").expect("routes");
+        assert_eq!(entry.cue_index as usize, cue_index);
+        let resolved = eng.resolve_cue(&entry).expect("resolves");
+        let w: Vec<_> = resolved.waves().collect();
+        assert_eq!((w.len(), w[0].wavebank, w[0].index), (1, wavebank, 0));
+        assert_eq!(eng.clip(wavebank, 0).unwrap().samples, samples);
+
+        let log = report.log.join("\n");
+        assert!(log.contains("linked qm_modloader"), "the loader is minted: {log}");
+    }
+
+    /// ★ `replace_sound_bank` on `vo_mattias` in English: the bank's soundbank and sounddb ship under
+    /// `m2("vo_mattias.english")` in the English patch, its waves in an override wavebank in the overlay,
+    /// and every declared cue routes to its WAV.
+    #[test]
+    fn replace_sound_bank_on_a_voice_over_bank_ships_to_its_language() {
+        let dir = scratch("rsb_vo_mattias");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lines = [("qm_mattias_line_a", 500i16), ("qm_mattias_line_b", -700)];
+        let mut cues = String::new();
+        for (i, (name, v)) in lines.iter().enumerate() {
+            std::fs::write(dir.join(format!("src/{name}.wav")), pcm16_wav(1, 22050, &[*v; 400])).unwrap();
+            cues.push_str(&sound_cue_yaml(name, &format!("src/{name}.wav"), i as u32, i as u32));
+        }
+        let s = named_shipment(
+            &dir,
+            "mattias-lines",
+            &format!("  - kind: replace_sound_bank\n    bank: vo_mattias\n    language: english\n    category: vo\n    cues:\n{cues}"),
+        );
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+
+        let entry = m2("vo_mattias.english");
+        assert!(game.has_asset(entry, TYPE_ID_SOUNDBANK), "English.wad carries vo_mattias.english");
+        let english = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::LanguagePatch { language, .. } if language == "english"))
+            .expect("an English patch");
+        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch));
+        let tables = tables_of(block_at(&blocks_of(&out, english), entry));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(entry, TYPE_HASH_SOUNDBANK), (entry, SOUNDDB_HASH)]);
+        let sb = Soundbank::parse(&tables[0].2).unwrap();
+        assert_eq!(sb.bank_hash, m2("vo_mattias"), "the tables carry the bank hash, not the entry's");
+
+        let wavebank = m2("qm_mattias-lines_vo_mattias.english");
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let wb = &tables_of(block_at(&blocks_of(&out, overlay), wavebank))[0].2;
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&tables[1].2).unwrap());
+        eng.load_soundbank(&tables[0].2).unwrap();
+        eng.load_wavebank(wb).unwrap();
+        for (name, v) in lines {
+            let e = *eng.sounddb.find_cue_by_name(name).expect("routes");
+            let r = eng.resolve_cue(&e).expect("resolves");
+            let w = r.waves().next().expect("a wave");
+            assert_eq!(w.wavebank, wavebank);
+            assert_eq!(eng.clip(w.wavebank, w.index).unwrap().samples, vec![v; 400], "{name}");
+        }
+    }
+
+    /// A cue name of `vo_mattias` in English, taken from the captioned inventory's contexts: the first
+    /// one whose hash is a cue of the bank.
+    fn a_mattias_cue(sb: &Soundbank) -> String {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data/audio_manifest.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display())))
+                .expect("the inventory parses");
+        let guids: std::collections::BTreeSet<u32> = sb.cues.iter().map(|c| c.guid).collect();
+        doc["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter(|e| e["bank"] == "vo_mattias")
+            .filter_map(|e| e["context"].as_str())
+            .find(|c| !c.is_empty() && guids.contains(&m2(c)))
+            .unwrap_or_else(|| panic!("no vo_mattias context in {} names a cue of the bank", manifest.display()))
+            .to_string()
+    }
+
+    /// ★ `replace_sound_cue` on `vo_mattias` in English: the forked soundbank ships in the English patch
+    /// and only the named cue changes.
+    #[test]
+    fn replace_sound_cue_on_a_voice_over_bank() {
+        let entry = m2("vo_mattias.english");
+        let probe = named_shipment(
+            &scratch("rsc_vo_probe"),
+            "probe",
+            "  - kind: replace_sound_cue\n    bank: vo_mattias\n    language: english\n    category: vo\n    cue:\n      name: x\n      wave: src/x.wav\n      group_gain_db: 0\n      cue_gain_db: 0\n      pitch_semitones: 0\n      positional: false\n      min_distance: 1\n      max_distance: 2\n      distance_exponent: 1\n      doppler_scale: 1\n      start_limit: 0\n      sound_id: 0\n      priority: 1\n      group_20: 1\n      cue_16: 0\n      clip_hash: 0\n",
+        );
+        let mut game = stack_for(&[&probe]);
+        let retail = Soundbank::parse(&table(&mut game, entry, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let cue = a_mattias_cue(&retail);
+        let cue_index = retail.cues.iter().position(|c| c.guid == m2(&cue)).unwrap();
+
+        let dir = scratch("rsc_vo");
+        let s = cue_override(&dir, "mattias-cue", "vo_mattias", Some("english"), &cue, &[3; 800]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let english = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::LanguagePatch { language, .. } if language == "english"))
+            .expect("an English patch");
+        let tables = tables_of(block_at(&blocks_of(&out, english), entry));
+        assert_eq!(tables.len(), 1, "the soundbank alone");
+        let forked = Soundbank::parse(&tables[0].2).unwrap();
+        assert_only_cue_changed(&retail, &forked, &[cue_index]);
+        let CueBody::SingleTrack { soundbank, group_index, .. } = forked.cues[cue_index].body else {
+            panic!("the rewritten cue is single-track")
+        };
+        assert_eq!((soundbank, group_index as usize), (m2("vo_mattias"), retail.groups.len()));
+        let GroupForm::Single { wave, .. } = &forked.groups[group_index as usize].form else { panic!("single-wave") };
+        assert_eq!(wave.wavebank, m2("qm_mattias-cue_vo_mattias.english"));
+    }
+
+    /// ★ Two Shipments overriding different cues of one bank: `qm link` merges both into one soundbank
+    /// per carrier at the path the plan promises, each cue playing its own Shipment's wavebank; and the
+    /// same cue in both is a conflict the plan refuses.
+    #[test]
+    fn the_link_merges_cue_overrides_of_one_bank() {
+        let root = scratch("rsc_link");
+        let mut game = GameStack::open(&[vz_wad()]).unwrap();
+        let retail = Soundbank::parse(&table(&mut game, m2("ui_hud"), TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let a_cue = "ui_PDA_Open_01_st";
+        let a_index = retail.cues.iter().position(|c| c.guid == m2(a_cue)).unwrap();
+        // A second cue of ui_hud, by a name retail Lua cues (`Sound.CueSound("ui_PDA_Close_01_st")`).
+        let names = ["ui_PDA_Close_01_st", "ui_PDA_Accept", "ui_PDA_Cancel", "ui_PDA_Scroll"];
+        let b_cue = names
+            .iter()
+            .find(|n| retail.cues.iter().any(|c| c.guid == m2(n)))
+            .unwrap_or_else(|| panic!("none of {names:?} is a cue of ui_hud"));
+        let b_index = retail.cues.iter().position(|c| c.guid == m2(b_cue)).unwrap();
+
+        let a = cue_override(&root.join("a"), "pda-open", "ui_hud", None, a_cue, &[1; 100]);
+        let b = cue_override(&root.join("b"), "pda-other", "ui_hud", None, b_cue, &[2; 100]);
+        let ids: Vec<String> = vec!["arg:1".into(), "arg:2".into()];
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &b }];
+        let out = root.join("link");
+        let report = build::link_installed(&inputs, &mut game, &corpus(), &out).expect("links");
+        eprintln!("{}", report.log.join("\n"));
+        let path = format!("blocks\\VZ\\mod_{:08x}.block", m2("ui_hud"));
+        assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("link overlay");
+        assert!(report.placements.iter().any(|p| p.destination == Destination::ShellPatch), "and its shell patch");
+        let merged = Soundbank::parse(&tables_of(block_at(&blocks_of(&out, overlay), m2("ui_hud")))[0].2).unwrap();
+        let mut changed = [a_index, b_index];
+        changed.sort();
+        assert_only_cue_changed(&retail, &merged, &changed);
+        for (index, shipment) in [(a_index, "pda-open"), (b_index, "pda-other")] {
+            let CueBody::SingleTrack { group_index, .. } = merged.cues[index].body else { panic!("single-track") };
+            let GroupForm::Single { wave, .. } = &merged.groups[group_index as usize].form else { panic!("single-wave") };
+            assert_eq!(wave.wavebank, m2(&format!("qm_{shipment}_ui_hud")));
+        }
+
+        let c = cue_override(&root.join("c"), "pda-open-too", "ui_hud", None, a_cue, &[3; 100]);
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &c }];
+        match build::link_installed(&inputs, &mut game, &corpus(), &root.join("conflict")) {
+            Err(build::BuildError::Plan(plan)) => assert!(!plan.ok),
+            other => panic!("one cue replaced twice must refuse the link, got {other:?}"),
+        }
+    }
+
+    /// M0218 and M0220 against the game: an override of a bank or a cue the game does not have, and an
+    /// added cue named like one it has — and none of them for real targets and a new name.
+    #[test]
+    fn sound_game_checks_fire_on_missing_targets_and_shadowed_names() {
+        let root = scratch("sound_game_checks");
+        let good = cue_override(&root.join("good"), "good", "ui_hud", None, "ui_PDA_Open_01_st", &[1; 10]);
+        let no_cue = cue_override(&root.join("nocue"), "nocue", "ui_hud", None, "qm_not_a_cue_of_ui_hud", &[1; 10]);
+        let no_bank = cue_override(&root.join("nobank"), "nobank", "qm_not_a_bank", None, "ui_PDA_Open_01_st", &[1; 10]);
+        let mut game = GameStack::open(&[vz_wad()]).unwrap();
+        let codes = |s: &LoadedShipment, game: &mut GameStack| -> Vec<&'static str> {
+            lint::game_checks(&s.manifest, game).iter().map(|d| d.rule.code).collect()
+        };
+        assert!(!codes(&good, &mut game).contains(&"M0218"));
+        assert!(codes(&no_cue, &mut game).contains(&"M0218"));
+        assert!(codes(&no_bank, &mut game).contains(&"M0218"));
+
+        let dir = root.join("add");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.wav"), pcm16_wav(1, 22050, &[1; 10])).unwrap();
+        for (cue, fires) in [("ui_PDA_Open_01_st", true), ("qm_brand_new_cue", false)] {
+            let s = named_shipment(
+                &dir,
+                "adder",
+                &format!(
+                    "  - kind: add_sound\n    bank: qm_adder_bank\n    category: ui\n    cues:\n{}",
+                    sound_cue_yaml(cue, "src/a.wav", 0, 0)
+                ),
+            );
+            assert_eq!(codes(&s, &mut game).contains(&"M0220"), fires, "{cue}");
+        }
+    }
+
+    /// ★ `add_language`: `data/<name>.wad` carries the string table, the fonts forked with their atlas
+    /// repointed, the atlases, and English's voice-over tables re-keyed to `<bank>.<name>` (streamed
+    /// wavebanks included, embedded ones not); nothing ships in an overlay; and the record copies the
+    /// English voice stream with the digest of the file read.
+    #[test]
+    fn add_language_ships_strings_fonts_and_voice_over_tables() {
+        let dir = scratch("add_language");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let s = named_shipment(
+            &dir,
+            "polski",
+            "  - kind: add_language\n    name: polski\n    display: Polski\n    strings: src/strings.txt\n",
+        );
+        let mut game = stack_for(&[&s]);
+        // A key the english table has, written as its hash.
+        let english = game
+            .container_for_asset(m2("english"), mercs2_formats::types::TYPE_HASH_STRINGDB, mercs2_formats::types::TYPE_ID_STRINGDB)
+            .expect("the english string table");
+        let key = super::string_entries(&english)[0].0;
+        std::fs::write(dir.join("src/strings.txt"), format!("0x{key:08X} = Anuluj\n")).unwrap();
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+        assert!(report.wad.is_none(), "nothing ships in an overlay");
+
+        let data = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::DataWad { relative, display } if relative == "data/polski.wad" && display == "Polski"))
+            .expect("the language WAD");
+        let blocks = blocks_of(&out, data);
+        let main = blocks.iter().find(|b| b.path_string == "blocks\\polski\\polski.block").expect("the main block");
+        let main_entries = entries_of(main);
+        let names: Vec<u32> = main_entries.iter().map(|t| t.0).collect();
+        assert_eq!(
+            names,
+            vec![m2("polski"), m2("polski_18"), m2("polski_18_main"), m2("polski_20"), m2("polski_20_main")]
+        );
+        let dec = mercs2_formats::sges::decompress_sges(&main.compressed_data).unwrap();
+        let (parsed, _) = walk_decompressed_block(&dec, "main");
+        for (font, old_atlas, new_atlas) in
+            [(1usize, "english_18_main", "polski_18_main"), (3, "english_20_main", "polski_20_main")]
+        {
+            let tree = mercs2_formats::ucfx::parse_ucfx_tree(&parsed.containers[font]).unwrap();
+            let mtrl = tree.iter().find(|n| &n.tag == b"MTRL").and_then(|n| n.body.clone()).expect("MTRL");
+            let has = |h: u32| mtrl.windows(4).any(|w| w == h.to_le_bytes());
+            assert!(has(m2(new_atlas)) && !has(m2(old_atlas)), "font {font} names {new_atlas}");
+        }
+
+        let vo: Vec<(u32, u32)> = blocks
+            .iter()
+            .filter(|b| b.path_string.starts_with("blocks\\polski\\vo_"))
+            .flat_map(|b| entries_of(b).into_iter().map(|t| (t.0, t.1)))
+            .collect();
+        let ext = |bank: &str| mercs2_formats::hash::pandemic_hash_m2_extend(m2(bank), ".polski");
+        assert!(vo.contains(&(ext("vo_mattias"), TYPE_HASH_SOUNDBANK)), "vo_mattias.polski soundbank");
+        assert!(vo.contains(&(ext("vo_mattias"), SOUNDDB_HASH)), "vo_mattias.polski sounddb");
+        assert!(vo.contains(&(ext("vo_stream"), TYPE_HASH_WAVEBANK)), "the streamed vo_stream.polski wavebank");
+        assert!(!vo.iter().any(|&(h, _)| h == ext("vo_solanoahj")), "an embedded wavebank carries audio and is not shipped");
+        assert_eq!(ext("vo_stream"), m2("vo_stream.polski"));
+
+        let copy = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::StreamCopy { .. }))
+            .expect("the voice stream copy");
+        assert_eq!(
+            copy.destination,
+            Destination::StreamCopy {
+                from: "data/Audios/vo_stream.english.pws".into(),
+                to: "data/Audios/vo_stream.polski.pws".into()
+            }
+        );
+        let source = vz_wad().parent().unwrap().join("Audios/vo_stream.english.pws");
+        assert_eq!(copy.bytes as u64, std::fs::metadata(&source).unwrap().len());
+        let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap()).unwrap();
+        assert!(record["placements"].as_array().unwrap().iter().any(|p| p["destination"]["kind"] == "stream_copy"));
+    }
+
+    /// M0219: a base language with no fonts to fork (only English ships them), and none for English.
+    #[test]
+    fn m0219_fires_for_a_base_without_fonts() {
+        let dir = scratch("m0219");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/strings.txt"), "0x00000001 = x\n").unwrap();
+        for (base, fires) in [("english", false), ("french", true)] {
+            let s = named_shipment(
+                &dir,
+                "lang",
+                &format!("  - kind: add_language\n    name: qmlang\n    display: Q\n    strings: src/strings.txt\n    base: {base}\n"),
+            );
+            let mut game = stack_for(&[&s]);
+            let codes: Vec<&str> = lint::game_checks(&s.manifest, &mut game).iter().map(|d| d.rule.code).collect();
+            assert_eq!(codes.contains(&"M0219"), fires, "{base}: {codes:?}");
+        }
+    }
+}
