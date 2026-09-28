@@ -3,11 +3,20 @@
 #
 # Game-gated tests (built by each crate's `retail` feature, run with `cargo xtask retail-test`) find
 # the game ONLY through the repo-root .mercs2-local.toml this script writes. They consult no
-# environment variable, and they FAIL — naming that file and this script — when it is missing, has no
-# `vz_wad` key, or names a path that is not a file.
+# environment variable, and they FAIL — naming that file and the key — when it is missing, has no
+# key the test needs, or a key names a path that is not a file.
 #
 #   scripts/find-vz-wad.sh            # print what it finds
 #   scripts/find-vz-wad.sh --write    # also write .mercs2-local.toml at the repo root
+#
+# Keys in .mercs2-local.toml, one `key = "path"` per line:
+#
+#   vz_wad        the PC base archive; every game-gated test reads it. This script writes it.
+#   xbox_vz_wad   an Xbox 360 bake (SCFF magic); read by the qm console-bake tests.
+#   ps3_vz_wad    a PS3 bake (SCFF magic); read by the qm console-bake tests.
+#
+# --write rewrites the whole file with `vz_wad` only. The console keys are added by hand after it
+# runs; this script reports console bakes it finds ("also present: console …") but never writes them.
 #
 # The same file is also a low-priority source for the tools (`mercs2_quartermaster::game::discover`,
 # `mercs2_formats::game_paths::vz_wad`), which check the environment first.
