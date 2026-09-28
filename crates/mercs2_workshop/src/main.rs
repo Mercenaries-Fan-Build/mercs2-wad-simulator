@@ -542,7 +542,8 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     block.len(), magic, has_ucfx, has_mtrl);
                 // parse from the UCFX start (block may carry a leading header)
                 let ucfx_start = has_ucfx.unwrap_or(0);
-                let mats = mercs2_formats::texture::parse_mtrl(&block[ucfx_start..]);
+                let mats = mercs2_formats::texture::parse_mtrl(&block[ucfx_start..], mercs2_formats::texture::MtrlSource::Model)
+                    .unwrap_or_else(|e| panic!("donor {donor_arg} MTRL: {e}"));
                 println!("donor {donor_arg} (0x{donor:08X}): {} MTRL records", mats.len());
                 for (mi, m) in mats.iter().enumerate() {
                     let slots: Vec<String> = m.textures.iter().enumerate()
