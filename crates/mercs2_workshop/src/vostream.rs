@@ -166,27 +166,29 @@ fn find_wad(game_dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-#[cfg(test)]
-mod tests {
+/// Game-gated: built by the `retail` feature, reads the vz.wad named by the repo-root
+/// `.mercs2-local.toml` and the `.pws` of the same install, and fails if either is absent.
+#[cfg(all(test, feature = "retail"))]
+mod retail {
     use super::*;
 
     /// ★ Decode straight from the retail game files and check it against an INDEPENDENT oracle: the
     /// bundled manifest's own `duration_s`, which the user measured from the extracted WAVs. If our
     /// record parse, `.pws` seek and PCM16 read are right, decoded seconds ≈ manifest seconds for
-    /// every sampled clip. Runs only when the game + `.pws` are present.
+    /// every sampled clip.
     #[test]
     fn decodes_vo_clips_matching_the_manifest_durations() {
-        let Some(found) = mercs2_quartermaster::game::discover() else {
-            eprintln!("SKIPPING: no game stack");
-            return;
-        };
+        let vzwad = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{e}"));
         // vz.wad → the install's `data/` folder → the game dir.
-        let vzwad = std::path::Path::new(&found.path).to_path_buf();
-        let data_dir = vzwad.parent().unwrap_or(Path::new("."));
-        let game_dir = data_dir.parent().unwrap_or(data_dir);
-        if super::find_pws(game_dir).is_none() {
-            eprintln!("SKIPPING: no vo_stream.english.pws under {}", game_dir.display());
-            return;
+        let data_dir = vzwad.parent().expect("vz.wad has a data folder");
+        let game_dir = data_dir.parent().expect("the data folder has an install root");
+        if find_pws(game_dir).is_none() {
+            panic!(
+                "no vo_stream.english.pws under {}/data/Audios, the install of {}",
+                game_dir.display(),
+                vzwad.display()
+            );
         }
         let vo = VoStream::open(game_dir).expect("open vo stream");
         assert!(vo.len() > 10_000, "expected ~12,988 records, got {}", vo.len());
