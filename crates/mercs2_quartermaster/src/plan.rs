@@ -179,8 +179,10 @@ pub struct LoadPlan {
     pub capabilities: Vec<CapabilityRow>,
     pub conflicts: Vec<ConflictRow>,
     pub supersedes: Vec<SupersededRow>,
-    /// The PTHS path of every block `qm link` re-emits: the scripts blocks, then each merged string
-    /// table's block. A deploy step drops the per-Shipment copies of exactly these.
+    /// The PTHS path of every block `qm link` re-emits: the `vz.wad` scripts blocks, the `shell.wad`
+    /// scripts block (`blocks\Shell\resident_P000_Q3.block`), then each merged string table's
+    /// block, then each merged sound bank's block. A deploy step drops the per-Shipment copies of
+    /// exactly these.
     pub link_block_paths: Vec<String>,
     pub findings: Vec<Finding>,
 }
