@@ -174,7 +174,22 @@ pub enum Destination {
     GameFolder { relative: String },
     /// A NEW base WAD in `data/`, at this path relative to the game folder (`data/<name>.wad`). Only
     /// `add_language` produces one; it is ADDITIVE and collision-checked, never over a shipped WAD.
-    DataWad { relative: String },
+    /// `display` is the label a language selector shows for it.
+    DataWad { relative: String, display: String },
+    /// A patch WAD, at `relative` under the output directory, whose blocks a deploy step merges —
+    /// with every other installed Shipment's for the same `language`, a link output last — into
+    /// `data/<language>-patch.wad`, which the engine mounts directly above `data/<language>.wad`
+    /// (`FUN_004BFEF0`: `%s\%s-patch.wad` with the language table's name).
+    LanguagePatch { language: String, relative: String },
+    /// A patch WAD, named by [`Placement::name`] in the output directory, whose blocks a deploy step
+    /// merges — with every other installed Shipment's, a link output last — into
+    /// `data/shell-patch.wad`, which the engine mounts directly above `shell.wad` in the front end
+    /// (`FUN_004BFDA0`: `%s\%s-patch.wad` with the level name `FUN_004C1280` sets to `shell`).
+    ShellPatch,
+    /// A copy, made by the deploy step, of the game file at `from` to `to` (both relative to the game
+    /// folder). No bytes are written to the output directory; [`Placement::sha256`] and
+    /// [`Placement::bytes`] describe `from` as the build read it.
+    StreamCopy { from: String, to: String },
 }
 
 /// One emitted artifact and its digest.
@@ -450,6 +465,7 @@ enum Lowering {
     /// shell.wad/vz.wad, never in the on-demand `.\Data\<lang>.wad`.
     LanguageWad {
         language: String,
+        display: String,
         blocks: Vec<PatchBlock>,
         overlay: Vec<PatchBlock>,
     },
@@ -3881,7 +3897,7 @@ fn lower(
         // stringdb the engine reads.
         Contribution::AddLanguage {
             name,
-            display: _,
+            display,
             strings,
             base,
         } => {
@@ -3973,6 +3989,7 @@ fn lower(
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::LanguageWad {
                 language: name.clone(),
+                display: display.clone(),
                 blocks: vec![base_block],
                 overlay: vec![overlay_block],
             })
@@ -4235,7 +4252,7 @@ pub fn build(
 
     let mut blocks = Vec::new();
     let mut files = Vec::new();
-    let mut lang_wads: Vec<(String, Vec<PatchBlock>)> = Vec::new();
+    let mut lang_wads: Vec<(String, String, Vec<PatchBlock>)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match lower(
             index,
@@ -4251,13 +4268,14 @@ pub fn build(
             Lowering::Blocks(bs) => blocks.extend(bs),
             Lowering::LanguageWad {
                 language,
+                display,
                 blocks: bs,
                 overlay,
             } => {
                 // The stringdb goes into the always-mounted Shipment overlay (vz-patch); the base WAD
                 // is emitted separately below, opened by name only to satisfy the mount check.
                 blocks.extend(overlay);
-                lang_wads.push((language, bs));
+                lang_wads.push((language, display, bs));
             }
             Lowering::File {
                 name,
@@ -4468,7 +4486,7 @@ pub fn build(
     // because the engine opens it by name. Assembled with the same machinery, self-checked before it
     // reaches disk, and recorded as a `Destination::DataWad` so deploy places it in `data/` — the one
     // place a Shipment writes a WAD, earned only by the collision-checked name (`language_name_refusal`).
-    for (language, lang_blocks) in lang_wads {
+    for (language, display, lang_blocks) in lang_wads {
         let wad =
             build_patch_wad_multi(&lang_blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
                 BuildError::Lower {
@@ -4504,7 +4522,7 @@ pub fn build(
             name: format!("{language}.wad"),
             bytes: wad.len(),
             sha256: digest,
-            destination: Destination::DataWad { relative },
+            destination: Destination::DataWad { relative, display },
         });
     }
 
@@ -5124,6 +5142,10 @@ pub fn link_installed(
 /// The file name every `qm` output directory carries. There is exactly one.
 pub const PLACEMENT_RECORD: &str = "placement.json";
 
+/// The `placement.json` format this build writes. Its destination kinds are `overlay`,
+/// `game_folder`, `data_wad`, `language_patch`, `shell_patch` and `stream_copy` ([`Destination`]).
+pub const PLACEMENT_FORMAT: u32 = 2;
+
 /// Write `placement.json` into `out_dir`, creating it if needed.
 ///
 /// # Why every emitting path calls this
@@ -5159,8 +5181,15 @@ fn placement_json(placements: &[Placement]) -> String {
                 Destination::GameFolder { relative } => {
                     serde_json::json!({ "kind": "game_folder", "relative": relative })
                 }
-                Destination::DataWad { relative } => {
-                    serde_json::json!({ "kind": "data_wad", "relative": relative })
+                Destination::DataWad { relative, display } => {
+                    serde_json::json!({ "kind": "data_wad", "relative": relative, "display": display })
+                }
+                Destination::LanguagePatch { language, relative } => {
+                    serde_json::json!({ "kind": "language_patch", "language": language, "relative": relative })
+                }
+                Destination::ShellPatch => serde_json::json!({ "kind": "shell_patch" }),
+                Destination::StreamCopy { from, to } => {
+                    serde_json::json!({ "kind": "stream_copy", "from": from, "to": to })
                 }
             };
             serde_json::json!({
@@ -5172,7 +5201,7 @@ fn placement_json(placements: &[Placement]) -> String {
         })
         .collect();
     serde_json::to_string_pretty(&serde_json::json!({
-        "format": 1,
+        "format": PLACEMENT_FORMAT,
         "placements": entries,
     }))
     .unwrap_or_else(|_| "{}".into())
