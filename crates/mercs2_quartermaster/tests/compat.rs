@@ -857,7 +857,8 @@ fn a_missing_runtime_dll_is_an_error() {
 
 /// Two Shipments editing the SAME key of one table: not a conflict — `qm link` merges both into one
 /// table in load order and the later one's text wins. The plan names that merged table's block in
-/// `link_block_paths`, after the scripts blocks, so a deploy step drops the per-Shipment copies.
+/// `link_block_paths`, after the `vz.wad` and `shell.wad` scripts blocks, so a deploy step drops the
+/// per-Shipment copies.
 #[test]
 fn stringdb_editors_of_one_table_compose() {
     let p = fixture_plan("request.stringdb.json", "game-clean");
@@ -869,18 +870,22 @@ fn stringdb_editors_of_one_table_compose() {
         vec![
             link::SCRIPT_BLOCKS[0].1.to_string(),
             link::SCRIPT_BLOCKS[1].1.to_string(),
+            link::SHELL_SCRIPT_BLOCKS[0].1.to_string(),
             format!("blocks\\VZ\\mod_{english:08x}.block"),
         ]
     );
     assert_golden(&p, "plan.stringdb.json");
 }
 
-/// A set that edits no string table: `link_block_paths` is the scripts blocks alone.
+/// A set that edits no string table: `link_block_paths` is the scripts blocks alone — `vz.wad`'s
+/// two, then `shell.wad`'s, which the link re-emits with the front end's sound loader.
 #[test]
 fn link_block_paths_without_string_tables_are_the_script_blocks() {
     let root = scratch("lbp-none");
     let a = ship(&root, "plain", "1.0.0", "");
     let p = plan_of(&[&a], None);
-    let scripts: Vec<String> = link::SCRIPT_BLOCKS.iter().map(|(_, p)| p.to_string()).collect();
+    let scripts: Vec<String> =
+        link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
     assert_eq!(p.link_block_paths, scripts);
+    assert_eq!(scripts[2], "blocks\\Shell\\resident_P000_Q3.block");
 }
