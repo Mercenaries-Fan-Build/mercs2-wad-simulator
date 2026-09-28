@@ -224,12 +224,17 @@ contributions:
     trnm: src/anim/new_clip.trnm
 
   - kind: add_shader
-    name: my_shader
-    blob: src/shaders/my_shader.bin
+    family: vertex
+    classes:
+      - name: MyShaderVP
+        stem: MyShaderVP
+        shader: {asm: src/shaders/my_shader.asm}
+        shader_low: {blob: src/shaders/my_shader_low.bin}
 
   - kind: replace_shader
-    target: shipped_shader
-    blob: src/shaders/new_shader.bin
+    target: PgMeshVP
+    shader: {asm: src/shaders/mesh_vp.asm}
+    shader_low: {asm: src/shaders/mesh_vp_low.asm}
 
   - kind: add_fx
     name: my_fx
@@ -448,13 +453,21 @@ const JSON: &str = r#"
     },
     {
       "kind": "add_shader",
-      "name": "my_shader",
-      "blob": "src/shaders/my_shader.bin"
+      "family": "vertex",
+      "classes": [
+        {
+          "name": "MyShaderVP",
+          "stem": "MyShaderVP",
+          "shader": {"asm": "src/shaders/my_shader.asm"},
+          "shader_low": {"blob": "src/shaders/my_shader_low.bin"}
+        }
+      ]
     },
     {
       "kind": "replace_shader",
-      "target": "shipped_shader",
-      "blob": "src/shaders/new_shader.bin"
+      "target": "PgMeshVP",
+      "shader": {"asm": "src/shaders/mesh_vp.asm"},
+      "shader_low": {"asm": "src/shaders/mesh_vp_low.asm"}
     },
     {
       "kind": "add_fx",
@@ -685,13 +698,19 @@ trnm = "src/anim/new_clip.trnm"
 
 [[contributions]]
 kind = "add_shader"
-name = "my_shader"
-blob = "src/shaders/my_shader.bin"
+family = "vertex"
+
+[[contributions.classes]]
+name = "MyShaderVP"
+stem = "MyShaderVP"
+shader = { asm = "src/shaders/my_shader.asm" }
+shader_low = { blob = "src/shaders/my_shader_low.bin" }
 
 [[contributions]]
 kind = "replace_shader"
-target = "shipped_shader"
-blob = "src/shaders/new_shader.bin"
+target = "PgMeshVP"
+shader = { asm = "src/shaders/mesh_vp.asm" }
+shader_low = { asm = "src/shaders/mesh_vp_low.asm" }
 
 [[contributions]]
 kind = "add_fx"
