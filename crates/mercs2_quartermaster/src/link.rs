@@ -839,6 +839,21 @@ pub struct SupportRegistration {
     pub shops: Vec<String>,
 }
 
+/// One sound bank the loader must load: an `add_sound` bank (its wavebank and soundbank), or the
+/// wavebank that carries a sound override's waves (its wavebank only — the overridden soundbank is
+/// one retail Lua already loads). A bank is only heard once it is loaded, and retail loads its own
+/// banks by name through `MrxSoundBanks.LoadWaveBank` / `LoadSoundBank` (`mrxsoundbootstrap.lua`),
+/// so the loader does the same for these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoundBankRegistration {
+    /// Which Shipment asked for it — the tie-break for the deterministic bake order.
+    pub shipment: String,
+    /// The bank name `MrxSoundBanks` is given.
+    pub bank: String,
+    /// Whether the soundbank is loaded as well as the wavebank.
+    pub soundbank: bool,
+}
+
 /// The whole `qm_modloader` script, baked from every UI registration.
 ///
 /// This is the "expandable load space" the user asked for: the game's resident scripts stay
@@ -858,12 +873,38 @@ pub fn qm_modloader_source(
     regs: &[UiRegistration],
     layers: &[LayerRegistration],
     support: &[SupportRegistration],
+    sounds: &[SoundBankRegistration],
     order: &[String],
 ) -> Result<String, LinkError> {
+    let mut inits = String::new();
+
+    // Sound banks load first, so a widget or a layer registered below can cue a sound. The loads
+    // are the calls retail makes for its own banks (`mrxsoundbootstrap.lua`): the wavebank, then
+    // the soundbank. Ordered by load order, then bank name, for the byte-identical bake.
+    let mut ordered_sounds: Vec<&SoundBankRegistration> = sounds.iter().collect();
+    sort_by_order(&mut ordered_sounds, order, |r| r.shipment.as_str(), |r| r.bank.clone())?;
+    for r in &ordered_sounds {
+        let n = lua_string(&r.bank);
+        let soundbank = if r.soundbank {
+            format!("      MrxSoundBanks.LoadSoundBank({n})\n")
+        } else {
+            String::new()
+        };
+        inits.push_str(&format!(
+            "  -- {shipment}: load sound bank {bank}\n  \
+             table.insert(_QM._inits, function()\n    \
+             if MrxSoundBanks then\n      \
+             MrxSoundBanks.LoadWaveBank({n})\n{soundbank}    \
+             end\n  \
+             end)\n",
+            shipment = r.shipment,
+            bank = r.bank,
+        ));
+    }
+
     let mut ordered: Vec<&UiRegistration> = regs.iter().collect();
     sort_by_order(&mut ordered, order, |r| r.shipment.as_str(), |r| r.movie.clone())?;
 
-    let mut inits = String::new();
     for r in &ordered {
         let n = lua_string(&r.movie);
         // The creation sequence — new → SetSwfFile → Play → SetVisible — is the proven one from
@@ -1085,7 +1126,7 @@ pub fn link_into(
         path: String::new(),
         block,
     }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[], order)
+    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[], &[], order)
 }
 
 /// Link every mutation into whichever of `blocks` actually carries its target script.
@@ -1114,14 +1155,18 @@ pub fn link_into_blocks(
     ui_regs: &[UiRegistration],
     layer_regs: &[LayerRegistration],
     support_regs: &[SupportRegistration],
+    sound_regs: &[SoundBankRegistration],
     additions: &[ScriptAddition],
     replacements: &[ScriptReplacement],
     order: &[String],
 ) -> Result<LinkOutput, LinkError> {
-    // Anything that lives in the load space — a UI widget, a layer activation, or a novel support
-    // behaviour — needs the loader minted and the resident trampoline installed.
-    let needs_loader =
-        !ui_regs.is_empty() || !layer_regs.is_empty() || !support_regs.is_empty();
+    // Anything that lives in the load space — a UI widget, a layer activation, a novel support
+    // behaviour or a sound bank to load — needs the loader minted and the resident trampoline
+    // installed.
+    let needs_loader = !ui_regs.is_empty()
+        || !layer_regs.is_empty()
+        || !support_regs.is_empty()
+        || !sound_regs.is_empty();
     // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any load-space
     // mod registered — ONE line regardless of how many, so the resident never grows with mod count.
     // The expandable part is `qm_modloader`, minted after the base scripts link (below).
@@ -1313,7 +1358,7 @@ pub fn link_into_blocks(
             });
         }
 
-        let source = qm_modloader_source(ui_regs, layer_regs, support_regs, order)?;
+        let source = qm_modloader_source(ui_regs, layer_regs, support_regs, sound_regs, order)?;
         // BARE chunk name, like every other script here — see the module note.
         let bytecode =
             mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
@@ -1332,6 +1377,7 @@ pub fn link_into_blocks(
             .map(|r| &r.shipment)
             .chain(layer_regs.iter().map(|r| &r.shipment))
             .chain(support_regs.iter().map(|r| &r.shipment))
+            .chain(sound_regs.iter().map(|r| &r.shipment))
             .collect();
         names.sort();
         names.dedup();
@@ -1582,6 +1628,7 @@ local i = import("esc\097ped")
             &[reg("mod-a", "my_hud"), reg("mod-b", "my_map")],
             &[],
             &[],
+            &[],
             &names(&["mod-a", "mod-b"]),
         )
         .unwrap();
@@ -1601,8 +1648,8 @@ local i = import("esc\097ped")
     #[test]
     fn the_bake_is_independent_of_input_order() {
         let order = names(&["aaa", "zzz"]);
-        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[], &[], &order).unwrap();
-        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[], &[], &order).unwrap();
+        let a = qm_modloader_source(&[reg("aaa", "one"), reg("zzz", "two")], &[], &[], &[], &order).unwrap();
+        let b = qm_modloader_source(&[reg("zzz", "two"), reg("aaa", "one")], &[], &[], &[], &order).unwrap();
         assert_eq!(a, b, "input order must not change the baked loader");
         assert!(a.find("one").unwrap() < a.find("two").unwrap(), "{a}");
     }
@@ -1615,6 +1662,7 @@ local i = import("esc\097ped")
         let order = names(&["ess", "a-consumer"]);
         let src = qm_modloader_source(
             &[reg("a-consumer", "consumer_hud"), reg("ess", "ess_ui")],
+            &[],
             &[],
             &[],
             &order,
@@ -1630,7 +1678,7 @@ local i = import("esc\097ped")
     #[test]
     fn a_movie_name_is_escaped_in_the_bake() {
         let src =
-            qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[], &[], &names(&["m"])).unwrap();
+            qm_modloader_source(&[reg("m", "evil\") os.exit() --")], &[], &[], &[], &names(&["m"])).unwrap();
         // The escaped form keeps the payload INSIDE the string literal ...
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         // ... and the unescaped breakout (a bare `evil") ` that would end the string early) is absent.
@@ -1652,6 +1700,7 @@ local i = import("esc\097ped")
         let src = qm_modloader_source(
             &[],
             &[layer("act-mod", "vz_state_pmccon004_destroyed", &["vz_state_pmccon004_pristine"])],
+            &[],
             &[],
             &names(&["act-mod"]),
         )
@@ -1684,12 +1733,14 @@ local i = import("esc\097ped")
             &[reg("ui-mod", "my_hud")],
             &[layer("aaa", "layer_a", &[]), layer("zzz", "layer_z", &[])],
             &[],
+            &[],
             &order,
         )
         .unwrap();
         let b = qm_modloader_source(
             &[reg("ui-mod", "my_hud")],
             &[layer("zzz", "layer_z", &[]), layer("aaa", "layer_a", &[])],
+            &[],
             &[],
             &order,
         )
@@ -1706,11 +1757,49 @@ local i = import("esc\097ped")
             &[],
             &[layer("m", "evil\") os.exit() --", &[])],
             &[],
+            &[],
             &names(&["m"]),
         )
         .unwrap();
         assert!(src.contains("evil\\\") os.exit()"), "the embedded quote must be escaped: {src}");
         assert!(!src.contains("Addition(\"evil\") os"), "the injection must not close the string: {src}");
+    }
+
+    fn sound(shipment: &str, bank: &str, soundbank: bool) -> SoundBankRegistration {
+        SoundBankRegistration { shipment: shipment.into(), bank: bank.into(), soundbank }
+    }
+
+    /// Sound banks bake first — before widgets and layers — each as the retail load calls (the
+    /// wavebank, then, for an added bank, its soundbank), in load order then bank name, whatever
+    /// order the registrations arrive in; a bank name is escaped like any other.
+    #[test]
+    fn the_mod_loader_loads_sound_banks_first_in_load_order() {
+        let order = names(&["ess", "b-mod", "a-mod"]);
+        let regs = [
+            sound("a-mod", "a_sounds", true),
+            sound("ess", "qm_ess_ui_hud", false),
+            sound("b-mod", "zz_bank", true),
+            sound("b-mod", "b_bank", true),
+        ];
+        let widget = [reg("ess", "ess_ui")];
+        let src = qm_modloader_source(&widget, &[], &[], &regs, &order).unwrap();
+        let mut reversed = regs.clone();
+        reversed.reverse();
+        assert_eq!(src, qm_modloader_source(&widget, &[], &[], &reversed, &order).unwrap());
+
+        let at = |needle: &str| src.find(needle).unwrap_or_else(|| panic!("{needle} missing: {src}"));
+        assert!(at("LoadWaveBank(\"qm_ess_ui_hud\")") < at("LoadWaveBank(\"b_bank\")"));
+        assert!(at("LoadWaveBank(\"b_bank\")") < at("LoadWaveBank(\"zz_bank\")"));
+        assert!(at("LoadWaveBank(\"zz_bank\")") < at("LoadWaveBank(\"a_sounds\")"));
+        assert!(at("LoadWaveBank(\"a_sounds\")") < at("SetSwfFile(\"ess_ui\")"), "sounds load first");
+        assert!(at("LoadWaveBank(\"b_bank\")") < at("LoadSoundBank(\"b_bank\")"), "wavebank, then soundbank");
+        assert!(!src.contains("LoadSoundBank(\"qm_ess_ui_hud\")"), "an override's wavebank only: {src}");
+        assert_eq!(src.matches("LoadSoundBank(").count(), 3);
+        assert!(src.contains("if MrxSoundBanks then"), "existence-checked: {src}");
+
+        let evil = qm_modloader_source(&[], &[], &[], &[sound("m", "x\") os.exit() --", true)], &names(&["m"]))
+            .unwrap();
+        assert!(evil.contains("x\\\") os.exit()"), "the embedded quote must be escaped: {evil}");
     }
 
     fn support(shipment: &str, id: &str, module: &str) -> SupportRegistration {
@@ -1743,6 +1832,7 @@ local i = import("esc\097ped")
             &[],
             &[],
             &[support("bomb-mod", "ggbomb", "DLC_MrxGreenGoblinBomb")],
+            &[],
             &names(&["bomb-mod"]),
         )
         .unwrap();
