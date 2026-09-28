@@ -27,3 +27,24 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # `mopp_swap` verifies its patched PHY2 artifacts BY sha256 (mandate: verify-artifacts-by-hash).
 sha2 = "0.10"
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
+# run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "audio_wad_probe"
+required-features = ["retail"]
+
+[[test]]
+name = "hardpoint_probe"
+required-features = ["retail"]
+
+[[test]]
+name = "spawn_marker_probe"
+required-features = ["retail"]
+
+[[test]]
+name = "watermap_wad_probe"
+required-features = ["retail"]
