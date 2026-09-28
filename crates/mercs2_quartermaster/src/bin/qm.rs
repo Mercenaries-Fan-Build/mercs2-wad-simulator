@@ -74,7 +74,10 @@ enum Command {
         /// Also write the findings as JSON (lint-report.json) to this file. Any older file there is
         /// removed first; when lint cannot run (exit 2), no report is written.
         #[arg(long, value_name = "FILE")]
-        report: Option<PathBuf>,
+        report: Option<PathBuf>,        /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
+        /// kinds read the stores only from here; required when any is present.
+        #[arg(long, value_name = "DIR")]
+        original_data: Option<PathBuf>,
     },
     /// Check version ranges with the same semver grammar qm applies to manifest ranges (M0172).
     /// Hermetic: no Shipment, no game, no network.
@@ -140,6 +143,10 @@ enum Command {
         /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
+        /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
+        /// kinds read the stores only from here; required when any is present.
+        #[arg(long, value_name = "DIR")]
+        original_data: Option<PathBuf>,
     },
     /// Check a set of Shipments before building: requirements, versions, conflicts, superseded
     /// legacy files and the load order. Writes <out>/load-plan.json. No WAD is opened.
@@ -185,6 +192,10 @@ enum Command {
         /// ships it). Used only when --corpus is absent. Env: MERCS2_WORKSHOP_DATA.
         #[arg(long, value_name = "DIR")]
         workshop_data: Option<PathBuf>,
+        /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
+        /// kinds read the stores only from here; required when any is present.
+        #[arg(long, value_name = "DIR")]
+        original_data: Option<PathBuf>,
     },
     /// Extract a destructible's state machine as an editable `states:` file.
     ///
@@ -238,12 +249,14 @@ fn main() -> ExitCode {
             game,
             names,
             report,
+            original_data,
         } => cmd_lint(
             &shipment,
             with_game,
             game.as_deref(),
             names.as_deref(),
             report.as_deref(),
+            original_data.as_deref(),
         ),
         Command::CheckRange { report, ranges } => cmd_check_range(&report, &ranges),
         Command::ManifestInfo { manifest } => cmd_manifest_info(&manifest),
@@ -259,6 +272,7 @@ fn main() -> ExitCode {
             corpus,
             workshop_data,
             names,
+            original_data,
         } => cmd_build(
             &shipment,
             game.as_deref(),
@@ -266,6 +280,7 @@ fn main() -> ExitCode {
             corpus.as_deref(),
             workshop_data.as_deref(),
             names.as_deref(),
+            original_data.as_deref(),
         ),
         Command::Preflight {
             shipments,
@@ -280,6 +295,7 @@ fn main() -> ExitCode {
             out,
             corpus,
             workshop_data,
+            original_data,
         } => cmd_link(
             &shipments,
             request.as_deref(),
@@ -287,6 +303,7 @@ fn main() -> ExitCode {
             &out,
             corpus.as_deref(),
             workshop_data.as_deref(),
+            original_data.as_deref(),
         ),
         Command::ExtractStates {
             target,
@@ -385,6 +402,7 @@ fn cmd_lint(
     game_dir: Option<&Path>,
     names_path: Option<&Path>,
     report_file: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> ExitCode {
     // The stale report goes first, so every exit-2 path below leaves no report behind.
     if let Some(file) = report_file {
@@ -401,9 +419,28 @@ fn cmd_lint(
     let mut found = lint::lint(&shipment.manifest, Some(&shipment.root), names.as_ref());
 
     if with_game {
-        match resolve_game(game_dir, [&shipment.manifest]) {
-            Ok(mut stack) => found.extend(lint::game_checks(&shipment.manifest, &mut stack)),
+        let mut stack = match resolve_game(game_dir, [&shipment.manifest]) {
+            Ok(stack) => stack,
             Err(code) => return code,
+        };
+        found.extend(lint::game_checks(&shipment.manifest, &mut stack));
+        if mercs2_quartermaster::shader::has_shader_kinds(&shipment.manifest) {
+            let Some(original) = original_data else {
+                eprintln!(
+                    "error: the shader kinds read shader3.bin and shader3Low.bin only from the \
+                     original data directory: pass --original-data <dir>"
+                );
+                return ExitCode::from(EXIT_UNUSABLE);
+            };
+            let checked = mercs2_quartermaster::shader::game_data_dir(&stack)
+                .and_then(|data| lint::shader_game_checks(&shipment.manifest, &shipment.root, &data, original));
+            match checked {
+                Ok(d) => found.extend(d),
+                Err(e) => {
+                    eprintln!("error: shader stores: {e}");
+                    return ExitCode::from(EXIT_UNUSABLE);
+                }
+            }
         }
     }
 
@@ -606,6 +643,7 @@ fn cmd_build(
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
     names_path: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> ExitCode {
     let shipment = match load(root) {
         Ok(s) => s,
@@ -633,6 +671,7 @@ fn cmd_build(
         names.as_ref(),
         out,
         corpus.as_deref(),
+        original_data,
     ) {
         Ok(report_) => {
             for line in &report_.log {
@@ -881,6 +920,7 @@ fn cmd_link(
     out: &Path,
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> ExitCode {
     // The stale plan goes first, so every exit-2 path below leaves no plan behind.
     if let Err(e) = plan::remove_stale(out) {
@@ -924,7 +964,7 @@ fn cmd_link(
             shipment,
         })
         .collect();
-    match build::link_installed(&inputs, &mut stack, &corpus, out) {
+    match build::link_installed(&inputs, &mut stack, &corpus, out, original_data) {
         Ok(report_) => {
             for line in &report_.log {
                 println!("{line}");
