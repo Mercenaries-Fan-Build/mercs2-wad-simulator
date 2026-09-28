@@ -1972,18 +1972,21 @@ mod sound {
     use super::common::build::{named_shipment, pcm16_wav, scratch, sound_cue_fields, sound_cue_yaml};
     use mercs2_audio::soundbank::{CueBody, GroupForm, Soundbank};
     use mercs2_audio::sounddb::SoundDb;
-    use mercs2_audio::AudioEngine;
-    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    use mercs2_audio::wave::WaveData;
+    use mercs2_audio::{AudioEngine, WavebankFile};
+    use mercs2_formats::hash::{pandemic_hash_m2 as m2, pandemic_hash_m2_extend};
     use mercs2_formats::patch_wad::{read_patch_wad, PatchBlock};
-    use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK, TYPE_ID_SOUNDBANK};
+    use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK, TYPE_ID_SOUNDBANK, TYPE_ID_WAVEBANK};
     use mercs2_formats::ucfx::{extract_data_chunk, walk_decompressed_block};
     use mercs2_quartermaster::build::{self, Destination};
     use mercs2_quartermaster::compat::PlanInput;
     use mercs2_quartermaster::discover::LoadedShipment;
     use mercs2_quartermaster::{lint, GameStack};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
 
     const SOUNDDB_HASH: u32 = 0xE527_3C14;
+    const TYPE_ID_SOUNDDB: u32 = 13;
 
     fn vz_wad() -> PathBuf {
         mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| panic!("{e}"))
@@ -2323,7 +2326,7 @@ mod sound {
 
     /// ★ `add_language`: `data/<name>.wad` carries the string table, the fonts forked with their atlas
     /// repointed, the atlases, and English's voice-over tables re-keyed to `<bank>.<name>` (streamed
-    /// wavebanks included, embedded ones not); nothing ships in an overlay; and the record copies the
+    /// and embedded wavebanks both); nothing ships in an overlay; and the record copies the
     /// English voice stream with the digest of the file read.
     #[test]
     fn add_language_ships_strings_fonts_and_voice_over_tables() {
@@ -2379,7 +2382,7 @@ mod sound {
         assert!(vo.contains(&(ext("vo_mattias"), TYPE_HASH_SOUNDBANK)), "vo_mattias.polski soundbank");
         assert!(vo.contains(&(ext("vo_mattias"), SOUNDDB_HASH)), "vo_mattias.polski sounddb");
         assert!(vo.contains(&(ext("vo_stream"), TYPE_HASH_WAVEBANK)), "the streamed vo_stream.polski wavebank");
-        assert!(!vo.iter().any(|&(h, _)| h == ext("vo_solanoahj")), "an embedded wavebank carries audio and is not shipped");
+        assert!(vo.contains(&(ext("vo_solanoahj"), TYPE_HASH_WAVEBANK)), "the embedded vo_solanoahj.polski wavebank");
         assert_eq!(ext("vo_stream"), m2("vo_stream.polski"));
 
         let copy = report
@@ -2398,6 +2401,264 @@ mod sound {
         assert_eq!(copy.bytes as u64, std::fs::metadata(&source).unwrap().len());
         let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap()).unwrap();
         assert!(record["placements"].as_array().unwrap().iter().any(|p| p["destination"]["kind"] == "stream_copy"));
+    }
+
+    /// The wavebanks of `English.wad` that carry their waves' audio in the table, by bank name: every
+    /// wavebank `English.wad` registers but the streamed `vo_stream`.
+    const EMBEDDED_VO_WAVEBANKS: [&str; 42] = [
+        "vo_allCon001",
+        "vo_allCon002",
+        "vo_allCon004",
+        "vo_chinCon001",
+        "vo_chinCon002",
+        "vo_chinCon004",
+        "vo_gurCon001",
+        "vo_gurCon002",
+        "vo_helirec001",
+        "vo_jetRec001",
+        "vo_job_all_Conrad",
+        "vo_job_all_gonzalez",
+        "vo_job_all_Lo",
+        "vo_job_all_Nicholas",
+        "vo_job_all_Patterson",
+        "vo_job_chin_Chan",
+        "vo_job_chin_Chu",
+        "vo_job_chin_Lee",
+        "vo_job_chin_Sun",
+        "vo_job_chin_wu",
+        "vo_job_gur_Diaz",
+        "vo_job_gur_Huang",
+        "vo_job_gur_rojas",
+        "vo_job_gur_Vargas",
+        "vo_job_gur_Vega",
+        "vo_job_heros",
+        "vo_job_pir_boyakasha",
+        "vo_job_pir_Devilbwoy",
+        "vo_job_pir_Jane",
+        "vo_job_pir_Stoosh",
+        "vo_job_pmc",
+        "vo_job_up_Kresge",
+        "vo_job_up_Marlowe",
+        "vo_job_up_McKinney",
+        "vo_job_up_Wahlquist",
+        "vo_mechRec001",
+        "vo_oilCon001",
+        "vo_oilCon002",
+        "vo_oilCon021",
+        "vo_pmcCon002",
+        "vo_pmcCon003",
+        "vo_solanoahj",
+    ];
+
+    /// `English.wad`, beside the configured `vz.wad`, opened on its own.
+    fn english_wad() -> GameStack {
+        let path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "english.wad").unwrap_or_else(|e| panic!("{e}"));
+        GameStack::open(std::slice::from_ref(&path)).unwrap_or_else(|e| panic!("could not open {}: {e}", path.display()))
+    }
+
+    /// Every table of `wad` of the three audio types, as `(entry hash, type hash, data body)`.
+    fn audio_tables(wad: &mut GameStack) -> Vec<(u32, u32, Vec<u8>)> {
+        let mut out = Vec::new();
+        for (type_id, type_hash) in
+            [(TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK), (TYPE_ID_SOUNDDB, SOUNDDB_HASH), (TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK)]
+        {
+            for h in wad.asset_hashes(type_id) {
+                out.push((h, type_hash, table(wad, h, type_hash, type_id)));
+            }
+        }
+        out
+    }
+
+    /// The bank hash of every embedded wavebank among `tables`.
+    fn embedded_wavebanks(tables: &[(u32, u32, Vec<u8>)]) -> BTreeSet<u32> {
+        tables
+            .iter()
+            .filter(|t| t.1 == TYPE_HASH_WAVEBANK)
+            .map(|t| WavebankFile::parse(&t.2).unwrap_or_else(|e| panic!("wavebank 0x{:08X}: {e}", t.0)))
+            .filter(|w| w.stream_name.is_none())
+            .map(|w| w.bank_hash)
+            .collect()
+    }
+
+    /// An engine holding every soundbank and wavebank of `tables`, routing every cue their sounddbs
+    /// route.
+    fn engine_of(tables: &[(u32, u32, Vec<u8>)]) -> AudioEngine {
+        let mut eng = AudioEngine::default();
+        let mut catalog = SoundDb::default();
+        for (entry, type_hash, body) in tables {
+            match *type_hash {
+                TYPE_HASH_SOUNDBANK => {
+                    eng.load_soundbank(body).unwrap_or_else(|e| panic!("soundbank 0x{entry:08X}: {e:?}"));
+                }
+                TYPE_HASH_WAVEBANK => {
+                    eng.load_wavebank(body).unwrap_or_else(|e| panic!("wavebank 0x{entry:08X}: {e:?}"));
+                }
+                SOUNDDB_HASH => catalog.merge(&SoundDb::parse(body).unwrap_or_else(|e| panic!("sounddb 0x{entry:08X}: {e:?}"))),
+                other => panic!("0x{entry:08X} has type 0x{other:08X}, which is no audio table"),
+            }
+        }
+        eng.set_sounddb(catalog);
+        eng
+    }
+
+    /// Every wavebank a cue can reach, read from the soundbanks: the group of a single-track cue, the
+    /// group of every entry of every sound of every track of a multi-track cue.
+    fn reached_wavebanks(banks: &BTreeMap<u32, Soundbank>, cue: &mercs2_audio::CueEntry) -> BTreeSet<u32> {
+        let group = |soundbank: u32, index: u16| {
+            let sb = banks.get(&soundbank).unwrap_or_else(|| panic!("cue 0x{:08X} names soundbank 0x{soundbank:08X}", cue.guid));
+            sb.groups[index as usize].waves().iter().map(|w| w.wavebank).collect::<Vec<_>>()
+        };
+        let sb = &banks[&cue.bank_hash];
+        match &sb.cues[cue.cue_index as usize].body {
+            CueBody::SingleTrack { soundbank, group_index, .. } => group(*soundbank, *group_index).into_iter().collect(),
+            CueBody::MultiTrack(m) => m
+                .tracks
+                .iter()
+                .flat_map(|t| t.sounds.iter().flat_map(|s| s.entries.iter()))
+                .flat_map(|e| group(e.soundbank, e.group_index))
+                .collect(),
+        }
+    }
+
+    /// Start `guid` with the engine's picks at `seed`, run it two seconds in 1/60 s frames, and return
+    /// every sample it mixed.
+    fn render_cue(eng: &mut AudioEngine, guid: u32, seed: u32) -> Vec<i16> {
+        eng.stop_and_flush_all_sounds();
+        eng.set_rng_seed(seed);
+        eng.cue_sound(guid, None).unwrap_or_else(|e| panic!("cue 0x{guid:08X} refused at start: {e:?}"));
+        let mut out = Vec::new();
+        for _ in 0..120 {
+            eng.tick(1.0 / 60.0);
+            out.extend(eng.render(735));
+        }
+        eng.stop_and_flush_all_sounds();
+        out
+    }
+
+    /// ★ Census of `English.wad`'s wavebanks: one streams, `vo_stream`, whose waves play from
+    /// `vo_stream.pws`; the 42 [`EMBEDDED_VO_WAVEBANKS`] carry 1,498 waves' audio in their tables.
+    /// Each is registered as `<bank>.english`. The 26 waves of `vo_job_all_gonzalez` are all-zero
+    /// samples; every other embedded wave carries a non-zero byte.
+    #[test]
+    fn english_wad_embedded_voice_over_wavebank_census() {
+        let mut english = english_wad();
+        let (mut streamed, mut embedded, mut waves) = (Vec::new(), BTreeSet::new(), 0usize);
+        let mut silent: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+        for entry in english.asset_hashes(TYPE_ID_WAVEBANK) {
+            let body = table(&mut english, entry, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK);
+            let file = WavebankFile::parse(&body).unwrap_or_else(|e| panic!("wavebank 0x{entry:08X}: {e}"));
+            assert_eq!(entry, pandemic_hash_m2_extend(file.bank_hash, ".english"), "0x{entry:08X} is <bank>.english");
+            match file.stream_name {
+                Some(stream) => streamed.push((file.bank_hash, stream)),
+                None => {
+                    assert!(file.records.iter().all(|r| matches!(r.data, WaveData::Embedded(_))), "0x{entry:08X}: every wave is in the table");
+                    waves += file.records.len();
+                    embedded.insert(file.bank_hash);
+                    let zero = file
+                        .records
+                        .iter()
+                        .filter(|r| matches!(&r.data, WaveData::Embedded(b) if b.iter().all(|&x| x == 0)))
+                        .count();
+                    if zero > 0 {
+                        silent.insert(file.bank_hash, (zero, file.records.len()));
+                    }
+                }
+            }
+        }
+        assert_eq!(streamed, vec![(m2("vo_stream"), "vo_stream.pws".to_string())]);
+        let named: BTreeSet<u32> = EMBEDDED_VO_WAVEBANKS.iter().map(|n| m2(n)).collect();
+        assert_eq!(named.len(), EMBEDDED_VO_WAVEBANKS.len(), "the names hash apart");
+        assert_eq!(embedded, named);
+        assert_eq!(waves, 1498);
+        assert_eq!(silent, BTreeMap::from([(m2("vo_job_all_gonzalez"), (26, 26))]), "the waves whose samples are all zero");
+    }
+
+    /// ★ `add_language` ships every audio table of `English.wad` under `<bank>.<name>`, byte for byte,
+    /// the 42 embedded voice-over wavebanks among them; and each of the 1,492 English cues that reach
+    /// an embedded wave plays under the new language's tables: it resolves to the same waves with
+    /// English's decoded samples, and rendered through the engine it mixes the same PCM as under
+    /// English's tables, audible for every cue but the 26 of `vo_job_all_gonzalez`, whose waves are
+    /// all-zero samples.
+    #[test]
+    fn add_language_embedded_voice_over_cues_play_under_the_new_language() {
+        let dir = scratch("add_language_embedded");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let s = named_shipment(
+            &dir,
+            "polski",
+            "  - kind: add_language\n    name: polski\n    display: Polski\n    strings: src/strings.txt\n",
+        );
+        let mut game = stack_for(&[&s]);
+        let english_strings = game
+            .container_for_asset(m2("english"), mercs2_formats::types::TYPE_HASH_STRINGDB, mercs2_formats::types::TYPE_ID_STRINGDB)
+            .expect("the english string table");
+        let key = super::string_entries(&english_strings)[0].0;
+        std::fs::write(dir.join("src/strings.txt"), format!("0x{key:08X} = Anuluj\n")).unwrap();
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None).expect("builds");
+        let data = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::DataWad { relative, .. } if relative == "data/polski.wad"))
+            .expect("the language WAD");
+        let polski: Vec<(u32, u32, Vec<u8>)> = blocks_of(&out, data)
+            .iter()
+            .filter(|b| b.path_string.starts_with("blocks\\polski\\vo_"))
+            .flat_map(tables_of)
+            .collect();
+
+        let english = audio_tables(&mut english_wad());
+        let embedded = embedded_wavebanks(&english);
+        assert_eq!(embedded.len(), EMBEDDED_VO_WAVEBANKS.len());
+        assert_eq!(embedded_wavebanks(&polski), embedded, "the new language carries every embedded wavebank");
+        for (entry, type_hash, body) in &english {
+            let bank = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            let rekeyed = pandemic_hash_m2_extend(bank, ".polski");
+            let shipped: Vec<&Vec<u8>> = polski.iter().filter(|t| (t.0, t.1) == (rekeyed, *type_hash)).map(|t| &t.2).collect();
+            assert_eq!(shipped, vec![body], "English 0x{entry:08X} ships once, unchanged, as 0x{rekeyed:08X}");
+        }
+
+        let soundbanks = |tables: &[(u32, u32, Vec<u8>)]| -> BTreeMap<u32, Soundbank> {
+            tables
+                .iter()
+                .filter(|t| t.1 == TYPE_HASH_SOUNDBANK)
+                .map(|t| Soundbank::parse(&t.2).unwrap_or_else(|e| panic!("soundbank 0x{:08X}: {e:?}", t.0)))
+                .map(|sb| (sb.bank_hash, sb))
+                .collect()
+        };
+        let english_banks = soundbanks(&english);
+        let mut english_eng = engine_of(&english);
+        let mut polski_eng = engine_of(&polski);
+        let cues: Vec<mercs2_audio::CueEntry> = english
+            .iter()
+            .filter(|t| t.1 == SOUNDDB_HASH)
+            .flat_map(|t| SoundDb::parse(&t.2).unwrap().cues)
+            .filter(|c| !reached_wavebanks(&english_banks, c).is_disjoint(&embedded))
+            .collect();
+        assert_eq!(cues.len(), 1492, "the English cues that reach an embedded wavebank");
+
+        let mut silent = Vec::new();
+        for (i, cue) in cues.iter().enumerate() {
+            let routed = *polski_eng.sounddb.find_cue(cue.guid).unwrap_or_else(|| panic!("cue 0x{:08X} is routed", cue.guid));
+            assert_eq!(routed, *cue);
+            let resolved = polski_eng.resolve_cue(cue).unwrap_or_else(|e| panic!("cue 0x{:08X} resolves: {e:?}", cue.guid));
+            assert_eq!(resolved, english_eng.resolve_cue(cue).unwrap(), "cue 0x{:08X} resolves as in English", cue.guid);
+            for w in resolved.waves() {
+                let clip = polski_eng.clip(w.wavebank, w.index).unwrap();
+                assert!(!clip.samples.is_empty(), "cue 0x{:08X} wave 0x{:08X}/{} carries samples", cue.guid, w.wavebank, w.index);
+                assert_eq!(clip, english_eng.clip(w.wavebank, w.index).unwrap(), "cue 0x{:08X}", cue.guid);
+            }
+            let seed = 0x5EED_0000 + i as u32;
+            let played = render_cue(&mut polski_eng, cue.guid, seed);
+            let audible = resolved.waves().any(|w| polski_eng.clip(w.wavebank, w.index).unwrap().samples.iter().any(|&v| v != 0));
+            if !audible {
+                silent.push(cue.guid);
+            }
+            assert_eq!(played.iter().any(|&v| v != 0), audible, "cue 0x{:08X} mixes audible samples exactly when its waves carry them", cue.guid);
+            assert_eq!(played, render_cue(&mut english_eng, cue.guid, seed), "cue 0x{:08X} mixes as in English", cue.guid);
+        }
+        assert_eq!(silent.len(), 26, "the cues of vo_job_all_gonzalez, whose waves are all-zero samples");
+        assert!(silent.iter().all(|g| cues.iter().any(|c| c.guid == *g && c.bank_hash == m2("vo_job_all_gonzalez"))));
     }
 
     /// M0219: a base language with no fonts to fork (only English ships them), and none for English.
