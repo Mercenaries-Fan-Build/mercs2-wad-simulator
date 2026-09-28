@@ -153,9 +153,10 @@ that live in `English.wad` — with its wavebanks resident too, 7 of those resol
 **605**. The earlier reading — third field as a wave index, `+0x20` body-relative — named a wave after a
 cue that does not play it for 1,084 of the 1,198 cues.
 
-Retail verification (game-gated on `MERCS2_GAME_DIR`; each test prints `SKIPPING` and returns when it is
-unset): `tests/retail_banks.rs` here, and `mercs2_probe/tests/audio_wad_probe.rs` for the resident banks
-mixed through the engine.
+Retail verification (game-gated: built only by the `retail` feature, reading the `vz.wad` named by the
+repo-root `.mercs2-local.toml`, and failing when it is missing — run with `cargo xtask retail-test`):
+`tests/retail_banks.rs` here, and `mercs2_probe/tests/audio_wad_probe.rs` for the resident banks mixed
+through the engine.
 
 ## Usage
 
