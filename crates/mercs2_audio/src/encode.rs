@@ -88,18 +88,18 @@ pub struct Pcm16 {
 }
 
 /// The single-wave group fields the caller supplies (see [`crate::soundbank`] for the offsets and
-/// which names are inferred).
+/// what the engine does with each).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupParams {
-    /// `+0x10`, unknown.
+    /// `+0x10` priority (voice stealing, `FUN_00837830`).
     pub unknown_10: f32,
-    /// `+0x14`, 0 or 1 in retail, unknown.
+    /// `+0x14` positional: 1 plays from the emitter's own source (`FUN_00837830`), 0 from the 2D one.
     pub unknown_14: u32,
     /// `+0x18` minimum distance.
     pub min_distance: f32,
     /// `+0x1C` maximum distance.
     pub max_distance: f32,
-    /// `+0x20`, unknown.
+    /// `+0x20`, no engine reader known.
     pub unknown_20: f32,
     /// `+0x24` distance fall-off exponent.
     pub distance_exponent: f32,
@@ -107,21 +107,23 @@ pub struct GroupParams {
     pub doppler_scale: f32,
     /// `+0x2C` linear gain.
     pub gain: f32,
-    /// `+0x30`, unknown.
+    /// `+0x30` the sound instance's base pitch, semitones (`FUN_0083d700`).
     pub unknown_30: f32,
-    /// The wave reference's weight (1.0 in every retail single-wave group).
+    /// The wave reference's weight (1.0 in every retail single-wave group; the single-wave pick,
+    /// `FUN_0083d410`, does not read it).
     pub wave_weight: f32,
 }
 
 /// The single-track cue fields the caller supplies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CueParams {
-    /// `+0x06` start limit: the engine starts the cue only while a counter in its runtime record is
-    /// below this (0 = no limit; that the counter counts live instances is inferred).
+    /// `+0x06` start limit: the engine starts the cue only while fewer than this many of its
+    /// instances play (`FUN_00834ad0`; `FUN_008354e0` counts one up as an instance plays,
+    /// `FUN_00835850` one down as it finishes); 0 = no limit.
     pub byte_06: u8,
     /// `+0x08` gain.
     pub gain: f32,
-    /// `+0x16`, unknown (0 in most retail cues).
+    /// `+0x16`, no engine reader known (0 in most retail cues).
     pub unknown_16: u16,
 }
 
@@ -154,7 +156,8 @@ pub struct CueSpec {
     pub name: String,
     /// Category name; must hash to one of [`RETAIL_CATEGORIES`].
     pub category: String,
-    /// The group's `+0x00` sound id (meaning unproven; `m2(name)` in `ui_PDA_Open_01_st`).
+    /// The group's `+0x00` sound id (read by `FUN_008369e0`'s language gate; `m2(name)` in
+    /// `ui_PDA_Open_01_st`).
     pub sound_id: u32,
     /// The wave record's clip hash (`m2(name)` in `ui_PDA_Open_01_st`).
     pub clip_hash: u32,
@@ -304,15 +307,15 @@ pub struct WaveSpec {
 /// The fields both group forms share (see [`crate::soundbank::GroupHead`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupHeadParams {
-    /// `+0x10`, unknown.
+    /// `+0x10` priority (voice stealing, `FUN_00837830`).
     pub unknown_10: f32,
-    /// `+0x14`, 0 or 1 in retail, unknown.
+    /// `+0x14` positional: 1 plays from the emitter's own source (`FUN_00837830`), 0 from the 2D one.
     pub unknown_14: u32,
     /// `+0x18` minimum distance.
     pub min_distance: f32,
     /// `+0x1C` maximum distance.
     pub max_distance: f32,
-    /// `+0x20`, unknown.
+    /// `+0x20`, no engine reader known.
     pub unknown_20: f32,
     /// `+0x24` distance fall-off exponent.
     pub distance_exponent: f32,
@@ -374,7 +377,7 @@ pub enum GroupFormSpec {
 /// One group of a bank.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupSpec {
-    /// `+0x00` sound id (meaning unproven).
+    /// `+0x00` sound id (read by `FUN_008369e0`'s language gate).
     pub sound_id: u32,
     /// Category name; must hash to one of [`RETAIL_CATEGORIES`].
     pub category: String,
@@ -391,7 +394,7 @@ pub enum CueBodySpec {
     SingleTrack {
         /// Index into [`TablesSpec::groups`].
         group: usize,
-        /// `+0x16`, unknown (0 in most retail cues).
+        /// `+0x16`, no engine reader known (0 in most retail cues).
         unknown_16: u16,
     },
     /// Tracks of timed sounds. Every entry must name one of this bank's groups (`m2(name)`): the
@@ -404,8 +407,9 @@ pub enum CueBodySpec {
 pub struct CueDef {
     /// Cue name; its guid is `m2(name)`.
     pub name: String,
-    /// `+0x06` start limit: the engine starts the cue only while a counter in its runtime record is
-    /// below this (0 = no limit; that the counter counts live instances is inferred).
+    /// `+0x06` start limit: the engine starts the cue only while fewer than this many of its
+    /// instances play (`FUN_00834ad0`; `FUN_008354e0` counts one up as an instance plays,
+    /// `FUN_00835850` one down as it finishes); 0 = no limit.
     pub byte_06: u8,
     /// `+0x08` gain.
     pub gain: f32,
