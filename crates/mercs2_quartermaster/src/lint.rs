@@ -514,6 +514,27 @@ pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic>
             fix: None,
         });
     }
+    // M0219: an add_language base with no fonts or atlases to fork.
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let Contribution::AddLanguage { base, .. } = c else { continue };
+        let base = base.as_deref().unwrap_or("english");
+        let problems = match crate::language::font_problems(game, base) {
+            Ok(p) => p,
+            Err(e) => vec![format!("the fonts could not be looked up: {e}")],
+        };
+        for p in problems {
+            out.push(Diagnostic {
+                rule: M0219_LANGUAGE_BASE_INCOMPLETE,
+                severity: Severity::Error,
+                message: format!(
+                    "add_language base {base:?}: {p}. A new language forks its base's fonts \
+                     {base}_18 / {base}_20 and their atlases; pick a base the game has them for."
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
+    }
     // M0220: an added cue named like a cue the game routes. FindCue answers with the first loaded
     // table that has the guid (`FUN_00835a70`), so the game's cue plays and the added one never does.
     if manifest.contributions.iter().any(|c| matches!(c, Contribution::AddSound { .. })) {
