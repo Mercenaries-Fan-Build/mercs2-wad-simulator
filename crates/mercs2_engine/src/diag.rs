@@ -345,7 +345,8 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
         // hashes (the ~30 material set) to see how the terrainmesh binds them.
         {
             let container = &dec[s0..s1];
-            let mats = mercs2_formats::texture::parse_mtrl(container);
+            let mats = mercs2_formats::texture::parse_mtrl(container, mercs2_formats::texture::MtrlSource::TerrainMesh)
+                .map_err(|e| format!("terrainmesh block {bi} MTRL: {e}"))?;
             let gmi = mercs2_formats::texture::group_material_indices(container);
             println!("[terrainmesh]   MTRL: parse_mtrl -> {} materials; group_material_indices (per draw) {:?}", mats.len(), &gmi.iter().take(12).collect::<Vec<_>>());
             for (mi, m) in mats.iter().enumerate().take(6) {
@@ -534,7 +535,8 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
             }
             // Per-draw splat layers (the reversed model): each group's material -> detail layers.
             {
-                let layers = mercs2_formats::texture::terrain_group_layers(container);
+                let layers = mercs2_formats::texture::terrain_group_layers(container)
+                    .map_err(|e| format!("terrainmesh block {bi} MTRL: {e}"))?;
                 let midx = mercs2_formats::texture::terrain_group_material_index(container);
                 let all: std::collections::HashSet<u32> = layers.iter().flatten().copied().collect();
                 let mut resolvable = 0usize;
@@ -566,7 +568,7 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
                 println!("[terrainmesh]   vertex COLOR (splat weights): {}/{} groups carry it; {} distinct values; sample {:?}", with_col, meshes.len(), distinct.len(), sample);
             }
         }
-        match mesh::build_indexed_from_container(&dec[s0..s1]) {
+        match mesh::build_indexed_from_terrainmesh(&dec[s0..s1]) {
             Ok((verts, indices, draws, stats)) => {
                 let cell = c3_cell_id_from_path(&path);
                 let cc = cell.map(c3_cell_centre);
@@ -744,7 +746,7 @@ pub fn terrain_probe(wadpath: &str) -> Result<(), String> {
         println!("[terrain-probe]     block={i} {p}");
     }
 
-    let probes = mercs2_formats::terrain::probe_terrain(&low);
+    let probes = mercs2_formats::terrain::probe_terrain(&low).map_err(|e| format!("low-res terrain MTRL: {e}"))?;
     let tiles = probes.len();
     let with_mtrl = probes.iter().filter(|p| !p.materials.is_empty()).count();
 
