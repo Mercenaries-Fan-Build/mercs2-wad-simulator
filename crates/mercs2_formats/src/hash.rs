@@ -37,6 +37,25 @@ pub fn pandemic_hash_m2(text: &str) -> u32 {
     h.wrapping_mul(FNV1A_PRIME)
 }
 
+/// The multiplicative inverse of the FNV prime modulo 2^32: `FNV1A_PRIME × this ≡ 1`.
+const FNV1A_PRIME_INVERSE: u32 = 0x359C_449B;
+
+/// `pandemic_hash_m2(s + suffix)` from `pandemic_hash_m2(s)` alone, without the text of `s`.
+///
+/// The finalization round (`^0x2A`, `×prime`) is invertible — the prime is odd, so it has an
+/// inverse modulo 2^32 — which recovers the FNV state after the last byte of `s`; the suffix's
+/// bytes are then folded in (case-suppressed) and the finalization applied again. `hash` must be a
+/// non-empty string's hash: the empty string's `0` is not a finalized state.
+pub fn pandemic_hash_m2_extend(hash: u32, suffix: &str) -> u32 {
+    let mut h = hash.wrapping_mul(FNV1A_PRIME_INVERSE) ^ 0x2A;
+    for &b in suffix.as_bytes() {
+        h ^= (b | 0x20) as u32;
+        h = h.wrapping_mul(FNV1A_PRIME);
+    }
+    h ^= 0x2A;
+    h.wrapping_mul(FNV1A_PRIME)
+}
+
 /// FNV-1a over raw bytes, no case suppression. Empty input hashes to 0.
 pub fn pandemic_hash_bytes(data: &[u8]) -> u32 {
     if data.is_empty() {
@@ -62,6 +81,18 @@ mod tests {
         assert_eq!(pandemic_hash_m2("model"), 0x5B72_4250);
         assert_eq!(pandemic_hash(""), 0);
         assert_eq!(pandemic_hash_m2(""), 0);
+    }
+
+    #[test]
+    fn extending_a_hash_equals_hashing_the_joined_text() {
+        assert_eq!(FNV1A_PRIME.wrapping_mul(FNV1A_PRIME_INVERSE), 1);
+        for (base, suffix) in [("vo_mattias", ".english"), ("vo_stream", ".polski"), ("a", ""), ("ui_hud", "_x")] {
+            assert_eq!(
+                pandemic_hash_m2_extend(pandemic_hash_m2(base), suffix),
+                pandemic_hash_m2(&format!("{base}{suffix}")),
+                "{base}{suffix}"
+            );
+        }
     }
 
     #[test]
