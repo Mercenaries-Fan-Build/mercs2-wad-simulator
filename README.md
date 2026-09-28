@@ -83,12 +83,30 @@ cargo nextest run --workspace          # all crates
 cargo test --workspace --doc           # doctests (nextest does not run these)
 ```
 
-Tests that need the retail `vz.wad` self-skip when it is absent (they print
-`SKIPPING: no vz.wad discovered` and return). Point `MERCS2_GAME_DIR` at a game
-install — or run `scripts/find-vz-wad.sh --write` — to exercise them.
+### Game-gated tests
+
+Tests that read the retail game are **not** part of the run above. The game cannot be
+committed, so they are built only by each crate's `retail` cargo feature, and one
+command runs all of them:
+
+```bash
+scripts/find-vz-wad.sh --write   # once: writes the git-ignored .mercs2-local.toml
+cargo xtask retail-test          # every game-gated test in the workspace
+```
+
+They find the game **only** through the repo-root `.mercs2-local.toml`
+(`vz_wad = "/path/to/vz.wad"`); no environment variable is consulted. When the file,
+its `vz_wad` key, or the file it names is missing, every one of them fails with a
+message naming the file and the script — none of them skips or passes silently.
+Two shapes exist: integration test targets declared
+`required-features = ["retail"]`, and unit tests that need a crate's private items,
+kept in src/ inside a `#[cfg(feature = "retail")] mod retail`. `cargo xtask
+retail-test` selects both from `cargo metadata`; extra arguments go to
+`cargo nextest run` (e.g. `cargo xtask retail-test --no-capture`).
 
 CI runs on every pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
-it runs the full workspace under nextest plus doctests, and rolls the results up
+it runs the full workspace under nextest plus doctests (without the `retail` feature,
+so no game-gated test is built there), and rolls the results up
 into a per-crate pass/fail/skip table in the run's summary so a failure is
 attributable to a specific crate.
 
