@@ -67,7 +67,7 @@ pub fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: 
 /// `terraintextures_*` blocks but carry their own texture ASET rows, so `extract_texture` finds them).
 pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32; 3]) -> Option<LoadedModel> {
     let container = wad::extract_container_typed(w, terrainmesh_hash, TERRAINMESH_TYPE_HASH).ok()?;
-    let (mut verts, indices, mut draws, stats) = mesh::build_indexed_from_container(&container).ok()?;
+    let (mut verts, indices, mut draws, stats) = mesh::build_indexed_from_terrainmesh(&container).ok()?;
     // World-place verts + synthesize a tiled world-XZ UV (the terrainmesh has no UV; detail materials
     // tile every ~12 m via the Repeat sampler).
     const UV_SCALE: f32 = 1.0 / 12.0;
@@ -95,7 +95,7 @@ pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32;
     // layers blending in where G/B fire. Absent layers ALIAS layer0 so a missing detail blends the base
     // again (never white/flat). `terrain_group_layers` is indexed by PRMG group ORDINAL, but the builder
     // emits multiple draws per group (sub-strip split), so map each draw via `DrawGroup::group_index`.
-    let layers = mercs2_formats::texture::terrain_group_layers(&container);
+    let layers = mercs2_formats::texture::terrain_group_layers(&container).ok()?;
     for d in draws.iter_mut() {
         if let Some(l) = layers.get(d.group_index).filter(|l| !l.is_empty()) {
             let rep_i = if l.len() > 2 { 2 } else { 0 }; // representative: detail0 else base0
@@ -2247,7 +2247,8 @@ mod terrain_texture_tests {
                 let container =
                     wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
                         .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", t.terrainmesh_hash));
-                let layers = mercs2_formats::texture::terrain_group_layers(&container);
+                let layers = mercs2_formats::texture::terrain_group_layers(&container)
+                    .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X} MTRL: {e}", t.terrainmesh_hash));
                 let ml = layers.iter().map(|l| l.len()).max().unwrap_or(0);
                 max_len_seen = max_len_seen.max(ml);
                 if ml >= 4 && multi_layer_tile.is_none() {
