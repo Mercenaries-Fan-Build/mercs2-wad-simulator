@@ -1346,7 +1346,8 @@ fn sound_shipment(dir: &Path) -> (discover::LoadedShipment, Vec<(String, u16, Ve
         ("mod_click".to_string(), 1u16, (0..1001).map(|i| (i * 7) as i16).collect::<Vec<_>>()),
         ("mod_whoosh".to_string(), 2u16, (0..2000).map(|i| (i * -3) as i16).collect::<Vec<_>>()),
     ];
-    let mut yaml = String::from("  - kind: add_sound\n    bank: mod_ui_sounds\n    category: ui\n    cues:\n");
+    let mut yaml =
+        String::from("  - kind: add_sound\n    bank: mod_ui_sounds\n    category: ui\n    load_in: [gameplay]\n    cues:\n");
     for (i, (name, channels, samples)) in cues.iter().enumerate() {
         let file = format!("src/{name}.wav");
         std::fs::write(dir.join(&file), pcm16_wav(*channels, 22050, samples)).unwrap();
@@ -1370,7 +1371,7 @@ fn add_sound_lowers_to_one_block_the_engine_plays() {
 
     let dir = scratch("add_sound_e2e");
     let (s, cues) = sound_shipment(&dir);
-    let Contribution::AddSound { bank, category, cues: authored } = &s.manifest.contributions[0] else {
+    let Contribution::AddSound { bank, category, cues: authored, .. } = &s.manifest.contributions[0] else {
         panic!("the fixture is an add_sound");
     };
     let mut log = Vec::new();
@@ -1459,7 +1460,7 @@ fn add_sound_is_reproducible() {
     use mercs2_quartermaster::manifest::Contribution;
     let dir = scratch("add_sound_repro");
     let (s, _) = sound_shipment(&dir);
-    let Contribution::AddSound { bank, category, cues } = &s.manifest.contributions[0] else {
+    let Contribution::AddSound { bank, category, cues, .. } = &s.manifest.contributions[0] else {
         panic!("the fixture is an add_sound");
     };
     let lower = || {
@@ -1493,7 +1494,7 @@ fn an_unusable_wav_blocks_the_build() {
     let s = shipment(
         &dir,
         &format!(
-            "  - kind: add_sound\n    bank: mod_bad\n    category: ui\n    cues:\n{}",
+            "  - kind: add_sound\n    bank: mod_bad\n    category: ui\n    load_in: [gameplay]\n    cues:\n{}",
             sound_cue_yaml("mod_bad_cue", "src/a.wav", 0, 0)
         ),
     );
