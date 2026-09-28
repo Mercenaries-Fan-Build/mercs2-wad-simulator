@@ -35,10 +35,8 @@ fn interior_hardpoint_derives_the_spawn() {
     let mut hq_checked = false;
     for mesh_name in ["pmcoutpost_interior_hq", "proutpost_interior_job"] {
         let hash = m2(mesh_name);
-        let Ok(container) = wad::extract_container(&mut w, hash) else {
-            println!("{mesh_name} (0x{hash:08X}): container not found");
-            continue;
-        };
+        let container = wad::extract_container(&mut w, hash)
+            .unwrap_or_else(|e| panic!("{mesh_name} (0x{hash:08X}): extract_container: {e}"));
         let hier = mercs2_formats::orchestrator::parse_hier(&container);
         println!("\n{mesh_name} (0x{hash:08X}): {} HIER nodes", hier.len());
 
@@ -67,7 +65,7 @@ fn interior_hardpoint_derives_the_spawn() {
     }
     assert!(
         hq_checked,
-        "pmcoutpost_interior_hq's container or its hp_playerA_enter hardpoint was not found in the retail vz.wad"
+        "pmcoutpost_interior_hq's HIER carries no hp_playerA_enter hardpoint in the retail vz.wad"
     );
 }
 
