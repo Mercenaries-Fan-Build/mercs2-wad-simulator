@@ -63,9 +63,10 @@ impl MergeClass {
 pub enum Claim {
     /// A Data-layer asset, identified by hash.
     Asset { hash: u32 },
-    /// A Lua script. The unit of replacement is the containing block, so claiming a script is
-    /// claiming a share of that block.
-    Script { name: String },
+    /// A Lua script of one level's WAD. The unit of replacement is the containing block, so
+    /// claiming a script is claiming a share of that block. The front end's `mrxsound` (in
+    /// `shell.wad`) and gameplay's (in `vz.wad`) are two scripts: each level runs its own copy.
+    Script { name: String, level: crate::link::Level },
     /// A row in the wardrobe. Key is `(wearer, slug)` — NOT slug alone: retail reuses `Original`
     /// and `ChickenSuit` across all three heroes.
     OutfitSlot { wearer: String, slug: String },
@@ -137,7 +138,10 @@ impl Claim {
                 Some(n) => format!("asset {n} (0x{hash:08X})"),
                 None => format!("asset 0x{hash:08X}"),
             },
-            Claim::Script { name } => format!("script {name}"),
+            Claim::Script { name, level } => match level {
+                crate::link::Level::Vz => format!("script {name}"),
+                crate::link::Level::Shell => format!("front-end script {name} (shell.wad)"),
+            },
             Claim::OutfitSlot { wearer, slug } => format!("outfit {wearer}/{slug}"),
             Claim::NativeHook { at } => format!("native hook at {at}"),
             Claim::FileArtifact { path } => format!("file artifact {path}"),
@@ -245,6 +249,28 @@ pub struct ClaimRecord {
     pub name: Option<String>,
 }
 
+/// The scripts a sound loader lives in, for the `sessions` a bank loads in: gameplay's trampoline
+/// hosts `wifpmcinterior` (the loads) and `mrxsoundbootstrap` (the unloads after `ExitGame`) in
+/// `vz.wad`; the front end's loader `qm_shell_modloader` and its trampoline host `mrxsound` in
+/// `shell.wad`. A sound kind claims them `Additive`: N loaders fold into one, and a `replace_lua` of
+/// a host is a conflict.
+pub fn loader_scripts(sessions: &std::collections::BTreeSet<crate::manifest::LoadSession>) -> Vec<Claim> {
+    use crate::link::Level;
+    use crate::manifest::LoadSession;
+    let mut out = Vec::new();
+    if sessions.contains(&LoadSession::Gameplay) {
+        for name in ["wifpmcinterior", "mrxsoundbootstrap"] {
+            out.push(Claim::Script { name: name.into(), level: Level::Vz });
+        }
+    }
+    if sessions.contains(&LoadSession::FrontEnd) {
+        for name in [crate::link::QM_SHELL_MODLOADER_NAME, "mrxsound"] {
+            out.push(Claim::Script { name: name.into(), level: Level::Shell });
+        }
+    }
+    out
+}
+
 /// Compute the blast radius of a manifest — COMPUTED for typed kinds, DECLARED only for `raw`.
 pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
     let mut out = Vec::new();
@@ -289,6 +315,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "wifpmcinterior".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -303,24 +330,36 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddTexture { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
-            // A new bank: its entry hash, and each cue's name, which the cue guid is the hash of.
-            Contribution::AddSound { bank, cues, .. } => {
+            // A new bank: its entry hash, and each cue's name, which the cue guid is the hash of;
+            // and the scripts each `load_in` session's loader lives in ([`loader_scripts`]).
+            Contribution::AddSound { bank, cues, load_in, .. } => {
                 push(Access::Write, Claim::asset(bank), Intent::Additive);
                 for c in cues {
                     push(Access::Write, Claim::sound_cue(&c.name, None), Intent::Additive);
                 }
+                let sessions: std::collections::BTreeSet<_> = load_in.iter().copied().collect();
+                for script in loader_scripts(&sessions) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             // The bank's entry (`<bank>` or `<bank>.<language>`) and every cue the replacement
-            // declares: each has one winner in the table the game loads.
+            // declares: each has one winner in the table the game loads. The override wavebank
+            // loads in each session retail loads the bank in ([`crate::sound::retail_sessions`]).
             Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
                 let entry = crate::sound::entry_name(bank, *language);
                 push(Access::Write, Claim::asset(&entry), Intent::ReplaceExclusive);
                 for c in cues {
                     push(Access::Write, Claim::sound_cue(&c.name, *language), Intent::ReplaceExclusive);
                 }
+                for script in loader_scripts(&crate::sound::retail_sessions(bank, *language)) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
-            Contribution::ReplaceSoundCue { language, cue, .. } => {
+            Contribution::ReplaceSoundCue { bank, language, cue, .. } => {
                 push(Access::Write, Claim::sound_cue(&cue.name, *language), Intent::ReplaceExclusive);
+                for script in loader_scripts(&crate::sound::retail_sessions(bank, *language)) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             // A movie mints a new hash and borrows nothing — one write claim, no read claim. The
             // `Additive` intent is what makes two Shipments choosing the same movie name a hard
@@ -340,6 +379,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "wifpmcinterior".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -363,6 +403,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: target.clone(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -382,6 +423,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: target.clone(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Replace,
                 );
@@ -440,6 +482,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: catalog_script.into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -447,6 +490,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "mrxrewarddata".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -469,6 +513,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "wifpmcinterior".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
