@@ -136,7 +136,7 @@ fn a_resident_script_links_into_the_resident_block() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["fixpack"]))
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &[], &order(&["fixpack"]))
         .expect("link must succeed")
         .scripts;
     drop(targets);
@@ -192,7 +192,7 @@ fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
         .iter_mut()
         .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs, &[], &[], &[], &[], &order(&["hud-mod"]))
+    let linked = link::link_into_blocks(&mut targets, &corpus, &[], &regs, &[], &[], &[], &[], &[], &order(&["hud-mod"]))
         .expect("link must succeed")
         .scripts;
     drop(targets);
@@ -255,7 +255,7 @@ fn vz_and_resident_targets_split_across_two_blocks() {
             block,
         })
         .collect();
-    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["fixpack"]))
+    let linked = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &[], &order(&["fixpack"]))
         .expect("link")
         .scripts;
     drop(targets);
@@ -463,6 +463,7 @@ fn link_output_follows_the_order_not_the_input_order() {
         &[],
         &[],
         &[],
+        &[],
         &resolved,
     )
     .expect("link forward")
@@ -471,6 +472,7 @@ fn link_output_follows_the_order_not_the_input_order() {
         &mut [link::TargetBlock { path, block: &mut rev }],
         &corpus,
         &[z, a],
+        &[],
         &[],
         &[],
         &[],
@@ -540,6 +542,7 @@ fn replace_lua_and_add_script_follow_the_order() {
         &[],
         &[],
         &[],
+        &[],
         &additions,
         &replacements,
         &resolved,
@@ -586,6 +589,7 @@ fn literal_import_unknown_warns_but_links() {
         &[],
         &[],
         &[],
+        &[],
         &additions,
         &[],
         &order(&["ess", "consumer"]),
@@ -618,7 +622,7 @@ fn dynamic_import_not_flagged() {
         .iter_mut()
         .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
         .collect();
-    let out = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &order(&["consumer"]))
+    let out = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &[], &order(&["consumer"]))
         .expect("link");
     assert_eq!(out.unresolved_imports, vec![]);
 }
