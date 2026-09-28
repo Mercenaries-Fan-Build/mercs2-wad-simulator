@@ -80,3 +80,7 @@ required-features = ["retail"]
 [[test]]
 name = "link_retail"
 required-features = ["retail"]
+
+[[test]]
+name = "shader_retail"
+required-features = ["retail"]
