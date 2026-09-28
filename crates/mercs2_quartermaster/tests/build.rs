@@ -123,7 +123,8 @@ fn the_placement_record_is_well_formed_json() {
     build::build(&s, None, None, None, None).expect("build");
     let text = std::fs::read_to_string(dir.join("_build/placement.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
-    assert_eq!(doc["format"], 1);
+    assert_eq!(doc["format"], build::PLACEMENT_FORMAT);
+    assert_eq!(doc["format"], 2);
     assert!(doc["placements"].is_array());
 }
 
@@ -1140,9 +1141,12 @@ fn a_plugin_and_its_companion_build_together() {
         .placements
         .iter()
         .map(|p| match &p.destination {
-            Destination::GameFolder { relative } => relative.clone(),
-            Destination::DataWad { relative } => relative.clone(),
+            Destination::GameFolder { relative }
+            | Destination::DataWad { relative, .. }
+            | Destination::LanguagePatch { relative, .. } => relative.clone(),
+            Destination::StreamCopy { to, .. } => to.clone(),
             Destination::Overlay => "overlay".into(),
+            Destination::ShellPatch => "shell_patch".into(),
         })
         .collect();
     assert_eq!(
