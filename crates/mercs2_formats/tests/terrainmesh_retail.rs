@@ -1,8 +1,8 @@
 //! Retail gates for [`mercs2_formats::terrainmesh`]: every one of the 400 hi-res terrain cells in
 //! `vz.wad`, and an edit of the cell under the PMC HQ.
 //!
-//! Needs the game: set `MERCS2_GAME_DIR` (install root, its `data` folder, or `vz.wad` itself). Without
-//! it every test here prints `SKIPPING` and returns.
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,8 +29,9 @@ fn pyramid(x: f32, z: f32) -> f32 {
     HEIGHT * (1.0 - d / HALF_WIDTH).max(0.0)
 }
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 struct Retail {
@@ -41,70 +42,53 @@ struct Retail {
 }
 
 /// Read once per test binary and shared: 400 cell blocks plus every placement layer.
-fn retail() -> Option<&'static Retail> {
-    static RETAIL: OnceLock<Option<Retail>> = OnceLock::new();
-    RETAIL
-        .get_or_init(|| {
-            let wad = vz_wad()?;
-            let mut f = std::fs::File::open(&wad).expect("open vz.wad");
-            let size = f.metadata().expect("stat vz.wad").len();
-            let archive = load_ffcs_archive(&mut f, size).expect("read FFCS tables");
-            let mut cells = Vec::new();
-            for row in archive
-                .aset
+fn retail() -> &'static Retail {
+    static RETAIL: OnceLock<Retail> = OnceLock::new();
+    RETAIL.get_or_init(|| {
+        let wad = vz_wad();
+        let mut f = std::fs::File::open(&wad).expect("open vz.wad");
+        let size = f.metadata().expect("stat vz.wad").len();
+        let archive = load_ffcs_archive(&mut f, size).expect("read FFCS tables");
+        let mut cells = Vec::new();
+        for row in archive
+            .aset
+            .iter()
+            .filter(|r| r.type_id == TYPE_ID_TERRAIN_MESH)
+        {
+            let block = row.block_index();
+            let dec =
+                decompress_block(&mut f, &archive.indx, block).expect("decompress cell block");
+            let (parsed, issues) = walk_decompressed_block(&dec, "cell");
+            assert!(
+                issues.is_empty(),
+                "block {block}: {:?}",
+                issues.iter().map(|i| &i.detail).collect::<Vec<_>>()
+            );
+            let i = parsed
+                .entries
                 .iter()
-                .filter(|r| r.type_id == TYPE_ID_TERRAIN_MESH)
-            {
-                let block = row.block_index();
+                .position(|e| e.name_hash == row.asset_hash && e.type_hash == TYPE_HASH)
+                .unwrap_or_else(|| {
+                    panic!("cell {:#010X} is not in its block {block}", row.asset_hash)
+                });
+            let path = archive
+                .paths
+                .get(block as usize)
+                .cloned()
+                .unwrap_or_default();
+            cells.push((row.asset_hash, path, parsed.containers[i].clone()));
+        }
+        let mut layers = Vec::new();
+        for (i, path) in archive.paths.iter().enumerate() {
+            let p = path.to_lowercase();
+            if p.contains("layers_static") || p.contains("vz_state") {
                 let dec =
-                    decompress_block(&mut f, &archive.indx, block).expect("decompress cell block");
-                let (parsed, issues) = walk_decompressed_block(&dec, "cell");
-                assert!(
-                    issues.is_empty(),
-                    "block {block}: {:?}",
-                    issues.iter().map(|i| &i.detail).collect::<Vec<_>>()
-                );
-                let i = parsed
-                    .entries
-                    .iter()
-                    .position(|e| e.name_hash == row.asset_hash && e.type_hash == TYPE_HASH)
-                    .unwrap_or_else(|| {
-                        panic!("cell {:#010X} is not in its block {block}", row.asset_hash)
-                    });
-                let path = archive
-                    .paths
-                    .get(block as usize)
-                    .cloned()
-                    .unwrap_or_default();
-                cells.push((row.asset_hash, path, parsed.containers[i].clone()));
-            }
-            let mut layers = Vec::new();
-            for (i, path) in archive.paths.iter().enumerate() {
-                let p = path.to_lowercase();
-                if p.contains("layers_static") || p.contains("vz_state") {
-                    let dec = decompress_block(&mut f, &archive.indx, i as u16)
-                        .expect("decompress layer");
-                    layers.push((path.clone(), dec));
-                }
-            }
-            Some(Retail { cells, layers })
-        })
-        .as_ref()
-}
-
-macro_rules! retail_or_skip {
-    () => {
-        match retail() {
-            Some(r) => r,
-            None => {
-                eprintln!(
-                    "SKIPPING {}: no vz.wad (set MERCS2_GAME_DIR)",
-                    module_path!()
-                );
-                return;
+                    decompress_block(&mut f, &archive.indx, i as u16).expect("decompress layer");
+                layers.push((path.clone(), dec));
             }
         }
-    };
+        Retail { cells, layers }
+    })
 }
 
 /// The ground decl: `POSITION·D3DCOLOR·NORMAL`, 20 bytes.
@@ -144,7 +128,7 @@ fn cell_centres(r: &Retail) -> HashMap<u32, [f32; 3]> {
 /// the raw record count read straight from the COMP data spans.
 #[test]
 fn every_terrain_and_scrub_object_has_a_transform() {
-    let r = retail_or_skip!();
+    let r = retail();
     let (mut raw_terrain, mut raw_scrub, mut tiles, mut scrubs) = (0usize, 0usize, 0usize, 0usize);
     for (path, block) in &r.layers {
         for c in comp_inventory(block) {
@@ -178,7 +162,7 @@ fn every_terrain_and_scrub_object_has_a_transform() {
 
 #[test]
 fn every_retail_cell_decodes_and_re_encodes_byte_identically() {
-    let r = retail_or_skip!();
+    let r = retail();
     assert_eq!(r.cells.len(), 400, "ASET terrainmesh rows");
     let mut decls: HashMap<Vec<(u16, u8, u8)>, usize> = HashMap::new();
     let (mut patches, mut worst_centre, mut worst_radius) = (0usize, 0f32, 0f32);
@@ -283,7 +267,7 @@ fn every_retail_cell_decodes_and_re_encodes_byte_identically() {
 
 #[test]
 fn every_retail_draw_strip_survives_stripify() {
-    let r = retail_or_skip!();
+    let r = retail();
     let (mut draws, mut tris, mut bounded) = (0usize, 0usize, 0usize);
     for (hash, _, bytes) in &r.cells {
         let cell = TerrainCell::decode(bytes).unwrap();
@@ -324,7 +308,7 @@ fn every_retail_draw_strip_survives_stripify() {
 
 #[test]
 fn retail_normals_follow_the_draw_winding() {
-    let r = retail_or_skip!();
+    let r = retail();
     let cell = hq(r);
     let mut errs = Vec::new();
     for g in &cell.geoms {
@@ -378,7 +362,7 @@ fn retail_normals_follow_the_draw_winding() {
 /// `(n × t) · ∂P/∂v < 0`, −1 when `> 0`. Computed here independently of the module's code.
 #[test]
 fn retail_tangents_follow_texture_u() {
-    let r = retail_or_skip!();
+    let r = retail();
     let cell = hq(r);
     let (mut errs, mut w_agree, mut w_total, mut w_undefined) =
         (Vec::new(), 0usize, 0usize, 0usize);
@@ -467,7 +451,7 @@ fn retail_tangents_follow_texture_u() {
 /// [`TerrainCell::displace`] refuses to move an edge vertex.
 #[test]
 fn retail_cell_edges_are_shared_with_the_neighbour() {
-    let r = retail_or_skip!();
+    let r = retail();
     let centres = cell_centres(r);
     let hq_centre = centres[&HQ_CELL];
     let cell = hq(r);
@@ -552,7 +536,7 @@ fn retail_cell_edges_are_shared_with_the_neighbour() {
 
 #[test]
 fn pyramid_on_the_pmc_hq_cell() {
-    let r = retail_or_skip!();
+    let r = retail();
     let centre = cell_centres(r)[&HQ_CELL];
     assert_eq!(
         centre,
@@ -645,7 +629,7 @@ fn pyramid_on_the_pmc_hq_cell() {
 
 #[test]
 fn rebuilt_hq_collision_parses_and_never_misses_an_edited_triangle() {
-    let r = retail_or_skip!();
+    let r = retail();
     let mut cell = hq(r);
     cell.displace(pyramid).unwrap();
     cell.rebuild_collision(HQ_CELL).unwrap();
@@ -722,7 +706,7 @@ fn rebuilt_hq_collision_parses_and_never_misses_an_edited_triangle() {
 /// whole-cell MOPP bakes, walks every byte and yields every key once (checked inside `rebuild_collision`).
 #[test]
 fn every_retail_cell_rebuilds_a_one_shape_collider() {
-    let r = retail_or_skip!();
+    let r = retail();
     let (mut most_tris, mut most_verts, mut biggest_body) = (0usize, 0usize, 0usize);
     for (hash, _, bytes) in &r.cells {
         let mut cell = TerrainCell::decode(bytes).unwrap();
@@ -750,7 +734,7 @@ fn every_retail_cell_rebuilds_a_one_shape_collider() {
 /// gate: it prints what it finds.
 #[test]
 fn placements_in_the_pyramid_footprint() {
-    let r = retail_or_skip!();
+    let r = retail();
     let centre = cell_centres(r)[&HQ_CELL];
     let (ax, az) = (centre[0] + APEX[0], centre[2] + APEX[1]);
     let mut in_cell = Vec::new();
