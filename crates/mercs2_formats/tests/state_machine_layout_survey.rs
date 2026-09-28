@@ -127,15 +127,15 @@ fn how_canonical_is_the_family_layout() {
 
     let mut c = Census::default();
     for bi in blocks {
-        let Ok(dec) = decompress_block(&mut file, &archive.indx, bi) else { continue };
+        let dec = decompress_block(&mut file, &archive.indx, bi)
+            .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
         let (_n, entries) = parse_block_entry_table(&dec);
         let mut pos = 4 + entries.len() * 16;
-        for e in &entries {
-            let end = (pos + e.chunk_size as usize).min(dec.len());
-            if pos >= end {
-                break;
-            }
-            survey(&dec[pos..end], &mut c);
+        for (ei, e) in entries.iter().enumerate() {
+            let end = pos + e.chunk_size as usize;
+            let label = format!("blk{bi}/entry{ei}/0x{:08X}", e.name_hash);
+            assert!(end <= dec.len(), "{label}: runs past the {}-byte block", dec.len());
+            survey(&dec[pos..end], &label, &mut c);
             pos = end;
         }
     }
@@ -160,13 +160,14 @@ fn how_canonical_is_the_family_layout() {
     eprintln!("═══════════════════════════════════\n");
 }
 
-fn survey(container: &[u8], c: &mut Census) {
+fn survey(container: &[u8], label: &str, c: &mut Census) {
     let (data_off, rows) = rows_of(container);
     if rows.is_empty() {
         return;
     }
     let Some(parent) = family_parent(&rows) else { return };
-    let Some(sm) = mercs2_formats::orchestrator::parse_state_machine(container) else { return };
+    let sm = mercs2_formats::orchestrator::parse_state_machine(container)
+        .unwrap_or_else(|| panic!("{label}: carries a destruction family that parse_state_machine rejects"));
     c.families += 1;
     let kids = children_of(&rows, parent);
     let leaf = |r: &Row| -> &[u8] {
