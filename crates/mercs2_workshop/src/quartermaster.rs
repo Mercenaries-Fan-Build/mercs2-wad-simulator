@@ -3117,6 +3117,19 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
         for (i, w) in wad_stack.iter().enumerate() {
             row(ui, if i == 0 { "base" } else { "overlay" }, &leaf(Path::new(w)), theme::DIM);
         }
+        // The language WADs the open Shipment reads: the build opens them after the rows above.
+        if let (Some(s), false) = (&p.shipment, wad_stack.is_empty()) {
+            match build_stack_paths(wad_stack, &s.manifest) {
+                Ok(paths) => {
+                    for w in &paths[wad_stack.len()..] {
+                        row(ui, "language", &leaf(w), theme::DIM);
+                    }
+                }
+                Err(e) => {
+                    ui.label(egui::RichText::new(e).size(11.0).color(theme::BAD));
+                }
+            }
+        }
     });
 
     if !p.diagnostics.is_empty() {
@@ -3265,6 +3278,26 @@ pub fn corpus_root() -> Option<PathBuf> {
     lua.is_dir().then_some(lua)
 }
 
+/// The WADs a build of `manifest` opens, in open order: the configured stack (`vz.wad`, then
+/// `vz-patch.wad` and each `--overlay`), then the WAD of each language the Shipment reads — the
+/// entries [`mercs2_quartermaster::compat::game_stack_paths`] lists after `vz.wad`. `GameStack`
+/// resolves the last-opened WAD first, so a language's copy of an entry is read over the base's.
+pub fn build_stack_paths(
+    wad_stack: &[String],
+    manifest: &mercs2_quartermaster::manifest::Manifest,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(vz) = wad_stack.first() else {
+        return Err(
+            "build needs the game's vz.wad: none is configured \u{2014} set it in Settings".into(),
+        );
+    };
+    let game = mercs2_quartermaster::compat::game_stack_paths(Path::new(vz), [manifest])
+        .map_err(|e| format!("build needs the game stack: {e}"))?;
+    let mut paths: Vec<PathBuf> = wad_stack.iter().map(PathBuf::from).collect();
+    paths.extend(game.into_iter().skip(1));
+    Ok(paths)
+}
+
 /// Execute one queued action.
 pub fn apply(
     act: Act,
@@ -3374,24 +3407,14 @@ pub fn apply(
             // WADs, linting and linking Lua takes seconds; doing it inline froze the frame (and any
             // "Building…" spinner with it), which is the whole bug. The game stack is opened ON the
             // worker for the same reason — `GameStack::open` decompresses index tables.
-            //
-            // The stack is the one `qm` opens for the same Shipment: `vz.wad` (the configured base,
-            // `wad_stack[0]`), then the WAD of each language the Shipment reads
-            // (`compat::game_stack_paths`).
-            let vz: Option<PathBuf> = wad_stack.first().map(PathBuf::from);
+            // The stack is [`build_stack_paths`]: the one the inspector lists.
+            let paths = build_stack_paths(wad_stack, &s.manifest);
             let names = names.cloned();
             let corpus = corpus.map(Path::to_path_buf);
             let (tx, rx) = std::sync::mpsc::channel();
             let spawned = std::thread::Builder::new()
                 .name("qm-build".into())
                 .spawn(move || {
-                    let paths = match vz {
-                        Some(vz) => mercs2_quartermaster::compat::game_stack_paths(&vz, [&s.manifest])
-                            .map_err(|e| format!("build needs the game stack: {e}")),
-                        None => Err("build needs the game's vz.wad: none is configured \u{2014} set \
-                                     it in Settings"
-                            .to_string()),
-                    };
                     let outcome = match paths.map(|p| mercs2_quartermaster::game::GameStack::open(&p)) {
                         Ok(Ok(mut g)) => {
                             run_build_outcome(&s, Some(&mut g), names.as_ref(), corpus.as_deref())
@@ -4017,6 +4040,49 @@ mod tests {
         assert!(parse_f32("NaN").is_err());
         assert!(parse_f64("inf").is_err());
         assert_eq!(parse_f64(""), Err("required".to_string()));
+    }
+
+    /// The build keeps the configured stack in its order (base, patch, overlays) and opens the WAD
+    /// of each language the Shipment reads after it; with no language, it is the configured stack.
+    #[test]
+    fn the_build_stack_is_the_configured_stack_then_the_language_wads() {
+        use mercs2_quartermaster::manifest::Language;
+        let data = tmp("build_stack").join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        for f in ["vz.wad", "vz-patch.wad", "French.wad"] {
+            std::fs::write(data.join(f), b"").unwrap();
+        }
+        let overlay = tmp("build_stack_overlay").join("mine.wad");
+        std::fs::write(&overlay, b"").unwrap();
+        let stack: Vec<String> = [data.join("vz.wad"), data.join("vz-patch.wad"), overlay.clone()]
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        let d = tmp("build_stack_shipment");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+        let plain = p.shipment.as_ref().unwrap().manifest.clone();
+        assert_eq!(
+            build_stack_paths(&stack, &plain).unwrap(),
+            stack.iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
+
+        let mut c = stub("replace_sound_bank", 1).unwrap();
+        if let Contribution::ReplaceSoundBank { bank, language, .. } = &mut c {
+            *bank = "vo_mattias".into();
+            *language = Some(Language::French);
+        }
+        p.mutate(None, |m| m.contributions.push(c)).expect("write");
+        let french = p.shipment.as_ref().unwrap().manifest.clone();
+        assert_eq!(
+            build_stack_paths(&stack, &french).unwrap(),
+            vec![data.join("vz.wad"), data.join("vz-patch.wad"), overlay, data.join("French.wad")]
+        );
+
+        assert!(build_stack_paths(&[], &plain).unwrap_err().contains("vz.wad"));
+        std::fs::remove_file(data.join("French.wad")).unwrap();
+        assert!(build_stack_paths(&stack, &french).unwrap_err().contains("french"));
     }
 
     /// Every kind a domain offers under "Add to Shipment" has a stub, or its button does nothing.
