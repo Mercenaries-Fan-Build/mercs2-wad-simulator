@@ -11,14 +11,14 @@
 //! * **Voice-over tables.** Retail Lua loads a `vo_*` bank as `<bank>.<language>`
 //!   (`_GetLocalizedName`, `mrxsoundbanks.lua:80-87`), and every audio table of `English.wad` is
 //!   registered under `m2("<bank>.english")` with the table's own bank hash `m2("<bank>")` inside.
-//!   Each soundbank, sounddb and streamed wavebank of `English.wad` is shipped again under
+//!   Each soundbank, sounddb and wavebank of `English.wad` is shipped again under
 //!   `m2("<bank>.<name>")`, computed from the bank hash it carries
-//!   ([`mercs2_formats::hash::pandemic_hash_m2_extend`]); the streamed `vo_stream` wavebank's
-//!   waves play from `Audios\vo_stream.<name>.pws`, which [`VO_STREAM_FROM`] is copied to. An
-//!   embedded wavebank carries audio and is not shipped.
+//!   ([`mercs2_formats::hash::pandemic_hash_m2_extend`]). The streamed `vo_stream` wavebank's
+//!   waves play from `Audios\vo_stream.<name>.pws`, which [`VO_STREAM_FROM`] is copied to. Every
+//!   other wavebank of `English.wad` is embedded: it carries its waves' audio in the table, and its
+//!   re-keyed copy carries that audio to the new language.
 
 use mercs2_audio::sounddb::ASSET_TYPE_SOUNDDB;
-use mercs2_audio::wave::WavebankFile;
 use mercs2_formats::hash::{pandemic_hash_m2 as m2, pandemic_hash_m2_extend};
 use mercs2_formats::types::{
     TYPE_HASH_FONT, TYPE_HASH_SOUNDBANK, TYPE_HASH_TEXTURE, TYPE_HASH_WAVEBANK, TYPE_ID_FONT, TYPE_ID_SOUNDBANK,
@@ -147,9 +147,9 @@ pub fn fork_fonts(game: &mut GameStack, base: &str, name: &str) -> Result<Vec<As
     Ok(out)
 }
 
-/// Every soundbank, sounddb and streamed wavebank of `English.wad` (beside the stack's `vz.wad`),
-/// re-keyed from `m2("<bank>.english")` to `m2("<bank>.<name>")`. An entry whose name is not the
-/// `.english` extension of the bank hash it carries is an error.
+/// Every soundbank, sounddb and wavebank of `English.wad` (beside the stack's `vz.wad`), streamed
+/// and embedded, re-keyed from `m2("<bank>.english")` to `m2("<bank>.<name>")`. An entry whose name
+/// is not the `.english` extension of the bank hash it carries is an error.
 pub fn fork_vo_tables(game: &GameStack, name: &str) -> Result<Vec<Asset>, String> {
     let vz = game.paths().first().map(|p| p.to_path_buf()).ok_or("the game stack is empty")?;
     let mut english = GameStack::open(&[sibling_wad(&vz, "english.wad")?]).map_err(|e| e.to_string())?;
@@ -175,12 +175,6 @@ pub fn fork_vo_tables(game: &GameStack, name: &str) -> Result<Vec<Asset>, String
                     "English.wad table 0x{hash:08X} carries bank hash 0x{bank:08X}, and is not named \
                      <bank>.english — it cannot be re-keyed for {name:?}"
                 ));
-            }
-            if type_id == TYPE_ID_WAVEBANK {
-                let wb = WavebankFile::parse(&body).map_err(|e| format!("English.wad wavebank 0x{hash:08X}: {e}"))?;
-                if wb.stream_name.is_none() {
-                    continue;
-                }
             }
             out.push(Asset { name_hash: pandemic_hash_m2_extend(bank, &suffix), type_hash, type_id, container });
         }
