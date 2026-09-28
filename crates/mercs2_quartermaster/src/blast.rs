@@ -343,21 +343,22 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 }
             }
             // The bank's entry (`<bank>` or `<bank>.<language>`) and every cue the replacement
-            // declares: each has one winner in the table the game loads. The override wavebank
-            // loads in each session retail loads the bank in ([`crate::sound::retail_sessions`]).
+            // declares: each has one winner in the table the game loads. The override wavebank of a
+            // bank retail Lua loads loads in each session retail loads the bank in; the engine loads
+            // any other bank itself, through no loader ([`crate::sound::loader_sessions`]).
             Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
                 let entry = crate::sound::entry_name(bank, *language);
                 push(Access::Write, Claim::asset(&entry), Intent::ReplaceExclusive);
                 for c in cues {
                     push(Access::Write, Claim::sound_cue(&c.name, *language), Intent::ReplaceExclusive);
                 }
-                for script in loader_scripts(&crate::sound::retail_sessions(bank, *language)) {
+                for script in loader_scripts(&crate::sound::loader_sessions(bank, *language)) {
                     push(Access::Write, bare(script), Intent::Additive);
                 }
             }
             Contribution::ReplaceSoundCue { bank, language, cue, .. } => {
                 push(Access::Write, Claim::sound_cue(&cue.name, *language), Intent::ReplaceExclusive);
-                for script in loader_scripts(&crate::sound::retail_sessions(bank, *language)) {
+                for script in loader_scripts(&crate::sound::loader_sessions(bank, *language)) {
                     push(Access::Write, bare(script), Intent::Additive);
                 }
             }
