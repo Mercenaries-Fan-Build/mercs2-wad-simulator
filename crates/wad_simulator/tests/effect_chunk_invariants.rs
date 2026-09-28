@@ -6,7 +6,8 @@
 //! stricter; this runs the validator over every effect container in retail `vz.wad` and requires
 //! zero violations, so the stricter minimums are shown to hold on real data.
 //!
-//! Game-gated: without `vz.wad` it prints `SKIPPING` and returns.
+//! Game-gated, built by the `retail` feature: reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml` and fails if it is absent. Run with `cargo xtask retail-test`.
 
 use std::path::Path;
 
@@ -18,10 +19,8 @@ use wad_simulator::chunk_invariants::validate_chunk_invariants;
 
 #[test]
 fn every_retail_effect_passes_the_chunk_invariants() {
-    let Some(wad) = mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))) else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR or .mercs2-local.toml)");
-        return;
-    };
+    let wad = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
     let mut f = std::fs::File::open(&wad).expect("open vz.wad");
     let size = f.metadata().expect("stat").len();
     let archive = load_ffcs_archive(&mut f, size).expect("read FFCS");
