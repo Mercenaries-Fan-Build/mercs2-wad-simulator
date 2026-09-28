@@ -1339,111 +1339,198 @@ fn two_movies_under_one_name_are_a_self_conflict() {
 
 // ──────────────────────────────────────────────────────────────────────────────── add_sound
 
-/// Re-read an emitted audio-bank WAD and check the row the loader will dispatch on.
-///
-/// Same shape as `read_back_movie`, and for the same reason: the survey found `soundbank`,
-/// `sounddb` and `wavebank` are the identical opaque `data` container `cfx_pack` is, so they share
-/// a builder and must share the assertions that builder's output has to satisfy.
-fn read_back_sound(wad: &[u8], type_id: u32, type_hash: u32) -> (u32, Vec<u8>) {
-    let contents = mercs2_formats::patch_wad::read_patch_wad(wad).expect("re-read the WAD");
-    assert_eq!(contents.blocks.len(), 1);
-    let block = &contents.blocks[0];
-    let row = &block.aset_entries[0];
-    assert_eq!(
-        row.u32_2 & 0xFFFF,
-        0xFFFF,
-        "an audio bank has no LOD chain, so anything but the primary sentinel dangles (M0001)"
-    );
-    assert_eq!(row.u32_3, type_id, "the row's type id is what picks the loader");
-
-    let decompressed = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&decompressed);
-    assert_eq!(count, 1, "expected a single-entry block table");
-    assert_eq!(entries[0].type_hash, type_hash);
-    assert_eq!(&decompressed[20..24], b"UCFX", "container must start after the 20-byte table");
-    assert_eq!(entries[0].name_hash, row.asset_hash);
-
-    let container = &decompressed[20..];
-    let bytes = mercs2_formats::ucfx::extract_chunk_body(container, b"data")
-        .expect("the container must carry a `data` leaf");
-    (entries[0].name_hash, bytes)
+/// A PCM16 WAV file's bytes.
+fn pcm16_wav(channels: u16, rate: u32, samples: &[i16]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&rate.to_le_bytes());
+    out.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+    out.extend_from_slice(&(channels * 2).to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&data);
+    out
 }
 
-/// ★ Audio becomes shippable — and it needs no game stack, so template CI can run it.
-///
-/// This kind exists because the container was MEASURED to be an opaque wrapper, not because
-/// anything here understands audio: `soundbank` 98/98, `sounddb` 58/58 and `wavebank` 92/93 of
-/// retail's containers are a bare `data` leaf. That is 248 assets and ~366 MB of game content that
-/// previously had no way into a Shipment at all.
-#[test]
-fn add_sound_builds_for_every_table_without_a_game() {
-    use mercs2_formats::types::*;
-    for (yaml_name, type_id, type_hash) in [
-        ("wavebank", TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK),
-        ("soundbank", TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK),
-        ("sounddb", 13, 0xE527_3C14u32),
-    ] {
-        let dir = scratch(&format!("add_sound_{yaml_name}"));
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        // Opaque on purpose: nothing in the pipeline parses these bytes, and a test that fed it a
-        // real bank would be asserting the fixture rather than the wrapper.
-        let bank: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
-        std::fs::write(dir.join("src/bank.bin"), &bank).unwrap();
-        let s = shipment(
-            &dir,
-            &format!(
-                "  - kind: add_sound\n    name: amb_ci_test\n    bank: src/bank.bin\n    \
-                 sound: {yaml_name}\n"
-            ),
-        );
+/// One `SoundCue` block of YAML at the list indent, every field given.
+fn sound_cue_yaml(name: &str, wave: &str, sound_id: u32, clip_hash: u32) -> String {
+    format!(
+        "      - name: {name}\n        wave: {wave}\n        group_gain_db: -4.0\n        \
+         cue_gain_db: -6.0\n        pitch_semitones: 1.5\n        positional: true\n        \
+         min_distance: 10.0\n        max_distance: 1000.0\n        distance_exponent: 2.0\n        \
+         doppler_scale: 0.5\n        start_limit: 3\n        sound_id: {sound_id}\n        \
+         priority: 0.95\n        group_20: 1.0\n        cue_16: 0x3E99\n        clip_hash: {clip_hash}\n"
+    )
+}
 
-        let report = build::build(&s, None, None, None, None).expect("must build with no game");
-        let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
-        let (hash, carried) = read_back_sound(&on_disk, type_id, type_hash);
-        assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("amb_ci_test"));
-        // VERBATIM. There is no encoder here, so any difference would be corruption.
-        assert_eq!(carried, bank, "{yaml_name}: the bank must ship byte-for-byte");
+/// The two-cue `add_sound` Shipment the tests below build: a mono and a stereo WAV.
+fn sound_shipment(dir: &Path) -> (discover::LoadedShipment, Vec<(String, u16, Vec<i16>)>) {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let cues = vec![
+        ("mod_click".to_string(), 1u16, (0..1001).map(|i| (i * 7) as i16).collect::<Vec<_>>()),
+        ("mod_whoosh".to_string(), 2u16, (0..2000).map(|i| (i * -3) as i16).collect::<Vec<_>>()),
+    ];
+    let mut yaml = String::from("  - kind: add_sound\n    bank: mod_ui_sounds\n    category: ui\n    cues:\n");
+    for (i, (name, channels, samples)) in cues.iter().enumerate() {
+        let file = format!("src/{name}.wav");
+        std::fs::write(dir.join(&file), pcm16_wav(*channels, 22050, samples)).unwrap();
+        yaml.push_str(&sound_cue_yaml(name, &file, 0x100 + i as u32, 0x200 + i as u32));
+    }
+    (shipment(dir, &yaml), cues)
+}
+
+/// ★ An `add_sound` bank, lowered and assembled into a patch WAD with no game present, reads back as
+/// one block of three entries — soundbank, sounddb, wavebank, all under `m2(bank)`, each with its
+/// primary ASET row — whose tables parse, and the audio engine resolves every cue by name to the
+/// WAV's samples, with every authored field at its offset bit for bit.
+#[test]
+fn add_sound_lowers_to_one_block_the_engine_plays() {
+    use mercs2_audio::soundbank::{CueBody, GroupForm, Soundbank};
+    use mercs2_audio::sounddb::SoundDb;
+    use mercs2_audio::AudioEngine;
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    use mercs2_formats::types::*;
+    use mercs2_quartermaster::manifest::Contribution;
+
+    let dir = scratch("add_sound_e2e");
+    let (s, cues) = sound_shipment(&dir);
+    let Contribution::AddSound { bank, category, cues: authored } = &s.manifest.contributions[0] else {
+        panic!("the fixture is an add_sound");
+    };
+    let mut log = Vec::new();
+    let block = mercs2_quartermaster::sound::lower_add_sound(bank, category, authored, &s.root, &mut log)
+        .expect("lowers without a game");
+    let wad = mercs2_formats::patch_wad::build_patch_wad_multi(
+        &[block],
+        0,
+        None,
+        &mercs2_formats::patch_wad::FFCS_CERT_BLOB,
+    )
+    .expect("assembles");
+
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+    let hash = m2("mod_ui_sounds");
+    let rows: Vec<(u32, u32, u32, u32)> =
+        block.aset_entries.iter().map(|r| (r.asset_hash, r.u32_1, r.u32_2, r.u32_3)).collect();
+    assert_eq!(
+        rows,
+        vec![
+            (hash, 0xFFFF_FFFF, rows[0].2, TYPE_ID_SOUNDBANK),
+            (hash, 0xFFFF_FFFF, rows[1].2, 13),
+            (hash, 0xFFFF_FFFF, rows[2].2, TYPE_ID_WAVEBANK),
+        ]
+    );
+    for r in &block.aset_entries {
+        assert_eq!(r.u32_2 & 0xFFFF, 0xFFFF, "a bank has no LOD chain (M0001)");
+    }
+    assert_eq!(block.path_string, format!("blocks\\VZ\\mod_{hash:08x}.block"));
+
+    let decompressed = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (parsed, issues) = mercs2_formats::ucfx::walk_decompressed_block(&decompressed, "add_sound");
+    assert!(issues.is_empty(), "{:?}", issues.iter().map(|i| &i.detail).collect::<Vec<_>>());
+    let types: Vec<(u32, u32)> = parsed.entries.iter().map(|e| (e.name_hash, e.type_hash)).collect();
+    assert_eq!(
+        types,
+        vec![(hash, TYPE_HASH_SOUNDBANK), (hash, 0xE527_3C14), (hash, TYPE_HASH_WAVEBANK)]
+    );
+    let body = |i: usize| mercs2_formats::ucfx::extract_data_chunk(&parsed.containers[i]).expect("data leaf");
+    let (sb, db, wb) = (body(0), body(1), body(2));
+    let soundbank = Soundbank::parse(&sb).expect("soundbank parses");
+    let sounddb = SoundDb::parse(&db).expect("sounddb parses");
+
+    let mut eng = AudioEngine::default();
+    eng.set_sounddb(sounddb.clone());
+    eng.load_soundbank(&sb).expect("the engine loads the soundbank");
+    eng.load_wavebank(&wb).expect("the engine loads the wavebank");
+    for (i, (name, channels, samples)) in cues.iter().enumerate() {
+        let entry = *eng.sounddb.find_cue_by_name(name).expect("the cue routes by name");
+        let resolved = eng.resolve_cue(&entry).expect("the cue resolves");
+        let waves: Vec<_> = resolved.waves().collect();
+        assert_eq!(waves.len(), 1, "{name}: one single-wave group");
+        let clip = eng.clip(waves[0].wavebank, waves[0].index).expect("the wave is resident");
+        assert_eq!(clip.samples, *samples, "{name}: the WAV's samples");
+        assert_eq!((clip.channels, clip.sample_rate), (*channels as u8, 22050));
+        assert_eq!(clip.clip_hash, 0x200 + i as u32, "{name}: clip_hash");
+
+        let cue = &soundbank.cues[entry.cue_index as usize];
+        assert_eq!(cue.guid, m2(name));
+        assert_eq!(cue.gain.to_bits(), 0x3F00_4DCE, "{name}: -6 dB");
+        assert_eq!(cue.byte_06, 3, "{name}: start_limit");
+        let CueBody::SingleTrack { group_index, unknown_16, .. } = cue.body else { panic!("single-track") };
+        assert_eq!(unknown_16, 0x3E99, "{name}: cue_16");
+        let g = &soundbank.groups[group_index as usize];
+        assert_eq!(g.head.sound_id, 0x100 + i as u32, "{name}: sound_id");
+        assert_eq!(g.head.category, m2("ui"));
+        assert_eq!(g.head.unknown_10.to_bits(), 0.95f32.to_bits(), "{name}: priority");
+        assert_eq!(g.head.unknown_14, 1, "{name}: positional");
+        assert_eq!((g.head.min_distance, g.head.max_distance), (10.0, 1000.0));
+        assert_eq!(g.head.unknown_20, 1.0, "{name}: group_20");
+        assert_eq!((g.head.distance_exponent, g.head.doppler_scale), (2.0, 0.5));
+        let GroupForm::Single { gain, unknown_30, wave } = &g.form else { panic!("single-wave") };
+        assert_eq!(gain.to_bits(), 0x3F21_866C, "{name}: -4 dB");
+        assert_eq!(*unknown_30, 1.5, "{name}: pitch_semitones");
+        assert_eq!(wave.weight, 1.0);
+        assert_eq!(cue.length_s, (samples.len() as f64 / f64::from(*channels) / 22050.0) as f32);
+    }
+    assert_eq!(sounddb.cues.len(), 2);
+}
+
+/// Two lowerings of one Shipment produce the same bytes, or verify-by-hash means nothing.
+#[test]
+fn add_sound_is_reproducible() {
+    use mercs2_quartermaster::manifest::Contribution;
+    let dir = scratch("add_sound_repro");
+    let (s, _) = sound_shipment(&dir);
+    let Contribution::AddSound { bank, category, cues } = &s.manifest.contributions[0] else {
+        panic!("the fixture is an add_sound");
+    };
+    let lower = || {
+        mercs2_quartermaster::sound::lower_add_sound(bank, category, cues, &s.root, &mut Vec::new())
+            .expect("lowers")
+            .compressed_data
+    };
+    assert_eq!(lower(), lower(), "two lowerings of one bank must be byte-identical");
+}
+
+/// The bank loads through the mod loader, which the build links into the scripts: a build with no
+/// game stack says so rather than emitting a bank nothing loads.
+#[test]
+fn add_sound_needs_the_game_to_link_its_loader() {
+    let dir = scratch("add_sound_nogame");
+    let (s, _) = sound_shipment(&dir);
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::GameRequired { .. }) => {}
+        other => panic!("expected GameRequired, got {other:?}"),
     }
 }
 
-/// Two builds of the same Shipment produce the same bytes, or verify-by-hash means nothing.
+/// A WAV the wavebank cannot embed blocks the build under M0214, before anything is lowered.
 #[test]
-fn add_sound_is_reproducible() {
-    let dir = scratch("add_sound_repro");
+fn an_unusable_wav_blocks_the_build() {
+    let dir = scratch("add_sound_badwav");
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("src/bank.bin"), vec![7u8; 1024]).unwrap();
+    let mut wav = pcm16_wav(1, 22050, &[1, 2, 3]);
+    wav[34..36].copy_from_slice(&8u16.to_le_bytes()); // 8-bit
+    std::fs::write(dir.join("src/a.wav"), wav).unwrap();
     let s = shipment(
         &dir,
-        "  - kind: add_sound\n    name: amb_repro\n    bank: src/bank.bin\n    sound: soundbank\n",
-    );
-    let a = std::fs::read(
-        build::build(&s, None, None, None, None).expect("build 1").wad.expect("wad"),
-    )
-    .unwrap();
-    let b = std::fs::read(
-        build::build(&s, None, None, None, None).expect("build 2").wad.expect("wad"),
-    )
-    .unwrap();
-    assert_eq!(a, b, "two builds of one Shipment must be byte-identical");
-}
-
-/// An empty bank is refused by NAME rather than emitted as a valid-looking container with nothing
-/// in it — the loader would be the first thing to find out, and it does not say which asset.
-#[test]
-fn an_empty_sound_bank_is_refused() {
-    let dir = scratch("add_sound_empty");
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("src/bank.bin"), b"").unwrap();
-    let s = shipment(
-        &dir,
-        "  - kind: add_sound\n    name: amb_empty\n    bank: src/bank.bin\n    sound: wavebank\n",
+        &format!(
+            "  - kind: add_sound\n    bank: mod_bad\n    category: ui\n    cues:\n{}",
+            sound_cue_yaml("mod_bad_cue", "src/a.wav", 0, 0)
+        ),
     );
     match build::build(&s, None, None, None, None) {
-        Err(e) => {
-            let m = format!("{e:?}");
-            assert!(m.contains("empty"), "the refusal should name the problem: {m}");
-        }
-        Ok(_) => panic!("an empty bank must not build"),
+        Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0214"), "{d:?}"),
+        other => panic!("expected Blocked by M0214, got {other:?}"),
     }
 }
 
