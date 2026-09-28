@@ -1470,8 +1470,8 @@ fn add_sound_is_reproducible() {
     assert_eq!(lower(), lower(), "two lowerings of one bank must be byte-identical");
 }
 
-/// The bank loads through the mod loader, which the build links into the scripts: a build with no
-/// game stack says so rather than emitting a bank nothing loads.
+/// The bank loads through the mod loader, which the build links into the scripts, so a build with
+/// no game stack is refused with `GameRequired`.
 #[test]
 fn add_sound_needs_the_game_to_link_its_loader() {
     let dir = scratch("add_sound_nogame");
