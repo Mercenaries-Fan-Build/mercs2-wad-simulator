@@ -337,8 +337,18 @@ impl Contribution {
                     out.push(("events", e.as_path()));
                 }
             }
-            Contribution::AddShader { blob, .. } => out.push(("blob", blob.as_path())),
-            Contribution::ReplaceShader { blob, .. } => out.push(("blob", blob.as_path())),
+            Contribution::AddShader { classes, .. } => {
+                for class in classes {
+                    out.push(("shader", class.shader.path()));
+                    out.push(("shader_low", class.shader_low.path()));
+                }
+            }
+            Contribution::ReplaceShader { shader, shader_low, .. } => {
+                out.push(("shader", shader.path()));
+                if let Some(low) = shader_low {
+                    out.push(("shader_low", low.path()));
+                }
+            }
             Contribution::AddFx { payload, .. } => out.push(("payload", payload.as_path())),
             Contribution::ReplaceFx { payload, .. } => out.push(("payload", payload.as_path())),
             Contribution::ReplaceTerrainCell { cell, .. } => out.push(("cell", cell.as_path())),
