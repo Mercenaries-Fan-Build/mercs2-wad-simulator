@@ -75,19 +75,21 @@ struct LoadedScriptBlock {
     rows: std::collections::HashMap<u32, (u32, u32, u32)>,
 }
 
-/// Load every scripts block a `patch_lua` target could live in.
+/// Load each of `blocks` (`(PTHS needle, PTHS path)`, [`link::SCRIPT_BLOCKS`] or
+/// [`link::SHELL_SCRIPT_BLOCKS`]) from `stack`.
 ///
 /// A block missing from the stack is **skipped, not fatal**. A synthetic or overlay-only stack may
 /// carry `scripts_vz` and nothing else, and if a mutation actually needed the absent block the
 /// linker already reports `UnknownScript` naming the target — which tells the author what to fix,
-/// where "no resident block in the game stack" would not.
+/// where "no resident block in the game stack" would not. A stack with none of them is an error.
 fn load_script_blocks(
-    game: &mut GameStack,
+    stack: &mut GameStack,
+    blocks: &[(&str, &str)],
     kind: &'static str,
 ) -> Result<Vec<LoadedScriptBlock>, BuildError> {
     let mut out = Vec::new();
-    for (needle, path) in link::SCRIPT_BLOCKS {
-        let Some((raw, rows)) = game.block_and_rows_by_path(needle) else {
+    for (needle, path) in blocks {
+        let Some((raw, rows)) = stack.block_and_rows_by_path(needle) else {
             continue;
         };
         let block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
@@ -105,7 +107,11 @@ fn load_script_blocks(
         return Err(BuildError::Lower {
             index: 0,
             kind,
-            message: "no scripts block in the configured game stack".into(),
+            message: format!(
+                "none of the scripts blocks {:?} is in {}",
+                blocks.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                stack.paths().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            ),
         });
     }
     Ok(out)
@@ -162,6 +168,65 @@ fn script_patch_blocks(
         );
     }
     Ok(out)
+}
+
+/// Link the front end's sound loader ([`link::link_front_end`]) into `shell.wad`'s scripts block,
+/// read from the `shell.wad` beside `game`'s base WAD ([`GameStack::open_sibling`]), and return the
+/// block to ship in the shell patch — every row copied from `shell.wad` ([`script_patch_blocks`]).
+/// Empty when no registration loads a bank in the front end. A missing `shell.wad` is an error.
+fn link_shell_loader(
+    game: &GameStack,
+    corpus: &Path,
+    sound_regs: &[link::SoundBankRegistration],
+    order: &[String],
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<Vec<PatchBlock>, BuildError> {
+    if !sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd)) {
+        return Ok(Vec::new());
+    }
+    let fail = |message: String| BuildError::Lower { index: 0, kind, message };
+    let mut shell = game.open_sibling("shell.wad").map_err(fail)?;
+    let mut loaded = load_script_blocks(&mut shell, link::SHELL_SCRIPT_BLOCKS, kind)?;
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|lb| link::TargetBlock { path: lb.path.clone(), block: &mut lb.block })
+        .collect();
+    let linked = link::link_front_end(&mut targets, corpus, sound_regs, order).map_err(|e| fail(e.to_string()))?;
+    drop(targets);
+    for l in &linked.scripts {
+        log.push(format!(
+            "linked {} in {} (shell.wad): {} → {} B source, {} B bytecode, from {:?}",
+            l.target, loaded[l.block].path, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes, l.contributors
+        ));
+    }
+    script_patch_blocks(&loaded, &linked.scripts, kind)
+}
+
+/// The loader self-check ([`crate::sound::check_loader_banks`]): every bank the gameplay loader
+/// loads has its wavebank in `overlay`, and every bank the front-end loader loads has its wavebank
+/// in `shell`.
+fn check_sound_loaders(
+    sound_regs: &[link::SoundBankRegistration],
+    overlay: &[&PatchBlock],
+    shell: &[&PatchBlock],
+    kind: &'static str,
+) -> Result<(), BuildError> {
+    use crate::manifest::LoadSession;
+    for (session, blocks) in [(LoadSession::Gameplay, overlay), (LoadSession::FrontEnd, shell)] {
+        let banks: Vec<&str> = sound_regs.iter().filter(|r| r.sessions.contains(&session)).map(|r| r.bank.as_str()).collect();
+        crate::sound::check_loader_banks(link::Level::of(session), &banks, blocks)
+            .map_err(|message| BuildError::Lower { index: 0, kind, message })?;
+    }
+    Ok(())
+}
+
+/// The CSUM row of the `shell.wad` beside `game`'s base WAD, which a shell patch is stamped with.
+fn shell_csum(game: &GameStack, kind: &'static str) -> Result<(u32, Option<u32>), BuildError> {
+    let fail = |message: String| BuildError::Lower { index: 0, kind, message };
+    let base = game.paths().first().map(|p| p.to_path_buf()).ok_or_else(|| fail("the game stack is empty".into()))?;
+    let shell = crate::sound::sibling_wad(&base, "shell.wad").map_err(fail)?;
+    mercs2_formats::donor::base_csum(&shell).map_err(fail)
 }
 
 /// Where a built artifact has to end up.
@@ -2965,13 +3030,10 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
-        // Encoded from the authored cues; needs no game stack. The mod loader loads the bank
-        // (`sound::sound_registrations`, baked by the link step).
-        Contribution::AddSound { bank, category, cues } => {
-            let block = crate::sound::lower_add_sound(bank, category, cues, root, log)
-                .map_err(|message| BuildError::Lower { index, kind, message })?;
-            Ok(Lowering::Block(block))
-        }
+        // Encoded from the authored cues with the Shipment's other sound, after every contribution
+        // (`sound::lower_shipment_sound`): the block ships to each `load_in` session's WAD, and that
+        // session's loader loads it.
+        Contribution::AddSound { .. } => Ok(Lowering::Nothing),
         // Lowered together, per bank, after every contribution (`sound::lower_overrides`): several
         // overrides of one bank share one forked soundbank and one override wavebank.
         Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. } => {
@@ -4267,29 +4329,17 @@ pub fn build(
         };
         blocks.extend(merge_string_tables(&[shipment], game, StringMerge::Strict, &mut log)?);
     }
-    // Sound overrides: every replace_sound_bank / replace_sound_cue of this Shipment, per bank. The
-    // blocks go where the game carries each bank: the overlay, the shell patch, a language's patch.
-    let mut shell_blocks: Vec<PatchBlock> = Vec::new();
-    let mut language_blocks: std::collections::BTreeMap<crate::manifest::Language, Vec<PatchBlock>> =
-        std::collections::BTreeMap::new();
-    if let Some((index, c)) = manifest.contributions.iter().enumerate().find(|(_, c)| {
-        matches!(c, Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. })
-    }) {
-        let Some(game) = game.as_deref_mut() else {
-            return Err(BuildError::GameRequired { index, kind: c.kind() });
-        };
-        let lowered = crate::sound::lower_overrides(
-            &[shipment],
-            game,
-            crate::sound::OverrideScope::Shipment,
-            &mut log,
-        )
-        .map_err(|message| BuildError::Lower { index, kind: c.kind(), message })?;
-        blocks.extend(lowered.overlay);
-        shell_blocks = lowered.shell;
-        language_blocks = lowered.language;
-    }
-    let sound_regs = crate::sound::sound_registrations(manifest);
+    // Sound: every add_sound, replace_sound_bank and replace_sound_cue of this Shipment
+    // (`sound::lower_shipment_sound`). The blocks go to the level of each session that loads them —
+    // the overlay for gameplay, the shell patch for the front end — and a language's `vo_*` banks to
+    // its patch; each session's loader loads the registrations.
+    let lowered = crate::sound::lower_shipment_sound(shipment, game.as_deref_mut(), &mut log)
+        .map_err(|(index, kind, message)| BuildError::Lower { index, kind, message })?;
+    blocks.extend(lowered.overlay);
+    let mut shell_blocks: Vec<PatchBlock> = lowered.shell;
+    let language_blocks = lowered.language;
+    let sound_regs = lowered.registrations;
+    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
     let mutations = script_mutations(manifest, &shipment.root)?;
     let ui_regs = ui_registrations(manifest);
     let layer_regs = layer_registrations(manifest);
@@ -4311,12 +4361,13 @@ pub fn build(
     // `ui_regs` / `layer_regs` / `additions` count too: an add_ui / activate_layer / add_script with
     // no other script edit still needs the linker to run (respectively: mints the loader trampoline,
     // mints the loader trampoline, mints a fresh scripts_vz entry). So a non-empty of any of them
-    // must trigger the link even when `mutations` is empty.
+    // must trigger the link even when `mutations` is empty. A bank the front end loads links into
+    // `shell.wad`'s scripts block instead (below).
     if !mutations.is_empty()
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
         || !support_regs.is_empty()
-        || !sound_regs.is_empty()
+        || gameplay_sounds
         || !additions.is_empty()
         || !replacements.is_empty()
     {
@@ -4337,7 +4388,7 @@ pub fn build(
                         .into(),
             });
         };
-        let mut loaded = load_script_blocks(game, "patch_lua")?;
+        let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "patch_lua")?;
         let mut targets: Vec<link::TargetBlock<'_>> = loaded
             .iter_mut()
             .map(|lb| link::TargetBlock {
@@ -4402,6 +4453,30 @@ pub fn build(
         }
         blocks.extend(script_blocks);
     }
+
+    // The front end's loader, linked into `shell.wad`'s scripts block and shipped in the shell patch.
+    if sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd)) {
+        let Some(game) = game.as_deref() else {
+            return Err(BuildError::GameRequired { index: 0, kind: "front-end loader" });
+        };
+        let Some(corpus) = corpus_root else {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "front-end loader",
+                message: "linking the front end's sound loader needs the decompiled corpus (the base \
+                          source of `mrxsound`); for `qm`, pass --corpus <dir> or --workshop-data <dir>"
+                    .into(),
+            });
+        };
+        let solo_order = [manifest.shipment.name.clone()];
+        shell_blocks.extend(link_shell_loader(game, corpus, &sound_regs, &solo_order, "front-end loader", &mut log)?);
+    }
+    check_sound_loaders(
+        &sound_regs,
+        &blocks.iter().collect::<Vec<_>>(),
+        &shell_blocks.iter().collect::<Vec<_>>(),
+        "sound loader",
+    )?;
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
     // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
@@ -4537,14 +4612,16 @@ pub fn build(
     }
 
     // The shell patch and the language patches: patch WADs a deploy step merges into
-    // `data/shell-patch.wad` and `data/<language>-patch.wad`.
+    // `data/shell-patch.wad` and `data/<language>-patch.wad`. The shell patch mounts above
+    // `shell.wad`, so it carries `shell.wad`'s CSUM row.
     if !shell_blocks.is_empty() {
         let name = format!("{}.shell-patch.wad", manifest.shipment.name);
+        let game = game.as_deref().ok_or(BuildError::GameRequired { index: 0, kind: "shell patch" })?;
         placements.push(write_patch_wad(
             &out_dir,
             &name,
             &shell_blocks,
-            csum,
+            shell_csum(game, "shell patch")?,
             Destination::ShellPatch,
             &mut log,
             &mut diagnostics,
@@ -4738,9 +4815,10 @@ pub fn merged_string_tables<'a>(
 }
 
 /// Every block `qm link` re-emits for a set, as the load plan's `link_block_paths` states it: the
-/// scripts blocks ([`link::SCRIPT_BLOCKS`]), then each merged string table's block in hash order,
-/// then each merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`];
-/// one path for the bank in every WAD that carries it).
+/// `vz.wad` scripts blocks ([`link::SCRIPT_BLOCKS`]), the `shell.wad` scripts block
+/// ([`link::SHELL_SCRIPT_BLOCKS`]), then each merged string table's block in hash order, then each
+/// merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`]; one path
+/// for the bank in every WAD that carries it).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
 /// the set-wide version of each.
 pub fn link_block_paths<'a>(
@@ -4749,6 +4827,7 @@ pub fn link_block_paths<'a>(
     let manifests: Vec<&crate::manifest::Manifest> = manifests.into_iter().collect();
     link::SCRIPT_BLOCKS
         .iter()
+        .chain(link::SHELL_SCRIPT_BLOCKS)
         .map(|(_, p)| p.to_string())
         .chain(merged_string_tables(manifests.iter().copied()).into_iter().map(stringdb_block_path))
         .chain(
@@ -4945,7 +5024,8 @@ fn merge_string_tables(
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
 pub const LINK_WAD_NAME: &str = "zz-quartermaster-link.wad";
 
-/// The filename of the link's shell patch: the merged sound banks `shell.wad` carries.
+/// The filename of the link's shell patch: the merged sound banks `shell.wad` carries and the
+/// front end's scripts block with the set's front-end loader.
 pub const LINK_SHELL_PATCH_NAME: &str = "zz-quartermaster-link.shell-patch.wad";
 
 /// What a cross-Shipment link produced.
@@ -5051,8 +5131,22 @@ pub fn link_installed(
     let mut additions: Vec<link::ScriptAddition> = Vec::new();
     let mut replacements: Vec<link::ScriptReplacement> = Vec::new();
     let mut sound_regs: Vec<link::SoundBankRegistration> = Vec::new();
+    // What each Shipment's own build ships for sound, by level: the loaders' self-check below reads
+    // it. Lowered through the one function `qm build` ships with (`sound::lower_shipment_sound`).
+    let mut shipped_overlay: Vec<PatchBlock> = Vec::new();
+    let mut shipped_shell: Vec<PatchBlock> = Vec::new();
     for s in &shipments {
-        sound_regs.extend(crate::sound::sound_registrations(&s.manifest));
+        let mut sound_log = Vec::new();
+        let sound = crate::sound::lower_shipment_sound(s, Some(&mut *game), &mut sound_log).map_err(|(index, kind, message)| {
+            BuildError::Lower {
+                index,
+                kind,
+                message: format!("{}: {message}", s.manifest.shipment.name),
+            }
+        })?;
+        sound_regs.extend(sound.registrations);
+        shipped_overlay.extend(sound.overlay);
+        shipped_shell.extend(sound.shell);
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
@@ -5064,18 +5158,20 @@ pub fn link_installed(
     // layer and sound-bank registrations mint `qm_modloader` and the trampoline; add_script mints
     // its own fresh scripts_vz entry; replace_lua swaps a shipped script's bytecode. Any of them
     // needs the script link to run.
+    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
+    let front_end_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd));
     let touches_scripts = !(mutations.is_empty()
         && ui_regs.is_empty()
         && layer_regs.is_empty()
         && support_regs.is_empty()
-        && sound_regs.is_empty()
+        && !gameplay_sounds
         && additions.is_empty()
         && replacements.is_empty());
     // Every string table any Shipment edits or adds keys to is merged into one link-owned copy.
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
     // Every sound bank any Shipment's replace_sound_cue targets, likewise.
     let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest));
-    if !touches_scripts && tables.is_empty() && sound_entries.is_empty() {
+    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() {
         log.push(
             "no installed Shipment touches a script, a string table or a sound bank — nothing to link"
                 .into(),
@@ -5113,7 +5209,7 @@ pub fn link_installed(
     let mut patches: Vec<PatchBlock> = Vec::new();
     let mut linked: Vec<link::LinkedScript> = Vec::new();
     if touches_scripts {
-        let mut loaded = load_script_blocks(game, "link")?;
+        let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "link")?;
         let mut targets: Vec<link::TargetBlock<'_>> = loaded
             .iter_mut()
             .map(|lb| link::TargetBlock {
@@ -5192,7 +5288,9 @@ pub fn link_installed(
     let promised: Vec<String> = plan
         .link_block_paths
         .iter()
-        .filter(|p| !link::SCRIPT_BLOCKS.iter().any(|(_, s)| s == p) && !sound_paths.contains(*p))
+        .filter(|p| {
+            !link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).any(|(_, s)| s == p) && !sound_paths.contains(*p)
+        })
         .cloned()
         .collect();
     let emitted: Vec<String> = table_blocks.iter().map(|b| b.path_string.clone()).collect();
@@ -5243,6 +5341,17 @@ pub fn link_installed(
         language_blocks = lowered.language;
     }
 
+    // The front end's loader: every Shipment's front-end banks in one `qm_shell_modloader`, linked
+    // into `shell.wad`'s scripts block and shipped in the link's shell patch.
+    shell_blocks.extend(link_shell_loader(game, corpus_root, &sound_regs, &order, "link", &mut log)?);
+    // The loaders load only what the set's builds ship, level by level.
+    check_sound_loaders(
+        &sound_regs,
+        &shipped_overlay.iter().collect::<Vec<_>>(),
+        &shipped_shell.iter().collect::<Vec<_>>(),
+        "link",
+    )?;
+
     let csum =
         mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
             index: 0,
@@ -5260,7 +5369,7 @@ pub fn link_installed(
             out_dir,
             LINK_SHELL_PATCH_NAME,
             &shell_blocks,
-            csum,
+            shell_csum(game, "link")?,
             Destination::ShellPatch,
             &mut log,
             &mut diagnostics,
