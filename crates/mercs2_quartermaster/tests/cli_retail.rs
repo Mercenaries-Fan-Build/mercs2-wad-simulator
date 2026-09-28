@@ -188,3 +188,81 @@ fn link_ok_plan_exits_0_and_writes_the_plan() {
     assert_eq!(placement["placements"], serde_json::json!([]));
     assert_eq!(listing(&out), ["load-plan.json", "placement.json"], "no link WAD");
 }
+
+// ---------------------------------------------------------------------------
+// `qm link` — the front end's sound loader
+// ---------------------------------------------------------------------------
+
+/// A PCM16 mono WAV of `samples`.
+fn wav(samples: &[i16]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&22050u32.to_le_bytes());
+    out.extend_from_slice(&44100u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&data);
+    out
+}
+
+/// A Shipment named `name` at `dir` replacing `cue` of `ui_hud` with a short WAV.
+fn ui_hud_override(dir: &Path, name: &str, cue: &str) -> PathBuf {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/new.wav"), wav(&[3; 200])).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!(
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\ncontributions:\n  - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n      name: {cue}\n      wave: src/new.wav\n      group_gain_db: 0\n      cue_gain_db: 0\n      pitch_semitones: 0\n      positional: false\n      min_distance: 1\n      max_distance: 2\n      distance_exponent: 1\n      doppler_scale: 1\n      start_limit: 0\n      sound_id: 0\n      priority: 1\n      group_20: 1\n      cue_16: 0\n      clip_hash: 0\n"
+        ),
+    )
+    .unwrap();
+    dir.to_path_buf()
+}
+
+/// ★ Two Shipments overriding `ui_hud` cues link, through the CLI, into ONE front-end scripts block
+/// in the link's shell patch: its `qm_shell_modloader` loads both override wavebanks, in the plan's
+/// order (the request order here, which the names sort against), and the plan lists the block.
+#[test]
+fn link_puts_both_front_end_loads_in_one_shell_block_in_plan_order() {
+    let vz = retail_vz_wad();
+    let dir = scratch("ln-front-end");
+    let zeta = ui_hud_override(&dir.join("zeta"), "zeta-sound", "ui_PDA_Open_01_st");
+    let alpha = ui_hud_override(&dir.join("alpha"), "alpha-sound", "ui_PDA_Accept");
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../mercs2_script/corpus/mercs2-luacd/src");
+    let out = dir.join("out");
+    let o = link(
+        &[
+            zeta.to_str().unwrap(),
+            alpha.to_str().unwrap(),
+            "--game",
+            vz.to_str().unwrap(),
+            "--corpus",
+            corpus.to_str().unwrap(),
+        ],
+        &out,
+    );
+    assert_eq!(code(&o), 0, "stdout: {}\nstderr: {}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    let plan = read_json(&out.join("load-plan.json"));
+    assert_eq!(plan["order"].as_array().unwrap().len(), 2);
+    assert!(plan["link_block_paths"].as_array().unwrap().iter().any(|p| p == "blocks\\Shell\\resident_P000_Q3.block"));
+
+    let wad = std::fs::read(out.join(mercs2_quartermaster::build::LINK_SHELL_PATCH_NAME)).expect("the link's shell patch");
+    let blocks = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read").blocks;
+    let scripts: Vec<_> = blocks.iter().filter(|b| b.path_string == "blocks\\Shell\\resident_P000_Q3.block").collect();
+    assert_eq!(scripts.len(), 1, "one front-end scripts block");
+    let dec = mercs2_formats::sges::decompress_sges(&scripts[0].compressed_data).unwrap();
+    let block = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).unwrap();
+    block.verify_csums().expect("every CSUM verifies");
+    let loader = block.extract_lua(block.find_script_by_name("qm_shell_modloader").expect("the loader")).unwrap();
+    let at = |needle: &str| loader.windows(needle.len()).position(|w| w == needle.as_bytes());
+    let (z, a) = (at("qm_zeta-sound_ui_hud").expect("zeta's load"), at("qm_alpha-sound_ui_hud").expect("alpha's load"));
+    assert!(z < a, "the plan's order: zeta, then alpha");
+}
