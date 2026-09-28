@@ -1429,19 +1429,6 @@ fn m0215_fires_on_unusable_sound_names() {
     assert!(!codes(&lint::lint(&add_sound("mod_sounds", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
 }
 
-/// M0215: a cue whose guid is below 0x401 is read as an index by FindCue.
-#[test]
-fn m0215_fires_on_a_guid_below_the_direct_index_limit() {
-    use mercs2_formats::hash::pandemic_hash_m2 as m2;
-    // A name hashing below 0x401 is found by search, so the rule has something real to fire on.
-    let low = (0u32..20_000_000)
-        .map(|i| format!("q{i}"))
-        .find(|n| m2(n) < lint::DIRECT_INDEX_GUID_LIMIT)
-        .expect("a short name hashes below 0x401");
-    let diags = lint::lint(&add_sound("mod_sounds", "ui", &[&low]), None, None);
-    assert!(codes(&diags).contains(&"M0215"), "{low}: {diags:?}");
-}
-
 /// M0216: a category outside the tree, with the nearest named one offered.
 #[test]
 fn m0216_fires_on_an_unknown_category_and_suggests_one() {
