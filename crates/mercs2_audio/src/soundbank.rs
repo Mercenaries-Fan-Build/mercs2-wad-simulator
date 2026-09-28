@@ -29,12 +29,14 @@
 //!
 //! ```text
 //! common head
-//!   +0x00 u32  sound id (meaning unproven; equals the cue guid in some banks, not in others)
+//!   +0x00 u32  sound id (read only by FUN_008369e0's language gate; equals the playing cue's guid in
+//!              some groups, not in others)
 //!   +0x04 u32  category hash, m2 of a Mercs2Globals category (e.g. m2("ui") = 0x8EC83583)
 //!   +0x08 u32  0
 //!   +0x0C u32  form: 0 = single-wave (64 bytes), 1 = multi-wave (0x68 + 12 × waves bytes)
-//!   +0x10 f32  unknown        +0x14 u32 0 | 1          +0x18 f32 min distance   +0x1C f32 max distance
-//!   +0x20 f32  unknown        +0x24 f32 distance exponent   +0x28 f32 Doppler scale
+//!   +0x10 f32  priority (GetWavePriority, voice stealing)   +0x14 u32 0 | 1 positional
+//!   +0x18 f32  min distance   +0x1C f32 max distance
+//!   +0x20 f32  no engine reader known   +0x24 f32 distance exponent   +0x28 f32 Doppler scale
 //! single-wave form
 //!   +0x2C f32  base volume (FUN_0083d770)   +0x30 f32 base pitch, semitones (FUN_0083d700)
 //!   +0x34 wave {wavebank hash, wave index, f32 weight}
@@ -67,12 +69,13 @@
 //! ```text
 //! common head
 //!   +0x00 u32  cue guid = m2(cue name)
-//!   +0x04 u8x4 [0, form, unknown, 0]; form 0 = single-track, 1 = multi-track
+//!   +0x04 u8x4 [0, form, start limit, 0]; form 0 = single-track, 1 = multi-track
 //!   +0x08 f32  gain
 //!   +0x0C f32  length in seconds (frames / rate of the wave, for an embedded single-wave cue)
 //! single-track form (24 bytes)
 //!   +0x10 u32  soundbank hash
-//!   +0x14 u16  group index      +0x16 u16 unknown (0 in most cues; float-like high halves in others)
+//!   +0x14 u16  group index      +0x16 u16 no engine reader known (0 in most cues; float-like high
+//!              halves in others)
 //! multi-track form
 //!   +0x10      tracks of timed sounds, each picking a group — see [`crate::multitrack`]
 //! ```
@@ -111,11 +114,14 @@ pub struct WaveRef {
 /// The fields both group forms share (`+0x00`..`+0x2B`, less the fixed `+0x08` and the form word).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupHead {
-    /// `+0x00` sound id (meaning unproven).
+    /// `+0x00` sound id. Its one known reader, `FUN_008369e0`, refuses to start a group whose id is
+    /// `0xEA1343AA`, `0xC05D8686` or `0xBB8AE67D` unless the game runs in English.
     pub sound_id: u32,
     /// `+0x04` category hash.
     pub category: u32,
-    /// `+0x10`, unknown.
+    /// `+0x10` priority: `GetWavePriority` returns it times the wave's distance volume, and with
+    /// every voice busy a new instance takes the lowest-priority wave's voice only when its own is
+    /// higher (`FUN_00837e10`, `FUN_00837830`).
     pub unknown_10: f32,
     /// `+0x14`, 0 or 1 in every retail group: the instance is positional and the wave takes a distance
     /// volume (module docs).
@@ -124,7 +130,8 @@ pub struct GroupHead {
     pub min_distance: f32,
     /// `+0x1C` maximum distance: silent from it (`FUN_0083d3a0`).
     pub max_distance: f32,
-    /// `+0x20`, unknown (1.0 in all but one retail group).
+    /// `+0x20`: copied into the wave (`+0x68`), whose getter has no call site; no engine reader is
+    /// known (1.0 in all but one retail group).
     pub unknown_20: f32,
     /// `+0x24` the distance fall-off exponent (`FUN_0083d3a0`).
     pub distance_exponent: f32,
@@ -212,7 +219,8 @@ pub enum CueBody {
         soundbank: u32,
         /// `+0x14` index of the group in that soundbank.
         group_index: u16,
-        /// `+0x16`, unknown (0 in most cues).
+        /// `+0x16`: no engine reader is known — the group reference is read at `+0x10` and `+0x14`
+        /// only (0 in most cues).
         unknown_16: u16,
     },
     /// Form 1: tracks of timed sounds ([`crate::multitrack`]).
@@ -224,8 +232,9 @@ pub enum CueBody {
 pub struct Cue {
     /// `+0x00` cue guid = m2(cue name).
     pub guid: u32,
-    /// `+0x06` start limit: the engine starts the cue only while a counter in its runtime record is
-    /// below this (0 = no limit; that the counter counts live instances is inferred).
+    /// `+0x06` start limit: the engine starts the cue only while fewer than this many of its
+    /// instances play (`FUN_00834ad0`; `FUN_008354e0` counts one up as an instance plays,
+    /// `FUN_00835850` one down as it finishes); 0 = no limit.
     pub byte_06: u8,
     /// `+0x08` gain.
     pub gain: f32,
