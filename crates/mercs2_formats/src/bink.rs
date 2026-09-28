@@ -520,7 +520,7 @@ mod tests {
             let dir = shipped_movies_dir();
             let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
                 .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-                .filter_map(|e| e.ok().map(|e| e.path()))
+                .map(|e| e.unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display())).path())
                 .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bik")))
                 .collect();
             files.sort();
@@ -626,10 +626,11 @@ mod tests {
             let dir = shipped_movies_dir();
             let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
                 .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-                .filter_map(|e| e.ok().map(|e| e.path()))
+                .map(|e| e.unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display())).path())
                 .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bik")))
                 .collect();
             files.sort();
+            assert!(!files.is_empty(), "no .bik files under {}", dir.display());
 
             let (mut total_frames, mut total_audio, mut total_video, mut silent_packets) =
                 (0usize, 0u64, 0u64, 0usize);
