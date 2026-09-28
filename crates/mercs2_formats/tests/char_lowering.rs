@@ -4,7 +4,9 @@
 //! skinned lowering actually produces a block, because "it builds" is not the claim — the claim is
 //! that a Shipment can ship a character.
 //!
-//! Needs the retail install and a rigged source model; skips loudly without either.
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent. It also needs a rigged source model, which is
+//! not part of the game; without one it skips loudly.
 
 use std::path::{Path, PathBuf};
 
@@ -39,11 +41,9 @@ fn container_of(block: &[u8]) -> &[u8] {
     block
 }
 
-fn vz_wad() -> Option<PathBuf> {
-    if let Some(p) = mercs2_formats::game_paths::vz_wad_from_env() {
-        return Some(p);
-    }
-    mercs2_formats::game_paths::wad_from_local_config(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// A rigged humanoid that is not on the game's own skeleton — the cross-rig case the whole
@@ -95,11 +95,7 @@ fn source_glb() -> Option<PathBuf> {
 
 #[test]
 fn a_rigged_glb_lowers_onto_a_retail_donor() {
-    let Some(wad) = vz_wad() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let wad = vz_wad();
     let Some(glb_path) = source_glb() else {
         return eprintln!("SKIPPING: no rigged source model under game-files/new-models");
     };
@@ -238,9 +234,7 @@ fn a_rigged_glb_lowers_onto_a_retail_donor() {
 /// The lowering must refuse a donor it cannot fit rather than emitting a block that renders wrong.
 #[test]
 fn a_mesh_that_cannot_fit_any_group_is_a_loud_error() {
-    let Some(wad) = vz_wad() else {
-        return eprintln!("SKIPPING: no vz.wad discovered");
-    };
+    let wad = vz_wad();
     let Some(glb_path) = source_glb() else {
         return eprintln!("SKIPPING: no rigged source model");
     };
