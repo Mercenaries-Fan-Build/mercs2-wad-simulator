@@ -48,6 +48,10 @@ clap = { version = "4", features = ["derive"] }
 # The same crate Cargo itself parses version requirements with, so the range semantics a modder
 # expects (`^1.0.0`, `>=0.7, <1`) are exactly what they get.
 semver = "1"
+# The sound kinds encode and fork bank tables (`encode_bank`, `retarget_cue`) and read authored
+# WAVs (`wav::read_pcm16_wav`) with the codecs that re-encode every retail bank byte-identically.
+# Decode/encode side only: no device output, so no `cpal` / ALSA in the CLI.
+mercs2_audio = { path = "../mercs2_audio", version = "1.2.3", default-features = false }
 
 [dev-dependencies]
 # Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
