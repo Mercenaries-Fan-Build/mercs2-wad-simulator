@@ -5,22 +5,32 @@
 //! empty and every god-ray glow card silently used its fallback constants. It now finds the block
 //! through the effect's own ASET row; these tests prove real effects arrive.
 //!
-//! Game-gated: without a discoverable `vz.wad` they print `SKIPPING` and return.
+//! Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails when it is absent.
 
 use mercs2_engine::game_world::{glow_card_for_effect, load_effect};
 use mercs2_engine::wad;
 use mercs2_formats::hash::pandemic_hash_m2;
 
-fn open() -> Option<wad::Wad> {
-    let path = wad::resolve_vz_wad(None)?;
-    Some(wad::open(&path).expect("open vz.wad"))
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
+/// The retail `vz.wad`, opened. Panics when it cannot be found or opened.
+fn open_vz_wad() -> wad::Wad {
+    let path = vz_wad_path();
+    wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"))
 }
 
 #[test]
 fn named_effects_load_and_a_non_effect_does_not() {
-    let Some(mut w) = open() else {
-        return eprintln!("SKIPPING: no vz.wad discovered. Set MERCS2_GAME_DIR.");
-    };
+    let mut w = open_vz_wad();
     for name in ["global_env_godray2", "global_explosion_c4"] {
         let fx = load_effect(&mut w, pandemic_hash_m2(name))
             .unwrap_or_else(|e| panic!("{name}: {e}"))
@@ -36,9 +46,7 @@ fn named_effects_load_and_a_non_effect_does_not() {
 /// (0.25, 0.24, 0.20) never is.
 #[test]
 fn the_godray_glow_card_uses_the_real_colr() {
-    let Some(mut w) = open() else {
-        return eprintln!("SKIPPING: no vz.wad discovered. Set MERCS2_GAME_DIR.");
-    };
+    let mut w = open_vz_wad();
     let fx = load_effect(&mut w, pandemic_hash_m2("global_env_godray2")).expect("parse").expect("godray loads");
     let colr = &fx.emitters[0].particle.colr;
     let lum = |c: [u8; 4]| c[0] as u32 + c[1] as u32 + c[2] as u32;
