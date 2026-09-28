@@ -25,7 +25,7 @@ use mercs2_formats::model_inject::{
     drawing_group_caps, inject_fresh_skeleton, inject_parts_into_donor_block,
     inject_static_into_donor_block, ExternalMesh, InjectPart, MtrlRepoint, SkelPart,
 };
-use mercs2_formats::texture::{group_material_indices, parse_mtrl};
+use mercs2_formats::texture::{group_material_indices, parse_mtrl, MtrlSource};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::compress_sges;
 use mercs2_formats::skeleton::Skeleton;
@@ -126,7 +126,8 @@ fn publish(
             let ucfx_len = u32::from_le_bytes([donor[16], donor[17], donor[18], donor[19]]) as usize;
             if 20 + ucfx_len <= donor.len() {
                 let ucfx = &donor[20..20 + ucfx_len];
-                let mats = parse_mtrl(ucfx);
+                let mats = parse_mtrl(ucfx, MtrlSource::Model)
+                    .map_err(|e| format!("donor MTRL: {e}"))?;
                 let gmi = group_material_indices(ucfx);
                 let mat_idx = gmi.get(item.target_group).copied().unwrap_or(0);
                 if let Some(mat) = mats.get(mat_idx) {
@@ -271,7 +272,7 @@ pub fn publish_conformant(
     let ucfx_len = u32::from_le_bytes([donor[16], donor[17], donor[18], donor[19]]) as usize;
     let ucfx = &donor[20..20 + ucfx_len];
     let gmi = group_material_indices(ucfx);
-    let donor_mats = parse_mtrl(ucfx);
+    let donor_mats = parse_mtrl(ucfx, MtrlSource::Model).map_err(|e| format!("donor MTRL: {e}"))?;
     let caps = drawing_group_caps(&donor); // (ordinal, vertex_cap, tri_cap)
     if caps.is_empty() {
         return Err("donor has no drawing groups".into());
