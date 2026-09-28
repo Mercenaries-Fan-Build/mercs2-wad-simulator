@@ -4362,7 +4362,7 @@ pub fn build(
     // no other script edit still needs the linker to run (respectively: mints the loader trampoline,
     // mints the loader trampoline, mints a fresh scripts_vz entry). So a non-empty of any of them
     // must trigger the link even when `mutations` is empty. A bank the front end loads links into
-    // `shell.wad`'s scripts block instead (below).
+    // `shell.wad`'s scripts block (below).
     if !mutations.is_empty()
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
