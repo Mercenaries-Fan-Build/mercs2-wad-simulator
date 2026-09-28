@@ -826,7 +826,7 @@ pub fn shop_reward_append(id: &str, field: &str, shops: &[crate::manifest::ShopV
 /// the DLC's own recipe for a new importable script (`dlc_aset_normalize.py`).
 ///
 /// `import` resolves a module by `(hash of its name, script type 0x42498680)` through the typed-asset
-/// lookup, with no block or WAD in the key (`_SYS._IMPORT` = `FUN_005AE2D0`, decomp 219707-219761),
+/// lookup, with no block or WAD in the key (`_SYS._IMPORT` = `FUN_005AE2D0`, decomp 219707-219760),
 /// so a script minted into any mounted block resolves. It lands in the block of its trampoline host
 /// `wifpmcinterior`, `scripts_vz`.
 pub const QM_MODLOADER_NAME: &str = "qm_modloader";
@@ -929,7 +929,8 @@ fn session_sounds<'a>(
 /// and a new one replaces the caller's, which for the front end is retail's `_StartShellMusic`.
 /// `MrxSoundBanks` reports no failure: `_FlagAssetOpComplete` takes no argument
 /// (`mrxsoundbanks.lua:141-152`) and the engine's callback carries no flag (`audio_code_map.md`
-/// §11.2), so a bank's presence is checked at build time instead.
+/// §11.2), so a bank's presence is checked at build time
+/// ([`crate::sound::check_loader_banks`]).
 fn sound_loader_functions(table: &str, regs: &[&SoundBankRegistration]) -> String {
     let mut load = String::new();
     let mut unload = String::new();
