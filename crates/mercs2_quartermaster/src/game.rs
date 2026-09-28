@@ -401,6 +401,16 @@ impl GameStack {
         exe.is_file().then_some(exe)
     }
 
+    /// The game WAD `file` beside this stack's base WAD (`shell.wad`, `English.wad`, matched
+    /// case-insensitively, [`crate::sound::sibling_wad`]), opened as a stack of its own and never
+    /// merged into this one: `shell.wad` and `vz.wad` never share a mount slot
+    /// (`fixpack/wad_duplicate_inventory.md` §B.5). A missing or unreadable file is an error.
+    pub fn open_sibling(&self, file: &str) -> Result<GameStack, String> {
+        let base = self.wads.first().map(|w| w.path.as_path()).ok_or("the game stack is empty")?;
+        let path = crate::sound::sibling_wad(base, file)?;
+        GameStack::open(std::slice::from_ref(&path)).map_err(|e| e.to_string())
+    }
+
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is
     /// never a mystery.
     pub fn paths(&self) -> Vec<&Path> {
