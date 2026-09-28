@@ -11,9 +11,10 @@
 //!
 //! Models *with* SWIT are expected to differ — that is the fix, not a regression.
 //!
-//! Needs the retail install, and deliberately **not** `#[ignore]`d — it discovers a `vz.wad` and
-//! runs automatically when one is present, skipping loudly when it is not. See the note in
-//! `registry_wad_probe.rs` for why `#[ignore]` was the wrong default.
+//! Needs the retail install, and deliberately **not** `#[ignore]`d — it is game-gated: built by the
+//! `retail` feature, it reads the retail `vz.wad` named by the repo-root `.mercs2-local.toml` and
+//! fails when it is absent. See the note in `registry_wad_probe.rs` for why `#[ignore]` was the wrong
+//! default.
 
 use mercs2_engine::render_state::RenderState;
 use mercs2_engine::{mesh, wad};
@@ -21,8 +22,20 @@ use mercs2_engine::{mesh, wad};
 /// How many model hashes to sweep. The whole 3,007 would decompress thousands of multi-MB blocks.
 const SAMPLE: usize = 200;
 
-fn open_base() -> Option<wad::Wad> {
-    wad::open(&wad::resolve_vz_wad(None)?).ok()
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
+/// The retail `vz.wad`, opened. Panics when it cannot be found or opened.
+fn open_vz_wad() -> wad::Wad {
+    let path = vz_wad_path();
+    wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"))
 }
 
 /// Identify the segments a build kept. NOT by `index_start`: that is an offset into the build's own
@@ -34,11 +47,7 @@ fn kept(draws: &[mesh::DrawGroup]) -> Vec<(usize, usize, u32)> {
 
 #[test]
 fn swit_less_models_gate_identically_at_rung_0() {
-    let Some(mut w) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut w = open_vz_wad();
     let hashes: Vec<u32> = wad::model_list(&w).into_iter().map(|(h, _)| h).take(SAMPLE).collect();
 
     let (mut checked, mut skipped_swit, mut skipped_zero_mask, mut load_fail) = (0, 0, 0, 0);
@@ -90,11 +99,7 @@ fn swit_less_models_gate_identically_at_rung_0() {
 fn build_indexed_all_is_a_superset_of_every_rung() {
     // Whole-model upload must contain every segment any rung could ask for — otherwise moving the
     // filter to draw time silently loses geometry at some distance.
-    let Some(mut w) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut w = open_vz_wad();
     for h in [0x9FCA_E910u32 /* md500 */, 0xA3C1_FABC /* mattias */, 0xE540_47D5 /* destroyer */] {
         let c = wad::extract_container(&mut w, h).expect("container");
         let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
@@ -121,11 +126,7 @@ fn build_indexed_all_is_a_superset_of_every_rung() {
 fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
     // Clause 3 is orthogonal to clause 2: a disabled node is gone at all rungs, near and far. This is
     // the mechanism that hides a wreck, and the one we do not implement today.
-    let Some(mut w) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut w = open_vz_wad();
     let c = wad::extract_container(&mut w, 0x9FCA_E910).expect("md500");
     let (_, _, all, _) = mesh::build_indexed_all(&c).expect("build all");
 
@@ -163,11 +164,7 @@ fn a_meshs_segment_record_is_segm_indx_group_not_segm_group() {
     //
     // Witness: the HIER node whose OWN bbox matches the mesh. It must agree with the node the rule
     // yields, and the barrel must land at turret height.
-    let Some(mut w) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut w = open_vz_wad();
     let c = wad::extract_container(&mut w, 0xF881_47A1).expect("ch_veh_tank_ztz98");
 
     let mut blk = vec![0u8; 20];
