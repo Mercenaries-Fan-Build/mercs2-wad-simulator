@@ -310,7 +310,12 @@ impl Contribution {
                 }
             }
             Contribution::AddTexture { image, .. } => out.push(("image", image.as_path())),
-            Contribution::AddSound { bank, .. } => out.push(("bank", bank.as_path())),
+            Contribution::AddSound { cues, .. } | Contribution::ReplaceSoundBank { cues, .. } => {
+                for c in cues {
+                    out.push(("cues[].wave", c.wave.as_path()));
+                }
+            }
+            Contribution::ReplaceSoundCue { cue, .. } => out.push(("cue.wave", cue.wave.as_path())),
             Contribution::AddMovie { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::AddUi { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
