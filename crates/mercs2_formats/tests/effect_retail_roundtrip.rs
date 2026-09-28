@@ -10,8 +10,7 @@
 //! * the C4 explosion's effect asset resolves by name hash.
 //!
 //! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
-//! `.mercs2-local.toml`, and fails if it is absent — it cannot assert anything about retail it
-//! cannot read.
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::BTreeMap;
 use std::fs::File;
