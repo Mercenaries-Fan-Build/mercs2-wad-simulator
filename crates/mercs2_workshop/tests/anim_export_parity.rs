@@ -13,14 +13,22 @@
 //!             using the values the exporter writes into the file.
 //! If the exporter's convention is wrong, these diverge and the test fails.
 //!
-//! Requires the retail WAD. Deliberately **not** `#[ignore]`d: it discovers the install and runs
-//! automatically when one is present, skipping loudly when it is not — see the note in
-//! `mercs2_engine/tests/registry_wad_probe.rs`.
+//! Game-gated: built by the `retail` feature (`cargo xtask retail-test`), reads the retail vz.wad
+//! named by the repo-root `.mercs2-local.toml`, and fails if it is absent.
 
 use mercs2_engine::{game_world, model::Model, wad};
 use mercs2_formats::anim::QsTransform;
 
 const MATTIAS_V3: u32 = 0xA3C1_FABC;
+
+/// The retail `vz.wad` the repo-root `.mercs2-local.toml` names, opened; panics when it cannot be.
+fn retail_wad() -> wad::Wad {
+    let path = mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!(
+        "CARGO_MANIFEST_DIR"
+    )))
+    .unwrap_or_else(|e| panic!("{e}"));
+    wad::open(&path.to_string_lossy()).unwrap_or_else(|e| panic!("open {}: {e}", path.display()))
+}
 
 /// Column-vector 4x4 multiply, glTF's convention: `out = a · b`.
 fn mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -53,12 +61,7 @@ fn gltf_trs(t: [f32; 3], q: [f32; 4], s: [f32; 3]) -> [[f32; 4]; 4] {
 
 #[test]
 fn exported_animation_matches_engine_pose() {
-    let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
-        eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-        return;
-    };
+    let mut w = retail_wad();
     let m = Model::load(&mut w, MATTIAS_V3).expect("load mattias");
     let (_v, _i, _d, stats) = m.flatten();
     let rig = &stats.rig;
@@ -149,12 +152,7 @@ fn exported_animation_matches_engine_pose() {
 /// large divergence, the parity test has gone blind and is no longer evidence of anything.
 #[test]
 fn a_conjugated_quaternion_would_be_caught() {
-    let Some(mut w) = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()) else {
-        eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-        return;
-    };
+    let mut w = retail_wad();
     let m = Model::load(&mut w, MATTIAS_V3).expect("load mattias");
     let (_v, _i, _d, stats) = m.flatten();
     let rig = &stats.rig;
