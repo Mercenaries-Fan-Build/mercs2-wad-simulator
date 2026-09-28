@@ -53,9 +53,9 @@ fn placement_blocks() -> Vec<(String, Vec<u8>)> {
     for (idx, path) in archive.paths.iter().enumerate() {
         let p = path.to_lowercase();
         if p.contains("layers_static") || p.contains("vz_state") {
-            if let Ok(dec) = decompress_block(&mut file, &archive.indx, idx as u16) {
-                out.push((path.clone(), dec));
-            }
+            let dec = decompress_block(&mut file, &archive.indx, idx as u16)
+                .unwrap_or_else(|e| panic!("decompress block {idx} ({path}): {e}"));
+            out.push((path.clone(), dec));
         }
     }
     out
@@ -149,9 +149,11 @@ fn survey_block(label: &str, block: &[u8], c: &mut Census) {
         let n = size / TRANSFORM_STRIDE;
         for i in 0..n {
             let o = off + i * TRANSFORM_STRIDE;
-            if o + TRANSFORM_STRIDE > block.len() {
-                break;
-            }
+            assert!(
+                o + TRANSFORM_STRIDE <= block.len(),
+                "{label}: Transform record {i} of {n} at {o} runs past the {}-byte block",
+                block.len()
+            );
             c.transform_records += 1;
             let key = u32_le(block, o);
             let pos = [f32_le(block, o + 4), f32_le(block, o + 8), f32_le(block, o + 12)];
