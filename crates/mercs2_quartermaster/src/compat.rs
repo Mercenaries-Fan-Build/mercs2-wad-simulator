@@ -279,6 +279,7 @@ pub fn plan(
             plugins,
             runtime_dlls,
             placed_files,
+            data_files: crate::shader::data_files(m),
         });
     }
 
@@ -695,6 +696,11 @@ pub fn plan(
         conflicts,
         supersedes,
         link_block_paths: build::link_block_paths(inputs.iter().map(|i| &i.shipment.manifest)),
+        link_file_paths: if inputs.iter().any(|i| crate::shader::has_shader_kinds(&i.shipment.manifest)) {
+            crate::shader::DataFile::ALL.to_vec()
+        } else {
+            Vec::new()
+        },
         findings,
     })
 }
