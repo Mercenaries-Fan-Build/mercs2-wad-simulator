@@ -376,6 +376,92 @@ pub const M0221_SOUND_LOAD_IN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0221",
 };
 
+/// A shader source that does not load: `asm` that does not assemble, a `blob` whose disassembly
+/// does not assemble back to the same bytes, a blob `check_blob` refuses (over 0x8000 bytes, a
+/// version token other than its stage's, no end token), no `CTAB` (the engine reads constants by
+/// name through `D3DXGetShaderConstantTable`), a stage that disagrees with the family or the
+/// replaced record, or `add_shader` classes sharing a stem with different bytes.
+pub const M0230_SHADER_SOURCE: Rule = Rule {
+    code: "M0230",
+    title: "a shader source does not load, or its stage is not the one it replaces or registers",
+    doc: "docs/modding/manifest_format.md#m0230",
+};
+
+/// An `add_shader` in a Shipment that does not `load.requires: [{capability: shader-registry}]`:
+/// nothing registers the shaders, so a material keyed to one crashes at `0x00858DB8`.
+pub const M0231_SHADER_CAPABILITY: Rule = Rule {
+    code: "M0231",
+    title: "add_shader without the shader-registry capability",
+    doc: "docs/modding/manifest_format.md#m0231",
+};
+
+/// Needs the game stack and `--original-data`. A `replace_shader` whose stem has no record of the
+/// source's stage in `shader3.bin` (or in `shader3Low.bin` for `shader_low`), that no retail
+/// registration loads, or whose `shader_low` presence disagrees with `shader3Low.bin`.
+pub const M0232_SHADER_TARGET: Rule = Rule {
+    code: "M0232",
+    title: "a replace_shader target is not a registered store record of that stage",
+    doc: "docs/modding/manifest_format.md#m0232",
+};
+
+/// Needs the game stack and `--original-data`. An added store id some resident store already
+/// holds, an added name whose key a retail or added registration already has (the registry keeps
+/// the first), or resident stores reaching the 0x1200-slot id table.
+pub const M0233_SHADER_COLLISION: Rule = Rule {
+    code: "M0233",
+    title: "a shader store id or registration name collides, or the stores fill the id table",
+    doc: "docs/modding/manifest_format.md#m0233",
+};
+
+/// An `add_shader`'s classes are not the family's shape: 4 for a pixel family (base, `_pl`, `_sl`,
+/// `_pl_sl`), 1 for a vertex family; a name that is empty or repeated (the key folds case); or a
+/// stem that is not a `.sho` file name.
+pub const M0234_SHADER_CLASSES: Rule = Rule {
+    code: "M0234",
+    title: "an add_shader's classes are malformed for its family",
+    doc: "docs/modding/manifest_format.md#m0234",
+};
+
+/// A material (`MTRL`) whose pixel-shader key is not a pixel shader registered in every
+/// configuration: `Mtrl_Parse` looks it up and reads the null entry at `0x00858DB8`.
+pub const M0235_MTRL_KEY_UNREGISTERED: Rule = Rule {
+    code: "M0235",
+    title: "a material's pixel-shader key is not registered in every configuration",
+    doc: "docs/modding/manifest_format.md#m0235",
+};
+
+/// A primitive group whose `INFO` vertex-shader word (`+0x0C` main, `+0x10` shadow) is not a
+/// registered vertex shader: the loader's lookup in the vertex registry misses.
+pub const M0236_PRMG_VS_UNREGISTERED: Rule = Rule {
+    code: "M0236",
+    title: "a primitive group's vertex-shader key is not a registered vertex shader",
+    doc: "docs/modding/manifest_format.md#m0236",
+};
+
+/// Needs the game stack. A shader's `CTAB` names a constant its family's binder never resolves, so
+/// the engine never sets it.
+pub const M0237_SHADER_CONSTANT_UNBOUND: Rule = Rule {
+    code: "M0237",
+    title: "a shader constant its family never binds",
+    doc: "docs/modding/manifest_format.md#m0237",
+};
+
+/// Reported by the `add_model` lowering. The vertex shader a group resolves to declares an input
+/// (`dcl_*` usage and index) the group's vertex declaration does not supply.
+pub const M0238_VS_INPUT_UNSUPPLIED: Rule = Rule {
+    code: "M0238",
+    title: "a vertex shader reads an input the group's vertex declaration does not supply",
+    doc: "docs/modding/manifest_format.md#m0238",
+};
+
+/// Needs the game stack. A configuration's registrations exceed a registry: 0x800 pixel names or
+/// 0x100 vertex names. The inserts' probes never give up on a full table.
+pub const M0239_SHADER_CAPACITY: Rule = Rule {
+    code: "M0239",
+    title: "the shader registry's capacity is exceeded",
+    doc: "docs/modding/manifest_format.md#m0239",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -423,6 +509,9 @@ pub const RULES: &[Rule] = &[
     M0216_SOUND_CATEGORY_UNKNOWN,
     M0217_SOUND_LANGUAGE,
     M0221_SOUND_LOAD_IN,
+    M0230_SHADER_SOURCE,
+    M0231_SHADER_CAPABILITY,
+    M0234_SHADER_CLASSES,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -435,6 +524,11 @@ pub const GAME_RULES: &[Rule] = &[
     M0218_SOUND_TARGET_MISSING,
     M0219_LANGUAGE_BASE_INCOMPLETE,
     M0220_SOUND_CUE_SHADOWED,
+    M0232_SHADER_TARGET,
+    M0233_SHADER_COLLISION,
+    M0237_SHADER_CONSTANT_UNBOUND,
+    M0238_VS_INPUT_UNSUPPLIED,
+    M0239_SHADER_CAPACITY,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -800,6 +894,8 @@ pub const ARTIFACT_RULES: &[Rule] = &[
     M0180_DUPLICATE_PRIMARY,
     M0181_HEADER_OVERFLOW,
     M0182_BLOCK_UNREADABLE,
+    M0235_MTRL_KEY_UNREGISTERED,
+    M0236_PRMG_VS_UNREGISTERED,
 ];
 
 /// Rules that can only be answered against the WAD the builder just emitted.
@@ -873,6 +969,108 @@ fn coherent_block(raw: &[u8], label: &str) -> Option<mercs2_formats::ucfx::Parse
     let complete = parsed.entries.len() == parsed.entry_count as usize
         && parsed.containers.len() == parsed.entries.len();
     complete.then_some(parsed)
+}
+
+/// The container types whose loaders parse `MTRL` with `Mtrl_Parse`, and each one's count source.
+fn mtrl_source(type_hash: u32) -> Option<mercs2_formats::texture::MtrlSource> {
+    use mercs2_formats::texture::MtrlSource;
+    use mercs2_formats::types::{
+        TYPE_HASH_FONT, TYPE_HASH_LOWRES_TERRAIN, TYPE_HASH_MODEL, TYPE_HASH_TERRAIN_MESH,
+    };
+    match type_hash {
+        TYPE_HASH_MODEL => Some(MtrlSource::Model),
+        TYPE_HASH_TERRAIN_MESH => Some(MtrlSource::TerrainMesh),
+        TYPE_HASH_FONT => Some(MtrlSource::Font),
+        TYPE_HASH_LOWRES_TERRAIN => Some(MtrlSource::LowResTerrain),
+        mercs2_formats::scrub::TYPE_HASH => Some(MtrlSource::Scrub),
+        _ => None,
+    }
+}
+
+/// M0235 and M0236 over emitted blocks: every material's pixel-shader key is in `pixel`, and every
+/// model primitive group's `INFO` vertex-shader words (`+0x0C` main, `+0x10` shadow; `MESH` and
+/// `TINY` groups carry a 60-byte `INFO`, `SKIN` groups a 56-byte one) are in `vertex`. The key sets
+/// are the registrations made in every configuration ([`crate::shader::keys_everywhere`]).
+pub fn shader_key_checks(
+    blocks: &[mercs2_formats::patch_wad::PatchBlock],
+    pixel: &std::collections::BTreeSet<u32>,
+    vertex: &std::collections::BTreeSet<u32>,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let hang = |rule: Rule, message: String| Diagnostic { rule, severity: Severity::Hang, message, at: None, fix: None };
+    let name = |key: u32| crate::shader::retail_name(key).map(|n| format!(" ({n})")).unwrap_or_default();
+    for blk in blocks {
+        let Some(raw) = inflated(blk) else { continue };
+        let Some(parsed) = coherent_block(&raw, &blk.path_string) else { continue };
+        for (entry, container) in parsed.entries.iter().zip(parsed.containers.iter()) {
+            let Some(source) = mtrl_source(entry.type_hash) else { continue };
+            let label = format!("{} asset 0x{:08X}", blk.path_string, entry.name_hash);
+            match mercs2_formats::texture::parse_mtrl(container, source) {
+                Ok(materials) => {
+                    for (mi, m) in materials.iter().enumerate() {
+                        if !pixel.contains(&m.shader_key) {
+                            out.push(hang(
+                                M0235_MTRL_KEY_UNREGISTERED,
+                                format!(
+                                    "{label}: material {mi}'s pixel-shader key 0x{:08X}{} is not a pixel \
+                                     shader registered in every configuration; Mtrl_Parse reads the \
+                                     null entry at 0x00858DB8",
+                                    m.shader_key,
+                                    name(m.shader_key)
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => out.push(hang(M0235_MTRL_KEY_UNREGISTERED, format!("{label}: its MTRL does not parse: {e}"))),
+            }
+            if entry.type_hash != mercs2_formats::types::TYPE_HASH_MODEL {
+                continue;
+            }
+            let tree = match mercs2_formats::ucfx::parse_ucfx_tree(container) {
+                Ok(t) => t,
+                Err(e) => {
+                    out.push(hang(M0236_PRMG_VS_UNREGISTERED, format!("{label}: the model does not parse: {e}")));
+                    continue;
+                }
+            };
+            for geom in tree.iter().filter(|n| &n.tag == b"GEOM") {
+                for (si, sub) in geom.children.iter().enumerate() {
+                    if !matches!(&sub.tag, b"MESH" | b"SKIN" | b"TINY") {
+                        continue;
+                    }
+                    for (gi, prmg) in sub.children.iter().filter(|n| &n.tag == b"PRMG").enumerate() {
+                        let Some(info) = prmg.children.iter().find(|n| &n.tag == b"INFO").and_then(|n| n.body.as_ref())
+                        else {
+                            out.push(hang(M0236_PRMG_VS_UNREGISTERED, format!("{label}: sub-object {si} group {gi} has no INFO")));
+                            continue;
+                        };
+                        if info.len() < 0x14 {
+                            out.push(hang(
+                                M0236_PRMG_VS_UNREGISTERED,
+                                format!("{label}: sub-object {si} group {gi} INFO is {} bytes, short of the vertex-shader words", info.len()),
+                            ));
+                            continue;
+                        }
+                        for (at, which) in [(0x0C, "main"), (0x10, "shadow")] {
+                            let key = u32::from_le_bytes([info[at], info[at + 1], info[at + 2], info[at + 3]]);
+                            if !vertex.contains(&key) {
+                                out.push(hang(
+                                    M0236_PRMG_VS_UNREGISTERED,
+                                    format!(
+                                        "{label}: sub-object {si} group {gi}'s {which} vertex-shader key \
+                                         0x{key:08X}{} is not a vertex shader registered in every configuration",
+                                        name(key)
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// M0003 — a texture BODY shorter than the mip chain the engine will read out of it.
@@ -1774,6 +1972,9 @@ pub fn lint(
                     }
                 }
             }
+            Contribution::AddShader { family, classes } => {
+                out.extend(shader_class_checks(index, *family, classes));
+            }
             Contribution::AddModel {
                 name,
                 retarget,
@@ -1806,7 +2007,200 @@ pub fn lint(
         }
     }
 
+    // M0231: the shaders an add_shader declares register at runtime, through the m2-sdk.
+    let adds_shaders = manifest.contributions.iter().position(|c| matches!(c, Contribution::AddShader { .. }));
+    let has_capability = manifest.load.requires.iter().any(|r| {
+        matches!(r, crate::manifest::Requirement::Capability(c) if c.capability == crate::shader::CAPABILITY)
+    });
+    if let (Some(index), false) = (adds_shaders, has_capability) {
+        out.push(Diagnostic {
+            rule: M0231_SHADER_CAPABILITY,
+            severity: Severity::Error,
+            message: format!(
+                "add_shader needs `load.requires: [{{capability: {}}}]`: the m2-sdk registers the \
+                 shaders from the author's ASI, and without it nothing registers them",
+                crate::shader::CAPABILITY
+            ),
+            at: Some(index),
+            fix: None,
+        });
+    }
+
+    // M0230: every shader source loads, with the stage its family or target needs.
+    if let Some(root) = root {
+        if crate::shader::has_shader_kinds(manifest) {
+            if let Err(findings) = crate::shader::shipment_edits(&manifest.shipment.name, manifest, root) {
+                for f in findings.into_iter().filter(|f| !source_issue_at.contains(&f.index)) {
+                    out.push(Diagnostic {
+                        rule: M0230_SHADER_SOURCE,
+                        severity: Severity::Error,
+                        message: f.message,
+                        at: Some(f.index),
+                        fix: None,
+                    });
+                }
+            }
+        }
+    }
+
     out
+}
+
+/// M0234 for one `add_shader`: the class count its family's stage takes, names that are non-empty
+/// and distinct by key, and `.sho` stems.
+fn shader_class_checks(
+    index: usize,
+    family: crate::shader::ShaderFamily,
+    classes: &[crate::manifest::ShaderClass],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut push = |message: String| {
+        out.push(Diagnostic { rule: M0234_SHADER_CLASSES, severity: Severity::Error, message, at: Some(index), fix: None })
+    };
+    let want = family.class_count();
+    if classes.len() != want {
+        push(match family.stage() {
+            crate::shader::Stage::Pixel => format!(
+                "family {} is a pixel family: classes must be exactly 4, in light-class order (base, \
+                 _pl, _sl, _pl_sl), because the material's index plus the light class selects the \
+                 pixel shader; this has {}",
+                family.name(),
+                classes.len()
+            ),
+            crate::shader::Stage::Vertex => format!(
+                "family {} is a vertex family: classes must be exactly 1; this has {}",
+                family.name(),
+                classes.len()
+            ),
+        });
+    }
+    let mut keys: Vec<(u32, &str)> = Vec::new();
+    for (ci, class) in classes.iter().enumerate() {
+        if class.name.trim().is_empty() || class.name.trim() != class.name {
+            push(format!("classes[{ci}].name {:?} is empty or has surrounding whitespace", class.name));
+        }
+        let key = mercs2_formats::hash::pandemic_hash_m2(&class.name);
+        if let Some((_, first)) = keys.iter().find(|(k, _)| *k == key) {
+            push(format!(
+                "classes[{ci}].name {:?} has the key of {first:?} (the hash folds case); each class \
+                 is its own registration",
+                class.name
+            ));
+        } else {
+            keys.push((key, &class.name));
+        }
+        if let Some(why) = crate::shader::stem_refusal(&class.stem) {
+            push(format!("classes[{ci}].stem {:?}: {why}", class.stem));
+        }
+    }
+    out
+}
+
+/// The checks of the shader kinds that need the game and `--original-data`: M0232 and M0233 by
+/// applying the Shipment's edits to the original stores beside the VT and R2VB pairs of the game's
+/// `data` folder (`game_data`), M0233
+/// and M0239 over the registry, and M0237 over each source's constants.
+///
+/// `Err` when the environment cannot answer: the original stores or the game's store pairs do not
+/// read. Sources that do not load are M0230, reported by [`lint`], and are not repeated here.
+pub fn shader_game_checks(
+    manifest: &Manifest,
+    root: &Path,
+    game_data: &Path,
+    original_data: &Path,
+) -> Result<Vec<Diagnostic>, String> {
+    use crate::shader;
+    let mut out = Vec::new();
+    if !shader::has_shader_kinds(manifest) {
+        return Ok(out);
+    }
+    let name = &manifest.shipment.name;
+    let Ok(edits) = shader::shipment_edits(name, manifest, root) else {
+        return Ok(out);
+    };
+    let originals = shader::read_originals(original_data)?;
+    let extra = shader::read_extra_pairs(game_data)?;
+    let diag = |rule: Rule, severity: Severity, message: String, at: usize| Diagnostic {
+        rule,
+        severity,
+        message,
+        at: Some(at),
+        fix: None,
+    };
+    if let Err(e) = shader::apply_edits(&originals, &extra, &edits) {
+        let rule = if e.code == "M0232" { M0232_SHADER_TARGET } else { M0233_SHADER_COLLISION };
+        match e.at {
+            Some((_, index)) => out.push(diag(rule, Severity::Error, e.message, index)),
+            None => return Err(e.to_string()),
+        }
+    }
+    let added = shader::added(name, manifest);
+    for (a, code, message) in shader::registration_findings(&added) {
+        let (rule, severity) = if code == "M0239" {
+            (M0239_SHADER_CAPACITY, Severity::Hang)
+        } else {
+            (M0233_SHADER_COLLISION, Severity::Error)
+        };
+        out.push(diag(rule, severity, message, a.index));
+    }
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        match c {
+            Contribution::ReplaceShader { target, .. } => {
+                let fams = shader::retail_families_of_stem(target);
+                if fams.is_empty() {
+                    out.push(diag(
+                        M0232_SHADER_TARGET,
+                        Severity::Error,
+                        format!(
+                            "no retail registration loads {target}.sho, so the engine never reads the \
+                             record replace_shader edits"
+                        ),
+                        index,
+                    ));
+                    continue;
+                }
+                for e in edits.iter().filter(|e| e.index == index) {
+                    for fam in &fams {
+                        let info = shader::families().iter().find(|f| f.name == *fam).expect("a registered family");
+                        let unbound = shader::unbound_constants(info, &e.code);
+                        if !unbound.is_empty() {
+                            out.push(diag(
+                                M0237_SHADER_CONSTANT_UNBOUND,
+                                Severity::Error,
+                                format!(
+                                    "{target} ({}) names constant(s) {unbound:?} that family {fam}'s \
+                                     binder never resolves, so the engine never sets them",
+                                    e.file.file_name()
+                                ),
+                                index,
+                            ));
+                        }
+                    }
+                }
+            }
+            Contribution::AddShader { family, .. } => {
+                for e in edits.iter().filter(|e| e.index == index) {
+                    let unbound = shader::unbound_constants(family.info(), &e.code);
+                    if !unbound.is_empty() {
+                        out.push(diag(
+                            M0237_SHADER_CONSTANT_UNBOUND,
+                            Severity::Error,
+                            format!(
+                                "stem {} ({}) names constant(s) {unbound:?} that family {}'s binder \
+                                 never resolves, so the engine never sets them",
+                                e.stem,
+                                e.file.file_name(),
+                                family.name()
+                            ),
+                            index,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// The build gate. `Hang` and `Error` block; warnings do not.
