@@ -313,6 +313,28 @@ fn m0237_fires_for_a_constant_the_family_never_binds() {
 }
 
 #[test]
+fn m0237_lets_a_replacement_keep_the_constants_its_retail_record_declares() {
+    let dir = scratch("m0237_keep");
+    write_sources(&dir);
+    let (original, game) = stores(&dir);
+    let tinted = "vs_3_0\n.ctab creator=\"t\" target=\"vs_3_0\" flags=0x0\n.const myTint c0 1 : vector float 1x4 [1]\n\
+                  .endctab\ndcl_position v0\ndcl_position o0\nadd o0, v0, c0\n";
+    std::fs::write(dir.join("src/vs.asm"), tinted).unwrap();
+    let s = shipment(&dir, false, &replace_mesh_vp(true));
+    assert!(codes(&game_checks(&s, &original, &game)).contains(&"M0237"), "the record does not declare myTint");
+    // An original PgMeshVP that declares myTint.
+    let mut b = StoreBuilder::new();
+    b.add(store_id("PgMeshVP", false).unwrap(), ShaderKind::Vertex, asm(tinted), &[]).unwrap();
+    b.add(store_id("PgSkyFP", false).unwrap(), ShaderKind::Pixel, asm(PS_ASM), &[]).unwrap();
+    std::fs::write(original.join("shader3.bin"), b.to_bytes().unwrap()).unwrap();
+    let d = game_checks(&s, &original, &game);
+    assert!(
+        !d.iter().any(|x| x.rule.code == "M0237" && x.message.contains("shader3.bin")),
+        "{d:?}"
+    );
+}
+
+#[test]
 fn m0239_fires_when_the_vertex_registry_would_overflow() {
     let dir = scratch("m0239");
     write_sources(&dir);
