@@ -201,7 +201,9 @@ mod retail {
         let mut checked = 0;
         for clip in idx.clips.iter().filter(|c| c.wave_index.is_some() && c.duration_s > 0.3).step_by(1500) {
             let wi = clip.wave_index.unwrap();
-            let Ok(pcm) = vo.clip_pcm(wi) else { continue };
+            let pcm = vo
+                .clip_pcm(wi)
+                .unwrap_or_else(|e| panic!("clip {wi} ({}) failed to decode: {e}", clip.original));
             let got = pcm.duration_s();
             assert!(
                 (got - clip.duration_s).abs() < 0.15,
