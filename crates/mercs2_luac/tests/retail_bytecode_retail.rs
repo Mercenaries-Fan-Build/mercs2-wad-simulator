@@ -52,7 +52,9 @@ fn every_retail_chunk_loads_into_this_vm() {
     let mut failures: Vec<String> = Vec::new();
 
     for (idx, entry) in block.entries.iter().enumerate() {
-        let Ok(chunk) = block.extract_lua(idx) else { continue };
+        let chunk = block
+            .extract_lua(idx)
+            .unwrap_or_else(|e| panic!("entry {idx} (0x{:08X}): extract_lua: {e}", entry.name_hash));
         if chunk.len() < 12 || &chunk[..4] != b"\x1bLua" {
             continue; // not a binary chunk; nothing to claim about it
         }
@@ -84,7 +86,9 @@ fn a_retail_chunk_is_a_callable_function() {
     let lua = Lua::new().expect("vm");
     let mut checked = 0usize;
     for (idx, entry) in block.entries.iter().enumerate() {
-        let Ok(chunk) = block.extract_lua(idx) else { continue };
+        let chunk = block
+            .extract_lua(idx)
+            .unwrap_or_else(|e| panic!("entry {idx} (0x{:08X}): extract_lua: {e}", entry.name_hash));
         if chunk.len() < 12 || &chunk[..4] != b"\x1bLua" {
             continue;
         }
