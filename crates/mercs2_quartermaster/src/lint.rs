@@ -355,9 +355,9 @@ pub const M0219_LANGUAGE_BASE_INCOMPLETE: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0219",
 };
 
-/// Needs the game stack. An `add_sound` cue named like a cue the game already has: FindCue walks the
-/// loaded sound tables from the first loaded (`FUN_00835a70`), so the game's own cue answers and the
-/// added one never plays.
+/// Needs the game stack. An `add_sound` cue named like a cue the game already has, in `vz.wad` or
+/// any installed language's voice-over: FindCue walks the loaded sound tables from the first loaded
+/// (`FUN_00835a70`), so the game's own cue answers and the added one never plays.
 pub const M0220_SOUND_CUE_SHADOWED: Rule = Rule {
     code: "M0220",
     title: "an add_sound cue has the name of a cue the game already has",
@@ -537,7 +537,7 @@ pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic>
     // M0220: an added cue named like a cue the game routes. FindCue answers with the first loaded
     // table that has the guid (`FUN_00835a70`), so the game's cue plays and the added one never does.
     if manifest.contributions.iter().any(|c| matches!(c, Contribution::AddSound { .. })) {
-        match crate::sound::game_cue_guids(game) {
+        match crate::sound::installed_cue_guids(game) {
             Ok(guids) => {
                 for (index, c) in manifest.contributions.iter().enumerate() {
                     let Contribution::AddSound { cues, .. } = c else { continue };
