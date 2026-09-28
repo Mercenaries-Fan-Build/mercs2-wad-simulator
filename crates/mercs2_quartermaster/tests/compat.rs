@@ -764,7 +764,7 @@ fn a_consumer_listed_before_ess_is_baked_after_it() {
             movie: "ess_ui".into(),
         },
     ];
-    let bake = link::qm_modloader_source(&regs, &[], &[], &names).unwrap();
+    let bake = link::qm_modloader_source(&regs, &[], &[], &[], &names).unwrap();
     assert!(
         bake.find("ess_ui").unwrap() < bake.find("consumer_hud").unwrap(),
         "{bake}"
