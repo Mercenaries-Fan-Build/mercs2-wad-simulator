@@ -45,6 +45,7 @@
   "link_block_paths": [
     "blocks\\VZ\\scripts_vz_P000_Q3.block",
     "blocks\\VZ\\resident_P000_Q3.block",
+    "blocks\\Shell\\resident_P000_Q3.block",
     "blocks\\VZ\\mod_b6a13123.block"
   ],
   "findings": []
