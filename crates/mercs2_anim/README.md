@@ -82,12 +82,14 @@ animation_system(&mut world, Some(&picker), &assets, dt); // writes SkinPalette 
 Tests:
 
 ```
-VZ_WAD=/path/to/vz.wad cargo test -p mercs2_anim
+cargo test -p mercs2_anim                 # hermetic
+cargo xtask retail-test                   # game-gated, workspace-wide
 ```
 
 The end-to-end test (`live_clip_picker_if_wad_present`) parses the retail `vz.wad`, resolves the
-three mercs' idles, and asserts the live-captured Chris idle is reachable. It **skips** (stays green)
-when the WAD is absent, so CI without retail data passes.
+three mercs' idles, and asserts the live-captured Chris idle is reachable. It is game-gated: built
+only by the `retail` feature, it reads the `vz.wad` named by the repo-root `.mercs2-local.toml`
+(`scripts/find-vz-wad.sh --write`) and fails when that is missing. CI does not build it.
 
 ## Modules
 
