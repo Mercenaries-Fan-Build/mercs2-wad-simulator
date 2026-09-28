@@ -343,7 +343,51 @@ pub fn extract_data_chunk_safe(container: &SafeSlice) -> AccessResult<SafeSlice>
 /// `GfxMovie::parse` gates the movie path, because a container whose `data` leaf is not what its
 /// type claims still checksums, still walks and still resolves; the loader is the first thing that
 /// finds out, and it does not say which asset.
+///
+/// The one-entry case of [`build_wrapped_entries`].
 pub fn build_wrapped_block(name_hash: u32, type_hash: u32, payload: &[u8]) -> Vec<u8> {
+    build_wrapped_entries(&[WrappedEntry { name_hash, type_hash, payload }])
+}
+
+/// One entry of a block [`build_wrapped_entries`] assembles: the entry row's name and type hash, and
+/// the payload its container wraps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrappedEntry<'a> {
+    pub name_hash: u32,
+    pub type_hash: u32,
+    pub payload: &'a [u8],
+}
+
+/// Wrap each payload as a single-`data`-leaf UCFX container (the shape [`build_wrapped_block`]
+/// documents) and lay them out as ONE block:
+///
+/// ```text
+/// u32 count
+/// count × { u32 name_hash, u32 type_hash, u32 0, u32 container size }
+/// the containers, in row order, back to back
+/// ```
+///
+/// This is the layout [`walk_decompressed_block`] reads. A retail sound bank is one such block of
+/// three entries under one name hash (soundbank, sounddb, wavebank).
+pub fn build_wrapped_entries(entries: &[WrappedEntry<'_>]) -> Vec<u8> {
+    let containers: Vec<Vec<u8>> = entries.iter().map(|e| wrap_data_container(e.payload)).collect();
+    let rows = 4 + 16 * entries.len();
+    let mut block = Vec::with_capacity(rows + containers.iter().map(Vec::len).sum::<usize>());
+    block.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (e, c) in entries.iter().zip(&containers) {
+        block.extend_from_slice(&e.name_hash.to_le_bytes());
+        block.extend_from_slice(&e.type_hash.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&(c.len() as u32).to_le_bytes());
+    }
+    for c in &containers {
+        block.extend_from_slice(c);
+    }
+    block
+}
+
+/// `UCFX | 40 | 0 | 0 | 1 | {"data", 0, len, 0, 0} | payload | "CSUM" | crc32_mercs2`.
+fn wrap_data_container(payload: &[u8]) -> Vec<u8> {
     const HEADER: u32 = 20;
     const DESC_ROW: u32 = 20;
     let data_area_off = HEADER + DESC_ROW;
@@ -363,15 +407,7 @@ pub fn build_wrapped_block(name_hash: u32, type_hash: u32, payload: &[u8]) -> Ve
     let csum = crate::crc32::crc32_mercs2(&ucfx);
     ucfx.extend_from_slice(b"CSUM");
     ucfx.extend_from_slice(&csum.to_le_bytes());
-
-    let mut block = Vec::with_capacity(20 + ucfx.len());
-    block.extend_from_slice(&1u32.to_le_bytes()); // entry count
-    block.extend_from_slice(&name_hash.to_le_bytes());
-    block.extend_from_slice(&type_hash.to_le_bytes());
-    block.extend_from_slice(&0u32.to_le_bytes());
-    block.extend_from_slice(&(ucfx.len() as u32).to_le_bytes());
-    block.extend_from_slice(&ucfx);
-    block
+    ucfx
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -780,5 +816,44 @@ mod tests {
             get_container_by_type_hash(&parsed, 0x1111_1111, Some(0xAAAA_AAAA)).as_deref(),
             Some(&b"last"[..]),
         );
+    }
+
+    /// Three entries: the rows come first, then the containers in row order; the walker reads each
+    /// back under its own row with a clean CSUM, and each container is the one-entry wrapping of its
+    /// payload.
+    #[test]
+    fn wrapped_entries_lay_out_rows_then_containers() {
+        let payloads: [&[u8]; 3] = [b"soundbank body", b"sounddb", b"wavebank body bytes"];
+        let types = [0x9F8B_CA10, 0xE527_3C14, 0xF753_F6D0];
+        let entries: Vec<WrappedEntry<'_>> = payloads
+            .iter()
+            .zip(types)
+            .map(|(p, t)| WrappedEntry { name_hash: 0x1234_5678, type_hash: t, payload: p })
+            .collect();
+        let block = build_wrapped_entries(&entries);
+
+        let (parsed, issues) = walk_decompressed_block(&block, "three");
+        assert!(issues.is_empty(), "{:?}", issues.iter().map(|i| &i.detail).collect::<Vec<_>>());
+        assert_eq!(parsed.entry_count, 3);
+        let mut expected_len = 4 + 16 * 3;
+        for (i, e) in parsed.entries.iter().enumerate() {
+            assert_eq!(e.name_hash, 0x1234_5678);
+            assert_eq!(e.type_hash, types[i]);
+            assert_eq!(e.field_c, 0);
+            let single = build_wrapped_block(0x1234_5678, types[i], payloads[i]);
+            assert_eq!(parsed.containers[i], single[20..], "entry {i} container");
+            assert_eq!(extract_data_chunk(&parsed.containers[i]).as_deref(), Some(payloads[i]));
+            expected_len += e.chunk_size as usize;
+        }
+        assert_eq!(block.len(), expected_len, "nothing follows the last container");
+    }
+
+    /// The one-entry block is exactly `build_wrapped_block`'s bytes.
+    #[test]
+    fn a_one_entry_block_is_the_wrapped_block() {
+        let one = build_wrapped_entries(&[WrappedEntry { name_hash: 7, type_hash: 9, payload: b"abc" }]);
+        assert_eq!(one, build_wrapped_block(7, 9, b"abc"));
+        assert_eq!(read_u32_le(&one, 0), 1);
+        assert_eq!(read_u32_le(&one, 16) as usize, one.len() - 20);
     }
 }
