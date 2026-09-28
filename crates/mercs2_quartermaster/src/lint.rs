@@ -340,10 +340,11 @@ pub const M0217_SOUND_LANGUAGE: Rule = Rule {
 };
 
 /// Needs the game stack. The bank a `replace_sound_bank` / `replace_sound_cue` names is not in the
-/// game, or the cue a `replace_sound_cue` names is not in that bank.
+/// game, no retail Lua call site loads it in a level that carries it
+/// ([`crate::sound::carrier_session`]), or the cue a `replace_sound_cue` names is not in that bank.
 pub const M0218_SOUND_TARGET_MISSING: Rule = Rule {
     code: "M0218",
-    title: "a sound override's bank or cue is not in the game",
+    title: "a sound override's bank or cue is not in the game, or the game never loads the bank",
     doc: "docs/modding/manifest_format.md#m0218",
 };
 
@@ -362,6 +363,14 @@ pub const M0220_SOUND_CUE_SHADOWED: Rule = Rule {
     code: "M0220",
     title: "an add_sound cue has the name of a cue the game already has",
     doc: "docs/modding/manifest_format.md#m0220",
+};
+
+/// An `add_sound` whose `load_in` lists no session, or one session twice: the bank would load
+/// nowhere, or the list says something other than what ships.
+pub const M0221_SOUND_LOAD_IN: Rule = Rule {
+    code: "M0221",
+    title: "an add_sound's load_in is empty or lists a session twice",
+    doc: "docs/modding/manifest_format.md#m0221",
 };
 
 /// Needs the game stack — see [`game_checks`], not [`lint`].
@@ -410,6 +419,7 @@ pub const RULES: &[Rule] = &[
     M0215_SOUND_NAME_UNUSABLE,
     M0216_SOUND_CATEGORY_UNKNOWN,
     M0217_SOUND_LANGUAGE,
+    M0221_SOUND_LOAD_IN,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -979,6 +989,24 @@ fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
             "the {what} name {name:?} is a bare hash; a sound {what} is authored by name, and the \
              name is what its guid is the hash of"
         ));
+    }
+    None
+}
+
+/// Why an `add_sound`'s `load_in` cannot be shipped as written (M0221), or `None`: it must list at
+/// least one session, each once.
+fn load_in_refusal(load_in: &[crate::manifest::LoadSession]) -> Option<String> {
+    let all = crate::manifest::LoadSession::ALL.map(|s| s.token()).join(", ");
+    if load_in.is_empty() {
+        return Some(format!(
+            "load_in lists no session, so no loader would load the bank. List where it plays: {all}."
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for s in load_in {
+        if !seen.insert(*s) {
+            return Some(format!("load_in lists {} twice. List each session once ({all}).", s.token()));
+        }
     }
     None
 }
@@ -1678,7 +1706,7 @@ pub fn lint(
                     &source_issue_at,
                 ));
             }
-            Contribution::AddSound { bank, category, cues } => {
+            Contribution::AddSound { bank, category, cues, load_in } => {
                 let fields = SoundFields {
                     kind: c.kind(),
                     bank,
@@ -1687,6 +1715,15 @@ pub fn lint(
                     cues: cues.iter().collect(),
                 };
                 out.extend(sound_checks(index, &fields, root, &source_issue_at));
+                if let Some(message) = load_in_refusal(load_in) {
+                    out.push(Diagnostic {
+                        rule: M0221_SOUND_LOAD_IN,
+                        severity: Severity::Error,
+                        message: format!("add_sound bank {bank:?}: {message}"),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
             }
             Contribution::ReplaceSoundBank { bank, language, category, cues } => {
                 let fields = SoundFields {
