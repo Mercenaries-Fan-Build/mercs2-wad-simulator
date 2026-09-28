@@ -15,8 +15,10 @@ everything between a script-level `Sound.CueSound(...)` and int16 PCM leaving th
   cues (which group a cue plays).
 * **`wavebank` decode** — turns a `LoadWaveBank` body into resident PCM clips (PCM16 + IMA-ADPCM
   decoders live here).
-* **Bank encoding** — builds a bank's wavebank, soundbank and sounddb from named PCM16 cues; every
-  one of the three codecs re-encodes all retail tables in `vz.wad` byte-identically.
+* **Bank encoding** — builds a bank's wavebank, soundbank and sounddb from named PCM16 cues, and
+  rewrites one cue of an existing soundbank to play a new wave; every one of the three codecs
+  re-encodes all retail tables in `vz.wad` byte-identically.
+* **WAV input** — a strict reader for the PCM16 WAVs an authored wave comes in as.
 * **Cue playback** — a started cue advanced frame by frame as the engine advances it: sounds fire at
   their start times, pick their groups and waves, draw their base volume / pitch / start delay, and
   follow the cue's and track's volume / pitch ramps, LFOs, parameter curves and output-channel
@@ -142,8 +144,13 @@ facts that matter most:
   a cue (`FUN_00603D20(0, 0, 1)` → `FUN_00835720`); its finite cues play to their end, and the record
   is freed once they have.
 * A bank's soundbank, sounddb and wavebank ship as three entries of one block under one name hash, each
-  wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload (one retail soundbank,
+  wrapped exactly as `mercs2_formats::ucfx::build_wrapped_block` wraps a payload
+  (`mercs2_formats::ucfx::build_wrapped_entries` lays several out as one block; one retail soundbank,
   `0xDCCF8AFA`, plays other blocks' waves and has no wavebank of its own).
+* **FindCue answers with the first loaded table.** The sounddb loader appends each table at the tail of
+  the list FindCue walks from the head (`FUN_00835b80`, `FUN_00835a70`), so when two loaded tables
+  route one guid, the one loaded first wins. A new cue under a name the game already routes never
+  plays; changing a game cue means rewriting it in the game's own bank (`encode::retarget_cue`).
 
 Resolving every per-bank sounddb entry in `vz.wad` (1,198 cues) with every `vz.wad` bank resident:
 **1,012** resolve through every path to decoded PCM (628 of them multi-track). The rest are named, never
@@ -155,8 +162,11 @@ cue that does not play it for 1,084 of the 1,198 cues.
 
 Retail verification (game-gated: built only by the `retail` feature, reading the `vz.wad` named by the
 repo-root `.mercs2-local.toml`, and failing when it is missing — run with `cargo xtask retail-test`):
-`tests/retail_banks.rs` here, and `mercs2_probe/tests/audio_wad_probe.rs` for the resident banks mixed
-through the engine.
+`tests/retail_banks.rs` here, `tests/retail_fields.rs` (the census of the group and cue fields an author
+declares — sound id, priority, `+0x20`, start limit, single-track `+0x16`, the single-wave weight, the
+clip hash — over `vz.wad`, `English.wad` and `shell.wad`, and how `English.wad` keys its tables as
+`<bank>.english`), and `mercs2_probe/tests/audio_wad_probe.rs` for the resident banks mixed through
+the engine.
 
 ## Usage
 
@@ -226,6 +236,31 @@ let bank = encode_bank(&BankSpec {
 // bank.wavebank / bank.soundbank / bank.sounddb: the three `data` bodies, all under bank.bank_hash.
 ```
 
+Read an authored WAV, and rewrite one cue of a game bank to play it from a wavebank of your own:
+
+```rust
+use mercs2_audio::encode::{retarget_cue, CueSpec};
+use mercs2_audio::soundbank::Soundbank;
+use mercs2_audio::wav::read_pcm16_wav;
+use mercs2_audio::wave::WavebankFile;
+
+let pcm = read_pcm16_wav(&std::fs::read("pda_open.wav")?)?; // PCM16, mono or stereo, any rate > 0
+let mut ui_hud = Soundbank::parse(&game_soundbank_body)?;
+let spec = CueSpec {
+    name: "ui_PDA_Open_01_st".into(), // the cue to rewrite
+    category: "ui".into(),
+    sound_id,
+    clip_hash,
+    pcm,
+    group, // GroupParams: every group field, declared
+    cue,   // CueParams: every cue field, declared
+};
+let mine = m2("my_waves");
+let r = retarget_cue(&mut ui_hud, &spec, mine, 0)?; // the cue keeps its index; one group is appended
+let wavebank = WavebankFile { bank_hash: mine, stream_name: None, records: vec![r.record] }.to_bytes()?;
+let soundbank = ui_hud.to_bytes()?; // every other cue and group byte-identical
+```
+
 Music and categories go through the same facade:
 
 ```rust
@@ -256,8 +291,11 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
 * **`wave`** — `WavebankFile` (exact parse/serialize) + PCM16/IMA-ADPCM decoders → `DecodedClip` /
   `Wavebank`.
 * **`encode`** — `encode_bank` (named PCM16 cues) and `encode_general` (waves, single- and multi-wave
-  groups, single- and multi-track cues) → the three table bodies; the `UI_PDA_OPEN_*` presets and the
-  retail category table.
+  groups, single- and multi-track cues) → the three table bodies; `retarget_cue` (one cue of a parsed
+  soundbank rewritten to play a new single-wave group) and `wave_record`; the `UI_PDA_OPEN_*` presets,
+  the retail category table and `RETAIL_CATEGORY_NAMES` (14 of its 19 categories named).
+* **`wav`** — `read_pcm16_wav`: uncompressed 16-bit PCM, mono or stereo, any rate above zero, and a
+  refusal with the reason for anything else.
 * **`voice`** — `VoicePool`: acquire, priority-steal, the 16-state `InstanceState` FSM.
 * **`mixer`** — `Mixer`: the per-source mix path (scratch, wave kernel, filter, commit, saturate);
   `SampleSource` trait, `PcmSource` (the wave kernel's 32.32 step and loop wrap), `ToneSource`.
