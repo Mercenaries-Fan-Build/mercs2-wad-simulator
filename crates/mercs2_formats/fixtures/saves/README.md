@@ -7,20 +7,10 @@ hardcoded path.
 
 ## Why they are committed
 
-They were previously read from one developer's `C:/Users/Shadow/Documents/My Games/Mercenaries 2/SaveGames`.
-That had two failure modes, both bad:
-
-* **`src/save.rs`** — the loader called `.unwrap_or_else(|e| panic!(...))`, so on any other machine
-  eight tests failed with "No such file or directory" rather than testing anything.
-* **`src/save_write.rs`** — the loader used `.ok()`, so every write-side test skipped silently and
-  reported **green while asserting nothing**. The module documents the `ProfileHash` derivation as
-  "verified byte-exact against all 8 retail `.profile` files"; that verification had not actually
-  executed anywhere but the machine the path names.
-
-A test that can only run on one computer is not a test. At 13,404 bytes each the whole set is 128 KiB,
-so vendoring costs nothing and makes every claim about the format continuously checked. (This is not
-an option for `vz.wad`, at 2.5 GiB — WAD-dependent tests are instead built only by the `retail`
-feature and run with `cargo xtask retail-test`, failing when `.mercs2-local.toml` names no `vz.wad`.)
+Every save test, read side and write side, runs on every machine against these files, so every
+claim about the format is continuously checked. At 13,404 bytes each the whole set is 128 KiB.
+(`vz.wad`, at 2.5 GiB, is not committed: WAD-dependent tests are built only by the `retail` feature
+and run with `cargo xtask retail-test`, failing when `.mercs2-local.toml` names no `vz.wad`.)
 
 ## The set
 
