@@ -181,7 +181,7 @@ impl Domain {
             Domain::Characters => &["add_outfit", "add_model", "add_texture", "replace_texture"],
             Domain::Weapons => &["add_model", "replace_texture", "add_texture"],
             Domain::Driving => &["add_model", "replace_texture", "add_texture", "edit_state_machine"],
-            Domain::Audio => &["add_sound"],
+            Domain::Audio => &["add_sound", "replace_sound_bank", "replace_sound_cue"],
             Domain::Missions => &["patch_lua", "edit_stringdb"],
             Domain::Systems => &["native_hook", "place_file", "patch_lua", "add_ui", "raw"],
         }
@@ -236,6 +236,15 @@ mod tests {
         assert!(Domain::World.kinds().contains(&"activate_layer"));
         assert!(Domain::World.browses_layers());
         assert!(Domain::ALL.iter().filter(|d| d.browses_layers()).count() == 1);
+    }
+
+    /// Audio offers every sound kind: a new bank, a replaced bank, and a replaced cue.
+    #[test]
+    fn audio_offers_every_sound_kind() {
+        assert_eq!(
+            Domain::Audio.kinds(),
+            &["add_sound", "replace_sound_bank", "replace_sound_cue"]
+        );
     }
 
     /// An unnamed (hash-only) row belongs to no domain lens — there is nothing to classify on.
