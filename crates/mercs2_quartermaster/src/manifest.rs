@@ -34,7 +34,7 @@ pub const MAX_NAME_LEN: usize = 64;
 /// for. Compared lowercased.
 pub const DENY_LISTED_DLL_STEMS: &[&str] = &["pmc_bb", "cruise", "dxwrapper", "binkw32"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: u32,
@@ -393,36 +393,112 @@ pub struct Textures {
     pub specular: Option<PathBuf>,
 }
 
-/// Which audio table a bank is.
+/// A language the engine can run in: an entry of its language table.
 ///
-/// A closed set of three, because the ASET type id decides which loader the engine dispatches
-/// and there is nothing safe to guess. All three are opaque `data` wrappers in retail —
-/// `soundbank` 98/98, `sounddb` 58/58, `wavebank` 92/93 — measured in
-/// `mercs2_formats/tests/novel_asset_shape_survey.rs`.
-///
-/// The bytes are copied VERBATIM: this crate has no encoder for any of them, and swapping an
-/// author's working bank for one nobody has run is the kind of helpfulness that produces a WAD
-/// which looks fine and does nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The table (`0x00CF281C`, nine pointers, bounded by `FUN_00826a10`) reads english, spanish,
+/// italian, french, german, japanese, english_uk, allcaps, russian; `*DAT_01176018` indexes it. The
+/// engine opens `.\Data\<entry>.wad` and `.\Data\<entry>-patch.wad` by the entry
+/// (`FUN_004BFE20`, `FUN_004BFEF0`), and retail Lua appends the same entry to every `vo_*` bank
+/// name before loading it (`_GetLocalizedName` with `Gui.GetLanguageName`,
+/// `mrxsoundbanks.lua:80-87`), so the token names both a language's WADs and its voice-over banks.
+/// `english_uk` and `allcaps` are selectable only from the command line (option `0xC13F3DE2`,
+/// `FUN_00826a10`); the OS-locale map (`FUN_00826a90`) never picks them, and the `GetLanguage` Lua
+/// binding (`0x005E6420`) reports both as English.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SoundKind {
-    Wavebank,
-    Soundbank,
-    Sounddb,
+pub enum Language {
+    English,
+    Spanish,
+    Italian,
+    French,
+    German,
+    Japanese,
+    Russian,
 }
 
-impl SoundKind {
-    /// The ASET `type_id` and UCFX `type_hash` the engine dispatches on.
-    pub fn ids(self) -> (u32, u32) {
-        use mercs2_formats::types::*;
+impl Language {
+    /// Every language, in table order.
+    pub const ALL: [Language; 7] = [
+        Language::English,
+        Language::Spanish,
+        Language::Italian,
+        Language::French,
+        Language::German,
+        Language::Japanese,
+        Language::Russian,
+    ];
+
+    /// The table's entry: the base name of `.\Data\<token>.wad`, and the suffix of a `vo_*` bank's
+    /// entry name.
+    pub const fn token(self) -> &'static str {
         match self {
-            SoundKind::Wavebank => (TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK),
-            SoundKind::Soundbank => (TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK),
-            // No constant for sounddb in `types`; the pair comes from `aset_type_ids`, which is
-            // the registry the rest of the workspace reads.
-            SoundKind::Sounddb => (13, 0xE527_3C14),
+            Language::English => "english",
+            Language::Spanish => "spanish",
+            Language::Italian => "italian",
+            Language::French => "french",
+            Language::German => "german",
+            Language::Japanese => "japanese",
+            Language::Russian => "russian",
         }
     }
+}
+
+/// One cue of an authored sound bank: a PCM16 WAV played by one single-wave group through one
+/// single-track cue — the shape of retail `ui_PDA_Open_01_st` (`audio_code_map.md` §11.6). Every
+/// field is a field of that group or cue, named for what the engine does with it, at the offset it
+/// is written to (§11.4); all are required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoundCue {
+    /// The name `Sound.CueSound` is given. The cue guid is `pandemic_hash_m2(name)`.
+    pub name: String,
+    /// The `src/`-relative WAV: uncompressed 16-bit PCM, mono or stereo, at any rate above zero.
+    pub wave: PathBuf,
+    /// Group `+0x2C`: the sound instance's base volume, in dB (`FUN_0083d770`), written as the
+    /// linear gain `10^(dB/20)`.
+    pub group_gain_db: f64,
+    /// Cue `+0x08`: the cue's gain, in dB (`FUN_00835060` multiplies the cue's volume by it each
+    /// frame), written as the linear gain `10^(dB/20)`.
+    pub cue_gain_db: f64,
+    /// Group `+0x30`: the sound instance's base pitch, in semitones (`FUN_0083d700`).
+    pub pitch_semitones: f32,
+    /// Group `+0x14`: `true` plays the cue from its emitter's own source, positioned, when it has
+    /// one; `false` plays it from the shared 2D source (`FUN_00837830`, `0x008378A9`).
+    pub positional: bool,
+    /// Group `+0x18`: full volume up to this distance from the listener (`FUN_0083d3a0`).
+    pub min_distance: f32,
+    /// Group `+0x1C`: silent from this distance (`FUN_0083d3a0`).
+    pub max_distance: f32,
+    /// Group `+0x24`: the exponent of the fall-off between the two distances (`FUN_0083d3a0`).
+    pub distance_exponent: f32,
+    /// Group `+0x28`: how much of the Doppler shift applies (`FUN_0083b120`).
+    pub doppler_scale: f32,
+    /// Cue `+0x06`, the start limit: the cue starts only while fewer than this many instances of it
+    /// are playing, and 0 starts it every time (`FUN_00834ad0` compares it with a count in the cue's
+    /// runtime record that `FUN_008354e0` raises when an instance plays and `FUN_00835850` lowers
+    /// when one finishes).
+    pub start_limit: u8,
+    /// Group `+0x00`, the sound id. Its one reader is `FUN_008369e0`, which refuses to start a
+    /// group whose id is `0xEA1343AA`, `0xC05D8686` or `0xBB8AE67D` unless the game runs in English;
+    /// in retail it equals the guid of a cue that plays the group in 411 of `vz.wad`'s 1,776 groups
+    /// and differs in 1,278.
+    pub sound_id: u32,
+    /// Group `+0x10`, the priority: `GetWavePriority` returns it times the wave's distance volume
+    /// (`0x00837EDF`), and with every voice busy a new instance takes the voice of the lowest-priority
+    /// wave only when its own priority is higher (`FUN_00837830`).
+    pub priority: f32,
+    /// Group `+0x20`, carried as written. No engine reader is known: it is copied into the wave
+    /// (`0x00838F70`, wave `+0x68`), whose getter (wave vtable `+0x44`, `0x00838F30`) has no call
+    /// site. 1.0 in every retail group but one.
+    pub group_20: f32,
+    /// Single-track cue `+0x16`, carried as written. No engine reader is known: the cue's `{soundbank,
+    /// group}` reference is read at `+0x10` and `+0x14` only (`FUN_0082e7d0`, `FUN_0083d410`). 0 in
+    /// most retail cues; a bank that carries a non-zero value carries the same one in every
+    /// single-track cue.
+    pub cue_16: u16,
+    /// The wave record's `+0x00` clip hash, carried as written. No engine reader is known:
+    /// `FUN_00837830` reads the record at `+0x05`..`+0x20` and not `+0x00`.
+    pub clip_hash: u32,
 }
 
 /// Which faction vendor a shop item is offered at (`add_shop_item`). Six shops key off
@@ -572,7 +648,7 @@ pub enum CollisionSource {
 }
 
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Contribution {
     /// A wardrobe outfit. **Two sides of one coin, decided by whether a `model` FILE is supplied:**
@@ -678,23 +754,50 @@ pub enum Contribution {
         #[serde(default)]
         normal_map: bool,
     },
-    /// Data, new-hash additive. An audio bank under a name the author chooses.
-    ///
-    /// Expressible because the container turned out to be an opaque `data` wrapper — the same shape
-    /// `add_movie` already shipped — rather than because anything here understands audio. The
-    /// survey measured it across the whole archive: `soundbank` 98/98, `sounddb` 58/58 and
-    /// `wavebank` 92/93 are bare `data`, which is 248 assets and ~366 MB of retail content that had
-    /// no way into a Shipment at all.
-    ///
-    /// The bytes ship VERBATIM; nothing here encodes or validates them, so `bank` must already be a
-    /// table the game accepts.
+    /// Data + Script. A new sound bank: its soundbank, sounddb and wavebank, encoded from the
+    /// authored cues (`mercs2_audio::encode`) and shipped as one block of three entries under
+    /// `pandemic_hash_m2(bank)`, the shape of every retail bank (`audio_code_map.md` §11.1). The mod
+    /// loader loads it (`MrxSoundBanks.LoadWaveBank` / `LoadSoundBank`), since a cue plays only
+    /// once its bank is loaded.
     AddSound {
-        /// ASSET identity → `pandemic_hash_m2`.
-        name: String,
-        bank: PathBuf,
-        /// Which table this is. Not inferable from the bytes, and the type id decides which loader
-        /// runs, so the author declares it.
-        sound: SoundKind,
+        /// The bank name: the entry name hash of all three tables and the name the loader loads.
+        bank: String,
+        /// The category every cue's group is in: a name of the game's category tree
+        /// (`mercs2_audio::encode::RETAIL_CATEGORY_NAMES`).
+        category: String,
+        /// The cues, in bank order.
+        cues: Vec<SoundCue>,
+    },
+    /// Data, SAME-HASH. Replace a bank the game ships: its soundbank and sounddb are encoded from
+    /// the authored cues and shipped under the bank's own entry name, which the game's own load of
+    /// the bank reads. The cues' waves ship in a wavebank of their own, which the mod loader loads.
+    /// A cue of the game's bank the replacement does not declare is gone.
+    ReplaceSoundBank {
+        /// The bank name, as the game's Lua loads it (`ui_hud`, `vo_mattias`).
+        bank: String,
+        /// For a `vo_*` bank, the language whose copy is replaced: the entry is
+        /// `<bank>.<language>`. Absent for any other bank.
+        #[serde(default)]
+        language: Option<Language>,
+        /// As [`Contribution::AddSound::category`].
+        category: String,
+        /// The bank's cues, in bank order.
+        cues: Vec<SoundCue>,
+    },
+    /// Data, SAME-HASH. Replace one cue of a bank the game ships: the bank's soundbank is forked,
+    /// a new single-wave group is appended, and the cue is rewritten to play it. The cue keeps its
+    /// index, so the bank's own sounddb still routes to it; every other cue and group is left as
+    /// the game has it. The wave ships in a wavebank of its own, which the mod loader loads.
+    ReplaceSoundCue {
+        /// The bank the cue is in, as the game's Lua loads it.
+        bank: String,
+        /// As [`Contribution::ReplaceSoundBank::language`].
+        #[serde(default)]
+        language: Option<Language>,
+        /// The category of the new group.
+        category: String,
+        /// The cue: `name` is the cue it replaces.
+        cue: SoundCue,
     },
     /// Data, new-hash additive. A Scaleform GFx movie (`cfx_pack`, type_id 23) added as a WAD asset,
     /// so Lua can point `SetSwfFile` at it.
@@ -1193,6 +1296,8 @@ impl Contribution {
         "add_model",
         "add_texture",
         "add_sound",
+        "replace_sound_bank",
+        "replace_sound_cue",
         "add_movie",
         "add_ui",
         "replace_texture",
@@ -1248,6 +1353,8 @@ impl Contribution {
             Contribution::AddModel { .. } => "add_model",
             Contribution::AddTexture { .. } => "add_texture",
             Contribution::AddSound { .. } => "add_sound",
+            Contribution::ReplaceSoundBank { .. } => "replace_sound_bank",
+            Contribution::ReplaceSoundCue { .. } => "replace_sound_cue",
             Contribution::AddMovie { .. } => "add_movie",
             Contribution::AddUi { .. } => "add_ui",
             Contribution::ReplaceTexture { .. } => "replace_texture",
