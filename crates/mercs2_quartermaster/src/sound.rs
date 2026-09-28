@@ -556,3 +556,72 @@ pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Ve
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// −4 dB and −6 dB give the gains retail `ui_PDA_Open_01_st` carries (group 70 and cue 57 of
+    /// `ui_hud`), bit for bit.
+    #[test]
+    fn db_gains_reproduce_the_retail_bit_patterns() {
+        assert_eq!(db_to_gain(-4.0).to_bits(), 0x3F21_866C);
+        assert_eq!(db_to_gain(-6.0).to_bits(), 0x3F00_4DCE);
+        assert_eq!(db_to_gain(0.0), 1.0);
+    }
+
+    #[test]
+    fn voice_over_banks_are_named_per_language() {
+        assert!(is_vo_bank("vo_mattias"));
+        assert!(!is_vo_bank("VO_mattias"), "the Lua prefix test is case-sensitive");
+        assert!(!is_vo_bank("ui_hud"));
+        assert_eq!(entry_name("vo_mattias", Some(Language::English)), "vo_mattias.english");
+        assert_eq!(entry_name("ui_hud", None), "ui_hud");
+        assert_eq!(override_wavebank_name("my-mod", "vo_mattias.french"), "qm_my-mod_vo_mattias.french");
+        assert!(!is_vo_bank(&override_wavebank_name("my-mod", "vo_mattias.french")));
+    }
+
+    fn manifest(contributions: &str) -> Manifest {
+        crate::from_str(
+            &format!("format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\ncontributions:\n{contributions}"),
+            crate::Format::Yaml,
+        )
+        .expect("parses")
+    }
+
+    fn cue(indent: &str, name: &str) -> String {
+        format!(
+            "{indent}name: {name}\n{indent}wave: src/a.wav\n{indent}group_gain_db: 0\n{indent}cue_gain_db: 0\n\
+             {indent}pitch_semitones: 0\n{indent}positional: false\n{indent}min_distance: 1\n{indent}max_distance: 2\n\
+             {indent}distance_exponent: 1\n{indent}doppler_scale: 1\n{indent}start_limit: 0\n{indent}sound_id: 0\n\
+             {indent}priority: 1\n{indent}group_20: 1\n{indent}cue_16: 0\n{indent}clip_hash: 0\n"
+        )
+    }
+
+    /// An added bank loads whole; the override wavebanks load once per bank entry, however many
+    /// overrides share it; and the link merges exactly the banks a replace_sound_cue targets.
+    #[test]
+    fn registrations_and_linked_entries() {
+        let added = cue("        ", "mod_click");
+        let m = manifest(&format!(
+            "  - kind: add_sound\n    bank: mod_sounds\n    category: ui\n    cues:\n      - {}\
+             \x20 - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}\
+             \x20 - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}\
+             \x20 - kind: replace_sound_bank\n    bank: vo_mattias\n    language: german\n    category: vo\n    cues:\n      - {}",
+            &added[8..],
+            cue("      ", "ui_PDA_Open_01_st"),
+            cue("      ", "ui_PDA_Close_01_st"),
+            &cue("        ", "line")[8..],
+        ));
+        let regs: Vec<(String, bool)> = sound_registrations(&m).into_iter().map(|r| (r.bank, r.soundbank)).collect();
+        assert_eq!(
+            regs,
+            vec![
+                ("mod_sounds".to_string(), true),
+                ("qm_s_ui_hud".to_string(), false),
+                ("qm_s_vo_mattias.german".to_string(), false),
+            ]
+        );
+        assert_eq!(linked_sound_entries([&m]), BTreeSet::from([m2("ui_hud")]));
+    }
+}
