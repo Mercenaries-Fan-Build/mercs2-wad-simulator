@@ -32,6 +32,8 @@ pub mod manifest;
 pub mod names;
 pub mod pe;
 pub mod plan;
+pub mod shader;
+pub mod shader_import;
 pub mod sound;
 pub mod states;
 pub mod world;
