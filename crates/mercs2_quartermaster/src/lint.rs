@@ -302,6 +302,69 @@ pub const M0303_MISSION_ID_UNPARSEABLE: Rule = Rule {
     doc: "docs/modding/lua_engine_seam_hardening.md",
 };
 
+/// A sound cue's `wave` is not a WAV a wavebank record can embed: the strict reader
+/// ([`mercs2_audio::wav::read_pcm16_wav`]) refuses it — not RIFF/WAVE, not uncompressed 16-bit PCM,
+/// not mono or stereo, rate 0, or an empty or partial-frame data chunk. The lowering reads the file
+/// through the same reader. Needs the file, so it runs only when lint has the Shipment root.
+pub const M0214_SOUND_WAVE_UNUSABLE: Rule = Rule {
+    code: "M0214",
+    title: "a sound cue's WAV is not uncompressed 16-bit mono or stereo PCM",
+    doc: "docs/modding/manifest_format.md#m0214",
+};
+
+/// A sound name the engine cannot reach: two cues of one bank whose names hash alike (the hash
+/// folds case), a cue whose guid is below `0x401` (FindCue reads such a guid as a direct index,
+/// `FUN_00835a70`), a name written as a bare hash or with surrounding whitespace, a bank with no
+/// cues, or an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before
+/// loading it, `mrxsoundbanks.lua:80-87`).
+pub const M0215_SOUND_NAME_UNUSABLE: Rule = Rule {
+    code: "M0215",
+    title: "a sound bank or cue name the engine cannot reach",
+    doc: "docs/modding/manifest_format.md#m0215",
+};
+
+/// A sound bank's `category` is not one of the global category tree's names
+/// ([`mercs2_audio::encode::RETAIL_CATEGORY_NAMES`]); the group's category hash must be one of the
+/// tree's (`audio_code_map.md` §11.3).
+pub const M0216_SOUND_CATEGORY_UNKNOWN: Rule = Rule {
+    code: "M0216",
+    title: "a sound bank's category is not a category of the game's tree",
+    doc: "docs/modding/manifest_format.md#m0216",
+};
+
+/// `language` on a sound override whose bank is not `vo_*` (the engine never localizes it), or no
+/// `language` on one whose bank is (the entry is `<bank>.<language>`).
+pub const M0217_SOUND_LANGUAGE: Rule = Rule {
+    code: "M0217",
+    title: "a sound override's language does not match its bank",
+    doc: "docs/modding/manifest_format.md#m0217",
+};
+
+/// Needs the game stack. The bank a `replace_sound_bank` / `replace_sound_cue` names is not in the
+/// game, or the cue a `replace_sound_cue` names is not in that bank.
+pub const M0218_SOUND_TARGET_MISSING: Rule = Rule {
+    code: "M0218",
+    title: "a sound override's bank or cue is not in the game",
+    doc: "docs/modding/manifest_format.md#m0218",
+};
+
+/// Needs the game stack. The `base` table of an `add_language` has no fonts `<base>_18` /
+/// `<base>_20` or atlases `<base>_18_main` / `<base>_20_main` to fork for the new language.
+pub const M0219_LANGUAGE_BASE_INCOMPLETE: Rule = Rule {
+    code: "M0219",
+    title: "an add_language base has no fonts or font atlases to fork",
+    doc: "docs/modding/manifest_format.md#m0219",
+};
+
+/// Needs the game stack. An `add_sound` cue named like a cue the game already has: FindCue walks the
+/// loaded sound tables from the first loaded (`FUN_00835a70`), so the game's own cue answers and the
+/// added one never plays.
+pub const M0220_SOUND_CUE_SHADOWED: Rule = Rule {
+    code: "M0220",
+    title: "an add_sound cue has the name of a cue the game already has",
+    doc: "docs/modding/manifest_format.md#m0220",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -344,6 +407,22 @@ pub const RULES: &[Rule] = &[
     M0301_BARE_EVENT_CREATE,
     M0302_GLOBAL_SHADOWING,
     M0303_MISSION_ID_UNPARSEABLE,
+    M0214_SOUND_WAVE_UNUSABLE,
+    M0215_SOUND_NAME_UNUSABLE,
+    M0216_SOUND_CATEGORY_UNKNOWN,
+    M0217_SOUND_LANGUAGE,
+];
+
+/// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
+pub const GAME_RULES: &[Rule] = &[
+    M0007_MULTI_RUNG_REPLACE,
+    M0009_NO_PRIMARY_ROW,
+    M0192_MOVIE_UNREFERENCED,
+    M0193_STATE_OFF_VOCABULARY,
+    M0194_LAYER_UNKNOWN,
+    M0218_SOUND_TARGET_MISSING,
+    M0219_LANGUAGE_BASE_INCOMPLETE,
+    M0220_SOUND_CUE_SHADOWED,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -422,8 +501,56 @@ fn parse_address(s: &str) -> Option<u32> {
 
 /// Rules that need the retail WADs. Separate from [`lint`] on purpose: everything there runs in CI
 /// with no game, and mixing the two would make the hermetic set impossible to run alone.
-pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
+pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+
+    // M0218: a sound override's bank or cue that is not in the game.
+    for (index, message) in crate::sound::override_target_problems(manifest, game) {
+        out.push(Diagnostic {
+            rule: M0218_SOUND_TARGET_MISSING,
+            severity: Severity::Error,
+            message,
+            at: Some(index),
+            fix: None,
+        });
+    }
+    // M0220: an added cue named like a cue the game routes. FindCue answers with the first loaded
+    // table that has the guid (`FUN_00835a70`), so the game's cue plays and the added one never does.
+    if manifest.contributions.iter().any(|c| matches!(c, Contribution::AddSound { .. })) {
+        match crate::sound::game_cue_guids(game) {
+            Ok(guids) => {
+                for (index, c) in manifest.contributions.iter().enumerate() {
+                    let Contribution::AddSound { cues, .. } = c else { continue };
+                    for cue in cues {
+                        let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
+                        if guids.contains(&guid) {
+                            out.push(Diagnostic {
+                                rule: M0220_SOUND_CUE_SHADOWED,
+                                severity: Severity::Error,
+                                message: format!(
+                                    "cue {:?} (0x{guid:08X}) is a cue the game already has. FindCue \
+                                     answers with the first loaded table that has it, so this one \
+                                     would never play. To change the game's cue, use \
+                                     replace_sound_cue; to add a cue, give it a new name.",
+                                    cue.name
+                                ),
+                                at: Some(index),
+                                fix: None,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(e) => out.push(Diagnostic {
+                rule: M0220_SOUND_CUE_SHADOWED,
+                severity: Severity::Error,
+                message: format!("the game's cue names could not be read to check the added cues: {e}"),
+                at: None,
+                fix: None,
+            }),
+        }
+    }
+
     for (index, c) in manifest.contributions.iter().enumerate() {
         // M0199 (game-gated half): compare each declared signature guard against the bytes actually
         // at that address in `Mercenaries2.exe`. Self-skips when the exe is not beside the install.
@@ -837,6 +964,172 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
 /// message about what a `.gfx` is supposed to look like, and that is a better place to say so than a
 /// rule about AS3 — a rule that reported "no AS3 found" for a file that is not a movie would be
 /// answering a question nobody asked.
+/// FindCue reads a guid below this as a direct index into the cue list, not as a hash
+/// (`FUN_00835a70`, decomp ~627672).
+pub const DIRECT_INDEX_GUID_LIMIT: u32 = 0x401;
+
+/// Why a bank or cue name cannot be used, or `None`.
+fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some(format!("the {what} name is empty"));
+    }
+    if name.trim() != name {
+        return Some(format!(
+            "the {what} name {name:?} has surrounding whitespace, which is hashed with it — trim it"
+        ));
+    }
+    if crate::manifest::bare_hash(name).is_some() {
+        return Some(format!(
+            "the {what} name {name:?} is a bare hash; a sound {what} is authored by name, and the \
+             name is what its guid is the hash of"
+        ));
+    }
+    None
+}
+
+/// The fields of one sound contribution [`sound_checks`] reads.
+struct SoundFields<'a> {
+    kind: &'a str,
+    bank: &'a str,
+    /// `None` for `add_sound`, which has no `language` field.
+    language: Option<Option<crate::manifest::Language>>,
+    category: &'a str,
+    cues: Vec<&'a crate::manifest::SoundCue>,
+}
+
+/// M0214, M0215, M0216 and M0217 for one sound contribution: the bank name, the cues' names and
+/// WAVs, the category, and the language.
+fn sound_checks(
+    index: usize,
+    fields: &SoundFields<'_>,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let SoundFields { kind, bank, language, category, cues } = fields;
+    let (kind, bank, category, language) = (*kind, *bank, *category, *language);
+    let mut out = Vec::new();
+    let mut push = |rule: Rule, message: String, fix: Option<String>| {
+        out.push(Diagnostic {
+            rule,
+            severity: Severity::Error,
+            message,
+            at: Some(index),
+            fix,
+        })
+    };
+
+    if let Some(why) = sound_name_refusal("bank", bank) {
+        push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
+    }
+    if kind == "add_sound" && crate::sound::is_vo_bank(bank) {
+        push(
+            M0215_SOUND_NAME_UNUSABLE,
+            format!(
+                "add_sound bank {bank:?} starts with `vo_`: retail Lua appends the language to such a \
+                 name before loading it (`_GetLocalizedName`, mrxsoundbanks.lua:80-87), so the loader \
+                 would ask for `{bank}.<language>` and find nothing. Name the bank without the \
+                 `vo_` prefix."
+            ),
+            None,
+        );
+    }
+    if cues.is_empty() {
+        push(M0215_SOUND_NAME_UNUSABLE, format!("{kind} bank {bank:?} declares no cues."), None);
+    }
+    let mut seen: std::collections::BTreeMap<u32, &str> = std::collections::BTreeMap::new();
+    for cue in cues {
+        if let Some(why) = sound_name_refusal("cue", &cue.name) {
+            push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
+            continue;
+        }
+        let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
+        if guid < DIRECT_INDEX_GUID_LIMIT {
+            push(
+                M0215_SOUND_NAME_UNUSABLE,
+                format!(
+                    "cue {:?} hashes to 0x{guid:08X}; FindCue reads a guid below 0x401 as a cue \
+                     index, not a name (FUN_00835a70), so the cue is unreachable. Rename it.",
+                    cue.name
+                ),
+                None,
+            );
+        }
+        if let Some(first) = seen.insert(guid, &cue.name) {
+            push(
+                M0215_SOUND_NAME_UNUSABLE,
+                format!(
+                    "cues {first:?} and {:?} hash to the same guid 0x{guid:08X} (the hash folds \
+                     case), so only one of them can be looked up. Rename one.",
+                    cue.name
+                ),
+                None,
+            );
+        }
+    }
+
+    let hash = mercs2_formats::hash::pandemic_hash_m2(category);
+    if !mercs2_audio::encode::RETAIL_CATEGORIES.iter().any(|c| c.category == hash) {
+        let names = mercs2_audio::encode::RETAIL_CATEGORY_NAMES;
+        push(
+            M0216_SOUND_CATEGORY_UNKNOWN,
+            format!(
+                "category {category:?} (0x{hash:08X}) is not a category of the game's tree; the \
+                 named ones are {}.",
+                names.join(", ")
+            ),
+            closest(category, &names).map(str::to_string),
+        );
+    }
+
+    if let Some(language) = language {
+        match (crate::sound::is_vo_bank(bank), language) {
+            (true, None) => push(
+                M0217_SOUND_LANGUAGE,
+                format!(
+                    "bank {bank:?} is a `vo_*` bank: each language has its own copy \
+                     (`{bank}.<language>`), so the override must name the language it replaces."
+                ),
+                None,
+            ),
+            (false, Some(l)) => push(
+                M0217_SOUND_LANGUAGE,
+                format!(
+                    "bank {bank:?} is not a `vo_*` bank, so it has one copy for every language; \
+                     remove `language: {}`.",
+                    l.token()
+                ),
+                None,
+            ),
+            _ => {}
+        }
+    }
+
+    if let Some(root) = root {
+        if !source_issue_at.contains(&index) {
+            for cue in cues {
+                let path = root.join(&cue.wave);
+                let why = match std::fs::read(&path) {
+                    Ok(bytes) => mercs2_audio::wav::read_pcm16_wav(&bytes).err().map(|e| e.to_string()),
+                    Err(e) => Some(format!("it cannot be read: {e}")),
+                };
+                if let Some(why) = why {
+                    push(
+                        M0214_SOUND_WAVE_UNUSABLE,
+                        format!(
+                            "cue {:?}: {} is not usable: {why}. Export it as uncompressed 16-bit PCM, \
+                             mono or stereo.",
+                            cue.name,
+                            cue.wave.display()
+                        ),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
 fn movie_checks(index: usize, name: &str, root: &Path, movie: &Path) -> Vec<Diagnostic> {
     // The message names `movie` as the manifest wrote it, never the joined path: a report must not
     // carry the local machine's absolute path.
@@ -1379,6 +1672,36 @@ pub fn lint(
                     root,
                     &source_issue_at,
                 ));
+            }
+            Contribution::AddSound { bank, category, cues } => {
+                let fields = SoundFields {
+                    kind: c.kind(),
+                    bank,
+                    language: None,
+                    category,
+                    cues: cues.iter().collect(),
+                };
+                out.extend(sound_checks(index, &fields, root, &source_issue_at));
+            }
+            Contribution::ReplaceSoundBank { bank, language, category, cues } => {
+                let fields = SoundFields {
+                    kind: c.kind(),
+                    bank,
+                    language: Some(*language),
+                    category,
+                    cues: cues.iter().collect(),
+                };
+                out.extend(sound_checks(index, &fields, root, &source_issue_at));
+            }
+            Contribution::ReplaceSoundCue { bank, language, category, cue } => {
+                let fields = SoundFields {
+                    kind: c.kind(),
+                    bank,
+                    language: Some(*language),
+                    category,
+                    cues: vec![cue],
+                };
+                out.extend(sound_checks(index, &fields, root, &source_issue_at));
             }
             Contribution::AddLanguage { name, .. } => {
                 // The `data/` safety pivot: refuse a name that is not a usable language token or that
@@ -2030,6 +2353,7 @@ mod tests {
             .iter()
             .chain(PENDING.iter())
             .chain(ARTIFACT_RULES.iter())
+            .chain(GAME_RULES.iter())
         {
             assert!(seen.insert(r.code), "duplicate rule code {}", r.code);
         }
