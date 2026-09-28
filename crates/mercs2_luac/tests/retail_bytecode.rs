@@ -5,13 +5,11 @@
 //!
 //! That matters beyond tidiness. The reimpl runs the **decompiled** corpus, so everything it
 //! executes inherits the decompiler's fidelity. Loading the shipped chunks directly removes that
-//! dependency for anything that does not need readable source, and it is free here: `lundump` was
-//! already patched to read 4-byte string lengths and a `sizeof(size_t)=4` header, because the
-//! compiler needs the same dialect on the dump side.
+//! dependency for anything that does not need readable source. `lundump` reads 4-byte string
+//! lengths and a `sizeof(size_t)=4` header, the same dialect the compiler dumps.
 //!
-//! It also could not have been written before. Executing retail bytecode needs a **runtime**, and
-//! this crate used to be compiler-only precisely because a second Lua in the process was a SIGSEGV
-//! (see the module note in `tests/common/mod.rs`). There is one Lua now.
+//! Executing retail bytecode needs a **runtime**. The workspace links one Lua, this crate's, for
+//! both compiling and running (see the module note in `tests/common/mod.rs`).
 //!
 //! This file holds the hermetic round trips through our own compiler. The loads of the chunks retail
 //! shipped are game-gated and live in `retail_bytecode_retail.rs`.
