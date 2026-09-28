@@ -63,7 +63,8 @@ const RETAIL_FEATURE: &str = "retail";
 /// Both lists come from the workspace itself, so a crate that gains a `retail` feature or a retail
 /// target is picked up with no edit here. Each test finds the game only through the repo-root
 /// `.mercs2-local.toml` (`mercs2_formats::game_paths::local_config_vz_wad`) and fails when that file,
-/// its `vz_wad` key, or the file it names is missing. Nothing is skipped.
+/// its `vz_wad` key, or the file it names is missing. Tests that also read a console bake resolve
+/// it the same way, through the `xbox_vz_wad` / `ps3_vz_wad` keys.
 fn retail_test(extra: &[String]) -> ExitCode {
     let meta = match cargo_metadata::MetadataCommand::new().no_deps().exec() {
         Ok(m) => m,
