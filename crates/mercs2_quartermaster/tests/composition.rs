@@ -650,7 +650,7 @@ fn patch_and_replace_lua_conflict() {
 #[test]
 fn each_newly_exclusive_kind_conflicts_on_the_same_target() {
     for block in [
-        "  - kind: replace_shader\n    target: s_hero\n    blob: src/b.bin\n",
+        "  - kind: replace_shader\n    target: PgMeshVP\n    shader: {asm: src/b.asm}\n",
         "  - kind: replace_fx\n    target: fx_boom\n    payload: src/p.bin\n",
         "  - kind: replace_animation\n    target: a_run\n    clip: src/c.bin\n    trnm: src/t.bin\n",
         "  - kind: replace_phy2\n    target: m_crate\n    phy2: src/p.bin\n",
@@ -660,6 +660,65 @@ fn each_newly_exclusive_kind_conflicts_on_the_same_target() {
     ] {
         exclusive_conflict(&one("mod-a", block), &one("mod-b", block));
     }
+}
+
+fn add_vertex_shader(name: &str, stem: &str) -> String {
+    format!(
+        "  - kind: add_shader\n    family: vertex\n    classes:\n      - {{ name: {name}, stem: {stem}, \
+         shader: {{asm: src/a.asm}}, shader_low: {{asm: src/a_low.asm}} }}\n"
+    )
+}
+
+/// Two Shipments adding one stem write one store record twice: exclusive, keyed on the stem's hash.
+#[test]
+fn two_add_shaders_of_one_stem_conflict() {
+    let a = one("mod-a", &add_vertex_shader("GlowVP", "GlowVP"));
+    let b = one("mod-b", &add_vertex_shader("OtherVP", "glowvp"));
+    let found = exclusive_conflict(&a, &b);
+    assert_eq!(found.claim, Claim::ShaderStem { key: mercs2_formats::hash::pandemic_hash_m2("GlowVP") });
+}
+
+/// Two Shipments registering one name: the registry keeps the first, so the second is absent.
+#[test]
+fn two_add_shaders_of_one_name_conflict() {
+    let a = one("mod-a", &add_vertex_shader("GlowVP", "GlowA"));
+    let b = one("mod-b", &add_vertex_shader("GlowVP", "GlowB"));
+    let found = exclusive_conflict(&a, &b);
+    assert_eq!(found.claim, Claim::ShaderName { key: mercs2_formats::hash::pandemic_hash_m2("GlowVP") });
+}
+
+/// A replace and an add of one stem edit one record.
+#[test]
+fn a_replace_and_an_add_of_one_stem_conflict() {
+    let a = one("mod-a", "  - kind: replace_shader\n    target: PgMeshVP\n    shader: {asm: src/b.asm}\n");
+    let b = one("mod-b", &add_vertex_shader("MyVP", "PgMeshVP"));
+    exclusive_conflict(&a, &b);
+}
+
+/// Disjoint stems and names compose.
+#[test]
+fn shaders_of_disjoint_stems_compose() {
+    let a = one("mod-a", &add_vertex_shader("GlowVP", "GlowVP"));
+    let b = one("mod-b", &add_vertex_shader("DimVP", "DimVP"));
+    let c = one("mod-c", "  - kind: replace_shader\n    target: PgMeshVP\n    shader: {asm: src/b.asm}\n");
+    assert!(blast::conflicts(&[("mod-a", &a), ("mod-b", &b), ("mod-c", &c)]).is_empty());
+}
+
+/// The four light classes of one pixel add_shader may share a stem: one record, one claim, and no
+/// self-conflict.
+#[test]
+fn light_classes_sharing_a_stem_claim_it_once() {
+    let m = one(
+        "mod-a",
+        "  - kind: add_shader\n    family: pixel\n    classes:\n\
+         \x20     - { name: GlowFP, stem: GlowFP, shader: {asm: src/a.asm}, shader_low: {asm: src/l.asm} }\n\
+         \x20     - { name: GlowFP_pl, stem: GlowFP, shader: {asm: src/a.asm}, shader_low: {asm: src/l.asm} }\n\
+         \x20     - { name: GlowFP_sl, stem: GlowFP, shader: {asm: src/a.asm}, shader_low: {asm: src/l.asm} }\n\
+         \x20     - { name: GlowFP_pl_sl, stem: GlowFP, shader: {asm: src/a.asm}, shader_low: {asm: src/l.asm} }\n",
+    );
+    let stems = blast::claims(&m).into_iter().filter(|c| matches!(c.claim, Claim::ShaderStem { .. })).count();
+    assert_eq!(stems, 1);
+    assert!(blast::self_conflicts(&m).is_empty());
 }
 
 /// `edit_world` edits the whole layer, so an `add_placement` on that layer in another Shipment
