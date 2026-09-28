@@ -11,8 +11,8 @@ mod common {
 }
 
 use common::build::{
-    anim_tracks, anim_trnm, fake_png, raw_shipment, read_back_animation, read_back_movie, scratch,
-    shipment, tiny_gfx_movie, ANIM_CLIP,
+    anim_tracks, anim_trnm, fake_png, pcm16_wav, raw_shipment, read_back_animation, read_back_movie,
+    scratch, shipment, sound_cue_yaml, tiny_gfx_movie, ANIM_CLIP,
 };
 use mercs2_quartermaster::build::{self, BuildError, Destination};
 use mercs2_quartermaster::discover;
@@ -1338,37 +1338,6 @@ fn two_movies_under_one_name_are_a_self_conflict() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────── add_sound
-
-/// A PCM16 WAV file's bytes.
-fn pcm16_wav(channels: u16, rate: u32, samples: &[i16]) -> Vec<u8> {
-    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    let mut out = Vec::new();
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
-    out.extend_from_slice(&(channels * 2).to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(&data);
-    out
-}
-
-/// One `SoundCue` block of YAML at the list indent, every field given.
-fn sound_cue_yaml(name: &str, wave: &str, sound_id: u32, clip_hash: u32) -> String {
-    format!(
-        "      - name: {name}\n        wave: {wave}\n        group_gain_db: -4.0\n        \
-         cue_gain_db: -6.0\n        pitch_semitones: 1.5\n        positional: true\n        \
-         min_distance: 10.0\n        max_distance: 1000.0\n        distance_exponent: 2.0\n        \
-         doppler_scale: 0.5\n        start_limit: 3\n        sound_id: {sound_id}\n        \
-         priority: 0.95\n        group_20: 1.0\n        cue_16: 0x3E99\n        clip_hash: {clip_hash}\n"
-    )
-}
 
 /// The two-cue `add_sound` Shipment the tests below build: a mono and a stereo WAV.
 fn sound_shipment(dir: &Path) -> (discover::LoadedShipment, Vec<(String, u16, Vec<i16>)>) {
