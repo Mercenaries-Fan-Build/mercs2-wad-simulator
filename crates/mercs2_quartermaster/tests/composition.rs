@@ -756,3 +756,98 @@ fn a_raw_block_on_an_edited_table_conflicts() {
     );
     exclusive_conflict(&one("mod-a", EDIT_ENGLISH), &raw);
 }
+
+// ---------------------------------------------------------------------------
+// Sound cues
+// ---------------------------------------------------------------------------
+
+fn sound(shipment: &str, contribution: &str) -> Manifest {
+    parse(&format!(
+        "format: 2\nshipment: {{ name: {shipment}, version: 1.0.0, target: retail }}\ncontributions:\n{contribution}"
+    ))
+}
+
+fn cue_yaml(indent: &str, name: &str) -> String {
+    format!(
+        "{indent}name: {name}\n{indent}wave: src/a.wav\n{indent}group_gain_db: 0\n{indent}cue_gain_db: 0\n\
+         {indent}pitch_semitones: 0\n{indent}positional: false\n{indent}min_distance: 1\n{indent}max_distance: 2\n\
+         {indent}distance_exponent: 1\n{indent}doppler_scale: 1\n{indent}start_limit: 0\n{indent}sound_id: 0\n\
+         {indent}priority: 1\n{indent}group_20: 1\n{indent}cue_16: 0\n{indent}clip_hash: 0\n"
+    )
+}
+
+fn replace_cue(shipment: &str, bank: &str, language: Option<&str>, cue: &str) -> Manifest {
+    let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+    sound(
+        shipment,
+        &format!("  - kind: replace_sound_cue\n    bank: {bank}\n{language}    category: ui\n    cue:\n{}", cue_yaml("      ", cue)),
+    )
+}
+
+fn add_cue(shipment: &str, bank: &str, cue: &str) -> Manifest {
+    let f = cue_yaml("        ", cue);
+    sound(shipment, &format!("  - kind: add_sound\n    bank: {bank}\n    category: ui\n    cues:\n      - {}", &f[8..]))
+}
+
+/// Two Shipments overriding different cues of one bank compose — the link merges them — while one
+/// cue replaced twice is a conflict no load order resolves.
+#[test]
+fn cue_overrides_of_one_bank_compose_and_one_cue_twice_conflicts() {
+    let a = replace_cue("a", "ui_hud", None, "ui_PDA_Open_01_st");
+    let b = replace_cue("b", "ui_hud", None, "ui_PDA_Close_01_st");
+    assert!(blast::conflicts(&[("a", &a), ("b", &b)]).is_empty());
+
+    let c = replace_cue("c", "ui_hud", None, "ui_PDA_Open_01_st");
+    let found = blast::conflicts(&[("a", &a), ("c", &c)]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].class, MergeClass::Exclusive);
+    assert!(matches!(found[0].claim, Claim::SoundCue { .. }));
+}
+
+/// One voice-over cue replaced in two languages is two claims: each language's bank is its own.
+#[test]
+fn different_languages_do_not_conflict() {
+    let en = replace_cue("en", "vo_mattias", Some("english"), "mattias_line");
+    let fr = replace_cue("fr", "vo_mattias", Some("french"), "mattias_line");
+    assert!(blast::conflicts(&[("en", &en), ("fr", &fr)]).is_empty());
+    let en2 = replace_cue("en2", "vo_mattias", Some("english"), "mattias_line");
+    assert_eq!(blast::conflicts(&[("en", &en), ("en2", &en2)]).len(), 1);
+}
+
+/// An added cue name is a key across the set (KeyedSet): two banks adding one cue name collide, and
+/// an added cue beside an override of the same cue takes the stricter class.
+#[test]
+fn added_cue_names_are_keys_and_meet_overrides_exclusively() {
+    let a = add_cue("a", "bank_a", "mod_click");
+    let b = add_cue("b", "bank_b", "mod_click");
+    let found = blast::conflicts(&[("a", &a), ("b", &b)]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].class, MergeClass::KeyedSet);
+    assert!(blast::conflicts(&[("a", &a), ("c", &add_cue("c", "bank_c", "mod_other"))]).is_empty());
+
+    let over = replace_cue("o", "ui_hud", None, "mod_click");
+    let found = blast::conflicts(&[("a", &a), ("o", &over)]);
+    assert_eq!(found[0].class, MergeClass::Exclusive);
+}
+
+/// A replaced bank is claimed whole by its entry: two replacements of one bank conflict, and the
+/// claim is on `<bank>.<language>` for a voice-over bank.
+#[test]
+fn a_bank_replaced_twice_conflicts() {
+    let bank = |s: &str, language: &str, cue: &str| {
+        let f = cue_yaml("        ", cue);
+        sound(
+            s,
+            &format!(
+                "  - kind: replace_sound_bank\n    bank: vo_mattias\n    language: {language}\n    category: vo\n    cues:\n      - {}",
+                &f[8..]
+            ),
+        )
+    };
+    let a = bank("a", "english", "line_a");
+    let b = bank("b", "english", "line_b");
+    let found = blast::conflicts(&[("a", &a), ("b", &b)]);
+    let entry = mercs2_formats::hash::pandemic_hash_m2("vo_mattias.english");
+    assert!(found.iter().any(|c| c.claim == Claim::Asset { hash: entry } && c.class == MergeClass::Exclusive), "{found:?}");
+    assert!(blast::conflicts(&[("a", &a), ("f", &bank("f", "french", "line_b"))]).is_empty());
+}
