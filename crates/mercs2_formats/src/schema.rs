@@ -729,207 +729,210 @@ mod tests {
         assert_eq!(recs[0].get(0x5b72_4250), Some(FieldValue::U32(0xdad8_a613)));
     }
 
-    // -----------------------------------------------------------------------
-    // Live end-to-end test against retail vz.wad. SKIPS (passes) when the WAD is
-    // absent so CI stays green, matching the existing live tests in this crate.
-    // Walks real blocks, finds representative components (HibernationControl,
-    // ModelName, FactionMarker, Road, Transform), and deserializes them through
-    // the schema, asserting concrete field values / invariants.
-    // -----------------------------------------------------------------------
-    #[test]
-    fn live_deserialize_representative_components_if_wad_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-        let Some(path) = crate::game_paths::vz_wad_from_env() else {
-            eprintln!("skip: vz.wad not found (set MERCS2_GAME_DIR or VZ_WAD)");
-            return;
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            eprintln!("skip: vz.wad not readable at {}", path.display());
-            return;
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
+        // -----------------------------------------------------------------------
+        // Live end-to-end test against retail vz.wad. Game-gated: built by the `retail`
+        // feature, reads the vz.wad named by the repo-root .mercs2-local.toml, and fails
+        // if it is absent.
+        // Walks real blocks, finds representative components (HibernationControl,
+        // ModelName, FactionMarker, Road, Transform), and deserializes them through
+        // the schema, asserting concrete field values / invariants.
+        // -----------------------------------------------------------------------
+        #[test]
+        fn live_deserialize_representative_components_if_wad_present() {
+            use crate::ffcs::load_ffcs_archive;
+            use crate::sges::decompress_block;
 
-        // Collect the first COMP group (with schm+data) for each target class name.
-        let targets = [
-            "HibernationControl",
-            "ModelName",
-            "FactionMarker",
-            "Road",
-            "Transform",
-        ];
-        let mut found: std::collections::HashMap<String, CompGroup> =
-            std::collections::HashMap::new();
+            let path =
+                crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                    .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path)
+                .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().unwrap().len();
+            let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
 
-        'outer: for bi in 0..arch.indx.len() {
-            if found.len() == targets.len() {
-                break;
-            }
-            let Ok(dec) = decompress_block(&mut f, &arch.indx, bi as u16) else {
-                continue;
-            };
-            if dec.len() < 4 {
-                continue;
-            }
-            let count = u32::from_le_bytes([dec[0], dec[1], dec[2], dec[3]]) as usize;
-            let mut pos = 4 + count * 16;
-            for ei in 0..count {
-                let base = 4 + ei * 16;
-                if base + 16 > dec.len() {
+            // Collect the first COMP group (with schm+data) for each target class name.
+            let targets = [
+                "HibernationControl",
+                "ModelName",
+                "FactionMarker",
+                "Road",
+                "Transform",
+            ];
+            let mut found: std::collections::HashMap<String, CompGroup> =
+                std::collections::HashMap::new();
+
+            'outer: for bi in 0..arch.indx.len() {
+                if found.len() == targets.len() {
                     break;
                 }
-                let chunk_size = u32::from_le_bytes([
-                    dec[base + 12],
-                    dec[base + 13],
-                    dec[base + 14],
-                    dec[base + 15],
-                ]) as usize;
-                if pos + chunk_size > dec.len() {
-                    break;
+                let Ok(dec) = decompress_block(&mut f, &arch.indx, bi as u16) else {
+                    continue;
+                };
+                if dec.len() < 4 {
+                    continue;
                 }
-                let container = &dec[pos..pos + chunk_size];
-                pos += chunk_size;
-                for g in parse_comp_groups(container) {
-                    if let Some(name) = g.name.clone() {
-                        if targets.contains(&name.as_str())
-                            && g.schm.is_some()
-                            && g.data.as_ref().is_some_and(|d| !d.is_empty())
-                            && !found.contains_key(&name)
-                        {
-                            found.insert(name, g);
-                            if found.len() == targets.len() {
-                                break 'outer;
+                let count = u32::from_le_bytes([dec[0], dec[1], dec[2], dec[3]]) as usize;
+                let mut pos = 4 + count * 16;
+                for ei in 0..count {
+                    let base = 4 + ei * 16;
+                    if base + 16 > dec.len() {
+                        break;
+                    }
+                    let chunk_size = u32::from_le_bytes([
+                        dec[base + 12],
+                        dec[base + 13],
+                        dec[base + 14],
+                        dec[base + 15],
+                    ]) as usize;
+                    if pos + chunk_size > dec.len() {
+                        break;
+                    }
+                    let container = &dec[pos..pos + chunk_size];
+                    pos += chunk_size;
+                    for g in parse_comp_groups(container) {
+                        if let Some(name) = g.name.clone() {
+                            if targets.contains(&name.as_str())
+                                && g.schm.is_some()
+                                && g.data.as_ref().is_some_and(|d| !d.is_empty())
+                                && !found.contains_key(&name)
+                            {
+                                found.insert(name, g);
+                                if found.len() == targets.len() {
+                                    break 'outer;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // HibernationControl: stride 6, fields u16@0,u8@2,u8@3,u8@4,bit@5,bit@5 (world_streaming spec).
-        if let Some(g) = found.get("HibernationControl") {
-            let s = g.schema().expect("hib schema");
-            assert_eq!(
-                s.payload_stride, 6,
-                "HibernationControl descriptor stride is 6"
-            );
-            assert_eq!(s.record_stride(), 10);
-            assert_eq!(s.fields.len(), 6);
-            assert_eq!(s.fields[0].field_type, SchemaFieldType::U16);
-            assert_eq!(s.fields[0].byte_offset, 0);
-            assert_eq!(s.fields[4].field_type, SchemaFieldType::Bit);
-            assert_eq!(s.fields[4].byte_offset, 5);
-            assert_eq!(s.fields[5].byte_offset, 5);
-            assert_ne!(
-                s.fields[4].bit_index, s.fields[5].bit_index,
-                "two bits packed in byte 5"
-            );
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("hib records");
-            assert!(!recs.is_empty());
-            // Every record must yield all 6 typed fields.
-            for r in &recs {
-                assert_eq!(r.fields.len(), 6);
-                assert!(matches!(
-                    r.get(s.fields[0].name_hash),
-                    Some(FieldValue::U16(_))
-                ));
-                assert!(matches!(
-                    r.get(s.fields[4].name_hash),
-                    Some(FieldValue::Bit(_))
-                ));
-            }
-        } else {
-            panic!("HibernationControl not found in retail vz.wad");
-        }
-
-        // ModelName: single u32 hash field named 0x5b724250 (== Model), stride 4.
-        if let Some(g) = found.get("ModelName") {
-            let s = g.schema().expect("modelname schema");
-            assert_eq!(s.payload_stride, 4);
-            assert_eq!(s.fields.len(), 1);
-            assert_eq!(s.fields[0].field_type, SchemaFieldType::U32);
-            assert_eq!(s.fields[0].name_hash, 0x5b72_4250);
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("modelname records");
-            assert!(!recs.is_empty());
-            // Each record's model hash is a non-zero u32.
-            for r in &recs {
-                match r.get(0x5b72_4250) {
-                    Some(FieldValue::U32(h)) => assert_ne!(h, 0),
-                    other => panic!("expected model hash u32, got {other:?}"),
+            // HibernationControl: stride 6, fields u16@0,u8@2,u8@3,u8@4,bit@5,bit@5 (world_streaming spec).
+            if let Some(g) = found.get("HibernationControl") {
+                let s = g.schema().expect("hib schema");
+                assert_eq!(
+                    s.payload_stride, 6,
+                    "HibernationControl descriptor stride is 6"
+                );
+                assert_eq!(s.record_stride(), 10);
+                assert_eq!(s.fields.len(), 6);
+                assert_eq!(s.fields[0].field_type, SchemaFieldType::U16);
+                assert_eq!(s.fields[0].byte_offset, 0);
+                assert_eq!(s.fields[4].field_type, SchemaFieldType::Bit);
+                assert_eq!(s.fields[4].byte_offset, 5);
+                assert_eq!(s.fields[5].byte_offset, 5);
+                assert_ne!(
+                    s.fields[4].bit_index, s.fields[5].bit_index,
+                    "two bits packed in byte 5"
+                );
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("hib records");
+                assert!(!recs.is_empty());
+                // Every record must yield all 6 typed fields.
+                for r in &recs {
+                    assert_eq!(r.fields.len(), 6);
+                    assert!(matches!(
+                        r.get(s.fields[0].name_hash),
+                        Some(FieldValue::U16(_))
+                    ));
+                    assert!(matches!(
+                        r.get(s.fields[4].name_hash),
+                        Some(FieldValue::Bit(_))
+                    ));
                 }
+            } else {
+                panic!("HibernationControl not found in retail vz.wad");
             }
-        } else {
-            panic!("ModelName not found in retail vz.wad");
-        }
 
-        // FactionMarker: single u32 field, stride 4 (matches the descriptor stride in the code map).
-        if let Some(g) = found.get("FactionMarker") {
-            let s = g.schema().expect("factionmarker schema");
-            assert_eq!(s.payload_stride, 4, "FactionMarker descriptor stride is 4");
-            assert_eq!(s.fields.len(), 1);
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("faction records");
-            assert!(!recs.is_empty());
-            assert!(matches!(
-                recs[0].get(s.fields[0].name_hash),
-                Some(FieldValue::U32(_))
-            ));
-        }
+            // ModelName: single u32 hash field named 0x5b724250 (== Model), stride 4.
+            if let Some(g) = found.get("ModelName") {
+                let s = g.schema().expect("modelname schema");
+                assert_eq!(s.payload_stride, 4);
+                assert_eq!(s.fields.len(), 1);
+                assert_eq!(s.fields[0].field_type, SchemaFieldType::U32);
+                assert_eq!(s.fields[0].name_hash, 0x5b72_4250);
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("modelname records");
+                assert!(!recs.is_empty());
+                // Each record's model hash is a non-zero u32.
+                for r in &recs {
+                    match r.get(0x5b72_4250) {
+                        Some(FieldValue::U32(h)) => assert_ne!(h, 0),
+                        other => panic!("expected model hash u32, got {other:?}"),
+                    }
+                }
+            } else {
+                panic!("ModelName not found in retail vz.wad");
+            }
 
-        // Road: 4×u32 + 2×vec3, stride 40; the vec3 fields must decode to finite floats.
-        if let Some(g) = found.get("Road") {
-            let s = g.schema().expect("road schema");
-            assert_eq!(s.payload_stride, 40, "Road stride 40 (4×u32 + 2×vec3)");
-            assert_eq!(
-                s.fields
+            // FactionMarker: single u32 field, stride 4 (matches the descriptor stride in the code map).
+            if let Some(g) = found.get("FactionMarker") {
+                let s = g.schema().expect("factionmarker schema");
+                assert_eq!(s.payload_stride, 4, "FactionMarker descriptor stride is 4");
+                assert_eq!(s.fields.len(), 1);
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("faction records");
+                assert!(!recs.is_empty());
+                assert!(matches!(
+                    recs[0].get(s.fields[0].name_hash),
+                    Some(FieldValue::U32(_))
+                ));
+            }
+
+            // Road: 4×u32 + 2×vec3, stride 40; the vec3 fields must decode to finite floats.
+            if let Some(g) = found.get("Road") {
+                let s = g.schema().expect("road schema");
+                assert_eq!(s.payload_stride, 40, "Road stride 40 (4×u32 + 2×vec3)");
+                assert_eq!(
+                    s.fields
+                        .iter()
+                        .filter(|f| f.field_type == SchemaFieldType::Vec3)
+                        .count(),
+                    2
+                );
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("road records");
+                assert!(!recs.is_empty());
+                for f in s
+                    .fields
                     .iter()
                     .filter(|f| f.field_type == SchemaFieldType::Vec3)
-                    .count(),
-                2
-            );
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("road records");
-            assert!(!recs.is_empty());
-            for f in s
-                .fields
-                .iter()
-                .filter(|f| f.field_type == SchemaFieldType::Vec3)
-            {
-                if let Some(FieldValue::Vec3(v)) = recs[0].get(f.name_hash) {
-                    assert!(v.iter().all(|c| c.is_finite()), "road vec3 finite");
-                } else {
-                    panic!("road vec3 field missing");
+                {
+                    if let Some(FieldValue::Vec3(v)) = recs[0].get(f.name_hash) {
+                        assert!(v.iter().all(|c| c.is_finite()), "road vec3 finite");
+                    } else {
+                        panic!("road vec3 field missing");
+                    }
                 }
             }
-        }
 
-        // Transform: type11 blob@0 (32B) + f32@32 + 8×u16@36..50 — assert the SCHEMA layout only.
-        // Transform's on-disk `data` record is written by a special CHDR-gated builder (0x0063D7C0),
-        // not the generic [key][payload] path, so its record stride is validated live (confirm-live),
-        // not asserted here.
-        if let Some(g) = found.get("Transform") {
-            let s = g.schema().expect("transform schema");
-            assert_eq!(s.fields[0].field_type, SchemaFieldType::Blob32);
-            assert_eq!(s.fields[0].byte_offset, 0);
-            assert_eq!(s.fields[1].field_type, SchemaFieldType::F32);
-            assert_eq!(s.fields[1].byte_offset, 32);
-            // The u16 tail is strictly monotonically increasing by 2 (36,38,…) — proves LOW-16 offsets.
-            let u16s: Vec<u16> = s
-                .fields
-                .iter()
-                .filter(|f| f.field_type == SchemaFieldType::U16)
-                .map(|f| f.byte_offset)
-                .collect();
-            for w in u16s.windows(2) {
-                assert_eq!(w[1] - w[0], 2, "Transform u16 fields are 2 bytes apart");
+            // Transform: type11 blob@0 (32B) + f32@32 + 8×u16@36..50 — assert the SCHEMA layout only.
+            // Transform's on-disk `data` record is written by a special CHDR-gated builder (0x0063D7C0),
+            // not the generic [key][payload] path, so its record stride is validated live (confirm-live),
+            // not asserted here.
+            if let Some(g) = found.get("Transform") {
+                let s = g.schema().expect("transform schema");
+                assert_eq!(s.fields[0].field_type, SchemaFieldType::Blob32);
+                assert_eq!(s.fields[0].byte_offset, 0);
+                assert_eq!(s.fields[1].field_type, SchemaFieldType::F32);
+                assert_eq!(s.fields[1].byte_offset, 32);
+                // The u16 tail is strictly monotonically increasing by 2 (36,38,…) — proves LOW-16 offsets.
+                let u16s: Vec<u16> = s
+                    .fields
+                    .iter()
+                    .filter(|f| f.field_type == SchemaFieldType::U16)
+                    .map(|f| f.byte_offset)
+                    .collect();
+                for w in u16s.windows(2) {
+                    assert_eq!(w[1] - w[0], 2, "Transform u16 fields are 2 bytes apart");
+                }
             }
         }
     }
