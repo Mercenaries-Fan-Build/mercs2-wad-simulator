@@ -679,6 +679,61 @@ pub enum CollisionSource {
     FollowGeometry,
 }
 
+/// Where a shader's bytecode comes from: `{asm: <path>}`, SM3 assembly text (`sm3asm` syntax) the
+/// builder assembles, or `{blob: <path>}`, a compiled `vs_3_0` / `ps_3_0` blob. Both paths are
+/// `src/`-relative.
+///
+/// Untagged over one-key structs, so it is the same one-key map in YAML, JSON and TOML, and a map
+/// with both keys, or neither, matches no form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ShaderSource {
+    Asm(AsmSource),
+    Blob(BlobSource),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsmSource {
+    pub asm: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobSource {
+    pub blob: PathBuf,
+}
+
+impl ShaderSource {
+    pub fn asm(path: impl Into<PathBuf>) -> ShaderSource {
+        ShaderSource::Asm(AsmSource { asm: path.into() })
+    }
+
+    pub fn blob(path: impl Into<PathBuf>) -> ShaderSource {
+        ShaderSource::Blob(BlobSource { blob: path.into() })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            ShaderSource::Asm(a) => &a.asm,
+            ShaderSource::Blob(b) => &b.blob,
+        }
+    }
+}
+
+/// One registration of an `add_shader`: the `name` the engine keys it by (`pandemic_hash_m2`), and
+/// the store `stem` it loads (`<stem>.sho`, whose record ids are `<stem>_3.sho` in `shader3.bin` and
+/// `<stem>_3l.sho` in `shader3Low.bin`). `shader_low` is the `shader3Low.bin` bytecode, which the
+/// engine loads when the ShaderLevel setting is off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShaderClass {
+    pub name: String,
+    pub stem: String,
+    pub shader: ShaderSource,
+    pub shader_low: ShaderSource,
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1026,21 +1081,33 @@ pub enum Contribution {
         #[serde(default)]
         events: Option<PathBuf>,
     },
-    /// Data. Add a NEW compiled shader (SM3 blob) to `shader3.bin`. Author is responsible for
-    /// producing the binary via an external SM3 compiler (fxc `/T vs_3_0` or `ps_3_0`).
-    /// The engine indexes shaders by their name hash, so a bind-by-name in a material picks up
-    /// the added shader transparently.
+    /// Data + Code. Register NEW shaders in the engine's shader registry and add their bytecode to
+    /// the shader stores.
+    ///
+    /// `family` is the record family the engine constructs for the shader: one vtable, which
+    /// decides the registry (vertex or pixel), the constants the engine binds, and the draw code
+    /// that reaches it. `classes` is exactly 4 entries for a pixel family, in the engine's
+    /// light-class order (base, `_pl`, `_sl`, `_pl_sl`: the material's index plus the light class
+    /// selects the pixel shader), or exactly 1 for a vertex family. Entries that share a `stem`
+    /// share one store record, and their sources must assemble to the same bytes.
+    ///
+    /// The registration itself happens at runtime: the author's ASI calls the m2-sdk
+    /// `shader-registry` API with the tables `qm build` writes to `<shipment>.shaders.h`, so the
+    /// Shipment must `load.requires: [{capability: shader-registry}]` (M0231).
     AddShader {
-        /// The shader name (hashed to become the ASET key).
-        name: String,
-        /// The compiled SM3 shader bytes.
-        blob: PathBuf,
+        family: crate::shader::ShaderFamily,
+        classes: Vec<ShaderClass>,
     },
-    /// Data, SAME-HASH. Wholesale REPLACE the compiled bytes of a shipped shader, keeping the
-    /// name. Same-hash swap; every material bind picks up the new shader.
+    /// Data. Replace the bytecode of a shipped shader in the stores, in place: `target` is the
+    /// registered `.sho` stem (`PgMeshVP` for `PgMeshVP.sho`). `shader` replaces its record in
+    /// `shader3.bin`; `shader_low` replaces its record in `shader3Low.bin`, and is required exactly
+    /// when the stem has one there. The stage comes from each source's version token and must be
+    /// the record's.
     ReplaceShader {
         target: String,
-        blob: PathBuf,
+        shader: ShaderSource,
+        #[serde(default)]
+        shader_low: Option<ShaderSource>,
     },
     /// Data. Add a NEW particle-effect entry to the fxdict, callable by its name from Lua and
     /// engine spawn sites. Pre-encoded `fxdict` payload (the sequence of tagged sub-chunks:
