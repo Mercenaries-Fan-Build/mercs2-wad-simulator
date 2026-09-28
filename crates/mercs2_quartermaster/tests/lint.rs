@@ -1324,3 +1324,151 @@ fn m0199_is_quiet_with_no_guards_or_full_valid_coverage() {
         "full valid coverage must be silent"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sound kinds (M0214–M0217)
+// ---------------------------------------------------------------------------
+
+/// Every field of one SoundCue, YAML at `indent`.
+fn cue_fields(indent: &str, name: &str, wave: &str) -> String {
+    [
+        format!("name: {name}"),
+        format!("wave: {wave}"),
+        "group_gain_db: -4.0".into(),
+        "cue_gain_db: -6.0".into(),
+        "pitch_semitones: 0.0".into(),
+        "positional: false".into(),
+        "min_distance: 10.0".into(),
+        "max_distance: 1000.0".into(),
+        "distance_exponent: 1.0".into(),
+        "doppler_scale: 1.0".into(),
+        "start_limit: 0".into(),
+        "sound_id: 0".into(),
+        "priority: 0.95".into(),
+        "group_20: 1.0".into(),
+        "cue_16: 0".into(),
+        "clip_hash: 0".into(),
+    ]
+    .iter()
+    .map(|l| format!("{indent}{l}\n"))
+    .collect()
+}
+
+/// An `add_sound` bank with one cue per name, all of category `category`.
+fn add_sound(bank: &str, category: &str, cues: &[&str]) -> Manifest {
+    let mut list = String::new();
+    for c in cues {
+        let f = cue_fields("        ", c, "src/a.wav");
+        list.push_str(&format!("      - {}", &f[8..]));
+    }
+    let cues = if cues.is_empty() { "    cues: []\n".to_string() } else { format!("    cues:\n{list}") };
+    shipment_with(&format!("  - kind: add_sound\n    bank: {bank}\n    category: {category}\n{cues}"))
+}
+
+/// A `replace_sound_cue` of `bank`, with `language` when given.
+fn replace_cue(bank: &str, language: Option<&str>) -> Manifest {
+    let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+    shipment_with(&format!(
+        "  - kind: replace_sound_cue\n    bank: {bank}\n{language}    category: ui\n    cue:\n{}",
+        cue_fields("      ", "ui_PDA_Open_01_st", "src/a.wav")
+    ))
+}
+
+#[test]
+fn a_well_formed_sound_bank_lints_clean() {
+    let diags = lint::lint(&add_sound("mod_sounds", "ui", &["mod_click", "mod_whoosh"]), None, None);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(lint::lint(&replace_cue("ui_hud", None), None, None).is_empty());
+    assert!(lint::lint(&replace_cue("vo_mattias", Some("english")), None, None).is_empty());
+}
+
+/// M0214: a WAV the strict reader refuses blocks; a PCM16 one does not.
+#[test]
+fn m0214_fires_on_a_wav_the_reader_refuses() {
+    let root = std::env::temp_dir().join(format!("qm_lint_m0214_{}", std::process::id()));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let wav = |bits: u16| {
+        let mut w = Vec::new();
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&40u32.to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&22050u32.to_le_bytes());
+        w.extend_from_slice(&(22050u32 * u32::from(bits / 8)).to_le_bytes());
+        w.extend_from_slice(&(bits / 8).to_le_bytes());
+        w.extend_from_slice(&bits.to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&4u32.to_le_bytes());
+        w.extend_from_slice(&[1, 2, 3, 4]);
+        w
+    };
+    let m = add_sound("mod_sounds", "ui", &["mod_click"]);
+    std::fs::write(root.join("src/a.wav"), wav(8)).unwrap();
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(codes(&diags).contains(&"M0214"), "{diags:?}");
+    assert!(lint::blocks_build(&diags));
+    std::fs::write(root.join("src/a.wav"), wav(16)).unwrap();
+    assert!(!codes(&lint::lint(&m, Some(&root), None)).contains(&"M0214"));
+}
+
+/// M0215: names the engine cannot reach — and none for usable ones.
+#[test]
+fn m0215_fires_on_unusable_sound_names() {
+    // Two names that differ only in case hash alike.
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &["Mod_Click", "mod_click"]), None, None)).contains(&"M0215"));
+    // A bare hash, a padded name.
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &["\"0x1234ABCD\""]), None, None)).contains(&"M0215"));
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &["\" mod_click\""]), None, None)).contains(&"M0215"));
+    assert!(codes(&lint::lint(&add_sound("\"0xDEADBEEF\"", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+    // No cues, and an add_sound bank the loader would localize.
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &[]), None, None)).contains(&"M0215"));
+    assert!(codes(&lint::lint(&add_sound("vo_mine", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+    // A usable bank is quiet.
+    assert!(!codes(&lint::lint(&add_sound("mod_sounds", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+}
+
+/// M0215: a cue whose guid is below 0x401 is read as an index by FindCue.
+#[test]
+fn m0215_fires_on_a_guid_below_the_direct_index_limit() {
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    // A name hashing below 0x401 is found by search, so the rule has something real to fire on.
+    let low = (0u32..20_000_000)
+        .map(|i| format!("q{i}"))
+        .find(|n| m2(n) < lint::DIRECT_INDEX_GUID_LIMIT)
+        .expect("a short name hashes below 0x401");
+    let diags = lint::lint(&add_sound("mod_sounds", "ui", &[&low]), None, None);
+    assert!(codes(&diags).contains(&"M0215"), "{low}: {diags:?}");
+}
+
+/// M0216: a category outside the tree, with the nearest named one offered.
+#[test]
+fn m0216_fires_on_an_unknown_category_and_suggests_one() {
+    let diags = lint::lint(&add_sound("mod_sounds", "weapn", &["mod_click"]), None, None);
+    let d = diags.iter().find(|d| d.rule.code == "M0216").expect("M0216 fires");
+    assert_eq!(d.fix.as_deref(), Some("weapon"));
+    for name in mercs2_audio::encode::RETAIL_CATEGORY_NAMES {
+        assert!(!codes(&lint::lint(&add_sound("mod_sounds", name, &["mod_click"]), None, None)).contains(&"M0216"), "{name}");
+    }
+}
+
+/// M0217: a language on a bank that is not vo_*, or none on one that is.
+#[test]
+fn m0217_fires_when_the_language_does_not_match_the_bank() {
+    assert!(codes(&lint::lint(&replace_cue("ui_hud", Some("english")), None, None)).contains(&"M0217"));
+    assert!(codes(&lint::lint(&replace_cue("vo_mattias", None), None, None)).contains(&"M0217"));
+    assert!(!codes(&lint::lint(&replace_cue("vo_mattias", Some("french")), None, None)).contains(&"M0217"));
+}
+
+/// The sound rules are registered with their doc anchors; the game-gated ones in GAME_RULES.
+#[test]
+fn the_sound_rules_are_registered() {
+    for code in ["M0214", "M0215", "M0216", "M0217"] {
+        let r = lint::RULES.iter().find(|r| r.code == code).unwrap_or_else(|| panic!("{code}"));
+        assert_eq!(r.doc, format!("docs/modding/manifest_format.md#{}", code.to_lowercase()));
+    }
+    for code in ["M0218", "M0219", "M0220"] {
+        assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code}");
+    }
+}
