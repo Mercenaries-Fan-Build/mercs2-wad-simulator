@@ -94,7 +94,7 @@ fn main() {
     // Work at the MTRL level: every material carries a FULL texture list (all slots), not just the
     // diffuse(0)/normal(2) the mesh builder keeps. Dump EVERY texture in EVERY slot so nothing is hidden.
     let container = wad::extract_container(&mut w, mhash).expect("extract container");
-    let mats = mercs2_formats::texture::parse_mtrl(&container);
+    let mats = mercs2_formats::texture::parse_mtrl(&container, mercs2_formats::texture::MtrlSource::Model).expect("parse the model MTRL");
     println!("model 0x{mhash:08X}: {} materials (slot roles: 0=diffuse, 1=?middle, 2=normal)", mats.len());
     let mut texs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for (i, mat) in mats.iter().enumerate() {
