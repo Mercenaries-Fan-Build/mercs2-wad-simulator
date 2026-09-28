@@ -317,6 +317,27 @@ fn used_inputs(tokens: &[u32], instrs: &[Instr]) -> (Vec<u32>, Vec<u32>) {
     (regs, texcoord_idx)
 }
 
+/// The `(usage, usage index)` of every input register (`v#`) a vertex shader declares with `dcl`,
+/// in declaration order: the vertex elements (`D3DDECLUSAGE`, index) the shader reads, which the
+/// bound vertex declaration must supply.
+pub fn vertex_inputs(blob: &[u8]) -> Result<Vec<(u8, u8)>, Error> {
+    let tokens = crate::sm3asm::to_tokens(blob)?;
+    if tokens.first() != Some(&VS_3_0) {
+        return Err(Error::NotVertexShader);
+    }
+    let (_, instrs) = walk(&tokens)?;
+    let mut out = Vec::new();
+    for ins in &instrs {
+        if ins.opcode == OP_DCL && ins.nparams >= 2 {
+            let usage_tok = tokens[ins.at + 1];
+            if regtype(tokens[ins.at + 2]) == REG_INPUT {
+                out.push(((usage_tok & 0xf) as u8, ((usage_tok >> 16) & 0xf) as u8));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Result of a splice, with an audit trail for the offline verification gate.
 #[derive(Debug)]
 pub struct SpliceReport {
@@ -680,8 +701,9 @@ pub struct StoreEntry {
     pub blob: Vec<u8>,
 }
 
-/// Refuse a blob the loader cannot take for a record of `kind`.
-fn check_blob(kind: ShaderKind, blob: &[u8]) -> Result<(), Error> {
+/// Refuse a blob the loader cannot take for a record of `kind`: over [`MAX_BLOB`] bytes, not a whole
+/// token stream, a version token other than `kind`'s, or no end token.
+pub fn check_blob(kind: ShaderKind, blob: &[u8]) -> Result<(), Error> {
     if blob.len() > MAX_BLOB {
         return Err(Error::BlobTooLarge { size: blob.len() });
     }
@@ -821,6 +843,24 @@ pub(crate) fn retail_store_for_test(name: &str) -> Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_inputs_lists_each_input_dcl_in_order() {
+        let blob = crate::sm3asm::assemble(
+            "vs_3_0\ndcl_position v0\ndcl_texcoord3 v1\ndcl_normal v2\ndcl_texcoord o3.xy\nmov o3.xy, v1\n",
+        )
+        .unwrap();
+        assert_eq!(vertex_inputs(&blob).unwrap(), vec![(0, 0), (5, 3), (3, 0)]);
+        let ps = crate::sm3asm::assemble("ps_3_0\ndcl_texcoord v0\nmov oC0, v0\n").unwrap();
+        assert!(matches!(vertex_inputs(&ps), Err(Error::NotVertexShader)));
+    }
+
+    #[test]
+    fn check_blob_refuses_a_version_token_of_the_other_stage() {
+        let ps = crate::sm3asm::assemble("ps_3_0\nmov oC0, c0\n").unwrap();
+        assert!(check_blob(ShaderKind::Pixel, &ps).is_ok());
+        assert!(matches!(check_blob(ShaderKind::Vertex, &ps), Err(Error::VersionMismatch { .. })));
+    }
 
     // A hand-built minimal vs_3_0 mirroring rec419 (the simplest static-mesh VS):
     //   dcl_position v0 ; dcl_position o0
