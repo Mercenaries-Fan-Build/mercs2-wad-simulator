@@ -4335,6 +4335,7 @@ pub fn build(
     // its patch; each session's loader loads the registrations.
     let lowered = crate::sound::lower_shipment_sound(shipment, game.as_deref_mut(), &mut log)
         .map_err(|(index, kind, message)| BuildError::Lower { index, kind, message })?;
+    let engine_banks = lowered.engine_banks;
     blocks.extend(lowered.overlay);
     let mut shell_blocks: Vec<PatchBlock> = lowered.shell;
     let language_blocks = lowered.language;
@@ -4477,6 +4478,9 @@ pub fn build(
         &shell_blocks.iter().collect::<Vec<_>>(),
         "sound loader",
     )?;
+    // Every bank the engine loads ships its three tables in one block of the overlay.
+    crate::sound::check_engine_banks(&engine_banks, &blocks.iter().collect::<Vec<_>>())
+        .map_err(|message| BuildError::Lower { index: 0, kind: "sound", message })?;
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
     // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
@@ -4818,7 +4822,8 @@ pub fn merged_string_tables<'a>(
 /// `vz.wad` scripts blocks ([`link::SCRIPT_BLOCKS`]), the `shell.wad` scripts block
 /// ([`link::SHELL_SCRIPT_BLOCKS`]), then each merged string table's block in hash order, then each
 /// merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`]; one path
-/// for the bank in every WAD that carries it).
+/// for the bank in every WAD that carries it; for a bank the engine loads, the block carries its
+/// sounddb and wavebank too).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
 /// the set-wide version of each.
 pub fn link_block_paths<'a>(
@@ -5307,7 +5312,8 @@ pub fn link_installed(
     patches.extend(table_blocks);
 
     // The merged sound banks: one soundbank per bank a replace_sound_cue targets, carrying every
-    // Shipment's cue overrides, in each WAD that carries the bank.
+    // Shipment's cue overrides, in each WAD that carries the bank; for a bank the engine loads, with
+    // its sounddb and the one wavebank of every Shipment's override waves, in load order.
     let mut shell_blocks: Vec<PatchBlock> = Vec::new();
     let mut language_blocks: std::collections::BTreeMap<crate::manifest::Language, Vec<PatchBlock>> =
         std::collections::BTreeMap::new();
@@ -5337,6 +5343,9 @@ pub fn link_installed(
             });
         }
         patches.extend(lowered.overlay);
+        // Every bank the engine loads ships its three tables in one block of the link WAD.
+        crate::sound::check_engine_banks(&lowered.engine_banks, &patches.iter().collect::<Vec<_>>())
+            .map_err(|message| BuildError::Lower { index: 0, kind: "link", message })?;
         shell_blocks = lowered.shell;
         language_blocks = lowered.language;
     }
