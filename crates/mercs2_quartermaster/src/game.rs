@@ -800,44 +800,49 @@ mod tests {
         }
     }
 
-    /// A console bake OPENS fine — Shipments are expected to export to every platform, so refusing
-    /// to read one would be wrong. Only EMITTING for it is unsupported, and that is the builder's
-    /// call, not this layer's.
-    #[test]
-    fn a_console_bake_opens_and_reports_its_platform() {
-        let Some(found) = discover() else { return };
-        let dir = found
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        for name in ["xbox-vz.wad", "ps3-VZ.WAD"] {
-            let candidate = dir.join(name);
-            if !candidate.is_file() {
-                continue;
-            }
-            let stack = GameStack::open(std::slice::from_ref(&candidate))
-                .unwrap_or_else(|e| panic!("a console bake must open, not error: {e}"));
-            assert_eq!(stack.platform(), Platform::BigEndianConsole, "{name}");
-        }
-    }
+    /// Game-gated: built by the `retail` feature, reads the vz.wad named by the repo-root
+    /// `.mercs2-local.toml`, and fails if it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-    /// Mixing platforms in one stack IS an error: resolution walks the whole stack, so it would read
-    /// structures of the wrong endianness.
-    #[test]
-    fn a_mixed_platform_stack_is_rejected() {
-        let Some(found) = discover() else { return };
-        let dir = found
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let console = dir.join("xbox-vz.wad");
-        if !console.is_file() {
-            return;
+        /// The retail `vz.wad` the repo-root `.mercs2-local.toml` names; panics when it cannot.
+        fn retail_vz_wad() -> PathBuf {
+            mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"))
         }
-        let err = GameStack::open(&[found.path.clone(), console]).unwrap_err();
-        assert!(err.to_string().contains("mixes PC and console"), "{err}");
+
+        /// A console bake OPENS fine — Shipments are expected to export to every platform, so refusing
+        /// to read one would be wrong. Only EMITTING for it is unsupported, and that is the builder's
+        /// call, not this layer's.
+        #[test]
+        fn a_console_bake_opens_and_reports_its_platform() {
+            let vz = retail_vz_wad();
+            let dir = vz.parent().expect("vz.wad has a parent folder");
+            for name in ["xbox-vz.wad", "ps3-VZ.WAD"] {
+                let candidate = dir.join(name);
+                if !candidate.is_file() {
+                    continue;
+                }
+                let stack = GameStack::open(std::slice::from_ref(&candidate))
+                    .unwrap_or_else(|e| panic!("a console bake must open, not error: {e}"));
+                assert_eq!(stack.platform(), Platform::BigEndianConsole, "{name}");
+            }
+        }
+
+        /// Mixing platforms in one stack IS an error: resolution walks the whole stack, so it would read
+        /// structures of the wrong endianness.
+        #[test]
+        fn a_mixed_platform_stack_is_rejected() {
+            let vz = retail_vz_wad();
+            let dir = vz.parent().expect("vz.wad has a parent folder");
+            let console = dir.join("xbox-vz.wad");
+            if !console.is_file() {
+                return;
+            }
+            let err = GameStack::open(&[vz.clone(), console]).unwrap_err();
+            assert!(err.to_string().contains("mixes PC and console"), "{err}");
+        }
     }
 
     #[test]
