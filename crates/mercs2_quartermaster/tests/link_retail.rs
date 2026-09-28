@@ -26,7 +26,7 @@ fn order(names: &[&str]) -> Vec<String> {
     names.iter().map(|s| s.to_string()).collect()
 }
 
-/// The vendored Lua corpus. It is in-tree, so its absence is a broken checkout, not a skip.
+/// The vendored Lua corpus. Panics when the corpus is missing.
 fn corpus() -> PathBuf {
     corpus_root().expect("the vendored Lua corpus crates/mercs2_script/corpus/mercs2-luacd/src is missing")
 }
@@ -370,8 +370,8 @@ fn mutations_on_different_scripts_are_independent() {
     block.verify_csums().expect("CSUMs");
 }
 
-/// A target that is not in the block is named, not silently skipped — a mod whose script vanished
-/// would otherwise install "successfully" and do nothing.
+/// A target that is not in the block is an error that names it, so a mod whose script vanished
+/// cannot install "successfully" and do nothing.
 #[test]
 fn an_unknown_target_is_reported() {
     let mut block = retail_block();
