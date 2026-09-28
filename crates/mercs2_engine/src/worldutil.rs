@@ -1615,7 +1615,7 @@ pub(crate) mod schema_wire_tests {
             // world names repeat heavily across blocks — the merged index is ~10k distinct names, not 100k.
             let static_only: std::collections::HashSet<String> =
                 mercs2_formats::placement::load_placements(&ls)
-                    .unwrap_or_default()
+                    .unwrap_or_else(|e| panic!("layers_static placements: {e}"))
                     .into_iter()
                     .filter_map(|p| p.name.map(|n| n.to_ascii_lowercase()))
                     .collect();
