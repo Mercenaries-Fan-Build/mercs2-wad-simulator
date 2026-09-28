@@ -1827,6 +1827,20 @@ fn sound_loader_rows(
         .collect()
 }
 
+/// The preview's `Script` rows for an override of `bank`: each session's loader of its wavebank for a
+/// bank retail Lua loads ([`sound_loader_rows`]); for a bank the engine loads, that the engine loads
+/// it by its retail name, through no loader (`sound::loader_sessions`).
+fn override_loader_rows(bank: &str, language: Option<mercs2_quartermaster::manifest::Language>) -> Vec<(String, String)> {
+    use mercs2_quartermaster::sound::{bank_loader, loader_sessions, BankLoader, RETAIL_LUA_LOAD_SITES};
+    match bank_loader(bank, &RETAIL_LUA_LOAD_SITES) {
+        BankLoader::Lua => sound_loader_rows(&loader_sessions(bank, language), "its wavebank"),
+        BankLoader::Engine => vec![(
+            "Script".to_string(),
+            format!("none: the engine loads {bank} by its retail name, the override waves appended to its wavebank"),
+        )],
+    }
+}
+
 /// The sessions an `add_sound` bank loads in: one pill per session, on or off, in manifest order
 /// (`LoadSession::ALL`). None on is M0221.
 fn sound_load_in_row(ui: &mut egui::Ui, load_in: &mut Vec<mercs2_quartermaster::manifest::LoadSession>) -> bool {
@@ -3053,7 +3067,7 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
             let entry = mercs2_quartermaster::sound::entry_name(bank, *language);
             let mut rows = vec![("Writes".to_string(), format!("sound bank {entry}  \u{2014} EXCLUSIVE"))];
-            rows.extend(sound_loader_rows(&mercs2_quartermaster::sound::retail_sessions(bank, *language), "its wavebank"));
+            rows.extend(override_loader_rows(bank, *language));
             rows.extend(cues.iter().map(|c| {
                 ("Writes".to_string(), format!("sound cue {}  \u{2014} EXCLUSIVE", c.name))
             }));
@@ -3068,7 +3082,7 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
                     mercs2_quartermaster::sound::entry_name(bank, *language)
                 ),
             )];
-            rows.extend(sound_loader_rows(&mercs2_quartermaster::sound::retail_sessions(bank, *language), "its wavebank"));
+            rows.extend(override_loader_rows(bank, *language));
             rows
         }
         Contribution::ReplaceTexture { target, .. } => vec![
@@ -4083,7 +4097,7 @@ mod tests {
 
     /// The preview names each session's loader for a sound kind: an `add_sound` its `load_in`, an
     /// override the sessions retail Lua loads its bank in (`ui_shell`: the front end only; `ui_hud`:
-    /// both).
+    /// both), and none for a bank the engine loads (`veh_jeep`).
     #[test]
     fn sound_previews_name_each_sessions_loader() {
         use mercs2_quartermaster::manifest::LoadSession;
@@ -4115,6 +4129,9 @@ mod tests {
         assert_eq!(shell.len(), 1, "{shell:?}");
         assert!(shell[0].starts_with("front end:"), "{shell:?}");
         assert_eq!(scripts(&cue("ui_hud")).len(), 2);
+        let engine = scripts(&cue("veh_jeep"));
+        assert_eq!(engine.len(), 1, "{engine:?}");
+        assert!(engine[0].starts_with("none: the engine loads veh_jeep"), "{engine:?}");
     }
 
     /// A whole-number field takes decimal or `0x` hex and refuses a value its type cannot hold.
