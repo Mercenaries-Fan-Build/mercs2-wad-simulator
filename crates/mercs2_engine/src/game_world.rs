@@ -1984,37 +1984,33 @@ mod prop_anim_tests {
         assert_eq!(ix.select_for_rig(&hier, 2), vec![0xB, 0xC]);
     }
 
-    /// Live: a KNOWN animated model (the Mattias avatar `0xA3C1FABC`) must auto-populate >0 clips
-    /// through the generalised load path — the core deliverable. SKIPS (passes) when vz.wad is
-    /// absent so `cargo test` stays green in CI.
-    #[test]
-    fn live_known_animated_model_yields_clips() {
-        // Resolved, never hardcoded: `$VZ_WAD` (a folder or the file) then the registry key. The old
-        // literal install path could not resolve off Windows, so this test silently never ran there.
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("skip: vz.wad not found (set VZ_WAD to the install folder or the file)");
-        };
-        let Ok(mut w) = wad::open(&path) else {
-            eprintln!("skip: vz.wad not present at {path}");
-            return;
-        };
-        let Some((m, _, _)) = load_model_by_hash(&mut w, 0xA3C1_FABC) else {
-            eprintln!("skip: player model 0xA3C1FABC not in this WAD");
-            return;
-        };
-        assert!(
-            m.skin.rig.len() >= MIN_ANIM_RIG_BONES,
-            "avatar must be rigged, got {} bones",
-            m.skin.rig.len()
-        );
-        assert!(
-            !m.clips.is_empty(),
-            "known animated model 0xA3C1FABC must auto-populate clips, got {}",
-            m.clips.len()
-        );
-        // Every populated clip actually decoded to sampleable frames.
-        for c in &m.clips {
-            assert!(c.clip.num_tracks > 0, "clip 0x{:08X} decoded 0 tracks", c.name_hash);
+    /// Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+    /// `.mercs2-local.toml`, and fails when it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        /// Live: a KNOWN animated model (the Mattias avatar `0xA3C1FABC`) must auto-populate >0 clips
+        /// through the generalised load path — the core deliverable.
+        #[test]
+        fn live_known_animated_model_yields_clips() {
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let (m, _, _) = load_model_by_hash(&mut w, 0xA3C1_FABC)
+                .expect("the retail vz.wad carries the player model 0xA3C1FABC");
+            assert!(
+                m.skin.rig.len() >= MIN_ANIM_RIG_BONES,
+                "avatar must be rigged, got {} bones",
+                m.skin.rig.len()
+            );
+            assert!(
+                !m.clips.is_empty(),
+                "known animated model 0xA3C1FABC must auto-populate clips, got {}",
+                m.clips.len()
+            );
+            // Every populated clip actually decoded to sampleable frames.
+            for c in &m.clips {
+                assert!(c.clip.num_tracks > 0, "clip 0x{:08X} decoded 0 tracks", c.name_hash);
+            }
         }
     }
 }
@@ -2091,66 +2087,6 @@ mod stream_collision_tests {
         assert!(collider_tris.is_empty(), "terrain contributes zero triangles to the collider");
     }
 
-    /// Live: authored PHY2 convex collision loads for a real streamed prop, triangulates to a SANE,
-    /// LOW tri count, and is lower-poly than the render mesh. Also proves the model→PHY2 linkage end to
-    /// end (extract container → `PHY2` sub-chunk → parse → triangulate) and reports the WAD-wide
-    /// authored-vs-fallback split across the ModelName props. SKIPS (passes) when vz.wad is absent.
-    #[test]
-    fn live_prop_phy2_convex_collision_is_sane_and_low_poly() {
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut w) = wad::open(&path) else {
-            return eprintln!("skip: vz.wad not present at {path}");
-        };
-        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
-            return eprintln!("skip: terrain blocks not found");
-        };
-        let mut hashes: Vec<u32> =
-            mercs2_formats::placement::load_model_placements(&ls).iter().map(|p| p.model_hash).collect();
-        hashes.sort_unstable();
-        hashes.dedup();
-
-        // Census + find one prop with a complete authored convex/box collider.
-        let (mut authored, mut no_authored) = (0usize, 0usize);
-        let mut example: Option<(u32, usize, usize)> = None; // hash, hull_tris, render_tris
-        for &h in &hashes {
-            match load_authored_collision(&mut w, h) {
-                Some(tris) => {
-                    authored += 1;
-                    // Every authored triangle vertex is finite and in a plausible model-local range.
-                    for t in &tris {
-                        for v in t {
-                            assert!(v.is_finite(), "authored PHY2 tri vertex not finite for 0x{h:08X}: {v:?}");
-                            assert!(v.length() < 2000.0, "authored PHY2 vertex implausibly far for 0x{h:08X}: {v:?}");
-                        }
-                    }
-                    if example.is_none() {
-                        let rt = load_model_by_hash(&mut w, h).map(|(m, _, _)| m.indices.len() / 3).unwrap_or(0);
-                        example = Some((h, tris.len(), rt));
-                    }
-                }
-                None => no_authored += 1,
-            }
-        }
-        eprintln!(
-            "ModelName props: {} distinct — authored PHY2 convex/box: {authored}, no authored collider (no collision): {no_authored}",
-            hashes.len()
-        );
-
-        // The WAD must ship at least one prop with an authored convex collider (this is the whole point).
-        let (h, hull_tris, render_tris) = example.expect("at least one prop ships authored convex PHY2 collision");
-        eprintln!("example prop 0x{h:08X}: authored hull_tris={hull_tris}, render_tris={render_tris}");
-        assert!(hull_tris >= 4, "a convex hull triangulates to >= 4 tris, got {hull_tris}");
-        assert!(hull_tris < 5000, "authored hull collision must be LOW-poly, got {hull_tris} tris");
-        if render_tris > 0 {
-            assert!(
-                hull_tris <= render_tris,
-                "authored hull collision ({hull_tris}) should not exceed the render mesh ({render_tris})"
-            );
-        }
-    }
-
     /// Dropping a hibernating tile removes exactly its grid, and a hole (uncovered interior after no
     /// dilation can reach it) reports `None` rather than a fabricated height.
     #[test]
@@ -2165,233 +2101,283 @@ mod stream_collision_tests {
         assert!(field.is_empty());
         assert_eq!(field.height_at(10.0, 10.0), None, "no resident tile → None");
     }
+
+    /// Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+    /// `.mercs2-local.toml`, and fails when it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        /// Live: authored PHY2 convex collision loads for a real streamed prop, triangulates to a SANE,
+        /// LOW tri count, and is lower-poly than the render mesh. Also proves the model→PHY2 linkage end to
+        /// end (extract container → `PHY2` sub-chunk → parse → triangulate) and reports the WAD-wide
+        /// authored-vs-fallback split across the ModelName props.
+        #[test]
+        fn live_prop_phy2_convex_collision_is_sane_and_low_poly() {
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let (_low, ls) = find_terrain_blocks(&mut w)
+                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
+            let mut hashes: Vec<u32> =
+                mercs2_formats::placement::load_model_placements(&ls).iter().map(|p| p.model_hash).collect();
+            hashes.sort_unstable();
+            hashes.dedup();
+
+            // Census + find one prop with a complete authored convex/box collider.
+            let (mut authored, mut no_authored) = (0usize, 0usize);
+            let mut example: Option<(u32, usize, usize)> = None; // hash, hull_tris, render_tris
+            for &h in &hashes {
+                match load_authored_collision(&mut w, h) {
+                    Some(tris) => {
+                        authored += 1;
+                        // Every authored triangle vertex is finite and in a plausible model-local range.
+                        for t in &tris {
+                            for v in t {
+                                assert!(v.is_finite(), "authored PHY2 tri vertex not finite for 0x{h:08X}: {v:?}");
+                                assert!(v.length() < 2000.0, "authored PHY2 vertex implausibly far for 0x{h:08X}: {v:?}");
+                            }
+                        }
+                        if example.is_none() {
+                            let rt = load_model_by_hash(&mut w, h).map(|(m, _, _)| m.indices.len() / 3).unwrap_or(0);
+                            example = Some((h, tris.len(), rt));
+                        }
+                    }
+                    None => no_authored += 1,
+                }
+            }
+            eprintln!(
+                "ModelName props: {} distinct — authored PHY2 convex/box: {authored}, no authored collider (no collision): {no_authored}",
+                hashes.len()
+            );
+
+            // The WAD must ship at least one prop with an authored convex collider (this is the whole point).
+            let (h, hull_tris, render_tris) = example.expect("at least one prop ships authored convex PHY2 collision");
+            eprintln!("example prop 0x{h:08X}: authored hull_tris={hull_tris}, render_tris={render_tris}");
+            assert!(hull_tris >= 4, "a convex hull triangulates to >= 4 tris, got {hull_tris}");
+            assert!(hull_tris < 5000, "authored hull collision must be LOW-poly, got {hull_tris} tris");
+            if render_tris > 0 {
+                assert!(
+                    hull_tris <= render_tris,
+                    "authored hull collision ({hull_tris}) should not exceed the render mesh ({render_tris})"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod terrain_texture_tests {
-    use super::*;
+    /// Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+    /// `.mercs2-local.toml`, and fails when it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::super::*;
 
-    /// Live: a real hi-res terrainmesh tile must come back TEXTURED, not white. Loading a tile binds
-    /// each draw's PRMG-group representative `terraintextures` detail layer (via `DrawGroup::group_index`
-    /// → `terrain_group_layers`) and resolves those hashes into the tile's texture map. Regression guard
-    /// for the `layers.len() == draws.len()` guard that once silently skipped ALL binding after the
-    /// multi-material sub-strip split, leaving the ground white. SKIPS (passes) when vz.wad is absent.
-    #[test]
-    fn live_terrainmesh_tile_is_textured() {
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("skip: vz.wad not found (set VZ_WAD to the install folder or the file)");
-        };
-        let Ok(mut w) = wad::open(&path) else {
-            return eprintln!("skip: vz.wad not present at {path}");
-        };
-        // The TerrainObject->Transform tile map (terrainmesh_hash -> world pos) lives in layers_static.
-        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
-            return eprintln!("skip: terrain blocks not found");
-        };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
-            .expect("every TerrainObject has a Transform");
-        let Some(tile) = tiles.into_iter().find(|t| {
-            wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok()
-        }) else {
-            return eprintln!("skip: no loadable terrainmesh tile in this WAD");
-        };
+        /// Live: a real hi-res terrainmesh tile must come back TEXTURED, not white. Loading a tile binds
+        /// each draw's PRMG-group representative `terraintextures` detail layer (via `DrawGroup::group_index`
+        /// → `terrain_group_layers`) and resolves those hashes into the tile's texture map. Regression guard
+        /// for the `layers.len() == draws.len()` guard that once silently skipped ALL binding after the
+        /// multi-material sub-strip split, leaving the ground white.
+        #[test]
+        fn live_terrainmesh_tile_is_textured() {
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            // The TerrainObject->Transform tile map (terrainmesh_hash -> world pos) lives in layers_static.
+            let (_low, ls) = find_terrain_blocks(&mut w)
+                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
+            let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+                .expect("every TerrainObject has a Transform");
+            let Some(tile) = tiles.into_iter().find(|t| {
+                wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok()
+            }) else {
+                panic!("no TerrainObject tile in the retail vz.wad has a loadable terrainmesh container");
+            };
 
-        let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos)
-            .expect("terrainmesh tile must load");
-        assert!(!m.draws.is_empty(), "tile has no draws");
+            let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos)
+                .expect("terrainmesh tile must load");
+            assert!(!m.draws.is_empty(), "tile has no draws");
 
-        // Every draw should carry a detail diffuse, and that hash must be a real, decoded
-        // terraintextures texture present in the tile's resolved texture map.
-        let with_diffuse = m.draws.iter().filter(|d| d.diffuse.is_some()).count();
-        let resolved = m
-            .draws
-            .iter()
-            .filter(|d| d.diffuse.map_or(false, |h| m.textures.contains_key(&h)))
-            .count();
-        assert!(!m.textures.is_empty(), "no terrain textures were loaded (terrain would render white)");
-        assert!(
-            with_diffuse * 100 >= m.draws.len() * 95,
-            "expected ~all draws bound to a detail layer, got {with_diffuse}/{} — the group_index \
-             mapping regressed and the terrain would render white",
-            m.draws.len()
-        );
-        assert!(
-            resolved * 100 >= m.draws.len() * 95,
-            "expected ~all bound draws to resolve to a loaded terraintextures texture, got \
-             {resolved}/{} resolved",
-            m.draws.len()
-        );
-        eprintln!(
-            "terrainmesh 0x{:08X}: {} draws, {with_diffuse} bound, {resolved} resolve, {} distinct textures",
-            tile.terrainmesh_hash, m.draws.len(), m.textures.len()
-        );
-    }
+            // Every draw should carry a detail diffuse, and that hash must be a real, decoded
+            // terraintextures texture present in the tile's resolved texture map.
+            let with_diffuse = m.draws.iter().filter(|d| d.diffuse.is_some()).count();
+            let resolved = m
+                .draws
+                .iter()
+                .filter(|d| d.diffuse.map_or(false, |h| m.textures.contains_key(&h)))
+                .count();
+            assert!(!m.textures.is_empty(), "no terrain textures were loaded (terrain would render white)");
+            assert!(
+                with_diffuse * 100 >= m.draws.len() * 95,
+                "expected ~all draws bound to a detail layer, got {with_diffuse}/{} — the group_index \
+                 mapping regressed and the terrain would render white",
+                m.draws.len()
+            );
+            assert!(
+                resolved * 100 >= m.draws.len() * 95,
+                "expected ~all bound draws to resolve to a loaded terraintextures texture, got \
+                 {resolved}/{} resolved",
+                m.draws.len()
+            );
+            eprintln!(
+                "terrainmesh 0x{:08X}: {} draws, {with_diffuse} bound, {resolved} resolve, {} distinct textures",
+                tile.terrainmesh_hash, m.draws.len(), m.textures.len()
+            );
+        }
 
-    /// Live: the multi-layer SPLAT BLEND is faithful and non-degenerate. Over real vz.wad tiles this
-    /// asserts (a) a terrainmesh group material carries >=2 blendable DETAIL diffuses beyond the base
-    /// (so the blend has real layers to mix); (b) the per-vertex D3DCOLOR weights decode to a sane,
-    /// non-degenerate distribution (dominant R, weights normalize to ~1, NOT all-equal); (c) after
-    /// binding, every blend draw carries a representative diffuse AND its aliased detail slots, all
-    /// resolving to loaded textures — the anti-white-terrain guarantee. SKIPS when vz.wad is absent.
-    #[test]
-    fn live_terrainmesh_splat_blend_is_faithful() {
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut w) = wad::open(&path) else {
-            return eprintln!("skip: vz.wad not present at {path}");
-        };
-        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
-            return eprintln!("skip: terrain blocks not found");
-        };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
-            .expect("every TerrainObject has a Transform");
+        /// Live: the multi-layer SPLAT BLEND is faithful and non-degenerate. Over real vz.wad tiles this
+        /// asserts (a) a terrainmesh group material carries >=2 blendable DETAIL diffuses beyond the base
+        /// (so the blend has real layers to mix); (b) the per-vertex D3DCOLOR weights decode to a sane,
+        /// non-degenerate distribution (dominant R, weights normalize to ~1, NOT all-equal); (c) after
+        /// binding, every blend draw carries a representative diffuse AND its aliased detail slots, all
+        /// resolving to loaded textures — the anti-white-terrain guarantee.
+        #[test]
+        fn live_terrainmesh_splat_blend_is_faithful() {
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let (_low, ls) = find_terrain_blocks(&mut w)
+                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
+            let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+                .expect("every TerrainObject has a Transform");
 
-        // (a) Find a tile whose material set carries >=2 blendable detail diffuses beyond base0 +
-        // the global 3B030C8A constant — i.e. a group layerset of len >= 4 — while AGGREGATING the
-        // per-vertex weight distribution across every scanned tile (a single sparse edge tile can be
-        // near-uniform; the corpus-wide distribution is what proves the weights are real splat data).
-        let mut multi_layer_tile = None;
-        let mut max_len_seen = 0usize;
-        let (mut nverts, mut sum_r, mut sum_g, mut sum_b) = (0u64, 0u64, 0u64, 0u64);
-        let mut sum_ok = 0u64; // verts whose R+G+B normalizes to ~1
-        let mut distinct: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
-        let mut scanned = 0usize;
-        for t in &tiles {
-            let Ok(container) =
-                wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
-            else { continue };
-            let layers = mercs2_formats::texture::terrain_group_layers(&container);
-            let ml = layers.iter().map(|l| l.len()).max().unwrap_or(0);
-            max_len_seen = max_len_seen.max(ml);
-            if ml >= 4 && multi_layer_tile.is_none() {
-                let best = layers.iter().max_by_key(|l| l.len()).unwrap().clone();
-                multi_layer_tile = Some((t.terrainmesh_hash, t.pos, best));
+            // (a) Find a tile whose material set carries >=2 blendable detail diffuses beyond base0 +
+            // the global 3B030C8A constant — i.e. a group layerset of len >= 4 — while AGGREGATING the
+            // per-vertex weight distribution across every scanned tile (a single sparse edge tile can be
+            // near-uniform; the corpus-wide distribution is what proves the weights are real splat data).
+            let mut multi_layer_tile = None;
+            let mut max_len_seen = 0usize;
+            let (mut nverts, mut sum_r, mut sum_g, mut sum_b) = (0u64, 0u64, 0u64, 0u64);
+            let mut sum_ok = 0u64; // verts whose R+G+B normalizes to ~1
+            let mut distinct: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
+            let mut scanned = 0usize;
+            for t in &tiles {
+                let Ok(container) =
+                    wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
+                else { continue };
+                let layers = mercs2_formats::texture::terrain_group_layers(&container);
+                let ml = layers.iter().map(|l| l.len()).max().unwrap_or(0);
+                max_len_seen = max_len_seen.max(ml);
+                if ml >= 4 && multi_layer_tile.is_none() {
+                    let best = layers.iter().max_by_key(|l| l.len()).unwrap().clone();
+                    multi_layer_tile = Some((t.terrainmesh_hash, t.pos, best));
+                }
+                if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(&container) {
+                    for m in &meshes {
+                        for c in &m.colors {
+                            // D3DCOLOR stored B,G,R,A: c[2]=R, c[1]=G, c[0]=B.
+                            let (r, g, b) = (c[2] as u64, c[1] as u64, c[0] as u64);
+                            sum_r += r; sum_g += g; sum_b += b;
+                            let s = (r + g + b) as f32 / 255.0;
+                            if (s - 1.0).abs() < 0.15 { sum_ok += 1; }
+                            distinct.insert(*c);
+                            nverts += 1;
+                        }
+                    }
+                }
+                scanned += 1;
+                if scanned >= 24 && multi_layer_tile.is_some() {
+                    break;
+                }
             }
-            if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(&container) {
-                for m in &meshes {
-                    for c in &m.colors {
-                        // D3DCOLOR stored B,G,R,A: c[2]=R, c[1]=G, c[0]=B.
-                        let (r, g, b) = (c[2] as u64, c[1] as u64, c[0] as u64);
-                        sum_r += r; sum_g += g; sum_b += b;
-                        let s = (r + g + b) as f32 / 255.0;
-                        if (s - 1.0).abs() < 0.15 { sum_ok += 1; }
-                        distinct.insert(*c);
-                        nverts += 1;
+            let Some((tile_hash, tile_pos, best)) = multi_layer_tile else {
+                panic!(
+                    "no multi-layer terrain tile in the retail vz.wad (scanned {scanned} tiles, max layerset \
+                     len {max_len_seen})"
+                );
+            };
+            // base0 + 3B030C8A + >=2 details => at least 2 blendable diffuses after dropping the base
+            // and the global constant (index 1).
+            let blendable_details = best.len().saturating_sub(2);
+            assert!(
+                blendable_details >= 2,
+                "expected a group to carry >=2 blendable detail diffuses, got layerset {best:08X?}"
+            );
+
+            // (b) Per-vertex weight distribution (aggregated): dominant R, sum normalizes to ~1, varied.
+            assert!(nverts > 0, "terrain tiles carried no per-vertex splat weights");
+            assert!(
+                distinct.len() > 16,
+                "weights are degenerate (all-equal): only {} distinct values over {nverts} verts",
+                distinct.len()
+            );
+            assert!(
+                sum_ok * 100 >= nverts * 90,
+                "expected >=90% of vertices' R+G+B to normalize to ~1, got {sum_ok}/{nverts}"
+            );
+            assert!(
+                sum_r > sum_g && sum_r > sum_b,
+                "expected the R channel to dominate the splat weights (means R {} G {} B {})",
+                sum_r / nverts, sum_g / nverts, sum_b / nverts
+            );
+
+            // (c) Binding: every blend draw carries a representative diffuse + aliased detail slots, all
+            // resolving to a loaded terraintextures texture (anti-white-terrain).
+            let m = load_terrainmesh_tile(&mut w, tile_hash, tile_pos).expect("tile loads");
+            let blend_draws: Vec<_> = m.draws.iter().filter(|d| d.diffuse.is_some()).collect();
+            assert!(!blend_draws.is_empty(), "no draw bound a detail layer");
+            for d in &blend_draws {
+                for slot in [d.diffuse, d.normal, d.specular] {
+                    let h = slot.expect("a blend draw must bind all three diffuse slots (aliased if absent)");
+                    assert!(
+                        m.textures.contains_key(&h),
+                        "blend layer 0x{h:08X} did not resolve to a loaded texture (white-terrain risk)"
+                    );
+                }
+            }
+            eprintln!(
+                "splat 0x{:08X}: layerset {:08X?} ({blendable_details} blendable details); {} distinct \
+                 weights over {nverts} verts, {sum_ok} normalize; {} blend draws all resolve",
+                tile_hash, best, distinct.len(), blend_draws.len()
+            );
+        }
+
+        /// Live proof of the K3 collision savings: a real terrainmesh tile carries thousands of triangles that
+        /// USED to be cloned into the collision world on every wake/hibernate. Baking it into a
+        /// `TileHeightGrid` costs one grid instead, and the grid reproduces the tile's surface height (so the
+        /// hero still grounds on the hi-res terrain). Prints the before/after tri count.
+        #[test]
+        fn live_terrain_tile_routes_to_heightfield_not_the_collider() {
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let (_low, ls) = find_terrain_blocks(&mut w)
+                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
+            let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+                .expect("every TerrainObject has a Transform");
+            let Some(tile) = tiles
+                .into_iter()
+                .find(|t| wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok())
+            else {
+                panic!("no TerrainObject tile in the retail vz.wad has a loadable terrainmesh container");
+            };
+            let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos).expect("tile loads");
+            let world_tris = extract_local_tris(&m); // already world-space
+            let tris_avoided = world_tris.len();
+            assert!(
+                tris_avoided > 100,
+                "a real terrain tile should carry many triangles (got {tris_avoided}) — these are the \
+                 collider entries the heightfield replaces"
+            );
+
+            let grid = TileHeightGrid::bake(&world_tris).expect("tile bakes into a heightfield");
+            let mut field = TerrainHeightField::default();
+            field.insert(tile.key, grid);
+
+            // The baked surface must track the tile's actual triangle vertices (the hero stands on THIS, not
+            // the low-res surface). Sample a spread of real vertices and compare to the field.
+            let mut checked = 0u32;
+            let mut max_err = 0.0f32;
+            for t in world_tris.iter().step_by(world_tris.len() / 50 + 1) {
+                for v in t {
+                    if let Some(h) = field.height_at(v.x, v.z) {
+                        // The grid stores per-cell MAX height, so it is >= any single vertex in that cell;
+                        // on the near-flat terrain the gap is small. Bound the shortfall generously.
+                        max_err = max_err.max((h - v.y).abs());
+                        checked += 1;
                     }
                 }
             }
-            scanned += 1;
-            if scanned >= 24 && multi_layer_tile.is_some() {
-                break;
-            }
+            assert!(checked > 0, "the field covered at least some of the tile's own vertices");
+            eprintln!(
+                "terrain tile 0x{:08X}: {tris_avoided} tris NO LONGER enter the collider (baked into a \
+                 {}-tile heightfield); surface tracked at {checked} verts, max |Δ|={max_err:.2} m",
+                tile.terrainmesh_hash,
+                field.tile_count()
+            );
         }
-        let Some((tile_hash, tile_pos, best)) = multi_layer_tile else {
-            return eprintln!("skip: no multi-layer terrain tile in this WAD (max layerset len {max_len_seen})");
-        };
-        // base0 + 3B030C8A + >=2 details => at least 2 blendable diffuses after dropping the base
-        // and the global constant (index 1).
-        let blendable_details = best.len().saturating_sub(2);
-        assert!(
-            blendable_details >= 2,
-            "expected a group to carry >=2 blendable detail diffuses, got layerset {best:08X?}"
-        );
-
-        // (b) Per-vertex weight distribution (aggregated): dominant R, sum normalizes to ~1, varied.
-        assert!(nverts > 0, "terrain tiles carried no per-vertex splat weights");
-        assert!(
-            distinct.len() > 16,
-            "weights are degenerate (all-equal): only {} distinct values over {nverts} verts",
-            distinct.len()
-        );
-        assert!(
-            sum_ok * 100 >= nverts * 90,
-            "expected >=90% of vertices' R+G+B to normalize to ~1, got {sum_ok}/{nverts}"
-        );
-        assert!(
-            sum_r > sum_g && sum_r > sum_b,
-            "expected the R channel to dominate the splat weights (means R {} G {} B {})",
-            sum_r / nverts, sum_g / nverts, sum_b / nverts
-        );
-
-        // (c) Binding: every blend draw carries a representative diffuse + aliased detail slots, all
-        // resolving to a loaded terraintextures texture (anti-white-terrain).
-        let m = load_terrainmesh_tile(&mut w, tile_hash, tile_pos).expect("tile loads");
-        let blend_draws: Vec<_> = m.draws.iter().filter(|d| d.diffuse.is_some()).collect();
-        assert!(!blend_draws.is_empty(), "no draw bound a detail layer");
-        for d in &blend_draws {
-            for slot in [d.diffuse, d.normal, d.specular] {
-                let h = slot.expect("a blend draw must bind all three diffuse slots (aliased if absent)");
-                assert!(
-                    m.textures.contains_key(&h),
-                    "blend layer 0x{h:08X} did not resolve to a loaded texture (white-terrain risk)"
-                );
-            }
-        }
-        eprintln!(
-            "splat 0x{:08X}: layerset {:08X?} ({blendable_details} blendable details); {} distinct \
-             weights over {nverts} verts, {sum_ok} normalize; {} blend draws all resolve",
-            tile_hash, best, distinct.len(), blend_draws.len()
-        );
-    }
-
-    /// Live proof of the K3 collision savings: a real terrainmesh tile carries thousands of triangles that
-    /// USED to be cloned into the collision world on every wake/hibernate. Baking it into a
-    /// `TileHeightGrid` costs one grid instead, and the grid reproduces the tile's surface height (so the
-    /// hero still grounds on the hi-res terrain). Prints the before/after tri count. SKIPS when vz.wad is
-    /// absent.
-    #[test]
-    fn live_terrain_tile_routes_to_heightfield_not_the_collider() {
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut w) = wad::open(&path) else {
-            return eprintln!("skip: vz.wad not present at {path}");
-        };
-        let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
-            return eprintln!("skip: terrain blocks not found");
-        };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
-            .expect("every TerrainObject has a Transform");
-        let Some(tile) = tiles
-            .into_iter()
-            .find(|t| wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok())
-        else {
-            return eprintln!("skip: no loadable terrainmesh tile");
-        };
-        let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos).expect("tile loads");
-        let world_tris = extract_local_tris(&m); // already world-space
-        let tris_avoided = world_tris.len();
-        assert!(
-            tris_avoided > 100,
-            "a real terrain tile should carry many triangles (got {tris_avoided}) — these are the \
-             collider entries the heightfield replaces"
-        );
-
-        let grid = TileHeightGrid::bake(&world_tris).expect("tile bakes into a heightfield");
-        let mut field = TerrainHeightField::default();
-        field.insert(tile.key, grid);
-
-        // The baked surface must track the tile's actual triangle vertices (the hero stands on THIS, not
-        // the low-res surface). Sample a spread of real vertices and compare to the field.
-        let mut checked = 0u32;
-        let mut max_err = 0.0f32;
-        for t in world_tris.iter().step_by(world_tris.len() / 50 + 1) {
-            for v in t {
-                if let Some(h) = field.height_at(v.x, v.z) {
-                    // The grid stores per-cell MAX height, so it is >= any single vertex in that cell;
-                    // on the near-flat terrain the gap is small. Bound the shortfall generously.
-                    max_err = max_err.max((h - v.y).abs());
-                    checked += 1;
-                }
-            }
-        }
-        assert!(checked > 0, "the field covered at least some of the tile's own vertices");
-        eprintln!(
-            "terrain tile 0x{:08X}: {tris_avoided} tris NO LONGER enter the collider (baked into a \
-             {}-tile heightfield); surface tracked at {checked} verts, max |Δ|={max_err:.2} m",
-            tile.terrainmesh_hash,
-            field.tile_count()
-        );
     }
 }
