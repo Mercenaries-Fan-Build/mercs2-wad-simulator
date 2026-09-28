@@ -769,28 +769,29 @@ mod tests {
                 if found.len() == targets.len() {
                     break;
                 }
-                let Ok(dec) = decompress_block(&mut f, &arch.indx, bi as u16) else {
-                    continue;
-                };
-                if dec.len() < 4 {
-                    continue;
-                }
+                let dec = decompress_block(&mut f, &arch.indx, bi as u16)
+                    .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
+                assert!(dec.len() >= 4, "block {bi}: {} bytes, too short for an entry count", dec.len());
                 let count = u32::from_le_bytes([dec[0], dec[1], dec[2], dec[3]]) as usize;
                 let mut pos = 4 + count * 16;
                 for ei in 0..count {
                     let base = 4 + ei * 16;
-                    if base + 16 > dec.len() {
-                        break;
-                    }
+                    assert!(
+                        base + 16 <= dec.len(),
+                        "block {bi}: entry {ei} of {count} runs past the {}-byte block",
+                        dec.len()
+                    );
                     let chunk_size = u32::from_le_bytes([
                         dec[base + 12],
                         dec[base + 13],
                         dec[base + 14],
                         dec[base + 15],
                     ]) as usize;
-                    if pos + chunk_size > dec.len() {
-                        break;
-                    }
+                    assert!(
+                        pos + chunk_size <= dec.len(),
+                        "block {bi}: entry {ei} container ({chunk_size} bytes at {pos}) runs past the {}-byte block",
+                        dec.len()
+                    );
                     let container = &dec[pos..pos + chunk_size];
                     pos += chunk_size;
                     for g in parse_comp_groups(container) {
@@ -883,6 +884,8 @@ mod tests {
                     recs[0].get(s.fields[0].name_hash),
                     Some(FieldValue::U32(_))
                 ));
+            } else {
+                panic!("FactionMarker not found in retail vz.wad");
             }
 
             // Road: 4×u32 + 2×vec3, stride 40; the vec3 fields must decode to finite floats.
@@ -911,6 +914,8 @@ mod tests {
                         panic!("road vec3 field missing");
                     }
                 }
+            } else {
+                panic!("Road not found in retail vz.wad");
             }
 
             // Transform: type11 blob@0 (32B) + f32@32 + 8×u16@36..50 — assert the SCHEMA layout only.
@@ -933,6 +938,8 @@ mod tests {
                 for w in u16s.windows(2) {
                     assert_eq!(w[1] - w[0], 2, "Transform u16 fields are 2 bytes apart");
                 }
+            } else {
+                panic!("Transform not found in retail vz.wad");
             }
         }
     }
