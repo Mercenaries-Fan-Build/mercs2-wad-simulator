@@ -52,6 +52,9 @@
 //!
 //! The assertions below exist so the serializer can rely on all of the above: a DLC or future
 //! archive that breaks any of it fails HERE, not by shipping a WAD that hangs the game.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -62,8 +65,9 @@ use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::TYPE_ID_MODEL;
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn u32_le(b: &[u8], o: usize) -> u32 {
@@ -169,10 +173,7 @@ struct Census {
 
 #[test]
 fn can_the_destruction_state_machine_be_written() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR or .mercs2-local.toml)");
-        return;
-    };
+    let wad = vz_wad();
     let mut file = std::fs::File::open(&wad).expect("open vz.wad");
     let size = file.metadata().expect("stat").len();
     let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");
