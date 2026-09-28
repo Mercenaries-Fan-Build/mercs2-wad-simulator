@@ -1,9 +1,8 @@
 //! Builder behaviour against the retail WADs.
 //!
 //! Game-gated: built by the `retail` feature (`cargo xtask retail-test`), these read the retail
-//! vz.wad named by the repo-root `.mercs2-local.toml` and fail if it is absent. They are the tests
-//! that exercise the real format, and those are precisely the ones that caught every structural bug
-//! so far. The hermetic builder tests are in `build.rs`.
+//! vz.wad named by the repo-root `.mercs2-local.toml` and fail if it is absent. The hermetic builder
+//! tests are in `build.rs`.
 
 mod common {
     pub mod build;
@@ -145,8 +144,7 @@ fn edit_state_machine_renames_a_state_end_to_end() {
 // ---------------------------------------------------------------------------
 
 /// The retail game stack, opened from the vz.wad the repo-root `.mercs2-local.toml` names. Panics
-/// when the config, the archive, or the stack cannot be had: a game-gated test never passes without
-/// the game.
+/// when the config, the archive, or the stack cannot be had.
 fn retail_game() -> mercs2_quartermaster::GameStack {
     let vz = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -598,7 +596,7 @@ fn add_outfit_builds_model_and_wardrobe_row_together() {
     );
 }
 
-/// The vendored Lua corpus. It is in-tree, so its absence is a broken checkout, not a skip.
+/// The vendored Lua corpus. Panics when the corpus is missing.
 fn corpus_for_tests() -> PathBuf {
     let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
     while let Some(d) = dir {
@@ -1499,8 +1497,7 @@ fn edit_stringdb_refuses_an_unknown_key() {
 
 // ──────────────────────────────────────────────────────────────────────────── donor auto-pick
 
-/// Omitting `donor:` on an add_outfit no longer refuses with "auto-pick not implemented" — it picks
-/// the wearer's hero model and proceeds. With a placeholder model the build then fails at model
+/// Omitting `donor:` on an add_outfit picks the wearer's hero model and proceeds. With a placeholder model the build then fails at model
 /// IMPORT, which is exactly the proof: auto-pick ran and handed off.
 #[test]
 fn add_outfit_without_donor_auto_picks_and_proceeds() {
