@@ -12,6 +12,9 @@
 //! If those hold across all 1,311 destructibles, a generator that emits that exact layout
 //! reproduces any retail family byte-for-byte, and adding a state is just emitting one more of the
 //! per-state group. Whatever it finds is recorded here so the generator can rely on it.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,8 +25,9 @@ use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::TYPE_ID_MODEL;
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn u32_le(b: &[u8], o: usize) -> u32 {
@@ -108,10 +112,7 @@ struct Census {
 
 #[test]
 fn how_canonical_is_the_family_layout() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let mut file = std::fs::File::open(&wad).expect("open");
     let size = file.metadata().unwrap().len();
     let archive = load_ffcs_archive(&mut file, size).expect("ffcs");
