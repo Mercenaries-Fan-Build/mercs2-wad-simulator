@@ -96,8 +96,8 @@ pub struct BootSaveState {
     pub transit_enabled: bool,
     /// `tTransitData[n]` — per-landing-zone transit state, sorted by zone.
     ///
-    /// This used to go in as an EMPTY table, so a resumed game came back with every zone at its
-    /// `MrxTransit.Reset` default: no faction, disabled, fanfare unplayed. The shape is measured from
+    /// Without it a resumed game comes back with every zone at its `MrxTransit.Reset` default: no
+    /// faction, disabled, fanfare unplayed. The shape is measured from
     /// the vendored retail saves and cross-checked against a live capture — see
     /// `mercs2_formats::save`'s `transit_data_decodes_from_the_retail_saves`.
     pub transit_zones: Vec<mercs2_formats::save::TransitZone>,
@@ -819,7 +819,7 @@ impl GameScriptHost {
     }
 
     /// Set the hero template for the boot flow, and tag the hero object with its identity label. Named
-    /// markers are no longer passed here — they live in the World + guidmap (the loader entity-izes them),
+    /// markers are not passed here — they live in the World + guidmap (the loader entity-izes them),
     /// so `CreatePlayerCharacter(location=<name>)` resolves through `Pg.GetGuidByName` → the live entity.
     pub fn set_boot_context(&mut self, hero_character: impl Into<String>) {
         self.hero_character = hero_character.into();
@@ -2125,9 +2125,9 @@ fn install_boot_save_state(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>) 
 /// | `tSaveData ~= nil`, no `tRetryLocations` (**resume at hub**) | `{"Pmc_Entry1", "Pmc_Entry2"}`, `_bPmcRequired = true` | the PMC HQ entrance |
 ///
 /// This function's job is only to answer `Pg.LoadGame` truthfully from [`GameScriptHost::boot_save_state`]
-/// and let the branch run. It deliberately does **not** call `MrxPlayer.SetSpawnLocations` itself: doing
-/// that (with `<contract>_Start1`) is what previously made every New Game start inside the PMC interior,
-/// because it overwrote the master script's answer a few lines after it was computed.
+/// and let the branch run. It does **not** call `MrxPlayer.SetSpawnLocations` itself: doing that (with
+/// `<contract>_Start1`) would overwrite the master script's answer a few lines after it is computed,
+/// and every New Game would start inside the PMC interior.
 ///
 /// A script error anywhere in this flow is FATAL — see [`lua_fatal`].
 pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, character: &str) {
@@ -2253,11 +2253,9 @@ pub fn run_boot_flow(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, charac
 
 /// A Lua error is a BLOCKER: report it and take the process down. No opt-out.
 ///
-/// These used to be printed and stepped over. That was worse than it looked: a script that errors
-/// mid-callback has left the state machine part-way through a transition — gates stay armed, the
-/// callbacks behind them never fire, and the world limps on in a state no shipped build ever reaches.
-/// The run then *appears* to boot, so the failure reads as ugly logging rather than the blocker it is,
-/// and it survives into every later session because nothing forces it to be dealt with.
+/// A script that errors mid-callback has left the state machine part-way through a transition — gates
+/// stay armed, the callbacks behind them never fire, and the world would limp on in a state no shipped
+/// build ever reaches while *appearing* to boot. So the process stops.
 fn lua_fatal(context: std::fmt::Arguments<'_>) -> ! {
     eprintln!("\n[script] FATAL: {context}");
     eprintln!(
@@ -2355,10 +2353,8 @@ pub fn pump_resident(sh: &ScriptHost, host: &Rc<RefCell<GameScriptHost>>, dt: f3
 /// Locate the vendored Lua corpus root. Returns `None` only where the corpus is genuinely absent
 /// (a crates.io consumer), and callers skip rather than fail.
 ///
-/// Delegates to [`mercs2_script::corpus::root`] — **no path is constructed here**. The baked path this
-/// used to carry assumed one particular checkout layout, so from a differently-laid-out clone it
-/// resolved to nothing and every corpus-driven test silently reported "0 [lua] lines", including
-/// `boot_flow_runs_real_game_lua`, which was failing for that reason and not for a boot regression.
+/// Delegates to [`mercs2_script::corpus::root`] — **no path is constructed here**, so it resolves the
+/// same way from any checkout layout.
 fn discover_lua_root() -> Option<PathBuf> {
     mercs2_script::corpus::root()
 }
@@ -2479,9 +2475,8 @@ mod tests {
     /// Scripts never do this. The engine hands handles out (`Pg.GetGuidByName`,
     /// `Player.GetLocalCharacter`) and they cross as lightuserdata; `mercs2_script::Guid` refuses to
     /// read one out of a number, because this VM's `lua_Number` is f32 and cannot carry a handle
-    /// above 2^24 without aliasing a different object. These tests used to pass bare integers and
-    /// relied on a transitional arm that has since been removed. Every literal below is small enough
-    /// to be exact in f32, so minting one here is a faithful stand-in for an engine-supplied handle.
+    /// above 2^24 without aliasing a different object. Every literal below is small enough to be exact
+    /// in f32, so minting one here is a faithful stand-in for an engine-supplied handle.
     fn install_guid_helper(sh: &ScriptHost) {
         let f = sh
             .lua()
@@ -3190,10 +3185,9 @@ mod tests {
 
     /// `Player.Set*` mode gates take `(handle, value)` and are **observable by their getters**.
     ///
-    /// This is the regression test for the inversion defect: every gate used to be declared
-    /// `|_, on: Option<bool>|`, so it read argument 1 — the player handle — as its flag, and mlua's
-    /// Lua-truthiness conversion (`_ => true`) meant a handle always converted to `true`. Passing
-    /// `false` therefore *set* the gate. `mrxutil.lua:975` calls `SetCinematicMode(uPlayer, false)`.
+    /// The flag is argument 2. A gate that read argument 1 — the player handle — as its flag would,
+    /// through mlua's Lua-truthiness conversion (`_ => true`), always see `true`, so passing `false`
+    /// would *set* the gate. `mrxutil.lua:975` calls `SetCinematicMode(uPlayer, false)`.
     #[test]
     fn game_lua_player_mode_gates_take_a_handle_and_a_value() {
         let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
@@ -3333,10 +3327,10 @@ mod tests {
         // that reaches GlobalExit ("world fully loaded").
         // KNOWN BLOCKER — and note it is *not* the paths this assertion's message names below.
         //
-        // Since the `Player` surface and the HUD's retained callbacks became real, the boot runs far
-        // deeper than it used to: `WifVzBoundary.SetupBoundary` → `MrxMissionFlow.Refresh` → the `Start`
-        // binding's blocking sequence → the intro cinematic `01_AOA_C` → `HideSlow` → `UnlockMission`.
-        // The widget-animation chain and the movie end callback both fire correctly now.
+        // With the `Player` surface and the HUD's retained callbacks real, the boot runs:
+        // `WifVzBoundary.SetupBoundary` → `MrxMissionFlow.Refresh` → the `Start` binding's blocking
+        // sequence → the intro cinematic `01_AOA_C` → `HideSlow` → `UnlockMission`. The
+        // widget-animation chain and the movie end callback both fire correctly.
         //
         // Where it stops is `MrxTransit.SaveSingleton` (`mrxtransit.lua:367`), which does
         // `pairs(_tLandingZones)` without the `if not _tLandingZones` guard its siblings at :138/:151
@@ -3346,7 +3340,7 @@ mod tests {
         //
         // WHY IT IS STILL EMPTY *HERE*: this host is deliberately worldless (`GameScriptHost::new`, no
         // `attach_world`), and a world with no landing pads honestly has none to return. The pads
-        // themselves are no longer missing — they are real, read from the `LandingZone` COMP
+        // themselves are real, read from the `LandingZone` COMP
         // (`worldutil::landing_zone_pads` → `register_landing_zones`), and
         // `mrxtransit_resets_and_saves_against_real_landing_zones` below proves `Reset` +
         // `SaveSingleton` both run clean once a world supplies them. Supplying them needs the retail
@@ -3378,10 +3372,9 @@ mod tests {
         // heroes → `EnsureHeroesInBoat` sees the last one in → `AssetsLoaded` →
         // `MrxMissionFlow._OnAssetsLoaded` (`:261-266`).
         //
-        // (This note used to say "needs layer streaming — different system". That was wrong three times
-        // over: the boat was a placement in a block `load_placements` already read, the layer that
-        // brings it in was one ASET lookup away, and the seat event needed state this host could simply
-        // keep. None of it needed new parsing or new data.)
+        // None of this needs layer streaming: the boat is a placement in a block `load_placements`
+        // reads, the layer that brings it in is one ASET lookup away, and the seat event needs only
+        // state this host keeps.
         // NOT asserted here: `complete`. A worldless host structurally cannot reach GlobalExit — the
         // chain above dies on `Pg.GetAllLandingZones` returning empty, which is the honest answer for a
         // world with no pads. Asserting it made this a permanently-red test whose own comment explained
@@ -3607,11 +3600,10 @@ mod tests {
     /// The economy round-trips through the profile singleton, in the **signed-i32 domain with no
     /// native caps**.
     ///
-    /// This test previously asserted a 1-billion cash clamp and a fuel-to-capacity clamp. Both were
-    /// inventions: `economy_cash_fuel_singleton.md` shows the setters store a raw dword (native ceiling
-    /// `i32::MAX`), and the limits are **Lua** soft-clamps in `MrxPmc` — which `mrxpmc.lua:474,538`
-    /// bypass by calling `Player.AddCash`/`SetCash` directly. Clamping natively made those bypasses
-    /// unobservable.
+    /// There is no native cash or fuel clamp: `economy_cash_fuel_singleton.md` shows the setters store
+    /// a raw dword (native ceiling `i32::MAX`), and the limits are **Lua** soft-clamps in `MrxPmc` —
+    /// which `mrxpmc.lua:474,538` bypass by calling `Player.AddCash`/`SetCash` directly. A native
+    /// clamp would make those bypasses unobservable.
     #[test]
     fn player_economy_round_trips_in_the_i32_domain() {
         let mut h = GameScriptHost::new("vz");
@@ -3932,9 +3924,9 @@ mod tests {
                  pad); see worldutil's retail_capture_corroborates_the_authored_landing_zone_set"
             );
 
-            // THE SAVE'S TRANSIT BLOB REACHED THE SCRIPT. `tTransitData` used to be handed over as an
-            // empty table, so a resumed game came back with every zone at its `Reset` default. The save
-            // carries all 23; `MrxTransit.LoadSingleton` must have applied them.
+            // THE SAVE'S TRANSIT BLOB REACHED THE SCRIPT. Handed an empty `tTransitData`, a resumed
+            // game would come back with every zone at its `Reset` default. The save carries all 23;
+            // `MrxTransit.LoadSingleton` must have applied them.
             assert_eq!(save_zone_count, 23, "the vendored save carries the full authored zone set");
             let restored: Option<i64> = sh
                 .exec(
@@ -3963,10 +3955,8 @@ mod tests {
         ///
         /// This is the acceptance test for the whole name-index path. `VzaCon001.StandardSetup`
         /// (`vz/vzacon001.lua:66-119`) does `Event.ObjectHibernation(Pg.GetGuidByName(...), "a")` and waits;
-        /// with the boat resolving to nil the boot parked there forever, and the note in
-        /// `boot_flow_runs_real_game_lua` used to call this "layer streaming, different system". It was not —
-        /// the boat is a placement in block 179 that `load_placements` already read; we were only indexing
-        /// block 29. Nothing was missing but the identification.
+        /// with the boat resolving to nil the boot parks there forever. The boat is a placement in block
+        /// 179, which the name index covers alongside block 29.
         #[test]
         fn vzacon001_boat_gate_arms_against_a_real_guid() {
             let ls = crate::worldutil::schema_wire_tests::retail::retail_layers_static();
@@ -4003,8 +3993,8 @@ mod tests {
             );
 
             // And the gate itself. This is `vzacon001.lua:120` verbatim in shape —
-            // `Event.Create(Event.ObjectHibernation, {uBoat, "a"}, _PutPlayersInBoat, {uBoat})` — the call
-            // that used to be handed a nil `uBoat`. `Event` is a global namespace, not an importable module.
+            // `Event.Create(Event.ObjectHibernation, {uBoat, "a"}, _PutPlayersInBoat, {uBoat})`, which
+            // must be handed a real `uBoat`. `Event` is a global namespace, not an importable module.
             sh.exec(
                 "local uBoat = Pg.GetGuidByName(\"VzaCon001_StartingBoat\")\n\
                  _hEvent = Event.Create(Event.ObjectHibernation, {uBoat, \"a\"}, function() _woke = true end, {uBoat})",
@@ -4037,8 +4027,8 @@ mod tests {
             //
             // Those names are the world's whole named object graph (10,290 placements, ~345 KB), not a
             // bounded table like the 46 landing pads that `retail_landing_zone_pads` vendors. Extracting
-            // the pads is a specific record set; extracting this would be redistributing the world, which
-            // this repo deliberately does not do. So it is read from the archive, which is why this test
+            // the pads is a specific record set; the world's named object graph is not vendored. So it
+            // is read from the archive, which is why this test
             // is game-gated like every other world-dependent test here.
             let names = {
                 let ls = crate::worldutil::schema_wire_tests::retail::retail_layers_static();
@@ -4126,9 +4116,8 @@ mod seat_tests {
     /// Scripts never do this. The engine hands handles out (`Pg.GetGuidByName`,
     /// `Player.GetLocalCharacter`) and they cross as lightuserdata; `mercs2_script::Guid` refuses to
     /// read one out of a number, because this VM's `lua_Number` is f32 and cannot carry a handle
-    /// above 2^24 without aliasing a different object. These tests used to pass bare integers and
-    /// relied on a transitional arm that has since been removed. Every literal below is small enough
-    /// to be exact in f32, so minting one here is a faithful stand-in for an engine-supplied handle.
+    /// above 2^24 without aliasing a different object. Every literal below is small enough to be exact
+    /// in f32, so minting one here is a faithful stand-in for an engine-supplied handle.
     fn install_guid_helper(sh: &ScriptHost) {
         let f = sh
             .lua()
