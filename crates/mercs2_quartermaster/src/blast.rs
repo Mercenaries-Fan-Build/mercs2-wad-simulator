@@ -82,6 +82,10 @@ pub enum Claim {
     /// other. Keying on the bare name would have called the first pair a conflict and been right
     /// about the second by accident.
     FileArtifact { path: String },
+    /// A sound cue, keyed on its guid (`pandemic_hash_m2` of its name) and, for a cue of a `vo_*`
+    /// bank, the language whose copy of the bank it is in. One language's cue does not touch
+    /// another's: each language's banks are separate entries (`<bank>.<language>`).
+    SoundCue { guid: u32, language: Option<String> },
 }
 
 impl Claim {
@@ -98,6 +102,17 @@ impl Claim {
         (
             Claim::Asset {
                 hash: crate::manifest::asset_hash(name),
+            },
+            Some(name.to_string()),
+        )
+    }
+
+    /// `(claim, display name)` for a sound cue.
+    fn sound_cue(name: &str, language: Option<crate::manifest::Language>) -> (Claim, Option<String>) {
+        (
+            Claim::SoundCue {
+                guid: crate::manifest::asset_hash(name),
+                language: language.map(|l| l.token().to_string()),
             },
             Some(name.to_string()),
         )
@@ -126,6 +141,12 @@ impl Claim {
             Claim::OutfitSlot { wearer, slug } => format!("outfit {wearer}/{slug}"),
             Claim::NativeHook { at } => format!("native hook at {at}"),
             Claim::FileArtifact { path } => format!("file artifact {path}"),
+            Claim::SoundCue { guid, language } => match (name, language) {
+                (Some(n), Some(l)) => format!("sound cue {n} (0x{guid:08X}, {l})"),
+                (Some(n), None) => format!("sound cue {n} (0x{guid:08X})"),
+                (None, Some(l)) => format!("sound cue 0x{guid:08X} ({l})"),
+                (None, None) => format!("sound cue 0x{guid:08X}"),
+            },
         }
     }
 
@@ -201,6 +222,13 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // And it is not `KeyedSet`, because there is no key: the bytes are opaque, so there is
         // nothing to union on. Same reasoning as `raw`, reached from the other direction.
         Claim::FileArtifact { .. } => MergeClass::Exclusive,
+        // An added cue's name is a key across the installed set: FindCue answers with the first
+        // loaded table that has the guid (`FUN_00835a70`), so two Shipments adding one cue name
+        // leave one of them silent.
+        Claim::SoundCue { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        // A replaced cue has one winner in the table the game loads; a second replacement of the
+        // same cue cannot also take effect.
+        Claim::SoundCue { .. } => MergeClass::Exclusive,
     }
 }
 
@@ -275,9 +303,24 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddTexture { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
-            // Same shape as a movie or a texture: one new hash, nothing borrowed.
-            Contribution::AddSound { name, .. } => {
-                push(Access::Write, Claim::asset(name), Intent::Additive);
+            // A new bank: its entry hash, and each cue's name, which the cue guid is the hash of.
+            Contribution::AddSound { bank, cues, .. } => {
+                push(Access::Write, Claim::asset(bank), Intent::Additive);
+                for c in cues {
+                    push(Access::Write, Claim::sound_cue(&c.name, None), Intent::Additive);
+                }
+            }
+            // The bank's entry (`<bank>` or `<bank>.<language>`) and every cue the replacement
+            // declares: each has one winner in the table the game loads.
+            Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
+                let entry = crate::sound::entry_name(bank, *language);
+                push(Access::Write, Claim::asset(&entry), Intent::ReplaceExclusive);
+                for c in cues {
+                    push(Access::Write, Claim::sound_cue(&c.name, *language), Intent::ReplaceExclusive);
+                }
+            }
+            Contribution::ReplaceSoundCue { language, cue, .. } => {
+                push(Access::Write, Claim::sound_cue(&cue.name, *language), Intent::ReplaceExclusive);
             }
             // A movie mints a new hash and borrows nothing — one write claim, no read claim. The
             // `Additive` intent is what makes two Shipments choosing the same movie name a hard
