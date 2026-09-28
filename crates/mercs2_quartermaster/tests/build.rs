@@ -36,7 +36,7 @@ fn a_blocking_diagnostic_fails_the_build() {
     model: src/m.glb
 ",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => {
             assert!(d.iter().any(|x| x.rule.code == "M0140"));
         }
@@ -61,7 +61,7 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
     image: src/t.png
 ",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::GameRequired { .. }) => {
             let msg = e.to_string();
             assert!(
@@ -85,7 +85,7 @@ fn a_texture_replacement_without_a_game_stack_reports_what_is_missing() {
 fn an_empty_shipment_still_emits_a_record_and_a_log() {
     let dir = scratch("empty");
     let s = shipment(&dir, "  []\n");
-    let report = build::build(&s, None, None, None, None).expect("empty shipment builds");
+    let report = build::build(&s, None, None, None, None, None).expect("empty shipment builds");
     assert!(report.wad.is_none(), "nothing to put in a WAD");
     assert!(report.placements.is_empty());
     assert!(dir.join("_build/placement.json").is_file());
@@ -97,7 +97,7 @@ fn the_output_directory_can_be_redirected() {
     let dir = scratch("outdir");
     let out = dir.join("elsewhere");
     let s = shipment(&dir, "  []\n");
-    build::build(&s, None, None, Some(&out), None).expect("build");
+    build::build(&s, None, None, Some(&out), None, None).expect("build");
     assert!(out.join("placement.json").is_file());
     assert!(!dir.join("_build").exists());
 }
@@ -120,7 +120,7 @@ fn sha256_matches_known_vectors() {
 fn the_placement_record_is_well_formed_json() {
     let dir = scratch("record");
     let s = shipment(&dir, "  []\n");
-    build::build(&s, None, None, None, None).expect("build");
+    build::build(&s, None, None, None, None, None).expect("build");
     let text = std::fs::read_to_string(dir.join("_build/placement.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
     assert_eq!(doc["format"], build::PLACEMENT_FORMAT);
@@ -202,7 +202,7 @@ fn build_with_supersedes_and_no_game_is_refused() {
     )
     .unwrap();
     let s = discover::open(&dir).expect("open");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Compat(e)) => assert!(e.to_string().contains("supersedes"), "{e}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -260,7 +260,7 @@ fn a_raw_block_lowers_into_the_overlay_as_a_primary_single_entry_block() {
     // must resolve to that hash, not to the hash of the string "0x00C0FFEE".
     let s = raw_shipment(&dir, &raw_payload(HASH), "\"0x00C0FFEE\"", "data");
 
-    let report = build::build(&s, None, None, None, None).expect("raw must build without a game");
+    let report = build::build(&s, None, None, None, None, None).expect("raw must build without a game");
     let wad_path = report.wad.expect("a WAD must be emitted");
     let on_disk = std::fs::read(&wad_path).unwrap();
     assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
@@ -303,7 +303,7 @@ fn a_raw_block_lowers_into_the_overlay_as_a_primary_single_entry_block() {
 
     // Determinism: verify-by-hash means nothing if two builds disagree.
     let again =
-        build::build(&s, None, None, Some(&dir.join("second")), None).expect("second build");
+        build::build(&s, None, None, Some(&dir.join("second")), None, None).expect("second build");
     assert_eq!(report.placements[0].sha256, again.placements[0].sha256);
 }
 
@@ -320,7 +320,7 @@ fn a_bare_container_payload_is_refused_by_name() {
         "fixture must be a bare container"
     );
     let s = raw_shipment(&dir, &container, "\"0x00C0FFEE\"", "data");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains("bare CONTAINER"), "{m}");
@@ -337,7 +337,7 @@ fn an_sges_compressed_payload_is_refused() {
     let dir = scratch("raw_sges");
     let packed = mercs2_formats::sges::compress_sges(&raw_payload(0x00C0_FFEE)).unwrap();
     let s = raw_shipment(&dir, &packed, "\"0x00C0FFEE\"", "data");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             assert!(e.to_string().contains("DECOMPRESSED"), "{e}");
         }
@@ -356,7 +356,7 @@ fn a_touch_the_payload_does_not_carry_is_refused() {
         "\"0x00C0FFEE\", \"0xDEADBEEF\"",
         "data",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains("0xDEADBEEF"), "must name the hash: {m}");
@@ -378,7 +378,7 @@ fn an_asset_the_payload_carries_but_does_not_claim_is_refused() {
         "\"0x00C0FFEE\"",
         "data",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains("0x0000BEEF"), "must name the hash: {m}");
@@ -398,7 +398,7 @@ fn a_multi_entry_payload_mints_a_row_for_every_entry() {
         "\"0x00C0FFEE\", \"0x0000BEEF\"",
         "data",
     );
-    let report = build::build(&s, None, None, None, None).expect("build");
+    let report = build::build(&s, None, None, None, None, None).expect("build");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
     let rows = &contents.blocks[0].aset_entries;
@@ -424,7 +424,7 @@ fn the_non_data_layers_are_refused_with_the_kind_to_use_instead() {
     ] {
         let dir = scratch(&format!("raw_layer_{layer}"));
         let s = raw_shipment(&dir, &raw_payload(0x00C0_FFEE), "\"0x00C0FFEE\"", layer);
-        match build::build(&s, None, None, None, None) {
+        match build::build(&s, None, None, None, None, None) {
             Err(e @ BuildError::Unsupported { .. }) => {
                 assert!(e.to_string().contains(expect), "{layer}: {e}");
             }
@@ -486,7 +486,7 @@ fn a_native_hook_places_a_file_and_records_its_digest() {
         "    touches: [\"0x004CF340\"]\n",
     );
 
-    let report = build::build(&s, None, None, None, None).expect("native_hook must build");
+    let report = build::build(&s, None, None, None, None, None).expect("native_hook must build");
     assert!(
         report.wad.is_none(),
         "the Code layer contributes nothing to a WAD"
@@ -555,7 +555,7 @@ fn the_chosen_subdir_is_one_the_loader_searches() {
 fn the_loaders_own_name_is_refused() {
     let dir = scratch("hook_reserved");
     let s = hook_shipment(&dir, "pmc_bb.asi", &loadable_asi(), "");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             assert!(e.to_string().contains("reserved"), "{e}");
         }
@@ -569,7 +569,7 @@ fn the_loaders_own_name_is_refused() {
 fn a_plugin_that_is_not_an_asi_is_refused() {
     let dir = scratch("hook_ext");
     let s = hook_shipment(&dir, "mybridge.dll", &loadable_asi(), "");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             assert!(e.to_string().contains("globs `*.asi`"), "{e}");
         }
@@ -592,7 +592,7 @@ fn a_plugin_the_game_cannot_load_is_refused() {
     ] {
         let dir = scratch("hook_badpe");
         let s = hook_shipment(&dir, "mybridge.asi", &bytes, "");
-        match build::build(&s, None, None, None, None) {
+        match build::build(&s, None, None, None, None, None) {
             Err(e @ BuildError::Lower { .. }) => {
                 assert!(e.to_string().contains(expect), "{e}");
             }
@@ -635,7 +635,7 @@ fn add_runtime_dll_places_in_game_root_with_placement_record() {
     let dir = scratch("rtdll_ok");
     let dll = loadable_asi();
     let s = runtime_shipment(&dir, &[("src/test-shipment.dll", dll.clone())]);
-    let report = build::build(&s, None, None, None, None).expect("add_runtime_dll must build");
+    let report = build::build(&s, None, None, None, None, None).expect("add_runtime_dll must build");
     assert!(report.wad.is_none(), "a runtime DLL contributes nothing to a WAD");
     assert_eq!(report.placements.len(), 1);
     let p = &report.placements[0];
@@ -662,7 +662,7 @@ fn add_runtime_dll_places_in_game_root_with_placement_record() {
 fn add_runtime_dll_refuses_non_dll() {
     let dir = scratch("rtdll_ext");
     let s = runtime_shipment(&dir, &[("src/test-shipment.asi", loadable_asi())]);
-    let found = blocked_codes(build::build(&s, None, None, None, None));
+    let found = blocked_codes(build::build(&s, None, None, None, None, None));
     assert!(
         found.iter().any(|(c, m)| c == "M0162" && m.contains("not a `.dll`")),
         "{found:?}"
@@ -674,7 +674,7 @@ fn add_runtime_dll_refuses_non_dll() {
 fn add_runtime_dll_refuses_name_not_equal_to_shipment_name() {
     let dir = scratch("rtdll_name");
     let s = runtime_shipment(&dir, &[("src/m2-sdk.dll", loadable_asi())]);
-    let found = blocked_codes(build::build(&s, None, None, None, None));
+    let found = blocked_codes(build::build(&s, None, None, None, None, None));
     assert!(
         found
             .iter()
@@ -688,7 +688,7 @@ fn add_runtime_dll_refuses_name_not_equal_to_shipment_name() {
 fn add_runtime_dll_accepts_name_differing_only_in_case() {
     let dir = scratch("rtdll_case");
     let s = runtime_shipment(&dir, &[("src/Test-Shipment.DLL", loadable_asi())]);
-    let report = build::build(&s, None, None, None, None).expect("case differs only");
+    let report = build::build(&s, None, None, None, None, None).expect("case differs only");
     assert_eq!(
         report.placements[0].destination,
         Destination::GameFolder {
@@ -709,7 +709,7 @@ fn add_runtime_dll_refuses_second_runtime_dll_in_one_shipment() {
             ("src/b/TEST-SHIPMENT.dll", loadable_asi()),
         ],
     );
-    let found = blocked_codes(build::build(&s, None, None, None, None));
+    let found = blocked_codes(build::build(&s, None, None, None, None, None));
     assert!(
         found
             .iter()
@@ -725,7 +725,7 @@ fn add_runtime_dll_refuses_deny_listed_dlls() {
         let dir = scratch("rtdll_deny");
         let path = format!("src/{file}");
         let s = runtime_shipment(&dir, &[(path.as_str(), loadable_asi())]);
-        let found = blocked_codes(build::build(&s, None, None, None, None));
+        let found = blocked_codes(build::build(&s, None, None, None, None, None));
         assert!(
             found
                 .iter()
@@ -739,7 +739,7 @@ fn add_runtime_dll_refuses_deny_listed_dlls() {
 fn add_runtime_dll_refuses_amd64() {
     let dir = scratch("rtdll_amd64");
     let s = runtime_shipment(&dir, &[("src/test-shipment.dll", fake_asi(0x8664, 0x230E))]);
-    let found = blocked_codes(build::build(&s, None, None, None, None));
+    let found = blocked_codes(build::build(&s, None, None, None, None, None));
     assert!(
         found
             .iter()
@@ -758,7 +758,7 @@ fn place_file_still_refuses_dll() {
         &dir,
         "  - kind: place_file\n    file: src/test-shipment.dll\n    dest: game_root\n",
     );
-    let found = blocked_codes(build::build(&s, None, None, None, None));
+    let found = blocked_codes(build::build(&s, None, None, None, None, None));
     assert!(
         found
             .iter()
@@ -776,7 +776,7 @@ fn a_symbol_without_a_plugin_says_what_to_do_instead() {
         &dir,
         "  - kind: native_hook\n    target: retail\n    symbol: MyDetour\n",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Unsupported { .. }) => {
             let m = e.to_string();
             assert!(m.contains("MyDetour"), "{m}");
@@ -797,7 +797,7 @@ fn an_asi_on_a_reimpl_target_never_reaches_lowering() {
         &dir,
         "  - kind: native_hook\n    target: reimpl\n    plugin: src/mybridge.asi\n",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => {
             assert!(d.iter().any(|x| x.rule.code == "M0160"), "{d:?}");
         }
@@ -825,7 +825,7 @@ fn a_shipment_can_emit_a_wad_and_a_file_together() {
          \x20   touches: [\"0x00C0FFEE\"]\n\
          \x20 - kind: native_hook\n    target: retail\n    plugin: src/mybridge.asi\n",
     );
-    let report = build::build(&s, None, None, None, None).expect("build");
+    let report = build::build(&s, None, None, None, None, None).expect("build");
     assert_eq!(report.placements.len(), 2);
     assert_eq!(report.placements[0].destination, Destination::Overlay);
     assert!(matches!(
@@ -834,7 +834,7 @@ fn a_shipment_can_emit_a_wad_and_a_file_together() {
     ));
     // Determinism covers the file half too: a placement record whose digests move between builds
     // cannot be verified at deploy.
-    let again = build::build(&s, None, None, Some(&dir.join("second")), None).expect("second");
+    let again = build::build(&s, None, None, Some(&dir.join("second")), None, None).expect("second");
     assert_eq!(
         report
             .placements
@@ -876,7 +876,7 @@ fn a_place_file_places_a_companion_and_records_its_digest() {
     let ini = b"[GlobalSets]\nmode=quiet\n";
     let s = place_shipment(&dir, "quiet_freeplay_vo.ini", "scripts", ini);
 
-    let report = build::build(&s, None, None, None, None).expect("place_file must build");
+    let report = build::build(&s, None, None, None, None, None).expect("place_file must build");
     assert!(
         report.wad.is_none(),
         "a companion contributes nothing to a WAD"
@@ -932,7 +932,7 @@ fn every_destination_stays_inside_the_game_folder() {
         let dir = scratch(&format!("place_dest_{yaml_name}"));
         let s = place_shipment(&dir, "config.ini", yaml_name, b"x");
         let report =
-            build::build(&s, None, None, None, None).expect("every destination must build");
+            build::build(&s, None, None, None, None, None).expect("every destination must build");
         let Destination::GameFolder { relative } = &report.placements[0].destination else {
             panic!("a companion is always a game-folder placement");
         };
@@ -1010,7 +1010,7 @@ fn a_source_path_that_leaves_the_shipment_is_refused() {
             &dir,
             &format!("  - kind: place_file\n    file: {file}\n    dest: scripts\n"),
         );
-        match build::build(&s, None, None, None, None) {
+        match build::build(&s, None, None, None, None, None) {
             Err(BuildError::Blocked(d)) => {
                 assert!(d.iter().any(|x| x.rule.code == "M0111"), "{file}: {d:?}")
             }
@@ -1034,7 +1034,7 @@ fn a_symlink_out_of_the_shipment_is_refused() {
         &dir,
         "  - kind: place_file\n    file: src/config.ini\n    dest: scripts\n",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0111"), "{d:?}"),
         other => panic!("expected Blocked, got {other:?}"),
     }
@@ -1056,7 +1056,7 @@ fn the_game_executable_and_the_wads_cannot_be_written() {
     ] {
         let dir = scratch("place_forbidden");
         let s = place_shipment(&dir, name, "game_root", b"x");
-        match build::build(&s, None, None, None, None) {
+        match build::build(&s, None, None, None, None, None) {
             Err(BuildError::Blocked(d)) => {
                 assert!(d.iter().any(|x| x.rule.code == "M0162"), "{name}: {d:?}")
             }
@@ -1072,7 +1072,7 @@ fn the_game_executable_and_the_wads_cannot_be_written() {
 fn the_loaders_own_name_cannot_be_placed_as_a_companion() {
     let dir = scratch("place_reserved");
     let s = place_shipment(&dir, build::RESERVED_ASI, "scripts", b"x");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => {
             assert!(d.iter().any(|x| x.rule.code == "M0162"), "{d:?}");
         }
@@ -1087,7 +1087,7 @@ fn the_loaders_own_name_cannot_be_placed_as_a_companion() {
 fn a_plugin_cannot_be_smuggled_in_as_a_companion() {
     let dir = scratch("place_asi");
     let s = place_shipment(&dir, "evil.asi", "scripts", &loadable_asi());
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => {
             let hit = d.iter().find(|x| x.rule.code == "M0162").expect("M0162");
             assert!(hit.message.contains("native_hook"), "{hit}");
@@ -1136,7 +1136,7 @@ fn a_plugin_and_its_companion_build_together() {
          \x20 - kind: place_file\n    file: src/lua_bridge_DEV.ini\n    dest: scripts\n\
          \x20 - kind: place_file\n    file: src/lua_console.py\n    dest: scripts\n",
     );
-    let report = build::build(&s, None, None, None, None).expect("build");
+    let report = build::build(&s, None, None, None, None, None).expect("build");
     let paths: Vec<String> = report
         .placements
         .iter()
@@ -1145,6 +1145,7 @@ fn a_plugin_and_its_companion_build_together() {
             | Destination::DataWad { relative, .. }
             | Destination::LanguagePatch { relative, .. } => relative.clone(),
             Destination::StreamCopy { to, .. } => to.clone(),
+            Destination::DataFile { relative, .. } => relative.relative().to_string(),
             Destination::Overlay => "overlay".into(),
             Destination::ShellPatch => "shell_patch".into(),
         })
@@ -1180,7 +1181,7 @@ fn one_filename_in_two_destinations_is_two_files() {
         "  - kind: place_file\n    file: src/boot/init.lua\n    dest: on_boot\n\
          \x20 - kind: place_file\n    file: src/load/init.lua\n    dest: on_load\n",
     );
-    let report = build::build(&s, None, None, None, None).expect("two rungs must build");
+    let report = build::build(&s, None, None, None, None, None).expect("two rungs must build");
     assert_eq!(report.placements.len(), 2);
     assert_ne!(
         report.placements[0].sha256, report.placements[1].sha256,
@@ -1241,7 +1242,7 @@ fn add_movie_needs_no_game_stack() {
         "  - kind: add_movie\n    name: qm_ci_hud\n    movie: src/ui.gfx\n",
     );
 
-    let report = build::build(&s, None, None, None, None).expect("must build with no game");
+    let report = build::build(&s, None, None, None, None, None).expect("must build with no game");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let (hash, carried) = read_back_movie(&on_disk);
     assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("qm_ci_hud"));
@@ -1275,7 +1276,7 @@ fn a_compressed_movie_is_not_re_encoded() {
         &dir,
         "  - kind: add_movie\n    name: qm_cfx_hud\n    movie: src/ui.gfx\n",
     );
-    let report = build::build(&s, None, None, None, None).expect("a CFX movie must build");
+    let report = build::build(&s, None, None, None, None, None).expect("a CFX movie must build");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let (_, carried) = read_back_movie(&on_disk);
     assert_eq!(
@@ -1306,7 +1307,7 @@ fn a_payload_that_is_not_a_movie_is_refused() {
         &dir,
         "  - kind: add_movie\n    name: qm_bad\n    movie: src/ui.gfx\n",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let text = e.to_string();
             assert!(text.contains("Scaleform"), "{text}");
@@ -1329,7 +1330,7 @@ fn two_movies_under_one_name_are_a_self_conflict() {
         "  - kind: add_movie\n    name: qm_dup\n    movie: src/a.gfx\n\
          \x20 - kind: add_movie\n    name: qm_dup\n    movie: src/b.gfx\n",
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => {
             assert!(d.iter().any(|x| x.rule.code == "M0120"), "{d:?}");
         }
@@ -1477,7 +1478,7 @@ fn add_sound_is_reproducible() {
 fn add_sound_needs_the_game_to_link_its_loader() {
     let dir = scratch("add_sound_nogame");
     let (s, _) = sound_shipment(&dir);
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::GameRequired { .. }) => {}
         other => panic!("expected GameRequired, got {other:?}"),
     }
@@ -1498,7 +1499,7 @@ fn an_unusable_wav_blocks_the_build() {
             sound_cue_yaml("mod_bad_cue", "src/a.wav", 0, 0)
         ),
     );
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0214"), "{d:?}"),
         other => panic!("expected Blocked by M0214, got {other:?}"),
     }
@@ -1526,7 +1527,7 @@ fn add_animation_builds_the_retail_clip_container_without_a_game() {
         "  - kind: add_animation\n    name: qm_test_clip\n    clip: src/c.hkx\n    trnm: src/c.trnm\n    \
          events: src/c.evnt\n",
     );
-    let report = build::build(&s, None, None, None, None).expect("add_animation builds with no game");
+    let report = build::build(&s, None, None, None, None, None).expect("add_animation builds with no game");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let (_, hash, chunks) = read_back_animation(&on_disk);
     assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("qm_test_clip"));
@@ -1546,7 +1547,7 @@ fn add_animation_without_events_ships_no_evnt() {
     std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
     std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
     let s = shipment(&dir, "  - kind: add_animation\n    name: qm_test_clip2\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
-    let report = build::build(&s, None, None, None, None).expect("builds");
+    let report = build::build(&s, None, None, None, None, None).expect("builds");
     let (_, _, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
     let tags: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.tag).collect();
     assert_eq!(tags, [b"info", b"data", b"trnm"]);
@@ -1561,7 +1562,7 @@ fn add_animation_with_a_mismatched_trnm_is_blocked_by_m0213() {
     std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
     std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks() + 1)).unwrap();
     let s = shipment(&dir, "  - kind: add_animation\n    name: qm_bad\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
-    match build::build(&s, None, None, None, None) {
+    match build::build(&s, None, None, None, None, None) {
         Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0213"), "{d:?}"),
         other => panic!("expected Blocked by M0213, got {other:?}"),
     }
@@ -1576,7 +1577,7 @@ fn replace_animation_without_a_game_says_so() {
     std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
     let s = shipment(&dir, "  - kind: replace_animation\n    target: x\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
     assert!(matches!(
-        build::build(&s, None, None, None, None),
+        build::build(&s, None, None, None, None, None),
         Err(BuildError::GameRequired { kind: "replace_animation", .. })
     ));
 }
