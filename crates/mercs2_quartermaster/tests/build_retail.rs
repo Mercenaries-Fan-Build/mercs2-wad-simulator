@@ -58,7 +58,7 @@ fn edit_state_machine_noop_ships_a_byte_identical_single_model_block() {
         &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit_state_machine must build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit_state_machine must build");
     let wad_path = report.wad.expect("a WAD must be emitted");
     let on_disk = std::fs::read(&wad_path).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
@@ -114,7 +114,7 @@ fn edit_state_machine_renames_a_state_end_to_end() {
         &dir,
         &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
     );
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("build the rename");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("build the rename");
     // Renaming to a novel hash decouples the state from the engine's SetState — M0193 must warn.
     assert!(
         report.log.iter().any(|l| l.contains("M0193")),
@@ -184,7 +184,7 @@ fn a_texture_replacement_builds_end_to_end() {
 ",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("build");
 
     // This target turns out to be a 4-rung STREAMED texture with no primary row of its own, so the
     // game-aware rules fire — and the build still completes, because they are warnings. That pairing
@@ -244,7 +244,7 @@ fn a_texture_replacement_builds_end_to_end() {
     // Expect "UCFX / FORMAT" to be absent and the verdict to report no violations.
 
     // Determinism: the mandate only means something if two builds agree byte for byte.
-    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None)
+    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None, None)
         .expect("second build");
     assert_eq!(
         placement.sha256, again.placements[0].sha256,
@@ -274,7 +274,7 @@ fn size_mismatch_refused_message_names_both_sizes() {
         &dir,
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains(&format!("{iw}x{ih}")), "names the image size: {m}");
@@ -350,6 +350,11 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
 ///
 /// Written by hand rather than committed as a binary fixture: it keeps the repo free of an opaque
 /// blob, and it exercises the reader against a file whose every byte is accounted for here.
+///
+/// Its one material declares `extras.pixel_shader: PgDiffSpecNormFP` and its mesh
+/// `extras.shadow_vertex_shader: PgMeshShadowVP`: retail uses several pixel shaders for a material
+/// with diffuse, specular and normal maps, and both shadow shaders for an opaque `PgMeshNoColorVP`
+/// group, so an imported model says which.
 fn cube_glb() -> Vec<u8> {
     // 6 faces x 4 verts. Positions/normals/uvs are generated so the data stays inspectable.
     const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
@@ -414,7 +419,8 @@ fn cube_glb() -> Vec<u8> {
     let vcount = pos.len();
     let json = format!(
         r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
-"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"mode":4}}]}}],
+"meshes":[{{"extras":{{"shadow_vertex_shader":"PgMeshShadowVP"}},"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"mode":4,"material":0}}]}}],
+"materials":[{{"extras":{{"pixel_shader":"PgDiffSpecNormFP"}}}}],
 "accessors":[
 {{"bufferView":0,"componentType":5126,"count":{vcount},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}},
 {{"bufferView":1,"componentType":5126,"count":{vcount},"type":"VEC3"}},
@@ -471,7 +477,7 @@ fn add_model_builds_end_to_end() {
         "  - kind: add_model\n    name: qm_test_prop\n    model: src/prop.glb\n    donor: oc_veh_helicopter_md500\n",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("add_model must build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("add_model must build");
     let wad_path = report.wad.expect("a WAD must be emitted");
     let on_disk = std::fs::read(&wad_path).unwrap();
     assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
@@ -499,6 +505,18 @@ fn add_model_builds_end_to_end() {
         !log.contains("0 verts"),
         "geometry must have survived the import: {log}"
     );
+
+    // The shader import wrote the declared pixel shader into the host group's materials and the
+    // convention's vertex shaders into its INFO.
+    let container = &dec[20..20 + entries[0].chunk_size as usize];
+    let (groups, materials) = mercs2_quartermaster::shader_import::read_model(container).expect("model");
+    let host = groups.iter().find(|g| log.contains(&format!("group {} vertex shader", g.ordinal))).expect("the logged host group");
+    for &m in &host.materials {
+        assert_eq!(materials[m].key, mercs2_formats::hash::pandemic_hash_m2("PgDiffSpecNormFP"));
+    }
+    let vs = mercs2_quartermaster::shader::retail_name(host.vertex).expect("a registered vertex shader");
+    let shadow = mercs2_quartermaster::shader::retail_name(host.shadow).expect("a registered shadow shader");
+    assert!(log.contains(&format!("vertex shader {vs}, shadow {shadow}")), "{log}");
 }
 
 /// Auto-pick is not implemented, so an omitted donor must ASK rather than guess — a wrong host
@@ -513,7 +531,7 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
         &dir,
         "  - kind: add_model\n    name: qm_x\n    model: src/prop.glb\n",
     );
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e @ BuildError::Unsupported { .. }) => {
             assert!(e.to_string().contains("auto-pick"), "{e}");
         }
@@ -540,7 +558,7 @@ fn add_outfit_builds_model_and_wardrobe_row_together() {
          \x20   donor: pmc_hum_mattias\n",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, Some(&corpus))
+    let report = build::build(&s, Some(&mut game), None, None, Some(&corpus), None)
         .expect("add_outfit must build");
     let log = report.log.join("\n");
     eprintln!("{log}");
@@ -670,7 +688,7 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
 
     let deploy = root.join("deploy");
     let ids = arg_ids(2);
-    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &deploy)
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &deploy, None)
         .expect("deploy link");
     eprintln!("{}", report.log.join("\n"));
 
@@ -778,7 +796,7 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
 
     let out = root.join("build");
     let report =
-        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus)).expect("build");
+        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus), None).expect("build");
     eprintln!("{}", report.log.join("\n"));
 
     let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
@@ -848,11 +866,11 @@ fn the_deploy_link_follows_the_request_order() {
     let b = outfit_shipment(&root.join("b"), "zzz-mod", "qm_b", "Zzz");
     let ids = arg_ids(2);
 
-    let one = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("one"))
+    let one = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("one"), None)
         .unwrap();
-    let again = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("again"))
+    let again = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("again"), None)
         .unwrap();
-    let two = build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &root.join("two"))
+    let two = build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &root.join("two"), None)
         .unwrap();
     assert_eq!(
         one.placements[0].sha256, again.placements[0].sha256,
@@ -885,7 +903,7 @@ fn an_unresolved_literal_import_is_a_warning_in_the_link_plan() {
     );
     let out = root.join("out");
     let ids = arg_ids(1);
-    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out)
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None)
         .expect("an unresolved import is a warning, not a refusal");
     assert!(report.plan.ok);
     let m0209: Vec<_> = report.plan.findings.iter().filter(|f| f.code == "M0209").collect();
@@ -985,7 +1003,7 @@ fn disjoint_stringdb_edits_both_survive_link() {
 
     let forward = root.join("forward");
     let ids = arg_ids(2);
-    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &forward)
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &forward, None)
         .expect("link");
     assert!(report.plan.ok, "{:?}", report.plan.findings);
     assert!(report.plan.link_block_paths.contains(&table_path));
@@ -995,7 +1013,7 @@ fn disjoint_stringdb_edits_both_survive_link() {
     assert_eq!(merged_text(&forward, added), "QM B ADDED", "an added key merges the same way");
 
     let reverse = root.join("reverse");
-    build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &reverse).expect("link");
+    build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &reverse, None).expect("link");
     assert_eq!(merged_text(&reverse, both), "QM A BOTH", "reversed order, reversed winner");
     assert_eq!(merged_text(&reverse, added), "QM A ADDED");
     assert_eq!(merged_text(&reverse, only_b), "QM B ONLY");
@@ -1038,7 +1056,7 @@ fn a_text_replacement_resolves_against_the_table_merged_so_far() {
     let ids = arg_ids(2);
 
     let forward = root.join("forward");
-    let report = build::link_installed(&request(&[&setter, &replacer], &ids), &mut game, &corpus, &forward)
+    let report = build::link_installed(&request(&[&setter, &replacer], &ids), &mut game, &corpus, &forward, None)
         .expect("link");
     assert!(report.plan.ok, "{:?}", report.plan.findings);
     let wad = std::fs::read(forward.join(build::LINK_WAD_NAME)).expect("a link WAD");
@@ -1049,7 +1067,7 @@ fn a_text_replacement_resolves_against_the_table_merged_so_far() {
     assert_eq!(text.as_deref(), Some("QM REPLACED"), "the replacement sees the earlier write");
 
     let reverse = root.join("reverse");
-    match build::link_installed(&request(&[&replacer, &setter], &ids), &mut game, &corpus, &reverse) {
+    match build::link_installed(&request(&[&replacer, &setter], &ids), &mut game, &corpus, &reverse, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains("text-replacer"), "names the Shipment: {m}");
@@ -1070,7 +1088,7 @@ fn a_text_replacement_that_matches_nothing_fails_the_build() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/pairs.txt"), "No retail string reads like this: qm-miss\tX\n").unwrap();
     let s = shipment(&dir, "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n");
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains("test-shipment") && m.contains("english"), "{m}");
@@ -1110,7 +1128,7 @@ fn a_shipment_build_applies_its_string_writes_in_order() {
     };
 
     let (dir, s) = make("own_order_ok", true);
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit then replace builds");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit then replace builds");
     let wad = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
     let table_path = build::stringdb_block_path(english);
@@ -1123,7 +1141,7 @@ fn a_shipment_build_applies_its_string_writes_in_order() {
     assert!(dir.join("_build/test-shipment.wad").is_file());
 
     let (_, s) = make("own_order_reversed", false);
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e @ BuildError::Lower { .. }) => {
             let m = e.to_string();
             assert!(m.contains("test-shipment") && m.contains("english") && m.contains(marker), "{m}");
@@ -1150,7 +1168,7 @@ fn an_unsatisfied_requirement_refuses_the_link() {
     let a = discover::open(&a.root).expect("reopen");
     let out = root.join("out");
     let ids = arg_ids(1);
-    match build::link_installed(&request(&[&a], &ids), &mut game, &corpus, &out) {
+    match build::link_installed(&request(&[&a], &ids), &mut game, &corpus, &out, None) {
         Err(BuildError::Plan(plan)) => {
             assert!(!plan.ok);
             assert!(plan.findings.iter().any(|f| f.code == "M0204"), "{:?}", plan.findings);
@@ -1177,7 +1195,7 @@ fn build_refuses_a_superseded_file() {
     )
     .unwrap();
     let s = discover::open(&dir).expect("open");
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(BuildError::Superseded { shipment, relative }) => {
             assert_eq!(shipment, "sup");
             assert_eq!(relative, "DATA");
@@ -1201,7 +1219,7 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
     );
     let out = root.join("out");
     let ids = arg_ids(1);
-    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out).expect("link");
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None).expect("link");
     assert!(report.wad.is_none());
     assert!(report.linked.is_empty());
 
@@ -1249,7 +1267,7 @@ fn a_retail_block_survives_being_carried_through_raw() {
 
     let dir = scratch("raw_retail");
     let s = raw_shipment(&dir, &donor, &touches, "data");
-    let report = build::build(&s, None, None, None, None).expect("a retail block must carry");
+    let report = build::build(&s, None, None, None, None, None).expect("a retail block must carry");
     eprintln!("{}", report.log.join("\n"));
 
     let wad = report.wad.expect("a WAD");
@@ -1312,7 +1330,7 @@ fn a_built_wad_is_read_back_and_self_checked() {
 ",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("build");
     let wad = report.wad.expect("a WAD must be emitted");
     let contents = mercs2_formats::patch_wad::read_patch_wad(&std::fs::read(&wad).unwrap())
         .expect("the WAD we wrote must read back — verify_emitted already required this");
@@ -1351,7 +1369,7 @@ fn add_movie_builds_end_to_end() {
         "  - kind: add_movie\n    name: qm_test_hud\n    movie: src/ui.gfx\n",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("add_movie must build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("add_movie must build");
     assert!(
         report
             .diagnostics
@@ -1386,7 +1404,7 @@ fn add_movie_builds_end_to_end() {
     assert!(log.contains("4 tag(s)"), "{log}");
 
     // Determinism: the verify-by-hash mandate only means something if two builds agree byte for byte.
-    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None)
+    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None, None)
         .expect("second build");
     assert_eq!(
         report.placements[0].sha256, again.placements[0].sha256,
@@ -1443,7 +1461,7 @@ fn edit_stringdb_builds_end_to_end() {
         "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n",
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("must build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("must build");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
 
     // Re-read the emitted overlay and confirm the ONE key changed and the table still parses.
@@ -1489,7 +1507,7 @@ fn edit_stringdb_refuses_an_unknown_key() {
         &dir,
         "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n",
     );
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e) => assert!(format!("{e:?}").contains("No.Such.Key"), "must name the key: {e:?}"),
         Ok(_) => panic!("an unknown key must not build"),
     }
@@ -1512,7 +1530,7 @@ fn add_outfit_without_donor_auto_picks_and_proceeds() {
          display: Auto\n    wearer: mattias\n    model: src/model.glb\n",
     );
 
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e) => {
             let m = format!("{e:?}");
             assert!(
@@ -1544,7 +1562,7 @@ fn add_outfit_without_donor_and_unknown_wearer_is_refused() {
         "  - kind: add_outfit\n    name: pmc_hum_x\n    slug: X\n    display: X\n    \
          wearer: bulldog\n    model: src/model.glb\n",
     );
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(e) => assert!(
             format!("{e:?}").contains("bulldog"),
             "the refusal should name the unknown wearer: {e:?}"
@@ -1686,7 +1704,7 @@ fn activate_layer_builds_the_layer_marks_into_the_mod_loader() {
 
     let out = root.join("build");
     let report =
-        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus)).expect("build");
+        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus), None).expect("build");
     eprintln!("{}", report.log.join("\n"));
 
     let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
@@ -1814,7 +1832,7 @@ fn edit_world_builds_an_overlay_that_moves_an_entity() {
         &format!("  - kind: edit_world\n    layer: \"{needle}\"\n    edits: src/world.yaml\n"),
     );
 
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit_world must build");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit_world must build");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
     // The overlay shadows the base layer block at its PTHS path.
@@ -1868,7 +1886,7 @@ fn replace_animation_replaces_a_clip_and_refuses_a_keyframe_animation() {
         &dir,
         &format!("  - kind: replace_animation\n    target: \"0x{clip_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
     );
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("a clip replace builds");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a clip replace builds");
     let (_, hash, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
     assert_eq!(hash, clip_target, "same hash");
     assert_eq!(chunks[1].body, ANIM_CLIP);
@@ -1881,7 +1899,7 @@ fn replace_animation_replaces_a_clip_and_refuses_a_keyframe_animation() {
         &dir,
         &format!("  - kind: replace_animation\n    target: \"0x{keyframe_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
     );
-    match build::build(&s, Some(&mut game), None, None, None) {
+    match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(BuildError::Lower { message, .. }) => assert!(message.contains("MANM"), "{message}"),
         other => panic!("a MANM target must be refused, got {other:?}"),
     }
@@ -1931,7 +1949,7 @@ fn a_rigid_add_model_with_textures_repoints_the_host_material() {
              group: {host}\n    textures:\n      diffuse: src/prop_d.png\n"
         ),
     );
-    let report = build::build(&s, Some(&mut game), None, None, None).expect("a textured rigid prop builds");
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a textured rigid prop builds");
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
     let want = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop_dm");
@@ -2127,7 +2145,7 @@ mod sound {
         let s = cue_override(&dir, "pda-sound", "ui_hud", None, "ui_PDA_Open_01_st", &samples);
         let mut game = stack_for(&[&s]);
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         eprintln!("{}", report.log.join("\n"));
 
         let bank = m2("ui_hud");
@@ -2187,7 +2205,7 @@ mod sound {
         let s = cue_override(&dir, "menu-sound", "ui_hud", None, "ui_PDA_Open_01_st", &samples);
         let mut game = stack_for(&[&s]);
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         let blocks = shell_patch_blocks(&out, &report);
         let bank = m2("ui_hud");
         let wavebank = m2("qm_menu-sound_ui_hud");
@@ -2224,7 +2242,7 @@ mod sound {
         assert!(GameStack::open(&[vz_wad()]).unwrap().has_asset(m2("ui_shell"), TYPE_ID_SOUNDBANK), "vz.wad carries ui_shell");
         let mut game = stack_for(&[&s]);
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         eprintln!("{}", report.log.join("\n"));
         assert!(report.wad.is_none(), "nothing ships in the overlay");
         let blocks = shell_patch_blocks(&out, &report);
@@ -2252,7 +2270,7 @@ mod sound {
         );
         let mut game = stack_for(&[&s]);
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         assert!(report.wad.is_none(), "nothing ships in the overlay");
         let blocks = shell_patch_blocks(&out, &report);
         let types: Vec<u32> = tables_of(block_at(&blocks, m2("qm_menu_bank"))).iter().map(|t| t.1).collect();
@@ -2419,7 +2437,7 @@ mod sound {
         let mut game = stack_for(&[&s]);
         assert!(!lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0218"));
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         eprintln!("{}", report.log.join("\n"));
 
         let bank = m2("wpn_shotgun");
@@ -2492,14 +2510,14 @@ mod sound {
         let path = format!("blocks\\VZ\\mod_{bank:08x}.block");
         for s in [&a, &b] {
             let out = root.join(format!("build_{}", s.manifest.shipment.name));
-            let report = build::build(s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+            let report = build::build(s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
             let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
             assert!(blocks_of(&out, overlay).iter().any(|b| b.path_string == path), "the Shipment's own copy");
         }
         let ids: Vec<String> = vec!["arg:1".into(), "arg:2".into()];
         let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &b }];
         let out = root.join("link");
-        let report = build::link_installed(&inputs, &mut game, &corpus(), &out).expect("links");
+        let report = build::link_installed(&inputs, &mut game, &corpus(), &out, None).expect("links");
         eprintln!("{}", report.log.join("\n"));
         assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
         assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch));
@@ -2550,7 +2568,7 @@ mod sound {
         let mut game = stack_for(&[&s]);
         assert!(!lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0218"));
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         eprintln!("{}", report.log.join("\n"));
         let bank = m2("wpn_grapplegun");
         let retail_wb = WavebankFile::parse(&table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
@@ -2614,7 +2632,7 @@ mod sound {
         );
         let mut game = stack_for(&[&s]);
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         eprintln!("{}", report.log.join("\n"));
 
         let entry = m2("vo_mattias.english");
@@ -2684,7 +2702,7 @@ mod sound {
         let dir = scratch("rsc_vo");
         let s = cue_override(&dir, "mattias-cue", "vo_mattias", Some("english"), &cue, &[3; 800]);
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
         let english = report
             .placements
             .iter()
@@ -2725,7 +2743,7 @@ mod sound {
         let ids: Vec<String> = vec!["arg:1".into(), "arg:2".into()];
         let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &b }];
         let out = root.join("link");
-        let report = build::link_installed(&inputs, &mut game, &corpus(), &out).expect("links");
+        let report = build::link_installed(&inputs, &mut game, &corpus(), &out, None).expect("links");
         eprintln!("{}", report.log.join("\n"));
         let path = format!("blocks\\VZ\\mod_{:08x}.block", m2("ui_hud"));
         assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
@@ -2756,7 +2774,7 @@ mod sound {
 
         let c = cue_override(&root.join("c"), "pda-open-too", "ui_hud", None, a_cue, &[3; 100]);
         let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &c }];
-        match build::link_installed(&inputs, &mut game, &corpus(), &root.join("conflict")) {
+        match build::link_installed(&inputs, &mut game, &corpus(), &root.join("conflict"), None) {
             Err(build::BuildError::Plan(plan)) => assert!(!plan.ok),
             other => panic!("one cue replaced twice must refuse the link, got {other:?}"),
         }
@@ -2820,7 +2838,7 @@ mod sound {
         let key = super::string_entries(&english)[0].0;
         std::fs::write(dir.join("src/strings.txt"), format!("0x{key:08X} = Anuluj\n")).unwrap();
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), None).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
         eprintln!("{}", report.log.join("\n"));
         assert!(report.wad.is_none(), "nothing ships in an overlay");
 
@@ -3070,7 +3088,7 @@ mod sound {
         let key = super::string_entries(&english_strings)[0].0;
         std::fs::write(dir.join("src/strings.txt"), format!("0x{key:08X} = Anuluj\n")).unwrap();
         let out = dir.join("_build");
-        let report = build::build(&s, Some(&mut game), None, Some(&out), None).expect("builds");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
         let data = report
             .placements
             .iter()
