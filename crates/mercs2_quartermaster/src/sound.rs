@@ -4,8 +4,9 @@
 //! A bank named `N` is three tables — soundbank (ASET type 21), sounddb (13) and wavebank (6) — each a
 //! single-`data` UCFX container, all three entries of one block under the name hash `m2(N)` (§11.1).
 //! A cue plays only once its bank is loaded, and retail loads banks by name from Lua
-//! (`MrxSoundBanks.LoadWaveBank` / `LoadSoundBank`, `mrxsoundbootstrap.lua`), so a bank this module
-//! mints is registered with the mod loader ([`sound_registrations`]).
+//! (`MrxSoundBanks.LoadWaveBank` / `LoadSoundBank`, `mrxsoundbootstrap.lua`, `mrxsound.lua`), so a
+//! bank this module mints is registered with the mod loader of each session that loads it
+//! ([`sound_registrations`]).
 //!
 //! * `add_sound` mints a new bank: one wave, one single-wave group and one single-track cue per
 //!   authored cue ([`mercs2_audio::encode::encode_bank`]).
@@ -20,9 +21,10 @@
 //!
 //! A `vo_*` bank is per language: retail Lua appends the language to its name before loading it
 //! (`_GetLocalizedName`, `mrxsoundbanks.lua:80-87`), so its entry is `m2("<bank>.<language>")` and it
-//! ships in that language's patch WAD. Any other bank ships where the game carries it: `vz.wad`'s go
-//! to the Shipment overlay, `shell.wad`'s (the front end) to the shell patch — both, when both carry
-//! it.
+//! ships in that language's patch WAD. Any other bank ships to each level that both carries it and
+//! loads it from a retail Lua call site ([`carrier_session`]): `vz.wad`'s gameplay banks to the
+//! Shipment overlay, `shell.wad`'s front-end banks to the shell patch. An override's wavebank ships
+//! to the level of each session that loads the bank, and that session's loader loads it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -38,8 +40,8 @@ use mercs2_formats::ucfx::{build_wrapped_entries, extract_data_chunk, WrappedEnt
 
 use crate::discover::LoadedShipment;
 use crate::game::GameStack;
-use crate::link::SoundBankRegistration;
-use crate::manifest::{Contribution, Language, Manifest, SoundCue};
+use crate::link::{Level, SoundBankRegistration};
+use crate::manifest::{Contribution, Language, LoadSession, Manifest, SoundCue};
 
 /// The sounddb's ASET type id (`mercs2_formats::aset_type_ids`: `0xE5273C14 → 13`).
 pub const TYPE_ID_SOUNDDB: u32 = 13;
@@ -170,21 +172,114 @@ pub fn lower_add_sound(
     )
 }
 
-/// Every bank the mod loader must load for this Shipment: each `add_sound` bank (wavebank and
-/// soundbank), and each override wavebank (wavebank only), once.
-pub fn sound_registrations(manifest: &Manifest) -> Vec<SoundBankRegistration> {
+/// The soundbanks the front end loads: `MrxSound.EnterShellState` (`shell/mrxsound.lua:9-14`,
+/// called from `shell/mrxguishell.lua:505`) is the only bank-load call site among `shell.wad`'s 28
+/// scripts.
+pub const FRONT_END_SOUNDBANK_LOADS: &[&str] = &["ui_shell", "ui_hud", "music"];
+
+/// The soundbanks gameplay loads by a literal name: `MrxSoundBootstrap.LoadBanks`
+/// (`resident/mrxsoundbootstrap.lua:196-245`), the `LoadSoundBank` calls. `vo_*` banks load per
+/// language ([`carrier_session`]).
+pub const GAMEPLAY_SOUNDBANK_LOADS: &[&str] = &[
+    "ambience",
+    "amb_birds",
+    "collision_shared",
+    "destruction_shared",
+    "fol_shared",
+    "veh_shared",
+    "wpn_shared",
+    "building_destruct",
+    "veh_support",
+    "music",
+    "ui_hud",
+];
+
+/// Whether `bank` is one of `names`, as the engine compares them: by name hash, which folds case.
+fn named_in(bank: &str, names: &[&str]) -> bool {
+    names.iter().any(|n| m2(n) == m2(bank))
+}
+
+/// Whether the `vz` level loads `bank` only through the front end's code it also carries: a bank of
+/// [`FRONT_END_SOUNDBANK_LOADS`] that `LoadBanks` does not load (`ui_shell`). `vz.wad`'s copy of
+/// `MrxSound.EnterShellState` (`resident/mrxsound.lua:9-14`) is reached only through
+/// `GameBootstrap.Start` (`resident/gamebootstrap.lua:58-75`), which returns at once when
+/// `Sys.FinishedShell()` is true (`:43-46`), as it is on the retail path from the main menu into
+/// the game.
+fn vz_front_end_only(bank: &str) -> bool {
+    named_in(bank, FRONT_END_SOUNDBANK_LOADS) && !named_in(bank, GAMEPLAY_SOUNDBANK_LOADS)
+}
+
+/// The session in which a level that carries `bank` loads it, or `None` when that level never
+/// loads it.
+///
+/// * [`Carrier::Vz`] — gameplay, except for a bank the `vz` level loads only through the front
+///   end's code ([`vz_front_end_only`]). `LoadBanks` names 11 of `vz.wad`'s 76 soundbanks
+///   ([`GAMEPLAY_SOUNDBANK_LOADS`]) and the front end's code names `ui_shell`; the other 64 have no
+///   literal Lua load site in the corpus, and their overrides load in gameplay.
+/// * [`Carrier::Shell`] — the front end, for a bank of [`FRONT_END_SOUNDBANK_LOADS`].
+/// * [`Carrier::Language`] — gameplay: the `vo_*` banks load through `LoadBanks`
+///   (`resident/mrxsoundbootstrap.lua:219-245`) and through `LoadTempBank` from data tables
+///   (`resident/mrxbriefing.lua:510`, `resident/mrxstarter.lua:452`), each localized.
+pub fn carrier_session(bank: &str, carrier: Carrier) -> Option<LoadSession> {
+    match carrier {
+        Carrier::Vz => (!vz_front_end_only(bank)).then_some(LoadSession::Gameplay),
+        Carrier::Shell => named_in(bank, FRONT_END_SOUNDBANK_LOADS).then_some(LoadSession::FrontEnd),
+        Carrier::Language(_) => Some(LoadSession::Gameplay),
+    }
+}
+
+/// The sessions that load an override of `bank` when the game carries it in `carriers`: the
+/// [`carrier_session`] of each.
+pub fn override_sessions(bank: &str, carriers: &BTreeSet<Carrier>) -> BTreeSet<LoadSession> {
+    carriers.iter().filter_map(|c| carrier_session(bank, *c)).collect()
+}
+
+/// The sessions retail Lua loads `bank` in, for the carriers the game ships it in: `vz.wad` and
+/// `shell.wad` for any bank, the language for a `vo_*` one. Needs no game: it is what
+/// [`override_sessions`] gives when every level that could carry the bank does.
+pub fn retail_sessions(bank: &str, language: Option<Language>) -> BTreeSet<LoadSession> {
+    let carriers: BTreeSet<Carrier> = match language {
+        Some(l) => BTreeSet::from([Carrier::Language(l)]),
+        None => BTreeSet::from([Carrier::Vz, Carrier::Shell]),
+    };
+    override_sessions(bank, &carriers)
+}
+
+/// The carriers of each overridden bank entry (`<bank>` or `<bank>.<language>`), as the game ships
+/// them.
+pub type CarrierMap = BTreeMap<String, BTreeSet<Carrier>>;
+
+/// Every bank a mod loader must load for this Shipment: each `add_sound` bank (wavebank and
+/// soundbank) in its `load_in` sessions, and each override wavebank (wavebank only) in the sessions
+/// that load its bank ([`override_sessions`] of the entry's carriers in `carriers`), once.
+///
+/// Pure: the carriers are the game's answer, looked up by the caller ([`lower_overrides`]). An
+/// override entry missing from `carriers`, or one no session loads, is an error.
+pub fn sound_registrations(manifest: &Manifest, carriers: &CarrierMap) -> Result<Vec<SoundBankRegistration>, String> {
     let shipment = &manifest.shipment.name;
     let mut out: Vec<SoundBankRegistration> = Vec::new();
-    for c in &manifest.contributions {
+    for (index, c) in manifest.contributions.iter().enumerate() {
         let reg = match c {
-            Contribution::AddSound { bank, .. } => {
-                SoundBankRegistration { shipment: shipment.clone(), bank: bank.clone(), soundbank: true }
-            }
+            Contribution::AddSound { bank, load_in, .. } => SoundBankRegistration {
+                shipment: shipment.clone(),
+                bank: bank.clone(),
+                soundbank: true,
+                sessions: load_in.iter().copied().collect(),
+            },
             Contribution::ReplaceSoundBank { bank, language, .. } | Contribution::ReplaceSoundCue { bank, language, .. } => {
+                let entry = entry_name(bank, *language);
+                let found = carriers.get(&entry).ok_or_else(|| {
+                    format!("internal error: {shipment} contributions[{index}] overrides {entry:?}, whose carriers were not looked up")
+                })?;
+                let sessions = override_sessions(bank, found);
+                if sessions.is_empty() {
+                    return Err(no_session(&entry, found, &format!("{shipment} contributions[{index}] ({})", c.kind())));
+                }
                 SoundBankRegistration {
                     shipment: shipment.clone(),
-                    bank: override_wavebank_name(shipment, &entry_name(bank, *language)),
+                    bank: override_wavebank_name(shipment, &entry),
                     soundbank: false,
+                    sessions,
                 }
             }
             _ => continue,
@@ -193,7 +288,89 @@ pub fn sound_registrations(manifest: &Manifest) -> Vec<SoundBankRegistration> {
             out.push(reg);
         }
     }
-    out
+    Ok(out)
+}
+
+/// Why an override of `entry`, which `carriers` carry, loads in no session.
+fn no_session(entry: &str, carriers: &BTreeSet<Carrier>, who: &str) -> String {
+    format!(
+        "[M0218] {who}: {} carries a soundbank named {entry:?}, and no level that carries it loads it \
+         in a session — the front end loads {} from shell.wad (shell/mrxsound.lua:9-14), and vz.wad \
+         loads {entry:?} only through the front end's code it carries \
+         (resident/gamebootstrap.lua:43-46), so an override of it is never heard",
+        carriers.iter().map(|c| c.wad()).collect::<Vec<_>>().join(" and "),
+        FRONT_END_SOUNDBANK_LOADS.join(", "),
+    )
+}
+
+/// Check that every bank a loader loads in `level` has its wavebank in `blocks`, the blocks emitted
+/// for that level: a `LoadWaveBank` of a name no mounted WAD holds times out after 20 s with no
+/// error (`audio_code_map.md` §11.2), so a missing one is refused here, naming the bank and the
+/// level.
+pub fn check_loader_banks(level: Level, banks: &[&str], blocks: &[&PatchBlock]) -> Result<(), String> {
+    for bank in banks {
+        let hash = m2(bank);
+        let shipped = blocks
+            .iter()
+            .any(|b| b.aset_entries.iter().any(|r| r.asset_hash == hash && r.u32_3 == TYPE_ID_WAVEBANK));
+        if !shipped {
+            return Err(format!(
+                "internal error: the {} loader loads the wavebank {bank:?} (0x{hash:08X}), and no block \
+                 emitted for {} carries it",
+                match level {
+                    Level::Vz => "gameplay",
+                    Level::Shell => "front-end",
+                },
+                level.wad()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every sound block one Shipment's build emits, by where it ships, and the Shipment's sound
+/// registrations: each `add_sound` bank's block ([`lower_add_sound`]) in the WAD of each session in
+/// its `load_in`, and every override ([`lower_overrides`], [`OverrideScope::Shipment`]). `qm build`
+/// ships exactly these; `qm link` lowers each Shipment of the set through here too, to check the
+/// linked loaders against what the set's builds ship.
+///
+/// An override needs the game (`game`); without it the error names the contribution. An error
+/// comes back with the index and kind of the contribution it is about.
+pub fn lower_shipment_sound(
+    s: &LoadedShipment,
+    game: Option<&mut GameStack>,
+    log: &mut Vec<String>,
+) -> Result<OverrideBlocks, (usize, &'static str, String)> {
+    let manifest = &s.manifest;
+    let mut out = match manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. }))
+    {
+        Some((index, c)) => {
+            let Some(game) = game else {
+                return Err((index, c.kind(), "a sound override reads the bank it overrides from the game".into()));
+            };
+            lower_overrides(&[s], game, OverrideScope::Shipment, log).map_err(|m| (index, c.kind(), m))?
+        }
+        None => OverrideBlocks {
+            registrations: sound_registrations(manifest, &CarrierMap::new()).map_err(|m| (0, "add_sound", m))?,
+            ..OverrideBlocks::default()
+        },
+    };
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let Contribution::AddSound { bank, category, cues, load_in } = c else { continue };
+        let block = lower_add_sound(bank, category, cues, &s.root, log).map_err(|m| (index, c.kind(), m))?;
+        let sessions: BTreeSet<LoadSession> = load_in.iter().copied().collect();
+        for session in &sessions {
+            match Level::of(*session) {
+                Level::Vz => out.overlay.push(block.clone()),
+                Level::Shell => out.shell.push(block.clone()),
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The entry hash of every bank a `replace_sound_cue` in the set targets: `qm link` merges each into
@@ -209,16 +386,20 @@ pub fn linked_sound_entries<'a>(manifests: impl IntoIterator<Item = &'a Manifest
         .collect()
 }
 
-/// Where a bank entry's override tables ship.
+/// Where a bank entry's override tables ship, and what the loaders load.
 #[derive(Debug, Default)]
 pub struct OverrideBlocks {
-    /// The Shipment overlay (or, for the link, the link WAD): `vz.wad`'s banks and every override
-    /// wavebank.
+    /// The Shipment overlay (or, for the link, the link WAD): the gameplay banks `vz.wad` carries,
+    /// and every override wavebank gameplay loads.
     pub overlay: Vec<PatchBlock>,
-    /// The shell patch: banks `shell.wad` carries.
+    /// The shell patch: the front-end banks `shell.wad` carries, and every override wavebank the
+    /// front end loads.
     pub shell: Vec<PatchBlock>,
     /// Each language's patch: that language's `vo_*` banks.
     pub language: BTreeMap<Language, Vec<PatchBlock>>,
+    /// Every Shipment's sound registrations, in `shipments` order: [`sound_registrations`] over the
+    /// carriers found here.
+    pub registrations: Vec<SoundBankRegistration>,
 }
 
 /// Which output [`lower_overrides`] produces.
@@ -283,13 +464,19 @@ fn carrier_soundbank(stack: &mut GameStack, entry: u32) -> Result<Option<Soundba
 /// Lower every `replace_sound_bank` and `replace_sound_cue` of `shipments` (in set order), for a
 /// Shipment's own build or for the link ([`OverrideScope`]).
 ///
+/// First, for every overridden bank entry, its carriers: the language for a `vo_*` bank; for any
+/// other bank each of `vz.wad` (`game`) and `shell.wad` (opened beside it,
+/// [`GameStack::open_sibling`]) that carries it. A bank no carrier has is an error, and so is one
+/// no carrier loads from a retail Lua call site ([`carrier_session`]). The registrations of every
+/// Shipment follow from them ([`sound_registrations`]).
+///
 /// Each Shipment's override waves for one bank entry form one wavebank
 /// ([`override_wavebank_name`]), in contribution order. A bank's base soundbank is the
 /// `replace_sound_bank` replacement when the set has one, the game's otherwise; every
-/// `replace_sound_cue` on it is then applied in set order ([`encode::retarget_cue`]). A `vo_*` bank
-/// is read from, and ships to, its language; any other bank from and to each of `vz.wad` (`game`)
-/// and `shell.wad` that carries it. A bank no carrier has, or a cue its bank does not have, is an
-/// error.
+/// `replace_sound_cue` on it is then applied in set order ([`encode::retarget_cue`]). The tables go
+/// to each carrier that loads the bank; the Shipment scope's wavebanks go to the level of each
+/// session that loads the bank (gameplay: the overlay; the front end: the shell patch). A cue its
+/// bank does not have is an error.
 pub fn lower_overrides(
     shipments: &[&LoadedShipment],
     game: &mut GameStack,
@@ -302,7 +489,7 @@ pub fn lower_overrides(
         let shipment = s.manifest.shipment.name.as_str();
         for (index, c) in s.manifest.contributions.iter().enumerate() {
             let (bank, language, category, cues, kind): (&str, Option<Language>, &str, Vec<&SoundCue>, OpKind) = match c {
-                Contribution::ReplaceSoundBank { bank, language, category, cues } => {
+                Contribution::ReplaceSoundBank { bank, language, category, cues, .. } => {
                     (bank, *language, category, cues.iter().collect(), OpKind::Bank)
                 }
                 Contribution::ReplaceSoundCue { bank, language, category, cue } => {
@@ -336,8 +523,42 @@ pub fn lower_overrides(
         }
     }
 
-    let mut out = OverrideBlocks::default();
+    // The carriers of every entry, each with the soundbank it carries, whatever the scope.
     let mut shell: Option<GameStack> = None;
+    let mut carried: BTreeMap<&str, Vec<(Carrier, Soundbank)>> = BTreeMap::new();
+    for (entry, e) in &entries {
+        let entry_hash = m2(entry);
+        let mut found: Vec<(Carrier, Soundbank)> = Vec::new();
+        if let Some(language) = e.language {
+            let base = carrier_soundbank(game, entry_hash)?.ok_or_else(|| missing(entry, &e.ops))?;
+            found.push((Carrier::Language(language), base));
+        } else {
+            if let Some(base) = carrier_soundbank(game, entry_hash)? {
+                found.push((Carrier::Vz, base));
+            }
+            if shell.is_none() {
+                shell = Some(game.open_sibling("shell.wad")?);
+            }
+            let stack = shell.as_mut().ok_or("internal error: shell.wad was not opened")?;
+            if let Some(base) = carrier_soundbank(stack, entry_hash)? {
+                found.push((Carrier::Shell, base));
+            }
+            if found.is_empty() {
+                return Err(missing(entry, &e.ops));
+            }
+        }
+        carried.insert(entry.as_str(), found);
+    }
+    let carriers: CarrierMap = carried
+        .iter()
+        .map(|(entry, found)| (entry.to_string(), found.iter().map(|(c, _)| *c).collect()))
+        .collect();
+
+    let mut out = OverrideBlocks::default();
+    for s in shipments {
+        out.registrations.extend(sound_registrations(&s.manifest, &carriers)?);
+    }
+
     for (entry, e) in &entries {
         let entry_hash = m2(entry);
         let banks: Vec<&Op<'_>> = e.ops.iter().filter(|o| o.kind == OpKind::Bank).collect();
@@ -346,6 +567,16 @@ pub fn lower_overrides(
                 "bank {entry:?} is replaced by {} — one replacement can take effect",
                 banks.iter().map(|o| o.who.as_str()).collect::<Vec<_>>().join(" and ")
             ));
+        }
+        // Only the carriers that load the bank get its tables.
+        let loading: Vec<(Carrier, Soundbank)> = carried[entry.as_str()]
+            .iter()
+            .filter(|(c, _)| carrier_session(e.bank, *c).is_some())
+            .cloned()
+            .collect();
+        if loading.is_empty() {
+            let who = e.ops.iter().map(|o| o.who.as_str()).collect::<Vec<_>>().join(" and ");
+            return Err(no_session(entry, &carriers[entry], &who));
         }
         let has_cue = e.ops.iter().any(|o| o.kind == OpKind::Cue);
         if scope == OverrideScope::Link && !has_cue {
@@ -374,31 +605,7 @@ pub fn lower_overrides(
             None => None,
         };
 
-        // The carriers: the language for a vo_* bank; `vz.wad` and `shell.wad` for any other.
-        let mut carriers: Vec<(Carrier, Soundbank)> = Vec::new();
-        if let Some(language) = e.language {
-            let base = carrier_soundbank(game, entry_hash)?.ok_or_else(|| missing(entry, &e.ops))?;
-            carriers.push((Carrier::Language(language), base));
-        } else {
-            if let Some(base) = carrier_soundbank(game, entry_hash)? {
-                carriers.push((Carrier::Vz, base));
-            }
-            if shell.is_none() {
-                let vz = game.paths().first().map(|p| p.to_path_buf()).ok_or("the game stack is empty")?;
-                let path = sibling_wad(&vz, "shell.wad")?;
-                shell = Some(GameStack::open(&[path]).map_err(|err| err.to_string())?);
-            }
-            if let Some(shell) = shell.as_mut() {
-                if let Some(base) = carrier_soundbank(shell, entry_hash)? {
-                    carriers.push((Carrier::Shell, base));
-                }
-            }
-            if carriers.is_empty() {
-                return Err(missing(entry, &e.ops));
-            }
-        }
-
-        for (carrier, retail) in carriers {
+        for (carrier, retail) in loading {
             let mut soundbank = match &replacement {
                 Some((sb, _)) => sb.clone(),
                 None => retail,
@@ -438,18 +645,33 @@ pub fn lower_overrides(
             let body = WavebankFile { bank_hash: hash, stream_name: None, records }
                 .to_bytes()
                 .map_err(|err| format!("wavebank {name:?}: {err}"))?;
-            log.push(format!("override wavebank {name} 0x{hash:08X}: {} B", body.len()));
-            out.overlay
-                .push(bank_block(hash, &[(TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK, &body)]).map_err(|err| format!("wavebank {name:?}: {err}"))?);
+            let sessions = override_sessions(entries[&entry].bank, &carriers[&entry]);
+            for session in &sessions {
+                let block = bank_block(hash, &[(TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK, &body)])
+                    .map_err(|err| format!("wavebank {name:?}: {err}"))?;
+                match Level::of(*session) {
+                    Level::Vz => out.overlay.push(block),
+                    Level::Shell => out.shell.push(block),
+                }
+            }
+            log.push(format!(
+                "override wavebank {name} 0x{hash:08X}: {} B → {}",
+                body.len(),
+                sessions.iter().map(|s| Level::of(*s).wad()).collect::<Vec<_>>().join(" and ")
+            ));
         }
     }
     Ok(out)
 }
 
-#[derive(Clone, Copy)]
-enum Carrier {
+/// A WAD that carries a bank's tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Carrier {
+    /// `vz.wad`, the gameplay level.
     Vz,
+    /// `shell.wad`, the front end.
     Shell,
+    /// A language's WAD: its `vo_*` banks.
     Language(Language),
 }
 
@@ -459,6 +681,15 @@ impl Carrier {
             Carrier::Vz => "overlay (vz.wad carries it)".into(),
             Carrier::Shell => "shell patch (shell.wad carries it)".into(),
             Carrier::Language(l) => format!("{}-patch", l.token()),
+        }
+    }
+
+    /// The WAD's file name, for messages.
+    pub fn wad(self) -> String {
+        match self {
+            Carrier::Vz => "vz.wad".into(),
+            Carrier::Shell => "shell.wad".into(),
+            Carrier::Language(l) => format!("{}.wad", l.token()),
         }
     }
 }
@@ -471,7 +702,6 @@ fn missing(entry: &str, ops: &[Op<'_>]) -> String {
         ops.iter().map(|o| o.who.as_str()).collect::<Vec<_>>().join(" and ")
     )
 }
-
 /// Every cue guid the game's sound tables route: the cue entries of every sounddb in `game`.
 pub fn game_cue_guids(game: &mut GameStack) -> Result<BTreeSet<u32>, String> {
     let mut guids = BTreeSet::new();
@@ -519,8 +749,9 @@ pub fn installed_cue_guids(game: &mut GameStack) -> Result<BTreeSet<u32>, String
 
 /// For each `replace_sound_bank` / `replace_sound_cue` of `manifest`, why its target is not in the
 /// game: the bank is in no carrier (`game`, which holds the declared languages' WADs, and
-/// `shell.wad` beside it), or the cue is not in the bank. A cue the same Shipment's
-/// `replace_sound_bank` declares for that bank is in it.
+/// `shell.wad` beside it), no carrier loads it from a retail Lua call site ([`carrier_session`]), or
+/// the cue is not in the bank. A cue the same Shipment's `replace_sound_bank` declares for that bank
+/// is in it.
 pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut shell: Option<Result<GameStack, String>> = None;
@@ -532,15 +763,15 @@ pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Ve
         };
         let entry = entry_name(bank, language);
         let hash = m2(&entry);
-        let mut carriers: Vec<Result<Option<Soundbank>, String>> = vec![carrier_soundbank(game, hash)];
+        let first = match language {
+            Some(l) => Carrier::Language(l),
+            None => Carrier::Vz,
+        };
+        let mut carriers: Vec<(Carrier, Result<Option<Soundbank>, String>)> = vec![(first, carrier_soundbank(game, hash))];
         if language.is_none() {
-            let shell = shell.get_or_insert_with(|| {
-                let vz = game.paths().first().map(|p| p.to_path_buf()).ok_or("the game stack is empty")?;
-                let path = sibling_wad(&vz, "shell.wad")?;
-                GameStack::open(&[path]).map_err(|e| e.to_string())
-            });
+            let shell = shell.get_or_insert_with(|| game.open_sibling("shell.wad"));
             match shell {
-                Ok(stack) => carriers.push(carrier_soundbank(stack, hash)),
+                Ok(stack) => carriers.push((Carrier::Shell, carrier_soundbank(stack, hash))),
                 Err(e) => {
                     out.push((index, format!("the front end's shell.wad cannot be read, so {bank:?} cannot be looked up in it: {e}")));
                     continue;
@@ -548,9 +779,13 @@ pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Ve
             }
         }
         let mut found: Vec<Soundbank> = Vec::new();
-        for carrier in carriers {
-            match carrier {
-                Ok(Some(sb)) => found.push(sb),
+        let mut found_in: BTreeSet<Carrier> = BTreeSet::new();
+        for (carrier, soundbank) in carriers {
+            match soundbank {
+                Ok(Some(sb)) => {
+                    found.push(sb);
+                    found_in.insert(carrier);
+                }
                 Ok(None) => {}
                 Err(e) => out.push((index, format!("bank {entry:?}: {e}"))),
             }
@@ -564,6 +799,11 @@ pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Ve
                     if language.is_some() { ", and the language" } else { "" }
                 ),
             ));
+            continue;
+        }
+        if override_sessions(bank, &found_in).is_empty() {
+            let who = format!("contributions[{index}] ({})", c.kind());
+            out.push((index, no_session(&entry, &found_in, &who).replacen("[M0218] ", "", 1)));
             continue;
         }
         let Some(cue) = cue else { continue };
@@ -628,30 +868,104 @@ mod tests {
         )
     }
 
-    /// An added bank loads whole; the override wavebanks load once per bank entry, however many
-    /// overrides share it; and the link merges exactly the banks a replace_sound_cue targets.
+    fn carriers(rows: &[(&str, &[Carrier])]) -> CarrierMap {
+        rows.iter().map(|(e, c)| (e.to_string(), c.iter().copied().collect())).collect()
+    }
+
+    fn sessions(list: &[LoadSession]) -> BTreeSet<LoadSession> {
+        list.iter().copied().collect()
+    }
+
+    /// An added bank loads whole in its `load_in` sessions; the override wavebanks load once per
+    /// bank entry, however many overrides share it, in the sessions their carriers load the bank
+    /// in; and the link merges exactly the banks a replace_sound_cue targets.
     #[test]
     fn registrations_and_linked_entries() {
         let added = cue("        ", "mod_click");
         let m = manifest(&format!(
-            "  - kind: add_sound\n    bank: mod_sounds\n    category: ui\n    cues:\n      - {}\
+            "  - kind: add_sound\n    bank: mod_sounds\n    category: ui\n    load_in: [front_end, gameplay]\n    cues:\n      - {}\
              \x20 - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}\
              \x20 - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}\
+             \x20 - kind: replace_sound_cue\n    bank: ui_shell\n    category: ui\n    cue:\n{}\
              \x20 - kind: replace_sound_bank\n    bank: vo_mattias\n    language: german\n    category: vo\n    cues:\n      - {}",
             &added[8..],
             cue("      ", "ui_PDA_Open_01_st"),
             cue("      ", "ui_PDA_Close_01_st"),
+            cue("      ", "ui_shell_click"),
             &cue("        ", "line")[8..],
         ));
-        let regs: Vec<(String, bool)> = sound_registrations(&m).into_iter().map(|r| (r.bank, r.soundbank)).collect();
+        let found = carriers(&[
+            ("ui_hud", &[Carrier::Vz, Carrier::Shell]),
+            ("ui_shell", &[Carrier::Vz, Carrier::Shell]),
+            ("vo_mattias.german", &[Carrier::Language(Language::German)]),
+        ]);
+        let regs: Vec<(String, bool, BTreeSet<LoadSession>)> =
+            sound_registrations(&m, &found).unwrap().into_iter().map(|r| (r.bank, r.soundbank, r.sessions)).collect();
+        let both = sessions(&LoadSession::ALL);
         assert_eq!(
             regs,
             vec![
-                ("mod_sounds".to_string(), true),
-                ("qm_s_ui_hud".to_string(), false),
-                ("qm_s_vo_mattias.german".to_string(), false),
+                ("mod_sounds".to_string(), true, both.clone()),
+                ("qm_s_ui_hud".to_string(), false, both),
+                ("qm_s_ui_shell".to_string(), false, sessions(&[LoadSession::FrontEnd])),
+                ("qm_s_vo_mattias.german".to_string(), false, sessions(&[LoadSession::Gameplay])),
             ]
         );
-        assert_eq!(linked_sound_entries([&m]), BTreeSet::from([m2("ui_hud")]));
+        assert_eq!(linked_sound_entries([&m]), BTreeSet::from([m2("ui_hud"), m2("ui_shell")]));
+
+        // An override whose carriers were not looked up is an internal error.
+        let partial = carriers(&[("ui_hud", &[Carrier::Vz, Carrier::Shell])]);
+        assert!(sound_registrations(&m, &partial).unwrap_err().contains("internal error"));
+    }
+
+    /// Each carrier gives its level's session: the front end loads `ui_shell`, `ui_hud` and `music`
+    /// from `shell.wad`; gameplay loads `vz.wad`'s banks but `ui_shell`, which `vz.wad` loads only
+    /// through the front end's code; a language loads its `vo_*` banks in gameplay. A bank no
+    /// carrier loads has no session, and its registration is an M0218 error. Names compare by hash,
+    /// so case is folded.
+    #[test]
+    fn sessions_follow_the_retail_load_sites() {
+        let vz_shell: BTreeSet<Carrier> = [Carrier::Vz, Carrier::Shell].into();
+        assert_eq!(override_sessions("ui_hud", &vz_shell), sessions(&LoadSession::ALL));
+        assert_eq!(override_sessions("music", &vz_shell), sessions(&LoadSession::ALL));
+        assert_eq!(override_sessions("ui_shell", &vz_shell), sessions(&[LoadSession::FrontEnd]));
+        assert_eq!(override_sessions("UI_Shell", &vz_shell), sessions(&[LoadSession::FrontEnd]));
+        assert_eq!(override_sessions("wpn_shared", &[Carrier::Vz].into()), sessions(&[LoadSession::Gameplay]));
+        assert_eq!(override_sessions("ui_hud", &[Carrier::Vz].into()), sessions(&[LoadSession::Gameplay]));
+        assert_eq!(override_sessions("ui_hud", &[Carrier::Shell].into()), sessions(&[LoadSession::FrontEnd]));
+        assert_eq!(override_sessions("veh_tank", &[Carrier::Vz].into()), sessions(&[LoadSession::Gameplay]));
+        assert!(override_sessions("ui_shell", &[Carrier::Vz].into()).is_empty(), "vz.wad's ui_shell is the front end's");
+        assert_eq!(
+            override_sessions("vo_mattias", &[Carrier::Language(Language::French)].into()),
+            sessions(&[LoadSession::Gameplay])
+        );
+        assert_eq!(retail_sessions("ui_shell", None), sessions(&[LoadSession::FrontEnd]));
+        assert_eq!(retail_sessions("ui_hud", None), sessions(&LoadSession::ALL));
+        assert_eq!(retail_sessions("vo_mattias", Some(Language::English)), sessions(&[LoadSession::Gameplay]));
+
+        let m = manifest(&format!(
+            "  - kind: replace_sound_cue\n    bank: ui_shell\n    category: ui\n    cue:\n{}",
+            cue("      ", "x")
+        ));
+        let err = sound_registrations(&m, &carriers(&[("ui_shell", &[Carrier::Vz])])).unwrap_err();
+        assert!(err.starts_with("[M0218]") && err.contains("ui_shell") && err.contains("vz.wad"), "{err}");
+    }
+
+    /// A block with one row of `type_id` for `name`; the check reads rows, not the table.
+    fn row_block(name: &str, type_id: u32, type_hash: u32) -> PatchBlock {
+        bank_block(m2(name), &[(type_id, type_hash, b"table")]).unwrap()
+    }
+
+    /// The loader self-check: every bank a level's loader loads needs its wavebank among the blocks
+    /// emitted for that level; a missing one names the bank and the level. A soundbank row of the
+    /// same name is not a wavebank.
+    #[test]
+    fn the_missing_wavebank_self_check_fails() {
+        let a = row_block("qm_s_ui_hud", TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK);
+        let sb = row_block("qm_s_ui_shell", TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK);
+        check_loader_banks(Level::Vz, &["qm_s_ui_hud"], &[&a]).expect("present");
+        check_loader_banks(Level::Shell, &[], &[]).expect("nothing to load");
+        let err = check_loader_banks(Level::Shell, &["qm_s_ui_hud", "qm_s_ui_shell"], &[&a, &sb]).unwrap_err();
+        assert!(err.contains("\"qm_s_ui_shell\"") && err.contains("shell.wad") && err.contains("front-end"), "{err}");
     }
 }
