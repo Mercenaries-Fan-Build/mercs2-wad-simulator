@@ -1948,7 +1948,12 @@ fn rigid_texture_repoints(
         return Ok((Vec::new(), Vec::new()));
     }
     let groups = mercs2_formats::texture::group_prmt_material_indices(donor_ucfx);
-    let mats = mercs2_formats::texture::parse_mtrl(donor_ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(donor_ucfx, mercs2_formats::texture::MtrlSource::Model)
+        .map_err(|e| BuildError::Lower {
+            index,
+            kind,
+            message: format!("donor {donor_name} MTRL: {e}"),
+        })?;
     let froms = rigid_slot_froms(host_group, &groups, &mats, &slots).map_err(|m| {
         BuildError::Lower {
             index,
@@ -2209,12 +2214,20 @@ fn lower_skinned(
     // hosts are chosen inside the lowering, after this has to run. Repointing all of them is also
     // the honest reading of one `textures:` block for one outfit, and non-hosts are neutralised.
     let donor_ucfx = donor_container(&donor_blk);
+    let donor_slots: Vec<Vec<u32>> = (0..3)
+        .map(|slot| mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot))
+        .collect::<Result<_, _>>()
+        .map_err(|e| BuildError::Lower {
+            index,
+            kind,
+            message: format!("donor {donor_name} MTRL: {e}"),
+        })?;
     let (mut tex_blocks, mut repoints) = author_texture_repoints(
         index,
         kind,
         ModelSkin { name, textures, root },
         &format!("any material of donor {donor_name}"),
-        |slot| mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot),
+        |slot| donor_slots[slot].clone(),
         log,
     )?;
 
@@ -2332,7 +2345,7 @@ fn lower_skinned(
                     &format!("{name}_dm atlas"),
                 ) {
                     Ok((block, to)) => {
-                        let froms = mercs2_formats::texture::material_slot_hashes(donor_ucfx, 0);
+                        let froms = donor_slots[0].clone();
                         for from in froms {
                             repoints.push(mercs2_formats::model_inject::MtrlRepoint { from, to });
                         }
@@ -2354,7 +2367,7 @@ fn lower_skinned(
                             None,
                             "matte spec",
                         ) {
-                            for from in mercs2_formats::texture::material_slot_hashes(donor_ucfx, 1) {
+                            for from in donor_slots[1].clone() {
                                 repoints.push(mercs2_formats::model_inject::MtrlRepoint {
                                     from,
                                     to: sto,
@@ -2385,7 +2398,7 @@ fn lower_skinned(
                             None,
                             "flat normal",
                         ) {
-                            for from in mercs2_formats::texture::material_slot_hashes(donor_ucfx, 2) {
+                            for from in donor_slots[2].clone() {
                                 repoints.push(mercs2_formats::model_inject::MtrlRepoint {
                                     from,
                                     to: nto,
@@ -5639,6 +5652,7 @@ mod rigid_texture_tests {
             textures: textures.to_vec(),
             flags,
             preamble: Vec::new(),
+            shader_key: 0,
         }
     }
 
