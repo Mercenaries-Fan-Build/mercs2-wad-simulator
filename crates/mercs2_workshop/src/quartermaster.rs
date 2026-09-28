@@ -888,8 +888,8 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("add_layer", "Mint a whole new placement layer"),
             ("add_animation", "Add a new animation clip"),
             ("replace_animation", "Replace a shipped animation, same hash"),
-            ("add_shader", "Add a compiled SM3 shader"),
-            ("replace_shader", "Replace a shipped shader, same hash"),
+            ("add_shader", "Register new shaders and add them to the shader stores"),
+            ("replace_shader", "Replace a shipped shader's bytecode in the shader stores"),
             ("add_fx", "Add a particle effect"),
             ("replace_fx", "Replace a shipped fx, same hash"),
             ("replace_terrain_cell", "Replace a terrain cell, same hash"),
@@ -1122,13 +1122,25 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             trnm: PathBuf::from("src/clip.trnm"),
             events: None,
         },
+        // A pixel family takes the four light classes, which may share one stem and one source.
+        // The shaders register through the m2-sdk, so M0231 fires until the Shipment requires the
+        // `shader-registry` capability.
         "add_shader" => Contribution::AddShader {
-            name,
-            blob: PathBuf::from("src/shader.bin"),
+            family: mercs2_quartermaster::shader::ShaderFamily::Pixel,
+            classes: ["", "_pl", "_sl", "_pl_sl"]
+                .iter()
+                .map(|suffix| mercs2_quartermaster::manifest::ShaderClass {
+                    name: format!("{name}{suffix}"),
+                    stem: name.clone(),
+                    shader: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader.asm"),
+                    shader_low: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm"),
+                })
+                .collect(),
         },
         "replace_shader" => Contribution::ReplaceShader {
-            target: "shipped_shader".into(),
-            blob: PathBuf::from("src/shader.bin"),
+            target: "PgMeshVP".into(),
+            shader: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader.asm"),
+            shader_low: Some(mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm")),
         },
         "add_fx" => Contribution::AddFx {
             name,
@@ -3558,7 +3570,7 @@ fn run_build_outcome(
     names: Option<&NameTable>,
     corpus: Option<&Path>,
 ) -> BuildOutcome {
-    match build::build(s, game, names, None, corpus) {
+    match build::build(s, game, names, None, corpus, None) {
         Ok(r) => BuildOutcome::Report(r),
         Err(BuildError::Blocked(ds)) => BuildOutcome::Blocked(ds),
         Err(e) => BuildOutcome::Failed(format!("{e:?}")),
